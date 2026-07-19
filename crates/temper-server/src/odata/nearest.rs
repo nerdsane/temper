@@ -26,7 +26,13 @@ use super::query_plane_read::QueryPlaneReadBudget;
 use super::read_support::materialize_entity_set_entities;
 use crate::response::odata_error;
 use crate::state::ServerState;
-use crate::vector_index::{VectorMetric, parse_vector_property, rank_nearest};
+use crate::vector_index::{
+    VectorMetric, declared_vector_set_signature, parse_vector_property, rank_nearest,
+};
+
+#[path = "nearest_generation.rs"]
+mod generation;
+use generation::generation_changed;
 
 /// Look up a named argument in the parsed bound-function parameter list.
 fn arg<'a>(params: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -121,6 +127,8 @@ pub(super) async fn handle_nearest(
             "Temper.Nearest does not accept the OData system query option '{unsupported}'; use the function arguments (decl, to/vector, k, model, filter)"
         ));
     }
+    let generation_guard = state.acquire_spec_generation_read_lock(tenant).await;
+    let staged_generation = state.current_spec_generation(tenant);
     let entity_type = match resolve_entity_type(state, tenant, &set_name) {
         Some(et) => et,
         None => {
@@ -132,13 +140,12 @@ pub(super) async fn handle_nearest(
             .into_response();
         }
     };
-
     // Resolve the declared vector path named by `decl=`.
     let Some(decl_name) = arg(params, "decl") else {
         return bad_request("Temper.Nearest requires a 'decl' argument naming the vector path");
     };
     let vectors = state.declared_vectors_for(tenant, &entity_type);
-    let Some(decl) = vectors.iter().find(|v| v.name == decl_name) else {
+    let Some(decl) = vectors.iter().find(|v| v.name == decl_name).cloned() else {
         return bad_request(&format!(
             "entity type '{entity_type}' declares no vector path named '{decl_name}'"
         ));
@@ -174,6 +181,13 @@ pub(super) async fn handle_nearest(
         },
         None => 10usize.min(budget.max_result_k()).max(1),
     };
+
+    // Actor materialization can start an unhydrated actor. Its pre-start path
+    // takes the generation read side around a possible bootstrap append, so it
+    // must not run beneath this handler's read guard: a queued fair-lock writer
+    // would otherwise sit between the two reads and form a cycle. We re-acquire
+    // and validate the staged epoch before consulting projection authority.
+    drop(generation_guard);
 
     // Resolve the query vector + its model tag from either `to=` (another entity)
     // or `vector=` (a raw query vector). Exactly one is required.
@@ -291,6 +305,11 @@ pub(super) async fn handle_nearest(
         None => None,
     };
 
+    let generation_guard = state.acquire_spec_generation_read_lock(tenant).await;
+    if state.current_spec_generation(tenant) != staged_generation {
+        return generation_changed();
+    }
+
     // Candidate scan: pull the partition's vectors and charge the read budget.
     let Some((store, _)) = state.event_journal() else {
         return odata_error(
@@ -300,6 +319,51 @@ pub(super) async fn handle_nearest(
         )
         .into_response();
     };
+    let _projection_guard = match store
+        .acquire_projection_read_fence(tenant.as_str(), &entity_type)
+        .await
+    {
+        Ok(guard) => guard,
+        Err(error) => {
+            tracing::warn!(
+                tenant = %tenant,
+                entity_type = %entity_type,
+                error = %error,
+                "vector projection read fence is unavailable"
+            );
+            return odata_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "VectorIndexRebuilding",
+                "vector search is unavailable while exact reconciliation is in progress",
+            )
+            .into_response();
+        }
+    };
+    if store.has_durable_vector_backfill_watermark() {
+        let current_set = declared_vector_set_signature(&vectors);
+        let covered = match store.vector_index_backfilled_types(tenant.as_str()).await {
+            Ok(types) => types.into_iter().find_map(|(covered_type, signature)| {
+                (covered_type == entity_type).then_some(signature)
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    tenant = %tenant,
+                    entity_type,
+                    error = %error,
+                    "vector authority watermark is unreadable"
+                );
+                None
+            }
+        };
+        if covered.as_deref() != Some(current_set.as_str()) {
+            return odata_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "VectorIndexRebuilding",
+                "vector search is unavailable until the current declaration generation is exactly reconciled",
+            )
+            .into_response();
+        }
+    }
     // Cap the scan at `budget + 1` rows in the store (a LIMIT), so an over-budget
     // partition is detected without loading the whole thing into memory (ADR-0155).
     let candidate_budget = budget.candidate_budget();
@@ -343,6 +407,14 @@ pub(super) async fn handle_nearest(
         candidates.len(),
         exclude_id.as_deref(),
     );
+
+    // The ranked candidate set is now an owned coherent snapshot. Do not retain
+    // either fair read lock across actor-backed row materialization: a cold actor
+    // may bootstrap through both the generation and projection read sides while
+    // a deploy/reconciler is already queued for their write sides. The final epoch
+    // check below fails closed if a specification generation overtakes this work.
+    drop(_projection_guard);
+    drop(generation_guard);
 
     let mut value: Vec<serde_json::Value> = Vec::with_capacity(k);
     for scored in ranked {
@@ -394,6 +466,11 @@ pub(super) async fn handle_nearest(
             );
         }
         value.push(body);
+    }
+
+    let _final_generation_guard = state.acquire_spec_generation_read_lock(tenant).await;
+    if state.current_spec_generation(tenant) != staged_generation {
+        return generation_changed();
     }
 
     crate::response::ODataResponse {

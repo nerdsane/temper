@@ -10,8 +10,9 @@
 //! - [`event_store`]: [`EventStore`] trait implementation
 
 use libsql::{Builder, Database};
-use std::sync::Arc;
+use std::collections::BTreeMap;
 use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex};
 use temper_runtime::persistence::{PersistenceError, storage_error};
 use tokio::sync::Semaphore;
 use tracing::instrument;
@@ -43,11 +44,16 @@ pub use field_index::QueryProjectionUpsert;
 use instrumentation::InstrumentedConnection;
 pub use published_artifacts::{PublishedArtifactRow, PublishedArtifactUpsert};
 
+type ProjectionPartition = (String, String);
+type ProjectionFence = Arc<tokio::sync::RwLock<()>>;
+type ProjectionFenceMap = BTreeMap<ProjectionPartition, ProjectionFence>;
+
 #[derive(Clone, Debug)]
 pub struct TursoEventStore {
     db: Arc<Database>,
     write_gate: Arc<Semaphore>,
     high_priority_write_waiters: Arc<AtomicUsize>,
+    projection_fences: Arc<Mutex<ProjectionFenceMap>>,
     /// True when connected to a remote Turso Cloud instance (libsql:// URL).
     /// PRAGMAs are skipped for remote connections.
     is_remote: bool,
@@ -84,10 +90,22 @@ impl TursoEventStore {
                 is_remote,
             ))),
             high_priority_write_waiters: Arc::new(AtomicUsize::new(0)),
+            projection_fences: Arc::new(Mutex::new(BTreeMap::new())),
             is_remote,
         };
         store.migrate().await?;
         Ok(store)
+    }
+
+    fn projection_fence(&self, tenant: &str, entity_type: &str) -> Arc<tokio::sync::RwLock<()>> {
+        let mut fences = self
+            .projection_fences
+            .lock()
+            .expect("Turso projection-fence lock poisoned");
+        fences
+            .entry((tenant.to_string(), entity_type.to_string()))
+            .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(())))
+            .clone()
     }
 
     /// Obtain a connection configured for local-SQLite concurrency.

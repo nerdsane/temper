@@ -17,29 +17,40 @@ use temper_runtime::persistence::EntityVectorCandidate;
 // reach for them through the vector-index module.
 pub use temper_runtime::persistence::{pack_f32_le, unpack_f32_le};
 
-/// The stable signature of a type's declared vector-path set (ADR-0155): each path
-/// rendered as `name:property:model_property:dims:metric`, sorted by name and
-/// semicolon-joined. Recorded in the vector-index backfill watermark and compared
-/// on the next backfill, so ANY change — a new path, or an in-place edit to a
-/// path's property/model_property/dims/metric — changes the signature and re-indexes
-/// the type instead of being treated as already complete. Including `dims` matters:
-/// an edited `dims` makes every existing row the wrong length (they would be dropped
-/// at read time as corrupt), so the type must be re-embedded/reconciled. Deterministic
-/// (sorted, no map iteration). Mirrors `declared_key_set_signature`.
+/// The stable signature of a type's declared vector-path set (ADR-0155): a
+/// schema-version prefix followed by a canonical JSON array of
+/// `[name, property, model_property, dims, metric]` declarations. Structured
+/// encoding is unambiguous even when identifiers contain punctuation. The
+/// version invalidates watermarks written under a weaker reconciliation
+/// contract, forcing one exact rebuild. Any declaration edit also changes the
+/// signature and re-indexes the type. Including `dims` matters: an edited `dims`
+/// makes every existing row the wrong length. Deterministic (sorted, no map
+/// iteration). Mirrors `declared_key_set_signature`.
 pub fn declared_vector_set_signature(
     vectors: &[temper_jit::table::types::DeclaredVector],
 ) -> String {
-    let mut entries: Vec<String> = vectors
+    let mut declarations = vectors
         .iter()
-        .map(|v| {
-            format!(
-                "{}:{}:{}:{}:{}",
-                v.name, v.property, v.model_property, v.dims, v.metric
+        .map(|vector| {
+            (
+                vector.name.as_str(),
+                vector.property.as_str(),
+                vector.model_property.as_str(),
+                vector.dims,
+                vector.metric.as_str(),
             )
         })
-        .collect();
-    entries.sort();
-    entries.join(";")
+        .collect::<Vec<_>>();
+    declarations.sort();
+    let encoded = serde_json::Value::Array(
+        declarations
+            .into_iter()
+            .map(|(name, property, model_property, dims, metric)| {
+                serde_json::json!([name, property, model_property, dims, metric])
+            })
+            .collect(),
+    );
+    format!("v2|{encoded}")
 }
 
 /// The similarity metric declared on a `[[vector]]` path.
@@ -205,12 +216,40 @@ pub fn rank_nearest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use temper_jit::table::types::DeclaredVector;
 
     fn candidate(id: &str, vector: Vec<f32>) -> EntityVectorCandidate {
         EntityVectorCandidate {
             entity_id: id.to_string(),
             vector,
         }
+    }
+
+    fn declaration(name: &str, property: &str, model_property: &str) -> DeclaredVector {
+        DeclaredVector {
+            name: name.to_string(),
+            property: property.to_string(),
+            model_property: model_property.to_string(),
+            dims: 4,
+            metric: "cosine".to_string(),
+        }
+    }
+
+    #[test]
+    fn vector_signature_is_structured_and_punctuation_safe() {
+        let first = declaration("a:b", "c", "d");
+        let second = declaration("a", "b:c", "d");
+        assert_ne!(
+            declared_vector_set_signature(std::slice::from_ref(&first)),
+            declared_vector_set_signature(std::slice::from_ref(&second)),
+            "punctuation in different declaration fields must not collide"
+        );
+        assert_eq!(
+            declared_vector_set_signature(&[first.clone(), second.clone()]),
+            declared_vector_set_signature(&[second, first]),
+            "declaration list order must not affect the signature"
+        );
+        assert_eq!(declared_vector_set_signature(&[]), "v2|[]");
     }
 
     #[test]

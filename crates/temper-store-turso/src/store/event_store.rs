@@ -1,11 +1,12 @@
 //! [`EventStore`] trait implementation for Turso/libSQL.
 
 use libsql::{TransactionBehavior, Value, params, params_from_iter};
+use std::collections::BTreeSet;
 use std::time::Duration;
 use temper_runtime::persistence::{
     EntityVectorCandidate, EntityVectorRow, EventMetadata, EventStore, PersistenceAppend,
-    PersistenceAppendResult, PersistenceEnvelope, PersistenceError, pack_f32_le, storage_error,
-    unpack_f32_le,
+    PersistenceAppendResult, PersistenceEnvelope, PersistenceError, ProjectionReconciliationFence,
+    pack_f32_le, storage_error, unpack_f32_le,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 use tracing::{error, instrument, warn};
@@ -24,6 +25,7 @@ struct PreparedEventInsert {
     entity_type: String,
     entity_id: String,
     sequence_nr: u64,
+    segment_index: i64,
     event_type: String,
     payload_json: String,
     metadata_json: String,
@@ -139,7 +141,7 @@ impl EventStore for TursoEventStore {
 
     // NOTE (ADR-0153): Turso intentionally does NOT implement `backfill_entity_keys`,
     // `mark_key_index_backfilled`, or `key_index_backfilled_types` — it keeps the
-    // no-op/empty trait defaults. Turso never co-commits key rows (it does not override
+    // fail-closed/empty trait defaults. Turso never co-commits key rows (it does not override
     // `append_with_keys`), so its `entity_key_index` is never maintained on write. A
     // store that does not maintain the index live must NEVER become authoritative for
     // absence: backfilling or watermarking it would let a keyed miss wrongly read a
@@ -152,8 +154,10 @@ impl EventStore for TursoEventStore {
     // appended first (with retries), then the derived vector rows follow in a separate,
     // also-retried write. This is safe for vectors (unlike keys) because a vector row
     // carries no uniqueness constraint and a lagging index write only makes a ranking
-    // temporarily incomplete; it can never corrupt a keyed absence. So Turso implements
-    // the full vector surface below.
+    // temporarily incomplete; it can never corrupt a keyed absence. Turso implements
+    // sequence-fenced vector replacement and reads below, but deliberately does not
+    // advertise a durable completion watermark: startup replay remains the repair path
+    // after an exhausted live write-behind retry.
     async fn append_with_index_rows(
         &self,
         persistence_id: &str,
@@ -163,6 +167,17 @@ impl EventStore for TursoEventStore {
         vector_rows: &[EntityVectorRow],
         reconciliation: temper_runtime::persistence::IndexReconciliation,
     ) -> Result<u64, PersistenceError> {
+        let _projection_guard = if reconciliation.vectors {
+            let (tenant, entity_type, _) =
+                parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+            Some(
+                self.projection_fence(tenant, entity_type)
+                    .read_owned()
+                    .await,
+            )
+        } else {
+            None
+        };
         // The journal append is the durable event (keys are not maintained on Turso,
         // per the note above).
         let new_seq = self
@@ -184,7 +199,7 @@ impl EventStore for TursoEventStore {
                     tokio::time::sleep(Duration::from_millis(retry_delay_ms(attempt - 1))).await;
                 }
                 match self
-                    .backfill_entity_vectors(tenant, entity_type, entity_id, vector_rows)
+                    .backfill_entity_vectors(tenant, entity_type, entity_id, new_seq, vector_rows)
                     .await
                 {
                     Ok(()) => {
@@ -211,11 +226,36 @@ impl EventStore for TursoEventStore {
         Ok(new_seq)
     }
 
+    async fn acquire_projection_reconciliation_fence(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<ProjectionReconciliationFence, PersistenceError> {
+        let guard = self
+            .projection_fence(tenant, entity_type)
+            .write_owned()
+            .await;
+        Ok(ProjectionReconciliationFence::new(guard))
+    }
+
+    async fn acquire_projection_read_fence(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<ProjectionReconciliationFence, PersistenceError> {
+        let guard = self
+            .projection_fence(tenant, entity_type)
+            .read_owned()
+            .await;
+        Ok(ProjectionReconciliationFence::new(guard))
+    }
+
     async fn backfill_entity_vectors(
         &self,
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
+        source_sequence: u64,
         vector_rows: &[EntityVectorRow],
     ) -> Result<(), PersistenceError> {
         // Reconcile: DELETE all of the entity's rows, then insert the current ones.
@@ -229,6 +269,34 @@ impl EventStore for TursoEventStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(storage_error)?;
+        // The caller derived `vector_rows` from `source_sequence`. The immediate
+        // transaction serializes this check+replace with Turso live writes. If a
+        // newer journal append won before this transaction began, skip the stale
+        // replay; if it begins later, its write-behind runs after this commit and
+        // overwrites us with the newer rows (including an empty current set).
+        let mut head_rows = tx
+            .query(
+                "SELECT COALESCE(MAX(sequence_nr), 0) FROM events \
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                params![tenant, entity_type, entity_id],
+            )
+            .await
+            .map_err(storage_error)?;
+        let durable_head = match head_rows.next().await.map_err(storage_error)? {
+            Some(row) => row.get::<i64>(0).map_err(storage_error)? as u64,
+            None => 0,
+        };
+        drop(head_rows);
+        if durable_head > source_sequence {
+            tx.rollback().await.map_err(storage_error)?;
+            return Ok(());
+        }
+        if durable_head < source_sequence {
+            tx.rollback().await.map_err(storage_error)?;
+            return Err(PersistenceError::Storage(format!(
+                "vector reconciliation source sequence {source_sequence} is ahead of durable head {durable_head}"
+            )));
+        }
         tx.execute(
             "DELETE FROM entity_vector_index \
              WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
@@ -240,7 +308,7 @@ impl EventStore for TursoEventStore {
             tx.execute(
                 "INSERT INTO entity_vector_index \
                  (tenant, entity_type, decl_name, model_tag, entity_id, vector, sequence_nr) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     tenant,
                     entity_type,
@@ -248,6 +316,7 @@ impl EventStore for TursoEventStore {
                     row.model_tag.as_str(),
                     entity_id,
                     Value::Blob(pack_f32_le(&row.vector)),
+                    source_sequence as i64,
                 ],
             )
             .await
@@ -286,51 +355,6 @@ impl EventStore for TursoEventStore {
         Ok(out)
     }
 
-    async fn mark_vector_index_backfilled(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        vector_set: &str,
-    ) -> Result<(), PersistenceError> {
-        let _write_permit = self
-            .acquire_write_permit("turso.mark_vector_index_backfilled", WritePriority::Low)
-            .await?;
-        let conn = self.configured_connection().await?;
-        let completed_at = temper_runtime::scheduler::sim_now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO vector_index_backfill_watermark (tenant, entity_type, vector_set, completed_at) \
-             VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT(tenant, entity_type) \
-             DO UPDATE SET vector_set = excluded.vector_set, completed_at = excluded.completed_at",
-            params![tenant, entity_type, vector_set, completed_at.as_str()],
-        )
-        .await
-        .map_err(storage_error)?;
-        Ok(())
-    }
-
-    async fn vector_index_backfilled_types(
-        &self,
-        tenant: &str,
-    ) -> Result<Vec<(String, String)>, PersistenceError> {
-        let conn = self.configured_connection().await?;
-        let mut rows = conn
-            .query(
-                "SELECT entity_type, vector_set FROM vector_index_backfill_watermark \
-                 WHERE tenant = ?1",
-                params![tenant],
-            )
-            .await
-            .map_err(storage_error)?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
-            let entity_type: String = row.get(0).map_err(storage_error)?;
-            let vector_set: String = row.get(1).map_err(storage_error)?;
-            out.push((entity_type, vector_set));
-        }
-        Ok(out)
-    }
-
     async fn vectored_entity_ids_for_type(
         &self,
         tenant: &str,
@@ -361,17 +385,49 @@ impl EventStore for TursoEventStore {
             return Ok(Vec::new());
         }
         if let [append] = appends {
-            let sequence_nr = self
-                .append(
+            let sequence_nr = if append.reconciliation.keys
+                || append.reconciliation.vectors
+                || !append.key_rows.is_empty()
+                || !append.vector_rows.is_empty()
+            {
+                self.append_with_index_rows(
+                    &append.persistence_id,
+                    append.expected_sequence,
+                    &append.events,
+                    &append.key_rows,
+                    &append.vector_rows,
+                    append.reconciliation,
+                )
+                .await?
+            } else {
+                self.append(
                     &append.persistence_id,
                     append.expected_sequence,
                     &append.events,
                 )
-                .await?;
+                .await?
+            };
             return Ok(vec![PersistenceAppendResult {
                 persistence_id: append.persistence_id.clone(),
                 sequence_nr,
             }]);
+        }
+
+        let mut partitions = BTreeSet::new();
+        for append in appends {
+            if append.reconciliation.vectors {
+                let (tenant, entity_type, _) = parse_persistence_id_parts(&append.persistence_id)
+                    .map_err(PersistenceError::Storage)?;
+                partitions.insert((tenant.to_string(), entity_type.to_string()));
+            }
+        }
+        let mut _projection_guards = Vec::with_capacity(partitions.len());
+        for (tenant, entity_type) in partitions {
+            _projection_guards.push(
+                self.projection_fence(&tenant, &entity_type)
+                    .read_owned()
+                    .await,
+            );
         }
 
         let attempt_timeout = append_attempt_timeout();
@@ -1065,9 +1121,65 @@ impl TursoEventStore {
             ));
         }
 
+        let mut segment_indices = Vec::with_capacity(appends.len());
+        for (append, (tenant, entity_type, entity_id)) in appends.iter().zip(parsed.iter()) {
+            let mut segment_rows = tx
+                .query(
+                    "SELECT segment_index
+                     FROM event_segments
+                     WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND sealed_at IS NULL
+                     ORDER BY segment_index DESC
+                     LIMIT 1",
+                    params![tenant.as_str(), entity_type.as_str(), entity_id.as_str()],
+                )
+                .await
+                .map_err(storage_error)?;
+            let segment_index =
+                if let Some(row) = segment_rows.next().await.map_err(storage_error)? {
+                    row.get::<i64>(0).map_err(storage_error)?
+                } else {
+                    drop(segment_rows);
+                    let mut max_rows = tx
+                        .query(
+                            "SELECT COALESCE(MAX(segment_index), 0)
+                         FROM events
+                         WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                            params![tenant.as_str(), entity_type.as_str(), entity_id.as_str()],
+                        )
+                        .await
+                        .map_err(storage_error)?;
+                    let index = match max_rows.next().await.map_err(storage_error)? {
+                        Some(row) => row.get::<i64>(0).map_err(storage_error)?,
+                        None => 0,
+                    };
+                    drop(max_rows);
+                    tx.execute(
+                        "INSERT INTO event_segments
+                     (tenant, entity_type, entity_id, segment_index, start_sequence_nr)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(tenant, entity_type, entity_id, segment_index) DO NOTHING",
+                        params![
+                            tenant.as_str(),
+                            entity_type.as_str(),
+                            entity_id.as_str(),
+                            index,
+                            ((append.expected_sequence + 1).max(1)) as i64,
+                        ],
+                    )
+                    .await
+                    .map_err(storage_error)?;
+                    index
+                };
+            segment_indices.push(segment_index);
+        }
+
         let mut results = Vec::with_capacity(appends.len());
         let mut event_rows = Vec::new();
-        for (append, (tenant, entity_type, entity_id)) in appends.iter().zip(parsed.iter()) {
+        for ((append, (tenant, entity_type, entity_id)), segment_index) in appends
+            .iter()
+            .zip(parsed.iter())
+            .zip(segment_indices.iter())
+        {
             let mut new_seq = append.expected_sequence;
             for event in &append.events {
                 new_seq += 1;
@@ -1085,6 +1197,7 @@ impl TursoEventStore {
                     entity_type: entity_type.clone(),
                     entity_id: entity_id.clone(),
                     sequence_nr: new_seq,
+                    segment_index: *segment_index,
                     event_type: event.event_type.clone(),
                     payload_json,
                     metadata_json,
@@ -1104,19 +1217,20 @@ impl TursoEventStore {
 
             let mut insert_sql = String::from(
                 "INSERT INTO events \
-                 (tenant, entity_type, entity_id, sequence_nr, event_type, payload, metadata) \
+                 (tenant, entity_type, entity_id, sequence_nr, segment_index, event_type, payload, metadata) \
                  VALUES ",
             );
-            let mut insert_values = Vec::with_capacity(chunk.len() * 7);
+            let mut insert_values = Vec::with_capacity(chunk.len() * 8);
             for (index, row) in chunk.iter().enumerate() {
                 if index > 0 {
                     insert_sql.push_str(", ");
                 }
-                insert_sql.push_str("(?, ?, ?, ?, ?, ?, ?)");
+                insert_sql.push_str("(?, ?, ?, ?, ?, ?, ?, ?)");
                 insert_values.push(Value::from(row.tenant.clone()));
                 insert_values.push(Value::from(row.entity_type.clone()));
                 insert_values.push(Value::from(row.entity_id.clone()));
                 insert_values.push(Value::from(row.sequence_nr as i64));
+                insert_values.push(Value::from(row.segment_index));
                 insert_values.push(Value::from(row.event_type.clone()));
                 insert_values.push(Value::from(row.payload_json.clone()));
                 insert_values.push(Value::from(row.metadata_json.clone()));
@@ -1145,6 +1259,69 @@ impl TursoEventStore {
                     });
                 }
                 return Err(PersistenceError::Storage(msg));
+            }
+        }
+
+        for (((append, result), (tenant, entity_type, entity_id)), segment_index) in appends
+            .iter()
+            .zip(results.iter())
+            .zip(parsed.iter())
+            .zip(segment_indices.iter())
+        {
+            if result.sequence_nr > append.expected_sequence {
+                tx.execute(
+                    "UPDATE event_segments
+                     SET end_sequence_nr = ?5, event_count = MAX(?5 - start_sequence_nr + 1, 0)
+                     WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND segment_index = ?4",
+                    params![
+                        tenant.as_str(),
+                        entity_type.as_str(),
+                        entity_id.as_str(),
+                        *segment_index,
+                        result.sequence_nr as i64,
+                    ],
+                )
+                .await
+                .map_err(storage_error)?;
+            }
+        }
+
+        // Multi-stream Turso batches already own one immediate transaction. Reconcile
+        // vector rows inside it so the journal head and derived rows become visible
+        // atomically. Keys remain intentionally unsupported/non-authoritative.
+        for (append, (tenant, entity_type, entity_id)) in appends.iter().zip(parsed.iter()) {
+            if append.reconciliation.vectors {
+                tx.execute(
+                    "DELETE FROM entity_vector_index \
+                     WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                    params![tenant.as_str(), entity_type.as_str(), entity_id.as_str()],
+                )
+                .await
+                .map_err(storage_error)?;
+            }
+        }
+        for ((append, result), (tenant, entity_type, entity_id)) in
+            appends.iter().zip(results.iter()).zip(parsed.iter())
+        {
+            if append.reconciliation.vectors {
+                for row in &append.vector_rows {
+                    tx.execute(
+                        "INSERT INTO entity_vector_index \
+                         (tenant, entity_type, decl_name, model_tag, entity_id, vector, sequence_nr) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            tenant.as_str(),
+                            entity_type.as_str(),
+                            row.decl_name.as_str(),
+                            row.model_tag.as_str(),
+                            entity_id.as_str(),
+                            Value::Blob(pack_f32_le(&row.vector)),
+                            result.sequence_nr as i64,
+                        ],
+                    )
+                    .await
+                    .map_err(storage_error)?;
+                }
             }
         }
 

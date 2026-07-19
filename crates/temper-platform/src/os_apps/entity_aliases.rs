@@ -70,6 +70,7 @@ pub(super) async fn ensure_entity_field_aliases(
             entity_id,
             serde_json::Value::Object(updates),
             false,
+            None,
         )
         .await
         .map(|_| ())

@@ -1,7 +1,7 @@
 use super::*;
 use temper_runtime::persistence::EventMetadata;
 
-fn test_envelope(seq: u64, event_type: &str) -> PersistenceEnvelope {
+pub(crate) fn test_envelope(seq: u64, event_type: &str) -> PersistenceEnvelope {
     PersistenceEnvelope {
         sequence_nr: seq,
         event_type: event_type.to_string(),
@@ -62,11 +62,17 @@ async fn append_batch_commits_multiple_journals_atomically() {
             persistence_id: "default:Order:ord-a".to_string(),
             expected_sequence: 0,
             events: vec![test_envelope(0, "Created")],
+            key_rows: Vec::new(),
+            vector_rows: Vec::new(),
+            reconciliation: Default::default(),
         },
         PersistenceAppend {
             persistence_id: "default:Order:ord-b".to_string(),
             expected_sequence: 0,
             events: vec![test_envelope(0, "Created"), test_envelope(0, "Submitted")],
+            key_rows: Vec::new(),
+            vector_rows: Vec::new(),
+            reconciliation: Default::default(),
         },
     ];
 
@@ -107,11 +113,17 @@ async fn append_batch_conflict_leaves_all_journals_untouched() {
                 persistence_id: "default:Order:ord-new".to_string(),
                 expected_sequence: 0,
                 events: vec![test_envelope(0, "Created")],
+                key_rows: Vec::new(),
+                vector_rows: Vec::new(),
+                reconciliation: Default::default(),
             },
             PersistenceAppend {
                 persistence_id: "default:Order:ord-existing".to_string(),
                 expected_sequence: 0,
                 events: vec![test_envelope(0, "Submitted")],
+                key_rows: Vec::new(),
+                vector_rows: Vec::new(),
+                reconciliation: Default::default(),
             },
         ])
         .await
@@ -195,6 +207,9 @@ async fn injected_concurrency_violations_report_the_durable_journal_head() {
             persistence_id: DETERMINISTIC_BATCH.to_string(),
             expected_sequence: 0,
             events: vec![test_envelope(0, "Duplicate")],
+            key_rows: Vec::new(),
+            vector_rows: Vec::new(),
+            reconciliation: Default::default(),
         }])
         .await
         .expect_err("deterministic batch append conflict");
@@ -231,6 +246,9 @@ async fn injected_concurrency_violations_report_the_durable_journal_head() {
             persistence_id: PROBABILISTIC_BATCH.to_string(),
             expected_sequence: 0,
             events: vec![test_envelope(0, "Duplicate")],
+            key_rows: Vec::new(),
+            vector_rows: Vec::new(),
+            reconciliation: Default::default(),
         }])
         .await
         .expect_err("injected batch append conflict");

@@ -78,11 +78,13 @@ impl DeployPipeline {
     /// 1. Parse and validate each IOA spec
     /// 2. Run verification cascade (L1/L2/L3) per entity
     /// 3. Parse CSDL XML
-    /// 4. Register tenant in the live SpecRegistry
-    /// 5. Broadcast deployment status
+    /// 4. Serialize the tenant generation and reconcile the currently installed projections
+    /// 5. Register tenant in the live SpecRegistry
+    /// 6. Reconcile the new generation before releasing the tenant barrier
+    /// 7. Broadcast deployment status
     ///
     /// Emits a parent `temper.deploy` span with child spans per entity.
-    pub fn verify_and_deploy(state: &PlatformState, input: &DeployInput) -> DeployResult {
+    pub async fn verify_and_deploy(state: &PlatformState, input: &DeployInput) -> DeployResult {
         let tracer = global::tracer("temper");
         let mut deploy_span = tracer
             .span_builder("temper.deploy")
@@ -94,6 +96,7 @@ impl DeployPipeline {
 
         let mut entity_results = Vec::new();
         let mut all_passed = true;
+        let mut failure_summary = None;
 
         // Step 1-2: Parse and verify each entity spec
         for entity in &input.entities {
@@ -299,60 +302,121 @@ impl DeployPipeline {
                         .map(|r| (r.entity_name.as_str(), r.ioa_source.as_str()))
                         .collect();
 
-                    // Register tenant in the live registry.
-                    let register_result = {
-                        let mut registry = state.registry.write().unwrap();
-                        registry.try_register_tenant(
-                            TenantId::new(&input.tenant_name),
-                            csdl,
-                            input.csdl_xml.clone(),
-                            &ioa_pairs,
-                        )
-                    };
+                    let tenant_id = TenantId::new(&input.tenant_name);
+                    let _generation_guard =
+                        state.server.acquire_spec_generation_lock(&tenant_id).await;
 
-                    match register_result {
-                        Ok(()) => {
-                            state.broadcast(PlatformEvent::DeployStatus {
-                                tenant: input.tenant_name.clone(),
-                                success: true,
-                                summary: format!(
-                                    "Deployed {} entities for tenant '{}'",
-                                    input.entities.len(),
-                                    input.tenant_name,
-                                ),
-                            });
+                    // Retire authority absent from the currently installed generation
+                    // before replacing it. A failed exact rebuild for a declaration
+                    // that is still installed must not block a corrective generation.
+                    if !state
+                        .server
+                        .retire_removed_projection_authority(&tenant_id)
+                        .await
+                    {
+                        let message = format!(
+                            "Removed projection authority retirement failed for the currently installed generation of tenant '{}'",
+                            input.tenant_name
+                        );
+                        all_passed = false;
+                        failure_summary = Some(message.clone());
+                        deploy_span.set_status(Status::Error {
+                            description: message.clone().into(),
+                        });
+                        state.broadcast(PlatformEvent::DeployStatus {
+                            tenant: input.tenant_name.clone(),
+                            success: false,
+                            summary: message,
+                        });
+                    } else {
+                        // Register tenant in the live registry while holding the same
+                        // generation barrier used by every other spec mutation path.
+                        let register_result = {
+                            let mut registry =
+                                state.registry.write().expect("spec registry lock poisoned");
+                            registry.try_register_tenant(
+                                tenant_id.clone(),
+                                csdl,
+                                input.csdl_xml.clone(),
+                                &ioa_pairs,
+                            )
+                        };
 
-                            state.broadcast(PlatformEvent::TenantRegistered {
-                                tenant: input.tenant_name.clone(),
-                                entity_count: input.entities.len(),
-                            });
-                        }
-                        Err(e) => {
-                            all_passed = false;
-                            deploy_span.set_status(Status::Error {
-                                description: format!("registry registration failed: {e}").into(),
-                            });
-                            state.broadcast(PlatformEvent::DeployStatus {
-                                tenant: input.tenant_name.clone(),
-                                success: false,
-                                summary: format!("Tenant registration failed: {e}"),
-                            });
+                        match register_result {
+                            Ok(()) => {
+                                // Do not advertise deployment success or release the
+                                // generation barrier until removed declarations have
+                                // durable empty markers and changed declarations have
+                                // completed their exact rebuild.
+                                if state
+                                    .server
+                                    .reconcile_declared_projections(&tenant_id)
+                                    .await
+                                {
+                                    state.broadcast(PlatformEvent::DeployStatus {
+                                        tenant: input.tenant_name.clone(),
+                                        success: true,
+                                        summary: format!(
+                                            "Deployed {} entities for tenant '{}'",
+                                            input.entities.len(),
+                                            input.tenant_name,
+                                        ),
+                                    });
+
+                                    state.broadcast(PlatformEvent::TenantRegistered {
+                                        tenant: input.tenant_name.clone(),
+                                        entity_count: input.entities.len(),
+                                    });
+                                } else {
+                                    let message = format!(
+                                        "Projection reconciliation failed for the newly installed generation of tenant '{}'",
+                                        input.tenant_name
+                                    );
+                                    all_passed = false;
+                                    failure_summary = Some(message.clone());
+                                    deploy_span.set_status(Status::Error {
+                                        description: message.clone().into(),
+                                    });
+                                    state.broadcast(PlatformEvent::DeployStatus {
+                                        tenant: input.tenant_name.clone(),
+                                        success: false,
+                                        summary: message,
+                                    });
+                                }
+                            }
+                            Err(e) => {
+                                let message = format!("Tenant registration failed: {e}");
+                                all_passed = false;
+                                failure_summary = Some(message.clone());
+                                deploy_span.set_status(Status::Error {
+                                    description: format!("registry registration failed: {e}")
+                                        .into(),
+                                });
+                                state.broadcast(PlatformEvent::DeployStatus {
+                                    tenant: input.tenant_name.clone(),
+                                    success: false,
+                                    summary: message,
+                                });
+                            }
                         }
                     }
                 }
                 Err(e) => {
+                    let message = format!("CSDL parsing failed: {e}");
                     all_passed = false;
+                    failure_summary = Some(message.clone());
                     deploy_span.set_status(Status::Error {
                         description: format!("CSDL failed: {e}").into(),
                     });
                     state.broadcast(PlatformEvent::DeployStatus {
                         tenant: input.tenant_name.clone(),
                         success: false,
-                        summary: format!("CSDL parsing failed: {e}"),
+                        summary: message,
                     });
                 }
             }
         } else if !all_passed {
+            failure_summary = Some("Deployment aborted: verification failed".into());
             deploy_span.set_status(Status::Error {
                 description: "verification failed".into(),
             });
@@ -373,12 +437,7 @@ impl DeployPipeline {
                 input.tenant_name,
             )
         } else {
-            let failed: Vec<&str> = entity_results
-                .iter()
-                .filter(|r| !r.verified)
-                .map(|r| r.entity_name.as_str())
-                .collect();
-            format!("Deployment failed: verification failed for {:?}", failed)
+            failure_summary.unwrap_or_else(|| "Deployment failed".into())
         };
 
         DeployResult {
@@ -450,10 +509,18 @@ permit(
 }
 
 #[cfg(test)]
+#[path = "deploy_projection_tests.rs"]
+mod projection_tests;
+
+#[cfg(test)]
+#[path = "deploy_generation_tests.rs"]
+mod generation_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    const TASK_IOA: &str = r#"
+    pub(super) const TASK_IOA: &str = r#"
 [automaton]
 name = "Task"
 initial = "Open"
@@ -472,7 +539,7 @@ to = "Done"
 kind = "internal"
 "#;
 
-    const TASK_CSDL: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+    pub(super) const TASK_CSDL: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
   <edmx:DataServices>
     <Schema Namespace="Test.TaskTracker" xmlns="http://docs.oasis-open.org/odata/ns/edm">
@@ -508,12 +575,12 @@ kind = "internal"
         }
     }
 
-    #[test]
-    fn test_deploy_pipeline_success() {
+    #[tokio::test]
+    async fn test_deploy_pipeline_success() {
         let state = PlatformState::new(None);
         let mut rx = state.subscribe();
 
-        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
+        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input()).await;
 
         assert!(
             result.success,
@@ -532,11 +599,11 @@ kind = "internal"
         assert!(!received.is_empty(), "Should have broadcast messages");
     }
 
-    #[test]
-    fn test_deploy_pipeline_registers_tenant() {
+    #[tokio::test]
+    async fn test_deploy_pipeline_registers_tenant() {
         let state = PlatformState::new(None);
 
-        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
+        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input()).await;
 
         assert!(result.success);
 
@@ -547,8 +614,8 @@ kind = "internal"
         assert!(registry.get_table(&tenant, "Task").is_some());
     }
 
-    #[test]
-    fn test_deploy_pipeline_empty_entities() {
+    #[tokio::test]
+    async fn test_deploy_pipeline_empty_entities() {
         let state = PlatformState::new(None);
 
         let input = DeployInput {
@@ -557,18 +624,18 @@ kind = "internal"
             entities: vec![],
             wasm_modules: std::collections::BTreeMap::new(),
         };
-        let result = DeployPipeline::verify_and_deploy(&state, &input);
+        let result = DeployPipeline::verify_and_deploy(&state, &input).await;
 
         // Empty entities should succeed vacuously
         assert!(result.success);
         assert!(result.entity_results.is_empty());
     }
 
-    #[test]
-    fn test_deploy_pipeline_verification_results() {
+    #[tokio::test]
+    async fn test_deploy_pipeline_verification_results() {
         let state = PlatformState::new(None);
 
-        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
+        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input()).await;
 
         assert!(result.success);
         let entity_result = &result.entity_results[0];
@@ -577,12 +644,12 @@ kind = "internal"
         assert!(cascade.all_passed);
     }
 
-    #[test]
-    fn test_deploy_pipeline_broadcasts_verify_status() {
+    #[tokio::test]
+    async fn test_deploy_pipeline_broadcasts_verify_status() {
         let state = PlatformState::new(None);
         let mut rx = state.subscribe();
 
-        let _result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
+        let _result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input()).await;
 
         let mut verify_msgs = Vec::new();
         let mut deploy_msgs = Vec::new();
@@ -605,21 +672,21 @@ kind = "internal"
         );
     }
 
-    #[test]
-    fn test_deploy_result_summary() {
+    #[tokio::test]
+    async fn test_deploy_result_summary() {
         let state = PlatformState::new(None);
 
-        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
+        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input()).await;
 
         assert!(result.summary.contains("Successfully deployed"));
         assert!(result.summary.contains("test-tenant"));
     }
 
-    #[test]
-    fn test_deploy_pipeline_span_noop() {
+    #[tokio::test]
+    async fn test_deploy_pipeline_span_noop() {
         // Verifies that OTEL span instrumentation doesn't panic with no-op tracer.
         let state = PlatformState::new(None);
-        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
+        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input()).await;
         assert!(
             result.success,
             "Pipeline should succeed with no-op OTEL: {}",
@@ -627,8 +694,8 @@ kind = "internal"
         );
     }
 
-    #[test]
-    fn test_deploy_multiple_entities() {
+    #[tokio::test]
+    async fn test_deploy_multiple_entities() {
         let state = PlatformState::new(None);
 
         let input = DeployInput {
@@ -647,7 +714,7 @@ kind = "internal"
             wasm_modules: std::collections::BTreeMap::new(),
         };
 
-        let result = DeployPipeline::verify_and_deploy(&state, &input);
+        let result = DeployPipeline::verify_and_deploy(&state, &input).await;
 
         assert!(
             result.success,
@@ -662,8 +729,8 @@ kind = "internal"
         assert!(registry.get_table(&tenant, "Bug").is_some());
     }
 
-    #[test]
-    fn test_deploy_bad_ioa_fails() {
+    #[tokio::test]
+    async fn test_deploy_bad_ioa_fails() {
         let state = PlatformState::new(None);
 
         let input = DeployInput {
@@ -676,7 +743,7 @@ kind = "internal"
             wasm_modules: std::collections::BTreeMap::new(),
         };
 
-        let result = DeployPipeline::verify_and_deploy(&state, &input);
+        let result = DeployPipeline::verify_and_deploy(&state, &input).await;
         assert!(!result.success);
         assert!(!result.entity_results[0].verified);
     }

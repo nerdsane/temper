@@ -131,7 +131,13 @@ async fn vector_index_write_behind_candidates_and_partitioning() {
 
     // Upsert: re-writing item-a's vector replaces (no duplicate row).
     store
-        .backfill_entity_vectors("t", "Item", "item-a", &[row("embed", "m1", vec![0.5, 0.5])])
+        .backfill_entity_vectors(
+            "t",
+            "Item",
+            "item-a",
+            1,
+            &[row("embed", "m1", vec![0.5, 0.5])],
+        )
         .await
         .unwrap();
     let candidates = store
@@ -141,14 +147,21 @@ async fn vector_index_write_behind_candidates_and_partitioning() {
     assert_eq!(candidates.len(), 2);
     assert_eq!(candidates[0].vector, vec![0.5, 0.5]);
 
-    // Watermark roundtrip + resumable id listing.
-    store
-        .mark_vector_index_backfilled("t", "Item", "embed")
-        .await
-        .unwrap();
-    assert_eq!(
-        store.vector_index_backfilled_types("t").await.unwrap(),
-        vec![("Item".to_string(), "embed".to_string())]
+    // Turso is write-behind, so it deliberately has no durable skip watermark:
+    // every startup replays, while sequence-aware replacement prevents stale
+    // replay from overwriting a newer journal state.
+    assert!(
+        store
+            .mark_vector_index_backfilled("t", "Item", "embed")
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .vector_index_backfilled_types("t")
+            .await
+            .unwrap()
+            .is_empty()
     );
     let mut ids = store
         .vectored_entity_ids_for_type("t", "Item")
@@ -212,9 +225,78 @@ async fn vector_index_reconcile_purges_on_delete_and_empty_rows() {
 
     // The explicit backfill purge (empty rows) is idempotent.
     store
-        .backfill_entity_vectors("t", "Item", "item-a", &[])
+        .backfill_entity_vectors("t", "Item", "item-a", 2, &[])
         .await
         .unwrap();
+    assert!(
+        store
+            .vector_candidates("t", "Item", "embed", "m1", 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn stale_vector_replay_cannot_overwrite_a_newer_turso_journal_state() {
+    let store = make_store("vector-stale-replay").await;
+    let row = |value: f32| EntityVectorRow {
+        decl_name: "embed".to_string(),
+        model_tag: "m1".to_string(),
+        vector: vec![value, 0.0],
+    };
+
+    store
+        .append_with_index_rows(
+            "t:Item:item-a",
+            0,
+            &[test_envelope("Create", serde_json::json!({}))],
+            &[],
+            &[row(1.0)],
+            VECTOR_RECONCILIATION,
+        )
+        .await
+        .unwrap();
+    store
+        .append_with_index_rows(
+            "t:Item:item-a",
+            1,
+            &[test_envelope("Update", serde_json::json!({}))],
+            &[],
+            &[row(2.0)],
+            VECTOR_RECONCILIATION,
+        )
+        .await
+        .unwrap();
+
+    store
+        .backfill_entity_vectors("t", "Item", "item-a", 1, &[row(1.0)])
+        .await
+        .expect("stale replay is skipped, not applied");
+    assert_eq!(
+        store
+            .vector_candidates("t", "Item", "embed", "m1", 10)
+            .await
+            .unwrap()[0]
+            .vector,
+        vec![2.0, 0.0]
+    );
+
+    store
+        .append_with_index_rows(
+            "t:Item:item-a",
+            2,
+            &[test_envelope("Clear", serde_json::json!({}))],
+            &[],
+            &[],
+            VECTOR_RECONCILIATION,
+        )
+        .await
+        .unwrap();
+    store
+        .backfill_entity_vectors("t", "Item", "item-a", 2, &[row(2.0)])
+        .await
+        .expect("stale replay cannot resurrect a cleared vector");
     assert!(
         store
             .vector_candidates("t", "Item", "embed", "m1", 10)
@@ -287,6 +369,9 @@ async fn append_batch_zero_sequence_detects_existing_stream_by_unique_key() {
                 "OrderUpdated",
                 serde_json::json!({ "step": 2 }),
             )],
+            key_rows: Vec::new(),
+            vector_rows: Vec::new(),
+            reconciliation: Default::default(),
         }])
         .await
         .unwrap_err();
@@ -302,6 +387,90 @@ async fn append_batch_zero_sequence_detects_existing_stream_by_unique_key() {
     let events = store.read_events(persistence_id, 0).await.unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event_type, "OrderCreated");
+}
+
+#[tokio::test]
+async fn append_batch_co_commits_exact_vector_rows() {
+    let store = make_store("append-batch-vectors").await;
+    let vector = |model: &str, values: Vec<f32>| EntityVectorRow {
+        decl_name: "embedding".to_string(),
+        model_tag: model.to_string(),
+        vector: values,
+    };
+    let append =
+        |entity_id: &str, expected_sequence, rows: Vec<EntityVectorRow>| PersistenceAppend {
+            persistence_id: format!("tenant-a:Item:{entity_id}"),
+            expected_sequence,
+            events: vec![test_envelope("Changed", serde_json::json!({}))],
+            key_rows: Vec::new(),
+            vector_rows: rows,
+            reconciliation: VECTOR_RECONCILIATION,
+        };
+
+    store
+        .append_batch(&[
+            append("item-a", 0, vec![vector("m1", vec![1.0, 0.0])]),
+            append("item-b", 0, vec![vector("m1", vec![0.0, 1.0])]),
+        ])
+        .await
+        .expect("create vector batch");
+    let initial = store
+        .vector_candidates("tenant-a", "Item", "embedding", "m1", 10)
+        .await
+        .expect("read initial vectors");
+    assert_eq!(
+        initial
+            .iter()
+            .map(|candidate| candidate.entity_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["item-a", "item-b"]
+    );
+
+    store
+        .append_batch(&[
+            append("item-a", 1, Vec::new()),
+            append("item-b", 1, vec![vector("m2", vec![0.5, 0.5])]),
+        ])
+        .await
+        .expect("replace vector batch");
+    assert!(
+        store
+            .vector_candidates("tenant-a", "Item", "embedding", "m1", 10)
+            .await
+            .expect("read purged model")
+            .is_empty()
+    );
+    let replacement = store
+        .vector_candidates("tenant-a", "Item", "embedding", "m2", 10)
+        .await
+        .expect("read replacement vector");
+    assert_eq!(replacement.len(), 1);
+    assert_eq!(replacement[0].entity_id, "item-b");
+    assert_eq!(replacement[0].vector, vec![0.5, 0.5]);
+
+    let conn = store.connection().expect("connection");
+    let mut rows = conn
+        .query(
+            "SELECT entity_id, start_sequence_nr, end_sequence_nr, event_count
+             FROM event_segments
+             WHERE tenant = ?1 AND entity_type = ?2
+             ORDER BY entity_id",
+            params!["tenant-a", "Item"],
+        )
+        .await
+        .expect("read batch segment metadata");
+    for expected_id in ["item-a", "item-b"] {
+        let row = rows
+            .next()
+            .await
+            .expect("read segment row")
+            .expect("segment row exists");
+        assert_eq!(row.get::<String>(0).unwrap(), expected_id);
+        assert_eq!(row.get::<i64>(1).unwrap(), 1);
+        assert_eq!(row.get::<i64>(2).unwrap(), 2);
+        assert_eq!(row.get::<i64>(3).unwrap(), 2);
+    }
+    assert!(rows.next().await.expect("finish segment rows").is_none());
 }
 
 #[tokio::test]

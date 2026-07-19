@@ -1,6 +1,7 @@
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
+use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::LintSeverity;
 use temper_spec::cross_invariant::{
     CrossInvariantLintSeverity, lint_cross_invariants, parse_cross_invariants,
@@ -184,6 +185,18 @@ pub(crate) async fn handle_load_dir(
         return build_ndjson_response(StatusCode::BAD_REQUEST, lines);
     }
 
+    let tenant_id = TenantId::new(&body.tenant);
+    let _generation_guard = state.acquire_spec_generation_lock(&tenant_id).await;
+    if !state.retire_removed_projection_authority(&tenant_id).await {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "Removed projection authority retirement failed for the currently installed generation of tenant '{}'",
+                body.tenant
+            ),
+        ));
+    }
+
     // Persist loaded specs first when Postgres is configured.
     let csdl_xml_for_db = csdl_xml.clone();
     for (entity_type, ioa_source) in &ioa_sources {
@@ -222,7 +235,19 @@ pub(crate) async fn handle_load_dir(
                 )
             })?;
     }
+    // The registry generation is already visible to dispatch. Refresh reactions
+    // immediately so a slow or failed projection repair cannot leave new tables
+    // paired with the previous generation's trigger graph.
     state.rebuild_reaction_dispatcher();
+    if !state.reconcile_declared_projections(&tenant_id).await {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "Projection reconciliation failed for the newly installed generation of tenant '{}'",
+                body.tenant
+            ),
+        ));
+    }
 
     if !state.data_dir.as_os_str().is_empty() {
         let registry_path = state.data_dir.join("specs-registry.json");

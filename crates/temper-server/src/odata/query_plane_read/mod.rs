@@ -30,18 +30,21 @@ fn should_try_native_before_catalog_coverage(
 /// it to the single matching `entity_id` via `entity_key_index` — a bounded
 /// candidate set (no full-type scan, so the budget cannot trip → no 413).
 ///
-/// Returns `Some(vec![id])` on a keyed **hit**; `None` otherwise — including a
-/// keyed **miss**, which falls back to the full scan because (until the backfill
-/// gate lands) a missing key row may be a pre-backfill entity rather than a true
-/// absence. So hits are fast and correct now; authoritative absence follows the
-/// per-tenant backfill watermark. `$orderby`/`$count` also decline (a point read
-/// has neither to honor).
+/// Returns a bounded candidate set only when the current versioned backfill
+/// signature makes the entire key index authoritative. Before that gate, both
+/// hits and misses fall back to the scan: an old positive row can belong to a
+/// tombstone or phantom just as an old missing row can hide a live entity.
+/// `$orderby`/`$count` also decline (a point read has neither to honor).
 async fn keyed_candidate_ids(request: &QueryPlaneReadRequest<'_>) -> Option<Vec<String>> {
     if request.query_options.orderby.is_some() || request.query_options.count == Some(true) {
         return None;
     }
     let filter = request.query_options.filter.as_ref()?;
     let pairs = super::filter_sql::equality_field_predicates(filter)?;
+    let _generation_guard = request
+        .state
+        .acquire_spec_generation_read_lock(request.tenant)
+        .await;
     // Resolve declared keys via the registry-aware path: runtime-installed os-app
     // entities (File, Directory, …) live in the per-tenant registry, NOT in
     // `transition_tables`. Reading `transition_tables` here would return `None` for
@@ -50,7 +53,19 @@ async fn keyed_candidate_ids(request: &QueryPlaneReadRequest<'_>) -> Option<Vec<
         .state
         .declared_keys_for(request.tenant, request.entity_type);
     let (key_name, key_hash) = crate::key_index::resolve_query_to_key(&keys, &pairs)?;
+    let current_key_set = crate::key_index::declared_key_set_signature(&keys);
     let (store, _) = request.state.event_journal()?;
+    let _projection_guard = store
+        .acquire_projection_read_fence(request.tenant.as_str(), request.entity_type)
+        .await
+        .ok()?;
+    if !request
+        .state
+        .key_index_backfill_complete(request.tenant, request.entity_type, &current_key_set)
+        .await
+    {
+        return None;
+    }
     match store
         .lookup_by_key(
             request.tenant.as_str(),
@@ -61,27 +76,7 @@ async fn keyed_candidate_ids(request: &QueryPlaneReadRequest<'_>) -> Option<Vec<
         .await
     {
         Ok(Some(entity_id)) => Some(vec![entity_id]),
-        Ok(None) => {
-            // A miss is authoritative absence ONLY once the backfill watermark says
-            // `entity_key_index` is complete for this (tenant, type) — then we can
-            // answer "not found" with an empty candidate set (no full-type scan, no
-            // 413). Before the watermark, a missing row may be a pre-backfill entity,
-            // so we fall back to the scan (correct, just not bounded). This is the
-            // retirement of #324's reconcile scan, gated per ADR-0153.
-            // Authoritative absence requires the CURRENT declared key-set to be fully
-            // backfilled — otherwise a just-declared key (e.g. a newly-added `ws_path`)
-            // whose rows are not yet assigned would make a present entity read as absent.
-            let current_key_set = crate::key_index::declared_key_set_signature(&keys);
-            if request
-                .state
-                .key_index_backfill_complete(request.tenant, request.entity_type, &current_key_set)
-                .await
-            {
-                Some(Vec::new())
-            } else {
-                None
-            }
-        }
+        Ok(None) => Some(Vec::new()),
         // Error: fall back to the full path (never trust a transient failure as absence).
         Err(_) => None,
     }

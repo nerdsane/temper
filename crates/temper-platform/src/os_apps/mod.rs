@@ -1121,6 +1121,21 @@ pub(super) async fn install_os_app_with_plan(
         state.server.enable_commons_guardrails(tenant);
     }
     let tenant_id = TenantId::new(tenant);
+    let spec_generation_guard = if plan.specs {
+        let guard = state.server.acquire_spec_generation_lock(&tenant_id).await;
+        if !state
+            .server
+            .retire_removed_projection_authority(&tenant_id)
+            .await
+        {
+            return Err(format!(
+                "Removed projection authority retirement failed for the currently installed generation of tenant '{tenant}'"
+            ));
+        }
+        Some(guard)
+    } else {
+        None
+    };
     let upload_replacement = if plan.wasm && !bundle.wasm_modules.is_empty() {
         uploaded_wasm_replacement_context(state, tenant, app_name, &bundle).await
     } else {
@@ -1360,6 +1375,15 @@ pub(super) async fn install_os_app_with_plan(
         state.server.rebuild_reaction_dispatcher();
     }
 
+    if plan.specs && !reconcile::reconcile_projections_after_spec_change(state, &tenant_id).await {
+        return Err(format!(
+            "Projection reconciliation failed for the newly installed OS-app generation of tenant '{tenant}'"
+        ));
+    }
+    // Projection retirement/rebuild is the end of the spec-generation critical
+    // section. Policies, WASM, and content bootstrap do not mutate declarations.
+    drop(spec_generation_guard);
+
     // App installs can add or change cross-entity reactions. Refresh the live
     // dispatcher immediately so the newly registered tenant config takes effect
     // without requiring a process restart or a separate specs reload.
@@ -1528,11 +1552,6 @@ pub(super) async fn install_os_app_with_plan(
     tracing::info!(
         "Installed os-app '{app_name}' for tenant '{tenant}': added={added:?} updated={updated:?} skipped={skipped:?} wasm={wasm_registered:?}"
     );
-
-    // ARN-68: re-key changed-key-set types after registration (boot-race fix; see the helper + ADR-0153).
-    if plan.specs && (!added.is_empty() || !updated.is_empty()) {
-        reconcile::spawn_key_index_rekey_after_spec_change(state, &tenant_id);
-    }
 
     // ── Step 5: Bootstrap App entity + APP.md. ──────────────────────────
     let (agents_bootstrapped, skills_bootstrapped, adrs_bootstrapped) = if plan.content {

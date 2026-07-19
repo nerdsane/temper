@@ -87,7 +87,7 @@ pub trait PersistentActor: Send + 'static {
 /// `key_hash` for `key_name`; the store writes it into `entity_key_index` in the
 /// same transaction as the journal append, giving the read plane an `O(log n)`
 /// present/absent probe (the negative-existence access path, ARN-68).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityKeyRow {
     /// The declared key's identifier (the `[[key]]` block's `name`).
     pub key_name: String,
@@ -101,7 +101,7 @@ pub struct EntityKeyRow {
 /// `entity_vector_index` write one row per `(decl_name, model_tag, entity_id)`; the
 /// blob is packed little-endian f32. Unlike a key row this has no uniqueness
 /// constraint — it is derived, rebuildable ranking state.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EntityVectorRow {
     /// The declared vector path's identifier (the `[[vector]]` block's `name`).
     pub decl_name: String,
@@ -156,12 +156,42 @@ pub struct EntityVectorCandidate {
 
 /// Which derived index families must be reconciled to the exact rows supplied
 /// with an event append.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexReconciliation {
     /// Replace all declared-key rows for the entity, including with an empty set.
     pub keys: bool,
     /// Replace all vector rows for the entity, including with an empty set.
     pub vectors: bool,
+}
+
+/// Opaque, RAII guard that serializes one type-wide projection reconciliation
+/// against other reconcilers and against live projection-maintaining writes.
+///
+/// Stores with authoritative derived projections keep their backend-specific
+/// guard (for example a PostgreSQL advisory-lock transaction or a simulation
+/// write-lock guard) inside this value. Dropping it releases the fence. Stores
+/// without such projections may use the default no-op guard.
+pub struct ProjectionReconciliationFence {
+    _guard: Box<dyn std::any::Any + Send>,
+}
+
+impl ProjectionReconciliationFence {
+    /// Wrap a backend-specific owned guard for RAII release.
+    pub fn new<T>(guard: T) -> Self
+    where
+        T: std::any::Any + Send,
+    {
+        Self {
+            _guard: Box::new(guard),
+        }
+    }
+}
+
+impl std::fmt::Debug for ProjectionReconciliationFence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProjectionReconciliationFence")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Trait for the event store backend (implemented by temper-store-postgres).
@@ -228,21 +258,81 @@ pub trait EventStore: Send + Sync + 'static {
         self.append(persistence_id, expected_sequence, events)
     }
 
+    /// Acquire the exclusive reconciliation fence for one `(tenant,
+    /// entity_type)` projection partition.
+    ///
+    /// Authoritative projection stores override this with a distributed or
+    /// deterministic fence. Their live [`EventStore::append_with_index_rows`]
+    /// implementation must take the matching shared fence whenever it maintains
+    /// keys or vectors. The caller holds the returned guard from the definitive
+    /// watermark read through exact reconciliation and watermark commit, so a
+    /// second worker cannot act on stale coverage and a live write cannot be
+    /// overwritten by replayed state. The default is a no-op for stores without
+    /// authoritative derived projections.
+    fn acquire_projection_reconciliation_fence(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> impl std::future::Future<Output = Result<ProjectionReconciliationFence, PersistenceError>> + Send
+    {
+        let _ = (tenant, entity_type);
+        async { Ok(ProjectionReconciliationFence::new(())) }
+    }
+
+    /// Acquire the shared side of the `(tenant, entity_type)` projection fence.
+    ///
+    /// Indexed readers hold this from before checking their authority watermark
+    /// through the corresponding key lookup or vector scan. This prevents an
+    /// authoritative read from observing the destructive middle of an exact
+    /// purge-and-rebuild. The default is a no-op for stores without authoritative
+    /// derived projections.
+    fn acquire_projection_read_fence(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> impl std::future::Future<Output = Result<ProjectionReconciliationFence, PersistenceError>> + Send
+    {
+        let _ = (tenant, entity_type);
+        async { Ok(ProjectionReconciliationFence::new(())) }
+    }
+
+    /// Whether this store maintains declared-key rows on every live write and can
+    /// therefore make a completed key watermark authoritative for absence.
+    ///
+    /// The default is false. Stores must opt in together with implementations of
+    /// key reconciliation, durable watermarks, and live key co-commit.
+    fn has_authoritative_key_index(&self) -> bool {
+        false
+    }
+
+    /// Whether this store can persist and safely reuse a vector reconciliation
+    /// watermark across restarts.
+    ///
+    /// Backends whose vector maintenance is write-behind may return false and
+    /// replay/reconcile on every startup. This preserves correctness after an
+    /// exhausted write-behind retry without treating an old watermark as current.
+    fn has_durable_vector_backfill_watermark(&self) -> bool {
+        false
+    }
+
     /// Reconcile the derived vector-index rows for an **existing** entity to exactly
     /// `vector_rows` (ADR-0155), without appending a journal event: DELETE every
     /// existing row for `(tenant, entity_type, entity_id)`, then INSERT `vector_rows`.
     /// Idempotent, and an empty `vector_rows` PURGES the entity (used to clean up a
     /// deleted or un-embedded entity). Used by the backfill and by the Turso
-    /// write-behind path. The default is a no-op (non-indexing backends); query-plane
-    /// stores implement it.
+    /// write-behind path. `source_sequence` is the journal sequence from which the
+    /// rows were derived; write-behind stores use it to reject stale replay after a
+    /// newer append. The default is a no-op (non-indexing backends); query-plane stores
+    /// implement it.
     fn backfill_entity_vectors(
         &self,
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
+        source_sequence: u64,
         vector_rows: &[EntityVectorRow],
     ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send {
-        let _ = (tenant, entity_type, entity_id, vector_rows);
+        let _ = (tenant, entity_type, entity_id, source_sequence, vector_rows);
         async { Ok(()) }
     }
 
@@ -266,11 +356,11 @@ pub trait EventStore: Send + Sync + 'static {
     }
 
     /// Record that `entity_vector_index` is **complete** for `(tenant, entity_type)`
-    /// — every existing entity has had its declared vectors indexed by the backfill
-    /// (ADR-0155 watermark, mirroring `mark_key_index_backfilled`). `vector_set` is
-    /// the sorted, comma-joined declared vector-path NAMES the backfill covered, so a
-    /// later declaration of an ADDITIONAL path is detected as a set change and the
-    /// type is re-indexed. Idempotent. Default no-op.
+    /// under the versioned `vector_set` signature (ADR-0155, mirroring
+    /// `mark_key_index_backfilled`). Declaration or reconciliation-schema changes
+    /// produce a different signature and force an exact re-index. Idempotent. The
+    /// default fails closed; only stores that return true from
+    /// [`EventStore::has_durable_vector_backfill_watermark`] may persist one.
     fn mark_vector_index_backfilled(
         &self,
         tenant: &str,
@@ -278,7 +368,11 @@ pub trait EventStore: Send + Sync + 'static {
         vector_set: &str,
     ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send {
         let _ = (tenant, entity_type, vector_set);
-        async { Ok(()) }
+        async {
+            Err(PersistenceError::Storage(
+                "durable vector backfill watermark is unsupported".to_string(),
+            ))
+        }
     }
 
     /// The `(entity_type, vector_set)` watermarks for `tenant` — each type whose
@@ -293,9 +387,10 @@ pub trait EventStore: Send + Sync + 'static {
         async { Ok(Vec::new()) }
     }
 
-    /// The `entity_id`s that already have at least one `entity_vector_index` row for
-    /// `(tenant, entity_type)`. Lets the vector backfill **resume** cheaply, skipping
-    /// already-indexed entities. Default empty (no resumption). Mirrors
+    /// The `entity_id`s that have at least one `entity_vector_index` row for
+    /// `(tenant, entity_type)`. Exact reconciliation unions these IDs with durable
+    /// entity enumeration so deleted or projection-only rows remain discoverable and
+    /// can be purged. Default empty (no projection enumeration). Mirrors
     /// `keyed_entity_ids_for_type`.
     fn vectored_entity_ids_for_type(
         &self,
@@ -306,12 +401,11 @@ pub trait EventStore: Send + Sync + 'static {
         async { Ok(Vec::new()) }
     }
 
-    /// Backfill declared key-index rows for an **existing** entity (ADR-0153),
-    /// without appending a journal event. Idempotent: re-running yields the same
-    /// rows. Used to populate `entity_key_index` for entities written before the
-    /// declared key existed, so a keyed read can authoritatively prove absence
-    /// (the per-tenant backfill watermark gates #324's retirement). The default
-    /// is a no-op (non-indexing backends); query-plane stores upsert the rows.
+    /// Reconcile an entity's complete declared key-index row set (ADR-0153) without
+    /// appending a journal event. Implementations replace every existing row for the
+    /// entity with `key_rows`; an empty slice therefore purges deleted, phantom, or
+    /// no-longer-keyable entities. Idempotent: re-running yields the same rows. The
+    /// default is a no-op for non-indexing backends.
     fn backfill_entity_keys(
         &self,
         tenant: &str,
@@ -351,15 +445,14 @@ pub trait EventStore: Send + Sync + 'static {
     /// backfills but does not maintain keys live (e.g. Turso, which does not
     /// co-commit) would let a later write go unkeyed, and a keyed miss for that
     /// present entity would then read as authoritative absence — a silent
-    /// correctness bug. Such backends MUST keep the default no-op so they never
+    /// correctness bug. Such backends MUST keep the default failure so they never
     /// become authoritative (their keyed misses fall back to the scan — correct,
     /// just not bounded). Postgres co-commits and overrides this; the sim store does
-    /// too for DST. The default is a no-op.
+    /// too for DST. The default fails closed.
     ///
-    /// `key_set` is the sorted, comma-joined declared key NAMES the backfill just
-    /// covered. It is recorded so a later declaration of an ADDITIONAL key is detected
-    /// as a key-set change (the recorded set no longer equals the current one) and the
-    /// type is re-keyed, instead of being wrongly treated as already complete.
+    /// `key_set` is the versioned, deterministic declared-key signature the backfill
+    /// just covered. A declaration or reconciliation-schema change produces a new
+    /// signature and forces the type to be reconciled again.
     fn mark_key_index_backfilled(
         &self,
         tenant: &str,
@@ -367,14 +460,17 @@ pub trait EventStore: Send + Sync + 'static {
         key_set: &str,
     ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send {
         let _ = (tenant, entity_type, key_set);
-        async { Ok(()) }
+        async {
+            Err(PersistenceError::Storage(
+                "authoritative key-index watermark is unsupported".to_string(),
+            ))
+        }
     }
 
     /// The `(entity_type, key_set)` watermarks for `tenant` — each type whose
-    /// `entity_key_index` backfill is complete, paired with the sorted comma-joined
-    /// declared key names it covered. The read plane caches these so a keyed miss on a
-    /// type resolves to authoritative absence ONLY when the covered key-set still equals
-    /// the currently-declared one. Default empty (no backend authority → scan-safe).
+    /// `entity_key_index` reconciliation is complete, paired with the versioned
+    /// declared-key signature it covered. A keyed miss is authoritative only when the
+    /// stored signature equals the current one. Default empty (scan-safe).
     fn key_index_backfilled_types(
         &self,
         tenant: &str,
@@ -384,12 +480,10 @@ pub trait EventStore: Send + Sync + 'static {
         async { Ok(Vec::new()) }
     }
 
-    /// The `entity_id`s that already have at least one `entity_key_index` row for
-    /// `(tenant, entity_type)`. Lets the backfill **resume** cheaply: it skips
-    /// already-keyed entities (the expensive part is loading each entity's state),
-    /// so a re-run after a partial pass only processes the remainder instead of
-    /// re-loading all N. Default empty (no resumption — a backend without the index
-    /// re-processes everything, which is correct, just not incremental).
+    /// The `entity_id`s that have at least one `entity_key_index` row for
+    /// `(tenant, entity_type)`. Exact reconciliation unions these IDs with durable
+    /// entity enumeration so deleted or projection-only rows remain discoverable and
+    /// can be purged. Default empty (no projection enumeration).
     fn keyed_entity_ids_for_type(
         &self,
         tenant: &str,
@@ -399,11 +493,14 @@ pub trait EventStore: Send + Sync + 'static {
         async { Ok(Vec::new()) }
     }
 
-    /// Atomically append events to multiple journals.
+    /// Atomically append events and their exact declared projection rows to
+    /// multiple journals.
     ///
     /// Backends must either commit every append in `appends`, or commit none.
-    /// This is the storage primitive composite actions need before they can
-    /// persist cross-actor sub-writes as one physical unit.
+    /// Stores that maintain keys or vectors must co-commit each item's rows and
+    /// take the same per-type shared reconciliation fence as
+    /// [`EventStore::append_with_index_rows`]. This is the storage primitive
+    /// composite actions use for cross-actor writes.
     fn append_batch(
         &self,
         appends: &[PersistenceAppend],
@@ -501,6 +598,15 @@ pub struct PersistenceAppend {
     pub expected_sequence: u64,
     /// Events to append to this journal.
     pub events: Vec<PersistenceEnvelope>,
+    /// Exact current declared-key rows for this entity.
+    #[serde(default)]
+    pub key_rows: Vec<EntityKeyRow>,
+    /// Exact current declared-vector rows for this entity.
+    #[serde(default)]
+    pub vector_rows: Vec<EntityVectorRow>,
+    /// Projection families that must be exactly reconciled with this append.
+    #[serde(default)]
+    pub reconciliation: IndexReconciliation,
 }
 
 /// New sequence number for one stream after an atomic batch append.

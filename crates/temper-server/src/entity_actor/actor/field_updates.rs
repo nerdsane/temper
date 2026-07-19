@@ -4,6 +4,8 @@ use super::*;
 pub(super) enum FieldUpdateCommitError {
     /// The mutation was rejected without making the actor unsafe to continue.
     Rejected(String),
+    /// The caller staged against a spec generation that is no longer current.
+    GenerationChanged,
     /// Authoritative recovery failed, so supervision must rebuild the actor.
     Recovery(ActorError),
 }
@@ -68,7 +70,22 @@ impl EntityActor {
         state: &mut EntityState,
         fields: &serde_json::Value,
         replace: bool,
+        idempotency_key: Option<&str>,
+        expected_spec_generation: Option<u64>,
     ) -> Result<(), FieldUpdateCommitError> {
+        let _generation_guard = self
+            .acquire_spec_generation_read_lock(expected_spec_generation)
+            .await
+            .map_err(|error| {
+                if super::super::is_spec_generation_changed_error(&error) {
+                    FieldUpdateCommitError::GenerationChanged
+                } else {
+                    FieldUpdateCommitError::Recovery(error)
+                }
+            })?;
+        if idempotency_key.is_some_and(|key| state.has_processed_idempotency_key(key)) {
+            return Ok(());
+        }
         let table = self.table.read().expect("table lock poisoned").clone();
         let mut base = state.clone();
         let mut retries_remaining = FIELD_UPDATE_RETRY_BUDGET;
@@ -97,7 +114,7 @@ impl EntityActor {
                     "fields": fields,
                     "replace": replace,
                 }),
-                idempotency_key: None,
+                idempotency_key: idempotency_key.map(str::to_string),
             };
 
             if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend)
@@ -107,13 +124,18 @@ impl EntityActor {
                         store,
                         backend,
                         &self.persistence_id(),
+                        &table,
                         &mut candidate,
                         &event,
                     )
                     .await
                 {
                     Ok(_) => {}
-                    Err(PersistenceError::ConcurrencyViolation { actual, .. }) => {
+                    Err(error) => {
+                        let authoritative_floor = match &error {
+                            PersistenceError::ConcurrencyViolation { actual, .. } => Some(*actual),
+                            _ => None,
+                        };
                         base = recover_entity_state_from_store(
                             &self.tenant,
                             &self.entity_type,
@@ -127,16 +149,28 @@ impl EntityActor {
                         )
                         .await
                         .map_err(FieldUpdateCommitError::Recovery)?;
-                        if base.sequence_nr < actual {
+                        if let Some(actual) = authoritative_floor
+                            && base.sequence_nr < actual
+                        {
                             return Err(FieldUpdateCommitError::Recovery(ActorError::custom(
                                 format!(
                                     "field update replay under-reached authoritative sequence \
-                                     (base.sequence_nr={} < actual={actual})",
-                                    base.sequence_nr
+                                     (base.sequence_nr={} < actual={})",
+                                    base.sequence_nr, actual
                                 ),
                             )));
                         }
                         *state = base.clone();
+                        if idempotency_key
+                            .is_some_and(|key| base.has_processed_idempotency_key(key))
+                        {
+                            return Ok(());
+                        }
+                        if authoritative_floor.is_none() {
+                            return Err(FieldUpdateCommitError::Rejected(format!(
+                                "persistence failed: {error}"
+                            )));
+                        }
                         if retries_remaining == 0 {
                             return Err(FieldUpdateCommitError::Rejected(
                                 "field update retry budget exhausted".to_string(),
@@ -144,11 +178,6 @@ impl EntityActor {
                         }
                         retries_remaining -= 1;
                         continue;
-                    }
-                    Err(error) => {
-                        return Err(FieldUpdateCommitError::Rejected(format!(
-                            "persistence failed: {error}"
-                        )));
                     }
                 }
             }

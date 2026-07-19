@@ -44,6 +44,7 @@ pub use wasm_invocation_log::WasmInvocationEntry;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 use temper_actor_runtime::ActorSystem as PgActorSystem;
@@ -344,6 +345,48 @@ pub struct QueryProjectionReplayParityDrift {
     pub authoritative_sequence: u64,
 }
 
+/// Per-tenant barrier and monotonic epoch for live specification generations.
+///
+/// The async lock serializes swaps against durable writers. The epoch lets a
+/// caller that must resolve actor-backed dependencies before taking the lock
+/// prove that those declarations still belong to the generation it stages.
+pub(crate) struct SpecGenerationBarrier {
+    lock: Arc<tokio::sync::RwLock<()>>,
+    epoch: AtomicU64,
+}
+
+impl SpecGenerationBarrier {
+    fn new() -> Self {
+        Self {
+            lock: Arc::new(tokio::sync::RwLock::new(())),
+            epoch: AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    pub(crate) async fn read_owned(&self) -> tokio::sync::OwnedRwLockReadGuard<()> {
+        self.lock.clone().read_owned().await
+    }
+}
+
+/// Write-side generation guard. Dropping it publishes a new epoch before the
+/// underlying write lock is released, so a subsequent reader cannot observe a
+/// changed registry with the preceding epoch.
+pub struct SpecGenerationWriteGuard {
+    guard: Option<tokio::sync::OwnedRwLockWriteGuard<()>>,
+    barrier: Arc<SpecGenerationBarrier>,
+}
+
+impl Drop for SpecGenerationWriteGuard {
+    fn drop(&mut self) {
+        self.barrier.epoch.fetch_add(1, Ordering::AcqRel);
+        self.guard.take();
+    }
+}
+
 /// Shared state for the Temper HTTP server.
 #[derive(Clone)]
 // ADR-0025 Phase 4: remove record_store field after IOA entity migration complete
@@ -387,6 +430,11 @@ pub struct ServerState {
     pub authz: Arc<AuthzEngine>,
     /// Multi-tenant specification registry (shared, mutable for live registration).
     pub registry: Arc<RwLock<SpecRegistry>>,
+    /// Per-tenant generation barriers shared by live spec mutations and durable
+    /// writers. Spec mutation owns the write side across swap + reconciliation;
+    /// writers own the read side from declaration snapshot through journal append.
+    /// The outer map lock is held only while cloning one asynchronous tenant lock.
+    spec_generation_locks: Arc<Mutex<BTreeMap<String, Arc<SpecGenerationBarrier>>>>,
     /// Index of entity IDs per (tenant:entity_type) for collection queries.
     pub entity_index: Arc<RwLock<BTreeMap<String, BTreeSet<String>>>>,
     /// `{tenant}:{entity_type}` keys whose `entity_index` entry has been fully
@@ -398,12 +446,12 @@ pub struct ServerState {
     pub entity_index_hydrated: Arc<RwLock<BTreeSet<String>>>,
     /// `{tenant}:{entity_type}` keys whose `entity_key_index` backfill is complete
     /// `"tenant:entity_type" -> covered key-set` (ADR-0153 watermark cache). The value
-    /// is the sorted comma-joined declared key names the backfill covered. A keyed read
-    /// MISS on that type is authoritative absence ONLY when the covered key-set still
-    /// equals the currently-declared one — so a newly-declared, not-yet-backfilled key
-    /// never reads a present entity as absent (it falls back to the scan). This turns a
-    /// 413-scan into an O(log n) answer once the type is fully keyed (ARN-68). Loaded
-    /// lazily from the durable watermark (see [`key_index_watermarks_loaded`]).
+    /// is the versioned declared-key signature the backfill covered. A keyed read MISS
+    /// on that type is authoritative absence only when the covered signature equals the
+    /// current one — so declaration or reconciliation-schema changes fall back to the
+    /// scan until exact reconciliation completes. This turns a 413-scan into an O(log n)
+    /// answer once the type is fully keyed (ARN-68). Loaded lazily from the durable
+    /// watermark (see [`key_index_watermarks_loaded`]).
     pub key_index_backfilled: Arc<RwLock<BTreeMap<String, String>>>,
     /// Tenants whose durable watermarks have been read into `key_index_backfilled`
     /// at least once this run. Gates the one-time-per-tenant load on the read path.
@@ -592,6 +640,56 @@ impl ServerState {
         self.storage_stack = Some(stack);
     }
 
+    fn spec_generation_barrier(&self, tenant: &TenantId) -> Arc<SpecGenerationBarrier> {
+        let mut locks = self
+            .spec_generation_locks
+            .lock()
+            .expect("spec generation locks map poisoned");
+        locks
+            .entry(tenant.to_string())
+            .or_insert_with(|| Arc::new(SpecGenerationBarrier::new()))
+            .clone()
+    }
+
+    /// Acquire the write side of the shared generation barrier for one tenant's
+    /// live spec mutation. The guard must cover registry mutation and exact
+    /// projection reconciliation.
+    pub async fn acquire_spec_generation_lock(
+        &self,
+        tenant: &TenantId,
+    ) -> SpecGenerationWriteGuard {
+        let barrier = self.spec_generation_barrier(tenant);
+        let guard = barrier.lock.clone().write_owned().await;
+        SpecGenerationWriteGuard {
+            guard: Some(guard),
+            barrier,
+        }
+    }
+
+    /// Acquire the read side of a tenant's generation barrier for a durable write.
+    /// Callers acquire this before reading projection declarations and retain it
+    /// through the corresponding event-journal commit.
+    pub async fn acquire_spec_generation_read_lock(
+        &self,
+        tenant: &TenantId,
+    ) -> tokio::sync::OwnedRwLockReadGuard<()> {
+        self.spec_generation_barrier(tenant).read_owned().await
+    }
+
+    /// Snapshot the monotonic generation epoch for optimistic declaration
+    /// resolution. Callers revalidate it while holding the read side.
+    pub(crate) fn current_spec_generation(&self, tenant: &TenantId) -> u64 {
+        self.spec_generation_barrier(tenant).epoch()
+    }
+
+    /// Clone the generation barrier passed to a long-lived entity actor.
+    pub(crate) fn spec_generation_barrier_for_actor(
+        &self,
+        tenant: &TenantId,
+    ) -> Arc<SpecGenerationBarrier> {
+        self.spec_generation_barrier(tenant)
+    }
+
     /// Return the durable query-plane capability for projection reads/writes.
     pub(crate) fn query_plane_store(&self) -> Option<Arc<dyn QueryPlaneStore>> {
         self.storage_stack
@@ -680,6 +778,7 @@ impl ServerState {
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
             authz: Arc::new(AuthzEngine::permissive()),
             registry: Arc::new(RwLock::new(SpecRegistry::new())),
+            spec_generation_locks: Arc::new(Mutex::new(BTreeMap::new())),
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
             entity_index_hydrated: Arc::new(RwLock::new(BTreeSet::new())),
             key_index_backfilled: Arc::new(RwLock::new(BTreeMap::new())),
@@ -928,6 +1027,7 @@ impl ServerState {
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
             authz: Arc::new(AuthzEngine::permissive()),
             registry,
+            spec_generation_locks: Arc::new(Mutex::new(BTreeMap::new())),
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
             entity_index_hydrated: Arc::new(RwLock::new(BTreeSet::new())),
             key_index_backfilled: Arc::new(RwLock::new(BTreeMap::new())),
@@ -1435,7 +1535,28 @@ impl ServerState {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_local_tdata_host;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, RwLock};
+    use std::time::Duration;
+
+    use temper_jit::table::TransitionTable;
+    use temper_runtime::ActorSystem;
+
+    use super::{SpecGenerationBarrier, SpecGenerationWriteGuard, normalize_local_tdata_host};
+    use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
+
+    const GENERATION_TEST_IOA: &str = r#"
+[automaton]
+name = "GenerationItem"
+states = ["New", "Ready"]
+initial = "New"
+
+[[action]]
+name = "Advance"
+kind = "input"
+from = ["New"]
+to = "Ready"
+"#;
 
     #[test]
     fn normalize_local_tdata_host_accepts_urls_domains_and_ports() {
@@ -1458,5 +1579,130 @@ mod tests {
         assert_eq!(normalize_local_tdata_host(""), None);
         assert_eq!(normalize_local_tdata_host("https:///tdata"), None);
         assert_eq!(normalize_local_tdata_host("bad host.example"), None);
+    }
+
+    #[tokio::test]
+    async fn actor_rejects_declaration_staged_against_prior_generation_epoch() {
+        let barrier = Arc::new(SpecGenerationBarrier::new());
+        let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(
+            GENERATION_TEST_IOA,
+        )));
+        let actor = EntityActor::new(
+            "GenerationItem",
+            "generation-item",
+            table,
+            serde_json::json!({}),
+        )
+        .with_spec_generation_barrier(barrier.clone());
+        let system = ActorSystem::new("generation-epoch-regression");
+        let actor_ref = system.spawn(actor, "generation-item");
+        let _: EntityResponse = actor_ref
+            .ask(EntityMsg::GetState, Duration::from_secs(1))
+            .await
+            .expect("start generation-aware actor");
+
+        let raw_guard = barrier.lock.clone().write_owned().await;
+        drop(SpecGenerationWriteGuard {
+            guard: Some(raw_guard),
+            barrier: barrier.clone(),
+        });
+        assert_eq!(barrier.epoch(), 1, "generation publication advances epoch");
+
+        let stale: EntityResponse = actor_ref
+            .ask(
+                EntityMsg::Action {
+                    name: "Advance".to_string(),
+                    params: serde_json::json!({}),
+                    cross_entity_booleans: BTreeMap::new(),
+                    idempotency_key: Some("stale-generation".to_string()),
+                    expected_spec_generation: Some(0),
+                },
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("stale generation returns a typed response");
+        assert!(!stale.success);
+        assert_eq!(
+            stale.error.as_deref(),
+            Some(crate::entity_actor::SPEC_GENERATION_CHANGED_ERROR)
+        );
+        assert_eq!(stale.state.status, "New");
+        assert_eq!(stale.state.sequence_nr, 0);
+
+        let current: EntityResponse = actor_ref
+            .ask(
+                EntityMsg::Action {
+                    name: "Advance".to_string(),
+                    params: serde_json::json!({}),
+                    cross_entity_booleans: BTreeMap::new(),
+                    idempotency_key: Some("current-generation".to_string()),
+                    expected_spec_generation: Some(1),
+                },
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("current generation action");
+        assert!(
+            current.success,
+            "current action failed: {:?}",
+            current.error
+        );
+        assert_eq!(current.state.status, "Ready");
+    }
+
+    #[tokio::test]
+    async fn actor_state_read_does_not_nest_a_fair_generation_reader() {
+        let barrier = Arc::new(SpecGenerationBarrier::new());
+        let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(
+            GENERATION_TEST_IOA,
+        )));
+        let actor = EntityActor::new(
+            "GenerationItem",
+            "generation-read",
+            table,
+            serde_json::json!({}),
+        )
+        .with_spec_generation_barrier(barrier.clone());
+        let system = ActorSystem::new("generation-read-regression");
+        let actor_ref = system.spawn(actor, "generation-read");
+        let _: EntityResponse = actor_ref
+            .ask(EntityMsg::GetState, Duration::from_secs(1))
+            .await
+            .expect("start generation-aware actor");
+
+        // Model a Nearest/read handler retaining the generation read side while
+        // a hot-deploy writer queues behind it. Tokio's fair RwLock will place a
+        // recursively acquired actor read behind that writer, creating a cycle:
+        // the writer waits for `outer`, while `outer` waits for the actor read.
+        let outer = barrier.read_owned().await;
+        let writer = barrier.lock.clone().write_owned();
+        tokio::pin!(writer);
+        tokio::select! {
+            biased;
+            _ = &mut writer => panic!("writer acquired while the outer read was retained"),
+            _ = tokio::task::yield_now() => {}
+        }
+
+        let read = actor_ref.ask::<EntityResponse>(EntityMsg::GetState, Duration::from_secs(1));
+        tokio::pin!(read);
+        let mut response = None;
+        for _ in 0..64 {
+            tokio::select! {
+                biased;
+                result = &mut read => {
+                    response = Some(result.expect("actor state read"));
+                    break;
+                }
+                _ = tokio::task::yield_now() => {}
+            }
+        }
+        let response = response.expect(
+            "actor read must not queue a nested generation reader behind the waiting writer",
+        );
+        assert!(response.success);
+        assert_eq!(response.state.status, "New");
+
+        drop(outer);
+        drop(writer.await);
     }
 }

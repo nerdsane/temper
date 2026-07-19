@@ -27,15 +27,28 @@ const TAG_BOOL: u8 = b'B';
 /// `ParentId`), tagged so it can never collide with the empty string.
 const TAG_NULL: u8 = b'0';
 
-/// The stable signature of a type's declared key-set: the sorted, comma-joined key
-/// NAMES. Recorded in the key-index backfill watermark and compared on read, so that
-/// declaring an ADDITIONAL key (a changed signature) re-keys the type instead of being
-/// treated as already complete, and a keyed read only trusts absence once the full
-/// current key-set is backfilled (ARN-68). Deterministic (sorted, no map iteration).
+/// The stable signature of a type's complete declared key-set: a schema-version
+/// prefix followed by a canonical JSON array of `[name, ordered_properties]`
+/// declarations, sorted by name and properties. The JSON structure is
+/// unambiguous even if an identifier contains punctuation. The version
+/// invalidates watermarks written by binaries whose reconciliation contract was
+/// weaker, forcing one exact rebuild before keyed reads become authoritative
+/// again. Adding a key, renaming it, changing a property, or reordering its
+/// properties changes the signature and re-keys the type (ARN-68). Deterministic
+/// (sorted, no map iteration).
 pub fn declared_key_set_signature(keys: &[DeclaredKey]) -> String {
-    let mut names: Vec<&str> = keys.iter().map(|key| key.name.as_str()).collect();
-    names.sort();
-    names.join(",")
+    let mut declarations = keys
+        .iter()
+        .map(|key| (key.name.as_str(), key.properties.as_slice()))
+        .collect::<Vec<_>>();
+    declarations.sort();
+    let encoded = serde_json::Value::Array(
+        declarations
+            .into_iter()
+            .map(|(name, properties)| serde_json::json!([name, properties]))
+            .collect(),
+    );
+    format!("v2|{encoded}")
 }
 
 /// Canonical `key_hash` for a declared key's values, or `None` when the key is

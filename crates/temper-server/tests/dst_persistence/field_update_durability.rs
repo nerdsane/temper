@@ -195,7 +195,12 @@ async fn dst_delete_co_commits_declared_key_projection_purge() {
     );
 
     let deleted = actor_ref
-        .ask::<EntityResponse>(EntityMsg::Delete, Duration::from_secs(5))
+        .ask::<EntityResponse>(
+            EntityMsg::Delete {
+                expected_spec_generation: None,
+            },
+            Duration::from_secs(5),
+        )
         .await
         .expect("delete keyed entity");
     assert!(deleted.success, "delete failed: {:?}", deleted.error);
@@ -245,7 +250,12 @@ async fn dst_delete_co_commits_vector_projection_purge() {
     assert_eq!(candidates[0].entity_id, entity_id);
 
     let deleted = actor_ref
-        .ask::<EntityResponse>(EntityMsg::Delete, Duration::from_secs(5))
+        .ask::<EntityResponse>(
+            EntityMsg::Delete {
+                expected_spec_generation: None,
+            },
+            Duration::from_secs(5),
+        )
         .await
         .expect("delete vectored entity");
     assert!(deleted.success, "delete failed: {:?}", deleted.error);
@@ -285,14 +295,24 @@ async fn dst_tombstone_rejects_field_updates_and_repeated_delete_is_idempotent()
 
     assert_eq!(get_state(&actor_ref).await.state.sequence_nr, 1);
     let deleted = actor_ref
-        .ask::<EntityResponse>(EntityMsg::Delete, Duration::from_secs(5))
+        .ask::<EntityResponse>(
+            EntityMsg::Delete {
+                expected_spec_generation: None,
+            },
+            Duration::from_secs(5),
+        )
         .await
         .expect("delete entity");
     assert!(deleted.success);
     assert_eq!(deleted.state.sequence_nr, 2);
 
     let repeated = actor_ref
-        .ask::<EntityResponse>(EntityMsg::Delete, Duration::from_secs(5))
+        .ask::<EntityResponse>(
+            EntityMsg::Delete {
+                expected_spec_generation: None,
+            },
+            Duration::from_secs(5),
+        )
         .await
         .expect("repeat delete");
     assert!(repeated.success, "repeated delete should be idempotent");
@@ -326,6 +346,61 @@ async fn dst_tombstone_rejects_field_updates_and_repeated_delete_is_idempotent()
     assert_eq!(recovered.state.status, "Deleted");
     assert_eq!(recovered.state.sequence_nr, 2);
     assert_eq!(recovered.state.fields["Title"], "durable-before");
+}
+
+#[tokio::test]
+async fn dst_delete_storage_error_after_commit_recovers_the_tombstone() {
+    let seed = 18_910;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let scripted_store = ConflictBeforeAppendStore::new(seed);
+    let store_inner = scripted_store.inner.clone();
+    let store = BoxedEventStore::new(scripted_store.clone());
+    let table = order_table();
+    let entity_id = "ord-ambiguous-delete";
+    let persistence_id = format!("default:Order:{entity_id}");
+    let system = ActorSystem::new("dst-ambiguous-delete");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        table,
+        serde_json::json!({"Title": "durable-before"}),
+        store,
+        BackendLabel::Sim,
+    )
+    .with_tenant("default");
+    let actor_ref = system.spawn(actor, entity_id);
+
+    assert_eq!(get_state(&actor_ref).await.state.sequence_nr, 1);
+    scripted_store.commit_then_report_storage_failure(&persistence_id);
+    let deleted = actor_ref
+        .ask::<EntityResponse>(
+            EntityMsg::Delete {
+                expected_spec_generation: None,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("ambiguous delete should recover authoritative history");
+    assert!(deleted.success, "delete failed: {:?}", deleted.error);
+    assert_eq!(deleted.state.status, "Deleted");
+    assert_eq!(deleted.state.sequence_nr, 2);
+    assert_eq!(store_inner.dump_journal(&persistence_id).len(), 2);
+
+    let live = get_state(&actor_ref).await;
+    assert_eq!(live.state.status, "Deleted");
+    assert_eq!(live.state.sequence_nr, 2);
+    let repeated = actor_ref
+        .ask::<EntityResponse>(
+            EntityMsg::Delete {
+                expected_spec_generation: None,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("repeated delete after recovery");
+    assert!(repeated.success);
+    assert_eq!(repeated.state.sequence_nr, 2);
+    assert_eq!(store_inner.dump_journal(&persistence_id).len(), 2);
 }
 
 // =========================================================================

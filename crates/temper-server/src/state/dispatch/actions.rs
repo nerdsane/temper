@@ -16,6 +16,7 @@ use super::{DispatchCommand, DispatchError, DispatchExtOptions, record_workflow_
 use crate::state::admission::AdmissionOutcome;
 
 const DEFAULT_BACKGROUND_REACTION_MAX_CONCURRENCY: usize = 64;
+const SPEC_GENERATION_RETRY_BUDGET: usize = 3;
 
 struct BackgroundReactionDispatch {
     dispatcher: Arc<crate::trigger::ReactionDispatcher>,
@@ -162,13 +163,6 @@ impl crate::state::ServerState {
             await_integration,
             await_reactions,
         } = cmd;
-
-        if self
-            .composite_metadata_for(tenant, entity_type, action)?
-            .is_some()
-        {
-            self.reject_action_supplied_sub_writes(entity_type, action, &params)?;
-        }
 
         let response = self
             .dispatch_tenant_action_core(
@@ -409,7 +403,7 @@ impl crate::state::ServerState {
         // W2 phase: actor_spawn — registry lookup / actor-creation path.
         // Emitted as a child span so `aggregate_spans group by resource_name`
         // slices dispatch latency by phase cleanly.
-        let (actor_ref, actor_existed_before) = {
+        let (mut actor_ref, actor_existed_before) = {
             let _phase = tracing::info_span!(
                 "dispatch.phase.actor_spawn",
                 tenant = %tenant,
@@ -441,11 +435,6 @@ impl crate::state::ServerState {
         } else {
             None
         };
-
-        // Pre-resolve cross-entity state gates (Gap 1: Agent OS).
-        let cross_entity_booleans = self
-            .resolve_cross_entity_guards(tenant, entity_type, entity_id, action)
-            .await;
 
         let action_params = params.clone();
         // ADR-0051: acquire an admission permit before spending retry budget.
@@ -515,7 +504,6 @@ impl crate::state::ServerState {
         let policy = self.dispatch_retry_policy();
         let action_name = action.to_string();
         let params_for_retry = params;
-        let cross_for_retry = cross_entity_booleans;
         let idempotency_key = Some(agent_ctx.idempotency_key.clone().unwrap_or_else(|| {
             format!(
                 "dispatch:{tenant}:{entity_type}:{entity_id}:{action}:{}",
@@ -531,19 +519,86 @@ impl crate::state::ServerState {
             action_name = %action_name,
         );
         let outcome = {
-            use tracing::Instrument;
-            retry::ask_with_backoff::<_, EntityResponse, _>(
-                &actor_ref,
-                || EntityMsg::Action {
-                    name: action_name.clone(),
-                    params: params_for_retry.clone(),
-                    cross_entity_booleans: cross_for_retry.clone(),
-                    idempotency_key: idempotency_key.clone(),
-                },
-                &policy,
-            )
-            .instrument(ask_span)
-            .await
+            let mut generation_retries = 0usize;
+            let mut total_attempts = 0u32;
+            let mut total_elapsed = std::time::Duration::ZERO;
+            let mut saw_transient_retry = false;
+            loop {
+                let expected_spec_generation = self.current_spec_generation(tenant);
+                if self
+                    .composite_metadata_for(tenant, entity_type, action)?
+                    .is_some()
+                {
+                    self.reject_action_supplied_sub_writes(entity_type, action, &params_for_retry)?;
+                }
+                // Actor-backed guard resolution intentionally happens before the
+                // async generation lock. Revalidate the epoch while holding the
+                // read side; if a swap raced this staging, discard it and resolve
+                // again from the new generation.
+                let cross_for_retry = self
+                    .resolve_cross_entity_guards(tenant, entity_type, entity_id, action)
+                    .await;
+                let generation_guard = self.acquire_spec_generation_read_lock(tenant).await;
+                if self.current_spec_generation(tenant) != expected_spec_generation {
+                    drop(generation_guard);
+                    generation_retries += 1;
+                    if generation_retries > SPEC_GENERATION_RETRY_BUDGET {
+                        return Err(DispatchError::Internal(
+                            "spec generation kept changing while preparing action".to_string(),
+                        ));
+                    }
+                    continue;
+                }
+                if !self
+                    .is_entity_type_governed(tenant, entity_type)
+                    .map_err(DispatchError::Internal)?
+                {
+                    return Err(DispatchError::Ungoverned(entity_type.to_string()));
+                }
+                drop(generation_guard);
+
+                use tracing::Instrument;
+                let mut ask_outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
+                    &actor_ref,
+                    || EntityMsg::Action {
+                        name: action_name.clone(),
+                        params: params_for_retry.clone(),
+                        cross_entity_booleans: cross_for_retry.clone(),
+                        idempotency_key: idempotency_key.clone(),
+                        expected_spec_generation: Some(expected_spec_generation),
+                    },
+                    &policy,
+                )
+                .instrument(ask_span.clone())
+                .await;
+                total_attempts = total_attempts.saturating_add(ask_outcome.attempts);
+                total_elapsed = total_elapsed.saturating_add(ask_outcome.elapsed);
+                saw_transient_retry |= ask_outcome.retried_after_transient;
+
+                let generation_changed = match ask_outcome.result.as_ref() {
+                    Ok(response) => {
+                        crate::entity_actor::is_spec_generation_changed_response(response)
+                    }
+                    Err(error) => crate::entity_actor::is_spec_generation_changed_error(error),
+                };
+                if generation_changed {
+                    generation_retries += 1;
+                    if generation_retries <= SPEC_GENERATION_RETRY_BUDGET {
+                        // A remove/re-add creates a new live table `Arc`; discard
+                        // any actor retaining the detached predecessor before
+                        // resolving the next generation.
+                        self.stop_and_remove_entity(tenant, entity_type, entity_id);
+                        actor_ref = self
+                            .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
+                            .ok_or_else(|| DispatchError::Ungoverned(entity_type.to_string()))?;
+                        continue;
+                    }
+                }
+                ask_outcome.attempts = total_attempts;
+                ask_outcome.elapsed = total_elapsed;
+                ask_outcome.retried_after_transient = saw_transient_retry;
+                break ask_outcome;
+            }
         };
         // ADR-0048: emit dispatch outcome / attempts / latency metrics.
         let ask_outcome_for_metrics = match &outcome.result {

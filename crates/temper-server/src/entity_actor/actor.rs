@@ -52,6 +52,77 @@ use field_updates::FieldUpdateCommitError;
 
 const FIELD_UPDATE_RETRY_BUDGET: usize = 2;
 
+fn spec_generation_changed_response(state: &EntityState) -> EntityResponse {
+    EntityResponse {
+        success: false,
+        state: state.clone(),
+        error: Some(super::SPEC_GENERATION_CHANGED_ERROR.to_string()),
+        custom_effects: vec![],
+        scheduled_actions: vec![],
+        spawn_requests: vec![],
+        spec_governed: true,
+    }
+}
+
+/// Exact declared projection rows derived from one committed entity state.
+pub(crate) struct DeclaredIndexRows {
+    pub(crate) key_rows: Vec<temper_runtime::persistence::EntityKeyRow>,
+    pub(crate) vector_rows: Vec<temper_runtime::persistence::EntityVectorRow>,
+    pub(crate) reconciliation: temper_runtime::persistence::IndexReconciliation,
+}
+
+/// Derive the exact key/vector rows used by both single-entity and atomic
+/// composite persistence. Keeping this in one helper prevents the two journal
+/// paths from silently diverging as projection rules evolve.
+pub(crate) fn declared_index_rows(
+    table: &TransitionTable,
+    state: &EntityState,
+) -> DeclaredIndexRows {
+    let reconciliation = temper_runtime::persistence::IndexReconciliation {
+        keys: !table.keys.is_empty(),
+        vectors: !table.vectors.is_empty(),
+    };
+    let mut key_rows = Vec::new();
+    let mut vector_rows = Vec::new();
+    if let Some(field_map) = state.fields.as_object() {
+        for key in table.keys.iter().filter(|_| state.status != "Deleted") {
+            if let Some(hash) =
+                crate::key_index::canonical_key_hash(&key.name, &key.properties, field_map)
+            {
+                key_rows.push(temper_runtime::persistence::EntityKeyRow {
+                    key_name: key.name.clone(),
+                    key_hash: hash,
+                });
+            }
+        }
+        for decl in table.vectors.iter().filter(|_| state.status != "Deleted") {
+            let Some(vector) = field_map
+                .get(&decl.property)
+                .and_then(|value| crate::vector_index::parse_vector_property(value, decl.dims))
+            else {
+                continue;
+            };
+            let Some(model_tag) = field_map
+                .get(&decl.model_property)
+                .and_then(|value| value.as_str())
+                .filter(|tag| !tag.is_empty())
+            else {
+                continue;
+            };
+            vector_rows.push(temper_runtime::persistence::EntityVectorRow {
+                decl_name: decl.name.clone(),
+                model_tag: model_tag.to_string(),
+                vector,
+            });
+        }
+    }
+    DeclaredIndexRows {
+        key_rows,
+        vector_rows,
+        reconciliation,
+    }
+}
+
 fn event_budget_workspace_id(state: &EntityState) -> String {
     if state.entity_type == "Workspace" {
         return state.entity_id.clone();
@@ -124,6 +195,13 @@ pub struct EntityActor {
     idempotency_cache: Option<Arc<crate::idempotency::IdempotencyCache>>,
     /// Object store for field-overflow blob bytes. SQL stores only refs.
     blob_store: Option<crate::blob_store::BlobStore>,
+    /// Tenant generation barrier. Durable handlers hold its read side from the
+    /// transition-table snapshot through the co-committed journal append, so a
+    /// hot swap cannot reconcile and then be followed by an old-generation write.
+    spec_generation_barrier: Option<Arc<crate::state::SpecGenerationBarrier>>,
+    /// Registry used to reject detached actors after their entity type is
+    /// removed from the tenant's current generation.
+    spec_registry: Option<Arc<RwLock<crate::registry::SpecRegistry>>>,
 }
 
 impl EntityActor {
@@ -246,6 +324,8 @@ impl EntityActor {
             trace_id: sim_uuid().to_string(),
             idempotency_cache: None,
             blob_store: None,
+            spec_generation_barrier: None,
+            spec_registry: None,
         }
     }
 
@@ -270,6 +350,8 @@ impl EntityActor {
             trace_id: sim_uuid().to_string(),
             idempotency_cache: None,
             blob_store: None,
+            spec_generation_barrier: None,
+            spec_registry: None,
         }
     }
 
@@ -302,6 +384,57 @@ impl EntityActor {
     ) -> Self {
         self.blob_store = blob_store;
         self
+    }
+
+    /// Attach the tenant generation barrier used by durable action writers.
+    pub(crate) fn with_spec_generation_barrier(
+        mut self,
+        barrier: Arc<crate::state::SpecGenerationBarrier>,
+    ) -> Self {
+        self.spec_generation_barrier = Some(barrier);
+        self
+    }
+
+    /// Attach the live registry so a removed entity type cannot keep writing
+    /// through an actor that retains its former transition-table `Arc`.
+    pub(crate) fn with_spec_registry(
+        mut self,
+        registry: Arc<RwLock<crate::registry::SpecRegistry>>,
+    ) -> Self {
+        self.spec_registry = Some(registry);
+        self
+    }
+
+    async fn acquire_spec_generation_read_lock(
+        &self,
+        expected_generation: Option<u64>,
+    ) -> Result<Option<tokio::sync::OwnedRwLockReadGuard<()>>, ActorError> {
+        let guard = match self.spec_generation_barrier.as_ref() {
+            Some(barrier) => Some(barrier.read_owned().await),
+            None => None,
+        };
+        if let (Some(expected), Some(barrier)) =
+            (expected_generation, self.spec_generation_barrier.as_ref())
+            && barrier.epoch() != expected
+        {
+            return Err(ActorError::custom(super::SPEC_GENERATION_CHANGED_ERROR));
+        }
+        self.validate_spec_registry_authority()?;
+        Ok(guard)
+    }
+
+    fn validate_spec_registry_authority(&self) -> Result<(), ActorError> {
+        if let Some(registry) = self.spec_registry.as_ref() {
+            let tenant = temper_runtime::tenant::TenantId::new(&self.tenant);
+            let live_table = registry
+                .read()
+                .map_err(|_| ActorError::custom("spec registry lock poisoned"))?
+                .get_table_live(&tenant, &self.entity_type);
+            if !live_table.is_some_and(|table| Arc::ptr_eq(&table, &self.table)) {
+                return Err(ActorError::custom(super::SPEC_GENERATION_CHANGED_ERROR));
+            }
+        }
+        Ok(())
     }
 
     async fn persist_overflow_blobs(
@@ -338,6 +471,7 @@ impl EntityActor {
         store: &BoxedEventStore,
         backend: BackendLabel,
         persistence_id: &str,
+        table: &TransitionTable,
         state: &mut EntityState,
         event: &EntityEvent,
     ) -> Result<u64, PersistenceError> {
@@ -361,70 +495,16 @@ impl EntityActor {
         // ADR-0153/0155: derive the declared key rows AND the vector-index rows from
         // the new state and co-commit them with the journal append, so a keyed read
         // is correct without a scan and a kNN read reflects the write deterministically.
-        let (key_rows, reconcile_keys, vector_rows, reconcile_vectors) = {
-            let table = self.table.read().expect("table lock poisoned");
-            let reconcile_keys = !table.keys.is_empty();
-            // The type declares vector paths → the store reconciles this entity's
-            // vector rows (delete stale + insert current) even when no row is emitted
-            // this write (a delete transition or a cleared property), so stale rows are
-            // purged instead of being ranked forever (ADR-0155).
-            let reconcile_vectors = !table.vectors.is_empty();
-            let mut key_rows = Vec::new();
-            let mut vector_rows = Vec::new();
-            if let Some(field_map) = state.fields.as_object() {
-                for key in table.keys.iter().filter(|_| state.status != "Deleted") {
-                    if let Some(hash) =
-                        crate::key_index::canonical_key_hash(&key.name, &key.properties, field_map)
-                    {
-                        key_rows.push(temper_runtime::persistence::EntityKeyRow {
-                            key_name: key.name.clone(),
-                            key_hash: hash,
-                        });
-                    }
-                }
-                // A soft-deleted (tombstone) entity is never indexed — it emits no
-                // vector rows, so the reconcile below PURGES any it had, even though
-                // its embedding field may still be present. Mirrors how the field-index
-                // projection removes a deleted entity.
-                let index_vectors = state.status != "Deleted";
-                for decl in table.vectors.iter().filter(|_| index_vectors) {
-                    // A vector is indexed only when its property parses to `dims`
-                    // floats AND its model tag is a non-empty string — otherwise the
-                    // path indexes nothing for this entity (like an incomplete key).
-                    let Some(vector) = field_map
-                        .get(&decl.property)
-                        .and_then(|v| crate::vector_index::parse_vector_property(v, decl.dims))
-                    else {
-                        continue;
-                    };
-                    let Some(model_tag) = field_map
-                        .get(&decl.model_property)
-                        .and_then(|v| v.as_str())
-                        .filter(|tag| !tag.is_empty())
-                    else {
-                        continue;
-                    };
-                    vector_rows.push(temper_runtime::persistence::EntityVectorRow {
-                        decl_name: decl.name.clone(),
-                        model_tag: model_tag.to_string(),
-                        vector,
-                    });
-                }
-            }
-            (key_rows, reconcile_keys, vector_rows, reconcile_vectors)
-        };
+        let index_rows = declared_index_rows(table, state);
         let append_start = Instant::now();
         let result = store
             .append_with_index_rows(
                 persistence_id,
                 state.sequence_nr,
                 &[envelope],
-                &key_rows,
-                &vector_rows,
-                temper_runtime::persistence::IndexReconciliation {
-                    keys: reconcile_keys,
-                    vectors: reconcile_vectors,
-                },
+                &index_rows.key_rows,
+                &index_rows.vector_rows,
+                index_rows.reconciliation,
             )
             .await;
         crate::runtime_metrics::record_event_store_append_wait(
@@ -566,6 +646,30 @@ impl EntityActor {
                     )));
                 }
                 for env in &envelopes {
+                    // Deletion is terminal for state, but not necessarily the last
+                    // envelope written by older binaries: repeated Delete requests
+                    // could append additional tombstones. Consume the complete durable
+                    // tail so sequence-based projection repair uses the true journal
+                    // head, while never applying a post-tombstone effect that could
+                    // make the entity live again.
+                    if state.status == "Deleted" {
+                        if env.event_type != COMPOSITE_EVENT_TYPE {
+                            match serde_json::from_value::<EntityEvent>(env.payload.clone()) {
+                                Ok(event) => state.push_event_bounded(event),
+                                Err(error) => tracing::warn!(
+                                    entity = %state.entity_id,
+                                    event_id = %env.metadata.event_id,
+                                    sequence_nr = env.sequence_nr,
+                                    event_type = %env.event_type,
+                                    error = %error,
+                                    "skipping incompatible post-tombstone event during replay"
+                                ),
+                            }
+                        }
+                        state.sequence_nr = env.sequence_nr;
+                        continue;
+                    }
+
                     if env.event_type == COMPOSITE_EVENT_TYPE {
                         state.sequence_nr = env.sequence_nr;
                         continue;
@@ -597,8 +701,8 @@ impl EntityActor {
                         continue;
                     }
 
-                    // Tombstone is terminal: once deleted, entity must not replay
-                    // into a live state. Stop at the first Deleted event.
+                    // Tombstone is terminal for state. Continue consuming the tail so
+                    // legacy duplicate tombstones still advance to the durable head.
                     if env.event_type == "Deleted" {
                         let tombstone = parsed_event.unwrap_or_else(|_| EntityEvent {
                             action: "Deleted".to_string(),
@@ -617,7 +721,7 @@ impl EntityActor {
                         }
                         state.push_event_bounded(tombstone);
                         state.sequence_nr = env.sequence_nr;
-                        break;
+                        continue;
                     }
 
                     match parsed_event {
@@ -801,6 +905,7 @@ impl Actor for EntityActor {
     type State = EntityState;
 
     async fn pre_start(&self, _ctx: &mut ActorContext<Self>) -> Result<Self::State, ActorError> {
+        let _generation_guard = self.acquire_spec_generation_read_lock(None).await?;
         // Snapshot the table for consistent startup (initial state + replay).
         // This is a cheap clone — TransitionTable is a few Vecs of strings.
         let table = self.table.read().expect("table lock poisoned").clone();
@@ -846,14 +951,21 @@ impl Actor for EntityActor {
 
             if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend)
             {
-                self.persist_event(store, backend, &self.persistence_id(), &mut state, &created)
-                    .await
-                    .map_err(|e| {
-                        ActorError::custom(format!(
-                            "failed to persist bootstrap Created event for {}:{}: {}",
-                            self.entity_type, self.entity_id, e
-                        ))
-                    })?;
+                self.persist_event(
+                    store,
+                    backend,
+                    &self.persistence_id(),
+                    &table,
+                    &mut state,
+                    &created,
+                )
+                .await
+                .map_err(|e| {
+                    ActorError::custom(format!(
+                        "failed to persist bootstrap Created event for {}:{}: {}",
+                        self.entity_type, self.entity_id, e
+                    ))
+                })?;
             }
             state.push_event_bounded(created);
         }
@@ -873,7 +985,19 @@ impl Actor for EntityActor {
                 params,
                 cross_entity_booleans,
                 idempotency_key,
+                expected_spec_generation,
             } => {
+                let _generation_guard = match self
+                    .acquire_spec_generation_read_lock(expected_spec_generation)
+                    .await
+                {
+                    Ok(guard) => guard,
+                    Err(error) if super::is_spec_generation_changed_error(&error) => {
+                        ctx.reply(spec_generation_changed_response(state));
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                };
                 // Capture start time for span duration (DST-safe: sim_now()
                 // returns logical clock in simulation, wall clock in production).
                 let action_start = sim_now();
@@ -1042,7 +1166,14 @@ impl Actor for EntityActor {
                         (self.event_journal.as_ref(), self.event_backend)
                     {
                         let first_persist = self
-                            .persist_event(store, backend, &self.persistence_id(), state, &event)
+                            .persist_event(
+                                store,
+                                backend,
+                                &self.persistence_id(),
+                                &table,
+                                state,
+                                &event,
+                            )
                             .await;
 
                         match first_persist {
@@ -1193,6 +1324,7 @@ impl Actor for EntityActor {
                                             store,
                                             backend,
                                             &self.persistence_id(),
+                                            &table,
                                             state,
                                             &retry_event,
                                         )
@@ -1437,6 +1569,12 @@ impl Actor for EntityActor {
                 );
             }
             EntityMsg::GetState => {
+                // A read linearizes at the registry authority check. Do not
+                // recursively acquire the fair async generation lock here:
+                // callers such as Nearest already retain its read side while
+                // materializing actors, and a queued writer would otherwise
+                // deadlock the nested reader behind itself.
+                self.validate_spec_registry_authority()?;
                 ctx.reply(EntityResponse {
                     success: true,
                     state: state.clone(),
@@ -1448,6 +1586,7 @@ impl Actor for EntityActor {
                 });
             }
             EntityMsg::GetField { field } => {
+                self.validate_spec_registry_authority()?;
                 let value = state
                     .fields
                     .get(&field)
@@ -1455,11 +1594,28 @@ impl Actor for EntityActor {
                     .unwrap_or(serde_json::Value::Null);
                 ctx.reply(value);
             }
-            EntityMsg::UpdateFields { fields, replace } => {
-                let committed = self.commit_field_update(state, &fields, replace).await;
+            EntityMsg::UpdateFields {
+                fields,
+                replace,
+                idempotency_key,
+                expected_spec_generation,
+            } => {
+                let committed = self
+                    .commit_field_update(
+                        state,
+                        &fields,
+                        replace,
+                        idempotency_key.as_deref(),
+                        expected_spec_generation,
+                    )
+                    .await;
                 let (success, error) = match committed {
                     Ok(()) => (true, None),
                     Err(FieldUpdateCommitError::Rejected(error)) => (false, Some(error)),
+                    Err(FieldUpdateCommitError::GenerationChanged) => {
+                        ctx.reply(spec_generation_changed_response(state));
+                        return Ok(());
+                    }
                     Err(FieldUpdateCommitError::Recovery(error)) => return Err(error),
                 };
                 ctx.reply(EntityResponse {
@@ -1472,7 +1628,21 @@ impl Actor for EntityActor {
                     spec_governed: true,
                 });
             }
-            EntityMsg::Delete => {
+            EntityMsg::Delete {
+                expected_spec_generation,
+            } => {
+                let _generation_guard = match self
+                    .acquire_spec_generation_read_lock(expected_spec_generation)
+                    .await
+                {
+                    Ok(guard) => guard,
+                    Err(error) if super::is_spec_generation_changed_error(&error) => {
+                        ctx.reply(spec_generation_changed_response(state));
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                };
+                let table = self.table.read().expect("table lock poisoned").clone();
                 if state.status == "Deleted" {
                     ctx.reply(EntityResponse {
                         success: true,
@@ -1485,6 +1655,7 @@ impl Actor for EntityActor {
                     });
                     return Ok(());
                 }
+                let sequence_before = state.sequence_nr;
 
                 let deleted = EntityEvent {
                     action: "Deleted".to_string(),
@@ -1510,20 +1681,40 @@ impl Actor for EntityActor {
 
                 if let (Some(store), Some(backend)) =
                     (self.event_journal.as_ref(), self.event_backend)
-                    && let Err(e) = self
+                    && let Err(error) = self
                         .persist_event(
                             store,
                             backend,
                             &self.persistence_id(),
+                            &table,
                             &mut tombstone,
                             &deleted,
                         )
                         .await
                 {
+                    // A backend can durably append the event and then fail while
+                    // publishing auxiliary metadata or reporting the response.
+                    // Strict replay is the only authority after any append error;
+                    // never keep serving the pre-delete live state on ambiguity.
+                    let recovered = recover_entity_state_from_store(
+                        &self.tenant,
+                        &self.entity_type,
+                        &self.entity_id,
+                        &table,
+                        store,
+                        backend,
+                        &self.initial_fields,
+                        self.blob_store.as_ref(),
+                        true,
+                    )
+                    .await?;
+                    let delete_committed =
+                        recovered.status == "Deleted" && recovered.sequence_nr > sequence_before;
+                    *state = recovered;
                     ctx.reply(EntityResponse {
-                        success: false,
+                        success: delete_committed,
                         state: state.clone(),
-                        error: Some(format!("persistence failed: {e}")),
+                        error: (!delete_committed).then(|| format!("persistence failed: {error}")),
                         custom_effects: vec![],
                         scheduled_actions: vec![],
                         spawn_requests: vec![],

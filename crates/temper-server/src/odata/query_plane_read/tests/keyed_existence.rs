@@ -229,7 +229,11 @@ async fn directory_root_lookup_souls_scenario_with_real_key_and_duplicates() {
     state.populate_key_index_from_snapshots(&tenant).await;
     assert!(
         state
-            .key_index_backfill_complete(&tenant, "Directory", "name_parent")
+            .key_index_backfill_complete(
+                &tenant,
+                "Directory",
+                r#"v2|[["name_parent",["Name","WorkspaceId","ParentId"]]]"#,
+            )
             .await,
         "Directory must watermark — duplicate roots are key-conflict skips, not failures"
     );
@@ -443,7 +447,11 @@ fn directory_root_souls_scenario_on_postgres() {
         state.populate_key_index_from_snapshots(&tenant).await;
         assert!(
             state
-                .key_index_backfill_complete(&tenant, "Directory", "name_parent")
+                .key_index_backfill_complete(
+                    &tenant,
+                    "Directory",
+                    r#"v2|[["name_parent",["Name","WorkspaceId","ParentId"]]]"#,
+                )
                 .await,
             "Directory must watermark on Postgres despite duplicate roots"
         );
@@ -757,7 +765,11 @@ async fn key_index_backfill_keys_store_entities_absent_from_the_lazy_index() {
     // Enumerated from the store and keyed both entities, and watermarked the type.
     assert!(
         state
-            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .key_index_backfill_complete(
+                &tenant,
+                "Order",
+                r#"v2|[["ws_path",["WorkspaceId","Path"]]]"#,
+            )
             .await,
         "Order must be watermarked after a clean backfill"
     );
@@ -773,12 +785,11 @@ async fn key_index_backfill_keys_store_entities_absent_from_the_lazy_index() {
     }
 }
 
-/// Robustness (ADR-0153): the backfill is RESUMABLE — already-keyed entities are
-/// skipped (not re-loaded), so a re-run after a partial pass only processes the
-/// remainder instead of re-loading all N. Pre-key one entity directly, then run the
-/// backfill, and confirm it completes + watermarks with both entities keyed.
+/// Exactness (ADR-0153): a pre-keyed entity is reconciled alongside unkeyed entities,
+/// and the type is watermarked only after the complete pass. Re-reading existing rows
+/// is deliberate: they may be stale remnants from an older reconciliation contract.
 #[tokio::test]
-async fn key_index_backfill_skips_already_keyed_entities_and_still_watermarks() {
+async fn key_index_backfill_reconciles_already_keyed_entities_and_watermarks() {
     let (state, store) = build_order_state_with_sim("key-backfill-resume");
     let tenant = TenantId::default();
     let agent_ctx = AgentContext::for_service("resume-test");
@@ -823,10 +834,14 @@ async fn key_index_backfill_skips_already_keyed_entities_and_still_watermarks() 
 
     state.populate_key_index_from_snapshots(&tenant).await;
 
-    // ord-a was skipped via the already-keyed set; ord-b keyed fresh; type watermarked.
+    // Both rows are exact after replay, and the type is watermarked.
     assert!(
         state
-            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .key_index_backfill_complete(
+                &tenant,
+                "Order",
+                r#"v2|[["ws_path",["WorkspaceId","Path"]]]"#,
+            )
             .await
     );
     for (ws, path) in [("ws1", "/a"), ("ws1", "/b")] {
@@ -882,7 +897,11 @@ async fn key_index_backfill_skips_deleted_entities_without_blocking_watermark() 
 
     assert!(
         state
-            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .key_index_backfill_complete(
+                &tenant,
+                "Order",
+                r#"v2|[["ws_path",["WorkspaceId","Path"]]]"#,
+            )
             .await,
         "a deleted entity must not block the watermark"
     );
@@ -953,7 +972,11 @@ async fn key_index_backfill_loadfailed_entity_blocks_watermark_then_resumes() {
     state.populate_key_index_from_snapshots(&tenant).await;
     assert!(
         !state
-            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .key_index_backfill_complete(
+                &tenant,
+                "Order",
+                r#"v2|[["ws_path",["WorkspaceId","Path"]]]"#,
+            )
             .await,
         "an unloadable entity must block the watermark"
     );
@@ -975,7 +998,11 @@ async fn key_index_backfill_loadfailed_entity_blocks_watermark_then_resumes() {
     state.populate_key_index_from_snapshots(&tenant).await;
     assert!(
         state
-            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .key_index_backfill_complete(
+                &tenant,
+                "Order",
+                r#"v2|[["ws_path",["WorkspaceId","Path"]]]"#,
+            )
             .await,
         "backfill must resume and watermark once the read succeeds"
     );
@@ -1036,8 +1063,13 @@ async fn keyed_miss_returns_empty_without_scan_413_once_watermarked() {
 
     // Watermark Order → a keyed miss is now authoritative absence.
     state
-        .mark_key_index_backfilled(&tenant, "Order", "ws_path")
-        .await;
+        .mark_key_index_backfilled(
+            &tenant,
+            "Order",
+            r#"v2|[["ws_path",["WorkspaceId","Path"]]]"#,
+        )
+        .await
+        .expect("persist key watermark");
 
     let result = match read_entity_set_page(QueryPlaneReadRequest {
         state: &state,
@@ -1077,9 +1109,8 @@ async fn key_index_backfill_rekeys_existing_entities_when_a_key_is_added() {
     // Two orders that ALREADY have a key row under an OLDER key name, and whose
     // ws_path-valued fields live in the snapshot — the exact prod shape: entities keyed
     // under an earlier declaration (here `old_key`), the new key (`ws_path`) not yet
-    // assigned. The old-key rows put them in `keyed_entity_ids_for_type`, so the
-    // per-entity resumability skip WOULD skip them — this is what `force_full_rekey`
-    // must bypass. Without the bypass this test fails (ws_path never gets assigned).
+    // assigned. The old-key rows put them in projection enumeration; exact
+    // reconciliation must replay them and replace the obsolete row set.
     for (eid, ws, path) in [("ord-rk-0", "ws1", "/a"), ("ord-rk-1", "ws1", "/b")] {
         state
             .dispatch_tenant_action(
@@ -1104,7 +1135,7 @@ async fn key_index_backfill_rekeys_existing_entities_when_a_key_is_added() {
             )
             .await
             .expect("seed snapshot");
-        // Key it under the OLD key only (so it appears already-keyed for resumability).
+        // Key it under the OLD key only (so projection enumeration discovers it).
         store
             .backfill_entity_keys(
                 tenant.as_str(),
@@ -1123,26 +1154,35 @@ async fn key_index_backfill_rekeys_existing_entities_when_a_key_is_added() {
 
     // Watermarked under the earlier declaration (`old_key`), which did NOT cover ws_path.
     state
-        .mark_key_index_backfilled(&tenant, "Order", "old_key")
-        .await;
+        .mark_key_index_backfilled(
+            &tenant,
+            "Order",
+            r#"v2|[["old_key",["WorkspaceId","Path"]]]"#,
+        )
+        .await
+        .expect("persist old key watermark");
 
     // Read gate: covered ("old_key") != current ("ws_path"), so the type reads as
     // INCOMPLETE for ws_path — a ws_path miss falls back to the scan, never a wrong absent.
     assert!(
         !state
-            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .key_index_backfill_complete(
+                &tenant,
+                "Order",
+                r#"v2|[["ws_path",["WorkspaceId","Path"]]]"#,
+            )
             .await,
         "a stale watermark covering a different key-set must read as incomplete for the new key"
     );
-    // The entities ARE already-keyed (under old_key) — so the resumability skip would
-    // exclude them; only force_full_rekey re-processes them.
+    // The entities ARE already keyed under old_key. Exact reconciliation must replace
+    // that obsolete row set with the current declaration.
     assert!(
         !store
             .keyed_entity_ids_for_type(tenant.as_str(), "Order")
             .await
             .unwrap()
             .is_empty(),
-        "precondition: entities appear already-keyed (old_key), so the resume-skip would skip them"
+        "precondition: projection enumeration discovers the old-key rows"
     );
     assert!(
         store
@@ -1164,7 +1204,11 @@ async fn key_index_backfill_rekeys_existing_entities_when_a_key_is_added() {
 
     assert!(
         state
-            .key_index_backfill_complete(&tenant, "Order", "ws_path")
+            .key_index_backfill_complete(
+                &tenant,
+                "Order",
+                r#"v2|[["ws_path",["WorkspaceId","Path"]]]"#,
+            )
             .await,
         "after the re-key the type is complete for the current declared key-set"
     );
@@ -1182,20 +1226,39 @@ async fn key_index_backfill_rekeys_existing_entities_when_a_key_is_added() {
 }
 
 #[test]
-fn declared_key_set_signature_is_sorted_and_joined() {
+fn declared_key_set_signature_covers_full_ordered_declarations() {
     use temper_jit::table::types::DeclaredKey;
-    let key = |name: &str| DeclaredKey {
+    let key = |name: &str, properties: &[&str]| DeclaredKey {
         name: name.to_string(),
-        properties: vec!["WorkspaceId".to_string(), "Path".to_string()],
+        properties: properties
+            .iter()
+            .map(|property| property.to_string())
+            .collect(),
     };
-    // Order-independent, comma-joined, sorted by name.
+    let ws_path = || key("ws_path", &["WorkspaceId", "Path"]);
+    let name_parent = || key("name_parent", &["WorkspaceId", "ParentId"]);
+
+    // Declaration order is irrelevant, but every ordered property is encoded.
     assert_eq!(
-        crate::key_index::declared_key_set_signature(&[key("ws_path"), key("name_parent")]),
-        "name_parent,ws_path"
+        crate::key_index::declared_key_set_signature(&[ws_path(), name_parent()]),
+        crate::key_index::declared_key_set_signature(&[name_parent(), ws_path()])
     );
-    assert_eq!(crate::key_index::declared_key_set_signature(&[]), "");
+    assert_eq!(crate::key_index::declared_key_set_signature(&[]), "v2|[]");
     assert_eq!(
-        crate::key_index::declared_key_set_signature(&[key("only")]),
-        "only"
+        crate::key_index::declared_key_set_signature(&[ws_path()]),
+        r#"v2|[["ws_path",["WorkspaceId","Path"]]]"#
+    );
+    assert_ne!(
+        crate::key_index::declared_key_set_signature(&[ws_path()]),
+        crate::key_index::declared_key_set_signature(&[key(
+            "ws_path",
+            &["WorkspaceId", "OtherPath"],
+        )]),
+        "changing properties under the same key name must invalidate coverage"
+    );
+    assert_ne!(
+        crate::key_index::declared_key_set_signature(&[ws_path()]),
+        crate::key_index::declared_key_set_signature(&[key("ws_path", &["Path", "WorkspaceId"],)]),
+        "property order changes canonical hashes and must invalidate coverage"
     );
 }

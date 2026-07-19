@@ -1,6 +1,6 @@
 //! Entity lifecycle methods for ServerState (spawn, query, delete, index).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 
@@ -18,6 +18,8 @@ use crate::events::EntityStateChange;
 use crate::registry::{VerificationDetail, VerificationStatus};
 use crate::runtime_metrics;
 use crate::storage::DataOnlyCreateRecord;
+
+const SPEC_GENERATION_RETRY_BUDGET: usize = 3;
 
 fn actor_idle_timeout_secs() -> i64 {
     static ACTOR_IDLE_TIMEOUT: OnceLock<i64> = OnceLock::new();
@@ -465,6 +467,7 @@ impl ServerState {
     /// boot are indexed via `run_post_dispatch_effects` step 8.
     #[instrument(skip_all, fields(otel.name = "entity.populate_field_index", tenant = %tenant))]
     pub async fn populate_field_index_from_snapshots(&self, tenant: &TenantId) {
+        let _generation_guard = self.acquire_spec_generation_read_lock(tenant).await;
         projection_backfill::populate_field_index_from_snapshots(self, tenant).await;
     }
 
@@ -478,7 +481,8 @@ impl ServerState {
     /// entities written after boot are keyed inline at write time.
     #[instrument(skip_all, fields(otel.name = "entity.populate_key_index", tenant = %tenant))]
     pub async fn populate_key_index_from_snapshots(&self, tenant: &TenantId) {
-        projection_backfill::populate_key_index_from_snapshots(self, tenant).await;
+        let _generation_guard = self.acquire_spec_generation_read_lock(tenant).await;
+        let _ = projection_backfill::populate_key_index_from_snapshots(self, tenant).await;
     }
 
     /// ADR-0155: backfill `entity_vector_index` for pre-existing entities of every
@@ -486,7 +490,64 @@ impl ServerState {
     /// after boot maintain their vectors inline (co-commit) or write-behind.
     #[instrument(skip_all, fields(otel.name = "entity.populate_vector_index", tenant = %tenant))]
     pub async fn populate_vector_index_from_snapshots(&self, tenant: &TenantId) {
-        projection_backfill::populate_vector_index_from_snapshots(self, tenant).await;
+        let _generation_guard = self.acquire_spec_generation_read_lock(tenant).await;
+        let _ = projection_backfill::populate_vector_index_from_snapshots(self, tenant).await;
+    }
+
+    /// Retire durable projection authority for declarations absent from the current
+    /// registry generation.
+    ///
+    /// Hot-deploy paths run this before registry mutation. It intentionally does not
+    /// rebuild still-declared projections: a generation whose exact reconciliation
+    /// fails must remain removable by a corrective generation.
+    #[instrument(skip_all, fields(otel.name = "entity.retire_removed_projection_authority", tenant = %tenant))]
+    pub async fn retire_removed_projection_authority(&self, tenant: &TenantId) -> bool {
+        let keys = projection_backfill::retire_removed_key_index_watermarks(self, tenant).await;
+        let vectors =
+            projection_backfill::retire_removed_vector_index_watermarks(self, tenant).await;
+        keys && vectors
+    }
+
+    /// Reconcile every declared key/vector projection and report whether all durable
+    /// reads, repairs, and watermark commits succeeded. Hot-deploy paths use this
+    /// strict form after installing a new registry generation, keeping projection
+    /// reads fail-closed until exact reconciliation completes.
+    #[instrument(skip_all, fields(otel.name = "entity.reconcile_declared_projections", tenant = %tenant))]
+    pub async fn reconcile_declared_projections(&self, tenant: &TenantId) -> bool {
+        self.evict_unregistered_tenant_actors(tenant);
+        let keys = projection_backfill::populate_key_index_from_snapshots(self, tenant).await;
+        let vectors = projection_backfill::populate_vector_index_from_snapshots(self, tenant).await;
+        keys && vectors
+    }
+
+    /// Stop and remove actors whose entity types are absent from the tenant's
+    /// current registry generation. Tenant deletion calls this after removing
+    /// the registry entry while it still owns the generation write guard.
+    pub fn evict_unregistered_tenant_actors(&self, tenant: &TenantId) {
+        let registered: BTreeSet<String> = self
+            .registry
+            .read()
+            .expect("spec registry lock poisoned")
+            .entity_types(tenant)
+            .into_iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        let prefix = format!("{tenant}:");
+        let detached: Vec<(String, String)> = self
+            .actor_registry
+            .read()
+            .expect("actor registry lock poisoned")
+            .keys()
+            .filter_map(|key| {
+                let remainder = key.strip_prefix(&prefix)?;
+                let (entity_type, entity_id) = remainder.split_once(':')?;
+                (!registered.contains(entity_type))
+                    .then(|| (entity_type.to_string(), entity_id.to_string()))
+            })
+            .collect::<Vec<_>>();
+        for (entity_type, entity_id) in detached {
+            self.stop_and_remove_entity(tenant, &entity_type, &entity_id);
+        }
     }
 
     /// Hydrate the per-tenant `entity_key_index` watermark cache once from the durable
@@ -502,18 +563,28 @@ impl ServerState {
             return;
         }
         if let Some((store, _)) = self.event_journal() {
-            if let Ok(types) = store.key_index_backfilled_types(tenant.as_str()).await {
-                let mut cache = self
-                    .key_index_backfilled
+            if !store.has_authoritative_key_index() {
+                self.replace_cached_key_index_watermarks(tenant, Vec::new());
+                self.key_index_watermarks_loaded
                     .write()
-                    .expect("key index backfilled lock poisoned");
-                for (et, key_set) in types {
-                    cache.insert(format!("{tenant}:{et}"), key_set);
-                }
+                    .expect("key index watermarks-loaded lock poisoned")
+                    .insert(tenant.to_string());
+                return;
             }
-            // Mark loaded even if the query errored: an error means "no authority
-            // yet", which is the safe scan-fallback state, and a completing
-            // backfill sets the cache entry directly via `mark_key_index_backfilled`.
+            let types = match store.key_index_backfilled_types(tenant.as_str()).await {
+                Ok(types) => types,
+                Err(error) => {
+                    tracing::warn!(
+                        tenant = %tenant, error = %error,
+                        "key-index durable watermark read failed; retaining scan fallback and retrying later"
+                    );
+                    // Unreadable is not absent. Leave this tenant retryable and scan-safe;
+                    // a later read or reconciliation must perform a definitive durable
+                    // watermark read before trusting or replacing projection state.
+                    return;
+                }
+            };
+            self.replace_cached_key_index_watermarks(tenant, types);
             self.key_index_watermarks_loaded
                 .write()
                 .expect("key index watermarks-loaded lock poisoned")
@@ -523,7 +594,7 @@ impl ServerState {
 
     /// The declared key-set the `entity_key_index` backfill covered for `(tenant,
     /// entity_type)`, or `None` if the type was never backfilled. The value is the
-    /// sorted comma-joined declared key names (see [`declared_key_set_signature`]).
+    /// versioned declared-key signature (see [`declared_key_set_signature`]).
     pub(crate) async fn key_index_backfill_covered_key_set(
         &self,
         tenant: &TenantId,
@@ -557,31 +628,74 @@ impl ServerState {
     }
 
     /// Record (durably + in the read-path cache) that `entity_key_index` is complete
-    /// for `(tenant, entity_type)` covering exactly `key_set` (the sorted comma-joined
-    /// declared key names). Called by the backfill once it has keyed every existing
-    /// entity of the type, so subsequent keyed misses resolve to absence without
-    /// scanning (ADR-0153). Overwrites any stale key-set from an earlier declaration.
+    /// for `(tenant, entity_type)` covering exactly the versioned `key_set` signature.
+    /// Called once every durable or projected entity has been reconciled, so subsequent
+    /// keyed misses resolve to absence without scanning (ADR-0153). Overwrites stale
+    /// signatures from earlier declarations or reconciliation schemas.
     pub(crate) async fn mark_key_index_backfilled(
         &self,
         tenant: &TenantId,
         entity_type: &str,
         key_set: &str,
-    ) {
-        if let Some((store, _)) = self.event_journal()
-            && let Err(e) = store
-                .mark_key_index_backfilled(tenant.as_str(), entity_type, key_set)
-                .await
-        {
-            tracing::error!(
-                tenant = %tenant, entity_type, error = %e,
-                "failed to persist key-index backfill watermark"
-            );
-            return;
+    ) -> Result<(), PersistenceError> {
+        let Some((store, _)) = self.event_journal() else {
+            return Err(PersistenceError::Storage(
+                "no event store can persist authoritative key-index coverage".to_string(),
+            ));
+        };
+        if !store.has_authoritative_key_index() {
+            return Err(PersistenceError::Storage(
+                "event store does not provide authoritative key-index coverage".to_string(),
+            ));
         }
+        store
+            .mark_key_index_backfilled(tenant.as_str(), entity_type, key_set)
+            .await?;
+        self.cache_key_index_backfilled(tenant, entity_type, key_set);
+        Ok(())
+    }
+
+    /// Refresh the read-path cache from a definitive durable watermark read.
+    pub(crate) fn cache_key_index_backfilled(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        key_set: &str,
+    ) {
         self.key_index_backfilled
             .write()
             .expect("key index backfilled lock poisoned")
             .insert(format!("{tenant}:{entity_type}"), key_set.to_string());
+    }
+
+    /// Remove cached authority for one type before an exact reconciliation mutates
+    /// its projection. Until the durable watermark is committed again, keyed misses
+    /// must use the scan fallback rather than trust rows that are being replaced.
+    pub(crate) fn invalidate_cached_key_index_backfilled(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+    ) {
+        self.key_index_backfilled
+            .write()
+            .expect("key index backfilled lock poisoned")
+            .remove(&format!("{tenant}:{entity_type}"));
+    }
+
+    fn replace_cached_key_index_watermarks(
+        &self,
+        tenant: &TenantId,
+        watermarks: Vec<(String, String)>,
+    ) {
+        let prefix = format!("{tenant}:");
+        let mut cache = self
+            .key_index_backfilled
+            .write()
+            .expect("key index backfilled lock poisoned");
+        cache.retain(|cache_key, _| !cache_key.starts_with(&prefix));
+        for (entity_type, key_set) in watermarks {
+            cache.insert(format!("{tenant}:{entity_type}"), key_set);
+        }
     }
 
     /// Compare durable projection rows with authoritative state rebuilt by event replay.
@@ -692,6 +806,27 @@ impl ServerState {
     ) -> Option<ActorRef<EntityMsg>> {
         let key = format!("{tenant}:{entity_type}:{entity_id}");
 
+        // Resolve current registry authority before consulting the actor cache.
+        // A removed type may still have a live ActorRef whose table `Arc` was
+        // detached by registry replacement; that ref is never authoritative.
+        let registry_table = {
+            let reg = self.registry.read().expect("spec registry lock poisoned");
+            reg.get_table_live(tenant, entity_type)
+        };
+        let (table, spec_registry) = match registry_table {
+            Some(table) => (table, Some(self.registry.clone())),
+            None => {
+                // Legacy single-tenant: wrap the static Arc<TransitionTable> in a
+                // new RwLock. Hot-swap doesn't apply to legacy mode, but the actor
+                // API is uniform. One clone per entity spawn (cheap).
+                let table = self
+                    .transition_tables
+                    .get(entity_type)
+                    .map(|t| Arc::new(RwLock::new((**t).clone())))?;
+                (table, None)
+            }
+        };
+
         // Fast-path: check actor registry under read lock.
         {
             let registry = self.actor_registry.read().unwrap();
@@ -700,21 +835,6 @@ impl ServerState {
                 return Some(actor_ref.clone());
             }
         }
-
-        // Look up live transition table reference: try SpecRegistry first,
-        // fall back to legacy map (wrapped in a fresh RwLock for compat).
-        let table = {
-            let reg = self.registry.read().unwrap();
-            reg.get_table_live(tenant, entity_type)
-        }
-        .or_else(|| {
-            // Legacy single-tenant: wrap the static Arc<TransitionTable> in a
-            // new RwLock. Hot-swap doesn't apply to legacy mode, but the actor
-            // API is uniform. One clone per entity spawn (cheap).
-            self.transition_tables
-                .get(entity_type)
-                .map(|t| Arc::new(RwLock::new((**t).clone())))
-        })?;
 
         // Build actor instance (spawn guarded below to avoid duplicate races).
         // ADR-0048 sub-decision 5: every actor gets the shared idempotency
@@ -725,7 +845,8 @@ impl ServerState {
             .lock()
             .ok()
             .and_then(|slot| slot.clone());
-        let actor = match self.event_journal() {
+        let spec_generation_barrier = self.spec_generation_barrier_for_actor(tenant);
+        let mut actor = match self.event_journal() {
             Some((store, backend)) => EntityActor::with_persistence(
                 entity_type,
                 entity_id,
@@ -735,14 +856,19 @@ impl ServerState {
                 backend,
             )
             .with_tenant(tenant.as_str())
+            .with_spec_generation_barrier(spec_generation_barrier.clone())
             .with_snapshot_queue(snapshot_queue)
             .with_idempotency_cache(self.idempotency_cache.clone())
             .with_blob_store(tenant_blob_store.clone()),
             None => EntityActor::new(entity_type, entity_id, table, initial_fields)
                 .with_tenant(tenant.as_str())
+                .with_spec_generation_barrier(spec_generation_barrier)
                 .with_idempotency_cache(self.idempotency_cache.clone())
                 .with_blob_store(tenant_blob_store),
         };
+        if let Some(registry) = spec_registry {
+            actor = actor.with_spec_registry(registry);
+        }
 
         // Slow-path: atomically re-check and spawn under write lock.
         // This prevents duplicate actors when concurrent requests race to create
@@ -1057,7 +1183,9 @@ impl ServerState {
 
     /// Create a durable data-only entity without spawning an actor.
     ///
-    /// This path is only eligible for transition tables with no rules. It
+    /// This path is only eligible for transition tables with no rules and no
+    /// declared key/vector projections. Indexed types stay on the actor path so
+    /// their journal and exact projection rows are co-committed. It
     /// preserves the event journal, projection acknowledgement, in-memory
     /// entity index, and observe/SSE event contracts used by the actor path.
     #[instrument(skip_all, fields(otel.name = "entity.create_data_only_tenant_entity_fast_path", tenant = %tenant, entity_type, entity_id))]
@@ -1075,8 +1203,9 @@ impl ServerState {
             return Ok(None);
         }
 
+        let _generation_guard = self.acquire_spec_generation_read_lock(tenant).await;
         let table = {
-            let reg = self.registry.read().unwrap();
+            let reg = self.registry.read().expect("spec registry lock poisoned");
             reg.get_table_live(tenant, entity_type)
         }
         .or_else(|| {
@@ -1091,7 +1220,7 @@ impl ServerState {
             .read()
             .expect("transition table lock poisoned")
             .clone();
-        if !table.rules.is_empty() {
+        if !table.rules.is_empty() || !table.keys.is_empty() || !table.vectors.is_empty() {
             return Ok(None);
         }
 
@@ -1344,8 +1473,9 @@ impl ServerState {
         entity_id: &str,
         fields: serde_json::Value,
         replace: bool,
+        request_idempotency_key: Option<String>,
     ) -> Result<EntityResponse, String> {
-        let actor_ref = self
+        let mut actor_ref = self
             .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
             .ok_or_else(|| {
                 format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
@@ -1353,17 +1483,65 @@ impl ServerState {
 
         let policy = self.dispatch_retry_policy();
         let fields_for_retry = fields;
-        let response = retry::ask_with_backoff::<_, EntityResponse, _>(
-            &actor_ref,
-            || EntityMsg::UpdateFields {
-                fields: fields_for_retry.clone(),
-                replace,
-            },
-            &policy,
-        )
-        .await
-        .result
-        .map_err(|e| format!("Actor update failed: {e}"))?;
+        let idempotency_key = request_idempotency_key
+            .filter(|key| !key.is_empty())
+            .unwrap_or_else(|| format!("field-update:{}", sim_uuid()));
+        let mut generation_retries = 0usize;
+        let response = loop {
+            let expected_spec_generation = self.current_spec_generation(tenant);
+            let generation_guard = self.acquire_spec_generation_read_lock(tenant).await;
+            if self.current_spec_generation(tenant) != expected_spec_generation {
+                drop(generation_guard);
+                generation_retries += 1;
+                if generation_retries > SPEC_GENERATION_RETRY_BUDGET {
+                    return Err(
+                        "spec generation kept changing while preparing field update".to_string()
+                    );
+                }
+                continue;
+            }
+            if !self.is_entity_type_governed(tenant, entity_type)? {
+                return Err(format!(
+                    "No transition table for tenant '{tenant}', entity type '{entity_type}'"
+                ));
+            }
+            drop(generation_guard);
+
+            let outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
+                &actor_ref,
+                || EntityMsg::UpdateFields {
+                    fields: fields_for_retry.clone(),
+                    replace,
+                    idempotency_key: Some(idempotency_key.clone()),
+                    expected_spec_generation: Some(expected_spec_generation),
+                },
+                &policy,
+            )
+            .await
+            .result;
+            let generation_changed = match outcome.as_ref() {
+                Ok(response) => crate::entity_actor::is_spec_generation_changed_response(response),
+                Err(error) => crate::entity_actor::is_spec_generation_changed_error(error),
+            };
+            if generation_changed {
+                generation_retries += 1;
+                if generation_retries > SPEC_GENERATION_RETRY_BUDGET {
+                    return Err(
+                        "spec generation kept changing while committing field update".to_string(),
+                    );
+                }
+                self.stop_and_remove_entity(tenant, entity_type, entity_id);
+                actor_ref = self
+                    .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
+                    .ok_or_else(|| {
+                        format!(
+                            "No transition table for tenant '{tenant}', entity type '{entity_type}'"
+                        )
+                    })?;
+                continue;
+            }
+            break outcome.map_err(|e| format!("Actor update failed: {e}"))?;
+        };
 
         if !response.success {
             return Err(response
@@ -1433,21 +1611,62 @@ impl ServerState {
         entity_type: &str,
         entity_id: &str,
     ) -> Result<EntityResponse, String> {
-        let actor_ref = self
+        let mut actor_ref = self
             .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
             .ok_or_else(|| {
                 format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
             })?;
 
         let policy = self.dispatch_retry_policy();
-        let response = retry::ask_with_backoff::<_, EntityResponse, _>(
-            &actor_ref,
-            || EntityMsg::Delete,
-            &policy,
-        )
-        .await
-        .result
-        .map_err(|e| format!("Actor delete failed: {e}"))?;
+        let mut generation_retries = 0usize;
+        let response = loop {
+            let expected_spec_generation = self.current_spec_generation(tenant);
+            let generation_guard = self.acquire_spec_generation_read_lock(tenant).await;
+            if self.current_spec_generation(tenant) != expected_spec_generation {
+                drop(generation_guard);
+                generation_retries += 1;
+                if generation_retries > SPEC_GENERATION_RETRY_BUDGET {
+                    return Err("spec generation kept changing while preparing delete".to_string());
+                }
+                continue;
+            }
+            if !self.is_entity_type_governed(tenant, entity_type)? {
+                return Err(format!(
+                    "No transition table for tenant '{tenant}', entity type '{entity_type}'"
+                ));
+            }
+            drop(generation_guard);
+
+            let outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
+                &actor_ref,
+                || EntityMsg::Delete {
+                    expected_spec_generation: Some(expected_spec_generation),
+                },
+                &policy,
+            )
+            .await
+            .result;
+            let generation_changed = match outcome.as_ref() {
+                Ok(response) => crate::entity_actor::is_spec_generation_changed_response(response),
+                Err(error) => crate::entity_actor::is_spec_generation_changed_error(error),
+            };
+            if generation_changed {
+                generation_retries += 1;
+                if generation_retries > SPEC_GENERATION_RETRY_BUDGET {
+                    return Err("spec generation kept changing while committing delete".to_string());
+                }
+                self.stop_and_remove_entity(tenant, entity_type, entity_id);
+                actor_ref = self
+                    .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
+                    .ok_or_else(|| {
+                        format!(
+                            "No transition table for tenant '{tenant}', entity type '{entity_type}'"
+                        )
+                    })?;
+                continue;
+            }
+            break outcome.map_err(|e| format!("Actor delete failed: {e}"))?;
+        };
 
         if response.success {
             if let Some(query_plane) = self.query_plane_store() {

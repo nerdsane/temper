@@ -28,7 +28,7 @@ mod governance_callback;
 ///
 /// Returns `Ok(())` if the hook ran successfully or the effect was
 /// unrecognized (silently ignored). Returns `Err` if the hook failed.
-pub fn dispatch_custom_effect(
+pub async fn dispatch_custom_effect(
     effect_name: &str,
     entity_type: &str,
     entity_id: &str,
@@ -36,7 +36,7 @@ pub fn dispatch_custom_effect(
     state: &PlatformState,
 ) -> Result<(), String> {
     match effect_name {
-        "DeploySpecs" => handle_deploy_specs(entity_type, entity_id, state),
+        "DeploySpecs" => handle_deploy_specs(entity_type, entity_id, state).await,
         "GenerateCedarPolicy" => {
             handle_generate_cedar_policy(entity_type, entity_id, _params, state)
         }
@@ -56,7 +56,7 @@ pub fn dispatch_custom_effect(
 ///
 /// Reads specs from the [`SpecStore`], builds a [`DeployInput`], and runs
 /// the verify-and-deploy pipeline. On success, removes specs from the store.
-fn handle_deploy_specs(
+async fn handle_deploy_specs(
     _entity_type: &str,
     entity_id: &str,
     state: &PlatformState,
@@ -100,7 +100,7 @@ fn handle_deploy_specs(
     };
 
     // Run the verify-and-deploy pipeline.
-    let result = DeployPipeline::verify_and_deploy(state, &input);
+    let result = DeployPipeline::verify_and_deploy(state, &input).await;
 
     if result.success {
         tracing::info!(tenant = entity_id, "DeploySpecs hook: pipeline succeeded");
@@ -336,8 +336,8 @@ fn generate_cedar_permit(
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_dispatch_unknown_effect_is_ok() {
+    #[tokio::test]
+    async fn test_dispatch_unknown_effect_is_ok() {
         let state = PlatformState::new(None);
         let result = dispatch_custom_effect(
             "UnknownEffect",
@@ -345,7 +345,8 @@ mod tests {
             "t-1",
             &serde_json::json!({}),
             &state,
-        );
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -376,8 +377,8 @@ mod tests {
         assert!(!policy.contains("submitOrder"));
     }
 
-    #[test]
-    fn test_dispatch_generate_cedar_policy_missing_fields() {
+    #[tokio::test]
+    async fn test_dispatch_generate_cedar_policy_missing_fields() {
         let state = PlatformState::new(None);
         let result = dispatch_custom_effect(
             "GenerateCedarPolicy",
@@ -385,13 +386,14 @@ mod tests {
             "gd-1",
             &serde_json::json!({}),
             &state,
-        );
+        )
+        .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("missing required fields"));
     }
 
-    #[test]
-    fn test_dispatch_deploy_specs_no_store_entry() {
+    #[tokio::test]
+    async fn test_dispatch_deploy_specs_no_store_entry() {
         let state = PlatformState::new(None);
         let result = dispatch_custom_effect(
             "DeploySpecs",
@@ -399,7 +401,8 @@ mod tests {
             "t-1",
             &serde_json::json!({}),
             &state,
-        );
+        )
+        .await;
         // No specs in store → error
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("no specs found"));

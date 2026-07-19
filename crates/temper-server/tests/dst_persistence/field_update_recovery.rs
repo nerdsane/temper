@@ -6,6 +6,128 @@ use super::field_update_support::*;
 use super::*;
 
 #[tokio::test]
+async fn dst_field_update_ambiguous_commit_replays_as_success_without_duplicate() {
+    let seed = 18_907;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let scripted_store = ConflictBeforeAppendStore::new(seed);
+    let store_inner = scripted_store.inner.clone();
+    let store = BoxedEventStore::new(scripted_store.clone());
+    let table = order_table();
+    let entity_id = "ord-field-ambiguous-commit";
+    let persistence_id = format!("default:Order:{entity_id}");
+    let system = ActorSystem::new("dst-field-update-ambiguous-commit");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        table,
+        serde_json::json!({"Title": "durable-before"}),
+        store,
+        BackendLabel::Sim,
+    )
+    .with_tenant("default");
+    let actor_ref = system.spawn(actor, entity_id);
+
+    let before = get_state(&actor_ref).await;
+    assert_eq!(before.state.sequence_nr, 1);
+    scripted_store.commit_then_report_conflict(&persistence_id);
+    let idempotency_key = "field-update:ambiguous-commit".to_string();
+
+    let response = actor_ref
+        .ask::<EntityResponse>(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Title": "durable-after"}),
+                replace: false,
+                idempotency_key: Some(idempotency_key.clone()),
+                expected_spec_generation: None,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("authoritative replay should recognize the committed update");
+    assert!(response.success);
+    assert_eq!(response.state.sequence_nr, 2);
+    assert_eq!(response.state.fields["Title"], "durable-after");
+    assert_eq!(store_inner.dump_journal(&persistence_id).len(), 2);
+
+    let retried = actor_ref
+        .ask::<EntityResponse>(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Title": "durable-after"}),
+                replace: false,
+                idempotency_key: Some(idempotency_key),
+                expected_spec_generation: None,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("an ask retry with the same key should return committed state");
+    assert!(retried.success);
+    assert_eq!(retried.state.sequence_nr, 2);
+    assert_eq!(store_inner.dump_journal(&persistence_id).len(), 2);
+}
+
+#[tokio::test]
+async fn dst_field_update_storage_error_after_commit_recovers_without_duplicate() {
+    let seed = 18_908;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let scripted_store = ConflictBeforeAppendStore::new(seed);
+    let store_inner = scripted_store.inner.clone();
+    let store = BoxedEventStore::new(scripted_store.clone());
+    let table = order_table();
+    let entity_id = "ord-field-ambiguous-storage";
+    let persistence_id = format!("default:Order:{entity_id}");
+    let system = ActorSystem::new("dst-field-update-ambiguous-storage");
+    let actor = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        table,
+        serde_json::json!({"Title": "durable-before"}),
+        store,
+        BackendLabel::Sim,
+    )
+    .with_tenant("default");
+    let actor_ref = system.spawn(actor, entity_id);
+
+    let before = get_state(&actor_ref).await;
+    assert_eq!(before.state.sequence_nr, 1);
+    scripted_store.commit_then_report_storage_failure(&persistence_id);
+    let idempotency_key = "field-update:ambiguous-storage".to_string();
+
+    let response = actor_ref
+        .ask::<EntityResponse>(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Title": "durable-after"}),
+                replace: false,
+                idempotency_key: Some(idempotency_key.clone()),
+                expected_spec_generation: None,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("authoritative replay should recognize the durably committed update");
+    assert!(response.success);
+    assert_eq!(response.state.sequence_nr, 2);
+    assert_eq!(response.state.fields["Title"], "durable-after");
+    assert_eq!(store_inner.dump_journal(&persistence_id).len(), 2);
+
+    let retried = actor_ref
+        .ask::<EntityResponse>(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Title": "durable-after"}),
+                replace: false,
+                idempotency_key: Some(idempotency_key),
+                expected_spec_generation: None,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("retry should return the recovered committed state");
+    assert!(retried.success);
+    assert_eq!(retried.state.sequence_nr, 2);
+    assert_eq!(store_inner.dump_journal(&persistence_id).len(), 2);
+}
+
+#[tokio::test]
 async fn dst_field_update_retry_exhaustion_is_reported_distinctly() {
     let (_guard, _clock, _id_gen) = install_deterministic_context(18_902);
     let store_inner = SimEventStore::no_faults(18_902);
@@ -240,6 +362,8 @@ async fn dst_field_update_recovery_read_failure_restarts_before_serving_state() 
             EntityMsg::UpdateFields {
                 fields: serde_json::json!({"Title": "must-not-publish"}),
                 replace: false,
+                idempotency_key: Some("field-update:recovery-read-failure".to_string()),
+                expected_spec_generation: None,
             },
             Duration::from_secs(5),
         )
@@ -305,6 +429,8 @@ async fn dst_field_update_restart_rejects_a_successful_looking_journal_prefix() 
             EntityMsg::UpdateFields {
                 fields: serde_json::json!({"Title": "must-not-publish"}),
                 replace: false,
+                idempotency_key: Some("field-update:truncated-tail".to_string()),
+                expected_spec_generation: None,
             },
             Duration::from_secs(5),
         )

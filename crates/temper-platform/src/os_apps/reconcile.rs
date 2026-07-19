@@ -505,17 +505,14 @@ pub async fn reconcile_os_app(
 /// backfill can fire BEFORE this (late — post-boot in prod) reconcile registers the key,
 /// see only the old key-set, and skip — so the added key would never backfill for
 /// existing entities and reads scan → 413. Running the key-set-aware re-key here, after
-/// registration, closes that race; it only re-scans types whose key-set actually changed
-/// (unchanged types skip via the watermark) and is spawned so a large re-key never blocks
-/// the reconcile. See ADR-0153.
-pub(super) fn spawn_key_index_rekey_after_spec_change(state: &PlatformState, tenant_id: &TenantId) {
-    let server = state.server.clone();
-    let tenant = tenant_id.clone();
-    tokio::spawn(async move {
-        server.populate_key_index_from_snapshots(&tenant).await;
-        // ADR-0155: same race for a newly declared [[vector]] path — a late reconcile
-        // registers it after boot, so re-index existing entities here (watermark-gated,
-        // unchanged types skip) so they are immediately rankable by Temper.Nearest.
-        server.populate_vector_index_from_snapshots(&tenant).await;
-    });
+/// registration, closes that race; it only re-scans types whose declaration signature
+/// actually changed (unchanged types skip via the watermark). This is deliberately
+/// awaited while the tenant generation barrier is held: an absent generation must
+/// durably retire its old authority before a later identical re-add can begin. See
+/// ADR-0153 and ADR-0170.
+pub(super) async fn reconcile_projections_after_spec_change(
+    state: &PlatformState,
+    tenant_id: &TenantId,
+) -> bool {
+    state.server.reconcile_declared_projections(tenant_id).await
 }

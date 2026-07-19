@@ -21,6 +21,7 @@ mod dst_projection_lag;
 mod keyed_existence;
 mod paging;
 mod proof;
+mod stale_key_authority;
 
 const CSDL_XML: &str = include_str!("../../../../../test-fixtures/specs/model.csdl.xml");
 const ORDER_IOA: &str = include_str!("../../../../../test-fixtures/specs/order.ioa.toml");

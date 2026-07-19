@@ -93,13 +93,24 @@ async fn patch_json(
     path: &str,
     body: serde_json::Value,
 ) -> (StatusCode, serde_json::Value) {
+    patch_json_with_idempotency(state, path, body, None).await
+}
+
+async fn patch_json_with_idempotency(
+    state: &ServerState,
+    path: &str,
+    body: serde_json::Value,
+    idempotency_key: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
     let router = build_router(state.clone());
-    let req = Request::builder()
+    let mut request = Request::builder()
         .method(axum::http::Method::PATCH)
         .uri(path)
-        .header("Content-Type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
+        .header("Content-Type", "application/json");
+    if let Some(key) = idempotency_key {
+        request = request.header("Idempotency-Key", key);
+    }
+    let req = request.body(Body::from(body.to_string())).unwrap();
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
@@ -160,6 +171,73 @@ async fn patch_returns_server_error_when_journal_append_fails() {
         .expect("live entity should remain readable");
     assert_eq!(current.state.fields["Title"], "durable-before");
     assert_eq!(current.state.sequence_nr, created.state.sequence_nr);
+}
+
+#[tokio::test]
+async fn patch_idempotency_header_deduplicates_repeat_delivery() {
+    let (state, sim_store) = build_default_state(190, "odata-patch-idempotency");
+    let tenant = TenantId::default();
+    {
+        let mut registry = state.registry.write().unwrap();
+        registry.set_verification_status(
+            &tenant,
+            "Order",
+            VerificationStatus::Completed(EntityVerificationResult {
+                all_passed: true,
+                levels: vec![],
+                verified_at: "2026-07-13T00:00:00Z".to_string(),
+            }),
+        );
+    }
+    let entity_id = "ord-patch-idempotency";
+    let created = dispatch(
+        &state,
+        &tenant,
+        "Order",
+        entity_id,
+        "AddItem",
+        serde_json::json!({"Title": "before"}),
+    )
+    .await
+    .expect("seed action should succeed");
+    assert!(created.success);
+
+    let path = format!("/tdata/Orders('{entity_id}')");
+    let first = patch_json_with_idempotency(
+        &state,
+        &path,
+        serde_json::json!({"Title": "after"}),
+        Some("patch-request-1"),
+    )
+    .await;
+    assert_eq!(first.0, StatusCode::OK, "first PATCH: {:?}", first.1);
+    let first_sequence = first.1["sequence_nr"]
+        .as_u64()
+        .expect("PATCH response sequence");
+    assert_eq!(first_sequence, created.state.sequence_nr + 1);
+
+    let repeated = patch_json_with_idempotency(
+        &state,
+        &path,
+        serde_json::json!({"Title": "after"}),
+        Some("patch-request-1"),
+    )
+    .await;
+    assert_eq!(
+        repeated.0,
+        StatusCode::OK,
+        "repeated PATCH: {:?}",
+        repeated.1
+    );
+    assert_eq!(repeated.1["sequence_nr"], first_sequence);
+    assert_eq!(repeated.1["fields"]["Title"], "after");
+    assert_eq!(
+        sim_store
+            .dump_journal(&format!("{tenant}:Order:{entity_id}"))
+            .len() as u64,
+        first_sequence,
+        "repeat delivery must not append a second field-update event"
+    );
 }
 
 async fn customer_json(

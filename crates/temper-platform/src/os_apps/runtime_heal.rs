@@ -225,12 +225,38 @@ pub(crate) async fn restore_app_specs_from_matching_digest(
         return false;
     }
 
+    let tenant_id = TenantId::new(tenant);
+    let _generation_guard = state.server.acquire_spec_generation_lock(&tenant_id).await;
+    if !state
+        .server
+        .retire_removed_projection_authority(&tenant_id)
+        .await
+    {
+        tracing::warn!(
+            tenant,
+            app = %app_name,
+            "Failed to retire removed projection authority before runtime metadata repair"
+        );
+        return false;
+    }
     if let Err(error) = repair_app_runtime_metadata_from_bundle(state, tenant, app_name, bundle) {
         tracing::warn!(
             tenant,
             app = %app_name,
             error = %error,
             "Failed to repair OS app runtime metadata from matching digest"
+        );
+        return false;
+    }
+    if !state
+        .server
+        .reconcile_declared_projections(&tenant_id)
+        .await
+    {
+        tracing::warn!(
+            tenant,
+            app = %app_name,
+            "Failed to reconcile new projection generation after runtime metadata repair"
         );
         return false;
     }

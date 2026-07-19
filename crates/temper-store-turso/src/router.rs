@@ -16,7 +16,7 @@ use tracing::{info, instrument, warn};
 
 use temper_runtime::persistence::{
     EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
-    storage_error,
+    ProjectionReconciliationFence, storage_error,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -660,6 +660,30 @@ impl EventStore for TenantStoreRouter {
             .await
     }
 
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "router.acquire_projection_reconciliation_fence"))]
+    async fn acquire_projection_reconciliation_fence(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<ProjectionReconciliationFence, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .acquire_projection_reconciliation_fence(tenant, entity_type)
+            .await
+    }
+
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "router.acquire_projection_read_fence"))]
+    async fn acquire_projection_read_fence(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<ProjectionReconciliationFence, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .acquire_projection_read_fence(tenant, entity_type)
+            .await
+    }
+
     #[instrument(skip_all, fields(otel.name = "router.append_batch"))]
     async fn append_batch(
         &self,
@@ -740,9 +764,11 @@ impl EventStore for TenantStoreRouter {
         store.list_entity_ids_by_type(tenant, entity_type).await
     }
 
-    // ADR-0155: forward the vector-index surface to the per-tenant store so kNN works
-    // on the routed Turso deployment. (Keys deliberately fall through to the no-op
-    // defaults — Turso does not maintain entity_key_index live; see event_store.rs.)
+    // ADR-0155: forward sequence-fenced vector replacement and reads to the per-tenant
+    // store so kNN works on the routed Turso deployment. Durable completion watermarks
+    // deliberately remain unsupported so startup replay repairs exhausted write-behind.
+    // Keys likewise fall through to fail-closed defaults because Turso does not maintain
+    // entity_key_index live; see event_store.rs.
     #[instrument(skip_all, fields(persistence_id, otel.name = "router.append_with_index_rows"))]
     async fn append_with_index_rows(
         &self,
@@ -774,11 +800,12 @@ impl EventStore for TenantStoreRouter {
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
+        source_sequence: u64,
         vector_rows: &[temper_runtime::persistence::EntityVectorRow],
     ) -> Result<(), PersistenceError> {
         let store = self.store_for_tenant(tenant).await?;
         store
-            .backfill_entity_vectors(tenant, entity_type, entity_id, vector_rows)
+            .backfill_entity_vectors(tenant, entity_type, entity_id, source_sequence, vector_rows)
             .await
     }
 
@@ -795,28 +822,6 @@ impl EventStore for TenantStoreRouter {
         store
             .vector_candidates(tenant, entity_type, decl_name, model_tag, limit)
             .await
-    }
-
-    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "router.mark_vector_index_backfilled"))]
-    async fn mark_vector_index_backfilled(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        vector_set: &str,
-    ) -> Result<(), PersistenceError> {
-        let store = self.store_for_tenant(tenant).await?;
-        store
-            .mark_vector_index_backfilled(tenant, entity_type, vector_set)
-            .await
-    }
-
-    #[instrument(skip_all, fields(tenant, otel.name = "router.vector_index_backfilled_types"))]
-    async fn vector_index_backfilled_types(
-        &self,
-        tenant: &str,
-    ) -> Result<Vec<(String, String)>, PersistenceError> {
-        let store = self.store_for_tenant(tenant).await?;
-        store.vector_index_backfilled_types(tenant).await
     }
 
     #[instrument(skip_all, fields(tenant, entity_type, otel.name = "router.vectored_entity_ids_for_type"))]

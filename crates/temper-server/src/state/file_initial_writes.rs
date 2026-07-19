@@ -63,7 +63,6 @@ impl ServerState {
                 "File initial content create requires an event journal".to_string(),
             ));
         };
-        let table = self.file_transition_table(tenant)?;
 
         // Reject a brand-new File whose target Workspace is not Active BEFORE
         // persisting any bytes. `workspace_id` arrives in the create params on
@@ -84,6 +83,12 @@ impl ServerState {
                     "failed to persist blob '{blob_key}': {e}"
                 ))
             })?;
+
+        // From this table snapshot through the journal commit, block registry
+        // generation swaps so exact reconciliation cannot be overtaken by an
+        // old-generation synthetic File append.
+        let _generation_guard = self.acquire_spec_generation_read_lock(tenant).await;
+        let table = self.file_transition_table(tenant)?;
 
         let persistence_id = format!("{tenant}:File:{file_id}");
         let mut state = initial_file_state(file_id, &table, serde_json::json!({}));
@@ -147,8 +152,19 @@ impl ServerState {
             .enumerate()
             .map(|(idx, event)| synthetic_envelope(&persistence_id, (idx + 1) as u64, event))
             .collect::<Result<Vec<_>, _>>()?;
+        let index_rows = crate::entity_actor::declared_index_rows(&table, &state);
 
-        match store.append(&persistence_id, 0, &envelopes).await {
+        match store
+            .append_with_index_rows(
+                &persistence_id,
+                0,
+                &envelopes,
+                &index_rows.key_rows,
+                &index_rows.vector_rows,
+                index_rows.reconciliation,
+            )
+            .await
+        {
             Ok(sequence_nr) => state.sequence_nr = sequence_nr,
             Err(PersistenceError::ConcurrencyViolation { .. }) => {
                 return Err(FileStreamContentError::ActionRejected(format!(

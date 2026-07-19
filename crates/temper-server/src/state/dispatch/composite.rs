@@ -25,6 +25,8 @@ use crate::storage::BackendLabel;
 
 use super::DispatchError;
 
+#[path = "composite_entry_guard.rs"]
+mod entry_guard;
 mod helpers;
 mod projection;
 use helpers::*;
@@ -59,6 +61,11 @@ struct AtomicCompositeParent<'a> {
     action: &'a str,
     idempotency: &'a str,
     record_event: bool,
+}
+
+enum AtomicCompositeApply {
+    Applied(bool),
+    GenerationChanged,
 }
 
 #[derive(Debug, Clone)]
@@ -126,16 +133,7 @@ impl crate::state::ServerState {
             return Ok(false);
         }
 
-        let metadata = self
-            .composite_metadata_for(tenant, entity_type, action)?
-            .ok_or_else(|| {
-                DispatchError::Internal(format!(
-                    "Integration result for non-Composite action {entity_type}.{action} included sub_writes"
-                ))
-            })?;
-
         let sub_writes = parse_sub_writes(callback_params)?;
-        validate_sub_writes(&metadata, &sub_writes)?;
         let parent_idempotency = composite_parent_idempotency(agent_ctx, callback_params);
 
         let _commons_guardrail_lock = self.acquire_commons_write_guardrail_lock(tenant).await;
@@ -150,35 +148,61 @@ impl crate::state::ServerState {
                 .with_action_context(composite_action_context),
         );
 
-        let prepared_sub_writes = self
-            .prepare_composite_sub_writes(
-                tenant,
-                entity_type,
-                entity_id,
-                action,
-                &sub_writes,
-                &metadata,
-                &composite_agent_ctx,
-                &parent_idempotency,
-            )
-            .await?;
-
-        if self
-            .apply_composite_sub_writes_atomic(
-                AtomicCompositeParent {
+        let mut generation_retries = 0usize;
+        let prepared_sub_writes = loop {
+            // Capture before every declaration-dependent step: Composite
+            // metadata controls parent gating and preparation consumes tables,
+            // guard declarations, and create defaults.
+            let expected_spec_generation = self.current_spec_generation(tenant);
+            let metadata = self
+                .composite_metadata_for(tenant, entity_type, action)?
+                .ok_or_else(|| {
+                    DispatchError::Internal(format!(
+                        "Integration result for non-Composite action {entity_type}.{action} included sub_writes"
+                    ))
+                })?;
+            validate_sub_writes(&metadata, &sub_writes)?;
+            let prepared = self
+                .prepare_composite_sub_writes(
                     tenant,
                     entity_type,
                     entity_id,
                     action,
-                    idempotency: &parent_idempotency,
-                    record_event: metadata.record_parent_event,
-                },
-                &prepared_sub_writes,
-            )
-            .await?
-        {
-            return Ok(true);
-        }
+                    &sub_writes,
+                    &metadata,
+                    &composite_agent_ctx,
+                    &parent_idempotency,
+                )
+                .await?;
+
+            match self
+                .apply_composite_sub_writes_atomic(
+                    AtomicCompositeParent {
+                        tenant,
+                        entity_type,
+                        entity_id,
+                        action,
+                        idempotency: &parent_idempotency,
+                        record_event: metadata.record_parent_event,
+                    },
+                    &prepared,
+                    expected_spec_generation,
+                )
+                .await?
+            {
+                AtomicCompositeApply::Applied(true) => return Ok(true),
+                AtomicCompositeApply::Applied(false) => break prepared,
+                AtomicCompositeApply::GenerationChanged => {
+                    generation_retries += 1;
+                    if generation_retries > 3 {
+                        return Err(DispatchError::Internal(
+                            "spec generation kept changing while preparing composite batch"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+        };
 
         for prepared in prepared_sub_writes {
             let mut sub_agent_ctx = composite_agent_ctx.clone();
@@ -215,7 +239,8 @@ impl crate::state::ServerState {
         &self,
         parent: AtomicCompositeParent<'_>,
         prepared_sub_writes: &[PreparedCompositeSubWrite],
-    ) -> Result<bool, DispatchError> {
+        expected_spec_generation: u64,
+    ) -> Result<AtomicCompositeApply, DispatchError> {
         let tenant = parent.tenant;
         let parent_entity_type = parent.entity_type;
         let parent_entity_id = parent.entity_id;
@@ -223,10 +248,10 @@ impl crate::state::ServerState {
         let parent_idempotency = parent.idempotency;
 
         let Some((store, backend)) = self.event_journal() else {
-            return Ok(false);
+            return Ok(AtomicCompositeApply::Applied(false));
         };
         if prepared_sub_writes.is_empty() {
-            return Ok(true);
+            return Ok(AtomicCompositeApply::Applied(true));
         }
 
         let field_sync_mode = self.composite_batch_field_sync_mode(tenant, backend);
@@ -273,9 +298,11 @@ impl crate::state::ServerState {
         }
         let parent_ms = parent_started_at.map(|started| started.elapsed().as_millis() as u64);
 
-        let stage_started_at = timing_enabled.then(std::time::Instant::now);
+        // Resolve every potentially actor-backed dependency before taking the
+        // generation read side. Actor startup takes the same read side, and doing
+        // that transitively while a spec writer is queued would deadlock a fair
+        // async RwLock. Projection declarations are re-read only after the guard.
         for write in prepared_sub_writes {
-            let persistence_id = format!("{tenant}:{}:{}", write.entity_type, write.entity_id);
             self.ensure_atomic_composite_stream(
                 &mut streams,
                 tenant,
@@ -285,7 +312,9 @@ impl crate::state::ServerState {
                 write.uses_parent_gate && write.action == "Create",
             )
             .await?;
-
+        }
+        let mut cross_entity_by_write = BTreeMap::new();
+        for write in prepared_sub_writes {
             let table = self.transition_table_for_dispatch(tenant, &write.entity_type)?;
             let cross_entity_booleans =
                 if table_has_cross_entity_guards_for_action(&table, &write.action) {
@@ -299,6 +328,20 @@ impl crate::state::ServerState {
                 } else {
                     BTreeMap::new()
                 };
+            cross_entity_by_write.insert(write.idx, cross_entity_booleans);
+        }
+
+        let generation_guard = self.acquire_spec_generation_read_lock(tenant).await;
+        if self.current_spec_generation(tenant) != expected_spec_generation {
+            return Ok(AtomicCompositeApply::GenerationChanged);
+        }
+        let stage_started_at = timing_enabled.then(std::time::Instant::now);
+        for write in prepared_sub_writes {
+            let persistence_id = format!("{tenant}:{}:{}", write.entity_type, write.entity_id);
+            let table = self.transition_table_for_dispatch(tenant, &write.entity_type)?;
+            let cross_entity_booleans = cross_entity_by_write
+                .get(&write.idx)
+                .expect("cross-entity result collected for every composite write");
             let stream = streams
                 .get_mut(&persistence_id)
                 .expect("stream inserted before processing sub-write");
@@ -330,7 +373,7 @@ impl crate::state::ServerState {
                 &table,
                 &write.action,
                 &write.params,
-                &cross_entity_booleans,
+                cross_entity_booleans,
                 field_sync_mode,
             );
             if !result.success {
@@ -345,7 +388,7 @@ impl crate::state::ServerState {
                 || !result.scheduled_actions.is_empty()
                 || !result.spawn_requests.is_empty()
             {
-                return Ok(false);
+                return Ok(AtomicCompositeApply::Applied(false));
             }
             if !result.overflow_blobs.is_empty() {
                 let blob_store = blob_store.as_ref().ok_or_else(|| {
@@ -377,14 +420,21 @@ impl crate::state::ServerState {
         let appends = streams
             .iter()
             .filter(|(_, stream)| !stream.events.is_empty())
-            .map(|(persistence_id, stream)| PersistenceAppend {
-                persistence_id: persistence_id.clone(),
-                expected_sequence: stream.expected_sequence,
-                events: stream.events.clone(),
+            .map(|(persistence_id, stream)| {
+                let table = self.transition_table_for_dispatch(tenant, &stream.entity_type)?;
+                let index_rows = crate::entity_actor::declared_index_rows(&table, &stream.state);
+                Ok(PersistenceAppend {
+                    persistence_id: persistence_id.clone(),
+                    expected_sequence: stream.expected_sequence,
+                    events: stream.events.clone(),
+                    key_rows: index_rows.key_rows,
+                    vector_rows: index_rows.vector_rows,
+                    reconciliation: index_rows.reconciliation,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, DispatchError>>()?;
         if appends.is_empty() {
-            return Ok(true);
+            return Ok(AtomicCompositeApply::Applied(true));
         }
 
         let append_started_at = timing_enabled.then(std::time::Instant::now);
@@ -392,6 +442,7 @@ impl crate::state::ServerState {
             .append_batch(&appends)
             .await
             .map_err(composite_batch_persistence_error)?;
+        drop(generation_guard);
         let append_ms = append_started_at.map(|started| started.elapsed().as_millis() as u64);
 
         let projection_collect_started_at = timing_enabled.then(std::time::Instant::now);
@@ -446,7 +497,7 @@ impl crate::state::ServerState {
             );
         }
 
-        Ok(true)
+        Ok(AtomicCompositeApply::Applied(true))
     }
 
     async fn ensure_atomic_composite_stream(
@@ -916,36 +967,6 @@ impl crate::state::ServerState {
             .get(entity_type)
             .cloned()
             .ok_or_else(|| DispatchError::Ungoverned(entity_type.to_string()))
-    }
-
-    #[allow(dead_code)]
-    async fn ensure_composite_entry_transition_allowed(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        action: &str,
-    ) -> Result<(), DispatchError> {
-        let table = self.transition_table_for_dispatch(tenant, entity_type)?;
-        let current = self
-            .get_tenant_entity_state(tenant, entity_type, entity_id)
-            .await
-            .map_err(DispatchError::Internal)?;
-        let cross_entity_booleans = self
-            .resolve_cross_entity_guards(tenant, entity_type, entity_id, action)
-            .await;
-        let eval_ctx = build_eval_context_with_xref(&current.state, &cross_entity_booleans);
-
-        match table.evaluate_ctx(&current.state.status, &eval_ctx, action) {
-            Some(result) if result.success => Ok(()),
-            Some(_) => Err(DispatchError::Internal(format!(
-                "Composite action '{action}' not valid from state '{}'",
-                current.state.status
-            ))),
-            None => Err(DispatchError::Internal(format!(
-                "Unknown composite action: {action}"
-            ))),
-        }
     }
 }
 

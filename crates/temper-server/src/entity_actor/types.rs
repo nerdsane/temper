@@ -48,6 +48,9 @@ pub enum EntityMsg {
         /// Covers the race where a dispatch-layer retry produces a second
         /// in-flight ask after the first one already processed.
         idempotency_key: Option<String>,
+        /// Generation whose declarations were used to pre-resolve guards.
+        /// The actor revalidates it after taking the generation read lock.
+        expected_spec_generation: Option<u64>,
     },
     /// Get the current entity state.
     GetState,
@@ -57,9 +60,18 @@ pub enum EntityMsg {
     UpdateFields {
         fields: serde_json::Value,
         replace: bool,
+        /// Stable key for this logical PATCH/PUT across actor ask and storage
+        /// retries. The committed field-update event records it so ambiguous
+        /// success can be recognized after authoritative replay.
+        idempotency_key: Option<String>,
+        /// Generation validated by the caller before targeting this actor.
+        expected_spec_generation: Option<u64>,
     },
     /// Delete this entity.
-    Delete,
+    Delete {
+        /// Generation validated by the caller before targeting this actor.
+        expected_spec_generation: Option<u64>,
+    },
 }
 
 impl Message for EntityMsg {}

@@ -182,6 +182,7 @@ async fn dst_add_item_then_submit() {
                 params: serde_json::json!({"ProductId": "prod-1"}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_spec_generation: None,
             },
             Duration::from_secs(1),
         )
@@ -199,6 +200,7 @@ async fn dst_add_item_then_submit() {
                 params: serde_json::json!({"ShippingAddressId": "addr-1"}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_spec_generation: None,
             },
             Duration::from_secs(1),
         )
@@ -232,6 +234,7 @@ async fn duplicate_composite_idempotency_reemits_spec_trigger() {
                 params: params.clone(),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: Some("same-pack".into()),
+                expected_spec_generation: None,
             },
             Duration::from_secs(1),
         )
@@ -246,6 +249,7 @@ async fn duplicate_composite_idempotency_reemits_spec_trigger() {
                 params,
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: Some("same-pack".into()),
+                expected_spec_generation: None,
             },
             Duration::from_secs(1),
         )
@@ -278,6 +282,7 @@ async fn dst_cannot_submit_without_items() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_spec_generation: None,
             },
             Duration::from_secs(1),
         )
@@ -321,6 +326,7 @@ async fn dst_full_order_lifecycle() {
                     params,
                     cross_entity_booleans: std::collections::BTreeMap::new(),
                     idempotency_key: None,
+                    expected_spec_generation: None,
                 },
                 Duration::from_secs(1),
             )
@@ -356,6 +362,7 @@ async fn dst_cancel_from_draft() {
                 params: serde_json::json!({"Reason": "changed mind"}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_spec_generation: None,
             },
             Duration::from_secs(1),
         )
@@ -387,6 +394,7 @@ async fn dst_cannot_cancel_shipped_order() {
                     params: serde_json::json!({}),
                     cross_entity_booleans: std::collections::BTreeMap::new(),
                     idempotency_key: None,
+                    expected_spec_generation: None,
                 },
                 Duration::from_secs(1),
             )
@@ -402,6 +410,7 @@ async fn dst_cannot_cancel_shipped_order() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_spec_generation: None,
             },
             Duration::from_secs(1),
         )
@@ -434,6 +443,7 @@ async fn dst_multiple_actors_independent() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_spec_generation: None,
             },
             Duration::from_secs(1),
         )
@@ -448,6 +458,7 @@ async fn dst_multiple_actors_independent() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_spec_generation: None,
             },
             Duration::from_secs(1),
         )

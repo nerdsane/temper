@@ -304,11 +304,11 @@ async fn try_resolve_composite_entity_key(
     entity_type: &str,
     key_pairs: &[(String, String)],
 ) -> Option<String> {
-    // ADR-0153 fast path: if the key is a declared `[[key]]`, probe
-    // `entity_key_index` (O(log n), present/absent) instead of the candidate
-    // scan. On a miss we fall through to the scan, which still covers
-    // pre-backfill entities — a safe additive fast path until #324's scan is
-    // retired behind the backfill gate.
+    let _generation_guard = state.acquire_spec_generation_read_lock(tenant).await;
+    // ADR-0153 fast path: if the key is a declared `[[key]]`, probe the index
+    // only after its current versioned signature is complete. Before that gate,
+    // positive rows can be stale tombstone/phantom holders and misses can hide
+    // live entities, so both outcomes must fall through to the scan.
     // Composite-key URL addressing delivers string values; carry them typed so
     // `resolve_query_to_key` hashes them the same way the write side does.
     let typed_pairs: Vec<(String, serde_json::Value)> = key_pairs
@@ -319,12 +319,21 @@ async fn try_resolve_composite_entity_key(
     // the per-tenant registry, not `transition_tables`).
     let keys = state.declared_keys_for(tenant, entity_type);
     if let Some((key_name, key_hash)) = crate::key_index::resolve_query_to_key(&keys, &typed_pairs)
-        && let Some((store, _)) = state.event_journal()
-        && let Ok(Some(entity_id)) = store
-            .lookup_by_key(tenant.as_str(), entity_type, &key_name, &key_hash)
-            .await
     {
-        return Some(entity_id);
+        let current_key_set = crate::key_index::declared_key_set_signature(&keys);
+        if let Some((store, _)) = state.event_journal()
+            && let Ok(_projection_guard) = store
+                .acquire_projection_read_fence(tenant.as_str(), entity_type)
+                .await
+            && state
+                .key_index_backfill_complete(tenant, entity_type, &current_key_set)
+                .await
+            && let Ok(Some(entity_id)) = store
+                .lookup_by_key(tenant.as_str(), entity_type, &key_name, &key_hash)
+                .await
+        {
+            return Some(entity_id);
+        }
     }
 
     let query_plane = state.query_plane_store()?;

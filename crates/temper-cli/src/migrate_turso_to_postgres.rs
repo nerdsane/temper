@@ -188,6 +188,21 @@ pub(crate) async fn run(options: MigrationOptions) -> Result<()> {
     let mut builder = ManifestBuilder::default();
 
     for tenant in &tenants {
+        if !options.dry_run {
+            // This importer appends journal tails through the raw EventStore API and
+            // migrates only catalog/field projections. Invalidate completeness claims
+            // BEFORE the first append so an interruption can never leave stale key or
+            // vector rows advertised as current. Startup reconciliation will replace
+            // the derived rows exactly and stamp the current declaration signatures.
+            target
+                .invalidate_projection_backfill_watermarks(tenant)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to invalidate projection authority before migrating tenant {tenant}"
+                    )
+                })?;
+        }
         migrate_event_journal(
             &source,
             &target,

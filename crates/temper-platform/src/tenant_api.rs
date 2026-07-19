@@ -124,12 +124,38 @@ async fn create_tenant(
         Ok(_store) => {
             // Bootstrap agent specs for the new tenant.
             // New tenant — no prior verification cache.
+            let tenant_id = temper_runtime::tenant::TenantId::new(&req.tenant_id);
+            let _generation_guard = state.server.acquire_spec_generation_lock(&tenant_id).await;
+            if !state
+                .server
+                .retire_removed_projection_authority(&tenant_id)
+                .await
+            {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(
+                        serde_json::json!({"error": "removed projection authority could not be retired"}),
+                    ),
+                );
+            }
             crate::bootstrap_agent_specs(
                 &state,
                 &req.tenant_id,
                 false,
                 &std::collections::BTreeMap::new(),
             );
+            if !state
+                .server
+                .reconcile_declared_projections(&tenant_id)
+                .await
+            {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(
+                        serde_json::json!({"error": "new projection generation could not be reconciled"}),
+                    ),
+                );
+            }
             (
                 StatusCode::CREATED,
                 Json(serde_json::json!(CreateTenantResponse {
@@ -201,15 +227,22 @@ pub(crate) async fn delete_tenant(
         );
     }
 
+    let tid = temper_runtime::tenant::TenantId::new(&tenant_id);
+    // A tenant deletion is a specification-generation mutation as well as a
+    // storage mutation. Retain the write side from before persistence removal
+    // through registry removal and actor eviction, so an old-generation actor
+    // that already validated its table cannot append after its tenant is gone.
+    let _generation_guard = state.server.acquire_spec_generation_lock(&tid).await;
+
     // Remove from persistence (Turso registry + users).
     match provider.remove_tenant(&tenant_id).await {
         Ok(true) => {
             // Also remove from in-memory SpecRegistry.
-            let tid = temper_runtime::tenant::TenantId::new(&tenant_id);
             {
                 let mut registry = state.registry.write().unwrap(); // ci-ok: infallible lock
                 registry.remove_tenant(&tid);
             }
+            state.server.evict_unregistered_tenant_actors(&tid);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -411,3 +444,7 @@ pub(crate) async fn get_genesis_app_bundle(
         ),
     }
 }
+
+#[cfg(test)]
+#[path = "tenant_api_tests.rs"]
+mod tests;

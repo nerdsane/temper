@@ -35,6 +35,7 @@ base64 = "0.22"
 
 [dev-dependencies]
 temper-codegen = { workspace = true }
+temper-store-sim = { workspace = true }
 tokio-test = { workspace = true }
 tower = { workspace = true }
 hyper = { workspace = true }

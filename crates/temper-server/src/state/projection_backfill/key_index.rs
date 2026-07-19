@@ -2,7 +2,7 @@
 //! and record the per-(tenant, entity_type) watermark, so a keyed read MISS can mean
 //! authoritative absence (retiring #324's full-type scan — the 413, ARN-68).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use temper_runtime::tenant::TenantId;
 
@@ -10,22 +10,119 @@ use crate::ServerState;
 
 use super::{EntityLoadOutcome, load_entity_current_fields, transition_table_for};
 
+/// Retire key-index authority for types whose current spec has no declared keys.
+///
+/// Hot-deploy paths run this narrower pass before changing the registry. It must not
+/// attempt exact rebuilds for declarations that are still installed: a bad current
+/// declaration (for example, one that exposes duplicate durable keys) must remain
+/// removable by a corrective generation even when its exact reconciliation fails.
+pub(in crate::state) async fn retire_removed_key_index_watermarks(
+    state: &ServerState,
+    tenant: &TenantId,
+) -> bool {
+    let Some((store, _)) = state.event_journal() else {
+        return true;
+    };
+    if !store.has_authoritative_key_index() {
+        return true;
+    }
+
+    let current_keyed_types = {
+        let registry = state.registry.read().expect("spec registry lock poisoned");
+        registry
+            .entity_types(tenant)
+            .into_iter()
+            .filter(|entity_type| {
+                registry
+                    .get_table(tenant, entity_type)
+                    .is_some_and(|table| !table.keys.is_empty())
+            })
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>()
+    };
+
+    let known_watermarks = match store.key_index_backfilled_types(tenant.as_str()).await {
+        Ok(watermarks) => watermarks,
+        Err(e) => {
+            tracing::error!(
+                tenant = %tenant, error = %e,
+                "key index backfill: durable watermark unreadable; retirement not started"
+            );
+            return false;
+        }
+    };
+    let empty_key_set = crate::key_index::declared_key_set_signature(&[]);
+    let mut succeeded = true;
+    for (entity_type, _) in known_watermarks {
+        if current_keyed_types.contains(&entity_type) {
+            continue;
+        }
+        let _retirement_fence = match store
+            .acquire_projection_reconciliation_fence(tenant.as_str(), &entity_type)
+            .await
+        {
+            Ok(fence) => fence,
+            Err(e) => {
+                succeeded = false;
+                tracing::error!(
+                    tenant = %tenant, entity_type = %entity_type, error = %e,
+                    "key index backfill: failed to fence removed-declaration watermark retirement"
+                );
+                continue;
+            }
+        };
+        let still_covered = match store.key_index_backfilled_types(tenant.as_str()).await {
+            Ok(watermarks) => watermarks
+                .into_iter()
+                .any(|(covered_type, _)| covered_type == entity_type),
+            Err(e) => {
+                succeeded = false;
+                tracing::error!(
+                    tenant = %tenant, entity_type = %entity_type, error = %e,
+                    "key index backfill: removed-declaration watermark re-read failed"
+                );
+                continue;
+            }
+        };
+        if !still_covered {
+            continue;
+        }
+        state.invalidate_cached_key_index_backfilled(tenant, &entity_type);
+        if let Err(e) = state
+            .mark_key_index_backfilled(tenant, &entity_type, &empty_key_set)
+            .await
+        {
+            succeeded = false;
+            tracing::error!(
+                tenant = %tenant, entity_type = %entity_type, error = %e,
+                "key index backfill: failed to retire removed-declaration watermark"
+            );
+        }
+    }
+
+    succeeded
+}
+
 /// Backfill `entity_key_index` for existing entities, then record the watermark.
 ///
-/// Enumeration is authoritative: keyed types come from the registry and their entity
-/// ids from `store.list_entity_ids_by_type`. It must NOT read `state.entity_index`,
-/// which is populated only when an actor spawns (lazy) and is therefore near-empty at
-/// boot — the original bug that left ~0 of N entities keyed.
+/// Enumeration is authoritative: keyed types come from the registry, and entity IDs
+/// are the union of durable entities and existing key rows. The projection half is
+/// required because durable enumeration can omit tombstones while their historical
+/// key rows still exist. It must NOT read `state.entity_index`, which is lazy.
 ///
 /// Robustness at scale (tenants hold 10k–100k+ entities of a keyed type):
-/// - **Resumable**: already-keyed entities are skipped (the costly step is loading
-///   each entity's state), so a re-run after a partial pass only processes the
-///   remainder instead of re-loading all N.
+/// - **Exact**: before stamping a versioned watermark, every durable or projected ID
+///   is replayed and its complete key-row set is replaced. A failed/partial pass is
+///   intentionally retried in full; skipping existing rows would preserve the stale
+///   rows this reconciliation exists to remove.
 /// - **Sound**: a type is watermarked only if EVERY existing entity was either keyed
 ///   or is definitively skippable (deleted/phantom). One entity that exists but
 ///   cannot be loaded fails the type — it is not watermarked, and keyed misses keep
 ///   scanning (correct, just not bounded) until the data issue is resolved. The
 ///   failing `entity_id`s are logged so the integrity problem is visible.
+/// - **Fenced**: a backend-owned per-type fence is held from the definitive durable
+///   watermark read through reconciliation and watermark commit. Other reconcilers
+///   and live projection writes cannot overlap that interval.
 /// - **Cooperative**: yields between entities and runs as a background task, so the
 ///   heavy types (e.g. SessionEntry) do not block boot or the smaller, higher-value
 ///   types. Types are processed in the registry's sorted order.
@@ -35,10 +132,17 @@ use super::{EntityLoadOutcome, load_entity_current_fields, transition_table_for}
 pub(in crate::state) async fn populate_key_index_from_snapshots(
     state: &ServerState,
     tenant: &TenantId,
-) {
+) -> bool {
+    let mut succeeded = retire_removed_key_index_watermarks(state, tenant).await;
     let Some((store, backend)) = state.event_journal() else {
-        return;
+        return succeeded;
     };
+    if !store.has_authoritative_key_index() {
+        // A backend that does not co-commit keys on live writes can never make a
+        // keyed miss authoritative. Do not perform no-op repairs or cache a false
+        // watermark (Turso intentionally remains scan-safe here).
+        return succeeded;
+    }
 
     // Keyed entity types from the registry — the authoritative record of what is
     // installed for this tenant (os-app entities live here, not in transition_tables).
@@ -60,40 +164,66 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
 
     for (entity_type, keys) in &keyed_types {
         let current_key_set = crate::key_index::declared_key_set_signature(keys);
-        let covered = state
-            .key_index_backfill_covered_key_set(tenant, entity_type)
-            .await;
+        let _reconciliation_fence = match store
+            .acquire_projection_reconciliation_fence(tenant.as_str(), entity_type)
+            .await
+        {
+            Ok(fence) => fence,
+            Err(e) => {
+                succeeded = false;
+                tracing::error!(
+                    tenant = %tenant, entity_type = %entity_type, error = %e,
+                    "key index backfill: failed to acquire reconciliation fence"
+                );
+                continue;
+            }
+        };
+        // Read the durable watermark only after acquiring the fence. A cached value
+        // may predate another worker's completed pass; a read error is not absence
+        // and must abort before any projection mutation.
+        let covered = match store.key_index_backfilled_types(tenant.as_str()).await {
+            Ok(types) => types.into_iter().find_map(|(covered_type, key_set)| {
+                (covered_type == *entity_type).then_some(key_set)
+            }),
+            Err(e) => {
+                succeeded = false;
+                tracing::error!(
+                    tenant = %tenant, entity_type = %entity_type, error = %e,
+                    "key index backfill: durable watermark unreadable; reconciliation not started"
+                );
+                continue;
+            }
+        };
         // Already complete for the CURRENT declared key-set: the co-committed write path
         // keeps the index whole, so skip the re-scan.
         if covered.as_deref() == Some(current_key_set.as_str()) {
+            state.cache_key_index_backfilled(tenant, entity_type, &current_key_set);
             continue;
         }
-        // A watermark that covered a DIFFERENT key-set means a key was declared after
-        // the first backfill (e.g. Directory `ws_path` added after `name_parent`):
-        // existing entities are keyed for the old keys but NOT the new one. Since
-        // `keyed_entity_ids_for_type` is per-entity (any key), the resumability skip
-        // would wrongly skip them, so force a full re-key that re-loads and re-keys
-        // every entity under all currently-declared keys (idempotent upsert).
-        let force_full_rekey = covered.is_some();
-        if force_full_rekey {
-            // One-time on the boot that first sees a changed key-set (incl. the 0011
-            // migration, which stamps every existing watermark's key_set to ''). Logged
-            // so this expected full-reload of the type is distinguishable in Datadog from
-            // a pathology.
+        // This worker is about to replace projection rows under a missing/stale
+        // durable watermark. Drop any older in-process claim of current coverage
+        // first, so concurrent keyed misses stay scan-safe throughout the repair and
+        // after any partial failure. A successful durable mark restores the cache.
+        state.invalidate_cached_key_index_backfilled(tenant, entity_type);
+        // Any missing/different watermark requires a full exact reconciliation. The
+        // signature version makes this happen once after upgrading from binaries that
+        // could leave tombstone rows behind.
+        if covered.is_some() {
             tracing::info!(
                 tenant = %tenant, entity_type = %entity_type,
                 covered_key_set = covered.as_deref().unwrap_or(""),
                 current_key_set = %current_key_set,
-                "key index backfill: declared key-set changed — re-keying every existing entity of this type (one-time)"
+                "key index backfill: signature changed — exactly reconciling every durable or projected entity (one-time)"
             );
         }
 
-        let entity_ids = match store
+        let mut entity_ids: BTreeSet<String> = match store
             .list_entity_ids_by_type(tenant.as_str(), entity_type)
             .await
         {
-            Ok(ids) => ids,
+            Ok(ids) => ids.into_iter().collect(),
             Err(e) => {
+                succeeded = false;
                 tracing::error!(
                     tenant = %tenant, entity_type = %entity_type, error = %e,
                     "key index backfill: failed to enumerate entities; type not watermarked"
@@ -101,35 +231,33 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                 continue;
             }
         };
-
-        // Resumability: on a FIRST-TIME backfill, skip entities already keyed (avoids
-        // re-loading their state). On a key-set change we must re-key already-keyed
-        // entities with the new key, so process all.
-        let already_keyed: BTreeSet<String> = if force_full_rekey {
-            BTreeSet::new()
-        } else {
-            match store
-                .keyed_entity_ids_for_type(tenant.as_str(), entity_type)
-                .await
-            {
-                Ok(ids) => ids.into_iter().collect(),
-                Err(_) => BTreeSet::new(), // cannot resume → process all (correct, slower)
+        let projected_ids = match store
+            .keyed_entity_ids_for_type(tenant.as_str(), entity_type)
+            .await
+        {
+            Ok(ids) => ids,
+            Err(e) => {
+                succeeded = false;
+                tracing::error!(
+                    tenant = %tenant, entity_type = %entity_type, error = %e,
+                    "key index backfill: failed to enumerate existing projection rows; type not watermarked"
+                );
+                continue;
             }
         };
+        entity_ids.extend(projected_ids);
 
         let table = transition_table_for(state, tenant, entity_type);
         let blob_store = state.blob_store_for_tenant(tenant).ok();
         let total = entity_ids.len();
-        let mut newly_keyed = 0usize;
-        let mut already = 0usize;
-        let mut skipped = 0usize;
+        let mut desired_rows = BTreeMap::new();
+        let mut reconciled = 0usize;
         let mut failed = 0usize;
 
+        // Phase 1: replay every discovered entity without mutating the projection.
+        // Holding the desired sets until all loads succeed prevents a partial read
+        // failure from beginning a destructive type reconciliation.
         for entity_id in &entity_ids {
-            if already_keyed.contains(entity_id) {
-                already += 1;
-                continue;
-            }
             match load_entity_current_fields(
                 tenant,
                 entity_type,
@@ -141,45 +269,28 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
             )
             .await
             {
-                EntityLoadOutcome::Fields(fields) => {
-                    let Some(field_map) = fields.as_object() else {
-                        skipped += 1;
-                        continue;
-                    };
+                EntityLoadOutcome::Fields { fields, .. } => {
                     let mut key_rows = Vec::new();
-                    for key in keys {
-                        if let Some(hash) = crate::key_index::canonical_key_hash(
-                            &key.name,
-                            &key.properties,
-                            field_map,
-                        ) {
-                            key_rows.push(temper_runtime::persistence::EntityKeyRow {
-                                key_name: key.name.clone(),
-                                key_hash: hash,
-                            });
+                    if let Some(field_map) = fields.as_object() {
+                        for key in keys {
+                            if let Some(hash) = crate::key_index::canonical_key_hash(
+                                &key.name,
+                                &key.properties,
+                                field_map,
+                            ) {
+                                key_rows.push(temper_runtime::persistence::EntityKeyRow {
+                                    key_name: key.name.clone(),
+                                    key_hash: hash,
+                                });
+                            }
                         }
                     }
-                    if key_rows.is_empty() {
-                        // No resolvable key (all key components absent/null) — the
-                        // entity is not addressable by this key, so skipping is sound.
-                        skipped += 1;
-                        continue;
-                    }
-                    match store
-                        .backfill_entity_keys(tenant.as_str(), entity_type, entity_id, &key_rows)
-                        .await
-                    {
-                        Ok(()) => newly_keyed += 1,
-                        Err(e) => {
-                            failed += 1;
-                            tracing::warn!(
-                                error = %e, entity_type = %entity_type, entity_id = %entity_id,
-                                "key index backfill: upsert failed"
-                            );
-                        }
-                    }
+                    desired_rows.insert(entity_id.clone(), key_rows);
                 }
-                EntityLoadOutcome::Skip => skipped += 1,
+                EntityLoadOutcome::Skip { .. } => {
+                    // A tombstone or projection-only phantom has an empty desired set.
+                    desired_rows.insert(entity_id.clone(), Vec::new());
+                }
                 EntityLoadOutcome::LoadFailed => {
                     failed += 1;
                     tracing::warn!(
@@ -190,25 +301,81 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
             }
             tokio::task::yield_now().await;
         }
+        let skipped = desired_rows.values().filter(|rows| rows.is_empty()).count();
 
-        // Watermark only if nothing failed — every existing entity was keyed or is
-        // definitively skippable. Otherwise keyed misses keep scanning (sound), and a
-        // later boot resumes from the remainder.
+        // Phase 2: purge every discovered entity before assigning any desired keys.
+        // Otherwise a later-sorted stale holder can make an earlier live assignment
+        // conflict, then disappear, leaving the key unassigned under a fresh watermark.
         if failed == 0 {
-            state
+            for entity_id in desired_rows.keys() {
+                if let Err(e) = store
+                    .backfill_entity_keys(tenant.as_str(), entity_type, entity_id, &[])
+                    .await
+                {
+                    failed += 1;
+                    tracing::warn!(
+                        error = %e, entity_type = %entity_type, entity_id = %entity_id,
+                        "key index backfill: purge phase failed"
+                    );
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+
+        // Phase 3: only after a clean type-wide purge, assign every non-empty current
+        // key set in deterministic entity-id order. Genuine duplicate live keys retain
+        // the existing deterministic first-holder behavior.
+        if failed == 0 {
+            for (entity_id, key_rows) in &desired_rows {
+                if key_rows.is_empty() {
+                    continue;
+                }
+                match store
+                    .backfill_entity_keys(tenant.as_str(), entity_type, entity_id, key_rows)
+                    .await
+                {
+                    Ok(()) => reconciled += 1,
+                    Err(e) => {
+                        failed += 1;
+                        tracing::warn!(
+                            error = %e, entity_type = %entity_type, entity_id = %entity_id,
+                            "key index backfill: assignment phase failed"
+                        );
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+
+        // Watermark only if nothing failed — every durable or projected entity was
+        // exactly reconciled. Otherwise keyed misses keep scanning, and a later boot
+        // retries the full exact pass.
+        if failed == 0
+            && let Err(e) = state
                 .mark_key_index_backfilled(tenant, entity_type, &current_key_set)
-                .await;
+                .await
+        {
+            failed += 1;
+            tracing::error!(
+                tenant = %tenant, entity_type = %entity_type, error = %e,
+                "key index backfill: failed to persist watermark"
+            );
+        }
+        if failed == 0 {
             tracing::info!(
                 tenant = %tenant, entity_type = %entity_type, key_set = %current_key_set,
-                total, newly_keyed, already, skipped,
+                total, reconciled, skipped,
                 "entity_key_index backfill complete; type watermarked"
             );
         } else {
+            succeeded = false;
             tracing::warn!(
                 tenant = %tenant, entity_type = %entity_type,
-                total, newly_keyed, already, skipped, failed,
-                "key index backfill: {failed} entities unresolved; type NOT watermarked (keyed misses keep scanning; will resume next run)"
+                total, reconciled, skipped, failed,
+                "key index backfill: {failed} entities unresolved; type NOT watermarked (keyed misses keep scanning; will retry exact reconciliation)"
             );
         }
     }
+
+    succeeded
 }

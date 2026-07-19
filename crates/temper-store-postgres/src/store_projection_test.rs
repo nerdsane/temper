@@ -1,7 +1,9 @@
 use super::*;
 use crate::migration::run_migrations;
-use sqlx::PgPool;
-use temper_runtime::persistence::{EntityKeyRow, EventStore};
+use sqlx::{PgPool, postgres::PgPoolOptions};
+use temper_runtime::persistence::{
+    EntityKeyRow, EntityVectorRow, EventStore, IndexReconciliation, PersistenceAppend,
+};
 
 fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
     PersistenceEnvelope {
@@ -121,10 +123,10 @@ fn entity_key_index_present_absent_and_atomic_reject() {
     });
 }
 
-/// ADR-0153 backfill robustness: the real postgres store honors the backfill
-/// primitives the resumable, watermark-gated backfill relies on —
-/// `backfill_entity_keys` (no journal event), `keyed_entity_ids_for_type` (resume:
-/// which entities are already keyed), and the watermark round-trip
+/// ADR-0153 backfill robustness: the real postgres store honors the exact,
+/// watermark-gated reconciliation primitives — `backfill_entity_keys` (including an
+/// empty-set purge), `keyed_entity_ids_for_type` (projection enumeration), and the
+/// watermark round-trip
 /// (`mark_key_index_backfilled` / `key_index_backfilled_types`, table from migration
 /// 0010). Gated on DATABASE_URL; isolated by a unique tenant.
 #[test]
@@ -144,13 +146,21 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
             key_hash: format!("root-{}", uuid::Uuid::new_v4()),
         };
 
+        // The real backend can acquire and release the distributed per-type
+        // reconciliation fence before issuing its exact repair queries.
+        let fence = store
+            .acquire_projection_reconciliation_fence(&tenant, "Directory")
+            .await
+            .expect("acquire postgres projection fence");
+        drop(fence);
+
         // Backfill (no journal event) keys a pre-existing entity — the root case.
         store
             .backfill_entity_keys(&tenant, "Directory", "dir-root", std::slice::from_ref(&key))
             .await
             .unwrap();
 
-        // Resumability source: the entity now shows as already-keyed for the type.
+        // Projection enumeration: the entity now shows as keyed for the type.
         assert_eq!(
             store
                 .keyed_entity_ids_for_type(&tenant, "Directory")
@@ -165,6 +175,59 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
                 .await
                 .unwrap(),
             Some("dir-root".to_string()),
+        );
+
+        let conflict = store
+            .backfill_entity_keys(
+                &tenant,
+                "Directory",
+                "dir-conflict",
+                std::slice::from_ref(&key),
+            )
+            .await
+            .expect_err("duplicate live key must fail exact reconciliation");
+        assert!(conflict.to_string().contains("duplicate declared key"));
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Directory", "name_parent", &key.key_hash)
+                .await
+                .unwrap(),
+            Some("dir-root".to_string()),
+            "failed exact repair must not disturb the existing holder"
+        );
+
+        // Empty exact reconciliation purges historical rows for a tombstone or
+        // projection-only phantom, without appending a journal event.
+        store
+            .backfill_entity_keys(&tenant, "Directory", "dir-root", &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Directory", "name_parent", &key.key_hash)
+                .await
+                .unwrap(),
+            None,
+        );
+
+        // Once the historical holder is purged, a live append can atomically
+        // reclaim that key. This is the production-backend half of the legacy
+        // tombstone upgrade proof.
+        store
+            .append_with_keys(
+                &format!("{tenant}:Directory:dir-replacement"),
+                0,
+                &[test_envelope("Create", serde_json::json!({}))],
+                std::slice::from_ref(&key),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Directory", "name_parent", &key.key_hash)
+                .await
+                .unwrap(),
+            Some("dir-replacement".to_string()),
         );
 
         // Watermark round-trip: not set until marked, then present for that type only.
@@ -213,6 +276,166 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
         .bind(&tenant)
         .execute(&pool)
         .await;
+    });
+}
+
+#[test]
+fn projection_fence_waiters_do_not_starve_the_main_postgres_pool() {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+
+    sqlx::test_block_on(async {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        run_migrations(&pool).await.unwrap();
+        let store = PostgresEventStore::new(pool.clone());
+        let tenant = format!("tenant-fence-pool-{}", uuid::Uuid::new_v4());
+        let fence = store
+            .acquire_projection_reconciliation_fence(&tenant, "Directory")
+            .await
+            .expect("acquire exclusive projection fence");
+
+        let writer_store = store.clone();
+        let writer_tenant = tenant.clone();
+        let writer = tokio::spawn(async move {
+            let appends = ["Directory", "IndexedB", "IndexedC", "IndexedD", "IndexedE"]
+                .into_iter()
+                .map(|entity_type| PersistenceAppend {
+                    persistence_id: format!("{writer_tenant}:{entity_type}:live"),
+                    expected_sequence: 0,
+                    events: vec![test_envelope("Create", serde_json::json!({}))],
+                    key_rows: vec![EntityKeyRow {
+                        key_name: "path".to_string(),
+                        key_hash: format!("live-{entity_type}"),
+                    }],
+                    vector_rows: vec![EntityVectorRow {
+                        decl_name: "embedding".to_string(),
+                        model_tag: "m1".to_string(),
+                        vector: vec![1.0, 0.0],
+                    }],
+                    reconciliation: IndexReconciliation {
+                        keys: true,
+                        vectors: true,
+                    },
+                })
+                .collect::<Vec<_>>();
+            writer_store.append_batch(&appends).await
+        });
+        // Wait until the writer owns a second dedicated lock-pool connection, then
+        // yield so its shared advisory-lock query reaches PostgreSQL. It must remain
+        // pending there, leaving the sole main-pool connection available to the
+        // exclusive holder's repair query.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while store.projection_lock_pool.size() < 2 {
+                tokio::task::yield_now().await;
+            }
+            tokio::task::yield_now().await;
+        })
+        .await
+        .expect("writer did not acquire its dedicated lock-pool connection");
+        assert!(
+            !writer.is_finished(),
+            "live writer unexpectedly bypassed the exclusive projection fence"
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            store.backfill_entity_keys(
+                &tenant,
+                "Directory",
+                "repair",
+                &[EntityKeyRow {
+                    key_name: "path".to_string(),
+                    key_hash: "repair-path".to_string(),
+                }],
+            ),
+        )
+        .await
+        .expect("exclusive holder was starved by a lock waiter")
+        .expect("repair under exclusive fence");
+
+        drop(fence);
+        let results = tokio::time::timeout(std::time::Duration::from_secs(5), writer)
+            .await
+            .expect("five-partition batch self-deadlocked in the lock pool")
+            .expect("writer task joined")
+            .expect("writer committed after fence release");
+        assert_eq!(results.len(), 5);
+        assert_eq!(
+            store
+                .lookup_by_key(&tenant, "Directory", "path", "live-Directory")
+                .await
+                .expect("lookup batch key")
+                .as_deref(),
+            Some("live")
+        );
+        let vectors = store
+            .vector_candidates(&tenant, "IndexedE", "embedding", "m1", 10)
+            .await
+            .expect("read batch vectors");
+        assert_eq!(vectors.len(), 1);
+        assert_eq!(vectors[0].entity_id, "live");
+
+        let _ = crate::dbm::postgres_query!("DELETE FROM entity_key_index WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await;
+        let _ = crate::dbm::postgres_query!("DELETE FROM entity_vector_index WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await;
+        let _ = crate::dbm::postgres_query!("DELETE FROM events WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await;
+    });
+}
+
+#[test]
+fn maintenance_import_invalidates_projection_authority_atomically() {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+
+    sqlx::test_block_on(async {
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let store = PostgresEventStore::new(pool.clone());
+        let tenant = format!("tenant-import-authority-{}", uuid::Uuid::new_v4());
+
+        store
+            .mark_key_index_backfilled(&tenant, "Document", "v2|keys")
+            .await
+            .unwrap();
+        store
+            .mark_vector_index_backfilled(&tenant, "Document", "v2|vectors")
+            .await
+            .unwrap();
+
+        store
+            .invalidate_projection_backfill_watermarks(&tenant)
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .key_index_backfilled_types(&tenant)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .vector_index_backfilled_types(&tenant)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     });
 }
 

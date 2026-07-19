@@ -11,9 +11,10 @@
 //! can't narrow, so the planner falls back to the authoritative scan, which trips
 //! the read budget at scale.
 //!
-//! The simulation reproduces the 413 deterministically (no key, or a non-key
-//! filter → QueryTooLarge) and proves the co-committed declared-key index
-//! eliminates it (keyed filter → bounded candidate, no 413) — under every seed.
+//! The simulation reproduces the 413 deterministically (no current key-index
+//! authority, or a non-key filter → QueryTooLarge) and proves the co-committed
+//! declared-key index plus its full declaration watermark eliminate it (keyed
+//! filter → bounded candidate, no 413) — under every seed.
 //! This is the plane the existing DST did not cover; it is why this class of bug
 //! (413, read-after-write) kept escaping to production.
 
@@ -217,9 +218,10 @@ fn sim_state(seed: u64, qp: std::sync::Arc<SimQueryPlane>) -> (ServerState, Boxe
 ///   * a read with NO usable keyed access path falls back to the authoritative
 ///     scan and returns **413 QueryTooLarge** — reproducing the production bug
 ///     deterministically;
-///   * the SAME read, when its `$filter` is exactly the declared key and the
-///     co-committed key row exists, resolves to a **bounded single candidate** and
-///     returns **200** — the elimination.
+///   * the SAME read, when its `$filter` is exactly the declared key, the
+///     co-committed key row exists, and the full declaration is durably covered,
+///     resolves to a **bounded single candidate** and returns **200** — the
+///     elimination.
 /// Holds under every seed.
 #[tokio::test]
 async fn dst_projection_lag_413_eliminated_by_keyed_index() {
@@ -330,13 +332,45 @@ async fn dst_projection_lag_413_eliminated_by_keyed_index() {
             "seed {seed}: same keyed filter shape with NO key row must still 413 (pre-backfill scan fallback)"
         );
 
-        // GREEN (the fix): the SAME workspace + budget + lag, but the $filter is
-        // exactly the declared key and the co-committed key row exists. The keyed
-        // fast path bounds the candidate set to the single id -> no scan -> 200.
+        // A positive row is also untrusted before current full-declaration
+        // authority. It could be a legacy tombstone/phantom row, so the exact same
+        // scan-safe fallback applies until reconciliation stamps the watermark.
         let keyed = QueryOptions {
             filter: Some(eq_filter(ws, target_path)),
             ..QueryOptions::default()
         };
+        let positive_before_authority = read_entity_set_page(QueryPlaneReadRequest {
+            state: &state,
+            tenant: &tenant,
+            security_ctx: &security_ctx,
+            entity_type: "Order",
+            entity_set_name: "Orders",
+            query_options: &keyed,
+            budget,
+        })
+        .await;
+        assert!(
+            matches!(
+                positive_before_authority,
+                Err(QueryPlaneReadError::QueryTooLarge { .. })
+            ),
+            "seed {seed}: positive key rows remain scan-safe before full declaration authority"
+        );
+
+        // The fixture has now established exact coverage: every journal-only noise
+        // entity is unkeyable and the sole keyed entity was co-committed above.
+        // Stamp the same structured full-declaration signature that production
+        // exact reconciliation records.
+        let key_set =
+            crate::key_index::declared_key_set_signature(&state.transition_tables["Order"].keys);
+        state
+            .mark_key_index_backfilled(&tenant, "Order", &key_set)
+            .await
+            .expect("mark exact key authority");
+
+        // GREEN (the fix): the SAME workspace + budget + lag, but the exact
+        // declared key is now fully authoritative. The fast path bounds the
+        // candidate set to the single id -> no scan -> 200.
         let green = read_entity_set_page(QueryPlaneReadRequest {
             state: &state,
             tenant: &tenant,
@@ -356,5 +390,22 @@ async fn dst_projection_lag_413_eliminated_by_keyed_index() {
             "seed {seed}: keyed read must bound the candidate set (no scan); candidate_count={}",
             green.telemetry.candidate_count
         );
+
+        let authoritative_absent = read_entity_set_page(QueryPlaneReadRequest {
+            state: &state,
+            tenant: &tenant,
+            security_ctx: &security_ctx,
+            entity_type: "Order",
+            entity_set_name: "Orders",
+            query_options: &keyed_absent,
+            budget,
+        })
+        .await;
+        let authoritative_absent = match authoritative_absent {
+            Ok(result) => result,
+            Err(_) => panic!("seed {seed}: current key authority must make a miss bounded"),
+        };
+        assert!(authoritative_absent.entities.is_empty());
+        assert_eq!(authoritative_absent.telemetry.candidate_count, 0);
     }
 }

@@ -839,7 +839,14 @@ pub async fn handle_odata_patch(
             }
 
             match state
-                .update_tenant_entity_fields(&tenant, &entity_type, &key_str, body_json, false)
+                .update_tenant_entity_fields(
+                    &tenant,
+                    &entity_type,
+                    &key_str,
+                    body_json,
+                    false,
+                    agent_ctx.idempotency_key.clone(),
+                )
                 .await
             {
                 Ok(response) => {
@@ -988,7 +995,14 @@ pub async fn handle_odata_put(
             }
 
             match state
-                .update_tenant_entity_fields(&tenant, &entity_type, &key_str, body_json, true)
+                .update_tenant_entity_fields(
+                    &tenant,
+                    &entity_type,
+                    &key_str,
+                    body_json,
+                    true,
+                    agent_ctx.idempotency_key.clone(),
+                )
                 .await
             {
                 Ok(response) => {

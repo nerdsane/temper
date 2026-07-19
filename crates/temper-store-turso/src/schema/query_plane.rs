@@ -52,12 +52,10 @@ CREATE INDEX IF NOT EXISTS idx_efi_status
 
 /// ADR-0153: declared composite-key index — the negative-existence access path.
 ///
-/// One row per (declared key, entity), co-committed with the journal append (unlike
-/// the eventually-consistent `entity_field_index`). A keyed read is a single
-/// O(log n) probe: hit -> entity_id, miss -> authoritatively absent — so the read
-/// plane no longer scans a whole entity type to prove absence (the 413, ARN-68).
-/// The PRIMARY KEY enforces declared-key uniqueness (reject-and-surface on conflict);
-/// `key_hash` is a canonical, type-tagged hash of the declared key's values.
+/// Shared schema for one row per (declared key, entity). Turso does not yet maintain
+/// these rows on every live write and therefore never advertises authoritative keyed
+/// absence; Postgres owns that capability. The PRIMARY KEY still expresses the
+/// eventual uniqueness contract, and `key_hash` is the canonical type-tagged hash.
 pub const CREATE_ENTITY_KEY_INDEX_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS entity_key_index (
     tenant       TEXT NOT NULL,
@@ -77,10 +75,10 @@ CREATE INDEX IF NOT EXISTS idx_eki_entity
 
 /// ADR-0155: declared vector access path — the exact-scan kNN index. One row per
 /// (declared vector path, model tag, entity). `vector` is packed little-endian
-/// f32; `model_tag` partitions the space. Unlike keys, Turso maintains this
-/// **write-behind** (the event append is followed by the index write, not
-/// co-committed) — safe because a vector row carries no uniqueness constraint; the
-/// backfill watermark gates when the index is authoritatively complete.
+/// f32; `model_tag` partitions the space. Turso's single-stream path maintains this
+/// write-behind with journal-sequence fencing; atomic multi-stream batches co-commit
+/// rows in their transaction. Startup always reconciles because no durable completion
+/// watermark is trusted after a potentially exhausted write-behind retry.
 pub const CREATE_ENTITY_VECTOR_INDEX_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS entity_vector_index (
     tenant       TEXT NOT NULL,
@@ -104,9 +102,9 @@ pub const CREATE_ENTITY_VECTOR_INDEX_ENTITY: &str = "\
 CREATE INDEX IF NOT EXISTS idx_evi_entity
     ON entity_vector_index(tenant, entity_type, entity_id);";
 
-/// Per-(tenant, entity_type) vector-index backfill watermark (ADR-0155): records
-/// the covered vector-path set so a keyed read knows when the index is complete and
-/// re-indexes on a set change. Mirrors `key_index_backfill_watermark`.
+/// Legacy/reserved vector-index watermark schema. Current Turso code deliberately
+/// does not read or write this table; startup replay is the repair authority. The
+/// table remains for on-disk compatibility and a future fully co-committed backend.
 pub const CREATE_VECTOR_INDEX_BACKFILL_WATERMARK: &str = "\
 CREATE TABLE IF NOT EXISTS vector_index_backfill_watermark (
     tenant       TEXT NOT NULL,

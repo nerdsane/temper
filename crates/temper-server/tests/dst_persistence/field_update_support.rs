@@ -21,6 +21,8 @@ pub(super) fn vectored_item_table() -> Arc<RwLock<TransitionTable>> {
 pub(super) struct ConflictBeforeAppendStore {
     pub(super) inner: SimEventStore,
     conflicts: Arc<Mutex<BTreeMap<String, VecDeque<PersistenceEnvelope>>>>,
+    ambiguous_commits: Arc<Mutex<BTreeMap<String, usize>>>,
+    ambiguous_storage_commits: Arc<Mutex<BTreeMap<String, usize>>>,
 }
 
 impl ConflictBeforeAppendStore {
@@ -28,6 +30,8 @@ impl ConflictBeforeAppendStore {
         Self {
             inner: SimEventStore::no_faults(seed),
             conflicts: Arc::new(Mutex::new(BTreeMap::new())),
+            ambiguous_commits: Arc::new(Mutex::new(BTreeMap::new())),
+            ambiguous_storage_commits: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -52,6 +56,50 @@ impl ConflictBeforeAppendStore {
         }
         event
     }
+
+    pub(super) fn commit_then_report_conflict(&self, persistence_id: &str) {
+        self.ambiguous_commits
+            .lock()
+            .expect("ambiguous commit script lock poisoned")
+            .insert(persistence_id.to_string(), 1);
+    }
+
+    fn take_ambiguous_commit(&self, persistence_id: &str) -> bool {
+        let mut commits = self
+            .ambiguous_commits
+            .lock()
+            .expect("ambiguous commit script lock poisoned");
+        let Some(remaining) = commits.get_mut(persistence_id) else {
+            return false;
+        };
+        *remaining -= 1;
+        if *remaining == 0 {
+            commits.remove(persistence_id);
+        }
+        true
+    }
+
+    pub(super) fn commit_then_report_storage_failure(&self, persistence_id: &str) {
+        self.ambiguous_storage_commits
+            .lock()
+            .expect("ambiguous storage commit script lock poisoned")
+            .insert(persistence_id.to_string(), 1);
+    }
+
+    fn take_ambiguous_storage_commit(&self, persistence_id: &str) -> bool {
+        let mut commits = self
+            .ambiguous_storage_commits
+            .lock()
+            .expect("ambiguous storage commit script lock poisoned");
+        let Some(remaining) = commits.get_mut(persistence_id) else {
+            return false;
+        };
+        *remaining -= 1;
+        if *remaining == 0 {
+            commits.remove(persistence_id);
+        }
+        true
+    }
 }
 
 impl EventStore for ConflictBeforeAppendStore {
@@ -75,6 +123,38 @@ impl EventStore for ConflictBeforeAppendStore {
         vector_rows: &[EntityVectorRow],
         reconciliation: IndexReconciliation,
     ) -> Result<u64, PersistenceError> {
+        if self.take_ambiguous_storage_commit(persistence_id) {
+            self.inner
+                .append_with_index_rows(
+                    persistence_id,
+                    expected_sequence,
+                    events,
+                    key_rows,
+                    vector_rows,
+                    reconciliation,
+                )
+                .await?;
+            return Err(PersistenceError::Storage(
+                "scripted post-commit projection metadata failure".to_string(),
+            ));
+        }
+        if self.take_ambiguous_commit(persistence_id) {
+            let actual = self
+                .inner
+                .append_with_index_rows(
+                    persistence_id,
+                    expected_sequence,
+                    events,
+                    key_rows,
+                    vector_rows,
+                    reconciliation,
+                )
+                .await?;
+            return Err(PersistenceError::ConcurrencyViolation {
+                expected: expected_sequence,
+                actual,
+            });
+        }
         if let Some(conflict) = self.scripted_conflict(persistence_id) {
             let actual = self
                 .inner
@@ -187,7 +267,12 @@ pub(super) async fn update_fields(
 ) -> EntityResponse {
     actor_ref
         .ask(
-            EntityMsg::UpdateFields { fields, replace },
+            EntityMsg::UpdateFields {
+                fields,
+                replace,
+                idempotency_key: Some(format!("field-update:{}", sim_uuid())),
+                expected_spec_generation: None,
+            },
             Duration::from_secs(5),
         )
         .await
