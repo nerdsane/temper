@@ -70,6 +70,36 @@ async fn unexpected_trigger_prevents_ledgering_and_is_preserved() {
 }
 
 #[tokio::test]
+async fn differently_cased_trigger_owner_cannot_bypass_inventory() {
+    let (_directory, connection) = temporary_connection("case-folded-trigger-owner").await;
+    create_events(&connection, None, None).await;
+    connection
+        .execute(
+            "CREATE TRIGGER reject_case_folded_events BEFORE INSERT ON EVENTS
+             BEGIN SELECT RAISE(FAIL, 'blocked'); END",
+            (),
+        )
+        .await
+        .expect("create blocking trigger with differently cased owner");
+    let before = trigger_sql(&connection, "reject_case_folded_events").await;
+
+    let error = migrate(&connection)
+        .await
+        .expect_err("SQLite-equivalent trigger owners must not bypass readiness");
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("migration 1"), "{diagnostic}");
+    assert!(
+        diagnostic.contains("reject_case_folded_events"),
+        "{diagnostic}"
+    );
+    assert_eq!(
+        trigger_sql(&connection, "reject_case_folded_events").await,
+        before
+    );
+    assert_eq!(ledger_count(&connection).await, 0);
+}
+
+#[tokio::test]
 async fn sqlite_x_named_trigger_cannot_bypass_inventory() {
     let (_directory, connection) = temporary_connection("sqlite-x-trigger").await;
     create_events(&connection, None, None).await;

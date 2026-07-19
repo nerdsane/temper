@@ -355,6 +355,70 @@ async fn legal_sqlitex_child_foreign_key_fails_before_cascade_data_loss() {
     );
 }
 
+#[tokio::test]
+async fn differently_cased_ots_trigger_owner_is_preserved_when_probe_rolls_back() {
+    let directory = tempfile::tempdir().expect("temporary database directory");
+    let database = Builder::new_local(directory.path().join("case-folded-ots-trigger.db"))
+        .build()
+        .await
+        .expect("build case-folded-OTS-trigger database");
+    let connection = database
+        .connect()
+        .expect("connect case-folded-OTS-trigger database");
+    create_legacy_ots(&connection, "PRIMARY KEY").await;
+    connection
+        .execute(
+            "CREATE TRIGGER reject_case_folded_ots BEFORE INSERT ON OTS_TRAJECTORIES
+             BEGIN SELECT RAISE(FAIL, 'blocked'); END",
+            (),
+        )
+        .await
+        .expect("create blocking trigger with differently cased OTS owner");
+    let before = scalar_string(
+        &connection,
+        "SELECT sql FROM sqlite_schema
+         WHERE type = 'trigger' AND name = 'reject_case_folded_ots'",
+    )
+    .await;
+
+    let error = migrate(&connection)
+        .await
+        .expect_err("the preserved trigger must fail the production write probe");
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("migration 5"), "{diagnostic}");
+    assert!(
+        diagnostic.contains("reject_case_folded_ots"),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("production persist/enqueue/status-transition probe"),
+        "{diagnostic}"
+    );
+    assert_eq!(
+        scalar_string(
+            &connection,
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'trigger' AND name = 'reject_case_folded_ots'",
+        )
+        .await,
+        before
+    );
+    assert_eq!(
+        scalar_i64(
+            &connection,
+            "SELECT COUNT(*) FROM pragma_table_info('ots_trajectories')
+             WHERE name = 'updated_at'"
+        )
+        .await,
+        0,
+        "the failed probe must roll back the destructive rebuild"
+    );
+    assert_eq!(
+        scalar_i64(&connection, "SELECT COUNT(*) FROM temper_schema_migrations").await,
+        4
+    );
+}
+
 async fn create_legacy_ots(connection: &libsql::Connection, primary_key: &str) {
     let sql = format!(
         "CREATE TABLE ots_trajectories (
