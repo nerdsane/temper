@@ -68,7 +68,7 @@ const fn column(
 }
 
 pub(super) const OTS_REBUILD_DEFINITION: OtsRebuildDefinition = OtsRebuildDefinition {
-    algorithm_version: "preserve-dependent-schema-v7-current-inbound",
+    algorithm_version: "preserve-dependent-schema-v8-sqlite-identifier-owners",
     table: "ots_trajectories",
     temporary_table: "__temper_migration_ots_trajectories",
     required_columns: REQUIRED_COLUMNS,
@@ -85,7 +85,8 @@ pub(super) const OTS_REBUILD_DEFINITION: OtsRebuildDefinition = OtsRebuildDefini
     schema_tables_query: "SELECT name FROM sqlite_schema
         WHERE type = 'table' AND name NOT GLOB 'sqlite_*' ORDER BY name",
     dependent_objects_query: "SELECT type, name, sql FROM sqlite_schema
-        WHERE tbl_name = ?1 AND type IN ('index', 'trigger') AND sql IS NOT NULL
+        WHERE tbl_name COLLATE NOCASE = ?1
+          AND type IN ('index', 'trigger') AND sql IS NOT NULL
         ORDER BY type, name",
     create_temporary_sql: "CREATE TABLE __temper_migration_ots_trajectories (
         trajectory_id TEXT PRIMARY KEY,

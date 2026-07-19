@@ -53,7 +53,8 @@ pub(super) async fn validate_ledger_schema(
     let mut triggers = connection
         .query(
             "SELECT name FROM sqlite_schema
-             WHERE type = 'trigger' AND tbl_name = 'temper_schema_migrations'
+             WHERE type = 'trigger'
+               AND tbl_name COLLATE NOCASE = 'temper_schema_migrations'
              ORDER BY name LIMIT 1",
             (),
         )

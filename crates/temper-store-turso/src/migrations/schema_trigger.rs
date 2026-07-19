@@ -19,7 +19,8 @@ pub(super) async fn capture_triggers(
         connection
             .query(
                 "SELECT name, tbl_name, sql FROM sqlite_schema
-                 WHERE type = 'trigger' AND name NOT GLOB 'sqlite_*' AND tbl_name = ?1
+                 WHERE type = 'trigger' AND name NOT GLOB 'sqlite_*'
+                   AND tbl_name COLLATE NOCASE = ?1
                  ORDER BY name",
                 [table],
             )
@@ -54,7 +55,7 @@ pub(super) async fn capture_triggers(
         triggers.insert(
             name,
             TriggerCapability {
-                table: owner,
+                table: owner.to_ascii_lowercase(),
                 definition: normalize_schema_ddl(&definition),
             },
         );

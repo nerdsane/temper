@@ -12,8 +12,10 @@ pub(super) const EXTRA_COLUMN_POLICY: &str =
     "allow-visible-nullable-no-default-non-primary-key-non-rowid-shadow-v2";
 pub(super) const EXTRA_INDEX_POLICY: &str =
     "allow-nonunique-full-plain-column-index-with-builtin-collation-v1";
-pub(super) const TRIGGER_POLICY: &str =
-    "exact-trigger-set-on-owned-tables-with-production-write-probed-legacy-ots-extensions-v3";
+pub(super) const TRIGGER_POLICY: &str = concat!(
+    "exact-trigger-set-with-sqlite-identifier-owners-and-",
+    "production-write-probed-legacy-ots-extensions-v4"
+);
 
 pub(super) async fn verify_schema(
     connection: &Connection,
@@ -72,7 +74,7 @@ async fn verify_triggers(
         }
     }
     for (name, expected_trigger) in &expected.triggers {
-        if expected_trigger.table == table && !actual.contains_key(name) {
+        if expected_trigger.table.eq_ignore_ascii_case(table) && !actual.contains_key(name) {
             return Err(compatibility_error(format!(
                 "table '{table}' is missing required trigger '{name}'"
             )));

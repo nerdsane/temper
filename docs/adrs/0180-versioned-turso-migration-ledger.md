@@ -142,6 +142,9 @@ remain convergent:
 - triggers are inventoried as normalized, owner-scoped capabilities; an
   undeclared trigger on a catalog-owned table prevents readiness, except for
   legacy OTS triggers that the existing rebuild contract deliberately preserves;
+  trigger owners are matched with SQLite's ASCII case-insensitive identifier
+  semantics and normalized before capability comparison, so alternate casing in
+  an `ON` clause cannot evade inventory, ledger protection, or OTS preservation;
   those triggers must pass rollback-only probes using the same SQL as production
   persisted writes, queued inserts/conflict updates, and failed/persisted status
   transitions on every startup, and both probe rows and trigger side effects are
