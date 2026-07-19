@@ -220,6 +220,32 @@ impl ServerState {
             || self.transition_tables.contains_key(entity_type))
     }
 
+    /// Entity types governed by the same registry-first, compatibility-table
+    /// fallback model used by dispatch and declaration lookup.
+    ///
+    /// Projection reconciliation and retirement must enumerate this union. Using
+    /// only the tenant registry omits every type installed through `with_specs`,
+    /// `with_persistence`, or `with_storage_stack`, so those types can never earn
+    /// durable projection authority even though live writes maintain their rows.
+    /// Actor eviction remains registry-generation-specific: a cached registry actor
+    /// must be removed before the same name falls back to a compatibility table.
+    pub(crate) fn governed_entity_types_for(&self, tenant: &TenantId) -> BTreeSet<String> {
+        let mut entity_types = self
+            .transition_tables
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        entity_types.extend(
+            self.registry
+                .read()
+                .expect("spec registry lock poisoned")
+                .entity_types(tenant)
+                .into_iter()
+                .map(ToString::to_string),
+        );
+        entity_types
+    }
+
     /// Declared `[[key]]` set for a `(tenant, entity_type)` (ADR-0153), resolved
     /// from the SAME sources dispatch uses: the per-tenant registry first — where
     /// runtime-installed os-app entities (File, Directory, SessionEntry, …) live —

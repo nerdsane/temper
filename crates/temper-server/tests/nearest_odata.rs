@@ -15,7 +15,6 @@ use temper_server::registry::SpecRegistry;
 use temper_server::request_context::AgentContext;
 use temper_server::{ServerState, StorageStack};
 use temper_spec::csdl::parse_csdl;
-use temper_store_postgres::PostgresEventStore;
 use temper_store_sim::SimEventStore;
 use tower::ServiceExt;
 
@@ -272,7 +271,7 @@ async fn storage_stack_compatibility_constructor_reconciles_nearest_authority() 
         parse_csdl(CSDL_XML).expect("CSDL parse"),
         CSDL_XML.to_string(),
         compatibility_ioa_sources(),
-        StorageStack::from_sim(store, None),
+        StorageStack::from_sim(store.clone(), None),
     )
     .expect("legacy storage-stack state");
     let tenant = TenantId::default();
@@ -290,31 +289,21 @@ async fn storage_stack_compatibility_constructor_reconciles_nearest_authority() 
 
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["value"][0]["entity_id"], "item-a");
-}
 
-#[tokio::test]
-async fn postgres_compatibility_constructor_registers_projection_declarations() {
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .connect_lazy("postgresql://localhost/arn189-unused")
-        .expect("lazy PostgreSQL pool");
-    let state = ServerState::with_persistence(
-        ActorSystem::new("nearest-legacy-postgres"),
-        parse_csdl(CSDL_XML).expect("CSDL parse"),
-        CSDL_XML.to_string(),
-        compatibility_ioa_sources(),
-        PostgresEventStore::new(pool),
-    )
-    .expect("legacy PostgreSQL state");
-    let tenant = TenantId::default();
-
-    assert!(
-        state
-            .registry
-            .read()
-            .expect("registry lock")
-            .get_table(&tenant, "VecItem")
-            .is_some_and(|table| !table.vectors.is_empty()),
-        "the PostgreSQL compatibility constructor must register declarations for reconciliation"
+    let watermark = store
+        .vector_index_backfilled_types(tenant.as_str())
+        .await
+        .expect("vector authority watermark");
+    assert_eq!(watermark.len(), 1);
+    assert!(watermark[0].1.starts_with("v2|"));
+    assert!(state.retire_removed_projection_authority(&tenant).await);
+    assert_eq!(
+        store
+            .vector_index_backfilled_types(tenant.as_str())
+            .await
+            .expect("watermark after declaration retirement pass"),
+        watermark,
+        "a compatibility declaration must remain current during retirement"
     );
 }
 

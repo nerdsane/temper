@@ -30,19 +30,11 @@ pub(in crate::state) async fn retire_removed_vector_index_watermarks(
         return true;
     }
 
-    let current_vectored_types = {
-        let registry = state.registry.read().expect("spec registry lock poisoned");
-        registry
-            .entity_types(tenant)
-            .into_iter()
-            .filter(|entity_type| {
-                registry
-                    .get_table(tenant, entity_type)
-                    .is_some_and(|table| !table.vectors.is_empty())
-            })
-            .map(str::to_string)
-            .collect::<BTreeSet<_>>()
-    };
+    let current_vectored_types = state
+        .governed_entity_types_for(tenant)
+        .into_iter()
+        .filter(|entity_type| !state.declared_vectors_for(tenant, entity_type).is_empty())
+        .collect::<BTreeSet<_>>();
 
     let known_watermarks = match store.vector_index_backfilled_types(tenant.as_str()).await {
         Ok(watermarks) => watermarks,
@@ -119,22 +111,16 @@ pub(in crate::state) async fn populate_vector_index_from_snapshots(
         return succeeded;
     };
 
-    // Types with a declared vector path, from the registry (os-app entities live here).
-    let vectored_types: Vec<(String, Vec<temper_jit::table::types::DeclaredVector>)> = {
-        let registry = state.registry.read().unwrap();
-        registry
-            .entity_types(tenant)
-            .into_iter()
-            .filter_map(|entity_type| {
-                let table = registry.get_table(tenant, entity_type)?;
-                if table.vectors.is_empty() {
-                    None
-                } else {
-                    Some((entity_type.to_string(), table.vectors.clone()))
-                }
-            })
-            .collect()
-    };
+    // Registry-installed and compatibility-table types share declaration lookup,
+    // so both must be eligible to earn the same durable vector authority.
+    let vectored_types: Vec<(String, Vec<temper_jit::table::types::DeclaredVector>)> = state
+        .governed_entity_types_for(tenant)
+        .into_iter()
+        .filter_map(|entity_type| {
+            let vectors = state.declared_vectors_for(tenant, &entity_type);
+            (!vectors.is_empty()).then_some((entity_type, vectors))
+        })
+        .collect();
 
     let durable_watermark = store.has_durable_vector_backfill_watermark();
 

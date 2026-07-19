@@ -27,19 +27,11 @@ pub(in crate::state) async fn retire_removed_key_index_watermarks(
         return true;
     }
 
-    let current_keyed_types = {
-        let registry = state.registry.read().expect("spec registry lock poisoned");
-        registry
-            .entity_types(tenant)
-            .into_iter()
-            .filter(|entity_type| {
-                registry
-                    .get_table(tenant, entity_type)
-                    .is_some_and(|table| !table.keys.is_empty())
-            })
-            .map(str::to_string)
-            .collect::<BTreeSet<_>>()
-    };
+    let current_keyed_types = state
+        .governed_entity_types_for(tenant)
+        .into_iter()
+        .filter(|entity_type| !state.declared_keys_for(tenant, entity_type).is_empty())
+        .collect::<BTreeSet<_>>();
 
     let known_watermarks = match store.key_index_backfilled_types(tenant.as_str()).await {
         Ok(watermarks) => watermarks,
@@ -144,23 +136,16 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
         return succeeded;
     }
 
-    // Keyed entity types from the registry — the authoritative record of what is
-    // installed for this tenant (os-app entities live here, not in transition_tables).
-    let keyed_types: Vec<(String, Vec<temper_jit::table::types::DeclaredKey>)> = {
-        let registry = state.registry.read().unwrap();
-        registry
-            .entity_types(tenant)
-            .into_iter()
-            .filter_map(|entity_type| {
-                let table = registry.get_table(tenant, entity_type)?;
-                if table.keys.is_empty() {
-                    None
-                } else {
-                    Some((entity_type.to_string(), table.keys.clone()))
-                }
-            })
-            .collect()
-    };
+    // Registry-installed and compatibility-table types share declaration lookup,
+    // so both must be eligible to earn the same durable key authority.
+    let keyed_types: Vec<(String, Vec<temper_jit::table::types::DeclaredKey>)> = state
+        .governed_entity_types_for(tenant)
+        .into_iter()
+        .filter_map(|entity_type| {
+            let keys = state.declared_keys_for(tenant, &entity_type);
+            (!keys.is_empty()).then_some((entity_type, keys))
+        })
+        .collect();
 
     for (entity_type, keys) in &keyed_types {
         let current_key_set = crate::key_index::declared_key_set_signature(keys);

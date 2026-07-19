@@ -1535,14 +1535,19 @@ impl ServerState {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
 
     use temper_jit::table::TransitionTable;
     use temper_runtime::ActorSystem;
+    use temper_runtime::tenant::TenantId;
+    use temper_spec::csdl::parse_csdl;
+    use temper_store_postgres::PostgresEventStore;
 
-    use super::{SpecGenerationBarrier, SpecGenerationWriteGuard, normalize_local_tdata_host};
+    use super::{
+        ServerState, SpecGenerationBarrier, SpecGenerationWriteGuard, normalize_local_tdata_host,
+    };
     use crate::entity_actor::{EntityActor, EntityMsg, EntityResponse};
 
     const GENERATION_TEST_IOA: &str = r#"
@@ -1557,6 +1562,45 @@ kind = "input"
 from = ["New"]
 to = "Ready"
 "#;
+
+    const PROJECTION_COMPATIBILITY_IOA: &str = r#"
+[automaton]
+name = "VecItem"
+states = ["New"]
+initial = "New"
+
+[[state]]
+name = "Embedding"
+type = "string"
+initial = ""
+
+[[state]]
+name = "EmbeddingModel"
+type = "string"
+initial = ""
+
+[[vector]]
+name = "embed"
+property = "Embedding"
+model_property = "EmbeddingModel"
+dims = 4
+metric = "cosine"
+"#;
+
+    const PROJECTION_COMPATIBILITY_CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Test" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="VecItem">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="TestService">
+        <EntitySet Name="VecItems" EntityType="Temper.Test.VecItem"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
 
     #[test]
     fn normalize_local_tdata_host_accepts_urls_domains_and_ports() {
@@ -1579,6 +1623,108 @@ to = "Ready"
         assert_eq!(normalize_local_tdata_host(""), None);
         assert_eq!(normalize_local_tdata_host("https:///tdata"), None);
         assert_eq!(normalize_local_tdata_host("bad host.example"), None);
+    }
+
+    #[tokio::test]
+    async fn postgres_compatibility_constructor_exposes_projection_declarations() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost/arn189-unused")
+            .expect("lazy PostgreSQL pool");
+        let state = ServerState::with_persistence(
+            ActorSystem::new("projection-compatibility-postgres"),
+            parse_csdl(PROJECTION_COMPATIBILITY_CSDL).expect("CSDL parse"),
+            PROJECTION_COMPATIBILITY_CSDL.to_string(),
+            BTreeMap::from([(
+                "VecItem".to_string(),
+                PROJECTION_COMPATIBILITY_IOA.to_string(),
+            )]),
+            PostgresEventStore::new(pool),
+        )
+        .expect("PostgreSQL compatibility state");
+        let tenant = TenantId::default();
+
+        assert!(
+            state
+                .registry
+                .read()
+                .expect("registry lock")
+                .tenant_ids()
+                .is_empty(),
+            "the compatibility constructor must not opt legacy specs into verification"
+        );
+        assert_eq!(
+            state.governed_entity_types_for(&tenant),
+            BTreeSet::from(["VecItem".to_string()])
+        );
+        assert_eq!(state.declared_vectors_for(&tenant, "VecItem").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn registry_removal_evicts_actor_before_compatibility_fallback() {
+        let tenant = TenantId::default();
+        let sources = BTreeMap::from([(
+            "VecItem".to_string(),
+            PROJECTION_COMPATIBILITY_IOA.to_string(),
+        )]);
+        let state = ServerState::with_specs(
+            ActorSystem::new("registry-to-compatibility-fallback"),
+            parse_csdl(PROJECTION_COMPATIBILITY_CSDL).expect("CSDL parse"),
+            PROJECTION_COMPATIBILITY_CSDL.to_string(),
+            sources,
+        )
+        .expect("compatibility state");
+        state
+            .registry
+            .write()
+            .expect("registry lock")
+            .register_tenant(
+                tenant.clone(),
+                parse_csdl(PROJECTION_COMPATIBILITY_CSDL).expect("CSDL parse"),
+                PROJECTION_COMPATIBILITY_CSDL.to_string(),
+                &[("VecItem", PROJECTION_COMPATIBILITY_IOA)],
+            );
+
+        let registry_actor = state
+            .get_or_spawn_tenant_actor(&tenant, "VecItem", "fallback-item")
+            .expect("registry actor");
+        let _: EntityResponse = registry_actor
+            .ask(EntityMsg::GetState, Duration::from_secs(1))
+            .await
+            .expect("registry actor state");
+        let actor_key = format!("{tenant}:VecItem:fallback-item");
+        assert!(
+            state
+                .actor_registry
+                .read()
+                .expect("actor registry lock")
+                .contains_key(&actor_key)
+        );
+
+        assert!(
+            state
+                .registry
+                .write()
+                .expect("registry lock")
+                .remove_tenant(&tenant)
+        );
+        state.evict_unregistered_tenant_actors(&tenant);
+        assert!(
+            !state
+                .actor_registry
+                .read()
+                .expect("actor registry lock")
+                .contains_key(&actor_key),
+            "tenant removal must evict the detached registry actor even when a legacy table remains"
+        );
+
+        let fallback_actor = state
+            .get_or_spawn_tenant_actor(&tenant, "VecItem", "fallback-item")
+            .expect("compatibility fallback actor");
+        let response: EntityResponse = fallback_actor
+            .ask(EntityMsg::GetState, Duration::from_secs(1))
+            .await
+            .expect("compatibility fallback read");
+        assert_eq!(response.state.status, "New");
     }
 
     #[tokio::test]

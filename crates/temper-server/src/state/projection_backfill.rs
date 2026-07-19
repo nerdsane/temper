@@ -120,23 +120,14 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
         return;
     };
 
-    // Enumerate authoritatively: every entity type from the registry, and its entity
-    // ids from `store.list_entity_ids_by_type`. It must NOT read `state.entity_index`,
-    // which is populated only when an actor spawns (lazy) and is therefore near-empty at
-    // boot — the original bug that left pre-existing entities out of the field index, so
-    // their non-keyed equality lookups (e.g. `Path eq '/souls' and WorkspaceId eq …`)
-    // fell back to the full-type scan and 413'd at tenant scale (ARN-68). This mirrors
-    // the authoritative enumeration the declared-key backfill already uses; the field
-    // index covers ALL types (not just keyed ones), so no key filter is applied.
+    // Enumerate authoritatively: every registry-installed or compatibility-table type,
+    // and its IDs from `store.list_entity_ids_by_type`. It must NOT read
+    // `state.entity_index`, which is populated only when an actor spawns (lazy) and is
+    // therefore near-empty at boot — the original bug that left pre-existing entities
+    // out of the field index, so non-keyed equality lookups fell back to a full scan.
+    // The field index covers ALL governed types, so no key filter is applied.
     let entities = {
-        let entity_types: Vec<String> = {
-            let registry = state.registry.read().unwrap();
-            registry
-                .entity_types(tenant)
-                .into_iter()
-                .map(ToString::to_string)
-                .collect()
-        };
+        let entity_types = state.governed_entity_types_for(tenant);
         let mut result = Vec::new();
         for entity_type in &entity_types {
             match store
