@@ -34,12 +34,22 @@ impl SafetyDeclarations {
     }
 }
 
-/// Version of the atomic runtime-invariant enforcement contract.
-pub const RUNTIME_INVARIANT_ENFORCEMENT_VERSION: u32 = 1;
+/// Version of the runtime-invariant enforcement contract.
+pub const RUNTIME_INVARIANT_ENFORCEMENT_VERSION: u32 = 2;
 
 /// Assertion forms whose safety is enforced on tentative runtime state.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RuntimeAssert {
+    /// An assertion that always holds.
+    Always,
+    /// A declared counter must remain positive.
+    CounterPositive { var: String },
+    /// Compare a declared counter with a literal bound.
+    CounterCompare {
+        var: String,
+        op: AssertCompareOp,
+        value: usize,
+    },
     /// A declared string field must contain at least one character.
     StringNonEmpty { var: String },
     /// Compare one declared counter with another.
@@ -48,6 +58,14 @@ pub enum RuntimeAssert {
         op: AssertCompareOp,
         right: String,
     },
+    /// A declared boolean must equal the expected value.
+    BoolRequired { var: String, expect: bool },
+    /// The entity must not enter the named state.
+    NeverState { state: String },
+    /// Every nested assertion must hold.
+    And(Vec<RuntimeAssert>),
+    /// At least one nested assertion must hold.
+    Or(Vec<RuntimeAssert>),
 }
 
 /// A named runtime-enforced assertion and its activating states.
@@ -66,6 +84,7 @@ pub struct RuntimeInvariant {
 /// Compile the runtime-enforced subset of an automaton's safety assertions.
 pub fn compile_runtime_invariants(automaton: &Automaton) -> Vec<RuntimeInvariant> {
     let declarations = SafetyDeclarations::from_automaton(automaton);
+    let has_parameter_counter_effect = has_parameter_counter_effect(automaton);
 
     automaton
         .invariants
@@ -75,13 +94,14 @@ pub fn compile_runtime_invariants(automaton: &Automaton) -> Vec<RuntimeInvariant
             if !declarations.supports(&invariant.when, &invariant.assert) {
                 return None;
             }
-            let assertion = match parsed {
-                ParsedAssert::StringNonEmpty { var } => RuntimeAssert::StringNonEmpty { var },
-                ParsedAssert::CounterVarCompare { left, op, right } => {
-                    RuntimeAssert::CounterVarCompare { left, op, right }
-                }
-                _ => return None,
-            };
+            let inherently_runtime_enforced = matches!(
+                parsed,
+                ParsedAssert::StringNonEmpty { .. } | ParsedAssert::CounterVarCompare { .. }
+            );
+            if !inherently_runtime_enforced && !has_parameter_counter_effect {
+                return None;
+            }
+            let assertion = compile_runtime_assert(parsed)?;
             Some(RuntimeInvariant {
                 name: invariant.name.clone(),
                 when: invariant.when.clone(),
@@ -92,6 +112,36 @@ pub fn compile_runtime_invariants(automaton: &Automaton) -> Vec<RuntimeInvariant
         .collect()
 }
 
+fn compile_runtime_assert(parsed: ParsedAssert) -> Option<RuntimeAssert> {
+    Some(match parsed {
+        ParsedAssert::Always => RuntimeAssert::Always,
+        ParsedAssert::CounterPositive { var } => RuntimeAssert::CounterPositive { var },
+        ParsedAssert::CounterCompare { var, op, value } => {
+            RuntimeAssert::CounterCompare { var, op, value }
+        }
+        ParsedAssert::StringNonEmpty { var } => RuntimeAssert::StringNonEmpty { var },
+        ParsedAssert::CounterVarCompare { left, op, right } => {
+            RuntimeAssert::CounterVarCompare { left, op, right }
+        }
+        ParsedAssert::BoolRequired { var, expect } => RuntimeAssert::BoolRequired { var, expect },
+        ParsedAssert::NeverState { state } => RuntimeAssert::NeverState { state },
+        ParsedAssert::NoFurtherTransitions => return None,
+        ParsedAssert::And(parts) => RuntimeAssert::And(
+            parts
+                .into_iter()
+                .map(compile_runtime_assert)
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        ParsedAssert::Or(parts) => RuntimeAssert::Or(
+            parts
+                .into_iter()
+                .map(compile_runtime_assert)
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        ParsedAssert::OrderingConstraint { .. } => return None,
+    })
+}
+
 /// Return every declared safety invariant that cannot be enforced by the
 /// shared verification/runtime capability contract.
 ///
@@ -99,20 +149,27 @@ pub fn compile_runtime_invariants(automaton: &Automaton) -> Vec<RuntimeInvariant
 /// specs cannot become live even when higher verification layers are bypassed.
 pub fn unsupported_safety_invariant_names(automaton: &Automaton) -> Vec<String> {
     let declarations = SafetyDeclarations::from_automaton(automaton);
+    let has_parameter_counter_effect = has_parameter_counter_effect(automaton);
     automaton
         .invariants
         .iter()
-        .filter(|invariant| !declarations.supports(&invariant.when, &invariant.assert))
+        .filter(|invariant| {
+            !declarations.supports(&invariant.when, &invariant.assert)
+                || (has_parameter_counter_effect
+                    && parse_assert_expr(&invariant.assert)
+                        .is_some_and(|parsed| contains_no_further_transitions(&parsed)))
+        })
         .map(|invariant| invariant.name.clone())
         .collect()
 }
 
 /// Return declared counter and boolean variables whose values are governed by
-/// model-proved invariants rather than the runtime-enforced assertion subset.
+/// model-proved invariants, including assertions that are also enforced at
+/// runtime because transition parameters are outside the finite model.
 ///
 /// Caller payloads must not mutate these variables directly. Their values are
-/// changed only by modeled transition effects, keeping production execution
-/// and replay within the state space proved by the verification backends.
+/// changed only by transition effects, while runtime enforcement rejects any
+/// parameter-derived result outside the state space proved by verification.
 /// Protection covers the complete logical model state whenever any invariant
 /// depends on model reachability: guard-only variables can otherwise make a
 /// transition reachable in production that was unreachable during proof.
@@ -150,10 +207,17 @@ fn declared_names(automaton: &Automaton, var_type: &str) -> BTreeSet<String> {
 /// Evaluate a typed runtime assertion against tentative entity state.
 pub fn evaluate_runtime_assert(
     assertion: &RuntimeAssert,
+    status: &str,
     counters: &BTreeMap<String, usize>,
+    booleans: &BTreeMap<String, bool>,
     fields: &serde_json::Map<String, serde_json::Value>,
 ) -> bool {
     match assertion {
+        RuntimeAssert::Always => true,
+        RuntimeAssert::CounterPositive { var } => counters.get(var).copied().unwrap_or(0) > 0,
+        RuntimeAssert::CounterCompare { var, op, value } => {
+            compare_counter(counters.get(var).copied().unwrap_or(0), op, *value)
+        }
         RuntimeAssert::StringNonEmpty { var } => fields.get(var).is_some_and(|value| {
             value.as_str().is_some_and(|value| !value.is_empty())
                 || value.as_object().is_some_and(|object| {
@@ -170,13 +234,130 @@ pub fn evaluate_runtime_assert(
         RuntimeAssert::CounterVarCompare { left, op, right } => {
             let left = counters.get(left).copied().unwrap_or(0);
             let right = counters.get(right).copied().unwrap_or(0);
-            match op {
-                AssertCompareOp::Gt => left > right,
-                AssertCompareOp::Gte => left >= right,
-                AssertCompareOp::Lt => left < right,
-                AssertCompareOp::Lte => left <= right,
-                AssertCompareOp::Eq => left == right,
-            }
+            compare_counter(left, op, right)
         }
+        RuntimeAssert::BoolRequired { var, expect } => {
+            booleans.get(var).copied().unwrap_or(false) == *expect
+        }
+        RuntimeAssert::NeverState { state } => status != state,
+        RuntimeAssert::And(parts) => parts
+            .iter()
+            .all(|part| evaluate_runtime_assert(part, status, counters, booleans, fields)),
+        RuntimeAssert::Or(parts) => parts
+            .iter()
+            .any(|part| evaluate_runtime_assert(part, status, counters, booleans, fields)),
+    }
+}
+
+fn has_parameter_counter_effect(automaton: &Automaton) -> bool {
+    automaton.actions.iter().any(|action| {
+        action.effect.iter().any(|effect| {
+            matches!(
+                effect,
+                super::Effect::Increment {
+                    amount: Some(_),
+                    ..
+                } | super::Effect::Decrement {
+                    amount: Some(_),
+                    ..
+                } | super::Effect::SetCounterFromParam { .. }
+            )
+        })
+    })
+}
+
+fn contains_no_further_transitions(assertion: &ParsedAssert) -> bool {
+    match assertion {
+        ParsedAssert::NoFurtherTransitions => true,
+        ParsedAssert::And(parts) | ParsedAssert::Or(parts) => {
+            parts.iter().any(contains_no_further_transitions)
+        }
+        _ => false,
+    }
+}
+
+fn compare_counter(left: usize, op: &AssertCompareOp, right: usize) -> bool {
+    match op {
+        AssertCompareOp::Gt => left > right,
+        AssertCompareOp::Gte => left >= right,
+        AssertCompareOp::Lt => left < right,
+        AssertCompareOp::Lte => left <= right,
+        AssertCompareOp::Eq => left == right,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automaton::parse_automaton;
+
+    fn parameter_counter_spec(assertion: &str) -> Automaton {
+        parse_automaton(&format!(
+            r#"
+[automaton]
+name = "Budget"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "budget"
+type = "counter"
+initial = "1"
+
+[[action]]
+name = "SetBudget"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["budget"]
+effect = [{{ type = "set_counter_from_param", var = "budget", param = "budget" }}]
+
+[[invariant]]
+name = "BudgetInvariant"
+when = ["Active"]
+assert = "{assertion}"
+"#
+        ))
+        .expect("parameter counter spec must parse")
+    }
+
+    fn evaluate_budget(assertion: &RuntimeAssert, budget: usize) -> bool {
+        evaluate_runtime_assert(
+            assertion,
+            "Active",
+            &BTreeMap::from([("budget".to_string(), budget)]),
+            &BTreeMap::new(),
+            &serde_json::Map::new(),
+        )
+    }
+
+    #[test]
+    fn parameter_counter_compounds_preserve_and_or_semantics() {
+        let and_spec = parameter_counter_spec("budget <= 10 && budget > 0");
+        let and_invariants = compile_runtime_invariants(&and_spec);
+        assert_eq!(and_invariants.len(), 1);
+        assert!(matches!(and_invariants[0].assertion, RuntimeAssert::And(_)));
+        assert!(evaluate_budget(&and_invariants[0].assertion, 5));
+        assert!(!evaluate_budget(&and_invariants[0].assertion, 0));
+        assert!(!evaluate_budget(&and_invariants[0].assertion, 100));
+
+        let or_spec = parameter_counter_spec("budget <= 10 || budget == 11");
+        let or_invariants = compile_runtime_invariants(&or_spec);
+        assert_eq!(or_invariants.len(), 1);
+        assert!(matches!(or_invariants[0].assertion, RuntimeAssert::Or(_)));
+        assert!(evaluate_budget(&or_invariants[0].assertion, 11));
+        assert!(!evaluate_budget(&or_invariants[0].assertion, 100));
+    }
+
+    #[test]
+    fn parameter_counter_effect_rejects_terminal_assertion_without_runtime_equivalence() {
+        let spec = parameter_counter_spec("budget <= 10 || no_further_transitions");
+
+        assert_eq!(
+            unsupported_safety_invariant_names(&spec),
+            vec!["BudgetInvariant"]
+        );
+        assert!(compile_runtime_invariants(&spec).is_empty());
     }
 }

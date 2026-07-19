@@ -84,17 +84,29 @@ fn runtime_field_kind(table: &TransitionTable, name: &str) -> Option<RuntimeFiel
     table
         .runtime_invariants
         .iter()
-        .find_map(|invariant| match &invariant.assertion {
-            temper_spec::automaton::RuntimeAssert::StringNonEmpty { var } if var == name => {
-                Some(RuntimeFieldKind::String)
-            }
-            temper_spec::automaton::RuntimeAssert::CounterVarCompare { left, right, .. }
-                if left == name || right == name =>
-            {
-                Some(RuntimeFieldKind::Counter)
-            }
-            _ => None,
-        })
+        .find_map(|invariant| runtime_assert_field_kind(&invariant.assertion, name))
+}
+
+fn runtime_assert_field_kind(
+    assertion: &temper_spec::automaton::RuntimeAssert,
+    name: &str,
+) -> Option<RuntimeFieldKind> {
+    use temper_spec::automaton::RuntimeAssert;
+    match assertion {
+        RuntimeAssert::StringNonEmpty { var } if var == name => Some(RuntimeFieldKind::String),
+        RuntimeAssert::CounterPositive { var } | RuntimeAssert::CounterCompare { var, .. }
+            if var == name =>
+        {
+            Some(RuntimeFieldKind::Counter)
+        }
+        RuntimeAssert::CounterVarCompare { left, right, .. } if left == name || right == name => {
+            Some(RuntimeFieldKind::Counter)
+        }
+        RuntimeAssert::And(parts) | RuntimeAssert::Or(parts) => parts
+            .iter()
+            .find_map(|part| runtime_assert_field_kind(part, name)),
+        _ => None,
+    }
 }
 
 /// Build the canonical initial entity state shared by production, simulation,
@@ -680,7 +692,9 @@ pub(crate) fn runtime_invariant_failure(
         (active
             && !temper_spec::automaton::evaluate_runtime_assert(
                 &invariant.assertion,
+                &state.status,
                 &state.counters,
+                &state.booleans,
                 fields,
             ))
         .then(|| {

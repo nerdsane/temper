@@ -436,6 +436,39 @@ assert = "goal != ''"
     }
 
     #[test]
+    fn accepts_model_only_counter_invariant_on_postgres_actor_runtime() {
+        let ioa = r#"
+[automaton]
+name = "Counter"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "items"
+type = "counter"
+initial = "1"
+
+[[action]]
+name = "Add"
+kind = "input"
+from = ["Active"]
+to = "Active"
+effect = [{ type = "increment", var = "items" }]
+
+[[invariant]]
+name = "HasItems"
+when = ["Active"]
+assert = "items > 0"
+"#;
+        let registry = registry_with("alpha", "Counter", ioa);
+        let definitions = collect_actor_runtime_definitions(&registry, &["Counter".into()])
+            .expect("model-only counter invariant remains actor-runtime compatible");
+
+        assert!(definitions.actor_backed_keys.contains("Counter"));
+    }
+
+    #[test]
     fn rejects_conflicting_same_named_specs_across_tenants() {
         let mut registry = registry_with("alpha", "Order", ORDER_IOA);
         let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
