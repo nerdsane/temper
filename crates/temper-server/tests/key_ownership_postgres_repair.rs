@@ -193,6 +193,78 @@ async fn postgres_backfill_purges_deleted_and_orphaned_key_owners_before_waterma
     );
 }
 
+/// Migrated deployments can have a durable query-plane catalog row without a
+/// journal: ADR-0077 populated the catalog directly from snapshots rather than
+/// replaying historical events. Key reconciliation must include that compatibility
+/// shape before publishing authoritative coverage, or a keyed miss can hide the
+/// existing owner and admit a duplicate claim after restart.
+#[tokio::test]
+async fn postgres_backfill_reconstructs_catalog_only_owner_before_watermark() {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("connect to Postgres");
+    temper_store_postgres::migration::run_migrations(&pool)
+        .await
+        .expect("run Postgres migrations");
+    let store = PostgresEventStore::new(pool);
+    let tenant = TenantId::new(format!("arn238-catalog-only-pg-{}", sim_uuid()));
+    let state = server_with_postgres(&tenant, store.clone());
+    let owner_id = "migrated-owner";
+    let hash = key_hash("ws", "/migrated");
+    let fields = serde_json::json!({"WorkspaceId": "ws", "Path": "/migrated"});
+
+    store
+        .upsert_query_projection(tenant.as_str(), "Doc", owner_id, "New", &fields, 7)
+        .await
+        .expect("seed migrated catalog-only entity");
+    assert!(
+        store
+            .read_events(&format!("{tenant}:Doc:{owner_id}"), 0)
+            .await
+            .expect("catalog-only journal read")
+            .is_empty(),
+        "precondition: migrated owner has no journal"
+    );
+
+    state.populate_key_index_from_snapshots(&tenant).await;
+
+    assert_eq!(
+        store
+            .lookup_by_key(tenant.as_str(), "Doc", "path", &hash)
+            .await
+            .expect("reconstructed key lookup"),
+        Some(owner_id.to_string()),
+        "repair must reconstruct the durable catalog-only owner before coverage"
+    );
+    let table = TransitionTableForTest::doc();
+    let signature = declared_key_set_signature(&table.keys);
+    assert!(
+        store
+            .key_index_backfilled_types(tenant.as_str())
+            .await
+            .expect("watermarks")
+            .contains(&("Doc".to_string(), signature)),
+        "coverage may publish only after the catalog-only owner is indexed"
+    );
+
+    let duplicate = state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Doc",
+            "duplicate",
+            serde_json::json!({"WorkspaceId": "ws", "Path": "/migrated"}),
+        )
+        .await;
+    assert!(
+        duplicate.is_err(),
+        "the reconstructed durable owner must reject a duplicate claim"
+    );
+}
+
 /// The native PostgreSQL data-only optimization must claim a declared key in the
 /// same transaction as its first event and projection. A conflicting claim rolls
 /// all three writes back.
