@@ -170,6 +170,7 @@ impl ServerState {
                 )));
             }
         }
+        self.reconcile_state_timeout_after_synthetic_commit(tenant, "File", file_id, &state);
 
         if let Some(query_plane) = self.query_plane_store() {
             let fields = self.query_projection_fields(tenant, "File", &state.fields);

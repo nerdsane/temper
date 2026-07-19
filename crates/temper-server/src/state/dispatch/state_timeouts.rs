@@ -513,6 +513,49 @@ impl crate::state::ServerState {
         );
     }
 
+    /// Reconcile a durable state produced without spawning or reloading its
+    /// actor before the successful commit returns to the caller.
+    ///
+    /// Atomic composite creation and initial File content writes deliberately
+    /// bypass actor materialization. Reusing hydration reconciliation here
+    /// preserves that fast path while ensuring a committed timed state owns a
+    /// live timer immediately. The durable clock remains authoritative, and a
+    /// concurrently replaced or removed declaration is resolved against the
+    /// current table by the shared scheduler.
+    pub(crate) fn reconcile_state_timeout_after_synthetic_commit(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        committed_state: &EntityState,
+    ) {
+        if committed_state.state_timeout_clock_reset_at.is_none()
+            && self
+                .current_state_timeout_declaration(tenant, entity_type, &committed_state.status)
+                .is_none()
+        {
+            return;
+        }
+
+        let response = EntityResponse {
+            success: true,
+            state: committed_state.clone(),
+            error: None,
+            custom_effects: vec![],
+            scheduled_actions: vec![],
+            spawn_requests: vec![],
+            spec_governed: true,
+        };
+        self.arm_state_timeouts_on_hydration(
+            tenant,
+            entity_type,
+            entity_id,
+            &response,
+            sim_now(),
+            Duration::ZERO,
+        );
+    }
+
     /// Arm or re-arm state timers based on the just-completed transition.
     ///
     /// Invoked from `run_post_dispatch_effects`. Walks the spec's

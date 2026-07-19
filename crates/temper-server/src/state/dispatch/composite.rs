@@ -409,6 +409,18 @@ impl crate::state::ServerState {
             .map_err(composite_batch_persistence_error)?;
         let append_ms = append_started_at.map(|started| started.elapsed().as_millis() as u64);
 
+        for stream in streams
+            .values()
+            .filter(|stream| !stream.events.is_empty() && !stream.target_existed)
+        {
+            self.reconcile_state_timeout_after_synthetic_commit(
+                tenant,
+                &stream.entity_type,
+                &stream.entity_id,
+                &stream.state,
+            );
+        }
+
         let projection_collect_started_at = timing_enabled.then(std::time::Instant::now);
         self.update_composite_query_projections(tenant, &streams)
             .await?;
