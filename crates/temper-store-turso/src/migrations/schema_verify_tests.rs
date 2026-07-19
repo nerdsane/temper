@@ -3,6 +3,7 @@ use libsql::{Builder, Connection};
 use super::catalog::MIGRATIONS;
 use super::runner::migrate;
 
+mod ots_probe_replacement;
 mod runtime_extensions;
 
 #[tokio::test]
