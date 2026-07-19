@@ -6,6 +6,7 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use std::collections::BTreeMap;
 use temper_runtime::ActorSystem;
 use temper_runtime::persistence::{EntityVectorRow, EventStore};
 use temper_runtime::tenant::TenantId;
@@ -14,6 +15,7 @@ use temper_server::registry::SpecRegistry;
 use temper_server::request_context::AgentContext;
 use temper_server::{ServerState, StorageStack};
 use temper_spec::csdl::parse_csdl;
+use temper_store_postgres::PostgresEventStore;
 use temper_store_sim::SimEventStore;
 use tower::ServiceExt;
 
@@ -106,6 +108,10 @@ fn build_unreconciled_state_with_store() -> (ServerState, SimEventStore) {
 
 fn build_unreconciled_state() -> ServerState {
     build_unreconciled_state_with_store().0
+}
+
+fn compatibility_ioa_sources() -> BTreeMap<String, String> {
+    BTreeMap::from([("VecItem".to_string(), VEC_ITEM_IOA.to_string())])
 }
 
 async fn build_state() -> ServerState {
@@ -256,6 +262,60 @@ async fn nearest_fails_closed_until_current_vector_generation_is_reconciled() {
 
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {body}");
     assert_eq!(body["error"]["code"], "VectorIndexRebuilding");
+}
+
+#[tokio::test]
+async fn storage_stack_compatibility_constructor_reconciles_nearest_authority() {
+    let store = SimEventStore::no_faults(71);
+    let state = ServerState::with_storage_stack(
+        ActorSystem::new("nearest-legacy-storage-stack"),
+        parse_csdl(CSDL_XML).expect("CSDL parse"),
+        CSDL_XML.to_string(),
+        compatibility_ioa_sources(),
+        StorageStack::from_sim(store, None),
+    )
+    .expect("legacy storage-stack state");
+    let tenant = TenantId::default();
+    create_item(&state, &tenant, "item-a", &[1.0, 0.0, 0.0, 0.0], "m1").await;
+
+    assert!(
+        state.reconcile_declared_projections(&tenant).await,
+        "legacy vector declaration should reconcile"
+    );
+    let (status, body) = get_json(
+        &state,
+        "/tdata/VecItems/Temper.Nearest(decl='embed',vector='%5B1,0,0,0%5D',k=1,model='m1')",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["value"][0]["entity_id"], "item-a");
+}
+
+#[tokio::test]
+async fn postgres_compatibility_constructor_registers_projection_declarations() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgresql://localhost/arn189-unused")
+        .expect("lazy PostgreSQL pool");
+    let state = ServerState::with_persistence(
+        ActorSystem::new("nearest-legacy-postgres"),
+        parse_csdl(CSDL_XML).expect("CSDL parse"),
+        CSDL_XML.to_string(),
+        compatibility_ioa_sources(),
+        PostgresEventStore::new(pool),
+    )
+    .expect("legacy PostgreSQL state");
+    let tenant = TenantId::default();
+
+    assert!(
+        state
+            .registry
+            .read()
+            .expect("registry lock")
+            .get_table(&tenant, "VecItem")
+            .is_some_and(|table| !table.vectors.is_empty()),
+        "the PostgreSQL compatibility constructor must register declarations for reconciliation"
+    );
 }
 
 #[tokio::test]
