@@ -1,14 +1,16 @@
+use std::sync::Arc;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use sha2::{Digest, Sha256};
 use temper_runtime::ActorSystem;
-use temper_runtime::persistence::EventStore;
+use temper_runtime::persistence::{EventStore, PersistenceError};
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::SpecRegistry;
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
 use temper_server::request_context::AgentContext;
 use temper_server::state::IndexedFileStreamRead;
-use temper_server::storage::StorageStack;
+use temper_server::storage::{QueryPlaneStore, QueryProjectionFieldsRow, StorageStack};
 use temper_server::{ServerState, build_router};
 use temper_spec::csdl::parse_csdl;
 use temper_store_sim::SimEventStore;
@@ -227,6 +229,61 @@ after_seconds = 60
 on_timeout = "TimeoutFail"
 "#;
 
+struct FailingQueryPlane;
+
+#[async_trait::async_trait]
+impl QueryPlaneStore for FailingQueryPlane {
+    async fn upsert_projection(
+        &self,
+        _tenant: &str,
+        _entity_type: &str,
+        _entity_id: &str,
+        _status: &str,
+        _fields: &serde_json::Value,
+        _state: &serde_json::Value,
+        _sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
+        Err(PersistenceError::Storage(
+            "injected query projection failure".to_string(),
+        ))
+    }
+
+    async fn remove_projection(
+        &self,
+        _tenant: &str,
+        _entity_type: &str,
+        _entity_id: &str,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    async fn query_field_index(
+        &self,
+        _tenant: &str,
+        _entity_type: &str,
+        _where_clause: &str,
+        _params: Vec<String>,
+    ) -> Result<Option<Vec<String>>, PersistenceError> {
+        Ok(None)
+    }
+
+    async fn load_projection_fields_many(
+        &self,
+        _tenant: &str,
+        _entity_type: &str,
+        _entity_ids: &[String],
+        _field_names: &[&str],
+    ) -> Result<Option<Vec<QueryProjectionFieldsRow>>, PersistenceError> {
+        Ok(None)
+    }
+
+    async fn projected_entity_counts_by_tenant(
+        &self,
+    ) -> Result<Option<Vec<(String, u64)>>, PersistenceError> {
+        Ok(None)
+    }
+}
+
 async fn build_turso_state(test_name: &str) -> (ServerState, TursoEventStore) {
     let db_path = std::env::temp_dir().join(format!(
         "temper-file-value-fast-path-{test_name}-{}.db",
@@ -266,6 +323,13 @@ async fn build_turso_file_state(test_name: &str) -> (ServerState, TursoEventStor
 }
 
 fn build_sim_timed_file_state(seed: u64) -> (ServerState, SimEventStore) {
+    build_sim_timed_file_state_with_query_plane(seed, None)
+}
+
+fn build_sim_timed_file_state_with_query_plane(
+    seed: u64,
+    query_plane: Option<Arc<dyn QueryPlaneStore>>,
+) -> (ServerState, SimEventStore) {
     let store = SimEventStore::no_faults(seed);
     let mut registry = SpecRegistry::new();
     let csdl = parse_csdl(FILE_CSDL_XML).expect("timed File CSDL should parse");
@@ -276,7 +340,9 @@ fn build_sim_timed_file_state(seed: u64) -> (ServerState, SimEventStore) {
         &[("File", TIMED_FILE_IOA)],
     );
     let mut state = ServerState::from_registry(ActorSystem::new("timed-file-create"), registry);
-    state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
+    let mut storage = StorageStack::from_sim(store.clone(), None);
+    storage.query_plane = query_plane;
+    state.set_storage_stack(storage);
     (state, store)
 }
 
@@ -431,6 +497,86 @@ async fn atomic_initial_file_content_arms_timeout_without_later_access() {
             .count(),
         1,
         "the synthetic File creation path must deliver the timeout exactly once"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn atomic_initial_file_content_arms_timeout_when_projection_fails_after_commit() {
+    let seed = 235;
+    let (_guard, clock, _ids) = temper_runtime::scheduler::install_deterministic_context(seed);
+    let (mut state, store) =
+        build_sim_timed_file_state_with_query_plane(seed, Some(Arc::new(FailingQueryPlane)));
+    let tenant = TenantId::default();
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    state.data_dir = data_dir.path().to_path_buf();
+    let file_id = "fl-timed-projection-failure";
+    let persistence_id = format!("default:File:{file_id}");
+
+    let error = state
+        .create_file_with_initial_stream_content(
+            &tenant,
+            file_id,
+            serde_json::json!({}),
+            b"timed File value before projection failure",
+            "text/plain",
+            &AgentContext::for_service("timed-file-projection-failure-test"),
+        )
+        .await
+        .expect_err("the injected query projection write must fail");
+    assert!(
+        error.contains("query projection write failed"),
+        "unexpected post-commit failure: {error}"
+    );
+    assert_eq!(
+        store
+            .dump_journal(&persistence_id)
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Created", "StreamUpdated"],
+        "the File journal commit precedes the injected projection failure"
+    );
+    assert_eq!(
+        state.state_timeout_tracker.pending_snapshot(),
+        vec![("File".to_string(), 1)],
+        "post-commit projection failure must not strand the durable timeout"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(60)).await;
+    clock.advance_by(600);
+    for _ in 0..128 {
+        tokio::task::yield_now().await;
+        if store
+            .dump_journal(&persistence_id)
+            .iter()
+            .any(|event| event.event_type == "TimeoutFail")
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        store
+            .dump_journal(&persistence_id)
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Created", "StreamUpdated", "TimeoutFail"],
+        "the committed File must time out without retry, access, or restart"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(60)).await;
+    clock.advance_by(600);
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        store
+            .dump_journal(&persistence_id)
+            .iter()
+            .filter(|event| event.event_type == "TimeoutFail")
+            .count(),
+        1,
+        "the projection-fault path must deliver the timeout exactly once"
     );
 }
 

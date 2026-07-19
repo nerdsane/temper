@@ -424,3 +424,6 @@ async fn composite_reset_on_addition_does_not_reinterpret_clock_after_abrupt_res
     )
     .await;
 }
+
+#[path = "composite_timeout_clock_projection_fault_tests.rs"]
+mod projection_fault_tests;
