@@ -11,6 +11,7 @@ use temper_server::state::IndexedFileStreamRead;
 use temper_server::storage::StorageStack;
 use temper_server::{ServerState, build_router};
 use temper_spec::csdl::parse_csdl;
+use temper_store_sim::SimEventStore;
 use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
@@ -180,6 +181,52 @@ effect = [
 ]
 "#;
 
+const TIMED_FILE_IOA: &str = r#"
+[automaton]
+name = "File"
+states = ["Created", "Ready", "TimedOut"]
+initial = "Created"
+allow_indefinite_states = ["Created", "TimedOut"]
+
+[[state]]
+name = "has_content"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "size_bytes"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "version_count"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "StreamUpdated"
+kind = "input"
+from = ["Created", "Ready"]
+to = "Ready"
+params = ["content_hash", "size_bytes", "mime_type", "version_number", "previous_version_id", "created_by"]
+effect = [
+  { type = "increment", var = "version_count" },
+  { type = "set_counter_from_param", var = "size_bytes", param = "size_bytes" },
+  { type = "set_bool", var = "has_content", value = "true" },
+]
+
+[[action]]
+name = "TimeoutFail"
+kind = "internal"
+from = ["Ready"]
+to = "TimedOut"
+
+[[state_timeout]]
+state = "Ready"
+after_seconds = 60
+on_timeout = "TimeoutFail"
+"#;
+
 async fn build_turso_state(test_name: &str) -> (ServerState, TursoEventStore) {
     let db_path = std::env::temp_dir().join(format!(
         "temper-file-value-fast-path-{test_name}-{}.db",
@@ -215,6 +262,21 @@ async fn build_turso_file_state(test_name: &str) -> (ServerState, TursoEventStor
     );
     let mut state = ServerState::from_registry(ActorSystem::new(test_name), registry);
     state.set_storage_stack(StorageStack::from_turso(store.clone()));
+    (state, store)
+}
+
+fn build_sim_timed_file_state(seed: u64) -> (ServerState, SimEventStore) {
+    let store = SimEventStore::no_faults(seed);
+    let mut registry = SpecRegistry::new();
+    let csdl = parse_csdl(FILE_CSDL_XML).expect("timed File CSDL should parse");
+    registry.register_tenant(
+        "default",
+        csdl,
+        FILE_CSDL_XML.to_string(),
+        &[("File", TIMED_FILE_IOA)],
+    );
+    let mut state = ServerState::from_registry(ActorSystem::new("timed-file-create"), registry);
+    state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
     (state, store)
 }
 
@@ -301,6 +363,75 @@ async fn create_file_with_initial_stream_content_projects_only_ready_content() {
         }
     );
     assert_local_blob(data_dir.path(), &expected_hash, body).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn atomic_initial_file_content_arms_timeout_without_later_access() {
+    let seed = 234;
+    let (_guard, clock, _ids) = temper_runtime::scheduler::install_deterministic_context(seed);
+    let (mut state, store) = build_sim_timed_file_state(seed);
+    let tenant = TenantId::default();
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    state.data_dir = data_dir.path().to_path_buf();
+    let file_id = "fl-timed-atomic-initial";
+    let persistence_id = format!("default:File:{file_id}");
+
+    let response = state
+        .create_file_with_initial_stream_content(
+            &tenant,
+            file_id,
+            serde_json::json!({}),
+            b"timed atomic File value",
+            "text/plain",
+            &AgentContext::for_service("timed-file-test-writer"),
+        )
+        .await
+        .expect("atomic initial File content write should succeed");
+    assert_eq!(response.state.status, "Ready");
+    assert_eq!(response.state.sequence_nr, 2);
+    assert_eq!(
+        state.state_timeout_tracker.pending_snapshot(),
+        vec![("File".to_string(), 1)],
+        "the atomic File commit must arm its timeout without a later read"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(60)).await;
+    clock.advance_by(600);
+    for _ in 0..128 {
+        tokio::task::yield_now().await;
+        if store
+            .dump_journal(&persistence_id)
+            .iter()
+            .any(|event| event.event_type == "TimeoutFail")
+        {
+            break;
+        }
+    }
+
+    let journal = store.dump_journal(&persistence_id);
+    assert_eq!(
+        journal
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Created", "StreamUpdated", "TimeoutFail"],
+        "the new File must time out without intervening entity access"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(60)).await;
+    clock.advance_by(600);
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        store
+            .dump_journal(&persistence_id)
+            .iter()
+            .filter(|event| event.event_type == "TimeoutFail")
+            .count(),
+        1,
+        "the synthetic File creation path must deliver the timeout exactly once"
+    );
 }
 
 #[tokio::test]

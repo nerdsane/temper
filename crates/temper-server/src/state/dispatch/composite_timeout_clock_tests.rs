@@ -40,6 +40,18 @@ states = ["Active"]
 initial = "Active"
 
 [[action]]
+name = "CreateTimedChild"
+kind = "Composite"
+from = ["Active"]
+to = "Active"
+record_parent_event = false
+
+[[action.sub_writes]]
+target_entity = "TimedChild"
+action = "Create"
+generated_from = "timed_child"
+
+[[action]]
 name = "HeartbeatTimedChild"
 kind = "Composite"
 from = ["Active"]
@@ -58,6 +70,12 @@ name = "TimedChild"
 states = ["Open", "TimedOut"]
 initial = "Open"
 allow_indefinite_states = ["TimedOut"]
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Open"]
+to = "Open"
 
 [[action]]
 name = "Heartbeat"
@@ -84,6 +102,12 @@ name = "TimedChild"
 states = ["Open", "TimedOut"]
 initial = "Open"
 allow_indefinite_states = ["TimedOut"]
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Open"]
+to = "Open"
 
 [[action]]
 name = "Heartbeat"
@@ -299,6 +323,84 @@ async fn run_restart_case(
         "restart delivers exactly one timeout"
     );
     assert_eq!(final_journal.len(), 3, "Created, Heartbeat, TimeoutFail");
+}
+
+#[tokio::test(start_paused = true)]
+async fn atomic_composite_creation_arms_timed_target_without_later_access() {
+    let seed = 233;
+    let (_guard, clock, _ids) = temper_runtime::scheduler::install_deterministic_context(seed);
+    let store = SimEventStore::no_faults(seed);
+    let tenant = TenantId::default();
+    let entity_id = "timed-composite-created-atomically";
+    let persistence_id = format!("default:TimedChild:{entity_id}");
+    let state = state_with_timed_child(
+        store.clone(),
+        TIMED_CHILD_WITH_RESET_IOA,
+        "composite-timeout-new-target",
+    );
+
+    state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            "parent-creates-timed-child",
+            "CreateTimedChild",
+            &json!({
+                "sub_writes": [{
+                    "entity_type": "TimedChild",
+                    "entity_id": entity_id,
+                    "action": "Create",
+                    "params": {}
+                }]
+            }),
+            &AgentContext::for_service("composite-timeout-new-target-test"),
+        )
+        .await
+        .expect("atomic composite creates the timed target");
+
+    assert_eq!(
+        state.state_timeout_tracker.pending_snapshot(),
+        vec![("TimedChild".to_string(), 1)],
+        "the atomic commit must arm the new timed target without a later read"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(60)).await;
+    clock.advance_by(600);
+    for _ in 0..128 {
+        tokio::task::yield_now().await;
+        if store
+            .dump_journal(&persistence_id)
+            .iter()
+            .any(|event| event.event_type == "TimeoutFail")
+        {
+            break;
+        }
+    }
+
+    let journal = store.dump_journal(&persistence_id);
+    assert_eq!(
+        journal
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Created", "Create", "TimeoutFail"],
+        "the new target must time out without intervening entity access"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(60)).await;
+    clock.advance_by(600);
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        store
+            .dump_journal(&persistence_id)
+            .iter()
+            .filter(|event| event.event_type == "TimeoutFail")
+            .count(),
+        1,
+        "the synthetic creation path must deliver the timeout exactly once"
+    );
 }
 
 #[tokio::test(start_paused = true)]
