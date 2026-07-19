@@ -24,6 +24,8 @@ use temper_store_sim::SimEventStore;
 mod field_update_recovery;
 #[path = "key_ownership_write_surfaces/key_contract_aba.rs"]
 mod key_contract_aba;
+#[path = "key_ownership_write_surfaces/tombstone_snapshot_recovery.rs"]
+mod tombstone_snapshot_recovery;
 
 const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
 const DOC_IOA: &str = include_str!("../../../test-fixtures/specs/keyed_doc.ioa.toml");
