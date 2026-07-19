@@ -22,6 +22,10 @@ async fn remote_final_ots_probe_is_atomic_and_side_effect_free() {
     migrate(&setup)
         .await
         .expect("migrate isolated remote database");
+    drop(setup);
+    let setup = initial_database
+        .connect()
+        .expect("reconnect remote setup after migration");
     setup
         .execute(
             "CREATE TABLE arn242_remote_probe_audit (
@@ -53,13 +57,21 @@ async fn remote_final_ots_probe_is_atomic_and_side_effect_free() {
         .connect()
         .expect("connect remote replay client");
     let reopened = migrate(&replay).await;
+    drop(replay);
+    let inspection = initial_database
+        .connect()
+        .expect("reconnect remote inspection after replay");
     let probe_rows = scalar_i64(
-        &setup,
+        &inspection,
         "SELECT COUNT(*) FROM ots_trajectories
          WHERE trajectory_id GLOB '__temper_trigger_probe__-*'",
     )
     .await;
-    let audit_rows = scalar_i64(&setup, "SELECT COUNT(*) FROM arn242_remote_probe_audit").await;
+    let audit_rows = scalar_i64(
+        &inspection,
+        "SELECT COUNT(*) FROM arn242_remote_probe_audit",
+    )
+    .await;
     let reopen_error = reopened.as_ref().err().map(ToString::to_string);
 
     assert!(
