@@ -1,18 +1,86 @@
-use libsql::Builder;
+use libsql::{Builder, Connection, params};
 
 use super::catalog::MIGRATIONS;
 use super::runner::migrate;
+use crate::store::ots::PERSIST_OTS_TRAJECTORY_SQL;
 
 #[tokio::test]
 async fn current_ots_shape_preserves_harmless_inbound_reference() {
+    let (_directory, connection) = current_ots_with_child("current-inbound", "NO ACTION").await;
+
+    migrate(&connection)
+        .await
+        .expect("an already-current table needs no destructive inbound-FK gate");
+
+    assert_eq!(
+        scalar_i64(&connection, "SELECT COUNT(*) FROM ots_trajectories").await,
+        1
+    );
+    assert_eq!(
+        scalar_i64(&connection, "SELECT COUNT(*) FROM current_ots_child").await,
+        1
+    );
+    assert_eq!(
+        scalar_i64(&connection, "SELECT COUNT(*) FROM temper_schema_migrations").await,
+        MIGRATIONS.len() as i64
+    );
+}
+
+#[tokio::test]
+async fn current_ots_cascade_child_survives_existing_id_production_persist() {
+    assert_existing_id_persist_preserves_child("current-cascade", "CASCADE").await;
+}
+
+#[tokio::test]
+async fn current_ots_restrict_child_allows_existing_id_production_persist() {
+    assert_existing_id_persist_preserves_child("current-restrict", "RESTRICT").await;
+}
+
+async fn assert_existing_id_persist_preserves_child(label: &str, on_delete: &str) {
+    let (_directory, connection) = current_ots_with_child(label, on_delete).await;
+
+    migrate(&connection)
+        .await
+        .expect("current OTS schema with an inbound reference remains compatible");
+    connection
+        .execute(
+            PERSIST_OTS_TRAJECTORY_SQL,
+            params![
+                "trajectory-current".to_string(),
+                "tenant-updated".to_string(),
+                "agent-updated".to_string(),
+                "session-updated".to_string(),
+                "persisted-updated".to_string(),
+                7_i64,
+                "{\"stage\":\"updated\"}".to_string(),
+            ],
+        )
+        .await
+        .expect("existing-ID production persist must not delete or reject inbound references");
+
+    assert_eq!(
+        scalar_i64(&connection, "SELECT COUNT(*) FROM current_ots_child").await,
+        1,
+        "ON DELETE {on_delete} child must survive an existing-ID production persist"
+    );
+    assert_eq!(
+        scalar_i64(
+            &connection,
+            "SELECT turn_count FROM ots_trajectories
+             WHERE trajectory_id = 'trajectory-current'"
+        )
+        .await,
+        7
+    );
+}
+
+async fn current_ots_with_child(label: &str, on_delete: &str) -> (tempfile::TempDir, Connection) {
     let directory = tempfile::tempdir().expect("temporary database directory");
-    let database = Builder::new_local(directory.path().join("current-inbound.db"))
+    let database = Builder::new_local(directory.path().join(format!("{label}.db")))
         .build()
         .await
-        .expect("build current-inbound database");
-    let connection = database
-        .connect()
-        .expect("connect current-inbound database");
+        .expect("build current OTS database");
+    let connection = database.connect().expect("connect current OTS database");
     connection
         .execute("PRAGMA foreign_keys = ON", ())
         .await
@@ -40,10 +108,13 @@ async fn current_ots_shape_preserves_harmless_inbound_reference() {
         .expect("create current OTS table");
     connection
         .execute(
-            "CREATE TABLE current_ots_child (
+            &format!(
+                "CREATE TABLE current_ots_child (
                 id TEXT PRIMARY KEY,
-                trajectory_id TEXT NOT NULL REFERENCES ots_trajectories(trajectory_id)
-            )",
+                trajectory_id TEXT NOT NULL
+                    REFERENCES ots_trajectories(trajectory_id) ON DELETE {on_delete}
+            )"
+            ),
             (),
         )
         .await
@@ -64,23 +135,7 @@ async fn current_ots_shape_preserves_harmless_inbound_reference() {
         )
         .await
         .expect("insert current OTS child");
-
-    migrate(&connection)
-        .await
-        .expect("an already-current table needs no destructive inbound-FK gate");
-
-    assert_eq!(
-        scalar_i64(&connection, "SELECT COUNT(*) FROM ots_trajectories").await,
-        1
-    );
-    assert_eq!(
-        scalar_i64(&connection, "SELECT COUNT(*) FROM current_ots_child").await,
-        1
-    );
-    assert_eq!(
-        scalar_i64(&connection, "SELECT COUNT(*) FROM temper_schema_migrations").await,
-        MIGRATIONS.len() as i64
-    );
+    (directory, connection)
 }
 
 async fn scalar_i64(connection: &libsql::Connection, sql: &str) -> i64 {

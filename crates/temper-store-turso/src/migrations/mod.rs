@@ -7,6 +7,8 @@ mod ots_current_tests;
 mod ots_rebuild;
 #[cfg(test)]
 mod ots_rebuild_tests;
+#[cfg(test)]
+mod remote_probe_tests;
 mod runner;
 mod schema_manifest;
 mod schema_ots_probe;
