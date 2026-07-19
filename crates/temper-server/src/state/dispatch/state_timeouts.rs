@@ -79,32 +79,31 @@ enum StateTimeoutArmCause {
 /// been idle in the current state, used by the hydration re-arm path to
 /// compute remaining timeout budget.
 ///
-/// A snapshot-carried anchor is authoritative when the bounded recent-event
-/// window no longer contains the entry event. Returns `None` only for a legacy
-/// snapshot (or fresh in-memory state) with neither source available.
+/// The actor-carried anchor is authoritative whenever present: current journal
+/// payloads co-commit the table-at-commit clock outcome with every event, and
+/// replay advances this field from that durable outcome. Re-scanning those
+/// events with a later `reset_on` definition would reinterpret history. The
+/// bounded event scan is therefore only a legacy/fresh-state fallback.
 fn compute_state_clock_reset_ts(
     events: &VecDeque<EntityEvent>,
-    snapshot_reset_at: Option<DateTime<Utc>>,
+    durable_reset_at: Option<DateTime<Utc>>,
     current_state: &str,
     reset_on: &[String],
 ) -> Option<DateTime<Utc>> {
+    if let Some(reset_at) = durable_reset_at {
+        return Some(reset_at);
+    }
+
     // Find the most recent state entry: last event whose to_status ==
     // current_state AND from_status != current_state. Scanning backward
     // because recent events are at the back.
     let entry_idx = events
         .iter()
-        .rposition(|e| e.to_status == current_state && e.from_status != current_state);
-    let entry_reset_at = entry_idx.map(|entry_idx| events[entry_idx].timestamp);
-    let reset_at = match (snapshot_reset_at, entry_reset_at) {
-        (Some(snapshot), Some(entry)) => snapshot.max(entry),
-        (Some(snapshot), None) => snapshot,
-        (None, Some(entry)) => entry,
-        (None, None) => return None,
-    };
+        .rposition(|e| e.to_status == current_state && e.from_status != current_state)?;
+    let reset_at = events[entry_idx].timestamp;
 
-    // When the entry is in the hot tail, only later events may reset it. When
-    // the entry is represented by a snapshot anchor, every tail event is later.
-    let reset_scan_start = entry_idx.map_or(0, |entry_idx| entry_idx + 1);
+    // Only actions committed after this retained entry may reset it.
+    let reset_scan_start = entry_idx + 1;
     let latest_reset_ts = events
         .iter()
         .skip(reset_scan_start)

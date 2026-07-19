@@ -17,6 +17,9 @@ use crate::entity_actor::EntityState;
 use crate::entity_actor::effects::{
     FieldSyncMode, build_eval_context_with_xref, process_action_with_xref_and_field_mode,
 };
+use crate::entity_actor::event_persistence::{
+    PersistedStateTimeoutClock, apply_state_timeout_clock, encode_entity_event_payload,
+};
 use crate::request_context::AgentContext;
 use crate::state::account_verification::CommonsAccountVerificationError;
 use crate::state::app_uniqueness::CommonsAppUniquenessError;
@@ -367,10 +370,21 @@ impl crate::state::ServerState {
                 .event
                 .expect("successful process_action returns an event");
             event.idempotency_key = Some(write.idempotency_key.clone());
-            stream
-                .events
-                .push(composite_envelope(&persistence_id, &event)?);
-            stream.state.sequence_nr = stream.state.sequence_nr.saturating_add(1);
+            let event_version = stream
+                .state
+                .sequence_nr
+                .checked_add(1)
+                .expect("composite event sequence overflow");
+            let (envelope, clock) = composite_envelope(
+                &persistence_id,
+                &table,
+                &stream.state,
+                &event,
+                event_version,
+            )?;
+            stream.events.push(envelope);
+            stream.state.sequence_nr = event_version;
+            apply_state_timeout_clock(&mut stream.state, clock);
             stream.state.push_event_bounded(event);
         }
         let stage_ms = stage_started_at.map(|started| started.elapsed().as_millis() as u64);
@@ -464,10 +478,10 @@ impl crate::state::ServerState {
             return Ok(());
         }
 
+        let table = self.transition_table_for_dispatch(tenant, entity_type)?;
         let (target_exists, mut state) = if let Some(target) = preflight_target {
             (target.target_existed, target.state.clone())
         } else {
-            let table = self.transition_table_for_dispatch(tenant, entity_type)?;
             let target_exists = self
                 .ensure_entity_loaded(tenant, entity_type, entity_id)
                 .await;
@@ -496,8 +510,15 @@ impl crate::state::ServerState {
                 params: serde_json::json!({}),
                 idempotency_key: None,
             };
-            events.push(composite_envelope(&persistence_id, &bootstrap)?);
-            state.sequence_nr = state.sequence_nr.saturating_add(1);
+            let event_version = state
+                .sequence_nr
+                .checked_add(1)
+                .expect("composite bootstrap sequence overflow");
+            let (envelope, clock) =
+                composite_envelope(&persistence_id, &table, &state, &bootstrap, event_version)?;
+            events.push(envelope);
+            state.sequence_nr = event_version;
+            apply_state_timeout_clock(&mut state, clock);
             state.push_event_bounded(bootstrap);
         }
         streams.insert(
@@ -953,3 +974,7 @@ impl crate::state::ServerState {
 #[cfg(test)]
 #[path = "composite_test.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "sim"))]
+#[path = "composite_timeout_clock_tests.rs"]
+mod timeout_clock_tests;

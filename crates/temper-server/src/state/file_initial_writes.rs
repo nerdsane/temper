@@ -3,6 +3,9 @@ use std::sync::{Arc, RwLock};
 use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 
+use crate::entity_actor::event_persistence::{
+    apply_state_timeout_clock, encode_entity_event_payload,
+};
 use crate::entity_actor::{EntityEvent, EntityResponse, EntityState, process_action_with_xref};
 use crate::events::EntityStateChange;
 
@@ -87,7 +90,7 @@ impl ServerState {
 
         let persistence_id = format!("{tenant}:File:{file_id}");
         let mut state = initial_file_state(file_id, &table, serde_json::json!({}));
-        let mut events = Vec::with_capacity(3);
+        let mut envelopes = Vec::with_capacity(3);
 
         let created = EntityEvent {
             action: "Created".to_string(),
@@ -97,7 +100,7 @@ impl ServerState {
             params: serde_json::json!({}),
             idempotency_key: None,
         };
-        push_synthetic_event(&mut state, &mut events, created);
+        push_synthetic_event(&table, &persistence_id, &mut state, &mut envelopes, created)?;
 
         let no_xref = std::collections::BTreeMap::new();
         if create_params
@@ -106,7 +109,13 @@ impl ServerState {
         {
             let create_event =
                 apply_synthetic_file_action(&mut state, &table, "Create", create_params, &no_xref)?;
-            push_synthetic_event(&mut state, &mut events, create_event);
+            push_synthetic_event(
+                &table,
+                &persistence_id,
+                &mut state,
+                &mut envelopes,
+                create_event,
+            )?;
         }
 
         let version_number = state.counters.get("version_count").copied().unwrap_or(0) + 1;
@@ -140,13 +149,13 @@ impl ServerState {
             stream_params,
             &stream_xref,
         )?;
-        push_synthetic_event(&mut state, &mut events, stream_event);
-
-        let envelopes = events
-            .iter()
-            .enumerate()
-            .map(|(idx, event)| synthetic_envelope(&persistence_id, (idx + 1) as u64, event))
-            .collect::<Result<Vec<_>, _>>()?;
+        push_synthetic_event(
+            &table,
+            &persistence_id,
+            &mut state,
+            &mut envelopes,
+            stream_event,
+        )?;
 
         match store.append(&persistence_id, 0, &envelopes).await {
             Ok(sequence_nr) => state.sequence_nr = sequence_nr,
@@ -400,24 +409,20 @@ fn apply_synthetic_file_action(
 }
 
 fn push_synthetic_event(
-    state: &mut EntityState,
-    events: &mut Vec<EntityEvent>,
-    event: EntityEvent,
-) {
-    state.sequence_nr = state.sequence_nr.saturating_add(1);
-    state.push_event_bounded(event.clone());
-    events.push(event);
-}
-
-fn synthetic_envelope(
+    table: &temper_jit::table::TransitionTable,
     persistence_id: &str,
-    sequence_nr: u64,
-    event: &EntityEvent,
-) -> Result<PersistenceEnvelope, FileStreamContentError> {
-    let payload = serde_json::to_value(event)
+    state: &mut EntityState,
+    envelopes: &mut Vec<PersistenceEnvelope>,
+    event: EntityEvent,
+) -> Result<(), FileStreamContentError> {
+    let event_version = state
+        .sequence_nr
+        .checked_add(1)
+        .expect("synthetic File event sequence overflow");
+    let (payload, clock) = encode_entity_event_payload(table, state, &event, event_version)
         .map_err(|e| FileStreamContentError::State(format!("failed to serialize event: {e}")))?;
-    Ok(PersistenceEnvelope {
-        sequence_nr,
+    envelopes.push(PersistenceEnvelope {
+        sequence_nr: event_version,
         event_type: event.action.clone(),
         payload,
         metadata: EventMetadata {
@@ -427,5 +432,9 @@ fn synthetic_envelope(
             timestamp: event.timestamp,
             actor_id: persistence_id.to_string(),
         },
-    })
+    });
+    state.sequence_nr = event_version;
+    apply_state_timeout_clock(state, clock);
+    state.push_event_bounded(event);
+    Ok(())
 }

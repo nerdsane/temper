@@ -13,6 +13,9 @@ use temper_runtime::tenant::TenantId;
 
 use super::dispatch::retry;
 use super::{ServerState, projection_backfill};
+use crate::entity_actor::event_persistence::{
+    apply_state_timeout_clock, encode_entity_event_payload,
+};
 use crate::entity_actor::{EntityActor, EntityEvent, EntityMsg, EntityResponse, EntityState};
 use crate::events::EntityStateChange;
 use crate::registry::{VerificationDetail, VerificationStatus};
@@ -1204,7 +1207,7 @@ impl ServerState {
             params: initial_fields,
             idempotency_key: None,
         };
-        let payload = serde_json::to_value(&created)
+        let (payload, clock) = encode_entity_event_payload(&table, &state, &created, 1)
             .map_err(|e| format!("failed to serialize Created event: {e}"))?;
         let envelope = PersistenceEnvelope {
             sequence_nr: 1,
@@ -1222,6 +1225,7 @@ impl ServerState {
         let projection_fields = self.query_projection_fields(tenant, entity_type, &state.fields);
         let mut created_projection_state = state.clone();
         created_projection_state.sequence_nr = 1;
+        apply_state_timeout_clock(&mut created_projection_state, clock);
         created_projection_state.push_event_bounded(created.clone());
         let projection_state = self.query_projection_state(&created_projection_state);
         if let Some(native_store) = self.data_only_create_store() {
@@ -1357,6 +1361,7 @@ impl ServerState {
                 projection_started_at,
             );
         }
+        apply_state_timeout_clock(&mut state, clock);
         state.push_event_bounded(created);
 
         {

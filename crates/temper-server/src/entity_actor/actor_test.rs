@@ -165,6 +165,10 @@ on_timeout = "TimeoutFail"
         payload.get("state_timeout_clock_reset_version"),
         Some(&serde_json::json!(1))
     );
+    assert_eq!(
+        payload.get(STATE_TIMEOUT_CLOCK_SNAPSHOT_AUTHORITY_KEY),
+        Some(&serde_json::Value::Bool(true))
+    );
     assert!(
         payload.get("events").is_none(),
         "hot events remain excluded"
@@ -176,14 +180,80 @@ on_timeout = "TimeoutFail"
         &table,
         &serde_json::json!({}),
     );
-    assert!(EntityActor::apply_snapshot_bytes(
-        &mut restored,
-        1,
-        &snapshot
-    ));
+    assert_eq!(
+        EntityActor::apply_snapshot_bytes(&mut restored, 1, &snapshot),
+        Some(true),
+        "a current snapshot carries an authoritative timeout-clock checkpoint"
+    );
     assert_eq!(restored.state_timeout_clock_reset_at, Some(reset_at));
     assert_eq!(restored.state_timeout_clock_reset_version, Some(1));
     assert!(restored.events.is_empty());
+
+    let mut false_marker: serde_json::Value =
+        serde_json::from_slice(&snapshot).expect("snapshot remains JSON");
+    false_marker
+        .as_object_mut()
+        .expect("snapshot object")
+        .insert(
+            STATE_TIMEOUT_CLOCK_SNAPSHOT_AUTHORITY_KEY.to_string(),
+            serde_json::Value::Bool(false),
+        );
+    let false_marker = serde_json::to_vec(&false_marker).expect("encode false-marker fixture");
+    assert_eq!(
+        EntityActor::apply_snapshot_bytes(&mut restored, 1, &false_marker),
+        None,
+        "current snapshots cannot downgrade their clock provenance"
+    );
+
+    let mut half_pair: serde_json::Value =
+        serde_json::from_slice(&snapshot).expect("snapshot remains JSON");
+    half_pair
+        .as_object_mut()
+        .expect("snapshot object")
+        .remove("state_timeout_clock_reset_version");
+    let half_pair = serde_json::to_vec(&half_pair).expect("encode half-pair fixture");
+    assert_eq!(
+        EntityActor::apply_snapshot_bytes(&mut restored, 1, &half_pair),
+        None,
+        "an authoritative snapshot must carry a complete clock pair"
+    );
+
+    let mut ahead_of_boundary: serde_json::Value =
+        serde_json::from_slice(&snapshot).expect("snapshot remains JSON");
+    ahead_of_boundary
+        .as_object_mut()
+        .expect("snapshot object")
+        .insert(
+            "state_timeout_clock_reset_version".to_string(),
+            serde_json::json!(2),
+        );
+    let ahead_of_boundary =
+        serde_json::to_vec(&ahead_of_boundary).expect("encode deferred-head fixture");
+    assert_eq!(
+        EntityActor::apply_snapshot_bytes(&mut restored, 1, &ahead_of_boundary),
+        Some(true),
+        "clock versions ahead of a replacement boundary require the captured journal head"
+    );
+    let head_error = EntityActor::validate_snapshot_timeout_clock_against_journal_head(
+        "default:TimedTask:clock-head-validation",
+        &restored,
+        1,
+        true,
+    )
+    .expect_err("a clock identity cannot exceed the proven journal head");
+    assert!(
+        head_error
+            .to_string()
+            .contains("journal_head_sequence_nr=1"),
+        "unexpected head-validation error: {head_error}"
+    );
+    EntityActor::validate_snapshot_timeout_clock_against_journal_head(
+        "default:TimedTask:clock-head-validation",
+        &restored,
+        2,
+        true,
+    )
+    .expect("a repaired clock identity may exceed its older replacement boundary");
 }
 
 #[cfg(feature = "sim")]

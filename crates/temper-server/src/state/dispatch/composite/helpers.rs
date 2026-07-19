@@ -340,23 +340,30 @@ pub(super) fn composite_event_envelope(
 
 pub(super) fn composite_envelope(
     persistence_id: &str,
+    table: &TransitionTable,
+    state: &EntityState,
     event: &crate::entity_actor::EntityEvent,
-) -> Result<PersistenceEnvelope, DispatchError> {
-    let payload = serde_json::to_value(event).map_err(|e| {
-        DispatchError::Internal(format!("failed to serialize composite event: {e}"))
-    })?;
-    Ok(PersistenceEnvelope {
-        sequence_nr: 0,
-        event_type: event.action.clone(),
-        payload,
-        metadata: EventMetadata {
-            event_id: sim_uuid(),
-            causation_id: sim_uuid(),
-            correlation_id: sim_uuid(),
-            timestamp: event.timestamp,
-            actor_id: persistence_id.to_string(),
+    event_version: u64,
+) -> Result<(PersistenceEnvelope, PersistedStateTimeoutClock), DispatchError> {
+    let (payload, clock) = encode_entity_event_payload(table, state, event, event_version)
+        .map_err(|e| {
+            DispatchError::Internal(format!("failed to serialize composite event: {e}"))
+        })?;
+    Ok((
+        PersistenceEnvelope {
+            sequence_nr: 0,
+            event_type: event.action.clone(),
+            payload,
+            metadata: EventMetadata {
+                event_id: sim_uuid(),
+                causation_id: sim_uuid(),
+                correlation_id: sim_uuid(),
+                timestamp: event.timestamp,
+                actor_id: persistence_id.to_string(),
+            },
         },
-    })
+        clock,
+    ))
 }
 
 pub(super) fn composite_batch_persistence_error(error: PersistenceError) -> DispatchError {

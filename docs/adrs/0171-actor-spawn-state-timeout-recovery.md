@@ -75,9 +75,15 @@ The first mailbox ask is the startup reconciliation barrier. Actor startup and o
 
 **Why this approach:** readiness asks are not lifecycle probes. Their response budgets can expire while `pre_start` is still making valid progress, leaving a live actor that starts after every probe has been discarded. A readiness notification alone is also insufficient: the actor can consume already-queued restart or application messages before the awakened task admits its state read, recreating the same exhaustion gap. Synchronous first-message admission makes readiness and mailbox ordering one atomic publication contract.
 
-### Sub-Decision 5: Persist the timeout clock identity in current snapshots
+### Sub-Decision 5: Co-commit timeout clock identity with events and snapshots
 
 `TransitionTable` carries the verified `[[state_timeout]]` declarations into the production actor. As each committed event enters a timed state or executes a declared `reset_on` action, the actor updates `state_timeout_clock_reset_at` and a monotonic `state_timeout_clock_reset_version` in the same state mutation. The version distinguishes separate resets that share one deterministic logical timestamp without letting unrelated events cancel the clock. Replayed tail events advance or clear both values alongside state, including tombstones. Periodic and passivation snapshots use one shared encoder that persists the pair while continuing to omit the bounded hot event deque. Hydration therefore recovers the exact clock identity even when the entry/reset event precedes the current snapshot.
+
+Every current `EntityEvent` journal payload also co-commits the clock outcome that results from applying that event under the exact `TransitionTable` used for the successful append. One crate-internal encoder is shared by ordinary actor appends, atomic composite bootstrap/sub-write batches, atomic File initialization, and the data-only create path; no production entity-event writer may emit a structurally current event through a legacy raw serializer. The tagged outcome distinguishes an inactive commit-time declaration from an active clock pair. It is internal to persistence and is removed when the public `EntityEvent` enters bounded response history. The same computed outcome drives both the appended payload and live staged state, including after optimistic-concurrency replay, so pre-crash and post-restart absolute deadlines are identical.
+
+Journal payloads written before this metadata remain readable. Absence of the reserved field alone selects legacy derivation under the current table. Presence is a current-format durability claim: `null`, malformed shapes, invalid versions, or an incompatible current event fail hydration instead of silently discarding the clock fact, including for tombstones and timeout-free replacement tables. The first present event after a legacy prefix is an authoritative checkpoint and may retain the reset identity established by an older event. After that checkpoint, each outcome must retain the exact pair, clear it, or establish a new pair at its own envelope sequence; decreasing versions and changed timestamps under a reused version fail hydration. Current snapshots carry the equivalent authority marker. Snapshot parsing validates marker and pair structure immediately, while the clock-version upper bound is validated against the atomically captured journal head: a compare-and-replace legacy repair may legitimately checkpoint the head's clock identity in an older snapshot boundary when the intervening tail contains only replay-skipped composite markers.
+
+An inactive historical outcome remains a truthful table-at-commit fact, but it cannot suppress a timeout added later for that target state. Replay deterministically applies the existing declaration-add migration policy to such an event and leaves the result derived until a current event or snapshot checkpoints it. This preserves journal-only untimed-to-timed upgrades without allowing later `reset_on` edits to reinterpret events committed while a timeout did exist.
 
 If actor startup captured an untimed table and a later hot-swap adds a timeout before the actor recorded clock metadata, the first unrelated event repairs the missing timestamp from the retained durable entry and later declared reset events. A retained `reset_on` self-loop is independently trustworthy even when the older entry predates the bounded tail. The repair event supplies the monotonic clock version but does not replace the historical timestamp. Only when the bounded tail contains neither a trustworthy entry nor a same-state reset does the existing conservative one-budget fallback anchor at the current event.
 
@@ -120,6 +126,7 @@ Actor replay requires the returned tail to start immediately after the snapshot 
 - A changed declaration rebinds immediately at the table-version signal and uses the new budget from the existing anchor; a removed declaration cancels and releases pending ownership without waiting for its old deadline.
 - A transient actor-state read failure after a table-version signal retries reconciliation and still fires a shorter replacement at its original-anchor deadline.
 - A declaration replaced while the old action is in delivery backoff cancels that retry and executes only the replacement action.
+- Adding or removing a `reset_on` action followed by abrupt restart before another event or snapshot preserves the table-at-commit absolute deadline and delivers exactly one timeout.
 - Optimistic-concurrency retry captures one live table before replay, rejects a timeout declaration removed during the failed append, and reproduces changed replay effects exactly.
 - Missing-clock repair uses a retained same-state reset even when the older state-entry event is outside the bounded tail.
 - Live and restart-hydrated timeout reactions execute under the same Cedar service principal and produce the same authorized target state.
@@ -143,7 +150,7 @@ Actor replay requires the returned tail to start immediately after the snapshot 
 - Each new actor reserves one mailbox slot for its first `GetState` ask and retains one reply receiver until startup reconciliation completes.
 - Persisted timed entities consume actor and timer memory while their liveness obligation is active.
 - Timeout recovery is asynchronous with respect to registry insertion, so readiness may briefly precede timer-arm observability.
-- Current snapshots gain one optional timeout-anchor timestamp.
+- Current snapshots and entity-event journal payloads gain internal timeout-clock authority metadata; legacy payloads remain identifiable by absence.
 - Hydration uses a head-bearing journal read instead of an event vector alone.
 - Legacy snapshot-only entities may receive one conservative full budget after their first upgraded hydration.
 - Legacy journal-only timed entities whose replay cannot reconstruct an anchor require a compatible migration before they can hydrate.
@@ -189,4 +196,4 @@ Actor replay requires the returned tail to start immediately after the snapshot 
 
 ## Rollback Policy
 
-Remove the post-spawn readiness task and explicit hydration cause, and restore `populate_index_from_store` to index-only behavior for every entity type. The snapshot anchor is an optional JSON field; older code ignores unknown fields, so rollback remains code-only and existing event histories and snapshots remain readable.
+Remove the post-spawn readiness task and explicit hydration cause, and restore `populate_index_from_store` to index-only behavior for every entity type. Snapshot anchors and event clock outcomes are optional JSON fields; older code ignores unknown fields, so rollback remains code-only and existing event histories and snapshots remain readable.

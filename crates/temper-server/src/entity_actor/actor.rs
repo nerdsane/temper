@@ -39,6 +39,12 @@ use super::effects::{
     FieldSyncMode, build_eval_context_with_xref, process_action_with_xref_and_field_mode,
     prune_transient_action_fields_from_state,
 };
+use super::event_persistence::{
+    PersistedStateTimeoutClock, STATE_TIMEOUT_CLOCK_SNAPSHOT_AUTHORITY_KEY,
+    apply_legacy_state_timeout_clock, apply_replayed_state_timeout_clock,
+    apply_state_timeout_clock, decode_entity_event_clock, encode_entity_event_payload,
+    state_timeout_clock_after_event,
+};
 use super::snapshot_queue::{SnapshotEnqueueOutcome, SnapshotWriteQueue};
 use super::types::{
     EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_SINCE_SNAPSHOT,
@@ -136,28 +142,6 @@ pub struct EntityActor {
 }
 
 impl EntityActor {
-    fn retained_state_timeout_reset_at(
-        state: &EntityState,
-        timeout: &temper_spec::automaton::StateTimeout,
-    ) -> Option<chrono::DateTime<chrono::Utc>> {
-        let entry_idx = state.events.iter().rposition(|event| {
-            event.to_status == timeout.state && event.from_status != timeout.state
-        });
-        let mut reset_at = entry_idx.map(|idx| state.events[idx].timestamp);
-        let scan_from = entry_idx.map_or(0, |idx| idx + 1);
-        for event in state.events.iter().skip(scan_from) {
-            if event.to_status == timeout.state
-                && timeout
-                    .reset_on
-                    .iter()
-                    .any(|action| action == &event.action)
-            {
-                reset_at = Some(reset_at.map_or(event.timestamp, |at| at.max(event.timestamp)));
-            }
-        }
-        reset_at
-    }
-
     fn build_initial_state(
         entity_type: &str,
         entity_id: &str,
@@ -192,32 +176,16 @@ impl EntityActor {
         }
     }
 
-    /// Advance the durable timeout clock metadata alongside the event that
-    /// changed or reset it.
+    /// Advance timeout clock metadata with the table that committed the event.
     ///
-    /// Keeping this on the actor state makes the anchor part of the same
-    /// snapshot as the state it describes. Unrelated self-loops retain the
-    /// prior anchor; leaving a timed state clears it.
+    /// Journaled events persist this exact outcome atomically with the event;
+    /// in-memory entities use the same calculation directly. Unrelated
+    /// self-loops retain the prior anchor, and leaving a timed state clears it.
     pub(super) fn update_state_timeout_clock(
         table: &TransitionTable,
         state: &mut EntityState,
         event: &EntityEvent,
     ) {
-        let Some(timeout) = table
-            .state_timeouts
-            .iter()
-            .find(|timeout| timeout.state == event.to_status)
-        else {
-            state.state_timeout_clock_reset_at = None;
-            state.state_timeout_clock_reset_version = None;
-            return;
-        };
-
-        let entered_state = event.from_status != event.to_status;
-        let reset_clock = timeout
-            .reset_on
-            .iter()
-            .any(|action| action == &event.action);
         let next_total_event = u64::try_from(state.total_event_count)
             .unwrap_or(u64::MAX)
             .checked_add(1)
@@ -227,23 +195,8 @@ impl EntityActor {
         } else {
             next_total_event
         };
-        if entered_state || reset_clock {
-            state.state_timeout_clock_reset_at = Some(event.timestamp);
-            state.state_timeout_clock_reset_version = Some(event_version);
-        } else if state.state_timeout_clock_reset_at.is_none() {
-            // A table may gain a timeout after actor startup captured its
-            // prior definition. Preserve a retained durable entry/reset
-            // timestamp instead of moving the deadline to this unrelated
-            // event. If the bounded tail has no such fact, retain the legacy
-            // conservative fallback of establishing one fresh budget now.
-            state.state_timeout_clock_reset_at =
-                Self::retained_state_timeout_reset_at(state, timeout).or(Some(event.timestamp));
-            state.state_timeout_clock_reset_version = Some(event_version);
-        } else if state.state_timeout_clock_reset_version.is_none() {
-            // Preserve an existing durable deadline while assigning a unique
-            // clock identity to snapshots written before this companion field.
-            state.state_timeout_clock_reset_version = Some(event_version);
-        }
+        let clock = state_timeout_clock_after_event(table, state, event, event_version);
+        apply_state_timeout_clock(state, clock);
     }
 
     fn validate_journal_read(
@@ -325,19 +278,32 @@ impl EntityActor {
                 "last_snapshot_sequence_nr".to_string(),
                 serde_json::json!(state.sequence_nr),
             );
+            obj.insert(
+                STATE_TIMEOUT_CLOCK_SNAPSHOT_AUTHORITY_KEY.to_string(),
+                serde_json::Value::Bool(true),
+            );
         }
         serde_json::to_vec(&value).map_err(|e| PersistenceError::Serialization(e.to_string()))
     }
 
     /// Attempt to load actor state from snapshot payload bytes.
-    fn apply_snapshot_bytes(state: &mut EntityState, sequence_nr: u64, bytes: &[u8]) -> bool {
+    fn apply_snapshot_bytes(
+        state: &mut EntityState,
+        sequence_nr: u64,
+        bytes: &[u8],
+    ) -> Option<bool> {
         let mut value = match serde_json::from_slice::<serde_json::Value>(bytes) {
             Ok(v) => v,
-            Err(_) => return false,
+            Err(_) => return None,
         };
-        let Some(obj) = value.as_object_mut() else {
-            return false;
-        };
+        let obj = value.as_object_mut()?;
+
+        let has_explicit_clock_authority =
+            match obj.remove(STATE_TIMEOUT_CLOCK_SNAPSHOT_AUTHORITY_KEY) {
+                Some(serde_json::Value::Bool(true)) => true,
+                Some(_) => return None,
+                None => false,
+            };
 
         // Snapshot intentionally excludes in-memory recent history.
         obj.insert("events".to_string(), serde_json::json!([]));
@@ -355,13 +321,61 @@ impl EntityActor {
 
         match serde_json::from_value::<EntityState>(value) {
             Ok(mut restored) => {
+                let complete_legacy_pair = match (
+                    restored.state_timeout_clock_reset_at,
+                    restored.state_timeout_clock_reset_version,
+                ) {
+                    (Some(_), Some(version)) if version > 0 => true,
+                    (Some(_), Some(_)) => return None,
+                    _ => false,
+                };
+                let clock_authoritative = has_explicit_clock_authority || complete_legacy_pair;
+                let valid_authoritative_pair = match (
+                    restored.state_timeout_clock_reset_at,
+                    restored.state_timeout_clock_reset_version,
+                ) {
+                    (None, None) => true,
+                    (Some(_), Some(version)) => version > 0,
+                    _ => false,
+                };
+                if clock_authoritative && !valid_authoritative_pair {
+                    return None;
+                }
                 restored.sequence_nr = sequence_nr;
                 restored.events_since_snapshot = 0;
                 restored.last_snapshot_sequence_nr = sequence_nr;
                 *state = restored;
-                true
+                Some(clock_authoritative)
             }
-            Err(_) => false,
+            Err(_) => None,
+        }
+    }
+
+    fn validate_snapshot_timeout_clock_against_journal_head(
+        persistence_id: &str,
+        state: &EntityState,
+        journal_head_sequence_nr: u64,
+        clock_authoritative: bool,
+    ) -> Result<(), ActorError> {
+        if !clock_authoritative {
+            return Ok(());
+        }
+
+        match (
+            state.state_timeout_clock_reset_at,
+            state.state_timeout_clock_reset_version,
+        ) {
+            (None, None) => Ok(()),
+            (Some(_), Some(reset_version))
+                if reset_version > 0 && reset_version <= journal_head_sequence_nr =>
+            {
+                Ok(())
+            }
+            (reset_at, reset_version) => Err(ActorError::custom(format!(
+                "invalid authoritative state-timeout clock in snapshot for {persistence_id}: \
+                 reset_at={reset_at:?}, reset_version={reset_version:?}, \
+                 journal_head_sequence_nr={journal_head_sequence_nr}"
+            ))),
         }
     }
 
@@ -476,11 +490,17 @@ impl EntityActor {
         store: &BoxedEventStore,
         backend: BackendLabel,
         persistence_id: &str,
+        table: &TransitionTable,
         state: &mut EntityState,
         event: &EntityEvent,
-    ) -> Result<u64, PersistenceError> {
-        let payload = serde_json::to_value(event)
-            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+    ) -> Result<(u64, PersistedStateTimeoutClock), PersistenceError> {
+        let event_version = state
+            .sequence_nr
+            .checked_add(1)
+            .expect("persisted state timeout clock version overflow");
+        let (payload, state_timeout_clock) =
+            encode_entity_event_payload(table, state, event, event_version)
+                .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
         let envelope = PersistenceEnvelope {
             sequence_nr: state.sequence_nr + 1,
             event_type: event.action.clone(),
@@ -500,7 +520,6 @@ impl EntityActor {
         // the new state and co-commit them with the journal append, so a keyed read
         // is correct without a scan and a kNN read reflects the write deterministically.
         let (key_rows, vector_rows, reconcile_vectors) = {
-            let table = self.table.read().expect("table lock poisoned");
             // The type declares vector paths → the store reconciles this entity's
             // vector rows (delete stale + insert current) even when no row is emitted
             // this write (a delete transition or a cleared property), so stale rows are
@@ -570,7 +589,11 @@ impl EntityActor {
             Ok(new_seq) => {
                 state.sequence_nr = new_seq;
                 tracing::debug!(entity = %state.entity_id, seq = new_seq, "event persisted");
-                Ok(new_seq)
+                assert_eq!(
+                    new_seq, event_version,
+                    "single-event append must return the persisted clock version"
+                );
+                Ok((new_seq, state_timeout_clock))
             }
             Err(e) => {
                 tracing::error!(
@@ -661,11 +684,15 @@ impl EntityActor {
         let persistence_id = persistence_id.as_str();
         let mut from_sequence = 0;
         let mut loaded_snapshot = None;
+        let mut timeout_clock_authoritative = false;
 
         match store.load_snapshot(persistence_id).await {
             Ok(Some((snapshot_seq, snapshot_bytes))) => {
-                if Self::apply_snapshot_bytes(state, snapshot_seq, &snapshot_bytes) {
+                if let Some(snapshot_clock_authoritative) =
+                    Self::apply_snapshot_bytes(state, snapshot_seq, &snapshot_bytes)
+                {
                     from_sequence = snapshot_seq;
+                    timeout_clock_authoritative = snapshot_clock_authoritative;
                     loaded_snapshot = Some((snapshot_seq, snapshot_bytes));
                     tracing::info!(
                         entity = %state.entity_id,
@@ -706,6 +733,12 @@ impl EntityActor {
         {
             Ok(read) => {
                 Self::validate_journal_read(persistence_id, from_sequence, &read)?;
+                Self::validate_snapshot_timeout_clock_against_journal_head(
+                    persistence_id,
+                    state,
+                    read.journal_head_sequence_nr,
+                    timeout_clock_authoritative,
+                )?;
                 let envelopes = read.events;
                 if envelopes.len() > MAX_EVENTS_SINCE_SNAPSHOT {
                     return Err(ActorError::custom(format!(
@@ -728,19 +761,32 @@ impl EntityActor {
                     // markers), so the previous sequence is not a safe version.
                     state.sequence_nr = env.sequence_nr;
 
+                    let persisted_clock =
+                        decode_entity_event_clock(persistence_id, env.sequence_nr, &env.payload)
+                            .map_err(ActorError::custom)?;
                     let parsed_event = serde_json::from_value::<EntityEvent>(env.payload.clone());
 
                     // Tombstone is terminal: once deleted, entity must not replay
                     // into a live state. Stop at the first Deleted event.
                     if env.event_type == "Deleted" {
-                        let tombstone = parsed_event.unwrap_or_else(|_| EntityEvent {
-                            action: "Deleted".to_string(),
-                            from_status: state.status.clone(),
-                            to_status: "Deleted".to_string(),
-                            timestamp: env.metadata.timestamp,
-                            params: serde_json::json!({}),
-                            idempotency_key: None,
-                        });
+                        let tombstone = match parsed_event {
+                            Ok(event) => event,
+                            Err(_error) if persisted_clock.is_none() => EntityEvent {
+                                action: "Deleted".to_string(),
+                                from_status: state.status.clone(),
+                                to_status: "Deleted".to_string(),
+                                timestamp: env.metadata.timestamp,
+                                params: serde_json::json!({}),
+                                idempotency_key: None,
+                            },
+                            Err(error) => {
+                                return Err(ActorError::custom(format!(
+                                    "cannot replay current tombstone at sequence {} for \
+                                     {persistence_id}: {error}",
+                                    env.sequence_nr
+                                )));
+                            }
+                        };
                         state.status = tombstone.to_status.clone();
                         if let Some(obj) = state.fields.as_object_mut() {
                             obj.insert(
@@ -748,7 +794,25 @@ impl EntityActor {
                                 serde_json::Value::String(state.status.clone()),
                             );
                         }
-                        Self::update_state_timeout_clock(table, state, &tombstone);
+                        if let Some(clock) = persisted_clock {
+                            let _terminal_clock_authoritative = apply_replayed_state_timeout_clock(
+                                persistence_id,
+                                table,
+                                state,
+                                &tombstone,
+                                env.sequence_nr,
+                                clock,
+                                timeout_clock_authoritative,
+                            )
+                            .map_err(ActorError::custom)?;
+                        } else {
+                            apply_legacy_state_timeout_clock(
+                                table,
+                                state,
+                                &tombstone,
+                                env.sequence_nr,
+                            );
+                        }
                         state.push_event_bounded(tombstone);
                         break;
                     }
@@ -820,13 +884,36 @@ impl EntityActor {
                                 );
                             }
 
-                            Self::update_state_timeout_clock(table, state, &event);
+                            if let Some(clock) = persisted_clock {
+                                timeout_clock_authoritative = apply_replayed_state_timeout_clock(
+                                    persistence_id,
+                                    table,
+                                    state,
+                                    &event,
+                                    env.sequence_nr,
+                                    clock,
+                                    timeout_clock_authoritative,
+                                )
+                                .map_err(ActorError::custom)?;
+                            } else {
+                                // Legacy event payloads did not record their
+                                // table-at-commit timeout interpretation.
+                                apply_legacy_state_timeout_clock(
+                                    table,
+                                    state,
+                                    &event,
+                                    env.sequence_nr,
+                                );
+                                timeout_clock_authoritative = false;
+                            }
                             state.push_event_bounded(event);
                         }
                         Err(e) => {
-                            if strict_journal_read && !table.state_timeouts.is_empty() {
+                            if persisted_clock.is_some()
+                                || (strict_journal_read && !table.state_timeouts.is_empty())
+                            {
                                 return Err(ActorError::custom(format!(
-                                    "cannot safely replay incompatible event at sequence {} for timeout-enabled {persistence_id}: {e}",
+                                    "cannot safely replay incompatible event at sequence {} for current or timeout-enabled {persistence_id}: {e}",
                                     env.sequence_nr
                                 )));
                             }
@@ -1092,7 +1179,15 @@ impl Actor for EntityActor {
 
             if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend)
             {
-                self.persist_event(store, backend, &self.persistence_id(), &mut state, &created)
+                let (_, clock) = self
+                    .persist_event(
+                        store,
+                        backend,
+                        &self.persistence_id(),
+                        &table,
+                        &mut state,
+                        &created,
+                    )
                     .await
                     .map_err(|e| {
                         ActorError::custom(format!(
@@ -1100,8 +1195,10 @@ impl Actor for EntityActor {
                             self.entity_type, self.entity_id, e
                         ))
                     })?;
+                apply_state_timeout_clock(&mut state, clock);
+            } else {
+                Self::update_state_timeout_clock(&table, &mut state, &created);
             }
-            Self::update_state_timeout_clock(&table, &mut state, &created);
             state.push_event_bounded(created);
         }
 
@@ -1283,6 +1380,7 @@ impl Actor for EntityActor {
                         .clone()
                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
                     event.idempotency_key = idempotency_key.clone();
+                    let mut persisted_timeout_clock = None;
 
                     if !result.overflow_blobs.is_empty()
                         && let Err(e) = Self::persist_overflow_blobs(
@@ -1313,11 +1411,19 @@ impl Actor for EntityActor {
                         (self.event_journal.as_ref(), self.event_backend)
                     {
                         let first_persist = self
-                            .persist_event(store, backend, &self.persistence_id(), state, &event)
+                            .persist_event(
+                                store,
+                                backend,
+                                &self.persistence_id(),
+                                &table,
+                                state,
+                                &event,
+                            )
                             .await;
 
                         match first_persist {
-                            Ok(_) => {
+                            Ok((_, clock)) => {
+                                persisted_timeout_clock = Some(clock);
                                 // Happy path — fall through to downstream telemetry.
                             }
                             Err(PersistenceError::ConcurrencyViolation {
@@ -1496,17 +1602,19 @@ impl Actor for EntityActor {
                                             store,
                                             backend,
                                             &self.persistence_id(),
+                                            &retry_table,
                                             state,
                                             &retry_event,
                                         )
                                         .await
                                     {
-                                        Ok(_) => {
+                                        Ok((_, clock)) => {
                                             // Commit re-evaluated event + result into
                                             // downstream telemetry and reply.
                                             event = retry_event;
                                             result = retry_result;
                                             committed_table = retry_table;
+                                            persisted_timeout_clock = Some(clock);
                                             retry_final = Some((
                                                 crate::runtime_metrics::ConcurrencyRetryOutcome::Success,
                                                 None,
@@ -1626,7 +1734,11 @@ impl Actor for EntityActor {
                     wide_event::emit_span(&wide);
                     wide_event::emit_metrics(&wide);
 
-                    Self::update_state_timeout_clock(&committed_table, state, &event);
+                    if let Some(clock) = persisted_timeout_clock {
+                        apply_state_timeout_clock(state, clock);
+                    } else {
+                        Self::update_state_timeout_clock(&committed_table, state, &event);
+                    }
                     state.push_event_bounded(event);
 
                     let persistence_id = self.persistence_id();
@@ -1791,6 +1903,7 @@ impl Actor for EntityActor {
                 });
             }
             EntityMsg::Delete => {
+                let table = self.table.read().expect("table lock poisoned").clone();
                 let deleted = EntityEvent {
                     action: "Deleted".to_string(),
                     from_status: state.status.clone(),
@@ -1799,23 +1912,36 @@ impl Actor for EntityActor {
                     params: serde_json::json!({}),
                     idempotency_key: None,
                 };
+                let mut persisted_timeout_clock = None;
 
                 if let (Some(store), Some(backend)) =
                     (self.event_journal.as_ref(), self.event_backend)
-                    && let Err(e) = self
-                        .persist_event(store, backend, &self.persistence_id(), state, &deleted)
-                        .await
                 {
-                    ctx.reply(EntityResponse {
-                        success: false,
-                        state: state.clone(),
-                        error: Some(format!("persistence failed: {e}")),
-                        custom_effects: vec![],
-                        scheduled_actions: vec![],
-                        spawn_requests: vec![],
-                        spec_governed: true,
-                    });
-                    return Ok(());
+                    match self
+                        .persist_event(
+                            store,
+                            backend,
+                            &self.persistence_id(),
+                            &table,
+                            state,
+                            &deleted,
+                        )
+                        .await
+                    {
+                        Ok((_, clock)) => persisted_timeout_clock = Some(clock),
+                        Err(e) => {
+                            ctx.reply(EntityResponse {
+                                success: false,
+                                state: state.clone(),
+                                error: Some(format!("persistence failed: {e}")),
+                                custom_effects: vec![],
+                                scheduled_actions: vec![],
+                                spawn_requests: vec![],
+                                spec_governed: true,
+                            });
+                            return Ok(());
+                        }
+                    }
                 }
 
                 state.status = deleted.to_status.clone();
@@ -1825,8 +1951,11 @@ impl Actor for EntityActor {
                         serde_json::Value::String(state.status.clone()),
                     );
                 }
-                state.state_timeout_clock_reset_at = None;
-                state.state_timeout_clock_reset_version = None;
+                if let Some(clock) = persisted_timeout_clock {
+                    apply_state_timeout_clock(state, clock);
+                } else {
+                    Self::update_state_timeout_clock(&table, state, &deleted);
+                }
                 state.push_event_bounded(deleted);
 
                 ctx.reply(EntityResponse {
@@ -1861,3 +1990,7 @@ mod tests;
 #[cfg(test)]
 #[path = "actor_timeout_clock_tests.rs"]
 mod timeout_clock_tests;
+
+#[cfg(all(test, feature = "sim"))]
+#[path = "actor_timeout_clock_migration_tests.rs"]
+mod timeout_clock_migration_tests;
