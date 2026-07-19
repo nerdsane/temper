@@ -1148,6 +1148,87 @@ async fn key_index_backfill_loadfailed_entity_blocks_watermark_then_resumes() {
     );
 }
 
+/// Catalog compatibility is only valid when the journal is absent. A durable but
+/// schema-incompatible event can advance the journal generation without producing
+/// replayable fields; a same-generation catalog row must not become authoritative.
+#[tokio::test]
+async fn key_index_backfill_never_uses_catalog_for_journal_present_missing_state() {
+    let store = SimEventStore::new(0, SimFaultConfig::none());
+    let query_plane = std::sync::Arc::new(SimQueryPlane::default());
+    let mut state = build_order_state("key-backfill-journal-present-missing");
+    let mut storage = StorageStack::from_sim(store.clone(), None);
+    storage.query_plane = Some(query_plane.clone());
+    state.set_storage_stack(storage);
+    let tenant = TenantId::default();
+    let persistence_id = format!("{tenant}:Order:ord-legacy");
+    let timestamp = temper_runtime::scheduler::sim_now();
+
+    store
+        .append(
+            &persistence_id,
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "LegacyCreate".to_string(),
+                payload: serde_json::json!({ "legacy_schema": true }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp,
+                    actor_id: persistence_id.clone(),
+                },
+            }],
+        )
+        .await
+        .expect("seed incompatible journal event");
+    let stale_catalog_fields = serde_json::json!({
+        "Id": "ord-legacy",
+        "WorkspaceId": "ws1",
+        "Path": "/stale-catalog"
+    });
+    query_plane
+        .upsert_projection(
+            tenant.as_str(),
+            "Order",
+            "ord-legacy",
+            "Draft",
+            &stale_catalog_fields,
+            &serde_json::json!({
+                "entity_type": "Order",
+                "entity_id": "ord-legacy",
+                "status": "Draft",
+                "fields": stale_catalog_fields,
+                "sequence_nr": 1,
+            }),
+            1,
+        )
+        .await
+        .expect("seed same-generation stale catalog row");
+
+    state.populate_key_index_from_snapshots(&tenant).await;
+
+    assert!(
+        !state
+            .key_index_backfill_complete(&tenant, "Order", ORDER_KEY_SET_SIGNATURE)
+            .await,
+        "journal-present missing state must block authoritative coverage"
+    );
+    assert_eq!(
+        store
+            .lookup_by_key(
+                tenant.as_str(),
+                "Order",
+                "ws_path",
+                &ws_path_hash("ws1", "/stale-catalog"),
+            )
+            .await
+            .expect("lookup stale catalog key"),
+        None,
+        "journal-present missing state must not install stale catalog ownership"
+    );
+}
+
 /// C (ADR-0153): once the backfill watermark is set, a keyed read MISS is
 /// authoritative absence — the read returns empty WITHOUT the full-type scan that
 /// otherwise 413s at scale (ARN-68). Before the watermark, the same miss falls back
