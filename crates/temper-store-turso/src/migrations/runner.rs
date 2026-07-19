@@ -74,15 +74,27 @@ async fn run_migrations(
         .await?;
     }
 
-    let final_ledger = load_ledger(connection).await?;
-    validate_ledger_rows(&final_ledger, catalog, &expected_migrations)?;
-    require_ledger_length(&final_ledger, catalog.len(), "after migration run")?;
-    if let Some((migration, expected)) = catalog.last().zip(expected_migrations.last()) {
-        verify_schema(connection, &expected.snapshot)
-            .await
-            .map_err(|error| migration_context(migration, "verify catalog head schema", error))?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .map_err(|error| {
+            migration_sql_error("begin catalog-head verification transaction", error)
+        })?;
+    let outcome = async {
+        let final_ledger = load_ledger(&transaction).await?;
+        validate_ledger_rows(&final_ledger, catalog, &expected_migrations)?;
+        require_ledger_length(&final_ledger, catalog.len(), "after migration run")?;
+        if let Some((migration, expected)) = catalog.last().zip(expected_migrations.last()) {
+            verify_schema(&transaction, &expected.snapshot)
+                .await
+                .map_err(|error| {
+                    migration_context(migration, "verify catalog head schema", error)
+                })?;
+        }
+        Ok(())
     }
-    Ok(())
+    .await;
+    finish_transaction(transaction, outcome, "verify catalog head schema").await
 }
 
 async fn ensure_ledger(connection: &Connection) -> Result<(), PersistenceError> {

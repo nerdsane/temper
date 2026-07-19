@@ -97,9 +97,13 @@ the migration's schema capabilities, inserts exactly one ledger row, rereads and
 validates that retained row, and commits. Any error rolls back both DDL and ledger
 insertion. Ledger triggers are incompatible because the system ledger is the
 durability boundary, not an extension point. Final readiness requires the exact
-catalog length and head rather than accepting a valid prefix. The in-transaction
-reread lets independent processes race safely: after one commits, the next
-observes and validates the recorded checksum rather than replaying the work.
+catalog length and head rather than accepting a valid prefix. Catalog-head
+verification also runs inside an immediate libSQL transaction, so rollback-only
+production-write probes remain on one pinned Hrana stream rather than allowing
+autocommit writes to escape between standalone savepoint statements. The
+in-transaction reread lets independent processes race safely: after one commits,
+the next observes and validates the recorded checksum rather than replaying the
+work.
 
 Local connections retain WAL and busy-timeout configuration before the runner
 starts. The busy handler is installed before WAL initialization so concurrent
@@ -146,10 +150,13 @@ remain convergent:
   semantics and normalized before capability comparison, so alternate casing in
   an `ON` clause cannot evade inventory, ledger protection, or OTS preservation;
   those triggers must pass rollback-only probes using the same SQL as production
-  fresh and existing-row `INSERT OR REPLACE` persisted writes, queued
-  inserts/conflict updates, and failed/persisted status transitions on every
-  startup; each resulting row is verified, and both probe rows and trigger side
-  effects are rolled back;
+  fresh and existing-row persisted upserts, queued inserts/conflict updates, and
+  failed/persisted status transitions on every startup; the persisted upsert uses
+  `ON CONFLICT DO UPDATE` rather than SQLite's delete-and-insert `REPLACE`
+  semantics, so admitted inbound `CASCADE` and `RESTRICT` references neither lose
+  child rows nor reject an existing-ID persist; each resulting row is verified,
+  and both probe rows and trigger side effects are rolled back on the same pinned
+  transaction stream;
 - schema inventory excludes only SQLite's literal reserved `sqlite_` prefix;
   legal user objects such as `sqliteX...` remain subject to the same trigger and
   index compatibility rules;
@@ -189,7 +196,9 @@ its cumulative prefix before its ledger row commits. Final readiness verifies
 only the current catalog-head snapshot: later append-only migrations are allowed
 to evolve capabilities introduced by earlier versions without making those
 historical prefix snapshots incompatible with the declared head. A store is returned from
-`TursoEventStore::new` only after that verification succeeds. Diagnostics
+`TursoEventStore::new` only after that verification succeeds. The final head
+check uses a real transaction on local SQLite and remote Hrana, not a standalone
+savepoint on an autocommit connection. Diagnostics
 identify the catalog head and the missing or incompatible capability so
 operators can repair or restore the database without waiting for a later query
 to fail.
@@ -228,6 +237,9 @@ can serve the current data paths.
 - A checksum mismatch, ledger gap, or newer schema version prevents readiness
   with an actionable diagnostic.
 - Concurrent independent startups produce one valid, contiguous ledger.
+- A benign legacy OTS trigger on remote Hrana leaves no durable probe or trigger
+  side-effect rows, and current inbound `CASCADE`/`RESTRICT` references survive
+  an existing-ID production persist.
 - Existing Turso event-store behavior remains green across the workspace.
 
 ## Consequences

@@ -8,9 +8,15 @@ use super::TursoEventStore;
 use crate::metrics::TursoQueryTimer;
 
 /// SQL used to persist a completed OTS trajectory.
-pub(crate) const PERSIST_OTS_TRAJECTORY_SQL: &str = "INSERT OR REPLACE INTO ots_trajectories \
+pub(crate) const PERSIST_OTS_TRAJECTORY_SQL: &str = "INSERT INTO ots_trajectories \
     (trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data, persistence_status, persist_attempts, last_error, created_at, updated_at) \
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'persisted', 0, NULL, datetime('now'), datetime('now'))";
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'persisted', 0, NULL, datetime('now'), datetime('now')) \
+    ON CONFLICT(trajectory_id) DO UPDATE SET \
+       tenant = excluded.tenant, agent_id = excluded.agent_id, session_id = excluded.session_id, \
+       outcome = excluded.outcome, entity_type = NULL, turn_count = excluded.turn_count, \
+       data = excluded.data, persistence_status = excluded.persistence_status, \
+       persist_attempts = excluded.persist_attempts, last_error = excluded.last_error, \
+       created_at = excluded.created_at, updated_at = excluded.updated_at";
 
 /// SQL used to enqueue or refresh an OTS trajectory for background persistence.
 pub(crate) const ENQUEUE_OTS_TRAJECTORY_SQL: &str = "INSERT INTO ots_trajectories \

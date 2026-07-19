@@ -14,7 +14,7 @@ pub(super) const EXTRA_INDEX_POLICY: &str =
     "allow-nonunique-full-plain-column-index-with-builtin-collation-v1";
 pub(super) const TRIGGER_POLICY: &str = concat!(
     "exact-trigger-set-with-sqlite-identifier-owners-and-",
-    "production-write-probed-legacy-ots-extensions-v5"
+    "transaction-pinned-production-upsert-probed-legacy-ots-extensions-v6"
 );
 
 pub(super) async fn verify_schema(
