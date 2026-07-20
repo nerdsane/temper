@@ -16,11 +16,12 @@ use std::time::Duration;
 
 use temper_runtime::persistence::{
     EntityKeyLookup, EntityVectorCandidate, EntityVectorRow, EventStore, IndexReconciliation,
-    PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
+    JournalBoundary, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
+    PersistenceError,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
-use key_index::reconcile_key_contract_locked;
+use key_index::{invalidate_coverage_for_derived_write_locked, reconcile_key_contract_locked};
 
 /// Fault injection configuration for simulation.
 ///
@@ -1044,6 +1045,23 @@ impl EventStore for SimEventStore {
         Ok(events)
     }
 
+    async fn journal_boundary(
+        &self,
+        persistence_id: &str,
+    ) -> Result<JournalBoundary, PersistenceError> {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        let Some(journal) = inner.journals.get(persistence_id) else {
+            return Ok(JournalBoundary::default());
+        };
+        Ok(JournalBoundary {
+            latest_sequence: journal.last().map(|event| event.sequence_nr).unwrap_or(0),
+            first_terminal_sequence: journal
+                .iter()
+                .find(|event| event.transitions_to_deleted())
+                .map(|event| event.sequence_nr),
+        })
+    }
+
     async fn save_snapshot(
         &self,
         persistence_id: &str,
@@ -1058,6 +1076,17 @@ impl EventStore for SimEventStore {
             return Err(PersistenceError::Storage(
                 "SimEventStore: injected snapshot failure".into(),
             ));
+        }
+
+        let changed =
+            inner
+                .snapshots
+                .get(persistence_id)
+                .is_none_or(|(stored_sequence, stored)| {
+                    *stored_sequence != sequence_nr || stored.as_slice() != snapshot
+                });
+        if changed {
+            invalidate_coverage_for_derived_write_locked(&mut inner, persistence_id, sequence_nr)?;
         }
 
         inner
@@ -1149,20 +1178,7 @@ impl EventStore for SimEventStore {
         entity_type: &str,
     ) -> Result<Vec<String>, PersistenceError> {
         let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
-        let mut result = Vec::new();
-        let mut seen = std::collections::BTreeSet::new();
-
-        for persistence_id in inner.journals.keys() {
-            if let Ok((t, found_type, entity_id)) = parse_persistence_id_parts(persistence_id)
-                && t == tenant
-                && found_type == entity_type
-                && seen.insert(entity_id.to_string())
-            {
-                result.push(entity_id.to_string());
-            }
-        }
-
-        Ok(result)
+        Ok(key_index::live_entity_ids(&inner, tenant, entity_type))
     }
 
     async fn list_entity_ids_for_key_reconciliation(

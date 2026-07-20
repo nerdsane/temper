@@ -347,6 +347,7 @@ async fn dst_retried_delete_does_not_append_a_terminal_suffix() {
             KeyIndexBackfillFence {
                 key_set_signature: signature,
                 contract_revision: revision,
+                expected_journal_sequence: recovered.sequence_nr,
                 expected_entity_live: false,
             },
             &[],
@@ -506,6 +507,7 @@ async fn dst_backfill_makes_pre_existing_entity_keyed_findable() {
                 KeyIndexBackfillFence {
                     key_set_signature: repair_signature,
                     contract_revision: repair_revision,
+                    expected_journal_sequence: 1,
                     expected_entity_live: true,
                 },
                 &rows,
@@ -522,6 +524,7 @@ async fn dst_backfill_makes_pre_existing_entity_keyed_findable() {
                 KeyIndexBackfillFence {
                     key_set_signature: repair_signature,
                     contract_revision: repair_revision,
+                    expected_journal_sequence: 1,
                     expected_entity_live: true,
                 },
                 &rows,

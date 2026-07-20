@@ -8,7 +8,7 @@ pub use index::{
     EntityKeyLookup, EntityKeyRow, EntityVectorCandidate, EntityVectorRow, IndexReconciliation,
     KeyIndexBackfillFence, pack_f32_le, unpack_f32_le,
 };
-pub use types::{PersistenceEnvelope, PersistenceError, storage_error};
+pub use types::{JournalBoundary, PersistenceEnvelope, PersistenceError, storage_error};
 
 /// Event type used for the parent-journal record of a Composite action.
 ///
@@ -246,14 +246,16 @@ pub trait EventStore: Send + Sync + 'static {
 
     /// Reconcile declared key-index rows for an **existing** entity (ADR-0153,
     /// ADR-0171), without appending a journal event. The store first validates that
-    /// `contract_fence` still identifies the tenant/type contract under which replay
-    /// derived `key_rows`, then validates `expected_sequence`. Only while both fences
-    /// hold does it DELETE every existing
+    /// `contract_fence` still identifies the tenant/type contract, exact journal
+    /// boundary, and entity liveness under which replay derived `key_rows`, then
+    /// validates `expected_sequence`. Only while all fences hold does it DELETE every existing
     /// row for `(tenant, entity_type, entity_id)` and INSERT `key_rows`. Idempotent,
     /// and an empty set purges stale ownership for deleted or currently unkeyable
     /// entities. A concurrent type-contract change fails with
-    /// [`PersistenceError::KeyContractChanged`]; a concurrent journal advance fails
-    /// with [`PersistenceError::ConcurrencyViolation`]. Used to populate and repair
+    /// [`PersistenceError::KeyContractChanged`]; a concurrent journal-source change
+    /// fails with [`PersistenceError::JournalBoundaryChanged`]; a concurrent liveness
+    /// change fails with [`PersistenceError::EntityLivenessChanged`]; a concurrent
+    /// durable sequence advance fails with [`PersistenceError::ConcurrencyViolation`]. Used to populate and repair
     /// `entity_key_index` before a keyed read can treat absence as authoritative. The
     /// default is a no-op (non-indexing backends).
     fn backfill_entity_keys(
@@ -360,10 +362,12 @@ pub trait EventStore: Send + Sync + 'static {
         async { Ok(Vec::new()) }
     }
 
-    /// Monotonic revision of the live declared-key contract for one type. It changes
-    /// whenever a durable write uses a different key signature. Backfill captures
-    /// this before replay and conditionally publishes its watermark against it, so a
-    /// concurrent spec/write interleaving cannot certify a stale repair.
+    /// Monotonic revision of the live declared-key reconciliation universe for one
+    /// type. It changes when a durable write uses a different key signature or when
+    /// a snapshot/catalog-only mutation is not already represented by the journal.
+    /// Backfill captures this before enumeration and conditionally publishes its
+    /// watermark against it, so neither a contract race nor a newly durable entity
+    /// can certify stale coverage.
     fn key_index_reconciliation_revision(
         &self,
         tenant: &str,
@@ -436,6 +440,47 @@ pub trait EventStore: Send + Sync + 'static {
         persistence_id: &str,
         from_sequence: u64,
     ) -> impl std::future::Future<Output = Result<Vec<PersistenceEnvelope>, PersistenceError>> + Send;
+
+    /// Return the exact durable high-water and terminal lifecycle boundary for one
+    /// stream.
+    ///
+    /// Snapshots are derived acceleration state and cannot outrank a terminal
+    /// journal event. Recovery also checks the high-water after replay so a
+    /// fault-truncated prefix cannot be accepted as current state. Backends whose
+    /// normal reads may be truncated must override this compatibility scan with an
+    /// exact metadata lookup.
+    fn journal_boundary(
+        &self,
+        persistence_id: &str,
+    ) -> impl std::future::Future<Output = Result<JournalBoundary, PersistenceError>> + Send {
+        async move {
+            let events = self.read_events(persistence_id, 0).await?;
+            Ok(JournalBoundary {
+                latest_sequence: events.last().map(|event| event.sequence_nr).unwrap_or(0),
+                first_terminal_sequence: events
+                    .iter()
+                    .find(|event| event.transitions_to_deleted())
+                    .map(|event| event.sequence_nr),
+            })
+        }
+    }
+
+    /// Return the first durable terminal sequence, if any.
+    ///
+    /// This compatibility helper delegates to [`EventStore::journal_boundary`];
+    /// recovery should use the complete boundary so it can also prove replay
+    /// completeness.
+    fn terminal_tombstone_sequence(
+        &self,
+        persistence_id: &str,
+    ) -> impl std::future::Future<Output = Result<Option<u64>, PersistenceError>> + Send {
+        async move {
+            Ok(self
+                .journal_boundary(persistence_id)
+                .await?
+                .first_terminal_sequence)
+        }
+    }
 
     /// Save a state snapshot.
     fn save_snapshot(

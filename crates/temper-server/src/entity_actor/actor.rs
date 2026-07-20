@@ -563,8 +563,18 @@ impl EntityActor {
         let replay_start = Instant::now(); // determinism-ok: wall-clock for production replay duration metric only
         let persistence_id = format!("{tenant}:{}:{}", state.entity_type, state.entity_id);
         let persistence_id = persistence_id.as_str();
+        let initial_state = state.clone();
         let mut from_sequence = 0;
         let mut loaded_snapshot = false;
+        let journal_boundary = store
+            .journal_boundary(persistence_id)
+            .await
+            .map_err(|error| {
+                ActorError::custom(format!(
+                    "failed to read durable journal boundary for {}:{}: {error}",
+                    state.entity_type, state.entity_id
+                ))
+            })?;
 
         match store.load_snapshot(persistence_id).await {
             Ok(Some((snapshot_seq, snapshot_bytes))) => {
@@ -594,6 +604,23 @@ impl EntityActor {
             }
         }
 
+        if loaded_snapshot && state.status != "Deleted" {
+            if let Some(tombstone_sequence) = journal_boundary.first_terminal_sequence
+                && tombstone_sequence <= from_sequence
+            {
+                let rejected_snapshot_sequence = from_sequence;
+                tracing::warn!(
+                    entity = %state.entity_id,
+                    snapshot_sequence = rejected_snapshot_sequence,
+                    tombstone_sequence,
+                    "discarding live snapshot newer than terminal journal boundary"
+                );
+                *state = initial_state;
+                from_sequence = 0;
+                loaded_snapshot = false;
+            }
+        }
+
         match store.read_events(persistence_id, from_sequence).await {
             Ok(envelopes) => {
                 if envelopes.len() > MAX_EVENTS_SINCE_SNAPSHOT {
@@ -606,6 +633,14 @@ impl EntityActor {
                     )));
                 }
                 for env in &envelopes {
+                    // A tombstone is terminal state, but a legacy/corrupt suffix is
+                    // still part of the durable stream high-water. Ignore every
+                    // state effect after deletion while advancing through the exact
+                    // journal boundary so later sequence-fenced repair can converge.
+                    if state.status == "Deleted" {
+                        state.sequence_nr = env.sequence_nr;
+                        continue;
+                    }
                     if env.event_type == COMPOSITE_EVENT_TYPE {
                         state.sequence_nr = env.sequence_nr;
                         continue;
@@ -645,7 +680,7 @@ impl EntityActor {
 
                     // Tombstone is terminal: once deleted, entity must not replay
                     // into a live state. Stop at the first Deleted event.
-                    if env.event_type == "Deleted" {
+                    if env.transitions_to_deleted() {
                         let tombstone = parsed_event.unwrap_or_else(|_| EntityEvent {
                             action: "Deleted".to_string(),
                             from_status: state.status.clone(),
@@ -663,7 +698,7 @@ impl EntityActor {
                         }
                         state.push_event_bounded(tombstone);
                         state.sequence_nr = env.sequence_nr;
-                        break;
+                        continue;
                     }
 
                     match parsed_event {
@@ -752,6 +787,28 @@ impl EntityActor {
                     }
                     state.sequence_nr = env.sequence_nr;
                 }
+                let observed_journal_sequence = envelopes
+                    .last()
+                    .map(|event| event.sequence_nr)
+                    .unwrap_or(from_sequence.min(journal_boundary.latest_sequence));
+                if observed_journal_sequence < journal_boundary.latest_sequence {
+                    return Err(ActorError::custom(format!(
+                        "journal replay for {}:{} stopped at sequence {} below durable high-water {}",
+                        state.entity_type,
+                        state.entity_id,
+                        observed_journal_sequence,
+                        journal_boundary.latest_sequence
+                    )));
+                }
+                if journal_boundary.first_terminal_sequence.is_some()
+                    && (state.status != "Deleted"
+                        || state.sequence_nr < journal_boundary.latest_sequence)
+                {
+                    return Err(ActorError::custom(format!(
+                        "journal replay for {}:{} did not preserve terminal history through sequence {}",
+                        state.entity_type, state.entity_id, journal_boundary.latest_sequence
+                    )));
+                }
                 if !envelopes.is_empty() {
                     let replayed_tail = state
                         .sequence_nr
@@ -789,7 +846,7 @@ impl EntityActor {
                 }
             }
             Err(e) => {
-                if strict_journal_read {
+                if strict_journal_read || journal_boundary.latest_sequence > from_sequence {
                     return Err(ActorError::custom(format!(
                         "failed to read events for replay of {}:{}: {e}",
                         state.entity_type, state.entity_id
@@ -1139,22 +1196,18 @@ impl Actor for EntityActor {
                                 while retry_idx < MAX_RETRIES {
                                     retry_idx += 1;
 
-                                    // Rollback speculative state.
-                                    *state = state_before.clone();
-
-                                    // Catch up to the authoritative sequence.
-                                    Self::replay_events(
-                                        &table,
-                                        store,
-                                        backend,
-                                        state,
-                                        &self.tenant,
-                                        self.blob_store.as_ref(),
-                                        // Actor hydration keeps the lenient "start
-                                        // fresh on read error" behavior (unchanged).
-                                        false,
-                                    )
-                                    .await?;
+                                    // Catch up from a clean initial state. Replaying
+                                    // onto the actor's pre-race state would apply
+                                    // non-idempotent effects a second time.
+                                    *state = self
+                                        .recover_authoritative_state(store, backend)
+                                        .await
+                                        .map_err(|error| {
+                                            ActorError::custom(format!(
+                                                "failed to catch up {}:{} after action concurrency loss: {error}",
+                                                self.entity_type, self.entity_id
+                                            ))
+                                        })?;
 
                                     // ADR-0046 Sub-Decision 4: replay must at
                                     // minimum reach the sequence the store
@@ -1167,6 +1220,12 @@ impl Actor for EntityActor {
                                          (state.sequence_nr={} < last_actual={last_actual})",
                                         state.sequence_nr
                                     );
+                                    if state.sequence_nr < last_actual {
+                                        return Err(ActorError::custom(format!(
+                                            "action catch-up under-reached authoritative sequence for {}:{} ({} < {last_actual})",
+                                            self.entity_type, self.entity_id, state.sequence_nr
+                                        )));
+                                    }
 
                                     // Refresh baselines so postconditions hold
                                     // against the replayed state, not the
@@ -1507,6 +1566,18 @@ impl Actor for EntityActor {
                     .await?;
             }
             EntityMsg::Delete => {
+                if state.status == "Deleted" {
+                    ctx.reply(EntityResponse {
+                        success: true,
+                        state: state.clone(),
+                        error: None,
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
                 let deleted = EntityEvent {
                     action: "Deleted".to_string(),
                     from_status: state.status.clone(),

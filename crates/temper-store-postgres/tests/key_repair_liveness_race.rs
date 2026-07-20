@@ -102,15 +102,22 @@ fn stale_orphan_classification_cannot_delete_a_concurrent_live_claim() {
                 KeyIndexBackfillFence {
                     key_set_signature,
                     contract_revision: repair_revision,
+                    expected_journal_sequence: 1,
+                    expected_entity_live: false,
                 },
                 &[],
             )
             .await;
 
-        assert!(
-            stale_repair.is_err(),
-            "the exact repair must reject the stale non-live classification"
-        );
+        assert!(matches!(
+            stale_repair,
+            Err(
+                temper_runtime::persistence::PersistenceError::EntityLivenessChanged {
+                    expected_live: false,
+                    actual_live: true,
+                }
+            )
+        ));
         assert_eq!(
             store
                 .lookup_by_key(&tenant, entity_type, &key.key_name, &key.key_hash)

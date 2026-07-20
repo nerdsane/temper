@@ -32,6 +32,217 @@ fn key(name: &str, hash: &str) -> EntityKeyRow {
     }
 }
 
+/// A key-only orphan can become live after repair enumeration without changing the
+/// type contract. The exact repair must validate the older non-live classification
+/// under the stream lock, not merely accept replay's now-current sequence.
+#[tokio::test]
+async fn dst_orphan_to_live_repair_is_liveness_fenced() {
+    for seed in [15] {
+        let (_guard, _clock, _id) = install_deterministic_context(seed);
+        let store = SimEventStore::no_faults(seed);
+        let persistence_id = "default:Doc:orphan-becomes-live";
+        let live_key = key("path", "concurrent-live-path");
+        let repair_signature = "v3:path";
+        let repair_revision = store
+            .begin_key_index_backfill("default", "Doc", repair_signature)
+            .await
+            .expect("begin repair contract");
+        store
+            .backfill_entity_keys(
+                "default",
+                "Doc",
+                "orphan-becomes-live",
+                0,
+                KeyIndexBackfillFence {
+                    key_set_signature: repair_signature,
+                    contract_revision: repair_revision,
+                    expected_journal_sequence: 0,
+                    expected_entity_live: false,
+                },
+                std::slice::from_ref(&live_key),
+            )
+            .await
+            .expect("seed key-only orphan");
+        assert!(
+            store
+                .list_entity_ids_by_type("default", "Doc")
+                .await
+                .expect("classify live entities")
+                .is_empty(),
+            "seed {seed}: key-only repair candidate starts non-live"
+        );
+
+        store
+            .append_with_index_rows(
+                persistence_id,
+                0,
+                &[envelope("Create")],
+                std::slice::from_ref(&live_key),
+                &[],
+                IndexReconciliation {
+                    keys: true,
+                    key_set_signature: Some(repair_signature.to_string()),
+                    vectors: false,
+                },
+            )
+            .await
+            .expect("same-contract create after repair enumeration");
+
+        let stale_repair = store
+            .backfill_entity_keys(
+                "default",
+                "Doc",
+                "orphan-becomes-live",
+                1,
+                KeyIndexBackfillFence {
+                    key_set_signature: repair_signature,
+                    contract_revision: repair_revision,
+                    expected_journal_sequence: 1,
+                    expected_entity_live: false,
+                },
+                &[],
+            )
+            .await;
+        assert!(matches!(
+            stale_repair,
+            Err(PersistenceError::EntityLivenessChanged {
+                expected_live: false,
+                actual_live: true,
+            })
+        ));
+        assert_eq!(
+            store
+                .lookup_by_key("default", "Doc", "path", &live_key.key_hash)
+                .await
+                .expect("lookup concurrent live claim"),
+            Some("orphan-becomes-live".to_string()),
+            "seed {seed}: stale repair cannot delete the concurrent live claim"
+        );
+    }
+}
+
+/// A spec action does not need to be named `Deleted`: the persisted lifecycle
+/// boundary is `to_status = "Deleted"`. A newer stale snapshot must not make that
+/// terminal stream live again or allow its key to survive exact repair.
+#[tokio::test]
+async fn dst_action_named_tombstone_outranks_newer_snapshot() {
+    for seed in [16] {
+        let (_guard, _clock, _id) = install_deterministic_context(seed);
+        let store = SimEventStore::no_faults(seed);
+        let persistence_id = "default:Doc:action-named-delete";
+        let stale_key = key("path", "deleted-path");
+        let repair_signature = "v3:path";
+        store
+            .append_with_index_rows(
+                persistence_id,
+                0,
+                &[envelope("Create")],
+                std::slice::from_ref(&stale_key),
+                &[],
+                IndexReconciliation {
+                    keys: true,
+                    key_set_signature: Some(repair_signature.to_string()),
+                    vectors: false,
+                },
+            )
+            .await
+            .expect("create live owner");
+        let mut tombstone = envelope("Delete");
+        tombstone.payload = serde_json::json!({
+            "action": "Delete",
+            "from_status": "Ready",
+            "to_status": "Deleted",
+        });
+        store
+            .append_with_index_rows(
+                persistence_id,
+                1,
+                &[tombstone],
+                &[],
+                &[],
+                IndexReconciliation {
+                    keys: false,
+                    key_set_signature: Some(repair_signature.to_string()),
+                    vectors: false,
+                },
+            )
+            .await
+            .expect("append action-named tombstone without key reconciliation");
+        store
+            .save_snapshot(persistence_id, 3, b"newer-stale-live-snapshot")
+            .await
+            .expect("seed newer stale live snapshot");
+        let repair_revision = store
+            .begin_key_index_backfill("default", "Doc", repair_signature)
+            .await
+            .expect("begin repair contract after derived writer fencing");
+
+        assert!(
+            store
+                .list_entity_ids_by_type("default", "Doc")
+                .await
+                .expect("classify live entities")
+                .is_empty(),
+            "seed {seed}: to_status tombstone outranks the newer snapshot"
+        );
+        let stale_live_repair = store
+            .backfill_entity_keys(
+                "default",
+                "Doc",
+                "action-named-delete",
+                3,
+                KeyIndexBackfillFence {
+                    key_set_signature: repair_signature,
+                    contract_revision: repair_revision,
+                    expected_journal_sequence: 2,
+                    expected_entity_live: true,
+                },
+                &[],
+            )
+            .await;
+        assert!(matches!(
+            stale_live_repair,
+            Err(PersistenceError::EntityLivenessChanged {
+                expected_live: true,
+                actual_live: false,
+            })
+        ));
+        assert_eq!(
+            store
+                .lookup_by_key("default", "Doc", "path", &stale_key.key_hash)
+                .await
+                .expect("lookup rejected-repair owner"),
+            Some("action-named-delete".to_string()),
+            "seed {seed}: rejected repair is non-mutating"
+        );
+
+        store
+            .backfill_entity_keys(
+                "default",
+                "Doc",
+                "action-named-delete",
+                3,
+                KeyIndexBackfillFence {
+                    key_set_signature: repair_signature,
+                    contract_revision: repair_revision,
+                    expected_journal_sequence: 2,
+                    expected_entity_live: false,
+                },
+                &[],
+            )
+            .await
+            .expect("purge action-named tombstone at newest durable sequence");
+        assert_eq!(
+            store
+                .lookup_by_key("default", "Doc", "path", &stale_key.key_hash)
+                .await
+                .expect("lookup purged owner"),
+            None,
+            "seed {seed}: non-live repair removes stale ownership"
+        );
+    }
+}
+
 /// A rejected exact replacement changes neither journal nor ownership. Retrying the
 /// same append replaces the complete set, including removal of a declaration no
 /// longer emitted; a later empty exact set releases the remaining claim.
@@ -173,6 +384,8 @@ async fn dst_stale_backfill_cannot_overwrite_newer_live_ownership() {
                 KeyIndexBackfillFence {
                     key_set_signature: repair_signature,
                     contract_revision: repair_revision,
+                    expected_journal_sequence: 1,
+                    expected_entity_live: true,
                 },
                 std::slice::from_ref(&old_path),
             )
@@ -180,7 +393,7 @@ async fn dst_stale_backfill_cannot_overwrite_newer_live_ownership() {
         assert!(
             matches!(
                 stale,
-                Err(PersistenceError::ConcurrencyViolation {
+                Err(PersistenceError::JournalBoundaryChanged {
                     expected: 1,
                     actual: 2
                 })
@@ -212,6 +425,8 @@ async fn dst_stale_backfill_cannot_overwrite_newer_live_ownership() {
                 KeyIndexBackfillFence {
                     key_set_signature: repair_signature,
                     contract_revision: repair_revision,
+                    expected_journal_sequence: 2,
+                    expected_entity_live: true,
                 },
                 std::slice::from_ref(&new_path),
             )
@@ -367,6 +582,8 @@ async fn dst_cross_stream_contract_change_fences_repair_rows() {
                 KeyIndexBackfillFence {
                     key_set_signature: stale_contract,
                     contract_revision: stale_revision,
+                    expected_journal_sequence: 1,
+                    expected_entity_live: true,
                 },
                 std::slice::from_ref(&stale_row),
             )
@@ -448,6 +665,8 @@ async fn dst_conflicting_backfill_claim_fails_without_partial_mutation() {
                 KeyIndexBackfillFence {
                     key_set_signature: repair_signature,
                     contract_revision: repair_revision,
+                    expected_journal_sequence: 1,
+                    expected_entity_live: true,
                 },
                 std::slice::from_ref(&claimed),
             )

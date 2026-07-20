@@ -562,6 +562,7 @@ async fn list_entity_ids_by_type_includes_events_and_excludes_deleted() {
 
     let deleted_order = format!("{tenant}:Order:ord-deleted");
     let active_order = format!("{tenant}:Order:ord-active");
+    let legacy_named_live_order = format!("{tenant}:Order:ord-legacy-named-live");
     let task = format!("{tenant}:Task:task-1");
 
     store
@@ -589,6 +590,21 @@ async fn list_entity_ids_by_type_includes_events_and_excludes_deleted() {
         .await
         .unwrap();
     store
+        .append(
+            &legacy_named_live_order,
+            0,
+            &[test_envelope(
+                "Deleted",
+                serde_json::json!({
+                    "action": "Deleted",
+                    "from_status": "Draft",
+                    "to_status": "Draft"
+                }),
+            )],
+        )
+        .await
+        .unwrap();
+    store
         .append(&task, 0, &[test_envelope("Created", serde_json::json!({}))])
         .await
         .unwrap();
@@ -598,7 +614,21 @@ async fn list_entity_ids_by_type_includes_events_and_excludes_deleted() {
         .await
         .expect("list Order IDs by type from events");
 
-    assert_eq!(ids, vec!["ord-active".to_string()]);
+    assert_eq!(
+        ids,
+        vec![
+            "ord-active".to_string(),
+            "ord-legacy-named-live".to_string()
+        ]
+    );
+    assert_eq!(
+        store
+            .terminal_tombstone_sequence(&legacy_named_live_order)
+            .await
+            .unwrap(),
+        None,
+        "structured live lifecycle metadata outranks legacy Deleted names"
+    );
 }
 
 #[tokio::test]
@@ -608,6 +638,7 @@ async fn list_entity_ids_excludes_entities_with_deleted_tombstones() {
 
     let deleted_order = format!("{tenant}:Order:ord-deleted");
     let active_order = format!("{tenant}:Order:ord-active");
+    let legacy_named_live_order = format!("{tenant}:Order:ord-legacy-named-live");
 
     store
         .append(
@@ -646,13 +677,31 @@ async fn list_entity_ids_excludes_entities_with_deleted_tombstones() {
         )
         .await
         .unwrap();
+    store
+        .append(
+            &legacy_named_live_order,
+            0,
+            &[test_envelope(
+                "Deleted",
+                serde_json::json!({
+                    "action": "Deleted",
+                    "from_status": "Draft",
+                    "to_status": "Draft"
+                }),
+            )],
+        )
+        .await
+        .unwrap();
 
     let mut entities = store.list_entity_ids(&tenant).await.unwrap();
     entities.sort();
 
     assert_eq!(
         entities,
-        vec![("Order".to_string(), "ord-active".to_string())]
+        vec![
+            ("Order".to_string(), "ord-active".to_string()),
+            ("Order".to_string(), "ord-legacy-named-live".to_string())
+        ]
     );
 }
 

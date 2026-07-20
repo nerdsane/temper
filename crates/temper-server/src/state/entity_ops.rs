@@ -35,14 +35,7 @@ fn actor_idle_timeout_secs() -> i64 {
 }
 
 fn is_deleted_envelope(event: &PersistenceEnvelope) -> bool {
-    if event.event_type == "Deleted" {
-        return true;
-    }
-    event
-        .payload
-        .get("action")
-        .and_then(serde_json::Value::as_str)
-        == Some("Deleted")
+    event.transitions_to_deleted()
 }
 
 fn record_projection_update_started(

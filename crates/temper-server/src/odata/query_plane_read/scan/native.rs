@@ -10,6 +10,7 @@ use crate::odata::query_plane_read::types::{
     QueryPlaneFallbackReason, QueryPlaneReadAuthorization, QueryPlaneReadRequest,
     QueryPlaneReadStrategy,
 };
+use crate::odata::read_support::CatalogMaterializationPolicy;
 use crate::storage::{QueryFieldIndexOrder, QueryFieldIndexOrderDirection, QueryFieldIndexPage};
 
 fn native_order_by(request: &QueryPlaneReadRequest<'_>) -> Option<Vec<QueryFieldIndexOrder>> {
@@ -207,7 +208,7 @@ pub(in crate::odata::query_plane_read) async fn try_native_page_read(
         let authorized = materialize_filter_and_authorize_ids(
             request,
             &page.entity_ids,
-            true,
+            CatalogMaterializationPolicy::Any,
             &mut counters,
             authorization,
         )

@@ -7,7 +7,7 @@ pub(super) use read_source::read_from_source_cursor;
 use temper_odata::query::types::QueryOptions;
 
 use super::super::authz::{READ_ACTION, authorize_read, entity_id_from_body};
-use super::super::read_support::materialize_entity_set_entities;
+use super::super::read_support::{CatalogMaterializationPolicy, materialize_entity_set_entities};
 use super::types::{
     QueryPlaneCoverageReport, QueryPlaneFallbackReason, QueryPlaneReadAuthorization,
     QueryPlaneReadBudget, QueryPlaneReadError, QueryPlaneReadRequest, QueryPlaneReadStrategy,
@@ -180,7 +180,7 @@ pub(super) fn apply_select_only(
 pub(super) async fn materialize_and_authorize_ids(
     request: &QueryPlaneReadRequest<'_>,
     entity_ids: &[String],
-    allow_catalog: bool,
+    catalog_policy: CatalogMaterializationPolicy,
     counters: &mut ScanCounters,
     authorization: QueryPlaneReadAuthorization,
 ) -> Vec<serde_json::Value> {
@@ -191,7 +191,7 @@ pub(super) async fn materialize_and_authorize_ids(
         request.entity_type,
         request.entity_set_name,
         entity_ids,
-        allow_catalog,
+        catalog_policy,
         None,
     )
     .await;
@@ -208,7 +208,7 @@ pub(super) async fn materialize_and_authorize_ids(
 pub(super) async fn materialize_filter_and_authorize_ids(
     request: &QueryPlaneReadRequest<'_>,
     entity_ids: &[String],
-    allow_catalog: bool,
+    catalog_policy: CatalogMaterializationPolicy,
     counters: &mut ScanCounters,
     authorization: QueryPlaneReadAuthorization,
 ) -> Vec<serde_json::Value> {
@@ -219,7 +219,7 @@ pub(super) async fn materialize_filter_and_authorize_ids(
         request.entity_type,
         request.entity_set_name,
         entity_ids,
-        allow_catalog,
+        catalog_policy,
         None,
     )
     .await;

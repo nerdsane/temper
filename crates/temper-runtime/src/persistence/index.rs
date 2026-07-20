@@ -22,14 +22,23 @@ pub struct EntityKeyLookup {
     pub sequence_nr: u64,
 }
 
-/// Tenant/type contract captured before a declared-key backfill replays entity state.
-/// Every repair row must validate this fence before mutation (ADR-0171).
+/// Contract and entity classification captured before a declared-key backfill
+/// replays entity state. Every repair row must validate this fence before mutation
+/// (ADR-0171).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyIndexBackfillFence<'a> {
     /// Versioned signature used to derive the attempted repair rows.
     pub key_set_signature: &'a str,
     /// Monotonic contract revision captured when the repair pass began.
     pub contract_revision: u64,
+    /// Exact journal high-water observed before reconstructing the repair row.
+    /// Revalidating this separately from the newest derived sequence prevents a
+    /// catalog/snapshot-only owner at generation N from racing a first journal
+    /// append at the same numeric generation N.
+    pub expected_journal_sequence: u64,
+    /// Whether authoritative enumeration classified the entity as live. The store
+    /// revalidates this under the same stream lock as exact key reconciliation.
+    pub expected_entity_live: bool,
 }
 
 /// A derived vector-index row to co-commit with an append (ADR-0155).

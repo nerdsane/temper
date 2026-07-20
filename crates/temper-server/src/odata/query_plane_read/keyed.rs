@@ -8,7 +8,9 @@ use super::types::{
 };
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::entity_actor::recover_entity_state_from_store;
+use crate::odata::read_support::catalog_row_to_entity_body;
 use crate::query_eval::apply_query_options;
+use crate::storage::{CatalogRowsLoad, load_catalog_rows_by_id};
 use temper_runtime::persistence::EntityKeyLookup;
 
 const MAX_OWNERSHIP_READ_ATTEMPTS: usize = 3;
@@ -93,7 +95,7 @@ async fn materialize_owner_from_journal(
     // stable owner row at N, and detects an index that failed to reconcile a
     // later journal append.
     if recovered.sequence_nr != owner.sequence_nr || recovered.status == "Deleted" {
-        return Ok(None);
+        return materialize_catalog_only_owner(request, owner).await;
     }
 
     let mut body =
@@ -107,6 +109,63 @@ async fn materialize_owner_from_journal(
                 request.entity_set_name, owner.entity_id
             )),
         );
+    }
+    Ok(Some(body))
+}
+
+/// Materialize an ADR-0077 migration owner whose catalog is durable but whose
+/// journal is genuinely absent. The exact catalog generation must match the key
+/// row, and the journal is checked both before and after materialization. The
+/// surrounding ownership/revision re-read is the final linearization fence.
+async fn materialize_catalog_only_owner(
+    request: &QueryPlaneReadRequest<'_>,
+    owner: &EntityKeyLookup,
+) -> Result<Option<serde_json::Value>, QueryPlaneReadError> {
+    let Some((store, _)) = request.state.event_journal() else {
+        return Ok(None);
+    };
+    let persistence_id = format!(
+        "{}:{}:{}",
+        request.tenant.as_str(),
+        request.entity_type,
+        owner.entity_id
+    );
+    let before = store
+        .journal_boundary(&persistence_id)
+        .await
+        .map_err(|_| QueryPlaneReadError::KeyOwnershipUnstable)?;
+    if before.latest_sequence != 0 {
+        return Ok(None);
+    }
+    let Some(query_plane) = request.state.query_plane_store() else {
+        return Ok(None);
+    };
+    let ids = [owner.entity_id.clone()];
+    let rows = load_catalog_rows_by_id(
+        &query_plane,
+        request.tenant.as_str(),
+        request.entity_type,
+        &ids,
+    )
+    .await
+    .map_err(|_| QueryPlaneReadError::KeyOwnershipUnstable)?;
+    let CatalogRowsLoad::Available(mut rows) = rows else {
+        return Ok(None);
+    };
+    let Some(row) = rows.remove(&owner.entity_id) else {
+        return Ok(None);
+    };
+    if row.sequence_nr != owner.sequence_nr || row.status == "Deleted" {
+        return Ok(None);
+    }
+    let mut body = catalog_row_to_entity_body(request.entity_type, request.entity_set_name, row);
+    hydrate_blob_refs_for_tenant(request.state, request.tenant, &mut body).await;
+    let after = store
+        .journal_boundary(&persistence_id)
+        .await
+        .map_err(|_| QueryPlaneReadError::KeyOwnershipUnstable)?;
+    if after.latest_sequence != 0 {
+        return Ok(None);
     }
     Ok(Some(body))
 }

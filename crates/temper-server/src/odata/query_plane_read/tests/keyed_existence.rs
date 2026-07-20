@@ -768,6 +768,37 @@ async fn key_index_backfill_keys_store_entities_absent_from_the_lazy_index() {
             .await
             .expect("seed snapshot");
     }
+    // ADR-0077 migration shape: a snapshot can be the only durable source. It
+    // must participate in the same deterministic replay and coverage proof even
+    // though no journal key exists for enumeration.
+    let snapshot_only = serde_json::json!({
+        "entity_type": "Order",
+        "entity_id": "ord-snapshot-only",
+        "status": "Draft",
+        "item_count": 0,
+        "fields": {
+            "Id": "ord-snapshot-only",
+            "Status": "Draft",
+            "WorkspaceId": "ws1",
+            "Path": "/snapshot-only"
+        },
+    });
+    store
+        .save_snapshot(
+            &format!("{tenant}:Order:ord-snapshot-only"),
+            5,
+            &serde_json::to_vec(&snapshot_only).unwrap(),
+        )
+        .await
+        .expect("seed snapshot-only migrated entity");
+    assert!(
+        store
+            .read_events(&format!("{tenant}:Order:ord-snapshot-only"), 0)
+            .await
+            .expect("snapshot-only journal read")
+            .is_empty(),
+        "precondition: migrated snapshot owner has no journal"
+    );
 
     // Nothing is keyed yet: the entities were seeded via `save_snapshot` with no
     // key-bearing Create event, so the sim store's live co-commit saw no key fields.
@@ -801,7 +832,7 @@ async fn key_index_backfill_keys_store_entities_absent_from_the_lazy_index() {
             .await,
         "Order must be watermarked after a clean backfill"
     );
-    for (ws, path) in [("ws1", "/a"), ("ws1", "/b")] {
+    for (ws, path) in [("ws1", "/a"), ("ws1", "/b"), ("ws1", "/snapshot-only")] {
         assert!(
             store
                 .lookup_by_key(tenant.as_str(), "Order", "ws_path", &ws_path_hash(ws, path))
@@ -861,6 +892,8 @@ async fn key_index_backfill_reconciles_existing_rows_and_still_watermarks() {
             KeyIndexBackfillFence {
                 key_set_signature: ORDER_KEY_SET_SIGNATURE,
                 contract_revision: repair_revision,
+                expected_journal_sequence: 1,
+                expected_entity_live: true,
             },
             &[temper_runtime::persistence::EntityKeyRow {
                 key_name: "ws_path".to_string(),
@@ -899,10 +932,7 @@ async fn key_index_backfill_skips_deleted_entities_without_blocking_watermark() 
     let (state, store) = build_order_state_with_sim("key-backfill-deleted");
     let tenant = TenantId::default();
     let agent_ctx = AgentContext::for_service("deleted-test");
-    for (eid, status, path) in [
-        ("ord-live", "Draft", "/live"),
-        ("ord-del", "Deleted", "/del"),
-    ] {
+    for (eid, path) in [("ord-live", "/live"), ("ord-del", "/del")] {
         state
             .dispatch_tenant_action(
                 &tenant,
@@ -915,7 +945,7 @@ async fn key_index_backfill_skips_deleted_entities_without_blocking_watermark() 
             .await
             .expect("create");
         let snap = serde_json::json!({
-            "entity_type": "Order", "entity_id": eid, "status": status, "item_count": 0,
+            "entity_type": "Order", "entity_id": eid, "status": "Draft", "item_count": 0,
             "fields": { "Id": eid, "WorkspaceId": "ws1", "Path": path },
         });
         store
@@ -927,7 +957,6 @@ async fn key_index_backfill_skips_deleted_entities_without_blocking_watermark() 
             .await
             .expect("snap");
     }
-
     state
         .dispatch_tenant_action(
             &tenant,
@@ -973,6 +1002,8 @@ async fn key_index_backfill_skips_deleted_entities_without_blocking_watermark() 
                 KeyIndexBackfillFence {
                     key_set_signature: stale_signature,
                     contract_revision: stale_revision,
+                    expected_journal_sequence: 1,
+                    expected_entity_live: true,
                 },
                 &[temper_runtime::persistence::EntityKeyRow {
                     key_name: "ws_path".to_string(),
@@ -982,6 +1013,50 @@ async fn key_index_backfill_skips_deleted_entities_without_blocking_watermark() 
             .await
             .expect("seed stale pre-v3 row");
     }
+    // This is the pre-v3 crash shape: the stale ownership row exists before a
+    // tombstone append that does not participate in exact key reconciliation.
+    let deleted_at = temper_runtime::scheduler::sim_now();
+    store
+        .append(
+            &format!("{tenant}:Order:ord-del"),
+            1,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "Deleted".to_string(),
+                payload: serde_json::json!({
+                    "action": "Deleted",
+                    "from_status": "Draft",
+                    "to_status": "Deleted",
+                    "timestamp": deleted_at,
+                    "params": {},
+                }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: deleted_at,
+                    actor_id: "default:Order:ord-del".to_string(),
+                },
+            }],
+        )
+        .await
+        .expect("append terminal tombstone");
+    let stale_live_snapshot = serde_json::json!({
+        "entity_type": "Order",
+        "entity_id": "ord-del",
+        "status": "Draft",
+        "item_count": 0,
+        "total_event_count": 3,
+        "fields": { "Id": "ord-del", "WorkspaceId": "ws1", "Path": "/del" },
+    });
+    store
+        .save_snapshot(
+            &format!("{tenant}:Order:ord-del"),
+            3,
+            &serde_json::to_vec(&stale_live_snapshot).unwrap(),
+        )
+        .await
+        .expect("seed newer stale live snapshot after tombstone");
     assert!(
         store
             .key_index_backfilled_types(tenant.as_str())
@@ -1355,6 +1430,8 @@ async fn key_index_backfill_rekeys_existing_entities_when_a_key_is_added() {
                 KeyIndexBackfillFence {
                     key_set_signature: old_signature,
                     contract_revision: old_revision,
+                    expected_journal_sequence: 1,
+                    expected_entity_live: true,
                 },
                 &[temper_runtime::persistence::EntityKeyRow {
                     key_name: "old_key".to_string(),

@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 use tracing::{info, instrument, warn};
 
 use temper_runtime::persistence::{
-    EventStore, IndexReconciliation, PersistenceAppend, PersistenceAppendResult,
+    EventStore, IndexReconciliation, JournalBoundary, PersistenceAppend, PersistenceAppendResult,
     PersistenceEnvelope, PersistenceError, storage_error,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
@@ -693,6 +693,17 @@ impl EventStore for TenantStoreRouter {
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let store = self.store_for_tenant(tenant).await?;
         store.read_events(persistence_id, from_sequence).await
+    }
+
+    #[instrument(skip_all, fields(persistence_id, otel.name = "router.journal_boundary"))]
+    async fn journal_boundary(
+        &self,
+        persistence_id: &str,
+    ) -> Result<JournalBoundary, PersistenceError> {
+        let (tenant, _, _) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let store = self.store_for_tenant(tenant).await?;
+        store.journal_boundary(persistence_id).await
     }
 
     #[instrument(skip_all, fields(persistence_id, otel.name = "router.save_snapshot"))]

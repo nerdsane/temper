@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use temper_runtime::persistence::{
-    EntityKeyLookup, EntityKeyRow, KeyIndexBackfillFence, PersistenceError,
+    EntityKeyLookup, EntityKeyRow, KeyIndexBackfillFence, PersistenceEnvelope, PersistenceError,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -45,6 +45,45 @@ pub(super) fn reconcile_key_contract_locked(
     }
 }
 
+/// Invalidate an in-flight coverage proof when a snapshot-only durable mutation
+/// expands or advances the entity universe outside the event journal.
+///
+/// A normal post-append snapshot is already represented by a journal sequence and
+/// does not change coverage. Keeping the current signature while advancing its
+/// revision makes publication ABA-safe without turning every snapshot into a
+/// contract change.
+pub(super) fn invalidate_coverage_for_derived_write_locked(
+    inner: &mut SimEventStoreInner,
+    persistence_id: &str,
+    durable_sequence: u64,
+) -> Result<(), PersistenceError> {
+    let (tenant, entity_type, _) =
+        parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+    let journal_dominates = inner
+        .journals
+        .get(persistence_id)
+        .and_then(|journal| journal.last())
+        .is_some_and(|event| event.sequence_nr >= durable_sequence);
+    if journal_dominates {
+        return Ok(());
+    }
+
+    let type_key = (tenant.to_string(), entity_type.to_string());
+    let Some((signature, revision)) = inner.key_index_contract.get(&type_key).cloned() else {
+        return Ok(());
+    };
+    let next = revision.checked_add(1).ok_or_else(|| {
+        PersistenceError::Storage(format!(
+            "SimEventStore: key reconciliation revision overflow for {tenant}:{entity_type}"
+        ))
+    })?;
+    inner
+        .key_index_contract
+        .insert(type_key.clone(), (signature, next));
+    inner.key_index_watermark.remove(&type_key);
+    Ok(())
+}
+
 pub(super) fn backfill_entity_keys(
     inner: &mut SimEventStoreInner,
     tenant: &str,
@@ -75,12 +114,31 @@ pub(super) fn backfill_entity_keys(
     }
 
     let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
-    let current_sequence = inner
+    let journal_sequence = inner
         .journals
         .get(&persistence_id)
         .and_then(|journal| journal.last())
         .map(|event| event.sequence_nr)
         .unwrap_or(0);
+    let snapshot_sequence = inner
+        .snapshots
+        .get(&persistence_id)
+        .map(|(sequence_nr, _)| *sequence_nr)
+        .unwrap_or(0);
+    let current_sequence = journal_sequence.max(snapshot_sequence);
+    if journal_sequence != contract_fence.expected_journal_sequence {
+        return Err(PersistenceError::JournalBoundaryChanged {
+            expected: contract_fence.expected_journal_sequence,
+            actual: journal_sequence,
+        });
+    }
+    let current_entity_live = entity_is_live(inner, &persistence_id);
+    if current_entity_live != contract_fence.expected_entity_live {
+        return Err(PersistenceError::EntityLivenessChanged {
+            expected_live: contract_fence.expected_entity_live,
+            actual_live: current_entity_live,
+        });
+    }
     if current_sequence != expected_sequence {
         return Err(PersistenceError::ConcurrencyViolation {
             expected: expected_sequence,
@@ -213,6 +271,36 @@ pub(super) fn keyed_entity_ids(
     ids.into_iter().collect()
 }
 
+pub(super) fn live_entity_ids(
+    inner: &SimEventStoreInner,
+    tenant: &str,
+    entity_type: &str,
+) -> Vec<String> {
+    let mut owners = BTreeSet::new();
+    for persistence_id in inner.journals.keys().chain(inner.snapshots.keys()) {
+        if let Ok((found_tenant, found_type, entity_id)) =
+            parse_persistence_id_parts(persistence_id)
+            && found_tenant == tenant
+            && found_type == entity_type
+            && entity_is_live(inner, persistence_id)
+        {
+            owners.insert(entity_id.to_string());
+        }
+    }
+    owners.into_iter().collect()
+}
+
+fn entity_is_live(inner: &SimEventStoreInner, persistence_id: &str) -> bool {
+    let has_durable_state =
+        inner.journals.contains_key(persistence_id) || inner.snapshots.contains_key(persistence_id);
+    let deleted = inner.journals.get(persistence_id).is_some_and(|journal| {
+        journal
+            .iter()
+            .any(PersistenceEnvelope::transitions_to_deleted)
+    });
+    has_durable_state && !deleted
+}
+
 pub(super) fn reconciliation_entity_ids(
     inner: &SimEventStoreInner,
     tenant: &str,
@@ -220,6 +308,15 @@ pub(super) fn reconciliation_entity_ids(
 ) -> Vec<String> {
     let mut owners = BTreeSet::new();
     for persistence_id in inner.journals.keys() {
+        if let Ok((found_tenant, found_type, entity_id)) =
+            parse_persistence_id_parts(persistence_id)
+            && found_tenant == tenant
+            && found_type == entity_type
+        {
+            owners.insert(entity_id.to_string());
+        }
+    }
+    for persistence_id in inner.snapshots.keys() {
         if let Ok((found_tenant, found_type, entity_id)) =
             parse_persistence_id_parts(persistence_id)
             && found_tenant == tenant

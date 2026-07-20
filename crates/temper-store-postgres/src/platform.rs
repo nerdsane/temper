@@ -13,6 +13,10 @@ use crate::metrics::{
     record_postgres_projection_index_fields, record_postgres_projection_index_reconciliation,
     record_postgres_transaction_begin_duration, record_postgres_transaction_commit_duration,
 };
+use crate::store::{
+    event_stream_lock_key, invalidate_key_coverage_for_derived_write, lock_event_stream,
+    lock_key_contract,
+};
 
 mod rows;
 use rows::*;
@@ -609,6 +613,10 @@ impl PostgresEventStore {
             }
         };
 
+        lock_key_contract(&mut tx, tenant, entity_type).await?;
+        let stream_lock_key = event_stream_lock_key(tenant, entity_type, entity_id);
+        lock_event_stream(&mut tx, &stream_lock_key).await?;
+
         let previous_catalog: Option<CatalogProjectionFingerprint> =
             crate::dbm::postgres_query_as!(
                 "SELECT status, projection_hash, sequence_nr \
@@ -755,6 +763,25 @@ impl PostgresEventStore {
             }
         };
 
+        let catalog_changed =
+            previous_catalog
+                .as_ref()
+                .is_none_or(|(old_status, old_hash, old_sequence)| {
+                    old_status.as_str() != status
+                        || old_hash.as_str() != projection_hash.as_str()
+                        || *old_sequence != new_sequence_nr
+                });
+        if catalog_changed {
+            invalidate_key_coverage_for_derived_write(
+                &mut tx,
+                tenant,
+                entity_type,
+                entity_id,
+                Some(sequence_nr),
+            )
+            .await?;
+        }
+
         let should_reconcile_index =
             previous_catalog
                 .as_ref()
@@ -857,22 +884,37 @@ impl PostgresEventStore {
                 return Err(storage_error(e));
             }
         };
-        crate::dbm::postgres_query!(
-            "DELETE FROM entity_catalog WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        lock_key_contract(&mut tx, tenant, entity_type).await?;
+        let stream_lock_key = event_stream_lock_key(tenant, entity_type, entity_id);
+        lock_event_stream(&mut tx, &stream_lock_key).await?;
+        let removed_catalog_sequence: Option<i64> = crate::dbm::postgres_query_scalar!(
+            "DELETE FROM entity_catalog \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+             RETURNING sequence_nr",
         )
         .bind(tenant)
         .bind(entity_type)
         .bind(entity_id)
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(storage_error)?;
-        crate::dbm::postgres_query!("DELETE FROM entity_field_index WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3")
+        let removed_fields = crate::dbm::postgres_query!("DELETE FROM entity_field_index WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3")
             .bind(tenant)
             .bind(entity_type)
             .bind(entity_id)
             .execute(&mut *tx)
             .await
             .map_err(storage_error)?;
+        if removed_catalog_sequence.is_some() || removed_fields.rows_affected() > 0 {
+            invalidate_key_coverage_for_derived_write(
+                &mut tx,
+                tenant,
+                entity_type,
+                entity_id,
+                removed_catalog_sequence.map(|sequence| sequence as u64),
+            )
+            .await?;
+        }
         let commit_started = Instant::now();
         tx.commit().await.map_err(|e| {
             record_postgres_transaction_commit_duration(

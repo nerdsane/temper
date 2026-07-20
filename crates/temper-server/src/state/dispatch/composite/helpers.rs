@@ -360,7 +360,9 @@ pub(super) fn composite_envelope(
 pub(super) fn composite_batch_persistence_error(error: PersistenceError) -> DispatchError {
     match error {
         PersistenceError::ConcurrencyViolation { .. }
-        | PersistenceError::KeyContractChanged { .. } => {
+        | PersistenceError::KeyContractChanged { .. }
+        | PersistenceError::JournalBoundaryChanged { .. }
+        | PersistenceError::EntityLivenessChanged { .. } => {
             DispatchError::Conflict(format!("composite batch persistence conflict: {error}"))
         }
         PersistenceError::Serialization(_) | PersistenceError::Storage(_) => {

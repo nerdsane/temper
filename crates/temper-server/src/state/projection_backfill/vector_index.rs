@@ -179,7 +179,7 @@ pub(in crate::state) async fn populate_vector_index_from_snapshots(
                         }
                     }
                 }
-                EntityLoadOutcome::Skip { .. } => {
+                EntityLoadOutcome::Deleted { .. } | EntityLoadOutcome::Missing { .. } => {
                     // A deleted (or phantom) entity must hold no vector rows — purge
                     // any it still has so a soft-deleted entity is never ranked
                     // (reconcile with an empty row set). Harmless when there is nothing

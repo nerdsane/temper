@@ -4,8 +4,8 @@ use libsql::{TransactionBehavior, Value, params, params_from_iter};
 use std::time::Duration;
 use temper_runtime::persistence::{
     EntityVectorCandidate, EntityVectorRow, EventMetadata, EventStore, IndexReconciliation,
-    PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError, pack_f32_le,
-    storage_error, unpack_f32_le,
+    JournalBoundary, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
+    PersistenceError, pack_f32_le, storage_error, unpack_f32_le,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 use tracing::{error, instrument, warn};
@@ -472,6 +472,42 @@ impl EventStore for TursoEventStore {
         Ok(out)
     }
 
+    #[instrument(skip_all, fields(persistence_id, otel.name = "turso.journal_boundary"))]
+    async fn journal_boundary(
+        &self,
+        persistence_id: &str,
+    ) -> Result<JournalBoundary, PersistenceError> {
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT COALESCE(MAX(sequence_nr), 0),
+                        MIN(CASE WHEN
+                          CASE WHEN json_type(payload, '$.to_status') IS NOT NULL
+                            THEN json_extract(payload, '$.to_status') = 'Deleted'
+                            ELSE event_type = 'Deleted'
+                              OR json_extract(payload, '$.action') = 'Deleted'
+                          END
+                        THEN sequence_nr END)
+                 FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                params![tenant, entity_type, entity_id],
+            )
+            .await
+            .map_err(storage_error)?;
+        let Some(row) = rows.next().await.map_err(storage_error)? else {
+            return Ok(JournalBoundary::default());
+        };
+        Ok(JournalBoundary {
+            latest_sequence: row.get::<i64>(0).map_err(storage_error)? as u64,
+            first_terminal_sequence: row
+                .get::<Option<i64>>(1)
+                .map_err(storage_error)?
+                .map(|sequence_nr| sequence_nr as u64),
+        })
+    }
+
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.save_snapshot"))]
     async fn save_snapshot(
         &self,
@@ -641,7 +677,11 @@ impl EventStore for TursoEventStore {
                      WHERE d.tenant = e.tenant
                        AND d.entity_type = e.entity_type
                        AND d.entity_id = e.entity_id
-                       AND d.event_type = 'Deleted'
+                       AND (CASE WHEN json_type(d.payload, '$.to_status') IS NOT NULL
+                         THEN json_extract(d.payload, '$.to_status') = 'Deleted'
+                         ELSE d.event_type = 'Deleted'
+                           OR json_extract(d.payload, '$.action') = 'Deleted'
+                       END)
                    )",
                 params![tenant],
             )
@@ -692,7 +732,11 @@ impl EventStore for TursoEventStore {
                          WHERE d.tenant = e.tenant
                            AND d.entity_type = e.entity_type
                            AND d.entity_id = e.entity_id
-                           AND d.event_type = 'Deleted'
+                           AND (CASE WHEN json_type(d.payload, '$.to_status') IS NOT NULL
+                             THEN json_extract(d.payload, '$.to_status') = 'Deleted'
+                             ELSE d.event_type = 'Deleted'
+                               OR json_extract(d.payload, '$.action') = 'Deleted'
+                           END)
                        )
                      ORDER BY e.entity_type, e.entity_id
                      LIMIT ?3",
@@ -721,7 +765,11 @@ impl EventStore for TursoEventStore {
                      WHERE d.tenant = e.tenant
                        AND d.entity_type = e.entity_type
                        AND d.entity_id = e.entity_id
-                       AND d.event_type = 'Deleted'
+                       AND (CASE WHEN json_type(d.payload, '$.to_status') IS NOT NULL
+                         THEN json_extract(d.payload, '$.to_status') = 'Deleted'
+                         ELSE d.event_type = 'Deleted'
+                           OR json_extract(d.payload, '$.action') = 'Deleted'
+                       END)
                    )
                  ORDER BY e.entity_type, e.entity_id
                  LIMIT ?2",

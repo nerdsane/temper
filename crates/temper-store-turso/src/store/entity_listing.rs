@@ -32,7 +32,11 @@ impl TursoEventStore {
                        WHERE d.tenant = c.tenant
                          AND d.entity_type = c.entity_type
                          AND d.entity_id = c.entity_id
-                         AND d.event_type = 'Deleted'
+                         AND (CASE WHEN json_type(d.payload, '$.to_status') IS NOT NULL
+                           THEN json_extract(d.payload, '$.to_status') = 'Deleted'
+                           ELSE d.event_type = 'Deleted'
+                             OR json_extract(d.payload, '$.action') = 'Deleted'
+                         END)
                      )
                    UNION
                    SELECT f.entity_id
@@ -45,7 +49,11 @@ impl TursoEventStore {
                        WHERE d.tenant = f.tenant
                          AND d.entity_type = f.entity_type
                          AND d.entity_id = f.entity_id
-                         AND d.event_type = 'Deleted'
+                         AND (CASE WHEN json_type(d.payload, '$.to_status') IS NOT NULL
+                           THEN json_extract(d.payload, '$.to_status') = 'Deleted'
+                           ELSE d.event_type = 'Deleted'
+                             OR json_extract(d.payload, '$.action') = 'Deleted'
+                         END)
                      )
                    UNION
                    SELECT DISTINCT e.entity_id
@@ -58,7 +66,11 @@ impl TursoEventStore {
                        WHERE d.tenant = e.tenant
                          AND d.entity_type = e.entity_type
                          AND d.entity_id = e.entity_id
-                         AND d.event_type = 'Deleted'
+                         AND (CASE WHEN json_type(d.payload, '$.to_status') IS NOT NULL
+                           THEN json_extract(d.payload, '$.to_status') = 'Deleted'
+                           ELSE d.event_type = 'Deleted'
+                             OR json_extract(d.payload, '$.action') = 'Deleted'
+                         END)
                      )
                  )
                  ORDER BY entity_id",

@@ -15,7 +15,7 @@ pub(in crate::odata) use types::{
 };
 
 use super::authz::{LIST_ACTION, authorize_read};
-use super::read_support::missing_catalog_entity_ids;
+use super::read_support::{CatalogMaterializationPolicy, missing_catalog_entity_ids};
 use keyed::{
     FencedKeyedRead, KeyedCandidateResolution, read_fenced_keyed_candidate,
     resolve_keyed_candidates,
@@ -187,7 +187,7 @@ async fn read_entity_set_page_with_authorization(
                     coverage,
                     &missing_ids,
                     QueryPlaneFallbackReason::CatalogCoverageGap,
-                    true,
+                    CatalogMaterializationPolicy::Any,
                     authorization,
                 )
                 .await?;
@@ -360,7 +360,7 @@ async fn read_entity_set_page_with_authorization(
                         coverage,
                         &missing_ids,
                         QueryPlaneFallbackReason::ProjectionLagReconcile,
-                        true,
+                        CatalogMaterializationPolicy::Any,
                         authorization,
                     )
                     .await?;
@@ -421,7 +421,11 @@ async fn read_entity_set_page_with_authorization(
         coverage,
         &missing_ids,
         fallback_reason,
-        !keyed_query,
+        if keyed_query {
+            CatalogMaterializationPolicy::JournalAbsentOnly
+        } else {
+            CatalogMaterializationPolicy::Any
+        },
         authorization,
     )
     .await?;

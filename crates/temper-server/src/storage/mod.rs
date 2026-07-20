@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use sqlx::PgPool;
 use temper_runtime::persistence::{
-    EntityKeyLookup, EventStore, IndexReconciliation, PersistenceAppend, PersistenceAppendResult,
-    PersistenceEnvelope, PersistenceError,
+    EntityKeyLookup, EventStore, IndexReconciliation, JournalBoundary, PersistenceAppend,
+    PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
 };
 use temper_store_postgres::{PostgresEventStore, PostgresPolicyRow, PostgresTrajectoryInsert};
 use temper_store_turso::{
@@ -75,6 +75,11 @@ pub trait DynEventStore: Send + Sync {
         persistence_id: &'a str,
         from_sequence: u64,
     ) -> EventStoreFuture<'a, Result<Vec<PersistenceEnvelope>, PersistenceError>>;
+
+    fn journal_boundary<'a>(
+        &'a self,
+        persistence_id: &'a str,
+    ) -> EventStoreFuture<'a, Result<JournalBoundary, PersistenceError>>;
 
     fn append_with_keys<'a>(
         &'a self,
@@ -290,6 +295,14 @@ impl BoxedEventStore {
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
         self.0.read_events(persistence_id, from_sequence).await
+    }
+
+    /// Return the exact high-water and terminal boundary for one persistence stream.
+    pub async fn journal_boundary(
+        &self,
+        persistence_id: &str,
+    ) -> Result<JournalBoundary, PersistenceError> {
+        self.0.journal_boundary(persistence_id).await
     }
 
     pub async fn append_with_keys(

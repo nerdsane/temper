@@ -163,13 +163,15 @@ fn entity_key_index_present_absent_and_atomic_reject() {
                 KeyIndexBackfillFence {
                     key_set_signature: repair_signature,
                     contract_revision: repair_revision,
+                    expected_journal_sequence: 1,
+                    expected_entity_live: true,
                 },
                 std::slice::from_ref(&key),
             )
             .await;
         assert!(matches!(
             stale,
-            Err(PersistenceError::ConcurrencyViolation {
+            Err(PersistenceError::JournalBoundaryChanged {
                 expected: 1,
                 actual: 2
             })
@@ -334,6 +336,8 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
                 KeyIndexBackfillFence {
                     key_set_signature: repair_signature,
                     contract_revision: repair_revision,
+                    expected_journal_sequence: 0,
+                    expected_entity_live: false,
                 },
                 std::slice::from_ref(&key),
             )
@@ -369,6 +373,8 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
                 KeyIndexBackfillFence {
                     key_set_signature: repair_signature,
                     contract_revision: repair_revision,
+                    expected_journal_sequence: 0,
+                    expected_entity_live: false,
                 },
                 std::slice::from_ref(&key),
             )
@@ -396,6 +402,8 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
                 KeyIndexBackfillFence {
                     key_set_signature: repair_signature,
                     contract_revision: repair_revision,
+                    expected_journal_sequence: 0,
+                    expected_entity_live: false,
                 },
                 &[],
             )
@@ -510,6 +518,8 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
                 KeyIndexBackfillFence {
                     key_set_signature: target_signature,
                     contract_revision: target_revision,
+                    expected_journal_sequence: 1,
+                    expected_entity_live: true,
                 },
                 std::slice::from_ref(&obsolete_row),
             )
@@ -602,7 +612,7 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
 }
 
 #[test]
-fn list_entity_ids_by_type_unions_catalog_field_index_and_events() {
+fn entity_listing_and_key_repair_union_every_durable_source() {
     let database_url = match std::env::var("DATABASE_URL") {
         Ok(url) => url,
         Err(_) => return,
@@ -661,12 +671,60 @@ fn list_entity_ids_by_type_unions_catalog_field_index_and_events() {
             .unwrap();
         store
             .append(
-                &format!("{tenant}:{entity_type}:dl-deleted"),
+                &format!("{tenant}:{entity_type}:dl-explicit-live-legacy-name"),
                 0,
-                &[test_envelope("Deleted", serde_json::json!({}))],
+                &[test_envelope(
+                    "Deleted",
+                    serde_json::json!({
+                        "action": "Deleted",
+                        "from_status": "Published",
+                        "to_status": "Published",
+                    }),
+                )],
             )
             .await
             .unwrap();
+        store
+            .append(
+                &format!("{tenant}:{entity_type}:dl-deleted"),
+                0,
+                &[test_envelope(
+                    "Delete",
+                    serde_json::json!({
+                        "action": "Delete",
+                        "from_status": "Published",
+                        "to_status": "Deleted",
+                    }),
+                )],
+            )
+            .await
+            .unwrap();
+        store
+            .save_snapshot(
+                &format!("{tenant}:{entity_type}:dl-deleted"),
+                3,
+                b"newer-stale-live-snapshot",
+            )
+            .await
+            .unwrap();
+        store
+            .save_snapshot(
+                &format!("{tenant}:{entity_type}:dl-snapshot"),
+                4,
+                b"snapshot-only",
+            )
+            .await
+            .unwrap();
+        crate::dbm::postgres_query!(
+            "INSERT INTO entity_key_index \
+             (tenant, entity_type, entity_id, key_name, key_hash, sequence_nr) \
+             VALUES ($1, $2, 'dl-key-only', 'path', 'orphan', 0)",
+        )
+        .bind(&tenant)
+        .bind(entity_type)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let ids = store
             .list_entity_ids_by_type(&tenant, entity_type)
@@ -678,8 +736,56 @@ fn list_entity_ids_by_type_unions_catalog_field_index_and_events() {
             vec![
                 "dl-catalog".to_string(),
                 "dl-event".to_string(),
+                "dl-explicit-live-legacy-name".to_string(),
                 "dl-index".to_string(),
+                "dl-snapshot".to_string(),
             ]
+        );
+
+        let repair_signature = "v3:name";
+        let repair_revision = store
+            .begin_key_index_backfill(&tenant, entity_type, repair_signature)
+            .await
+            .unwrap();
+        let stale_live_repair = store
+            .backfill_entity_keys(
+                &tenant,
+                entity_type,
+                "dl-deleted",
+                3,
+                KeyIndexBackfillFence {
+                    key_set_signature: repair_signature,
+                    contract_revision: repair_revision,
+                    expected_journal_sequence: 1,
+                    expected_entity_live: true,
+                },
+                &[],
+            )
+            .await;
+        assert!(matches!(
+            stale_live_repair,
+            Err(PersistenceError::EntityLivenessChanged {
+                expected_live: true,
+                actual_live: false,
+            })
+        ));
+
+        let repair_ids = store
+            .list_entity_ids_for_key_reconciliation(&tenant, entity_type)
+            .await
+            .unwrap();
+        assert_eq!(
+            repair_ids,
+            vec![
+                "dl-catalog".to_string(),
+                "dl-deleted".to_string(),
+                "dl-event".to_string(),
+                "dl-explicit-live-legacy-name".to_string(),
+                "dl-index".to_string(),
+                "dl-key-only".to_string(),
+                "dl-snapshot".to_string(),
+            ],
+            "repair coverage must include live, deleted, derived-only, and migration-only rows"
         );
 
         crate::dbm::postgres_query!("DELETE FROM entity_field_index WHERE tenant = $1")
@@ -688,6 +794,16 @@ fn list_entity_ids_by_type_unions_catalog_field_index_and_events() {
             .await
             .unwrap();
         crate::dbm::postgres_query!("DELETE FROM entity_catalog WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::dbm::postgres_query!("DELETE FROM entity_key_index WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::dbm::postgres_query!("DELETE FROM snapshots WHERE tenant = $1")
             .bind(&tenant)
             .execute(&pool)
             .await

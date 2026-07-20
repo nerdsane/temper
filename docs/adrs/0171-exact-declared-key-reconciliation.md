@@ -110,17 +110,37 @@ not a best-effort projection.
 
 ### Backfill uses the same exact reconciliation primitive
 
-`backfill_entity_keys` is defined as type-contract- and sequence-fenced exact
-reconciliation: the caller passes the key-set signature and monotonic contract
-revision captured before replay, plus the journal sequence that produced the replayed
-state. Only while both fences still hold does the store delete all existing rows for
-the entity and insert the supplied current rows, including an empty set. Postgres
+`backfill_entity_keys` is defined as type-contract-, source-, liveness-, and
+sequence-fenced exact reconciliation: the caller passes the key-set signature and
+monotonic contract revision captured before replay, the entity's tombstone-aware live
+classification, the exact latest journal sequence, and the sequence that produced
+the reconstructed state. The reconstruction sequence is the newest durable
+representation across the journal, snapshot, and query-plane catalog, because
+ADR-0077 migrations can leave a snapshot or catalog row with no event stream. The
+journal sequence is fenced separately: a snapshot-only generation at sequence 1
+followed by the first journal event at sequence 1 is a source change even though the
+aggregate sequence and liveness are unchanged. Only while all fences still hold does
+the store
+delete all existing rows for the entity and insert the supplied current rows,
+including an empty set. The liveness fence prevents an ID enumerated only through a
+stale key row from deleting a same-contract create that commits before replay: even
+when replay observes the new sequence, its older non-live classification cannot pass
+the exact-repair transaction. Postgres
 acquires the tenant/type contract lock before the per-stream advisory transaction
 lock, validates signature and revision in the same transaction, then validates the
-stream sequence before mutation. Sim performs both checks under its deterministic
-store lock. A live write on either the same stream or a different stream of the type
+exact journal boundary, stream liveness, and reconstruction sequence before mutation.
+Sim performs the same checks under its deterministic store lock. A live write on
+either the same stream or a different stream of the type
 therefore makes a stale repair fail instead of letting stale state overwrite the
 newer key set. The next full pass retries from current state.
+
+The monotonic revision fences the durable entity universe as well as the key
+signature. A snapshot or catalog writer takes the same type-then-stream lock order as
+repair. If that mutation is not already represented at an equal-or-newer sequence in
+the entity journal, it advances the current signature's revision and removes the
+watermark in the same transaction. Ordinary post-append snapshots and projections
+are journal-dominated and do not churn coverage. Consequently an entity that appears
+after repair enumeration cannot be hidden by a stale conditional publication.
 
 A current claim already held by another live stream is not a skippable row. Both
 authoritative stores reject the repair before mutation, the caller records the entity
@@ -128,6 +148,36 @@ as failed, and the type remains unwatermarked. Postgres also lets a unique-const
 race fail the transaction instead of using conflict-ignore insertion. Historical
 duplicate durable state therefore stays scan-safe and visible for operator repair;
 it can never be silently certified as a complete ownership index.
+
+The repair universe is the union of events, snapshots, `entity_catalog`,
+`entity_field_index`, and existing key rows. Event and snapshot state is replayed
+first. When neither yields fields, a catalog row is an explicit compatibility source;
+field-index-only state cannot reconstruct a complete composite key and therefore
+fails the type closed. A journal, snapshot, transition-table, or replay error is not
+equivalent to missing state and never falls back to the catalog; it fails the type
+closed until strict recovery succeeds. Catalog fallback is permitted only when the
+separately observed journal sequence is exactly zero, so a schema-incompatible or
+otherwise unreconstructable journal can never be replaced by same-generation stale
+catalog state. Tombstone-aware live enumeration governs every
+replay and catalog result: a terminal journal tombstone outranks any later stale live
+snapshot or catalog row, whose sequence can fence the purge but whose fields can never
+restore ownership. Tombstone detection uses the durable lifecycle (`to_status = "Deleted"`)
+as well as legacy canonical `Deleted` event/action names, because a valid spec may
+name its deleting action `Delete` or another domain verb. When structured
+`to_status` metadata is present on a JSON object it is authoritative, including an
+explicit live target on a legacy-named event; event/action-name inference is used
+when that object key is absent. Non-object JSON payloads cannot carry structured
+lifecycle metadata and therefore use the same legacy inference in Rust, PostgreSQL,
+and Turso.
+
+Recovery reads an exact journal boundary containing both the first terminal sequence
+and the latest durable sequence before choosing a snapshot. A live snapshot at or
+after an older tombstone is rejected without becoming the actor's accepted snapshot
+boundary. Replay then consumes the complete journal: the first tombstone changes
+state to `Deleted`, while any legacy/corrupt suffix advances the durable sequence but
+applies no effects. A truncated replay that does not reach the exact high-water fails
+closed. Repair tracks a rejected snapshot's durable sequence separately from actor
+snapshot bookkeeping so the store fence still detects a newer derived write.
 
 The backfill calls the exact primitive for current entities whose key is
 all-null/non-scalar and for definitively skippable deleted/phantom streams, so stale
@@ -206,16 +256,23 @@ authoritative and uses budgeted journal/actor materialization.
 - Seeded actor/store DST proves delete and all-null release ownership across restart.
 - Composite delete/reclaim, partial-null, and rename cases prove exact final-row
   replacement and atomic ownership transfer.
-- Fault, concurrent reclaim, same-stream and cross-stream stale-backfill fencing,
-  retry, and replay cases prove journal/key atomicity.
+- Fault, concurrent reclaim, orphan-to-live, equal-sequence source replacement,
+  same-stream and cross-stream stale-backfill fencing, retry, and replay cases prove
+  journal/key atomicity.
 - A target-contract race and A → no-key → A cycle prove old signatures cannot regain
   coverage through an ABA-equivalent watermark.
 - Real Postgres coverage proves empty reconciliation, rollback, concurrent reclaim,
-  sequence-fenced repair behavior, target-contract revision fencing, and
-  conflict-before-watermark failure.
+  sequence- and liveness-fenced repair behavior, target-contract revision fencing,
+  and conflict-before-watermark failure, including catalog-only migration rows.
 - PATCH/PUT replay, real intervening-journal retry, concurrent-delete rejection,
   replay-budget, action-name collision, data-only create, and synthetic File
   initial-content regressions cover every non-composite write surface.
+- Fault-truncated terminal replay, stale-live-snapshot rejection, duplicate-delete
+  delivery, and non-idempotent action retry prove recovery reaches the exact durable
+  high-water without reapplying effects.
+- Sim and real-Postgres races prove snapshot/catalog-only writers invalidate an
+  in-flight coverage epoch while journal-dominated projection writes do not, and
+  prove an equal-sequence journal source change rejects snapshot-derived repair.
 - A live local server flow demonstrates release and reclaim through the actual API.
 - Restarted normal, count-bearing, and ordered keyed reads return only the current
   owner while a lagging tombstone projection is repaired; the same options never
@@ -245,7 +302,7 @@ authoritative and uses budgeted journal/actor materialization.
 - The first deployment performs one complete repair pass for each keyed type without
   a matching v3 watermark, including interrupted/unwatermarked indexes.
 - Per-stream Postgres appends take an advisory transaction lock so a background repair
-  and a live write cannot cross after the replay-sequence check.
+  and a live write cannot cross after the replay liveness/sequence checks.
 - Authoritative Postgres writes also take a tenant/type contract lock before their
   stream lock; backfill target establishment, every repair-row transaction, and final
   publication take that same contract lock.
@@ -263,9 +320,12 @@ authoritative and uses budgeted journal/actor materialization.
 - Trusting the index during the repair would make an unremoved stale or missing row
   authoritative. Every incomplete type is fully replayed, and the versioned watermark
   withholds authoritative hits and misses until the pass succeeds.
-- Replaying state and repairing later without a sequence fence could restore an old
-  key after a concurrent rename/delete. The expected sequence plus shared stream lock
-  makes either the repair or the live append happen first; a stale repair is rejected.
+- Replaying state and repairing later without source, liveness, and sequence fences
+  could restore an old key after a concurrent rename/delete, remove a key after an
+  orphan candidate becomes live, or install snapshot-derived ownership after an
+  equal-sequence journal replaces that source. The expected journal boundary,
+  classification, and reconstruction sequence plus the shared stream lock make
+  either the repair or the live append happen first; a stale repair is rejected.
 - Capturing a revision before declaring the repair target could miss a live write that
   still uses the old contract. Backfill establishes the target first, and publication
   compares both target signature and revision.

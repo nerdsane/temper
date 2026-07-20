@@ -10,6 +10,7 @@ use super::{
     budget_rejection, filter_only_query_options, materialize_and_authorize_ids,
     query_options_with_default_page,
 };
+use crate::odata::read_support::CatalogMaterializationPolicy;
 use crate::query_eval::apply_query_options;
 
 async fn read_source_cursor_without_filter_or_count(
@@ -17,7 +18,7 @@ async fn read_source_cursor_without_filter_or_count(
     all_entity_ids: &[String],
     coverage: QueryPlaneCoverageReport,
     fallback_reason: QueryPlaneFallbackReason,
-    allow_catalog: bool,
+    catalog_policy: CatalogMaterializationPolicy,
     authorization: QueryPlaneReadAuthorization,
 ) -> Result<CandidateScanResult, QueryPlaneReadError> {
     let requested_top = request.budget.requested_top(request.query_options);
@@ -30,7 +31,7 @@ async fn read_source_cursor_without_filter_or_count(
                 strategy: QueryPlaneReadStrategy::ReadSourceCursor,
                 fallback_reason,
                 filter_pushdown: false,
-                catalog_materialization: allow_catalog
+                catalog_materialization: catalog_policy.uses_catalog()
                     && request.state.query_plane_store().is_some(),
                 coverage,
                 counters,
@@ -58,7 +59,7 @@ async fn read_source_cursor_without_filter_or_count(
                 request,
                 QueryPlaneReadStrategy::ReadSourceCursor,
                 false,
-                allow_catalog && request.state.query_plane_store().is_some(),
+                catalog_policy.uses_catalog() && request.state.query_plane_store().is_some(),
                 coverage,
                 counters,
             ));
@@ -70,7 +71,7 @@ async fn read_source_cursor_without_filter_or_count(
         let authorized = materialize_and_authorize_ids(
             request,
             &all_entity_ids[offset..end],
-            allow_catalog,
+            catalog_policy,
             &mut counters,
             authorization,
         )
@@ -97,7 +98,8 @@ async fn read_source_cursor_without_filter_or_count(
             strategy: QueryPlaneReadStrategy::ReadSourceCursor,
             fallback_reason,
             filter_pushdown: false,
-            catalog_materialization: allow_catalog && request.state.query_plane_store().is_some(),
+            catalog_materialization: catalog_policy.uses_catalog()
+                && request.state.query_plane_store().is_some(),
             coverage,
             counters,
             returned_count,
@@ -116,7 +118,7 @@ async fn read_source_full_proof(
     mut coverage: QueryPlaneCoverageReport,
     missing_ids: &[String],
     fallback_reason: QueryPlaneFallbackReason,
-    allow_catalog: bool,
+    catalog_policy: CatalogMaterializationPolicy,
     authorization: QueryPlaneReadAuthorization,
 ) -> Result<CandidateScanResult, QueryPlaneReadError> {
     let scan_budget = request.budget.scan_candidate_budget();
@@ -129,7 +131,7 @@ async fn read_source_full_proof(
             request,
             QueryPlaneReadStrategy::ReadSourceCursor,
             false,
-            allow_catalog && request.state.query_plane_store().is_some(),
+            catalog_policy.uses_catalog() && request.state.query_plane_store().is_some(),
             coverage,
             counters,
         ));
@@ -139,7 +141,7 @@ async fn read_source_full_proof(
     let authorized = materialize_and_authorize_ids(
         request,
         all_entity_ids,
-        allow_catalog,
+        catalog_policy,
         &mut counters,
         authorization,
     )
@@ -167,7 +169,8 @@ async fn read_source_full_proof(
             strategy: QueryPlaneReadStrategy::ReadSourceCursor,
             fallback_reason,
             filter_pushdown: false,
-            catalog_materialization: allow_catalog && request.state.query_plane_store().is_some(),
+            catalog_materialization: catalog_policy.uses_catalog()
+                && request.state.query_plane_store().is_some(),
             coverage,
             counters,
             returned_count,
@@ -186,7 +189,7 @@ pub(in crate::odata::query_plane_read) async fn read_from_source_cursor(
     coverage: QueryPlaneCoverageReport,
     missing_ids: &[String],
     fallback_reason: QueryPlaneFallbackReason,
-    allow_catalog: bool,
+    catalog_policy: CatalogMaterializationPolicy,
     authorization: QueryPlaneReadAuthorization,
 ) -> Result<CandidateScanResult, QueryPlaneReadError> {
     let needs_full_proof = request.query_options.filter.is_some()
@@ -199,7 +202,7 @@ pub(in crate::odata::query_plane_read) async fn read_from_source_cursor(
             coverage,
             missing_ids,
             fallback_reason,
-            allow_catalog,
+            catalog_policy,
             authorization,
         )
         .await
@@ -209,7 +212,7 @@ pub(in crate::odata::query_plane_read) async fn read_from_source_cursor(
             all_entity_ids,
             coverage,
             fallback_reason,
-            allow_catalog,
+            catalog_policy,
             authorization,
         )
         .await

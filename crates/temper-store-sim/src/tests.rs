@@ -267,6 +267,7 @@ async fn key_reconciliation_includes_snapshot_and_key_only_owners() {
             KeyIndexBackfillFence {
                 key_set_signature: repair_signature,
                 contract_revision: repair_revision,
+                expected_journal_sequence: 0,
                 expected_entity_live: false,
             },
             &[orphan],
@@ -277,6 +278,10 @@ async fn key_reconciliation_includes_snapshot_and_key_only_owners() {
         .save_snapshot("default:Doc:snapshot-only", 5, b"snapshot-only")
         .await
         .expect("seed snapshot-only owner");
+    let repair_revision = store
+        .begin_key_index_backfill("default", "Doc", repair_signature)
+        .await
+        .expect("refresh repair epoch after snapshot-only writer");
 
     assert_eq!(
         store
@@ -308,6 +313,7 @@ async fn key_reconciliation_includes_snapshot_and_key_only_owners() {
             KeyIndexBackfillFence {
                 key_set_signature: repair_signature,
                 contract_revision: repair_revision,
+                expected_journal_sequence: 0,
                 expected_entity_live: true,
             },
             std::slice::from_ref(&snapshot_key),
@@ -329,6 +335,7 @@ async fn key_reconciliation_includes_snapshot_and_key_only_owners() {
             KeyIndexBackfillFence {
                 key_set_signature: repair_signature,
                 contract_revision: repair_revision,
+                expected_journal_sequence: 0,
                 expected_entity_live: true,
             },
             std::slice::from_ref(&snapshot_key),
@@ -341,6 +348,83 @@ async fn key_reconciliation_includes_snapshot_and_key_only_owners() {
             .await
             .expect("snapshot-only lookup"),
         Some("snapshot-only".to_string())
+    );
+}
+
+#[tokio::test]
+async fn journal_source_fence_rejects_equal_sequence_snapshot_repair() {
+    let store = SimEventStore::no_faults(42);
+    let persistence_id = "default:Doc:source-aba";
+    let repair_signature = "v4:path";
+    let snapshot_key = EntityKeyRow {
+        key_name: "path".to_string(),
+        key_hash: "snapshot-path".to_string(),
+    };
+    let journal_key = EntityKeyRow {
+        key_name: "path".to_string(),
+        key_hash: "journal-path".to_string(),
+    };
+
+    store
+        .save_snapshot(persistence_id, 1, b"snapshot-only")
+        .await
+        .expect("seed snapshot-only generation");
+    let repair_revision = store
+        .begin_key_index_backfill("default", "Doc", repair_signature)
+        .await
+        .expect("begin snapshot-derived repair");
+
+    store
+        .append_with_index_rows(
+            persistence_id,
+            0,
+            &[test_envelope(0, "Create")],
+            std::slice::from_ref(&journal_key),
+            &[],
+            IndexReconciliation {
+                keys: true,
+                key_set_signature: Some(repair_signature.to_string()),
+                vectors: false,
+            },
+        )
+        .await
+        .expect("replace snapshot-only source with equal-sequence journal state");
+
+    let stale = store
+        .backfill_entity_keys(
+            "default",
+            "Doc",
+            "source-aba",
+            1,
+            KeyIndexBackfillFence {
+                key_set_signature: repair_signature,
+                contract_revision: repair_revision,
+                expected_journal_sequence: 0,
+                expected_entity_live: true,
+            },
+            std::slice::from_ref(&snapshot_key),
+        )
+        .await;
+    assert!(matches!(
+        stale,
+        Err(PersistenceError::JournalBoundaryChanged {
+            expected: 0,
+            actual: 1,
+        })
+    ));
+    assert_eq!(
+        store
+            .lookup_by_key("default", "Doc", "path", &journal_key.key_hash)
+            .await
+            .expect("lookup current journal ownership"),
+        Some("source-aba".to_string())
+    );
+    assert_eq!(
+        store
+            .lookup_by_key("default", "Doc", "path", &snapshot_key.key_hash)
+            .await
+            .expect("lookup rejected snapshot ownership"),
+        None
     );
 }
 

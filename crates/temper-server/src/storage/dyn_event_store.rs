@@ -39,6 +39,14 @@ where
         Box::pin(EventStore::read_events(self, persistence_id, from_sequence))
     }
 
+    fn journal_boundary<'a>(
+        &'a self,
+        persistence_id: &'a str,
+    ) -> EventStoreFuture<'a, Result<temper_runtime::persistence::JournalBoundary, PersistenceError>>
+    {
+        Box::pin(EventStore::journal_boundary(self, persistence_id))
+    }
+
     fn append_with_keys<'a>(
         &'a self,
         persistence_id: &'a str,

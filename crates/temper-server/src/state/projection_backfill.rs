@@ -43,12 +43,20 @@ pub(super) enum EntityLoadOutcome {
     Fields {
         fields: serde_json::Value,
         sequence_nr: u64,
+        journal_sequence: u64,
     },
-    /// Definitively skippable: deleted, or a phantom with no events. Correctly NOT
-    /// indexed, and NOT a failure (it must not block the watermark). The sequence is
-    /// still required so an empty exact repair cannot overwrite a concurrent live
-    /// append after replay.
-    Skip { sequence_nr: u64 },
+    /// Durably deleted. Tombstone replay is authoritative even if an asynchronous
+    /// catalog row still contains the entity's former live fields.
+    Deleted {
+        sequence_nr: u64,
+        journal_sequence: u64,
+    },
+    /// No replayable events or valid snapshot state. This can be a true key-only
+    /// phantom, or a migration-era entity whose catalog is its durable state.
+    Missing {
+        sequence_nr: u64,
+        journal_sequence: u64,
+    },
     /// The entity exists (it was enumerated from the durable store) but its current
     /// state could not be loaded — no transition table to replay with, an unreadable
     /// snapshot, or a replay error. Indexing it is impossible, so the type must NOT be
@@ -73,6 +81,16 @@ pub(super) async fn load_entity_current_fields(
     let Some(table) = table else {
         return EntityLoadOutcome::LoadFailed;
     };
+    let persistence_id = format!("{}:{entity_type}:{entity_id}", tenant.as_str());
+    let journal_sequence = match store.journal_boundary(&persistence_id).await {
+        Ok(boundary) => boundary.latest_sequence,
+        Err(_) => return EntityLoadOutcome::LoadFailed,
+    };
+    let durable_snapshot_sequence = match store.load_snapshot(&persistence_id).await {
+        Ok(Some((sequence_nr, _))) => sequence_nr,
+        Ok(None) => 0,
+        Err(_) => return EntityLoadOutcome::LoadFailed,
+    };
     match recover_entity_state_from_store(
         tenant.as_str(),
         entity_type,
@@ -87,15 +105,18 @@ pub(super) async fn load_entity_current_fields(
     .await
     {
         Err(_) => EntityLoadOutcome::LoadFailed,
-        Ok(state) if state.status == "Deleted" => EntityLoadOutcome::Skip {
-            sequence_nr: state.sequence_nr,
+        Ok(state) if state.status == "Deleted" => EntityLoadOutcome::Deleted {
+            sequence_nr: state.sequence_nr.max(durable_snapshot_sequence),
+            journal_sequence,
         },
-        Ok(state) if state.total_event_count == 0 => EntityLoadOutcome::Skip {
-            sequence_nr: state.sequence_nr,
+        Ok(state) if state.total_event_count == 0 => EntityLoadOutcome::Missing {
+            sequence_nr: state.sequence_nr.max(durable_snapshot_sequence),
+            journal_sequence,
         },
         Ok(state) => EntityLoadOutcome::Fields {
             fields: state.fields,
-            sequence_nr: state.sequence_nr,
+            sequence_nr: state.sequence_nr.max(durable_snapshot_sequence),
+            journal_sequence,
         },
     }
 }

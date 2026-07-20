@@ -162,6 +162,8 @@ async fn run_reconciliation_workload(seed: u64) -> ReconciliationTrace {
                 KeyIndexBackfillFence {
                     key_set_signature: contract_b,
                     contract_revision: first_repair_revision,
+                    expected_journal_sequence: stale_sequence,
+                    expected_entity_live: true,
                 },
                 &stale_rows,
             )
@@ -190,7 +192,7 @@ async fn run_reconciliation_workload(seed: u64) -> ReconciliationTrace {
         } else {
             assert!(matches!(
                 stale,
-                Err(PersistenceError::ConcurrencyViolation {
+                Err(PersistenceError::JournalBoundaryChanged {
                     expected: 1,
                     actual: 2
                 })
@@ -229,6 +231,8 @@ async fn run_reconciliation_workload(seed: u64) -> ReconciliationTrace {
             KeyIndexBackfillFence {
                 key_set_signature: contract_b,
                 contract_revision: final_revision,
+                expected_journal_sequence: 2,
+                expected_entity_live: true,
             },
             &final_rows,
         )

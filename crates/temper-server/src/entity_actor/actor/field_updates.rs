@@ -100,7 +100,7 @@ impl EntityActor {
     /// journal twice when no snapshot exists. A fresh rebuild is therefore part
     /// of the retry contract, and journal reads are strict: an actor that cannot
     /// catch up must stop instead of continuing to serve stale state.
-    async fn recover_authoritative_state(
+    pub(super) async fn recover_authoritative_state(
         &self,
         store: &BoxedEventStore,
         backend: BackendLabel,

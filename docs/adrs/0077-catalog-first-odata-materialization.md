@@ -68,6 +68,17 @@ No data migration required for new deployments — the projection is populated o
 
 For deployments that were migrated from another backend (e.g., Turso → Postgres ETL): the ETL must populate `entity_catalog` directly from `snapshots`, since migrated snapshots never replay through the live transition path. The openpaw 2026-04-30 cutover discovered this gap and backfilled `entity_catalog` (1287 rows) and `entity_field_index` (11363 rows) post-hoc; the methodology is captured in ADR-0074.
 
+Derived-index repair must consequently treat snapshots, `entity_catalog`, and
+`entity_field_index` as durable entity-enumeration sources rather than assuming an
+event stream exists. A catalog-only row can reconstruct declared keys; a durable row
+that cannot be reconstructed must prevent authoritative coverage from publishing.
+Before declared-key coverage exists, exact-key scans may materialize such a catalog
+row only after proving that the entity's journal is absent both before and after the
+read. Once coverage exists, the key row's sequence must equal the catalog row's
+sequence, and a stable ownership row plus reconciliation revision fences the result.
+Journal-backed entities continue to materialize from journal state, so a lagging live
+catalog row can never outrank a tombstone.
+
 ## Alternatives considered
 
 - **Vercel ISR + revalidate** on katagami: caches the SSR'd HTML at the edge for N seconds. Mitigation, not a root fix; first request after revalidation still pays the 22s cost. Composes with this ADR but does not replace it.

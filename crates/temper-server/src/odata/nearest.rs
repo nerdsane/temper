@@ -23,7 +23,7 @@ use temper_runtime::tenant::TenantId;
 use super::authz::{LIST_ACTION, READ_ACTION, authorize_read};
 use super::common::resolve_entity_type;
 use super::query_plane_read::QueryPlaneReadBudget;
-use super::read_support::materialize_entity_set_entities;
+use super::read_support::{CatalogMaterializationPolicy, materialize_entity_set_entities};
 use crate::response::odata_error;
 use crate::state::ServerState;
 use crate::vector_index::{VectorMetric, parse_vector_property, rank_nearest};
@@ -196,7 +196,7 @@ pub(super) async fn handle_nearest(
                 &entity_type,
                 &set_name,
                 std::slice::from_ref(&reference_id.to_string()),
-                true,
+                CatalogMaterializationPolicy::Any,
                 None,
             )
             .await;
@@ -355,7 +355,7 @@ pub(super) async fn handle_nearest(
             &entity_type,
             &set_name,
             std::slice::from_ref(&scored.entity_id),
-            true,
+            CatalogMaterializationPolicy::Any,
             None,
         )
         .await;

@@ -11,8 +11,8 @@ use std::time::Instant;
 use sqlx::{Acquire, PgPool};
 use temper_runtime::persistence::{
     EntityKeyLookup, EntityVectorCandidate, EntityVectorRow, EventMetadata, EventStore,
-    IndexReconciliation, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
-    PersistenceError, pack_f32_le, unpack_f32_le,
+    IndexReconciliation, JournalBoundary, PersistenceAppend, PersistenceAppendResult,
+    PersistenceEnvelope, PersistenceError, pack_f32_le, unpack_f32_le,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -23,7 +23,8 @@ use crate::metrics::{
 use crate::segments;
 
 pub(crate) use key_index::{
-    event_stream_lock_key, lock_event_stream, lock_key_contract, reconcile_key_contract_state,
+    event_stream_lock_key, invalidate_key_coverage_for_derived_write, lock_event_stream,
+    lock_key_contract, reconcile_key_contract_state,
 };
 
 const EVENT_APPEND_OPERATION: &str = "event_append";
@@ -882,6 +883,34 @@ impl EventStore for PostgresEventStore {
             .collect()
     }
 
+    async fn journal_boundary(
+        &self,
+        persistence_id: &str,
+    ) -> Result<JournalBoundary, PersistenceError> {
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let row: (i64, Option<i64>) = crate::dbm::postgres_query_as!(
+            "SELECT COALESCE(MAX(sequence_nr), 0), \
+               MIN(sequence_nr) FILTER (WHERE \
+                 CASE WHEN jsonb_typeof(payload) = 'object' AND payload ? 'to_status' \
+                   THEN payload ->> 'to_status' = 'Deleted' \
+                   ELSE event_type = 'Deleted' OR payload ->> 'action' = 'Deleted' \
+                 END) \
+             FROM events \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        Ok(JournalBoundary {
+            latest_sequence: row.0 as u64,
+            first_terminal_sequence: row.1.map(|sequence_nr| sequence_nr as u64),
+        })
+    }
+
     /// Save (upsert) a snapshot for the given entity.
     ///
     /// Uses `ON CONFLICT … DO UPDATE` so that only the latest snapshot is
@@ -900,6 +929,35 @@ impl EventStore for PostgresEventStore {
             .begin()
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+
+        lock_key_contract(&mut tx, tenant, entity_type).await?;
+        let lock_key = event_stream_lock_key(tenant, entity_type, entity_id);
+        lock_event_stream(&mut tx, &lock_key).await?;
+
+        let previous: Option<(i64, Vec<u8>)> = crate::dbm::postgres_query_as!(
+            "SELECT sequence_nr, state FROM snapshots \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+             FOR UPDATE",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        let snapshot_changed = previous.as_ref().is_none_or(|(stored_sequence, stored)| {
+            *stored_sequence != sequence_nr as i64 || stored.as_slice() != snapshot
+        });
+        if snapshot_changed {
+            invalidate_key_coverage_for_derived_write(
+                &mut tx,
+                tenant,
+                entity_type,
+                entity_id,
+                Some(sequence_nr),
+            )
+            .await?;
+        }
 
         crate::dbm::postgres_query!(
             "INSERT INTO snapshots (tenant, entity_type, entity_id, sequence_nr, state) \
@@ -1003,7 +1061,10 @@ impl EventStore for PostgresEventStore {
                    WHERE d.tenant = c.tenant \
                      AND d.entity_type = c.entity_type \
                      AND d.entity_id = c.entity_id \
-                     AND d.event_type = 'Deleted' \
+                     AND (CASE WHEN jsonb_typeof(d.payload) = 'object' AND d.payload ? 'to_status' \
+                       THEN d.payload ->> 'to_status' = 'Deleted' \
+                       ELSE d.event_type = 'Deleted' OR d.payload ->> 'action' = 'Deleted' \
+                     END) \
                  ) \
                UNION \
                SELECT f.entity_id \
@@ -1016,7 +1077,26 @@ impl EventStore for PostgresEventStore {
                    WHERE d.tenant = f.tenant \
                      AND d.entity_type = f.entity_type \
                      AND d.entity_id = f.entity_id \
-                     AND d.event_type = 'Deleted' \
+                     AND (CASE WHEN jsonb_typeof(d.payload) = 'object' AND d.payload ? 'to_status' \
+                       THEN d.payload ->> 'to_status' = 'Deleted' \
+                       ELSE d.event_type = 'Deleted' OR d.payload ->> 'action' = 'Deleted' \
+                     END) \
+                 ) \
+               UNION \
+               SELECT s.entity_id \
+               FROM snapshots s \
+               WHERE s.tenant = $1 \
+                 AND s.entity_type = $2 \
+                 AND NOT EXISTS ( \
+                   SELECT 1 \
+                   FROM events d \
+                   WHERE d.tenant = s.tenant \
+                     AND d.entity_type = s.entity_type \
+                     AND d.entity_id = s.entity_id \
+                     AND (CASE WHEN jsonb_typeof(d.payload) = 'object' AND d.payload ? 'to_status' \
+                       THEN d.payload ->> 'to_status' = 'Deleted' \
+                       ELSE d.event_type = 'Deleted' OR d.payload ->> 'action' = 'Deleted' \
+                     END) \
                  ) \
                UNION \
                SELECT DISTINCT e.entity_id \
@@ -1029,7 +1109,10 @@ impl EventStore for PostgresEventStore {
                    WHERE d.tenant = e.tenant \
                      AND d.entity_type = e.entity_type \
                      AND d.entity_id = e.entity_id \
-                     AND d.event_type = 'Deleted' \
+                     AND (CASE WHEN jsonb_typeof(d.payload) = 'object' AND d.payload ? 'to_status' \
+                       THEN d.payload ->> 'to_status' = 'Deleted' \
+                       ELSE d.event_type = 'Deleted' OR d.payload ->> 'action' = 'Deleted' \
+                     END) \
                  ) \
              ) ids \
              ORDER BY entity_id",
@@ -1050,9 +1133,9 @@ impl EventStore for PostgresEventStore {
     ) -> Result<Vec<String>, PersistenceError> {
         // Repair authority is deliberately broader than live query enumeration:
         // deleted streams can retain pre-v3 rows, while interrupted/manual legacy
-        // writes can leave key rows whose journal no longer exists. Both owners
-        // must replay (or classify as a phantom) and receive an exact empty set
-        // before the type can be watermarked.
+        // writes can leave key rows whose journal no longer exists. Migration-era
+        // catalog, field-index, and snapshot rows may also be the only durable copy
+        // of an entity. Every source must therefore participate in repair coverage.
         let rows: Vec<String> = crate::dbm::postgres_query_scalar!(
             "SELECT entity_id \
              FROM ( \
@@ -1063,6 +1146,18 @@ impl EventStore for PostgresEventStore {
                SELECT DISTINCT k.entity_id \
                FROM entity_key_index k \
                WHERE k.tenant = $1 AND k.entity_type = $2 \
+               UNION \
+               SELECT c.entity_id \
+               FROM entity_catalog c \
+               WHERE c.tenant = $1 AND c.entity_type = $2 \
+               UNION \
+               SELECT DISTINCT f.entity_id \
+               FROM entity_field_index f \
+               WHERE f.tenant = $1 AND f.entity_type = $2 \
+               UNION \
+               SELECT s.entity_id \
+               FROM snapshots s \
+               WHERE s.tenant = $1 AND s.entity_type = $2 \
              ) repair_ids \
              ORDER BY entity_id",
         )

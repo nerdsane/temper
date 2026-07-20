@@ -117,6 +117,77 @@ pub(crate) async fn reconcile_key_contract_state(
     Ok(1)
 }
 
+/// Advance the current reconciliation epoch when a durable snapshot or catalog
+/// mutation is not already represented by the same stream's journal.
+///
+/// Callers hold the type contract lock and the entity stream lock. The signature
+/// remains unchanged; only the monotonic revision advances, invalidating an
+/// enumeration that began before a snapshot/catalog-only entity appeared or
+/// changed. Normal projections at or below the journal high-water are already
+/// covered by append fencing and do not churn the epoch.
+pub(crate) async fn invalidate_key_coverage_for_derived_write(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+    durable_sequence: Option<u64>,
+) -> Result<(), PersistenceError> {
+    if let Some(durable_sequence) = durable_sequence {
+        let journal_sequence: Option<i64> = crate::dbm::postgres_query_scalar!(
+            "SELECT MAX(sequence_nr) FROM events \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        if journal_sequence.is_some_and(|sequence| sequence as u64 >= durable_sequence) {
+            return Ok(());
+        }
+    }
+
+    let current: Option<(String, i64)> = crate::dbm::postgres_query_as!(
+        "SELECT key_set, revision FROM key_index_contract_state \
+         WHERE tenant = $1 AND entity_type = $2 FOR UPDATE",
+    )
+    .bind(tenant)
+    .bind(entity_type)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+    let Some((_, revision)) = current else {
+        return Ok(());
+    };
+    let next = revision.checked_add(1).ok_or_else(|| {
+        PersistenceError::Storage(format!(
+            "key reconciliation revision overflow for {tenant}:{entity_type}"
+        ))
+    })?;
+    crate::dbm::postgres_query!(
+        "UPDATE key_index_contract_state \
+         SET revision = $3, updated_at = now() \
+         WHERE tenant = $1 AND entity_type = $2",
+    )
+    .bind(tenant)
+    .bind(entity_type)
+    .bind(next)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+    crate::dbm::postgres_query!(
+        "DELETE FROM key_index_backfill_watermark \
+         WHERE tenant = $1 AND entity_type = $2",
+    )
+    .bind(tenant)
+    .bind(entity_type)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+    Ok(())
+}
+
 pub(super) async fn backfill_entity_keys(
     pool: &PgPool,
     tenant: &str,
@@ -163,9 +234,54 @@ pub(super) async fn backfill_entity_keys(
     let lock_key = event_stream_lock_key(tenant, entity_type, entity_id);
     lock_event_stream(&mut tx, &lock_key).await?;
 
-    let row: (i64,) = crate::dbm::postgres_query_as!(
-        "SELECT COALESCE(MAX(sequence_nr), 0) FROM events \
-         WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+    // Migration-era entities can be represented only by a snapshot or catalog
+    // projection. Fence against the newest durable representation, not merely the
+    // event journal, before replacing that entity's complete ownership set.
+    let row: (i64, i64, bool) = crate::dbm::postgres_query_as!(
+        "SELECT GREATEST( \
+           COALESCE(( \
+             SELECT MAX(sequence_nr) FROM events \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+           ), 0), \
+           COALESCE(( \
+             SELECT sequence_nr FROM snapshots \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+           ), 0), \
+           COALESCE(( \
+             SELECT sequence_nr FROM entity_catalog \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+           ), 0) \
+         ), COALESCE(( \
+           SELECT MAX(sequence_nr) FROM events \
+           WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+         ), 0), ( \
+           ( \
+             EXISTS ( \
+               SELECT 1 FROM events \
+               WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+             ) \
+             OR EXISTS ( \
+               SELECT 1 FROM snapshots \
+               WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+             ) \
+             OR EXISTS ( \
+               SELECT 1 FROM entity_catalog \
+               WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+             ) \
+             OR EXISTS ( \
+               SELECT 1 FROM entity_field_index \
+               WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+             ) \
+           ) \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM events \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+               AND (CASE WHEN jsonb_typeof(payload) = 'object' AND payload ? 'to_status' \
+                 THEN payload ->> 'to_status' = 'Deleted' \
+                 ELSE event_type = 'Deleted' OR payload ->> 'action' = 'Deleted' \
+               END) \
+           ) \
+         )",
     )
     .bind(tenant)
     .bind(entity_type)
@@ -174,6 +290,20 @@ pub(super) async fn backfill_entity_keys(
     .await
     .map_err(|e| PersistenceError::Storage(e.to_string()))?;
     let current_sequence = row.0 as u64;
+    let current_journal_sequence = row.1 as u64;
+    if current_journal_sequence != contract_fence.expected_journal_sequence {
+        return Err(PersistenceError::JournalBoundaryChanged {
+            expected: contract_fence.expected_journal_sequence,
+            actual: current_journal_sequence,
+        });
+    }
+    let current_entity_live = row.2;
+    if current_entity_live != contract_fence.expected_entity_live {
+        return Err(PersistenceError::EntityLivenessChanged {
+            expected_live: contract_fence.expected_entity_live,
+            actual_live: current_entity_live,
+        });
+    }
     if current_sequence != expected_sequence {
         return Err(PersistenceError::ConcurrencyViolation {
             expected: expected_sequence,
