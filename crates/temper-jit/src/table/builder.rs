@@ -18,23 +18,25 @@ use super::types::{
 impl TransitionTable {
     /// Build a TransitionTable from I/O Automaton TOML source.
     ///
-    /// Returns an error if the TOML fails to parse. Prefer this over
-    /// [`from_ioa_source`](Self::from_ioa_source) in production code
-    /// where parse errors should be propagated.
+    /// Returns an error if the TOML fails to parse or declares an unsupported
+    /// safety invariant. Prefer this over [`from_ioa_source`](Self::from_ioa_source)
+    /// in production code where construction errors should be propagated.
     pub fn try_from_ioa_source(ioa_toml: &str) -> Result<Self, String> {
         let automaton = automaton::parse_automaton(ioa_toml)
             .map_err(|e| format!("failed to parse I/O Automaton TOML: {e}"))?;
-        Ok(Self::from_automaton(&automaton))
+        Self::try_from_automaton(&automaton)
     }
 
     /// Build a TransitionTable from I/O Automaton TOML source.
     ///
     /// # Panics
     ///
-    /// Panics if the TOML fails to parse. Use [`try_from_ioa_source`](Self::try_from_ioa_source)
-    /// for fallible construction.
+    /// Panics if the TOML fails to parse or declares an unsupported safety
+    /// invariant. Use [`try_from_ioa_source`](Self::try_from_ioa_source) for
+    /// fallible construction.
     pub fn from_ioa_source(ioa_toml: &str) -> Self {
-        Self::try_from_ioa_source(ioa_toml).expect("failed to parse I/O Automaton TOML")
+        Self::try_from_ioa_source(ioa_toml)
+            .expect("failed to build transition table from I/O Automaton TOML")
     }
 
     /// Build a TransitionTable directly from a parsed [`Automaton`].
@@ -42,7 +44,31 @@ impl TransitionTable {
     /// Each action becomes a [`TransitionRule`] with guards and effects
     /// derived from the IOA specification via the shared translation layer.
     /// Output actions are skipped (they don't transition state).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the automaton declares an unsupported safety invariant. Use
+    /// [`try_from_automaton`](Self::try_from_automaton) for fallible construction.
     pub fn from_automaton(automaton: &Automaton) -> Self {
+        Self::try_from_automaton(automaton).expect("failed to build transition table")
+    }
+
+    /// Build a TransitionTable directly from a parsed [`Automaton`].
+    ///
+    /// Returns an error before constructing executable rules if any declared
+    /// safety invariant is outside the shared verification/runtime contract.
+    pub fn try_from_automaton(automaton: &Automaton) -> Result<Self, String> {
+        let unsupported = automaton::unsupported_safety_invariant_names(automaton);
+        if !unsupported.is_empty() {
+            return Err(format!(
+                "unsupported safety invariants: {}",
+                unsupported.join(", ")
+            ));
+        }
+        Ok(Self::build_from_automaton(automaton))
+    }
+
+    fn build_from_automaton(automaton: &Automaton) -> Self {
         let resolved_actions = translate_actions(automaton);
 
         let rules: Vec<TransitionRule> = resolved_actions
@@ -167,6 +193,10 @@ impl TransitionTable {
     }
 }
 
+#[cfg(test)]
+#[path = "builder_safety_tests.rs"]
+mod builder_safety_tests;
+
 /// Convert a shared [`ResolvedGuard`] to the JIT [`Guard`] type.
 fn convert_guard(guard: ResolvedGuard) -> Guard {
     match guard {
@@ -241,82 +271,8 @@ fn convert_effect(effect: ResolvedEffect) -> Effect {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_schedule_effect_maps_to_schedule_action() {
-        let spec = r#"
-[automaton]
-name = "OAuthToken"
-states = ["Active", "Refreshing", "Expired"]
-initial = "Active"
-
-[[action]]
-name = "Activate"
-from = ["Refreshing"]
-to = "Active"
-effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
-"#;
-
-        let table = TransitionTable::from_ioa_source(spec);
-        let rule = table.rules.iter().find(|r| r.name == "Activate").unwrap();
-
-        let has_schedule = rule.effects.iter().any(|e| {
-            matches!(
-                e,
-                Effect::ScheduleAction { action, delay_seconds }
-                    if action == "Refresh" && *delay_seconds == 2700
-            )
-        });
-        assert!(
-            has_schedule,
-            "expected ScheduleAction effect, got: {:?}",
-            rule.effects
-        );
-    }
-
-    #[test]
-    fn composite_metadata_is_registered_on_transition_table() {
-        let spec = r#"
-[automaton]
-name = "Repository"
-states = ["Active"]
-initial = "Active"
-
-[[action]]
-name = "IngestPack"
-kind = "Composite"
-from = ["Active"]
-to = "Active"
-record_parent_event = false
-
-[[action.cedar_gate]]
-principal = "request.principal"
-resource = "this"
-action = "Repository::IngestPack"
-
-[[action.sub_writes]]
-target_entity = "Blob"
-action = "Create"
-generated_from = "pack_bytes"
-"#;
-
-        let table = TransitionTable::from_ioa_source(spec);
-        let metadata = table.composite_actions.get("IngestPack").unwrap();
-
-        assert_eq!(
-            metadata
-                .cedar_gate
-                .as_ref()
-                .map(|gate| gate.action.as_str()),
-            Some("Repository::IngestPack")
-        );
-        assert!(!metadata.record_parent_event);
-        assert_eq!(metadata.sub_writes.len(), 1);
-        assert_eq!(metadata.sub_writes[0].target_entity, "Blob");
-    }
-}
+#[path = "builder_metadata_tests.rs"]
+mod builder_metadata_tests;
 
 #[cfg(test)]
 #[path = "builder_initial_tests.rs"]
