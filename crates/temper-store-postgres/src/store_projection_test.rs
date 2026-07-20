@@ -206,6 +206,7 @@ fn entity_key_index_present_absent_and_atomic_reject() {
                     key_rows: vec![renamed_key.clone()],
                     reconcile_keys: true,
                     key_set_signature: Some("v3:path".to_string()),
+                    snapshot_source: Default::default(),
                 },
                 PersistenceAppend {
                     persistence_id: winner_pid.clone(),
@@ -214,6 +215,7 @@ fn entity_key_index_present_absent_and_atomic_reject() {
                     key_rows: Vec::new(),
                     reconcile_keys: true,
                     key_set_signature: Some("v3:path".to_string()),
+                    snapshot_source: Default::default(),
                 },
             ])
             .await
@@ -243,6 +245,7 @@ fn entity_key_index_present_absent_and_atomic_reject() {
                     key_rows: vec![unrelated_key.clone()],
                     reconcile_keys: true,
                     key_set_signature: Some("v3:path".to_string()),
+                    snapshot_source: Default::default(),
                 },
                 PersistenceAppend {
                     persistence_id: conflict_pid.clone(),
@@ -251,6 +254,7 @@ fn entity_key_index_present_absent_and_atomic_reject() {
                     key_rows: vec![renamed_key.clone()],
                     reconcile_keys: true,
                     key_set_signature: Some("v3:path".to_string()),
+                    snapshot_source: Default::default(),
                 },
             ])
             .await;
@@ -479,6 +483,7 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
                     keys: true,
                     key_set_signature: Some(target_signature.to_string()),
                     vectors: false,
+                    snapshot_source: Default::default(),
                 },
             )
             .await
@@ -506,6 +511,7 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
                     keys: true,
                     key_set_signature: Some("v3:directory-old".to_string()),
                     vectors: false,
+                    snapshot_source: Default::default(),
                 },
             )
             .await
@@ -822,6 +828,11 @@ fn entity_listing_and_key_repair_union_every_durable_source() {
             .await
             .unwrap();
         crate::dbm::postgres_query!("DELETE FROM events WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::dbm::postgres_query!("DELETE FROM event_segments WHERE tenant = $1")
             .bind(&tenant)
             .execute(&pool)
             .await
@@ -1672,6 +1683,172 @@ fn upsert_query_projection_removes_index_row_when_value_becomes_too_long() {
             .await
             .unwrap();
         crate::dbm::postgres_query!("DELETE FROM entity_catalog WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
+fn journal_generation_replaces_a_numerically_newer_migration_projection() {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+
+    sqlx::test_block_on(async {
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let store = PostgresEventStore::new(pool.clone());
+        let tenant = format!("tenant-journal-projection-{}", uuid::Uuid::new_v4());
+        let entity_type = "Order";
+        let entity_id = "ord-materialized";
+        let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+
+        store
+            .upsert_query_projection(
+                &tenant,
+                entity_type,
+                entity_id,
+                "Draft",
+                &serde_json::json!({"Title": "migration"}),
+                5,
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                &persistence_id,
+                0,
+                &[
+                    test_envelope(
+                        "Temper.Internal.StateMaterialization.v1",
+                        serde_json::json!({}),
+                    ),
+                    test_envelope("Touch", serde_json::json!({})),
+                ],
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_query_projection(
+                &tenant,
+                entity_type,
+                entity_id,
+                "Ready",
+                &serde_json::json!({"Title": "journal"}),
+                2,
+            )
+            .await
+            .unwrap();
+
+        let row: (i64, serde_json::Value) = crate::dbm::postgres_query_as!(
+            "SELECT sequence_nr, fields FROM entity_catalog \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(&tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, 2);
+        assert_eq!(row.1["Title"], "journal");
+
+        let journal_indexed: i64 = crate::dbm::postgres_query_scalar!(
+            "SELECT COUNT(*)::bigint FROM entity_field_index \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+               AND field_name = 'Title' AND field_value = 'journal'",
+        )
+        .bind(&tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(journal_indexed, 1);
+        let migration_indexed: i64 = crate::dbm::postgres_query_scalar!(
+            "SELECT COUNT(*)::bigint FROM entity_field_index \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+               AND field_name = 'Title' AND field_value = 'migration'",
+        )
+        .bind(&tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(migration_indexed, 0);
+
+        for (delayed_sequence, title) in [(5, "delayed-migration"), (1, "stale-journal")] {
+            store
+                .upsert_query_projection(
+                    &tenant,
+                    entity_type,
+                    entity_id,
+                    "Delayed",
+                    &serde_json::json!({"Title": title}),
+                    delayed_sequence,
+                )
+                .await
+                .unwrap();
+        }
+        let current: (i64, serde_json::Value, String) = crate::dbm::postgres_query_as!(
+            "SELECT sequence_nr, fields, status FROM entity_catalog \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(&tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(current.0, 2);
+        assert_eq!(current.1["Title"], "journal");
+        assert_eq!(current.2, "Ready");
+        let journal_still_indexed: i64 = crate::dbm::postgres_query_scalar!(
+            "SELECT COUNT(*)::bigint FROM entity_field_index \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+               AND field_name = 'Title' AND field_value = 'journal' AND status = 'Ready'",
+        )
+        .bind(&tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(journal_still_indexed, 1);
+        let rejected_indexed: i64 = crate::dbm::postgres_query_scalar!(
+            "SELECT COUNT(*)::bigint FROM entity_field_index \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+               AND field_name = 'Title' AND field_value IN ('delayed-migration', 'stale-journal')",
+        )
+        .bind(&tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rejected_indexed, 0);
+
+        crate::dbm::postgres_query!("DELETE FROM event_segments WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        crate::dbm::postgres_query!("DELETE FROM entity_field_index WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::dbm::postgres_query!("DELETE FROM entity_catalog WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::dbm::postgres_query!("DELETE FROM events WHERE tenant = $1")
             .bind(&tenant)
             .execute(&pool)
             .await

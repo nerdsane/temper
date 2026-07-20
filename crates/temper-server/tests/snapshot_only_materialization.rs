@@ -5,8 +5,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use temper_jit::table::TransitionTable;
-use temper_runtime::scheduler::install_deterministic_context;
 use temper_runtime::ActorSystem;
+use temper_runtime::scheduler::install_deterministic_context;
 use temper_server::entity_actor::{EntityActor, EntityMsg, EntityResponse};
 use temper_server::storage::{BackendLabel, BoxedEventStore};
 use temper_store_sim::SimEventStore;
@@ -89,6 +89,21 @@ async fn first_journal_write_materializes_snapshot_only_state_for_restart() {
         .expect("increment snapshot-only actor");
     assert!(updated.success, "increment failed: {:?}", updated.error);
     assert_eq!(updated.state.counters.get("value"), Some(&11));
+    let journal = sim.dump_journal(persistence_id);
+    assert_eq!(journal.len(), 2);
+    assert_eq!(
+        journal[0].event_type, "Temper.Internal.StateMaterialization.v1",
+        "the first journal record must carry the complete snapshot-only baseline"
+    );
+    assert_eq!(journal[1].event_type, "Increment");
+    assert!(
+        events
+            .load_snapshot(persistence_id)
+            .await
+            .expect("load snapshot after materialization")
+            .is_none(),
+        "the fenced first journal append must atomically retire the migration snapshot"
+    );
 
     let restart_system = ActorSystem::new("snapshot-only-materialization-restart");
     let restarted = restart_system.spawn(

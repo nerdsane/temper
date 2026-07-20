@@ -3,7 +3,7 @@
 use libsql::params;
 use temper_runtime::persistence::{
     EntityVectorRow, EventMetadata, EventStore, IndexReconciliation, PersistenceAppend,
-    PersistenceEnvelope, PersistenceError,
+    PersistenceEnvelope, PersistenceError, SnapshotSourceFence,
 };
 
 use super::{PublishedArtifactUpsert, QueryProjectionUpsert, TursoEventStore};
@@ -13,6 +13,7 @@ const VECTOR_RECONCILIATION: IndexReconciliation = IndexReconciliation {
     keys: false,
     key_set_signature: None,
     vectors: true,
+    snapshot_source: SnapshotSourceFence::Unchecked,
 };
 
 fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
@@ -43,6 +44,133 @@ async fn make_store(test_name: &str) -> TursoEventStore {
     TursoEventStore::new(&sqlite_test_url(test_name), None)
         .await
         .expect("create store")
+}
+
+fn source_reconciliation(snapshot_source: SnapshotSourceFence) -> IndexReconciliation {
+    IndexReconciliation {
+        keys: false,
+        key_set_signature: None,
+        vectors: false,
+        snapshot_source,
+    }
+}
+
+fn unchecked_batch_append(
+    persistence_id: &str,
+    expected_sequence: u64,
+    events: Vec<PersistenceEnvelope>,
+) -> PersistenceAppend {
+    PersistenceAppend {
+        persistence_id: persistence_id.to_string(),
+        expected_sequence,
+        events,
+        key_rows: Vec::new(),
+        reconcile_keys: false,
+        key_set_signature: None,
+        snapshot_source: SnapshotSourceFence::Unchecked,
+    }
+}
+
+async fn segment_topology(
+    store: &TursoEventStore,
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+) -> Vec<(i64, i64, Option<i64>, Option<i64>, i64, i64)> {
+    let conn = store
+        .configured_connection()
+        .await
+        .expect("open topology connection");
+    let mut rows = conn
+        .query(
+            "SELECT segment_index, start_sequence_nr, end_sequence_nr,
+                    snapshot_sequence, event_count, sealed_at IS NOT NULL
+             FROM event_segments
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
+             ORDER BY segment_index",
+            params![tenant, entity_type, entity_id],
+        )
+        .await
+        .expect("query segment topology");
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await.expect("read segment topology") {
+        out.push((
+            row.get::<i64>(0).expect("segment index"),
+            row.get::<i64>(1).expect("segment start"),
+            row.get::<Option<i64>>(2).expect("segment end"),
+            row.get::<Option<i64>>(3).expect("segment snapshot"),
+            row.get::<i64>(4).expect("segment event count"),
+            row.get::<i64>(5).expect("segment sealed flag"),
+        ));
+    }
+    out
+}
+
+async fn event_segment_assignments(
+    store: &TursoEventStore,
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+) -> Vec<(i64, i64)> {
+    let conn = store
+        .configured_connection()
+        .await
+        .expect("open event assignment connection");
+    let mut rows = conn
+        .query(
+            "SELECT sequence_nr, segment_index
+             FROM events
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
+             ORDER BY sequence_nr",
+            params![tenant, entity_type, entity_id],
+        )
+        .await
+        .expect("query event segment assignments");
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await.expect("read event segment assignment") {
+        out.push((
+            row.get::<i64>(0).expect("event sequence"),
+            row.get::<i64>(1).expect("event segment"),
+        ));
+    }
+    out
+}
+
+async fn seed_legacy_snapshot_ahead_segments(
+    store: &TursoEventStore,
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+) {
+    let conn = store
+        .configured_connection()
+        .await
+        .expect("open legacy segment connection");
+    conn.execute(
+        "DELETE FROM event_segments
+         WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+        params![tenant, entity_type, entity_id],
+    )
+    .await
+    .expect("clear current segment topology");
+    conn.execute(
+        "INSERT INTO event_segments
+         (tenant, entity_type, entity_id, segment_index, start_sequence_nr,
+          end_sequence_nr, snapshot_sequence, event_count, sealed_at)
+         VALUES (?1, ?2, ?3, 0, 1, 5, 5, 5, datetime('now'))",
+        params![tenant, entity_type, entity_id],
+    )
+    .await
+    .expect("seed legacy sealed segment");
+    conn.execute(
+        "INSERT INTO event_segments
+         (tenant, entity_type, entity_id, segment_index, start_sequence_nr,
+          end_sequence_nr, snapshot_sequence, event_count, sealed_at)
+         VALUES (?1, ?2, ?3, 1, 6, NULL, NULL, 0, NULL)",
+        params![tenant, entity_type, entity_id],
+    )
+    .await
+    .expect("seed legacy open segment");
 }
 
 #[tokio::test]
@@ -291,6 +419,7 @@ async fn append_batch_zero_sequence_detects_existing_stream_by_unique_key() {
             key_rows: Vec::new(),
             reconcile_keys: false,
             key_set_signature: None,
+            snapshot_source: SnapshotSourceFence::Unchecked,
         }])
         .await
         .unwrap_err();
@@ -359,6 +488,554 @@ async fn snapshot_save_and_load_roundtrip() {
 
     let updated = store.load_snapshot(persistence_id).await.unwrap();
     assert_eq!(updated, Some((8, b"{\"status\":\"shipped\"}".to_vec())));
+}
+
+#[tokio::test]
+async fn delayed_snapshot_splits_tail_and_equal_replacement_preserves_segments() {
+    let store = make_store("delayed-snapshot-segments").await;
+    let tenant = "tenant-segments";
+    let entity_type = "Order";
+    let entity_id = "delayed-snapshot";
+    let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+    let events = (1..=10)
+        .map(|sequence| test_envelope("Updated", serde_json::json!({"sequence": sequence})))
+        .collect::<Vec<_>>();
+
+    store.append(&persistence_id, 0, &events).await.unwrap();
+    store
+        .save_snapshot(&persistence_id, 5, b"snapshot-a")
+        .await
+        .unwrap();
+
+    let expected_topology = vec![(0, 1, Some(5), Some(5), 5, 1), (1, 6, Some(10), None, 5, 0)];
+    assert_eq!(
+        segment_topology(&store, tenant, entity_type, entity_id).await,
+        expected_topology
+    );
+    let expected_assignments = (1..=10)
+        .map(|sequence| (sequence, if sequence <= 5 { 0 } else { 1 }))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        event_segment_assignments(&store, tenant, entity_type, entity_id).await,
+        expected_assignments
+    );
+
+    let audit_conn = store.configured_connection().await.unwrap();
+    audit_conn
+        .execute_batch(
+            "CREATE TABLE snapshot_mutation_audit (
+                target TEXT NOT NULL,
+                operation TEXT NOT NULL
+             );
+             CREATE TRIGGER audit_snapshots_update AFTER UPDATE ON snapshots
+             BEGIN
+                INSERT INTO snapshot_mutation_audit VALUES ('snapshots', 'update');
+             END;
+             CREATE TRIGGER audit_history_update AFTER UPDATE ON snapshot_history
+             BEGIN
+                INSERT INTO snapshot_mutation_audit VALUES ('snapshot_history', 'update');
+             END;
+             CREATE TRIGGER audit_history_insert AFTER INSERT ON snapshot_history
+             BEGIN
+                INSERT INTO snapshot_mutation_audit VALUES ('snapshot_history', 'insert');
+             END;
+             CREATE TRIGGER audit_events_update AFTER UPDATE ON events
+             BEGIN
+                INSERT INTO snapshot_mutation_audit VALUES ('events', 'update');
+             END;
+             CREATE TRIGGER audit_segments_insert AFTER INSERT ON event_segments
+             BEGIN
+                INSERT INTO snapshot_mutation_audit VALUES ('event_segments', 'insert');
+             END;
+             CREATE TRIGGER audit_segments_update AFTER UPDATE ON event_segments
+             BEGIN
+                INSERT INTO snapshot_mutation_audit VALUES ('event_segments', 'update');
+             END;
+             CREATE TRIGGER audit_segments_delete AFTER DELETE ON event_segments
+             BEGIN
+                INSERT INTO snapshot_mutation_audit VALUES ('event_segments', 'delete');
+             END;",
+        )
+        .await
+        .unwrap();
+
+    let topology_before_equal_replacement =
+        segment_topology(&store, tenant, entity_type, entity_id).await;
+    let assignments_before_equal_replacement =
+        event_segment_assignments(&store, tenant, entity_type, entity_id).await;
+    store
+        .save_snapshot(&persistence_id, 5, b"snapshot-b")
+        .await
+        .unwrap();
+    assert_eq!(
+        segment_topology(&store, tenant, entity_type, entity_id).await,
+        topology_before_equal_replacement
+    );
+    assert_eq!(
+        event_segment_assignments(&store, tenant, entity_type, entity_id).await,
+        assignments_before_equal_replacement
+    );
+    assert_eq!(
+        store.load_snapshot(&persistence_id).await.unwrap(),
+        Some((5, b"snapshot-b".to_vec()))
+    );
+    let mut audit_rows = audit_conn
+        .query(
+            "SELECT target, operation
+             FROM snapshot_mutation_audit
+             ORDER BY target, operation",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut audited_mutations = Vec::new();
+    while let Some(row) = audit_rows.next().await.unwrap() {
+        audited_mutations.push((row.get::<String>(0).unwrap(), row.get::<String>(1).unwrap()));
+    }
+    assert_eq!(
+        audited_mutations,
+        vec![
+            ("snapshot_history".to_string(), "update".to_string()),
+            ("snapshots".to_string(), "update".to_string()),
+        ],
+        "equal-sequence replacement may update snapshot bytes but not topology"
+    );
+    audit_conn
+        .execute("DELETE FROM snapshot_mutation_audit", ())
+        .await
+        .unwrap();
+
+    // Identical and older saves are complete no-ops: neither the current row,
+    // history, nor segment topology changes.
+    store
+        .save_snapshot(&persistence_id, 5, b"snapshot-b")
+        .await
+        .unwrap();
+    store
+        .save_snapshot(&persistence_id, 4, b"snapshot-older")
+        .await
+        .unwrap();
+    assert_eq!(
+        segment_topology(&store, tenant, entity_type, entity_id).await,
+        topology_before_equal_replacement
+    );
+    assert_eq!(
+        store.load_snapshot(&persistence_id).await.unwrap(),
+        Some((5, b"snapshot-b".to_vec()))
+    );
+    let mut audit_rows = audit_conn
+        .query("SELECT COUNT(*) FROM snapshot_mutation_audit", ())
+        .await
+        .unwrap();
+    let mutation_count = audit_rows
+        .next()
+        .await
+        .unwrap()
+        .expect("audit count")
+        .get::<i64>(0)
+        .unwrap();
+    assert_eq!(mutation_count, 0, "older/identical saves must not write");
+
+    let conn = store.configured_connection().await.unwrap();
+    let mut history_rows = conn
+        .query(
+            "SELECT sequence_nr, snapshot
+             FROM snapshot_history
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
+             ORDER BY sequence_nr",
+            params![tenant, entity_type, entity_id],
+        )
+        .await
+        .unwrap();
+    let history = history_rows.next().await.unwrap().expect("history row");
+    assert_eq!(history.get::<i64>(0).unwrap(), 5);
+    assert_eq!(history.get::<Vec<u8>>(1).unwrap(), b"snapshot-b");
+    assert!(history_rows.next().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn append_batch_after_snapshot_uses_each_streams_open_segment() {
+    let store = make_store("append-batch-after-snapshot").await;
+    let tenant = "tenant-batch-segments";
+    let entity_type = "Order";
+    let entity_ids = ["batch-a", "batch-b"];
+    let persistence_ids = entity_ids.map(|entity_id| format!("{tenant}:{entity_type}:{entity_id}"));
+    let initial_events = (1..=5)
+        .map(|sequence| test_envelope("Updated", serde_json::json!({"sequence": sequence})))
+        .collect::<Vec<_>>();
+
+    for persistence_id in &persistence_ids {
+        store
+            .append(persistence_id, 0, &initial_events)
+            .await
+            .unwrap();
+        store
+            .save_snapshot(persistence_id, 3, b"snapshot-three")
+            .await
+            .unwrap();
+    }
+
+    let results = store
+        .append_batch(&[
+            unchecked_batch_append(
+                &persistence_ids[0],
+                5,
+                vec![
+                    test_envelope("Updated", serde_json::json!({"sequence": 6})),
+                    test_envelope("Updated", serde_json::json!({"sequence": 7})),
+                ],
+            ),
+            unchecked_batch_append(
+                &persistence_ids[1],
+                5,
+                vec![
+                    test_envelope("Updated", serde_json::json!({"sequence": 6})),
+                    test_envelope("Updated", serde_json::json!({"sequence": 7})),
+                ],
+            ),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.sequence_nr)
+            .collect::<Vec<_>>(),
+        vec![7, 7]
+    );
+
+    let expected_topology = vec![(0, 1, Some(3), Some(3), 3, 1), (1, 4, Some(7), None, 4, 0)];
+    let expected_assignments = (1..=7)
+        .map(|sequence| (sequence, if sequence <= 3 { 0 } else { 1 }))
+        .collect::<Vec<_>>();
+    for entity_id in entity_ids {
+        assert_eq!(
+            segment_topology(&store, tenant, entity_type, entity_id).await,
+            expected_topology
+        );
+        assert_eq!(
+            event_segment_assignments(&store, tenant, entity_type, entity_id).await,
+            expected_assignments
+        );
+    }
+}
+
+#[tokio::test]
+async fn snapshot_only_streams_start_their_first_journal_at_segment_zero() {
+    let store = make_store("snapshot-only-first-journal").await;
+    let tenant = "tenant-snapshot-only";
+    let entity_type = "Order";
+    let entity_ids = ["ordinary", "batch-a", "batch-b"];
+
+    for entity_id in entity_ids {
+        let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+        store
+            .save_snapshot(&persistence_id, 5, b"snapshot-five")
+            .await
+            .unwrap();
+        assert!(
+            segment_topology(&store, tenant, entity_type, entity_id)
+                .await
+                .is_empty(),
+            "a snapshot without journal events must not manufacture segments"
+        );
+        seed_legacy_snapshot_ahead_segments(&store, tenant, entity_type, entity_id).await;
+    }
+
+    let ordinary_id = format!("{tenant}:{entity_type}:ordinary");
+    store
+        .append(
+            &ordinary_id,
+            0,
+            &[test_envelope("Created", serde_json::json!({"sequence": 1}))],
+        )
+        .await
+        .unwrap();
+
+    let batch_a_id = format!("{tenant}:{entity_type}:batch-a");
+    let batch_b_id = format!("{tenant}:{entity_type}:batch-b");
+    store
+        .append_batch(&[
+            unchecked_batch_append(
+                &batch_a_id,
+                0,
+                vec![test_envelope("Created", serde_json::json!({"sequence": 1}))],
+            ),
+            unchecked_batch_append(
+                &batch_b_id,
+                0,
+                vec![test_envelope("Created", serde_json::json!({"sequence": 1}))],
+            ),
+        ])
+        .await
+        .unwrap();
+
+    let expected_topology = vec![(0, 1, Some(1), None, 1, 0)];
+    let expected_assignments = vec![(1, 0)];
+    for entity_id in entity_ids {
+        assert_eq!(
+            segment_topology(&store, tenant, entity_type, entity_id).await,
+            expected_topology,
+            "first journal append must replace legacy snapshot-only topology"
+        );
+        assert_eq!(
+            event_segment_assignments(&store, tenant, entity_type, entity_id).await,
+            expected_assignments
+        );
+        assert_eq!(
+            store
+                .load_snapshot(&format!("{tenant}:{entity_type}:{entity_id}"))
+                .await
+                .unwrap(),
+            Some((5, b"snapshot-five".to_vec()))
+        );
+    }
+}
+
+#[tokio::test]
+async fn snapshot_ahead_of_nonempty_journal_does_not_rotate_past_the_hwm() {
+    let store = make_store("snapshot-ahead-of-journal").await;
+    let tenant = "tenant-snapshot-ahead";
+    let entity_type = "Order";
+    let entity_ids = ["ordinary", "batch-a", "batch-b"];
+    let initial_events = vec![
+        test_envelope("Created", serde_json::json!({"sequence": 1})),
+        test_envelope("Updated", serde_json::json!({"sequence": 2})),
+    ];
+
+    for entity_id in entity_ids {
+        let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+        store
+            .append(&persistence_id, 0, &initial_events)
+            .await
+            .unwrap();
+        store
+            .save_snapshot(&persistence_id, 5, b"snapshot-five")
+            .await
+            .unwrap();
+        assert_eq!(
+            segment_topology(&store, tenant, entity_type, entity_id).await,
+            vec![(0, 1, Some(2), None, 2, 0)],
+            "snapshot sequence beyond the journal HWM is not a journal boundary"
+        );
+        seed_legacy_snapshot_ahead_segments(&store, tenant, entity_type, entity_id).await;
+    }
+
+    let ordinary_id = format!("{tenant}:{entity_type}:ordinary");
+    store
+        .append(
+            &ordinary_id,
+            2,
+            &[test_envelope("Updated", serde_json::json!({"sequence": 3}))],
+        )
+        .await
+        .unwrap();
+
+    let batch_a_id = format!("{tenant}:{entity_type}:batch-a");
+    let batch_b_id = format!("{tenant}:{entity_type}:batch-b");
+    store
+        .append_batch(&[
+            unchecked_batch_append(
+                &batch_a_id,
+                2,
+                vec![test_envelope("Updated", serde_json::json!({"sequence": 3}))],
+            ),
+            unchecked_batch_append(
+                &batch_b_id,
+                2,
+                vec![test_envelope("Updated", serde_json::json!({"sequence": 3}))],
+            ),
+        ])
+        .await
+        .unwrap();
+
+    let expected_topology = vec![(0, 1, Some(3), None, 3, 0)];
+    let expected_assignments = vec![(1, 0), (2, 0), (3, 0)];
+    for entity_id in entity_ids {
+        assert_eq!(
+            segment_topology(&store, tenant, entity_type, entity_id).await,
+            expected_topology,
+            "append must repair a legacy future-start open segment"
+        );
+        assert_eq!(
+            event_segment_assignments(&store, tenant, entity_type, entity_id).await,
+            expected_assignments
+        );
+        assert_eq!(
+            store
+                .load_snapshot(&format!("{tenant}:{entity_type}:{entity_id}"))
+                .await
+                .unwrap(),
+            Some((5, b"snapshot-five".to_vec()))
+        );
+    }
+}
+
+#[tokio::test]
+async fn append_with_index_rows_fences_absent_and_exact_snapshot_sources() {
+    let store = make_store("append-snapshot-source-fence").await;
+    let persistence_id = "tenant-fence:Order:exact-source";
+    store
+        .append(
+            persistence_id,
+            0,
+            &[test_envelope("Created", serde_json::json!({}))],
+        )
+        .await
+        .unwrap();
+    store
+        .save_snapshot(persistence_id, 1, b"snapshot-a")
+        .await
+        .unwrap();
+    store
+        .save_snapshot(persistence_id, 1, b"snapshot-b")
+        .await
+        .unwrap();
+
+    let topology_before_reject =
+        segment_topology(&store, "tenant-fence", "Order", "exact-source").await;
+    let stale_exact = source_reconciliation(SnapshotSourceFence::Exact {
+        sequence_nr: 1,
+        state: b"snapshot-a".to_vec(),
+    });
+    let error = store
+        .append_with_index_rows(
+            persistence_id,
+            1,
+            &[test_envelope("Updated", serde_json::json!({}))],
+            &[],
+            &[],
+            stale_exact,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, PersistenceError::SnapshotGenerationChanged));
+    assert_eq!(store.read_events(persistence_id, 0).await.unwrap().len(), 1);
+    assert_eq!(
+        segment_topology(&store, "tenant-fence", "Order", "exact-source").await,
+        topology_before_reject
+    );
+
+    store
+        .append_with_index_rows(
+            persistence_id,
+            1,
+            &[test_envelope("Updated", serde_json::json!({}))],
+            &[],
+            &[],
+            source_reconciliation(SnapshotSourceFence::Exact {
+                sequence_nr: 1,
+                state: b"snapshot-b".to_vec(),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.read_events(persistence_id, 0).await.unwrap().len(), 2);
+
+    let absent_id = "tenant-fence:Order:absent-source";
+    store
+        .append_with_index_rows(
+            absent_id,
+            0,
+            &[test_envelope("Created", serde_json::json!({}))],
+            &[],
+            &[],
+            source_reconciliation(SnapshotSourceFence::Absent),
+        )
+        .await
+        .unwrap();
+    store
+        .save_snapshot(absent_id, 1, b"appeared")
+        .await
+        .unwrap();
+    let error = store
+        .append_with_index_rows(
+            absent_id,
+            1,
+            &[test_envelope("Updated", serde_json::json!({}))],
+            &[],
+            &[],
+            source_reconciliation(SnapshotSourceFence::Absent),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, PersistenceError::SnapshotGenerationChanged));
+    assert_eq!(store.read_events(absent_id, 0).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn checked_snapshot_save_rejects_a_changed_derivation_source() {
+    let store = make_store("checked-snapshot-save").await;
+    let tenant = "tenant-checked-snapshot";
+    let entity_type = "Order";
+    let entity_id = "checked-source";
+    let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+    let events = (1..=4)
+        .map(|sequence| test_envelope("Updated", serde_json::json!({"sequence": sequence})))
+        .collect::<Vec<_>>();
+    store.append(&persistence_id, 0, &events).await.unwrap();
+    store
+        .save_snapshot(&persistence_id, 2, b"snapshot-a")
+        .await
+        .unwrap();
+
+    store
+        .save_snapshot_if_source(
+            &persistence_id,
+            2,
+            b"snapshot-b",
+            &SnapshotSourceFence::Exact {
+                sequence_nr: 2,
+                state: b"snapshot-a".to_vec(),
+            },
+        )
+        .await
+        .expect("current exact source may replace equal-sequence bytes");
+    let topology_before_stale_write =
+        segment_topology(&store, tenant, entity_type, entity_id).await;
+    let assignments_before_stale_write =
+        event_segment_assignments(&store, tenant, entity_type, entity_id).await;
+
+    let error = store
+        .save_snapshot_if_source(
+            &persistence_id,
+            3,
+            b"snapshot-c",
+            &SnapshotSourceFence::Exact {
+                sequence_nr: 2,
+                state: b"snapshot-a".to_vec(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, PersistenceError::SnapshotGenerationChanged));
+    assert_eq!(
+        store.load_snapshot(&persistence_id).await.unwrap(),
+        Some((2, b"snapshot-b".to_vec()))
+    );
+    assert_eq!(
+        segment_topology(&store, tenant, entity_type, entity_id).await,
+        topology_before_stale_write
+    );
+    assert_eq!(
+        event_segment_assignments(&store, tenant, entity_type, entity_id).await,
+        assignments_before_stale_write
+    );
+
+    let absent_id = "tenant-checked-snapshot:Order:absent-source";
+    store
+        .save_snapshot_if_source(absent_id, 1, b"first", &SnapshotSourceFence::Absent)
+        .await
+        .expect("absent source may create the first snapshot");
+    let error = store
+        .save_snapshot_if_source(absent_id, 2, b"second", &SnapshotSourceFence::Absent)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, PersistenceError::SnapshotGenerationChanged));
+    assert_eq!(
+        store.load_snapshot(absent_id).await.unwrap(),
+        Some((1, b"first".to_vec()))
+    );
 }
 
 #[tokio::test]
@@ -1073,6 +1750,161 @@ async fn query_projection_batch_updates_catalog_and_field_index() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].sequence_nr, 2);
     assert_eq!(rows[1].sequence_nr, 3);
+}
+
+#[tokio::test]
+async fn journal_generation_replaces_a_numerically_newer_migration_projection() {
+    let store = make_store("journal-generation-replaces-migration-projection").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+    let entity_type = "Order";
+    let entity_id = "ord-materialized";
+    let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+
+    let migration_fields = serde_json::json!({"Title": "migration"});
+    let migration_state = serde_json::json!({
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "status": "Draft",
+        "fields": migration_fields,
+        "sequence_nr": 5,
+    });
+    store
+        .upsert_query_projection_with_state(
+            &tenant,
+            entity_type,
+            entity_id,
+            "Draft",
+            migration_state.get("fields").unwrap(),
+            &migration_state,
+            5,
+        )
+        .await
+        .expect("seed migration projection");
+
+    store
+        .append(
+            &persistence_id,
+            0,
+            &[
+                test_envelope(
+                    "Temper.Internal.StateMaterialization.v1",
+                    serde_json::json!({}),
+                ),
+                test_envelope("Touch", serde_json::json!({})),
+            ],
+        )
+        .await
+        .expect("seed materialized journal generation");
+
+    let journal_fields = serde_json::json!({"Title": "journal"});
+    let journal_state = serde_json::json!({
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "status": "Ready",
+        "fields": journal_fields,
+        "sequence_nr": 2,
+    });
+    store
+        .upsert_query_projection_with_state(
+            &tenant,
+            entity_type,
+            entity_id,
+            "Ready",
+            journal_state.get("fields").unwrap(),
+            &journal_state,
+            2,
+        )
+        .await
+        .expect("write current journal projection");
+
+    let rows = store
+        .load_entity_catalog_rows(&tenant, entity_type, &[entity_id.to_string()])
+        .await
+        .expect("load current projection");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].sequence_nr, 2);
+    assert_eq!(rows[0].fields["Title"], "journal");
+    assert_eq!(
+        store
+            .query_field_index(
+                &tenant,
+                entity_type,
+                "field_name = ?3 AND field_value = ?4",
+                vec!["Title".to_string(), "journal".to_string()],
+            )
+            .await
+            .expect("query current journal projection"),
+        vec![entity_id.to_string()]
+    );
+    assert!(
+        store
+            .query_field_index(
+                &tenant,
+                entity_type,
+                "field_name = ?3 AND field_value = ?4",
+                vec!["Title".to_string(), "migration".to_string()],
+            )
+            .await
+            .expect("query retired migration projection")
+            .is_empty()
+    );
+
+    for (delayed_sequence, title) in [(5, "delayed-migration"), (1, "stale-journal")] {
+        let delayed_fields = serde_json::json!({"Title": title});
+        let delayed_state = serde_json::json!({
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "status": "Delayed",
+            "fields": delayed_fields,
+            "sequence_nr": delayed_sequence,
+        });
+        store
+            .upsert_query_projection_with_state(
+                &tenant,
+                entity_type,
+                entity_id,
+                "Delayed",
+                delayed_state.get("fields").unwrap(),
+                &delayed_state,
+                delayed_sequence,
+            )
+            .await
+            .expect("ignore projection outside the current journal generation");
+    }
+
+    let rows = store
+        .load_entity_catalog_rows(&tenant, entity_type, &[entity_id.to_string()])
+        .await
+        .expect("reload current projection");
+    assert_eq!(rows[0].sequence_nr, 2);
+    assert_eq!(rows[0].status, "Ready");
+    assert_eq!(rows[0].fields["Title"], "journal");
+    assert_eq!(
+        store
+            .query_field_index(
+                &tenant,
+                entity_type,
+                "field_name = ?3 AND field_value = ?4 AND status = 'Ready'",
+                vec!["Title".to_string(), "journal".to_string()],
+            )
+            .await
+            .expect("query journal projection after rejected updates"),
+        vec![entity_id.to_string()]
+    );
+    for title in ["delayed-migration", "stale-journal"] {
+        assert!(
+            store
+                .query_field_index(
+                    &tenant,
+                    entity_type,
+                    "field_name = ?3 AND field_value = ?4",
+                    vec!["Title".to_string(), title.to_string()],
+                )
+                .await
+                .expect("query rejected projection value")
+                .is_empty()
+        );
+    }
 }
 
 #[tokio::test]
