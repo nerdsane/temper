@@ -8,6 +8,88 @@ use temper_store_sim::SimFaultConfig;
 
 const PERSISTENCE_ID: &str = "default:Doc:stale-snapshot";
 
+/// A first journal generation can replace a snapshot-only migration generation
+/// without advancing the aggregate sequence. Actor restart must follow the
+/// journal just like key-authority reads and backfill do.
+#[tokio::test]
+async fn actor_recovery_prefers_equal_sequence_journal_generation_over_snapshot() {
+    let (_guard, _clock, _ids) = install_deterministic_context(276);
+    let sim = SimEventStore::no_faults(276);
+    let events = BoxedEventStore::new(sim);
+    let persistence_id = "default:Doc:equal-sequence-source";
+    let snapshot = serde_json::json!({
+        "entity_type": "Doc",
+        "entity_id": "equal-sequence-source",
+        "status": "Ready",
+        "item_count": 0,
+        "fields": {
+            "Id": "equal-sequence-source",
+            "Status": "Ready",
+            "WorkspaceId": "ws",
+            "Path": "/snapshot-generation"
+        }
+    });
+    events
+        .save_snapshot(
+            persistence_id,
+            1,
+            &serde_json::to_vec(&snapshot).expect("serialize snapshot-only generation"),
+        )
+        .await
+        .expect("seed snapshot-only generation");
+
+    let timestamp = sim_now();
+    events
+        .append(
+            persistence_id,
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 1,
+                event_type: "Temper.Internal.FieldUpdate.v1".to_string(),
+                payload: serde_json::json!({
+                    "schema": "temper.field-update.v1",
+                    "fields": {
+                        "Path": "/journal-generation",
+                        "JournalOnly": "must-survive"
+                    },
+                    "replace": false,
+                    "idempotency_key": "equal-sequence-source"
+                }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp,
+                    actor_id: persistence_id.to_string(),
+                },
+            }],
+        )
+        .await
+        .expect("replace snapshot-only source with first journal generation");
+
+    let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(DOC_IOA)));
+    let restarted_system = ActorSystem::new("arn238-equal-sequence-source-restart");
+    let restarted = restarted_system.spawn(
+        EntityActor::with_persistence(
+            "Doc",
+            "equal-sequence-source",
+            table,
+            serde_json::json!({}),
+            events,
+            BackendLabel::Sim,
+        )
+        .with_tenant("default"),
+        "equal-sequence-source",
+    );
+    let recovered = state(&restarted).await.state;
+    assert_eq!(
+        recovered.fields["Path"], "/journal-generation",
+        "the first journal generation, not the equal-sequence snapshot, owns current state"
+    );
+    assert_eq!(recovered.fields["JournalOnly"], "must-survive");
+    assert_eq!(recovered.sequence_nr, 1);
+}
+
 async fn persist_tombstone_behind_stale_live_snapshot(
     events: &BoxedEventStore,
     table: &Arc<RwLock<TransitionTable>>,
