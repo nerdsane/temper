@@ -181,6 +181,79 @@ assert = "safe"
 }
 
 #[test]
+fn hot_swap_rejects_string_initial_change_under_runtime_invariant() {
+    const ORIGINAL_IOA: &str = r#"
+[automaton]
+name = "Order"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "title"
+type = "string"
+initial = "ready"
+
+[[invariant]]
+name = "TitleRequired"
+when = ["Active"]
+assert = "title != ''"
+"#;
+    const CHANGED_INITIAL_IOA: &str = r#"
+[automaton]
+name = "Order"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "title"
+type = "string"
+initial = ""
+
+[[invariant]]
+name = "TitleRequired"
+when = ["Active"]
+assert = "title != ''"
+"#;
+
+    let mut registry = SpecRegistry::new();
+    let (csdl, xml) = minimal_csdl();
+    registry.register_tenant("alpha", csdl, xml, &[("Order", ORIGINAL_IOA)]);
+    let tenant = TenantId::new("alpha");
+    let original = registry.get_spec(&tenant, "Order").unwrap();
+    let original_lock = original.swap_controller().current();
+    let original_source = original.ioa_source.clone();
+    let original_table = serde_json::to_value(&*original.table()).unwrap();
+
+    let (replacement_csdl, replacement_xml) = minimal_csdl();
+    let error = registry
+        .try_register_tenant(
+            "alpha",
+            replacement_csdl,
+            replacement_xml,
+            &[("Order", CHANGED_INITIAL_IOA)],
+        )
+        .expect_err("changing a string initial under a safety invariant requires migration");
+
+    assert!(matches!(
+        error,
+        RegistryError::RuntimeInvariantMigrationRequired { .. }
+    ));
+    let current = registry.get_spec(&tenant, "Order").unwrap();
+    assert_eq!(current.ioa_source, original_source);
+    assert!(Arc::ptr_eq(
+        &current.swap_controller().current(),
+        &original_lock
+    ));
+    assert_eq!(
+        serde_json::to_value(&*current.table()).unwrap(),
+        original_table,
+        "rejection must leave the prior live transition table untouched"
+    );
+}
+
+#[test]
 fn hot_swap_rejects_reachability_change_under_same_model_invariant() {
     const GUARDED_IOA: &str = r#"
 [automaton]

@@ -6,11 +6,7 @@ pub(super) fn model_safety_contract_changed(
     current: &automaton::Automaton,
     incoming: &automaton::Automaton,
 ) -> bool {
-    let current_runtime = automaton::compile_runtime_invariants(current);
-    let incoming_runtime = automaton::compile_runtime_invariants(incoming);
-    let current_has_model_contract = current.invariants.len() > current_runtime.len();
-    let incoming_has_model_contract = incoming.invariants.len() > incoming_runtime.len();
-    if !current_has_model_contract && !incoming_has_model_contract {
+    if current.invariants.is_empty() && incoming.invariants.is_empty() {
         return false;
     }
 
@@ -125,7 +121,12 @@ fn model_reachability_semantics(spec: &automaton::Automaton) -> ModelReachabilit
     let states = spec
         .state
         .iter()
-        .filter(|state| matches!(state.var_type.as_str(), "bool" | "counter" | "list" | "set"))
+        .filter(|state| {
+            matches!(
+                state.var_type.as_str(),
+                "bool" | "counter" | "list" | "set" | "string"
+            )
+        })
         .map(|state| {
             (
                 state.name.clone(),
