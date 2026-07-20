@@ -2,12 +2,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
-use crate::storage::{BackendLabel, BoxedEventStore};
+use crate::storage::{BackendLabel, BoxedEventStore, QueryPlaneStore};
 use temper_runtime::persistence::{
     EntityKeyLookup, JournalBoundary, PersistenceAppend, PersistenceAppendResult, PersistenceError,
 };
 
-fn complete_field_update(
+mod catalog_deleted;
+mod complete_coverage;
+
+pub(super) fn complete_field_update(
     persistence_id: &str,
     entity_id: &str,
     workspace: &str,
@@ -23,7 +26,7 @@ fn complete_field_update(
     event
 }
 
-async fn read_path(
+pub(super) async fn read_path(
     state: &ServerState,
     tenant: &TenantId,
     workspace: &str,
@@ -284,7 +287,11 @@ impl EventStore for BoundaryMutationStore {
     }
 }
 
-fn install_boundary_store(state: &mut ServerState, store: BoundaryMutationStore) {
+fn install_boundary_store(
+    state: &mut ServerState,
+    store: BoundaryMutationStore,
+    query_plane: Option<Arc<dyn QueryPlaneStore>>,
+) {
     state.set_storage_stack(StorageStack::new(
         BackendLabel::Sim,
         BoxedEventStore::new(store),
@@ -292,7 +299,7 @@ fn install_boundary_store(state: &mut ServerState, store: BoundaryMutationStore)
         None,
         None,
         None,
-        None,
+        query_plane,
         None,
         None,
         None,
@@ -336,6 +343,7 @@ async fn journal_zero_actor_source_is_closed_by_a_second_boundary_read() {
             mode: BoundaryMutationMode::ReturnCapturedBoundary,
             boundary_calls: boundary_calls.clone(),
         },
+        None,
     );
 
     let current = expect_read(
@@ -395,7 +403,7 @@ async fn incomplete_scan_retries_when_journal_advances_after_replay() {
         boundary_calls: boundary_calls.clone(),
     };
     let mut state = build_order_state("incomplete-post-replay-race");
-    install_boundary_store(&mut state, racing);
+    install_boundary_store(&mut state, racing, None);
 
     let current = expect_read(
         read_path(&state, &tenant, workspace, raced_path).await,

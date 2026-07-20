@@ -1,6 +1,7 @@
 use super::*;
 
 mod fault_paths;
+mod projection_race;
 mod source_transitions;
 
 #[tokio::test]

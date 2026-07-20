@@ -61,6 +61,22 @@ fn tombstone_event(persistence_id: &str) -> PersistenceEnvelope {
     }
 }
 
+fn complete_field_update(
+    persistence_id: &str,
+    entity_id: &str,
+    workspace: &str,
+    path: &str,
+    token: &str,
+) -> PersistenceEnvelope {
+    let mut event = field_update_event(persistence_id, path, token);
+    event.payload["fields"] = serde_json::json!({
+        "Id": entity_id,
+        "WorkspaceId": workspace,
+        "Path": path,
+    });
+    event
+}
+
 #[tokio::test]
 async fn exhausted_journal_faults_return_unstable_not_authoritative_absence() {
     let (_guard, _clock, _ids) = install_deterministic_context(255);
@@ -97,6 +113,116 @@ async fn exhausted_journal_faults_return_unstable_not_authoritative_absence() {
         matches!(result, Err(QueryPlaneReadError::KeyOwnershipUnstable)),
         "journal uncertainty must not be flattened into an empty successful read"
     );
+}
+
+#[tokio::test]
+async fn incompatible_journal_event_returns_unstable_not_authoritative_absence() {
+    let (_guard, _clock, _ids) = install_deterministic_context(259);
+    let tenant = TenantId::default();
+    let workspace = "ws-incompatible-journal";
+    let path = "/durably-present";
+    let entity_id = "ord-incompatible-journal";
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    let (state, store) = build_order_state_with_sim("incomplete-incompatible-journal");
+    let timestamp = sim_now();
+    EventStore::append_with_index_rows(
+        &store,
+        &persistence_id,
+        0,
+        &[PersistenceEnvelope {
+            sequence_nr: 0,
+            event_type: "LegacyCreate".to_string(),
+            payload: serde_json::json!({"legacy_schema": true}),
+            metadata: EventMetadata {
+                event_id: sim_uuid(),
+                causation_id: sim_uuid(),
+                correlation_id: sim_uuid(),
+                timestamp,
+                actor_id: persistence_id.clone(),
+            },
+        }],
+        &[key_row(workspace, path)],
+        &[],
+        IndexReconciliation {
+            keys: true,
+            key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
+            vectors: false,
+        },
+    )
+    .await
+    .expect("seed incompatible durable journal event");
+
+    let result = read_path(&state, &tenant, workspace, path).await;
+    assert!(
+        matches!(result, Err(QueryPlaneReadError::KeyOwnershipUnstable)),
+        "an undecodable authoritative event must not become a successful empty read"
+    );
+}
+
+#[tokio::test]
+async fn journal_only_materialization_pages_beyond_snapshot_tail_budget() {
+    let (_guard, _clock, _ids) = install_deterministic_context(260);
+    let tenant = TenantId::default();
+    let workspace = "ws-long-lived-journal";
+    let snapshot_path = "/at-snapshot";
+    let final_path = "/after-snapshot";
+    let entity_id = "ord-long-lived-journal";
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    let (state, store) = build_order_state_with_sim("incomplete-long-lived-journal");
+    let event_count = crate::entity_actor::types::MAX_EVENTS_SINCE_SNAPSHOT + 1;
+    let mut events = Vec::with_capacity(event_count);
+    events.push(complete_field_update(
+        &persistence_id,
+        entity_id,
+        workspace,
+        "/initial",
+        "long-lived-0",
+    ));
+    for index in 1..event_count {
+        let path = if index + 1 == event_count {
+            final_path
+        } else if index + 1 == event_count - 1 {
+            snapshot_path
+        } else {
+            "/intermediate"
+        };
+        events.push(field_update_event(
+            &persistence_id,
+            path,
+            &format!("long-lived-{index}"),
+        ));
+    }
+    EventStore::append_with_index_rows(
+        &store,
+        &persistence_id,
+        0,
+        &events,
+        &[key_row(workspace, final_path)],
+        &[],
+        IndexReconciliation {
+            keys: true,
+            key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
+            vectors: false,
+        },
+    )
+    .await
+    .expect("seed long-lived journal");
+    EventStore::save_snapshot(
+        &store,
+        &persistence_id,
+        (event_count - 1) as u64,
+        &snapshot(entity_id, workspace, snapshot_path),
+    )
+    .await
+    .expect("seed valid near-head snapshot");
+
+    let current = expect_read(
+        read_path(&state, &tenant, workspace, final_path).await,
+        "long-lived journal must page to the current generation",
+    );
+    assert_eq!(current.entities.len(), 1);
+    assert_eq!(current.entities[0]["fields"]["Path"], final_path);
+    assert_eq!(current.entities[0]["sequence_nr"], event_count as u64);
 }
 
 #[tokio::test]
