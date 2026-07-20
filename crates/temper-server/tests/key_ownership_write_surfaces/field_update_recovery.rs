@@ -60,6 +60,119 @@ fn event_envelope(persistence_id: &str, event: EntityEvent) -> PersistenceEnvelo
     }
 }
 
+/// A same-sequence snapshot rewrite changes the legacy field baseline without
+/// advancing the journal. The next actor write must detect that source change,
+/// recover it, and derive key ownership from the replacement fields.
+#[tokio::test]
+async fn field_update_retries_when_snapshot_generation_changes_without_journal_advance() {
+    let (_guard, _clock, _ids) = install_deterministic_context(280);
+    let sim = SimEventStore::no_faults(280);
+    let events = BoxedEventStore::new(sim.clone());
+    let persistence_id = "default:Doc:snapshot-generation-race";
+    let legacy_snapshot = |workspace: &str| {
+        serde_json::to_vec(&serde_json::json!({
+            "entity_type": "Doc",
+            "entity_id": "snapshot-generation-race",
+            "status": "Ready",
+            "item_count": 0,
+            "fields": {
+                "Id": "snapshot-generation-race",
+                "Status": "Ready",
+                "WorkspaceId": workspace,
+                "Path": "/journal"
+            }
+        }))
+        .expect("serialize legacy snapshot")
+    };
+    events
+        .save_snapshot(persistence_id, 1, &legacy_snapshot("ws-before"))
+        .await
+        .expect("seed first snapshot baseline");
+    let timestamp = sim_now();
+    events
+        .append(
+            persistence_id,
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 1,
+                event_type: "Temper.Internal.FieldUpdate.v1".to_string(),
+                payload: serde_json::json!({
+                    "schema": "temper.field-update.v1",
+                    "fields": {"Path": "/journal"},
+                    "replace": false,
+                    "idempotency_key": "snapshot-generation-seed"
+                }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp,
+                    actor_id: persistence_id.to_string(),
+                },
+            }],
+        )
+        .await
+        .expect("seed equal-sequence journal generation");
+
+    let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(DOC_IOA)));
+    let system = ActorSystem::new("arn238-snapshot-generation-race");
+    let actor = system.spawn(
+        EntityActor::with_persistence(
+            "Doc",
+            "snapshot-generation-race",
+            table,
+            serde_json::json!({}),
+            events.clone(),
+            BackendLabel::Sim,
+        )
+        .with_tenant("default"),
+        "snapshot-generation-race",
+    );
+    let before_rewrite = state(&actor).await.state;
+    assert_eq!(before_rewrite.fields["WorkspaceId"], "ws-before");
+
+    events
+        .save_snapshot(persistence_id, 1, &legacy_snapshot("ws-after"))
+        .await
+        .expect("rewrite the captured snapshot generation");
+
+    let updated = update(&actor, serde_json::json!({"Path": "/after"}), false).await;
+    assert!(
+        updated.success,
+        "field update retry failed: {:?}",
+        updated.error
+    );
+    assert_eq!(
+        updated.state.fields["WorkspaceId"], "ws-after",
+        "the append must recover the replacement snapshot before deriving state"
+    );
+    assert_eq!(updated.state.fields["Path"], "/after");
+    assert_eq!(
+        events
+            .lookup_by_key(
+                "default",
+                "Doc",
+                "path",
+                &doc_key_hash("ws-after", "/after"),
+            )
+            .await
+            .expect("lookup replacement ownership"),
+        Some("snapshot-generation-race".to_string())
+    );
+    assert_eq!(
+        events
+            .lookup_by_key(
+                "default",
+                "Doc",
+                "path",
+                &doc_key_hash("ws-before", "/after"),
+            )
+            .await
+            .expect("lookup stale ownership"),
+        None
+    );
+}
+
 /// A real intervening journal append must make PATCH rebuild from the durable
 /// stream before retrying. The retried update keeps the other writer's fields,
 /// moves exact key ownership, and leaves the actor fresh for the next message.

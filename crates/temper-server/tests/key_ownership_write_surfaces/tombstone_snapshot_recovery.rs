@@ -87,6 +87,11 @@ async fn actor_recovery_prefers_equal_sequence_journal_generation_over_snapshot(
         "the first journal generation, not the equal-sequence snapshot, owns current state"
     );
     assert_eq!(recovered.fields["JournalOnly"], "must-survive");
+    assert_eq!(
+        recovered.status, "New",
+        "the journal generation owns lifecycle rather than the snapshot status"
+    );
+    assert_eq!(recovered.fields["Status"], "New");
     assert_eq!(recovered.sequence_nr, 1);
 }
 

@@ -2,10 +2,97 @@
 
 mod common;
 
-use temper_runtime::persistence::EventStore;
-use temper_runtime::scheduler::{install_deterministic_context, sim_now};
+use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
+use temper_runtime::scheduler::{install_deterministic_context, sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 use temper_store_sim::SimEventStore;
+
+#[tokio::test]
+async fn passivated_snapshot_only_actor_does_not_claim_journal_provenance() {
+    let seed = 278;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let sim_store = SimEventStore::no_faults(seed);
+    let state = common::build_default_state_with_store(sim_store.clone(), "passivation-source");
+    let tenant = TenantId::default();
+    let entity_id = "snapshot-only-passivation";
+    let actor_key = format!("{tenant}:Order:{entity_id}");
+    let snapshot = serde_json::json!({
+        "entity_type": "Order",
+        "entity_id": entity_id,
+        "status": "Draft",
+        "item_count": 0,
+        "fields": {
+            "Id": entity_id,
+            "Status": "Draft",
+            "Marker": "snapshot-generation"
+        }
+    });
+    sim_store
+        .save_snapshot(
+            &actor_key,
+            1,
+            &serde_json::to_vec(&snapshot).expect("serialize snapshot-only generation"),
+        )
+        .await
+        .expect("seed snapshot-only generation");
+
+    let hydrated = state
+        .get_tenant_entity_state(&tenant, "Order", entity_id)
+        .await
+        .expect("hydrate snapshot-only actor");
+    assert_eq!(hydrated.state.fields["Marker"], "snapshot-generation");
+    {
+        let mut last_accessed = state.last_accessed.write().expect("last-accessed lock");
+        last_accessed.insert(
+            actor_key.clone(),
+            sim_now() - chrono::Duration::seconds(600),
+        );
+    }
+    state.passivate_idle_actors().await;
+    assert!(
+        !state
+            .actor_registry
+            .read()
+            .expect("actor registry lock")
+            .contains_key(&actor_key),
+        "fixture must passivate the snapshot-only actor"
+    );
+
+    let timestamp = sim_now();
+    sim_store
+        .append(
+            &actor_key,
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 1,
+                event_type: "Temper.Internal.FieldUpdate.v1".to_string(),
+                payload: serde_json::json!({
+                    "schema": "temper.field-update.v1",
+                    "fields": {"Marker": "journal-generation"},
+                    "replace": false,
+                    "idempotency_key": "passivation-source-replacement"
+                }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp,
+                    actor_id: actor_key.clone(),
+                },
+            }],
+        )
+        .await
+        .expect("replace snapshot-only source with first journal generation");
+
+    let recovered = state
+        .get_tenant_entity_state(&tenant, "Order", entity_id)
+        .await
+        .expect("respawn after equal-sequence journal replacement");
+    assert_eq!(
+        recovered.state.fields["Marker"], "journal-generation",
+        "passivation must not forge journal provenance for snapshot-only state"
+    );
+}
 
 #[tokio::test]
 async fn passivated_actor_respawns_with_correct_state() {

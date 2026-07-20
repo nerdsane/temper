@@ -13,6 +13,7 @@ struct SnapshotRewriteDuringBackfillStore {
     persistence_id: String,
     replacement: Vec<u8>,
     rewritten: Arc<AtomicBool>,
+    rewrite_on_snapshot_load: bool,
 }
 
 impl EventStore for SnapshotRewriteDuringBackfillStore {
@@ -74,7 +75,19 @@ impl EventStore for SnapshotRewriteDuringBackfillStore {
         &self,
         persistence_id: &str,
     ) -> Result<Option<(u64, Vec<u8>)>, PersistenceError> {
-        EventStore::load_snapshot(&self.inner, persistence_id).await
+        let captured = EventStore::load_snapshot(&self.inner, persistence_id).await?;
+        if self.rewrite_on_snapshot_load
+            && persistence_id == self.persistence_id
+            && !self.rewritten.swap(true, Ordering::SeqCst)
+        {
+            let sequence_nr = captured
+                .as_ref()
+                .map(|(sequence_nr, _)| *sequence_nr)
+                .expect("rewrite fixture requires a captured snapshot");
+            EventStore::save_snapshot(&self.inner, persistence_id, sequence_nr, &self.replacement)
+                .await?;
+        }
+        Ok(captured)
     }
 
     async fn list_entity_ids(
@@ -223,6 +236,7 @@ async fn same_sequence_snapshot_rewrite_invalidates_the_backfill_row() {
         persistence_id: persistence_id.clone(),
         replacement: legacy_snapshot(entity_id, after_workspace, "/snapshot-path"),
         rewritten: Arc::new(AtomicBool::new(false)),
+        rewrite_on_snapshot_load: false,
     };
     let mut state = build_order_state("snapshot-rewrite-backfill");
     state.set_storage_stack(StorageStack::new(
@@ -279,4 +293,74 @@ async fn same_sequence_snapshot_rewrite_invalidates_the_backfill_row() {
         .as_deref(),
         Some(entity_id)
     );
+}
+
+#[tokio::test]
+async fn actor_recovery_retries_a_same_sequence_snapshot_rewrite_before_upgrade() {
+    let (_guard, _clock, _ids) = install_deterministic_context(279);
+    let tenant = TenantId::default();
+    let entity_id = "ord-actor-snapshot-rewrite";
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    let before_workspace = "ws-before-actor-rewrite";
+    let after_workspace = "ws-after-actor-rewrite";
+    let journal_path = "/journal-generation";
+    let (state, inner) = build_order_state_with_sim("actor-snapshot-rewrite");
+    EventStore::save_snapshot(
+        &inner,
+        &persistence_id,
+        1,
+        &legacy_snapshot(entity_id, before_workspace, "/snapshot-generation"),
+    )
+    .await
+    .expect("seed captured actor snapshot");
+    EventStore::append(
+        &inner,
+        &persistence_id,
+        0,
+        &[journal_path_delta(
+            &persistence_id,
+            journal_path,
+            "actor-snapshot-rewrite",
+        )],
+    )
+    .await
+    .expect("seed equal-sequence journal generation");
+
+    let rewritten = Arc::new(AtomicBool::new(false));
+    let store = BoxedEventStore::new(SnapshotRewriteDuringBackfillStore {
+        inner,
+        persistence_id,
+        replacement: legacy_snapshot(entity_id, after_workspace, "/snapshot-generation"),
+        rewritten: rewritten.clone(),
+        rewrite_on_snapshot_load: true,
+    });
+    let table = state
+        .registry
+        .read()
+        .expect("registry lock")
+        .get_table_live(&tenant, "Order")
+        .expect("Order transition table")
+        .read()
+        .expect("table lock")
+        .clone();
+    let recovered = crate::entity_actor::recover_entity_state_from_store(
+        tenant.as_str(),
+        "Order",
+        entity_id,
+        &table,
+        &store,
+        BackendLabel::Sim,
+        &serde_json::json!({}),
+        None,
+        false,
+    )
+    .await
+    .expect("recover one closed snapshot/journal generation");
+
+    assert!(rewritten.load(Ordering::SeqCst));
+    assert_eq!(
+        recovered.fields["WorkspaceId"], after_workspace,
+        "recovery must retry the replacement snapshot instead of overwriting it with a stale provenance upgrade"
+    );
+    assert_eq!(recovered.fields["Path"], journal_path);
 }
