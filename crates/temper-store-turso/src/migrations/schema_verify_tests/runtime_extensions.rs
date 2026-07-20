@@ -251,7 +251,7 @@ async fn blocking_legacy_ots_trigger_fails_the_runtime_write_probe() {
     assert!(diagnostic.contains("migration 7"), "{diagnostic}");
     assert!(diagnostic.contains("reject_ots_insert"), "{diagnostic}");
     assert!(
-        diagnostic.contains("production persist/enqueue/status-transition probe"),
+        diagnostic.contains("unsupported executable trigger extension"),
         "{diagnostic}"
     );
     assert_eq!(trigger_sql(&connection, "reject_ots_insert").await, before);
@@ -279,7 +279,7 @@ async fn queued_only_ots_trigger_fails_the_production_write_probe() {
     assert!(diagnostic.contains("migration 7"), "{diagnostic}");
     assert!(diagnostic.contains("reject_queued_ots"), "{diagnostic}");
     assert!(
-        diagnostic.contains("probe OTS enqueue insert"),
+        diagnostic.contains("unsupported executable trigger extension"),
         "{diagnostic}"
     );
     assert_eq!(ledger_count(&connection).await, MIGRATIONS.len() as i64);
@@ -332,6 +332,45 @@ async fn benign_legacy_ots_trigger_probe_has_no_durable_side_effects() {
         )
         .await,
         1
+    );
+    assert_eq!(ledger_count(&connection).await, MIGRATIONS.len() as i64);
+}
+
+#[tokio::test]
+async fn ots_audit_trigger_with_executable_sink_restriction_prevents_readiness() {
+    let (_directory, connection) = temporary_connection("restricted-ots-audit-sink").await;
+    migrate(&connection).await.expect("install current catalog");
+    connection
+        .execute(
+            "CREATE TABLE ots_restricted_audit (
+                trajectory_id TEXT PRIMARY KEY,
+                CHECK (trajectory_id GLOB '__temper_trigger_probe__-*')
+             )",
+            (),
+        )
+        .await
+        .expect("create audit sink that recognizes historical probe ids");
+    connection
+        .execute(
+            "CREATE TRIGGER audit_ots_restricted AFTER INSERT ON ots_trajectories
+             BEGIN
+                 INSERT INTO ots_restricted_audit (trajectory_id)
+                 VALUES (NEW.trajectory_id);
+             END",
+            (),
+        )
+        .await
+        .expect("create structurally simple trigger with an executable sink");
+
+    let error = migrate(&connection)
+        .await
+        .expect_err("an executable audit sink schema must prevent readiness");
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("migration 7"), "{diagnostic}");
+    assert!(diagnostic.contains("audit_ots_restricted"), "{diagnostic}");
+    assert!(
+        diagnostic.contains("unsupported audit sink"),
+        "{diagnostic}"
     );
     assert_eq!(ledger_count(&connection).await, MIGRATIONS.len() as i64);
 }

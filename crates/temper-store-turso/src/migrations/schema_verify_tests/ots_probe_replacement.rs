@@ -74,7 +74,7 @@ async fn persisted_replacement_trigger_prevents_readiness_and_rolls_back_migrati
     });
     let error = migrate_catalog(&connection, &catalog)
         .await
-        .expect_err("readiness must probe replacement through production persist SQL");
+        .expect_err("readiness must reject a trigger outside the supported audit contract");
     let diagnostic = error.to_string();
     assert!(diagnostic.contains("migration 8"), "{diagnostic}");
     assert!(
@@ -82,7 +82,7 @@ async fn persisted_replacement_trigger_prevents_readiness_and_rolls_back_migrati
         "{diagnostic}"
     );
     assert!(
-        diagnostic.contains("probe OTS persisted replacement"),
+        diagnostic.contains("unsupported executable trigger extension"),
         "{diagnostic}"
     );
     assert_eq!(

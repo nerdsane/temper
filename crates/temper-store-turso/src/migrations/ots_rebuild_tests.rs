@@ -356,7 +356,7 @@ async fn legal_sqlitex_child_foreign_key_fails_before_cascade_data_loss() {
 }
 
 #[tokio::test]
-async fn differently_cased_ots_trigger_owner_is_preserved_when_probe_rolls_back() {
+async fn differently_cased_ots_trigger_owner_is_preserved_when_contract_rejects() {
     let directory = tempfile::tempdir().expect("temporary database directory");
     let database = Builder::new_local(directory.path().join("case-folded-ots-trigger.db"))
         .build()
@@ -383,7 +383,7 @@ async fn differently_cased_ots_trigger_owner_is_preserved_when_probe_rolls_back(
 
     let error = migrate(&connection)
         .await
-        .expect_err("the preserved trigger must fail the production write probe");
+        .expect_err("the preserved trigger must fail the supported audit contract");
     let diagnostic = error.to_string();
     assert!(diagnostic.contains("migration 5"), "{diagnostic}");
     assert!(
@@ -391,7 +391,7 @@ async fn differently_cased_ots_trigger_owner_is_preserved_when_probe_rolls_back(
         "{diagnostic}"
     );
     assert!(
-        diagnostic.contains("production persist/enqueue/status-transition probe"),
+        diagnostic.contains("unsupported executable trigger extension"),
         "{diagnostic}"
     );
     assert_eq!(
@@ -411,7 +411,7 @@ async fn differently_cased_ots_trigger_owner_is_preserved_when_probe_rolls_back(
         )
         .await,
         0,
-        "the failed probe must roll back the destructive rebuild"
+        "the rejected contract must roll back the destructive rebuild"
     );
     assert_eq!(
         scalar_i64(&connection, "SELECT COUNT(*) FROM temper_schema_migrations").await,

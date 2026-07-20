@@ -26,6 +26,7 @@ async fn remote_final_ots_probe_is_atomic_and_side_effect_free() {
     let setup = initial_database
         .connect()
         .expect("reconnect remote setup after migration");
+    let ots_rows_before = scalar_i64(&setup, "SELECT COUNT(*) FROM ots_trajectories").await;
     setup
         .execute(
             "CREATE TABLE arn242_remote_probe_audit (
@@ -39,7 +40,6 @@ async fn remote_final_ots_probe_is_atomic_and_side_effect_free() {
         .execute(
             "CREATE TRIGGER arn242_remote_probe_audit_trigger
              AFTER INSERT ON ots_trajectories
-             WHEN NEW.trajectory_id GLOB '__temper_trigger_probe__-*'
              BEGIN
                  INSERT INTO arn242_remote_probe_audit (trajectory_id)
                  VALUES (NEW.trajectory_id);
@@ -61,12 +61,7 @@ async fn remote_final_ots_probe_is_atomic_and_side_effect_free() {
     let inspection = initial_database
         .connect()
         .expect("reconnect remote inspection after replay");
-    let probe_rows = scalar_i64(
-        &inspection,
-        "SELECT COUNT(*) FROM ots_trajectories
-         WHERE trajectory_id GLOB '__temper_trigger_probe__-*'",
-    )
-    .await;
+    let ots_rows_after = scalar_i64(&inspection, "SELECT COUNT(*) FROM ots_trajectories").await;
     let audit_rows = scalar_i64(
         &inspection,
         "SELECT COUNT(*) FROM arn242_remote_probe_audit",
@@ -75,9 +70,10 @@ async fn remote_final_ots_probe_is_atomic_and_side_effect_free() {
     let reopen_error = reopened.as_ref().err().map(ToString::to_string);
 
     assert!(
-        reopened.is_ok() && probe_rows == 0 && audit_rows == 0,
+        reopened.is_ok() && ots_rows_after == ots_rows_before && audit_rows == 0,
         "remote head verification must succeed without durable probe effects: \
-         reopen_error={reopen_error:?}, probe_rows={probe_rows}, audit_rows={audit_rows}"
+         reopen_error={reopen_error:?}, ots_rows_before={ots_rows_before}, \
+         ots_rows_after={ots_rows_after}, audit_rows={audit_rows}"
     );
 }
 

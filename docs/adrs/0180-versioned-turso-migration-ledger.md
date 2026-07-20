@@ -149,13 +149,21 @@ remain convergent:
   trigger owners are matched with SQLite's ASCII case-insensitive identifier
   semantics and normalized before capability comparison, so alternate casing in
   an `ON` clause cannot evade inventory, ledger protection, or OTS preservation;
-  those triggers must pass rollback-only probes using the same SQL as production
-  fresh and existing-row persisted upserts, queued inserts/conflict updates, and
+  preserved OTS triggers are admitted only under a parsed audit-sink contract:
+  an unconditional `AFTER INSERT` trigger with exactly one statement that inserts
+  `NEW.trajectory_id` into a one-column plain `TEXT` audit table; the sink must
+  have no foreign keys, table restrictions, secondary triggers, executable or
+  non-canonical indexes, or other columns; conditions, OTS mutations, multiple
+  statements, quoted or compound target expressions, and arbitrary side effects
+  prevent readiness because fixed example writes cannot prove arbitrary trigger
+  behavior; admitted audit triggers additionally pass rollback-only probes using
+  opaque database-generated identities and the same SQL as production fresh and
+  existing-row persisted upserts, queued inserts/conflict updates, and
   failed/persisted status transitions on every startup; the persisted upsert uses
   `ON CONFLICT DO UPDATE` rather than SQLite's delete-and-insert `REPLACE`
   semantics, so admitted inbound `CASCADE` and `RESTRICT` references neither lose
   child rows nor reject an existing-ID persist; each resulting row is verified,
-  and both probe rows and trigger side effects are rolled back on the same pinned
+  and both probe rows and audit side effects are rolled back on the same pinned
   transaction stream;
 - schema inventory excludes only SQLite's literal reserved `sqlite_` prefix;
   legal user objects such as `sqliteX...` remain subject to the same trigger and
@@ -228,8 +236,8 @@ can serve the current data paths.
   before their owning version is recorded, while nullable column extensions stay
   compatible with canonical runtime inserts.
 - Undeclared triggers and executable expression/partial indexes fail before
-  readiness and remain unmodified; plain non-unique indexes and rollback-probed
-  legacy OTS triggers retain their supported behavior.
+  readiness and remain unmodified; plain non-unique indexes and structurally
+  verified OTS audit triggers retain their supported behavior.
 - A later migration can tighten a table introduced by an earlier version,
   commit its ledger row, and pass replay against the declared catalog head.
 - Injected DDL/permission failure rolls back the active version and prevents
@@ -237,9 +245,10 @@ can serve the current data paths.
 - A checksum mismatch, ledger gap, or newer schema version prevents readiness
   with an actionable diagnostic.
 - Concurrent independent startups produce one valid, contiguous ledger.
-- A benign legacy OTS trigger on remote Hrana leaves no durable probe or trigger
-  side-effect rows, and current inbound `CASCADE`/`RESTRICT` references survive
-  an existing-ID production persist.
+- A structurally verified legacy OTS audit trigger on remote Hrana leaves no
+  durable probe or audit rows; recognizable-input bypasses and unmodeled trigger
+  mutations prevent readiness; current inbound `CASCADE`/`RESTRICT` references
+  survive an existing-ID production persist.
 - Existing Turso event-store behavior remains green across the workspace.
 
 ## Consequences
@@ -257,6 +266,9 @@ can serve the current data paths.
 - Historical migration definitions become immutable; correcting one requires a
   new compensating migration.
 - An older binary cannot open a database whose ledger was advanced by newer code.
+- Legacy OTS triggers outside the explicit audit-sink contract require operator
+  removal or a future catalog-declared integration before the database can become
+  ready.
 
 ### Risks
 

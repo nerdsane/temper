@@ -60,7 +60,7 @@ fn normalize_sql_fragment(sql: &str) -> String {
     tokens.join(" ")
 }
 
-fn canonical_tokens(sql: &str) -> Vec<String> {
+pub(super) fn canonical_tokens(sql: &str) -> Vec<String> {
     let bytes = sql.as_bytes();
     let mut tokens = Vec::new();
     let mut cursor = 0;

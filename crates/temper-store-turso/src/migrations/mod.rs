@@ -12,6 +12,7 @@ mod remote_probe_tests;
 mod runner;
 mod schema_manifest;
 mod schema_ots_probe;
+mod schema_ots_trigger;
 mod schema_snapshot;
 mod schema_sql;
 mod schema_trigger;

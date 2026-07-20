@@ -14,7 +14,7 @@ pub(super) const EXTRA_INDEX_POLICY: &str =
     "allow-nonunique-full-plain-column-index-with-builtin-collation-v1";
 pub(super) const TRIGGER_POLICY: &str = concat!(
     "exact-trigger-set-with-sqlite-identifier-owners-and-",
-    "transaction-pinned-production-upsert-probed-legacy-ots-extensions-v6"
+    "parsed-audit-sink-contract-with-transaction-pinned-production-upsert-probe-v7"
 );
 
 pub(super) async fn verify_schema(
@@ -59,7 +59,7 @@ async fn verify_triggers(
                 )));
             }
             None => {
-                unexpected.push(name.as_str());
+                unexpected.push((name.as_str(), actual_trigger));
             }
         }
     }
@@ -69,7 +69,7 @@ async fn verify_triggers(
         } else {
             return Err(compatibility_error(format!(
                 "table '{table}' has unexpected executable trigger '{}'",
-                unexpected[0]
+                unexpected[0].0
             )));
         }
     }
