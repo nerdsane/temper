@@ -604,21 +604,21 @@ impl EntityActor {
             }
         }
 
-        if loaded_snapshot && state.status != "Deleted" {
-            if let Some(tombstone_sequence) = journal_boundary.first_terminal_sequence
-                && tombstone_sequence <= from_sequence
-            {
-                let rejected_snapshot_sequence = from_sequence;
-                tracing::warn!(
-                    entity = %state.entity_id,
-                    snapshot_sequence = rejected_snapshot_sequence,
-                    tombstone_sequence,
-                    "discarding live snapshot newer than terminal journal boundary"
-                );
-                *state = initial_state;
-                from_sequence = 0;
-                loaded_snapshot = false;
-            }
+        if loaded_snapshot
+            && state.status != "Deleted"
+            && let Some(tombstone_sequence) = journal_boundary.first_terminal_sequence
+            && tombstone_sequence <= from_sequence
+        {
+            let rejected_snapshot_sequence = from_sequence;
+            tracing::warn!(
+                entity = %state.entity_id,
+                snapshot_sequence = rejected_snapshot_sequence,
+                tombstone_sequence,
+                "discarding live snapshot newer than terminal journal boundary"
+            );
+            *state = initial_state;
+            from_sequence = 0;
+            loaded_snapshot = false;
         }
 
         match store.read_events(persistence_id, from_sequence).await {
