@@ -76,6 +76,8 @@ fn build_state_with_field_invariant() -> ServerState {
                     summary: "OK".to_string(),
                     details: None,
                 }],
+                warnings: Vec::new(),
+                errors: Vec::new(),
                 verified_at: "2026-04-11T00:00:00Z".to_string(),
             }),
         );

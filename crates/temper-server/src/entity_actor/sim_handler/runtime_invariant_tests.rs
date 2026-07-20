@@ -21,6 +21,7 @@ assert = "used_bytes ** quota_limit"
 "#;
     let config = SimActorSystemConfig {
         seed: 213,
+        max_ticks: 0,
         faults: FaultConfig::none(),
         ..SimActorSystemConfig::default()
     };
@@ -33,8 +34,10 @@ assert = "used_bytes ** quota_limit"
     .with_ioa_invariants(unsupported_ioa);
     simulation.register_actor("o1", Box::new(handler));
 
-    simulation.step("o1", "AddItem", "{}").expect("step order");
+    let result = simulation.run_random();
 
+    assert!(!result.all_invariants_held);
+    assert_eq!(result.transitions, 0);
     assert!(simulation.has_violations());
     assert!(
         simulation

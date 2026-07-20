@@ -710,6 +710,8 @@ async fn test_reconcile_os_app_repairs_spec_content_drift_despite_matching_diges
                         summary: "Spec drift should still force app reconcile".to_string(),
                         details: None,
                     }],
+                    warnings: Vec::new(),
+                    errors: Vec::new(),
                     verified_at: verified_at.clone(),
                 }),
             );
@@ -813,6 +815,8 @@ async fn test_reconcile_os_app_repairs_entity_set_map_from_matching_digest() {
                         summary: "Preserved verification for skipped reconcile".to_string(),
                         details: None,
                     }],
+                    warnings: Vec::new(),
+                    errors: Vec::new(),
                     verified_at: verified_at.clone(),
                 }),
             );
@@ -1263,6 +1267,8 @@ async fn test_reinstall_of_skipped_specs_repairs_entity_set_map() {
                         summary: "Preserved verification for skipped reinstall".to_string(),
                         details: None,
                     }],
+                    warnings: Vec::new(),
+                    errors: Vec::new(),
                     verified_at: verified_at.clone(),
                 }),
             );

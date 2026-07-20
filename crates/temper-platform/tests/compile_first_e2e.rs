@@ -104,6 +104,8 @@ fn build_user_registry(tenant: &str, ioa_specs: &[(&str, &str)]) -> SpecRegistry
                     summary: "Pre-verified".to_string(),
                     details: None,
                 }],
+                warnings: Vec::new(),
+                errors: Vec::new(),
                 verified_at: "2026-02-18T00:00:00Z".to_string(),
             }),
         );
@@ -263,6 +265,8 @@ async fn e2e_compile_first_two_tenants() {
                     summary: "Pre-verified".to_string(),
                     details: None,
                 }],
+                warnings: Vec::new(),
+                errors: Vec::new(),
                 verified_at: "2026-02-18T00:00:00Z".to_string(),
             }),
         );

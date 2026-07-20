@@ -691,6 +691,8 @@ assert = "title != ''"
                     temper_server::registry::EntityVerificationResult {
                         all_passed: true,
                         levels: vec![],
+                        warnings: Vec::new(),
+                        errors: Vec::new(),
                         verified_at: "runtime-cache".to_string(),
                     },
                 ),

@@ -44,8 +44,122 @@ pub struct EntityVerificationResult {
     pub all_passed: bool,
     /// Per-level summaries.
     pub levels: Vec<EntityLevelSummary>,
+    /// Non-fatal disclosures, including runtime-only enforcement contracts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// Structured capability errors that blocked backend verification.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<VerificationCapabilityError>,
     /// ISO-8601 timestamp when verification completed.
     pub verified_at: String,
+}
+
+impl EntityVerificationResult {
+    /// Preserve the complete cascade result for registry, persistence, and UI consumers.
+    #[cfg(feature = "observe")]
+    pub fn from_cascade(result: &temper_verify::CascadeResult, verified_at: String) -> Self {
+        let levels = result
+            .levels
+            .iter()
+            .map(|level| {
+                let mut details = Vec::new();
+                if !level.passed {
+                    if let Some(simulation) = &level.simulation {
+                        for violation in &simulation.liveness_violations {
+                            details.push(VerificationDetail {
+                                kind: "liveness_violation".into(),
+                                property: violation.property.clone(),
+                                description: violation.description.clone(),
+                                actor_id: Some(violation.actor_id.clone()),
+                            });
+                        }
+                        for violation in &simulation.violations {
+                            details.push(VerificationDetail {
+                                kind: "invariant_violation".into(),
+                                property: violation.invariant.clone(),
+                                description: format!(
+                                    "Actor {} violated invariant at tick {} during action {}",
+                                    violation.actor_id, violation.tick, violation.action
+                                ),
+                                actor_id: Some(violation.actor_id.clone()),
+                            });
+                        }
+                    }
+                    if let Some(verification) = &level.verification {
+                        for counterexample in &verification.counterexamples {
+                            details.push(VerificationDetail {
+                                kind: "counterexample".into(),
+                                property: counterexample.property.clone(),
+                                description: format!(
+                                    "Counterexample found with {} step trace",
+                                    counterexample.trace.len()
+                                ),
+                                actor_id: None,
+                            });
+                        }
+                        for transition in &verification.dead_transitions {
+                            details.push(VerificationDetail {
+                                kind: "dead_transition".into(),
+                                property: transition.clone(),
+                                description: "Transition is unreachable in model check".into(),
+                                actor_id: None,
+                            });
+                        }
+                    }
+                    if let Some(prop_test) = &level.prop_test
+                        && let Some(failure) = &prop_test.failure
+                    {
+                        details.push(VerificationDetail {
+                            kind: "proptest_failure".into(),
+                            property: failure.invariant.clone(),
+                            description: format!(
+                                "Property test failed after sequence: {}",
+                                failure.action_sequence.join(" -> ")
+                            ),
+                            actor_id: None,
+                        });
+                    }
+                }
+
+                EntityLevelSummary {
+                    level: level.level.to_string(),
+                    passed: level.passed,
+                    summary: level.summary.clone(),
+                    details: (!details.is_empty()).then_some(details),
+                }
+            })
+            .collect();
+
+        Self {
+            all_passed: result.all_passed,
+            levels,
+            warnings: result.warnings.clone(),
+            errors: result
+                .errors
+                .iter()
+                .map(|error| VerificationCapabilityError {
+                    code: error.code.clone(),
+                    invariant: error.invariant.clone(),
+                    assertion: error.assertion.clone(),
+                    source_span: error.source_span,
+                })
+                .collect(),
+            verified_at,
+        }
+    }
+}
+
+/// Structured safety-capability error retained in deployment status records.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VerificationCapabilityError {
+    /// Stable machine-readable diagnostic code.
+    pub code: String,
+    /// Declared invariant name.
+    pub invariant: String,
+    /// Unsupported assertion expression.
+    pub assertion: String,
+    /// Exact half-open assertion source span.
+    pub source_span: temper_spec::automaton::SourceSpan,
 }
 
 /// Summary of a single verification level.
@@ -304,6 +418,8 @@ mod tests {
                 summary: "All checks passed".into(),
                 details: None,
             }],
+            warnings: vec!["runtime disclosure".into()],
+            errors: Vec::new(),
             verified_at: "2025-01-01T00:00:00Z".into(),
         };
         let json = serde_json::to_string(&result).unwrap();
@@ -311,6 +427,38 @@ mod tests {
         assert!(back.all_passed);
         assert_eq!(back.levels.len(), 1);
         assert!(back.levels[0].details.is_none());
+        assert_eq!(back.warnings, vec!["runtime disclosure"]);
+        assert!(back.errors.is_empty());
+    }
+
+    #[cfg(feature = "observe")]
+    #[test]
+    fn cascade_conversion_retains_capability_errors_and_disclosures() {
+        let source = r#"
+[automaton]
+name = "Quota"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[invariant]]
+name = "UnsupportedQuota"
+when = ["Active"]
+assert = "used_bytes ** quota_limit"
+"#;
+        let mut cascade = temper_verify::VerificationCascade::from_ioa(source).run();
+        cascade.warnings.push("runtime-only disclosure".to_string());
+
+        let result =
+            EntityVerificationResult::from_cascade(&cascade, "2026-07-20T00:00:00Z".to_string());
+
+        assert!(!result.all_passed);
+        assert_eq!(result.warnings, vec!["runtime-only disclosure"]);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].code, "TVE001");
+        assert_eq!(result.errors[0].invariant, "UnsupportedQuota");
+        assert_eq!(result.errors[0].assertion, "used_bytes ** quota_limit");
+        assert!(result.levels.is_empty());
     }
 
     #[test]

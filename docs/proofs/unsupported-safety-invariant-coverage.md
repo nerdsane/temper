@@ -3,7 +3,7 @@
 This proof records the verification capability boundary introduced by ADR-0190.
 Every `[[invariant]]` assertion is translated once into the shared
 `InvariantKind` IR. An assertion is model-proved, explicitly attached to typed
-runtime enforcement contract version 1, or becomes `Unverifiable`.
+runtime enforcement contract version 2, or becomes `Unverifiable`.
 `Unverifiable` is a hard `TVE001` error and no cascade backend runs.
 
 ## Checked-in corpus replay
@@ -52,7 +52,7 @@ operator, `no_further_transitions`, and compound `&&`/`||` expressions.
 ## Rejected production forms
 
 None. All 53 checked-in assertion forms are either model-proved or attached to
-runtime enforcement contract version 1. Unknown syntax remains a `TVE001`
+runtime enforcement contract version 2. Unknown syntax remains a `TVE001`
 capability error before any backend, cache, or trust decision.
 
 The parser also recognizes `ordering(Before, After)`, but the shared verifier
@@ -66,7 +66,7 @@ so bypassing the cascade cannot turn an omitted safety claim into proof.
 ## Runtime-enforced claims
 
 The corpus contains non-empty string and counter-to-counter assertions. They
-compile into the closed `RuntimeAssert` enum and contract version 1. Production
+compile into the closed `RuntimeAssert` enum and contract version 2. Production
 and deterministic simulation share the evaluator; live actions are checked on
 tentative post-transition state before persistence/publication with atomic
 rollback, checked counter overflow is rejected, blob-backed oversized strings

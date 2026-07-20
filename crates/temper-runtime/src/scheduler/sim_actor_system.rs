@@ -197,6 +197,27 @@ impl SimActorSystem {
     pub fn register_actor(&mut self, id: &str, mut handler: Box<dyn SimActorHandler>) {
         self.scheduler.register_actor(id);
         handler.init().expect("actor init should succeed");
+        let status = handler.current_status();
+        for invariant in handler.spec_invariants() {
+            if matches!(
+                &invariant.assert,
+                super::sim_handler::SpecAssert::Unsupported { .. }
+            ) {
+                self.recorded_invariants
+                    .push((id.to_string(), invariant.name.clone(), false));
+                self.violations.push(ActorInvariantViolation {
+                    actor_id: id.to_string(),
+                    action: "<registration>".to_string(),
+                    status_before: status.clone(),
+                    status_after: status.clone(),
+                    description: format!(
+                        "{}: unsupported safety assertion at actor registration",
+                        invariant.name
+                    ),
+                    tick: self.clock.tick(),
+                });
+            }
+        }
         self.actors.insert(id.to_string(), handler);
         self.action_counts.insert(id.to_string(), 0);
     }

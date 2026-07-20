@@ -231,6 +231,8 @@ fn mark_file_verified(state: &ServerState) {
                 summary: "test fixture verified".to_string(),
                 details: None,
             }],
+            warnings: Vec::new(),
+            errors: Vec::new(),
             verified_at: "2026-05-15T00:00:00Z".to_string(),
         }),
     );

@@ -921,6 +921,108 @@ assert = "budget <= 10"
 
 #[cfg(feature = "sim")]
 #[tokio::test]
+async fn malformed_counter_effect_params_fail_durable_replay() {
+    use temper_runtime::persistence::EventStore;
+    use temper_runtime::scheduler::install_deterministic_context;
+    use temper_store_sim::SimEventStore;
+
+    let (_guard, _clock, _id_gen) = install_deterministic_context(213);
+    let table = TransitionTable::from_ioa_source(
+        r#"
+[automaton]
+name = "Budget"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "budget"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "SetBudget"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["amount"]
+effect = [{ type = "set_counter_from_param", var = "budget", param = "amount" }]
+
+[[action]]
+name = "IncreaseBudget"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["amount"]
+effect = [{ type = "increment", var = "budget", amount = "amount" }]
+
+[[action]]
+name = "DecreaseBudget"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["amount"]
+effect = [{ type = "decrement", var = "budget", amount = "amount" }]
+"#,
+    );
+
+    for (index, action) in ["SetBudget", "IncreaseBudget", "DecreaseBudget"]
+        .into_iter()
+        .enumerate()
+    {
+        let store = Arc::new(SimEventStore::no_faults(213 + index as u64));
+        let entity_id = format!("malformed-replay-{index}");
+        let pid = format!("default:Budget:{entity_id}");
+        store
+            .append(
+                &pid,
+                0,
+                &[PersistenceEnvelope {
+                    sequence_nr: 0,
+                    event_type: action.to_string(),
+                    payload: serde_json::json!({
+                        "action": action,
+                        "from_status": "Active",
+                        "to_status": "Active",
+                        "timestamp": "2024-01-01T00:00:00Z",
+                        "params": {"amount": "bad"}
+                    }),
+                    metadata: EventMetadata {
+                        event_id: sim_uuid(),
+                        causation_id: sim_uuid(),
+                        correlation_id: sim_uuid(),
+                        timestamp: sim_now(),
+                        actor_id: pid.clone(),
+                    },
+                }],
+            )
+            .await
+            .expect("append malformed persisted event");
+
+        let error = recover_entity_state_from_store(
+            "default",
+            "Budget",
+            &entity_id,
+            &table,
+            &crate::storage::BoxedEventStore::from_arc(store),
+            crate::storage::BackendLabel::Sim,
+            &serde_json::json!({}),
+            None,
+            true,
+        )
+        .await
+        .expect_err("malformed persisted counter parameter must fail replay");
+        assert!(
+            error.to_string().contains(
+                "persisted event cannot be replayed safely: runtime counter parameter 'amount' must be a usize"
+            ),
+            "unexpected replay error for {action}: {error}"
+        );
+    }
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
 async fn hydration_rejects_invalid_snapshot_before_healing_tail_event() {
     use temper_runtime::persistence::EventStore;
     use temper_runtime::scheduler::install_deterministic_context;

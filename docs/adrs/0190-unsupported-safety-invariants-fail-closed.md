@@ -99,7 +99,7 @@ The shared parser recognizes two checked-in forms that the bounded model does no
 non-empty strings (`field != ''`) and counter-to-counter comparisons. The model builder
 classifies these as `RuntimeEnforced(RuntimeAssert)`, distinct from both model-proved
 assertions and `Unverifiable`. Each compiled `TransitionTable` carries the typed
-`RuntimeInvariant` values and enforcement contract version 1.
+`RuntimeInvariant` values and enforcement contract version 2.
 
 The entity handler evaluates these assertions on tentative post-transition state after
 effects, status fallback, and action-parameter field synchronization, but before event
@@ -149,7 +149,7 @@ The typed, versioned contract makes the enforcement owner and lifecycle explicit
 6. Reject runtime-contract hot swaps without an explicit durable-state validation and
    migration, leaving the previous registry configuration untouched.
 7. Run the checked-in IOA corpus and prove every declaration is either model-proved or
-   attached to runtime enforcement contract version 1; do not weaken or delete claims.
+   attached to runtime enforcement contract version 2; do not weaken or delete claims.
 
 ## Readiness Gates
 
@@ -207,7 +207,7 @@ The typed, versioned contract makes the enforcement owner and lifecycle explicit
   and bootstrap therefore rerun the cheap typed capability preflight before consulting
   hash caches or bundle trust; only supported specs retain the performance benefit.
 - A future runtime assertion semantic change could invalidate compiled artifacts. Every
-  runtime assertion therefore carries enforcement version 1, deployment/bootstrap
+  runtime assertion therefore carries enforcement version 2, deployment/bootstrap
   rebuild tables from source after capability preflight, and deserialization rejects
   pre-contract tables that lack the runtime-invariant field.
 - Runtime contracts cannot be introduced or changed through ordinary hot swap for an

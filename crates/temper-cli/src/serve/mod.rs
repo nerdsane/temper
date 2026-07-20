@@ -755,21 +755,10 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
                         }
                     }
 
-                    // Build verification result
-                    let verification_result = EntityVerificationResult {
-                        all_passed: cascade_result.all_passed,
-                        levels: cascade_result
-                            .levels
-                            .iter()
-                            .map(|l| EntityLevelSummary {
-                                level: format!("{:?}", l.level),
-                                passed: l.passed,
-                                summary: l.summary.clone(),
-                                details: None,
-                            })
-                            .collect(),
-                        verified_at: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
-                    };
+                    let verification_result = EntityVerificationResult::from_cascade(
+                        &cascade_result,
+                        chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
+                    );
 
                     let all_passed = cascade_result.all_passed;
 
@@ -850,6 +839,8 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
                             summary: format!("Verification failed: {e}"),
                             details: None,
                         }],
+                        warnings: Vec::new(),
+                        errors: Vec::new(),
                         verified_at: chrono::Utc::now().to_rfc3339(), // determinism-ok: CLI code
                     };
 

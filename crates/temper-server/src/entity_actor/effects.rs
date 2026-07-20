@@ -866,7 +866,7 @@ pub fn apply_effects(
                 state.counters.insert(var.clone(), value);
             }
             Effect::IncrementCounterByParam { var, param } => {
-                let delta = counter_delta_from_params(params, param);
+                let delta = counter_delta_from_params(params, param)?;
                 let value = state.counters.get(var).copied().unwrap_or_default();
                 let value = value
                     .checked_add(delta)
@@ -886,7 +886,7 @@ pub fn apply_effects(
                 }
             }
             Effect::DecrementCounterByParam { var, param } => {
-                let delta = counter_delta_from_params(params, param);
+                let delta = counter_delta_from_params(params, param)?;
                 let c = state.counters.entry(var.clone()).or_default();
                 *c = c.saturating_sub(delta);
                 if var == "items" {
@@ -894,27 +894,10 @@ pub fn apply_effects(
                 }
             }
             Effect::SetCounterFromParam { var, param } => {
-                let parsed = params
-                    .get(param)
-                    .and_then(|v| {
-                        v.as_u64()
-                            .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
-                    })
-                    .and_then(|n| usize::try_from(n).ok());
-                match parsed {
-                    Some(value) => {
-                        state.counters.insert(var.clone(), value);
-                        if var == "items" {
-                            state.item_count = value;
-                        }
-                    }
-                    None => tracing::warn!(
-                        entity_type = %state.entity_type,
-                        entity_id = %state.entity_id,
-                        counter = %var,
-                        param = %param,
-                        "set_counter_from_param skipped because param was missing or not a non-negative integer"
-                    ),
+                let value = counter_value_from_params(params, param)?;
+                state.counters.insert(var.clone(), value);
+                if var == "items" {
+                    state.item_count = value;
                 }
             }
             Effect::SetBool { var, value } => {
@@ -1053,7 +1036,15 @@ pub fn apply_effects(
     ))
 }
 
-fn counter_delta_from_params(params: &serde_json::Value, param: &str) -> usize {
+fn counter_value_from_params(params: &serde_json::Value, param: &str) -> Result<usize, String> {
+    params
+        .get(param)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| format!("runtime counter parameter '{param}' must be a usize"))
+}
+
+fn counter_delta_from_params(params: &serde_json::Value, param: &str) -> Result<usize, String> {
     params
         .get(param)
         .and_then(|value| match value {
@@ -1063,7 +1054,7 @@ fn counter_delta_from_params(params: &serde_json::Value, param: &str) -> usize {
             serde_json::Value::String(text) => text.parse::<usize>().ok(),
             _ => None,
         })
-        .unwrap_or(0)
+        .ok_or_else(|| format!("runtime counter parameter '{param}' must be a usize"))
 }
 
 /// Resolve deferred `schedule_at` requests into [`ScheduledAction`]s.
@@ -2097,6 +2088,118 @@ effect = [{ type = "set_counter_from_param", var = "size_bytes", param = "payloa
             state.fields.get("size_bytes").and_then(|v| v.as_u64()),
             Some(4096)
         );
+    }
+
+    #[test]
+    fn counter_effect_param_rejects_missing_or_malformed_values_atomically() {
+        let spec = r#"
+[automaton]
+name = "Upload"
+states = ["Pending", "Ready"]
+initial = "Pending"
+
+[[state]]
+name = "size_bytes"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "Set"
+from = ["Pending"]
+to = "Ready"
+params = ["payload_size"]
+effect = [{ type = "set_counter_from_param", var = "size_bytes", param = "payload_size" }]
+
+[[action]]
+name = "Increment"
+from = ["Pending"]
+to = "Ready"
+params = ["payload_size"]
+effect = [{ type = "increment", var = "size_bytes", amount = "payload_size" }]
+
+[[action]]
+name = "Decrement"
+from = ["Pending"]
+to = "Ready"
+params = ["payload_size"]
+effect = [{ type = "decrement", var = "size_bytes", amount = "payload_size" }]
+"#;
+
+        let table = TransitionTable::from_ioa_source(spec);
+        for (action, params) in ["Set", "Increment", "Decrement"]
+            .into_iter()
+            .flat_map(|action| {
+                [
+                    serde_json::json!({}),
+                    serde_json::json!({ "payload_size": "bad" }),
+                    serde_json::json!({ "payload_size": -1 }),
+                ]
+                .into_iter()
+                .map(move |params| (action, params))
+            })
+        {
+            let mut state = EntityState {
+                entity_type: "Upload".into(),
+                entity_id: "upload-1".into(),
+                status: "Pending".into(),
+                item_count: 0,
+                counters: std::collections::BTreeMap::new(),
+                booleans: std::collections::BTreeMap::new(),
+                lists: std::collections::BTreeMap::new(),
+                fields: serde_json::json!({}),
+                events: std::collections::VecDeque::new(),
+                total_event_count: 0,
+                events_since_snapshot: 0,
+                last_snapshot_sequence_nr: 0,
+                sequence_nr: 0,
+                processed_idempotency_keys: std::collections::BTreeMap::new(),
+            };
+
+            let result = process_action(&mut state, &table, action, &params);
+
+            assert!(
+                !result.success,
+                "{action} must reject invalid params: {params}"
+            );
+            assert_eq!(state.status, "Pending");
+            assert_eq!(state.counters.get("size_bytes"), None);
+            assert!(state.events.is_empty());
+            assert_eq!(
+                result.error.as_deref(),
+                Some("runtime counter parameter 'payload_size' must be a usize")
+            );
+        }
+
+        for action in ["Increment", "Decrement"] {
+            let mut state = EntityState {
+                entity_type: "Upload".into(),
+                entity_id: "upload-1".into(),
+                status: "Pending".into(),
+                item_count: 0,
+                counters: std::collections::BTreeMap::new(),
+                booleans: std::collections::BTreeMap::new(),
+                lists: std::collections::BTreeMap::new(),
+                fields: serde_json::json!({}),
+                events: std::collections::VecDeque::new(),
+                total_event_count: 0,
+                events_since_snapshot: 0,
+                last_snapshot_sequence_nr: 0,
+                sequence_nr: 0,
+                processed_idempotency_keys: std::collections::BTreeMap::new(),
+            };
+
+            let result = process_action(
+                &mut state,
+                &table,
+                action,
+                &serde_json::json!({ "payload_size": "4096" }),
+            );
+
+            assert!(
+                result.success,
+                "{action} must retain numeric-string support"
+            );
+        }
     }
 
     #[test]

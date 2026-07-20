@@ -127,6 +127,8 @@ fn row_to_registry_status(row: &impl SpecRowLike) -> VerificationStatus {
             VerificationStatus::Restored(EntityVerificationResult {
                 all_passed,
                 levels,
+                warnings: Vec::new(),
+                errors: Vec::new(),
                 verified_at: row.updated_at_rfc3339(),
             })
         }

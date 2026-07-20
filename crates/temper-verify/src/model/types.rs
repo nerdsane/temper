@@ -187,7 +187,7 @@ pub enum InvariantKind {
     And(Vec<InvariantKind>),
     /// Compound: at least one subexpression must hold.
     Or(Vec<InvariantKind>),
-    /// Assertion enforced atomically by runtime contract version 1.
+    /// Assertion enforced atomically by runtime contract version 2.
     RuntimeEnforced(temper_spec::automaton::RuntimeAssert),
     /// Assertion expression that cannot be represented by the verifier.
     /// Every backend must treat this as a hard failure.
