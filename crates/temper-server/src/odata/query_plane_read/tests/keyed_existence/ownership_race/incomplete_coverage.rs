@@ -1,5 +1,7 @@
 use super::*;
 
+mod catalog_fault;
+mod composite_events;
 mod fault_paths;
 mod projection_race;
 mod source_transitions;
