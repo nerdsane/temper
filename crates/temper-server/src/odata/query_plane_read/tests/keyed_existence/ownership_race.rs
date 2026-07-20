@@ -11,6 +11,8 @@ use temper_runtime::persistence::{
 };
 use temper_runtime::scheduler::{install_deterministic_context, sim_now, sim_uuid};
 
+mod incomplete_coverage;
+
 fn field_update_event(persistence_id: &str, path: &str, token: &str) -> PersistenceEnvelope {
     let timestamp = sim_now();
     PersistenceEnvelope {
