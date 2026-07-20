@@ -74,6 +74,7 @@ impl QueryPlaneStore for SimQueryPlane {
         _tenant: &str,
         entity_type: &str,
         entity_id: &str,
+        _sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
         self.catalog
             .lock()

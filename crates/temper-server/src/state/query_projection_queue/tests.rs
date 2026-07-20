@@ -40,6 +40,7 @@ impl QueryPlaneStore for RecordingQueryPlane {
         _tenant: &str,
         _entity_type: &str,
         _entity_id: &str,
+        _sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
         Ok(())
     }

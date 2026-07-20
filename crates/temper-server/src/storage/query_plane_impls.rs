@@ -50,8 +50,9 @@ impl QueryPlaneStore for PostgresEventStore {
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
+        sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
-        self.remove_query_projection(tenant, entity_type, entity_id)
+        self.remove_query_projection_versioned(tenant, entity_type, entity_id, sequence_nr)
             .await
     }
 
@@ -217,8 +218,9 @@ impl QueryPlaneStore for TursoEventStore {
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
+        sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
-        self.remove_query_projection(tenant, entity_type, entity_id)
+        self.remove_query_projection_versioned(tenant, entity_type, entity_id, sequence_nr)
             .await
     }
 
@@ -364,10 +366,11 @@ impl QueryPlaneStore for TenantStoreRouter {
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
+        sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
         let store = self.store_for_tenant(tenant).await?;
         store
-            .remove_query_projection(tenant, entity_type, entity_id)
+            .remove_query_projection_versioned(tenant, entity_type, entity_id, sequence_nr)
             .await
     }
 

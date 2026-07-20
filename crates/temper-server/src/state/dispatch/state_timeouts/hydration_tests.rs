@@ -1,5 +1,7 @@
 //! Focused tests for durable timeout hydration helpers and arm races.
 
+use std::collections::BTreeMap;
+
 use super::*;
 use crate::entity_actor::EntityState;
 use crate::registry::SpecRegistry;
@@ -50,11 +52,7 @@ reset_on = ["Heartbeat"]
 "#;
 
 fn key() -> EntityKey {
-    EntityKey {
-        tenant: "t".into(),
-        entity_type: "E".into(),
-        entity_id: "1".into(),
-    }
+    EntityKey::new(&temper_runtime::tenant::TenantId::new("t"), "E", "1")
 }
 
 async fn wait_for_ticket_pending(state: &ServerState, expected: u64) {
@@ -69,6 +67,48 @@ async fn wait_for_ticket_pending(state: &ServerState, expected: u64) {
         state.state_timeout_tracker.pending_snapshot(),
         vec![("Ticket".to_string(), expected)]
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn readiness_waits_for_the_exact_actor_hydration_barrier() {
+    let (_guard, _clock, _ids) = install_deterministic_context(255);
+    let tenant = TenantId::default();
+    let entity_id = "readiness-hydration-barrier";
+    let mut registry = SpecRegistry::new();
+    registry.register_tenant(
+        tenant.as_str(),
+        parse_csdl(TICKET_CSDL).expect("CSDL parses"),
+        TICKET_CSDL.to_string(),
+        &[("Ticket", TICKET_WITH_RESET_TIMEOUT_IOA)],
+    );
+    let state = ServerState::from_registry(ActorSystem::new(entity_id), registry);
+    let actor = state
+        .get_or_spawn_tenant_actor_when_ready(&tenant, "Ticket", entity_id)
+        .await
+        .expect("the initial actor becomes ready");
+    let actor_uid = actor.id().uid;
+
+    // Reinstall the same incarnation's barrier to deterministically model the
+    // window after its first-mailbox response but before that response has
+    // published timeout ownership. A second GetState must not bypass it.
+    let completion = state
+        .state_timeout_tracker
+        .register_hydration(&tenant, "Ticket", entity_id, actor_uid);
+    let mut readiness =
+        Box::pin(state.get_or_spawn_tenant_actor_when_ready(&tenant, "Ticket", entity_id));
+    tokio::select! {
+        biased;
+        result = &mut readiness => panic!("readiness bypassed hydration completion: {result:?}"),
+        () = tokio::task::yield_now() => {}
+    }
+
+    state
+        .state_timeout_tracker
+        .complete_hydration(&tenant, "Ticket", entity_id, actor_uid, completion);
+    let ready = readiness
+        .await
+        .expect("readiness completes after hydration");
+    assert_eq!(ready.id().uid, actor_uid);
 }
 
 async fn assert_in_memory_fallback_rearm(action: &str, seed: u64, entity_id: &str) {
@@ -112,7 +152,7 @@ async fn assert_in_memory_fallback_rearm(action: &str, seed: u64, entity_id: &st
     assert_eq!(response.state.sequence_nr, 0);
     assert_eq!(response.state.total_event_count, 1);
     assert_eq!(response.state.state_timeout_clock_reset_version, Some(1));
-    wait_for_ticket_pending(&state, 2).await;
+    wait_for_ticket_pending(&state, 1).await;
 
     tokio::time::advance(Duration::from_secs(40)).await;
     clock.advance_by(400);
@@ -153,10 +193,12 @@ fn dispatch_arm_wins_when_it_precedes_hydration_reconciliation() {
 
     let dispatch_seq = tracker
         .advance_if_fresh(&entity, 2, None, None, None)
-        .expect("new dispatch claims timeout ownership");
-    assert_eq!(
-        tracker.reconcile_if_fresh(&entity, 1, None, None, None),
-        None
+        .expect("new dispatch claims timeout ownership")
+        .generation;
+    assert!(
+        tracker
+            .reconcile_if_fresh(&entity, 1, None, None, None)
+            .is_none()
     );
     assert_eq!(
         tracker.current_generation(&entity),
@@ -172,10 +214,12 @@ fn dispatch_arm_supersedes_an_earlier_hydration_reservation() {
 
     let hydration_seq = tracker
         .reconcile_if_fresh(&entity, 1, None, None, None)
-        .expect("hydration claims an unarmed entity");
+        .expect("hydration claims an unarmed entity")
+        .generation;
     let dispatch_seq = tracker
         .advance_if_fresh(&entity, 2, None, None, None)
-        .expect("newer dispatch supersedes hydration");
+        .expect("newer dispatch supersedes hydration")
+        .generation;
     assert_ne!(hydration_seq, dispatch_seq);
     assert_eq!(
         tracker.current_generation(&entity),
@@ -316,6 +360,7 @@ async fn delayed_post_dispatch_entry_and_reset_keep_the_durable_deadline() {
             dispatch_idempotency_key: None,
             action_params: &action_params,
             await_integration: false,
+            actor_uid: None,
         };
         state.arm_state_timeouts_if_needed(&ctx, &response(entity_id, action, from_status));
     }
@@ -410,6 +455,7 @@ async fn reverse_ordered_reset_callbacks_keep_the_newest_durable_deadline() {
         dispatch_idempotency_key: None,
         action_params: &action_params,
         await_integration: false,
+        actor_uid: None,
     };
 
     // Both transitions committed in actor order, but the newer response's
@@ -446,33 +492,5 @@ async fn reverse_ordered_reset_callbacks_keep_the_newest_durable_deadline() {
     );
 }
 
-#[test]
-fn snapshot_anchor_survives_an_empty_recent_event_window() {
-    let reset_at = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
-    assert_eq!(
-        compute_state_clock_reset_ts(&VecDeque::new(), Some(reset_at), "Running", &[]),
-        Some(reset_at),
-        "a current snapshot must retain the durable timeout anchor"
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn absolute_deadline_survives_timer_task_poll_delay() {
-    let deadline = timeout_deadline(Duration::from_secs(10));
-
-    // Model a spawned timer task that receives no CPU for four seconds.
-    tokio::time::advance(Duration::from_secs(4)).await;
-    let timer = tokio::spawn(async move { tokio::time::sleep_until(deadline).await });
-    tokio::task::yield_now().await;
-
-    tokio::time::advance(Duration::from_millis(5_999)).await;
-    tokio::task::yield_now().await;
-    assert!(
-        !timer.is_finished(),
-        "the timer must not fire before its deadline"
-    );
-    tokio::time::advance(Duration::from_millis(1)).await;
-    timer
-        .await
-        .expect("task queue time must not move the precomputed deadline later");
-}
+#[path = "hydration_deadline_tests.rs"]
+mod deadline_tests;

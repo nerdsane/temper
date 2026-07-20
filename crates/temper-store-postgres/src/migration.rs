@@ -37,6 +37,7 @@ mod tests {
             include_str!("../migrations/0006_segmented_event_history.sql"),
             include_str!("../migrations/0007_installed_app_follow_policy.sql"),
             include_str!("../migrations/0008_ots_trajectory_outbox_status.sql"),
+            include_str!("../migrations/0013_query_projection_tombstones.sql"),
         ]
         .join("\n")
         .to_lowercase();
@@ -53,6 +54,7 @@ mod tests {
             "event_segments",
             "snapshot_history",
             "ots_trajectories",
+            "query_projection_tombstones",
         ] {
             assert!(
                 migration.contains(&format!("create table if not exists {table}")),
@@ -101,6 +103,15 @@ mod tests {
             !migration_six.contains("entity_catalog"),
             "entity_catalog state must not reuse migration version 0006"
         );
+    }
+
+    #[test]
+    fn migration_thirteen_preserves_projection_delete_high_water_marks() {
+        let migration = include_str!("../migrations/0013_query_projection_tombstones.sql");
+        assert!(migration.contains("CREATE TABLE IF NOT EXISTS query_projection_tombstones"));
+        assert!(migration.contains("tombstone.sequence_nr >= NEW.sequence_nr"));
+        assert!(migration.contains("BEFORE INSERT ON entity_catalog"));
+        assert!(migration.contains("BEFORE UPDATE ON entity_catalog"));
     }
 
     #[test]

@@ -352,7 +352,8 @@ pub(super) fn composite_envelope(
     Ok((
         PersistenceEnvelope {
             sequence_nr: 0,
-            event_type: event.action.clone(),
+            event_type: crate::entity_actor::event_persistence::entity_event_type(event)
+                .to_string(),
             payload,
             metadata: EventMetadata {
                 event_id: sim_uuid(),

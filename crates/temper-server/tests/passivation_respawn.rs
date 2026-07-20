@@ -1,6 +1,8 @@
 //! Integration test: idle passivation and lazy respawn.
 
 mod common;
+#[path = "passivation_respawn/drain_tail.rs"]
+mod drain_tail;
 #[path = "passivation_respawn/timeout_anchors.rs"]
 mod timeout_anchors;
 #[path = "passivation_respawn/timeout_failures.rs"]
@@ -8,9 +10,13 @@ mod timeout_failures;
 #[path = "passivation_respawn/timeout_hotswap_deadline.rs"]
 mod timeout_hotswap_deadline;
 
+use temper_runtime::ActorSystem;
 use temper_runtime::persistence::EventStore;
 use temper_runtime::scheduler::{install_deterministic_context, sim_now};
 use temper_runtime::tenant::TenantId;
+use temper_server::ServerState;
+use temper_server::registry::SpecRegistry;
+use temper_spec::csdl::parse_csdl;
 use temper_store_sim::SimEventStore;
 
 #[tokio::test]
@@ -91,4 +97,56 @@ async fn passivated_actor_respawns_with_correct_state() {
     assert_eq!(recovered.state.status, "Submitted");
     assert_eq!(recovered.state.item_count, 1);
     assert!(recovered.state.total_event_count >= 3); // Created + AddItem + SubmitOrder
+}
+
+#[tokio::test]
+async fn memory_only_fallback_still_bounds_idle_actor_registry() {
+    let seed = 43;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let tenant = TenantId::default();
+    let entity_id = "memory-only-passivation";
+    let actor_key = format!("{tenant}:Order:{entity_id}");
+    let mut registry = SpecRegistry::new();
+    registry.register_tenant(
+        tenant.as_str(),
+        parse_csdl(common::CSDL_XML).expect("CSDL parse"),
+        common::CSDL_XML.to_string(),
+        &[("Order", common::ORDER_IOA)],
+    );
+    let state = ServerState::from_registry(ActorSystem::new("memory-only-passivation"), registry);
+
+    common::dispatch(
+        &state,
+        &tenant,
+        "Order",
+        entity_id,
+        "AddItem",
+        serde_json::json!({}),
+    )
+    .await
+    .expect("memory-only actor accepts traffic");
+    state.last_accessed.write().unwrap().insert(
+        actor_key.clone(),
+        sim_now() - chrono::Duration::seconds(600),
+    );
+
+    state.passivate_idle_actors().await;
+
+    assert!(
+        !state
+            .actor_registry
+            .read()
+            .unwrap()
+            .contains_key(&actor_key),
+        "memory-only passivation must preserve the idle registry bound"
+    );
+    assert!(
+        state.entity_exists(&tenant, "Order", entity_id),
+        "passivation keeps lazy-respawn index membership"
+    );
+    let respawned = state
+        .get_tenant_entity_state(&tenant, "Order", entity_id)
+        .await
+        .expect("memory-only entity lazily respawns");
+    assert_eq!(respawned.state.item_count, 0);
 }

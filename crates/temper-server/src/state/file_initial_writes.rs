@@ -12,6 +12,8 @@ use crate::events::EntityStateChange;
 use super::file_writes::content_hash_and_native_blob_key;
 use super::{FileStreamContentError, ServerState};
 
+mod reconciliation;
+
 impl ServerState {
     /// Create a brand-new TemperFS `File` and persist its first stream bytes as
     /// one kernel operation.
@@ -170,39 +172,30 @@ impl ServerState {
                 )));
             }
         }
-        self.reconcile_state_timeout_after_synthetic_commit(tenant, "File", file_id, &state);
-
-        if let Some(query_plane) = self.query_plane_store() {
-            let fields = self.query_projection_fields(tenant, "File", &state.fields);
-            let projected_state = self.query_projection_state(&state);
-            query_plane
-                .upsert_projection(
-                    tenant.as_str(),
-                    "File",
-                    file_id,
-                    &state.status,
-                    &fields,
-                    &projected_state,
-                    state.sequence_nr,
+        let reconciliation_state = self.clone();
+        let reconciliation_tenant = tenant.to_owned();
+        let reconciliation_file_id = file_id.to_string();
+        // Persistence is now irrevocable. Transfer the complete lifecycle and
+        // projection reconciliation to an owned task before the next await so
+        // dropping the request future cannot reopen the stale actor mailbox or
+        // strand the durable timeout clock.
+        let reconciliation = tokio::spawn(async move {
+            // determinism-ok: cancellation-safe post-commit durability reconciliation
+            let result = reconciliation_state
+                .reconcile_initial_file_commit(
+                    &reconciliation_tenant,
+                    &reconciliation_file_id,
+                    &state,
                 )
-                .await
-                .map_err(|error| {
-                    FileStreamContentError::State(format!(
-                        "query projection write failed during atomic File initial content create: {error}"
-                    ))
-                })?;
-        }
-
-        self.stop_and_remove_entity(tenant, "File", file_id);
-        {
-            let index_key = format!("{tenant}:File");
-            let mut index = self.entity_index.write().unwrap();
-            index
-                .entry(index_key)
-                .or_default()
-                .insert(file_id.to_string());
-        }
-        crate::runtime_metrics::record_server_state_metrics(self);
+                .await;
+            (state, result)
+        });
+        let (state, reconciliation_result) = reconciliation.await.map_err(|error| {
+            FileStreamContentError::State(format!(
+                "File('{file_id}') committed initial content but its reconciliation task failed: {error}"
+            ))
+        })?;
+        reconciliation_result?;
 
         let response = EntityResponse {
             success: true,
@@ -424,7 +417,7 @@ fn push_synthetic_event(
         .map_err(|e| FileStreamContentError::State(format!("failed to serialize event: {e}")))?;
     envelopes.push(PersistenceEnvelope {
         sequence_nr: event_version,
-        event_type: event.action.clone(),
+        event_type: crate::entity_actor::event_persistence::entity_event_type(&event).to_string(),
         payload,
         metadata: EventMetadata {
             event_id: sim_uuid(),

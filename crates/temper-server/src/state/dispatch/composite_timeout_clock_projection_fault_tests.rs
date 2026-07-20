@@ -15,50 +15,6 @@ use crate::storage::{QueryPlaneStore, QueryProjectionFieldsRow, StorageStack};
 
 use super::{CSDL, PARENT_IOA, TIMED_CHILD_WITH_RESET_IOA};
 
-const PARENT_ARMS_EXISTING_CHILD_IOA: &str = r#"
-[automaton]
-name = "Parent"
-states = ["Active"]
-initial = "Active"
-
-[[action]]
-name = "ArmTimedChild"
-kind = "Composite"
-from = ["Active"]
-to = "Active"
-record_parent_event = false
-
-[[action.sub_writes]]
-target_entity = "TimedChild"
-action = "Arm"
-generated_from = "timed_child"
-"#;
-
-const CHILD_ENTERS_TIMED_STATE_IOA: &str = r#"
-[automaton]
-name = "TimedChild"
-states = ["Idle", "Open", "TimedOut"]
-initial = "Idle"
-allow_indefinite_states = ["Idle", "TimedOut"]
-
-[[action]]
-name = "Arm"
-kind = "input"
-from = ["Idle"]
-to = "Open"
-
-[[action]]
-name = "TimeoutFail"
-kind = "internal"
-from = ["Open"]
-to = "TimedOut"
-
-[[state_timeout]]
-state = "Open"
-after_seconds = 60
-on_timeout = "TimeoutFail"
-"#;
-
 struct FailingQueryPlane {
     fail_writes: Arc<AtomicBool>,
 }
@@ -89,8 +45,15 @@ impl QueryPlaneStore for FailingQueryPlane {
         _tenant: &str,
         _entity_type: &str,
         _entity_id: &str,
+        _sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
-        Ok(())
+        if self.fail_writes.load(Ordering::SeqCst) {
+            Err(PersistenceError::Storage(
+                "injected query projection removal failure".to_string(),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     async fn query_field_index(
@@ -161,109 +124,6 @@ fn state_with_projection_failure_control(
         .lock()
         .expect("query projection queue lock") = None;
     (state, fail_writes)
-}
-
-#[tokio::test(start_paused = true)]
-async fn existing_composite_target_arms_timeout_when_projection_fails_after_timed_entry() {
-    let seed = 237;
-    let (_guard, clock, _ids) = temper_runtime::scheduler::install_deterministic_context(seed);
-    let store = SimEventStore::no_faults(seed);
-    let tenant = TenantId::default();
-    let entity_id = "existing-composite-enters-timed-state";
-    let persistence_id = format!("default:TimedChild:{entity_id}");
-    let (state, fail_writes) = state_with_projection_failure_control(
-        store.clone(),
-        "existing-composite-projection-failure",
-        PARENT_ARMS_EXISTING_CHILD_IOA,
-        CHILD_ENTERS_TIMED_STATE_IOA,
-        false,
-    );
-
-    state
-        .get_or_create_tenant_entity(&tenant, "TimedChild", entity_id, json!({}))
-        .await
-        .expect("pre-create the untimed composite target");
-    assert!(
-        state.state_timeout_tracker.pending_snapshot().is_empty(),
-        "the pre-existing Idle target has no timeout"
-    );
-    fail_writes.store(true, Ordering::SeqCst);
-
-    let error = state
-        .apply_composite_integration_result(
-            &tenant,
-            "Parent",
-            "parent-arms-existing-child",
-            "ArmTimedChild",
-            &json!({
-                "sub_writes": [{
-                    "entity_type": "TimedChild",
-                    "entity_id": entity_id,
-                    "action": "Arm",
-                    "params": {}
-                }]
-            }),
-            &AgentContext::for_service("existing-composite-projection-failure-test"),
-        )
-        .await
-        .expect_err("the injected query projection write must fail");
-    assert!(
-        error
-            .to_string()
-            .contains("query projection write failed after composite batch"),
-        "unexpected post-commit failure: {error}"
-    );
-    assert_eq!(
-        store
-            .dump_journal(&persistence_id)
-            .iter()
-            .map(|event| event.event_type.as_str())
-            .collect::<Vec<_>>(),
-        vec!["Created", "Arm"],
-        "the timed-state entry commits before the injected projection failure"
-    );
-    assert_eq!(
-        state.state_timeout_tracker.pending_snapshot(),
-        vec![("TimedChild".to_string(), 1)],
-        "a pre-existing target entering a timed state must arm before projection"
-    );
-
-    tokio::time::advance(std::time::Duration::from_secs(60)).await;
-    clock.advance_by(600);
-    for _ in 0..128 {
-        tokio::task::yield_now().await;
-        if store
-            .dump_journal(&persistence_id)
-            .iter()
-            .any(|event| event.event_type == "TimeoutFail")
-        {
-            break;
-        }
-    }
-    assert_eq!(
-        store
-            .dump_journal(&persistence_id)
-            .iter()
-            .map(|event| event.event_type.as_str())
-            .collect::<Vec<_>>(),
-        vec!["Created", "Arm", "TimeoutFail"],
-        "the existing target must time out without retry, access, or restart"
-    );
-
-    tokio::time::advance(std::time::Duration::from_secs(60)).await;
-    clock.advance_by(600);
-    for _ in 0..64 {
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(
-        store
-            .dump_journal(&persistence_id)
-            .iter()
-            .filter(|event| event.event_type == "TimeoutFail")
-            .count(),
-        1,
-        "the pre-existing projection-fault path must deliver exactly once"
-    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -352,3 +212,6 @@ async fn atomic_composite_creation_arms_timeout_when_projection_fails_after_comm
         "the projection-fault path must deliver the timeout exactly once"
     );
 }
+
+#[path = "composite_timeout_clock_existing_target_projection_fault_tests.rs"]
+mod existing_target_tests;

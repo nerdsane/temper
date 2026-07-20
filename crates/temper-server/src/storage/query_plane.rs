@@ -107,6 +107,7 @@ pub trait QueryPlaneStore: Send + Sync {
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
+        sequence_nr: u64,
     ) -> Result<(), PersistenceError>;
 
     async fn query_field_index(

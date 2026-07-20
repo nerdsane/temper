@@ -4,7 +4,7 @@ pub(crate) mod context;
 pub(crate) mod errors;
 pub(crate) mod traits;
 
-pub use actor_ref::{ActorId, ActorRef, PendingAsk, SystemSignal};
+pub use actor_ref::{ActorDrainGuard, ActorId, ActorRef, PendingAsk, SystemSignal};
 pub use cell::ActorCell;
 pub use context::ActorContext;
 pub use errors::ActorError;

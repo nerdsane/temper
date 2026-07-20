@@ -334,7 +334,12 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
             errors += 1;
         } else if replayed.status == "Deleted" {
             if let Err(e) = query_plane
-                .remove_projection(tenant.as_str(), entity_type, entity_id)
+                .remove_projection(
+                    tenant.as_str(),
+                    entity_type,
+                    entity_id,
+                    replayed.sequence_nr,
+                )
                 .await
             {
                 tracing::debug!(

@@ -163,6 +163,7 @@ async fn setup_blocked_timeout(entity_id: &str) -> (ServerState, TenantId, Admis
         dispatch_idempotency_key: None,
         action_params: &action_params,
         await_integration: false,
+        actor_uid: None,
     };
     state.arm_state_timeouts_if_needed(&ctx, &response);
     assert_eq!(

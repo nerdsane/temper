@@ -44,11 +44,13 @@ impl QueryPlaneStore for RecordingQueryPlane {
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
+        sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
         assert_eq!(
             (tenant, entity_type, entity_id),
             ("default", "Ticket", "t-1")
         );
+        assert_eq!(sequence_nr, 8);
         Ok(())
     }
 
@@ -343,7 +345,7 @@ async fn storage_stack_exposes_query_plane_and_trajectory_capabilities() {
         Some("hello".to_string())
     );
     query_plane
-        .remove_projection("default", "Ticket", "t-1")
+        .remove_projection("default", "Ticket", "t-1", 8)
         .await
         .expect("remove projection");
     assert_eq!(

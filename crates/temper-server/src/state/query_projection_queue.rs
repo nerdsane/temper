@@ -84,7 +84,11 @@ impl QueryProjectionWriteQueue {
     }
 
     #[cfg(test)]
-    fn new_for_test(store: Arc<dyn QueryPlaneStore>, capacity: usize, drain_batch: usize) -> Self {
+    pub(crate) fn new_for_test(
+        store: Arc<dyn QueryPlaneStore>,
+        capacity: usize,
+        drain_batch: usize,
+    ) -> Self {
         Self {
             store,
             pending: Arc::new(Mutex::new(PendingProjectionUpdates::default())),
@@ -254,6 +258,26 @@ impl QueryProjectionWriteQueue {
         updates
     }
 
+    #[cfg(test)]
+    pub(crate) fn pending_update_for_test(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Option<(&'static str, u64, &'static str)> {
+        let key = ProjectionKey {
+            tenant: tenant.to_string(),
+            entity_type: entity_type.to_string(),
+            entity_id: entity_id.to_string(),
+        };
+        self.pending
+            .lock()
+            .expect("query projection queue mutex poisoned")
+            .updates
+            .get(&key)
+            .map(|update| (update.operation.label(), update.sequence_nr, update.source))
+    }
+
     fn has_newer_pending(&self, update: &QueuedProjectionUpdate) -> bool {
         let pending = self
             .pending
@@ -320,6 +344,7 @@ impl QueryProjectionWriteQueue {
                                 &update.key.tenant,
                                 &update.key.entity_type,
                                 &update.key.entity_id,
+                                update.sequence_nr,
                             )
                             .await
                     }

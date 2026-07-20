@@ -346,3 +346,7 @@ mod tests {
         assert_eq!(count, 1); // fresh state after restart
     }
 }
+
+#[cfg(test)]
+#[path = "drain_tests.rs"]
+mod drain_tests;

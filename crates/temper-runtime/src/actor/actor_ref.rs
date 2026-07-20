@@ -6,7 +6,7 @@ use tokio::sync::oneshot;
 
 use super::errors::ActorError;
 use super::traits::Message;
-use crate::mailbox::MailboxSender;
+use crate::mailbox::{MailboxDrainOwner, MailboxSender};
 
 /// An envelope wrapping a message with an optional reply channel.
 pub enum Envelope<M: Message> {
@@ -39,6 +39,18 @@ pub enum SystemSignal {
 pub struct ActorRef<M: Message> {
     pub(crate) sender: MailboxSender<M>,
     pub(crate) id: ActorId,
+}
+
+/// Completion guard for a fully stopped actor drain.
+///
+/// Dropping the guard releases callers waiting for the owner to finish its
+/// registry-side UID cleanup. Keeping that cleanup inside the guard lifetime
+/// prevents a replacement incarnation from publishing in the gap between
+/// receiver closure and authoritative tail reconciliation.
+#[must_use = "hold the drain guard until registry-side cleanup is complete"]
+pub struct ActorDrainGuard<M: Message> {
+    owner: Option<MailboxDrainOwner>,
+    message: PhantomData<fn() -> M>,
 }
 
 /// Reply handle for an ask that has already been admitted to an actor mailbox.
@@ -116,12 +128,36 @@ impl<M: Message> ActorRef<M> {
 
     /// Send a system signal to the actor.
     pub fn signal(&self, sig: SystemSignal) -> Result<(), ActorError> {
-        self.sender.send(Envelope::Signal(sig))
+        if matches!(sig, SystemSignal::Stop | SystemSignal::PoisonPill) {
+            self.sender.try_begin_draining(Envelope::Signal(sig))
+        } else {
+            self.sender.send(Envelope::Signal(sig))
+        }
     }
 
     /// Stop the actor gracefully.
     pub fn stop(&self) -> Result<(), ActorError> {
         self.signal(SystemSignal::Stop)
+    }
+
+    /// Stop the actor gracefully and wait for its current incarnation to exit.
+    ///
+    /// Unlike [`Self::stop`], this waits for bounded mailbox capacity so the
+    /// stop signal cannot be dropped when the mailbox is full. Completion
+    /// means the actor finished any message already in flight, processed the
+    /// stop signal in FIFO order, ran `post_stop`, and closed its receiver.
+    pub async fn stop_and_wait(&self) -> Result<ActorDrainGuard<M>, ActorError> {
+        let owner = self
+            .sender
+            .begin_draining(Envelope::Signal(SystemSignal::Stop))
+            .await;
+        if owner.is_some() {
+            self.sender.closed().await;
+        }
+        Ok(ActorDrainGuard {
+            owner,
+            message: PhantomData,
+        })
     }
 
     /// Get the actor's unique ID.
@@ -148,6 +184,37 @@ impl<M: Message> ActorRef<M> {
     /// Return whether this actor incarnation can no longer receive messages.
     pub fn is_stopped(&self) -> bool {
         self.sender.is_closed()
+    }
+
+    /// Return whether this incarnation has stopped accepting application
+    /// traffic but still owns registry-side drain cleanup.
+    pub fn is_draining(&self) -> bool {
+        self.sender.is_draining()
+    }
+
+    /// Return whether this incarnation crossed its one-way drain admission
+    /// fence, including after registry cleanup completed.
+    pub fn is_drain_fenced(&self) -> bool {
+        self.sender.is_drain_fenced()
+    }
+
+    /// Wait until the actor's drain owner releases registry-side cleanup.
+    pub async fn wait_for_drain_completion(&self) {
+        self.sender.wait_for_drain_completion().await;
+    }
+}
+
+impl<M: Message> Drop for ActorDrainGuard<M> {
+    fn drop(&mut self) {
+        if let Some(owner) = self.owner.take() {
+            owner.finish();
+        }
+    }
+}
+
+impl<M: Message> fmt::Debug for ActorDrainGuard<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ActorDrainGuard")
     }
 }
 

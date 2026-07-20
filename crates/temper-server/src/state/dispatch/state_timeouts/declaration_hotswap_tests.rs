@@ -145,6 +145,7 @@ async fn setup_hot_swappable_timeout(
         dispatch_idempotency_key: None,
         action_params: &action_params,
         await_integration: false,
+        actor_uid: None,
     };
     state.arm_state_timeouts_if_needed(&ctx, &created);
     assert_eq!(

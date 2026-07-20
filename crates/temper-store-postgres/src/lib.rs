@@ -17,6 +17,7 @@ pub mod dbm;
 mod metrics;
 pub mod migration;
 pub mod platform;
+mod projection_tombstones;
 mod query_page;
 pub mod schema;
 mod schema_event_history;

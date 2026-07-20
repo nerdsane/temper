@@ -17,6 +17,33 @@ pub(crate) const STATE_TIMEOUT_CLOCK_PAYLOAD_KEY: &str = "__temper_state_timeout
 pub(crate) const STATE_TIMEOUT_CLOCK_SNAPSHOT_AUTHORITY_KEY: &str =
     "__temper_state_timeout_clock_authoritative";
 
+/// Canonical journal event type for a terminal entity transition.
+pub(crate) const ENTITY_TOMBSTONE_EVENT_TYPE: &str = "Deleted";
+
+/// Choose the stable journal event type for a committed entity event.
+///
+/// Domain specs may name their transition `Delete`, `Remove`, or something
+/// else. Durable enumeration and recovery use the resulting terminal state,
+/// so every new transition into `Deleted` is encoded with one canonical type.
+pub(crate) fn entity_event_type(event: &EntityEvent) -> &str {
+    if event.to_status == ENTITY_TOMBSTONE_EVENT_TYPE {
+        ENTITY_TOMBSTONE_EVENT_TYPE
+    } else {
+        &event.action
+    }
+}
+
+/// Whether a durable envelope represents a terminal entity tombstone.
+///
+/// Payload inspection preserves compatibility with events written before
+/// terminal transitions were normalized to [`ENTITY_TOMBSTONE_EVENT_TYPE`].
+pub(crate) fn is_entity_tombstone(event_type: &str, payload: &Value) -> bool {
+    match payload.get("to_status").and_then(Value::as_str) {
+        Some(status) => status == ENTITY_TOMBSTONE_EVENT_TYPE,
+        None => event_type == ENTITY_TOMBSTONE_EVENT_TYPE,
+    }
+}
+
 /// Timeout-clock outcome co-committed with a domain event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

@@ -99,6 +99,42 @@ Actor replay requires the returned tail to start immediately after the snapshot 
 
 **Why this approach:** a second, independent head query would race a concurrent append and could not prove which journal view the tail represented. Capturing the head and tail in one database statement, Redis script, or simulation lock gives every backend the same durable replay contract.
 
+### Sub-Decision 7: Post-commit lifecycle work is cancellation-safe
+
+Composite batches and atomic File initialization commit outside an entity actor's mailbox. Immediately after the journal append returns, the server starts one bounded reconciliation task that owns the complete post-commit lifecycle: establish inactive timeout high-water marks, recover a poisoned actor-registry guard if necessary, drain every captured pre-commit incarnation through a FIFO stop barrier, publish or hydrate the replacement, activate its timeout decision, and repair the query projection. The request awaits that task for an ordinary success or error response, but dropping the request's future detaches rather than cancels the task. There is no await point between observing append success and starting the task.
+
+The generic mailbox drain remains cancelable before its barrier is committed, because speculative lifecycle callers must be able to restore admission. Durability-sensitive callers instead make the *owner task* non-cancelable. A synchronous compatibility eviction only unregisters an incarnation after its nonblocking stop barrier was accepted; a failed reservation leaves the actor and indexes intact, while an accepted barrier receives UID-checked background cleanup after receiver closure. No path may remove a registry entry merely because it attempted to stop the actor.
+
+**Why this approach:** changing every mailbox drain into a non-cancelable operation would leak fences for speculative callers, while letting request cancellation own post-commit cleanup can reopen an actor whose durable state has already changed behind it.
+
+### Sub-Decision 8: Readiness and timeout ownership share one barrier
+
+The first mailbox `GetState` reply remains the sole authoritative startup observation. A per-incarnation readiness record is registered before the actor becomes registry-visible. The hydration task records its measured observation and startup elapsed time, reconciles timeout ownership, and only then completes that readiness record. Any wrapper that promises a readable materialized actor waits for the same record before using a later `GetState` response. A later response may confirm state, but it cannot win ownership first with a zero elapsed interval and turn the measured callback into a duplicate.
+
+**Why this approach:** FIFO orders actor replies, not the executor turns of two separate response consumers. Explicit completion closes that scheduler race without adding another actor message or changing the durable deadline.
+
+### Sub-Decision 9: Terminality and derived query visibility are monotonic
+
+All replay, lazy-load, listing, and DST-oracle paths use one semantic rule: an envelope is terminal when its string `payload.to_status` is `Deleted`, or when its canonical `event_type` is `Deleted` and there is no string target. The first such envelope is authoritative even if a legacy or corrupt tail follows it. A payload action merely named `Deleted` does not make a transition to a live state terminal.
+
+Query-projection removals carry the terminal journal sequence. PostgreSQL and Turso persist that sequence in a projection-tombstone table in the same transaction that removes catalog and field-index rows. Storage triggers suppress an insert or update whose sequence is not newer than the tombstone, so delayed work from another process cannot resurrect query visibility after the deleting worker or process has gone away. The background queue still coalesces by sequence, but correctness does not depend on one process retaining an in-memory high-water mark.
+
+**Why this approach:** physical deletion discards the only fact that can distinguish a delayed older upsert from a legitimate later projection. A durable sequence tombstone preserves that comparison while keeping deleted rows out of query tables.
+
+### Sub-Decision 10: Redis live indexes are co-committed and legacy migration is resumable
+
+New Redis appends update the historical entity set, tenant and typed live sorted sets, tombstone set, and index-version metadata in the same append Lua script. Listing therefore never scans journals for upgraded tenants. Legacy tenants migrate through a Redis-side pending set plus per-entity journal cursors. Each bounded call transfers at most one entity reference and decodes at most a fixed event budget; scalar and null payloads are valid non-target payloads. Until the historical set has been scanned, every pending journal is classified, and an atomic cardinality check confirms every historical reference is represented as live or terminal, the bounded listing returns an explicit retryable migration-incomplete error rather than an authoritative-looking subset.
+
+Completion is revalidated on reads. If a mixed-version writer adds a historical reference without the new indexes, the count mismatch atomically clears completion and restarts the bounded scan. Upgraded appenders converge with migration because both update the same live/tombstone metadata atomically. Segment records remain derived metadata: once the append Lua script commits the journal, a later segment-reconciliation failure is logged for repair but cannot turn the committed append into an acknowledged failure.
+
+**Why this approach:** an unordered legacy set cannot produce the globally first authoritative live IDs without completing classification, and an unbounded `LRANGE` merely moves the memory/latency failure into Redis. Explicit incomplete results preserve both the API truthfulness and a fixed work budget.
+
+### Sub-Decision 11: Touched legacy modules cross the repository boundary now
+
+Every Rust file changed by this effort must remain below the repository's 500-line module budget. Existing large modules touched for timeout, lifecycle, tombstone, projection, or store behavior are split into domain-named child modules; tests are split by behavior. The split is mechanical where possible and retains one production code path.
+
+**Why this approach:** these changes already require reasoning across lifecycle, timeout, and storage boundaries. Leaving new protocol code inside multi-thousand-line files would make later durability review materially less reliable.
+
 ## Rollout Plan
 
 1. **Immediate** — ship actor-spawn reconciliation and deterministic restart coverage.
@@ -116,6 +152,14 @@ Actor replay requires the returned tail to start immediately after the snapshot 
 - A snapshot-read failure fails hydration without overwriting an existing boundary or rotating its segment metadata.
 - A journal-tail read failure fails hydration without rewriting a stale snapshot or arming its timeout.
 - A successful-looking truncated journal prefix fails hydration because it does not reach the atomically captured durable head.
+- A readiness wrapper cannot arm before the first-mailbox hydration callback records its measured elapsed interval.
+- Dropping a composite or File request after its durable append cannot reopen admission on the stale incarnation or strand timeout ownership.
+- A fallible inline integration cannot return after a timed transition without that durable transition owning its timer.
+- A later untimed response advances an already-inactive timeout high-water and rejects an older timed callback.
+- Projection deletion at sequence N rejects an upsert from any process at sequence N or below.
+- An earlier canonical or legacy tombstone followed by a live-looking corrupt tail remains absent from actor, in-memory index, durable listings, query projection, and DST oracles.
+- Each Redis legacy-migration call decodes a bounded journal chunk; bounded listing reports incomplete until global/type results are authoritative.
+- A committed Redis append remains successful when derived segment metadata is malformed or temporarily unavailable.
 - Two repairs that loaded the same legacy boundary have one winner; the stale writer cannot overwrite that anchor.
 - Snapshot-boundary replacement enters the persistence writer as actor-readiness work rather than background maintenance.
 - An injected repair failure followed by store recovery in the same server replaces the stopped actor incarnation, persists the anchor, and arms exactly one timer.
@@ -167,6 +211,8 @@ Actor replay requires the returned tail to start immediately after the snapshot 
 - **Timed-entity startup volume.** Bounded to entity types with declared liveness obligations; non-timed entities retain index-only lazy hydration. A future durable scheduler may avoid one resident actor per persisted instance of a timeout-declaring type.
 - **Duplicate timers during startup races.** Mitigated by atomic initial-sequence reservation and the existing fire-time sequence/state checks.
 - **Runtime task nondeterminism.** The task coordinates production actor readiness only; state mutation remains actor-serialized, time comes from `sim_now()`, and deterministic tests use a logical clock plus paused Tokio time.
+- **Detached post-commit reconciliation.** Exactly one bounded task is started synchronously after each successful out-of-band append. It owns no new domain decision; it completes already-required fencing, actor replacement, timeout activation, and derived projection repair when the initiating request disappears.
+- **Legacy Redis writers.** Completion validation detects historical references added without upgraded index metadata and restarts migration. Rolling deployments must still converge writers promptly because an old writer mutating an already-known journal has no legacy global mutation counter; the next full validation/migration pass reclassifies known references before completion is trusted.
 
 ### DST Compliance
 

@@ -7,7 +7,10 @@
 //! The capacity is set at actor creation time and cannot grow.
 //! When full, sends return MailboxFull immediately — no blocking, no OOM.
 
-use tokio::sync::mpsc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::{Notify, mpsc};
 
 use crate::actor::actor_ref::Envelope;
 use crate::actor::errors::ActorError;
@@ -17,15 +20,51 @@ use crate::actor::traits::Message;
 /// TigerStyle: This is a budget, not a suggestion.
 pub const DEFAULT_MAILBOX_CAPACITY: usize = 1_000;
 
+const MAILBOX_ACCEPTING: u8 = 0;
+const MAILBOX_DRAINING_RESERVING: u8 = 1;
+const MAILBOX_DRAINING_UNOWNED: u8 = 2;
+const MAILBOX_DRAINING_OWNED: u8 = 3;
+const MAILBOX_DRAINED: u8 = 4;
+
+struct MailboxLifecycle {
+    state: AtomicU8,
+    admission_gate: Mutex<()>,
+    receiver_closed: AtomicBool,
+    drain_completed: Notify,
+}
+
+/// Exclusive ownership of registry-side cleanup for one mailbox drain.
+///
+/// Before the FIFO barrier commits, the owner holds the distinct reserving
+/// state. Dropping it restores admission only if the receiver remains open.
+/// Once committed, dropping ownership leaves the barrier unowned so receiver
+/// shutdown or another waiter can complete cleanup without reopening admission.
+pub(crate) struct MailboxDrainOwner {
+    lifecycle: Arc<MailboxLifecycle>,
+    barrier_committed: bool,
+    active: bool,
+}
+
+enum DrainOwnership {
+    Owner {
+        owner: MailboxDrainOwner,
+        needs_barrier: bool,
+    },
+    Wait,
+    Complete,
+}
+
 /// The sender half of a mailbox. Held by ActorRef, cloneable.
 pub struct MailboxSender<M: Message> {
     inner: mpsc::Sender<Envelope<M>>,
     capacity: usize,
+    lifecycle: Arc<MailboxLifecycle>,
 }
 
 /// The receiver half of a mailbox. Held by ActorCell, not cloneable.
 pub struct MailboxReceiver<M: Message> {
     inner: mpsc::Receiver<Envelope<M>>,
+    lifecycle: Arc<MailboxLifecycle>,
 }
 
 /// Create a new bounded mailbox with the given capacity.
@@ -39,12 +78,22 @@ pub fn mailbox<M: Message>(capacity: usize) -> (MailboxSender<M>, MailboxReceive
     );
 
     let (tx, rx) = mpsc::channel(capacity);
+    let lifecycle = Arc::new(MailboxLifecycle {
+        state: AtomicU8::new(MAILBOX_ACCEPTING),
+        admission_gate: Mutex::new(()),
+        receiver_closed: AtomicBool::new(false),
+        drain_completed: Notify::new(),
+    });
     (
         MailboxSender {
             inner: tx,
             capacity,
+            lifecycle: Arc::clone(&lifecycle),
         },
-        MailboxReceiver { inner: rx },
+        MailboxReceiver {
+            inner: rx,
+            lifecycle,
+        },
     )
 }
 
@@ -52,10 +101,202 @@ impl<M: Message> MailboxSender<M> {
     /// Send a message to the mailbox. Returns MailboxFull if at capacity.
     /// TigerStyle: This never blocks. Full is an error, not a wait condition.
     pub fn send(&self, msg: Envelope<M>) -> Result<(), ActorError> {
+        let _admission = self
+            .lifecycle
+            .admission_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.lifecycle.state.load(Ordering::Acquire) != MAILBOX_ACCEPTING {
+            return Err(ActorError::Stopped);
+        }
         self.inner.try_send(msg).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => ActorError::MailboxFull,
             mpsc::error::TrySendError::Closed(_) => ActorError::SendFailed,
         })
+    }
+
+    /// Atomically stop admitting application traffic, then enqueue the FIFO
+    /// drain barrier once bounded capacity becomes available.
+    pub(crate) async fn begin_draining(&self, msg: Envelope<M>) -> Option<MailboxDrainOwner> {
+        loop {
+            match self.acquire_drain_ownership() {
+                DrainOwnership::Owner {
+                    mut owner,
+                    needs_barrier,
+                } => {
+                    if needs_barrier {
+                        match self.inner.clone().reserve_owned().await {
+                            Ok(permit) => {
+                                let _admission = self
+                                    .lifecycle
+                                    .admission_gate
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                if self.lifecycle.state.load(Ordering::Acquire)
+                                    == MAILBOX_DRAINING_RESERVING
+                                {
+                                    permit.send(msg);
+                                    self.lifecycle
+                                        .state
+                                        .store(MAILBOX_DRAINING_OWNED, Ordering::Release);
+                                } else {
+                                    drop(permit);
+                                }
+                                owner.barrier_committed = true;
+                            }
+                            Err(_) => {
+                                let _admission = self
+                                    .lifecycle
+                                    .admission_gate
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                if self.lifecycle.state.load(Ordering::Acquire)
+                                    == MAILBOX_DRAINING_RESERVING
+                                {
+                                    self.lifecycle
+                                        .state
+                                        .store(MAILBOX_DRAINED, Ordering::Release);
+                                    self.lifecycle.drain_completed.notify_waiters();
+                                }
+                                // Receiver closure itself is the terminal FIFO
+                                // barrier and must never reopen admission.
+                                owner.barrier_committed = true;
+                            }
+                        }
+                    }
+                    return Some(owner);
+                }
+                DrainOwnership::Wait => self.wait_for_drain_owner_transition().await,
+                DrainOwnership::Complete => return None,
+            }
+        }
+    }
+
+    fn acquire_drain_ownership(&self) -> DrainOwnership {
+        let _admission = self
+            .lifecycle
+            .admission_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match self.lifecycle.state.load(Ordering::Acquire) {
+            MAILBOX_ACCEPTING => {
+                self.lifecycle
+                    .state
+                    .store(MAILBOX_DRAINING_RESERVING, Ordering::Release);
+                DrainOwnership::Owner {
+                    owner: MailboxDrainOwner {
+                        lifecycle: Arc::clone(&self.lifecycle),
+                        barrier_committed: false,
+                        active: true,
+                    },
+                    needs_barrier: true,
+                }
+            }
+            MAILBOX_DRAINING_UNOWNED => {
+                self.lifecycle
+                    .state
+                    .store(MAILBOX_DRAINING_OWNED, Ordering::Release);
+                DrainOwnership::Owner {
+                    owner: MailboxDrainOwner {
+                        lifecycle: Arc::clone(&self.lifecycle),
+                        barrier_committed: true,
+                        active: true,
+                    },
+                    needs_barrier: false,
+                }
+            }
+            MAILBOX_DRAINING_RESERVING | MAILBOX_DRAINING_OWNED => DrainOwnership::Wait,
+            MAILBOX_DRAINED => DrainOwnership::Complete,
+            unexpected => unreachable!("unknown mailbox lifecycle state {unexpected}"),
+        }
+    }
+
+    async fn wait_for_drain_owner_transition(&self) {
+        loop {
+            if !matches!(
+                self.lifecycle.state.load(Ordering::Acquire),
+                MAILBOX_DRAINING_RESERVING | MAILBOX_DRAINING_OWNED
+            ) {
+                return;
+            }
+            let changed = self.lifecycle.drain_completed.notified();
+            if !matches!(
+                self.lifecycle.state.load(Ordering::Acquire),
+                MAILBOX_DRAINING_RESERVING | MAILBOX_DRAINING_OWNED
+            ) {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    /// Try to close admission and enqueue a drain barrier without waiting.
+    pub(crate) fn try_begin_draining(&self, msg: Envelope<M>) -> Result<(), ActorError> {
+        let _admission = self
+            .lifecycle
+            .admission_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match self.lifecycle.state.load(Ordering::Acquire) {
+            MAILBOX_ACCEPTING => {}
+            MAILBOX_DRAINING_RESERVING => return Err(ActorError::MailboxFull),
+            MAILBOX_DRAINING_UNOWNED | MAILBOX_DRAINING_OWNED | MAILBOX_DRAINED => {
+                return Ok(());
+            }
+            unexpected => unreachable!("unknown mailbox lifecycle state {unexpected}"),
+        }
+        self.lifecycle
+            .state
+            .store(MAILBOX_DRAINING_UNOWNED, Ordering::Release);
+        match self.inner.try_send(msg) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.lifecycle
+                    .state
+                    .store(MAILBOX_ACCEPTING, Ordering::Release);
+                self.lifecycle.drain_completed.notify_waiters();
+                Err(ActorError::MailboxFull)
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.lifecycle
+                    .state
+                    .store(MAILBOX_DRAINED, Ordering::Release);
+                self.lifecycle.drain_completed.notify_waiters();
+                Ok(())
+            }
+        }
+    }
+
+    /// Wait until the actor-side mailbox receiver has closed.
+    pub(crate) async fn closed(&self) {
+        self.inner.closed().await;
+    }
+
+    /// Wait until the owner has completed registry-side drain cleanup.
+    pub(crate) async fn wait_for_drain_completion(&self) {
+        loop {
+            if !self.is_draining() {
+                return;
+            }
+            let completed = self.lifecycle.drain_completed.notified();
+            if !self.is_draining() {
+                return;
+            }
+            completed.await;
+        }
+    }
+
+    /// Return whether admission is fenced pending drain cleanup.
+    pub(crate) fn is_draining(&self) -> bool {
+        matches!(
+            self.lifecycle.state.load(Ordering::Acquire),
+            MAILBOX_DRAINING_RESERVING | MAILBOX_DRAINING_UNOWNED | MAILBOX_DRAINING_OWNED
+        )
+    }
+
+    /// Return whether this mailbox ever crossed its drain admission fence.
+    pub(crate) fn is_drain_fenced(&self) -> bool {
+        self.lifecycle.state.load(Ordering::Acquire) != MAILBOX_ACCEPTING
     }
 
     /// Get the mailbox capacity.
@@ -92,122 +333,89 @@ impl<M: Message> MailboxReceiver<M> {
     }
 }
 
+impl<M: Message> Drop for MailboxReceiver<M> {
+    fn drop(&mut self) {
+        self.lifecycle
+            .receiver_closed
+            .store(true, Ordering::Release);
+        let _admission = self
+            .lifecycle
+            .admission_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(
+            self.lifecycle.state.load(Ordering::Acquire),
+            MAILBOX_DRAINING_RESERVING | MAILBOX_DRAINING_UNOWNED
+        ) {
+            self.lifecycle
+                .state
+                .store(MAILBOX_DRAINED, Ordering::Release);
+            self.lifecycle.drain_completed.notify_waiters();
+        }
+    }
+}
+
+impl MailboxDrainOwner {
+    /// Publish that the exclusive owner finished registry-side cleanup.
+    pub(crate) fn finish(mut self) {
+        let _admission = self
+            .lifecycle
+            .admission_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.lifecycle.state.load(Ordering::Acquire) == MAILBOX_DRAINING_OWNED {
+            self.lifecycle
+                .state
+                .store(MAILBOX_DRAINED, Ordering::Release);
+        }
+        self.active = false;
+        self.lifecycle.drain_completed.notify_waiters();
+    }
+}
+
+impl Drop for MailboxDrainOwner {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let _admission = self
+            .lifecycle
+            .admission_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = self.lifecycle.state.load(Ordering::Acquire);
+        let next = match (state, self.barrier_committed) {
+            (MAILBOX_DRAINING_RESERVING, false) => {
+                if self.lifecycle.receiver_closed.load(Ordering::Acquire) {
+                    MAILBOX_DRAINED
+                } else {
+                    MAILBOX_ACCEPTING
+                }
+            }
+            (MAILBOX_DRAINING_OWNED, true) => {
+                if self.lifecycle.receiver_closed.load(Ordering::Acquire) {
+                    MAILBOX_DRAINED
+                } else {
+                    MAILBOX_DRAINING_UNOWNED
+                }
+            }
+            _ => return,
+        };
+        self.lifecycle.state.store(next, Ordering::Release);
+        self.lifecycle.drain_completed.notify_waiters();
+    }
+}
+
 impl<M: Message> Clone for MailboxSender<M> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
             capacity: self.capacity,
+            lifecycle: Arc::clone(&self.lifecycle),
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[derive(Debug)]
-    struct TestMsg(String);
-    impl Message for TestMsg {}
-
-    #[tokio::test]
-    async fn test_bounded_mailbox_send_recv() {
-        let (tx, mut rx) = mailbox::<TestMsg>(10);
-        tx.send(Envelope::Tell(TestMsg("hello".into()))).unwrap();
-        let msg = rx.recv().await.unwrap();
-        match msg {
-            Envelope::Tell(TestMsg(s)) => assert_eq!(s, "hello"),
-            _ => panic!("expected Tell"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_bounded_mailbox_full() {
-        let (tx, _rx) = mailbox::<TestMsg>(2);
-        tx.send(Envelope::Tell(TestMsg("1".into()))).unwrap();
-        tx.send(Envelope::Tell(TestMsg("2".into()))).unwrap();
-        // Third send should fail — mailbox full
-        let result = tx.send(Envelope::Tell(TestMsg("3".into())));
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), ActorError::MailboxFull);
-    }
-
-    #[tokio::test]
-    async fn test_mailbox_fifo_ordering() {
-        let (tx, mut rx) = mailbox::<TestMsg>(10);
-        for i in 0..5 {
-            tx.send(Envelope::Tell(TestMsg(format!("msg-{i}"))))
-                .unwrap();
-        }
-        for i in 0..5 {
-            match rx.recv().await.unwrap() {
-                Envelope::Tell(TestMsg(s)) => assert_eq!(s, format!("msg-{i}")),
-                _ => panic!("expected Tell"),
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_mailbox_sender_clone() {
-        let (tx1, mut rx) = mailbox::<TestMsg>(10);
-        let tx2 = tx1.clone();
-        tx1.send(Envelope::Tell(TestMsg("from-1".into()))).unwrap();
-        tx2.send(Envelope::Tell(TestMsg("from-2".into()))).unwrap();
-
-        let m1 = rx.recv().await.unwrap();
-        let m2 = rx.recv().await.unwrap();
-        match (m1, m2) {
-            (Envelope::Tell(TestMsg(a)), Envelope::Tell(TestMsg(b))) => {
-                assert_eq!(a, "from-1");
-                assert_eq!(b, "from-2");
-            }
-            _ => panic!("expected Tell"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_mailbox_closed_on_receiver_drop() {
-        let (tx, rx) = mailbox::<TestMsg>(10);
-        assert!(!tx.is_closed());
-        drop(rx);
-        assert!(tx.is_closed());
-        let result = tx.send(Envelope::Tell(TestMsg("orphan".into())));
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), ActorError::SendFailed);
-    }
-
-    #[tokio::test]
-    async fn test_mailbox_depth_empty() {
-        let (tx, _rx) = mailbox::<TestMsg>(10);
-        assert_eq!(tx.depth(), 0);
-        assert_eq!(tx.utilization(), 0.0);
-    }
-
-    #[tokio::test]
-    async fn test_mailbox_depth_after_sends() {
-        let (tx, _rx) = mailbox::<TestMsg>(10);
-        tx.send(Envelope::Tell(TestMsg("a".into()))).unwrap();
-        tx.send(Envelope::Tell(TestMsg("b".into()))).unwrap();
-        tx.send(Envelope::Tell(TestMsg("c".into()))).unwrap();
-        assert_eq!(tx.depth(), 3);
-        assert!((tx.utilization() - 0.3).abs() < 0.01);
-    }
-
-    #[tokio::test]
-    async fn test_mailbox_depth_full() {
-        let (tx, _rx) = mailbox::<TestMsg>(3);
-        tx.send(Envelope::Tell(TestMsg("1".into()))).unwrap();
-        tx.send(Envelope::Tell(TestMsg("2".into()))).unwrap();
-        tx.send(Envelope::Tell(TestMsg("3".into()))).unwrap();
-        assert_eq!(tx.depth(), 3);
-        assert_eq!(tx.utilization(), 1.0);
-    }
-
-    #[tokio::test]
-    async fn test_mailbox_depth_after_recv() {
-        let (tx, mut rx) = mailbox::<TestMsg>(10);
-        tx.send(Envelope::Tell(TestMsg("a".into()))).unwrap();
-        tx.send(Envelope::Tell(TestMsg("b".into()))).unwrap();
-        let _ = rx.recv().await;
-        assert_eq!(tx.depth(), 1);
-    }
-}
+#[path = "tests.rs"]
+mod tests;

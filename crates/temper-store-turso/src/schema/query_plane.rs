@@ -24,6 +24,47 @@ pub const CREATE_ENTITY_CATALOG_STATUS_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_entity_catalog_status
     ON entity_catalog(tenant, entity_type, status);";
 
+/// Durable high-water marks for query projection removals.
+pub const CREATE_QUERY_PROJECTION_TOMBSTONES_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS query_projection_tombstones (
+    tenant       TEXT NOT NULL,
+    entity_type  TEXT NOT NULL,
+    entity_id    TEXT NOT NULL,
+    sequence_nr  INTEGER NOT NULL,
+    deleted_at   TEXT NOT NULL,
+    PRIMARY KEY (tenant, entity_type, entity_id)
+);";
+
+/// Suppress an insert that is no newer than the durable removal mark.
+pub const CREATE_QUERY_PROJECTION_TOMBSTONE_INSERT_TRIGGER: &str = "\
+CREATE TRIGGER IF NOT EXISTS suppress_stale_entity_catalog_projection_insert
+BEFORE INSERT ON entity_catalog
+WHEN EXISTS (
+    SELECT 1 FROM query_projection_tombstones tombstone
+     WHERE tombstone.tenant = NEW.tenant
+       AND tombstone.entity_type = NEW.entity_type
+       AND tombstone.entity_id = NEW.entity_id
+       AND tombstone.sequence_nr >= NEW.sequence_nr
+)
+BEGIN
+    SELECT RAISE(IGNORE);
+END;";
+
+/// Suppress an update that is no newer than the durable removal mark.
+pub const CREATE_QUERY_PROJECTION_TOMBSTONE_UPDATE_TRIGGER: &str = "\
+CREATE TRIGGER IF NOT EXISTS suppress_stale_entity_catalog_projection_update
+BEFORE UPDATE ON entity_catalog
+WHEN EXISTS (
+    SELECT 1 FROM query_projection_tombstones tombstone
+     WHERE tombstone.tenant = NEW.tenant
+       AND tombstone.entity_type = NEW.entity_type
+       AND tombstone.entity_id = NEW.entity_id
+       AND tombstone.sequence_nr >= NEW.sequence_nr
+)
+BEGIN
+    SELECT RAISE(IGNORE);
+END;";
+
 /// Entity-Attribute-Value field index for SQL-level OData filter push-down.
 ///
 /// Mirrors top-level scalar fields from entity state so that `$filter`

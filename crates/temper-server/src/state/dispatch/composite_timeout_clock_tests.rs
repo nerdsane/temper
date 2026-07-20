@@ -196,6 +196,14 @@ async fn run_restart_case(
         )
         .await
         .expect("atomic composite Heartbeat commits");
+    assert!(
+        state
+            .actor_registry
+            .read()
+            .expect("actor registry lock")
+            .contains_key(&persistence_id),
+        "successful existing-target composite writes must reload the actor before returning"
+    );
     let after_heartbeat = state
         .get_tenant_entity_state(&tenant, "TimedChild", &entity_id)
         .await
@@ -234,7 +242,9 @@ async fn run_restart_case(
     state
         .state_timeout_tracker
         .forget(&tenant, "TimedChild", &entity_id);
-    state.stop_and_remove_entity(&tenant, "TimedChild", &entity_id);
+    state
+        .drain_and_remove_entity(&tenant, "TimedChild", &entity_id)
+        .await;
     drop(state);
 
     let restarted = state_with_timed_child(
