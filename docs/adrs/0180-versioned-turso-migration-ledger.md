@@ -72,8 +72,11 @@ application metadata, and every declared post-migration capability. Capability
 manifests use an explicit versioned, length-prefixed field encoding over ordered
 maps and sets; compiler debug formatting and serializer implementation details
 never enter the durable checksum. A change to either mutation behavior or
-compatibility validation therefore changes the checksum. Startup validates the
-complete ledger before applying work:
+compatibility validation therefore changes the checksum. Validator inventory
+semantics carry dedicated policy labels: SQLite-equivalent index-owner discovery
+is part of the owner-aware extra-index policy v2, so changing that behavior
+rotates every affected prefix checksum. Startup validates the complete ledger
+before applying work:
 
 - versions must be positive, unique, contiguous, and known to this binary;
 - recorded names and checksums must exactly match the compiled catalog;

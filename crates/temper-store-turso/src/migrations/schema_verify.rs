@@ -10,8 +10,7 @@ use super::schema_trigger::capture_triggers;
 
 pub(super) const EXTRA_COLUMN_POLICY: &str =
     "allow-visible-nullable-no-default-non-primary-key-non-rowid-shadow-v2";
-pub(super) const EXTRA_INDEX_POLICY: &str =
-    "allow-nonunique-full-plain-column-index-with-builtin-collation-v1";
+pub(super) const EXTRA_INDEX_POLICY: &str = "allow-nonunique-full-plain-column-index-with-builtin-collation-and-sqlite-identifier-owners-v2";
 pub(super) const TRIGGER_POLICY: &str = concat!(
     "exact-trigger-set-with-sqlite-identifier-owners-and-",
     "parsed-audit-sink-contract-with-transaction-pinned-production-upsert-probe-v7"
