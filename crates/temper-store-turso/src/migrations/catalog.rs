@@ -407,6 +407,17 @@ pub(super) const MIGRATIONS: &[Migration] = &[
 #[cfg(test)]
 mod tests {
     use super::super::runner::expected_checksums;
+    use super::super::schema_verify::EXTRA_INDEX_POLICY;
+
+    const PRE_OWNER_AWARE_CHECKSUMS: &[&str] = &[
+        "78bafc020d87a65741a6f7c117604f693d5eb265d75b178db1737f8934da8069",
+        "83bc0de0ecf597a24ebe14fc6636b9b70b3cc76b6342b326afb583715e5d18b9",
+        "54a077e4353c6df79dce2029cded8ce148c50be90400c4893dea21752adde4ea",
+        "6dfcf2905113a7943f80c44da094cb5b53b35633298b1a8fdf933df127b1ee8d",
+        "f63408461791d04d70082f996c5f7bd620d3f6af505b9c98ffa7d3a63df38d75",
+        "5347da7626a3ca311ba8295e46fc7a0a22f0f6eb1944f09aee85dabca3a7fc4d",
+        "a8b51d91118d03697d98db8a3ff55fbed5967a71e7305dcd13876a56ad206a7c",
+    ];
 
     const RELEASED_CHECKSUMS: &[&str] = &[
         "78bafc020d87a65741a6f7c117604f693d5eb265d75b178db1737f8934da8069",
@@ -423,5 +434,26 @@ mod tests {
         let checksums = expected_checksums().await.expect("expected checksums");
         assert!(checksums.len() >= RELEASED_CHECKSUMS.len());
         assert_eq!(&checksums[..RELEASED_CHECKSUMS.len()], RELEASED_CHECKSUMS);
+    }
+
+    #[tokio::test]
+    async fn owner_aware_index_inventory_changes_durable_checksums() {
+        assert!(
+            EXTRA_INDEX_POLICY.contains("sqlite-identifier-owners-v2"),
+            "owner-aware index inventory must have an explicit durable policy version: {EXTRA_INDEX_POLICY}"
+        );
+
+        let checksums = expected_checksums().await.expect("expected checksums");
+        assert!(checksums.len() >= PRE_OWNER_AWARE_CHECKSUMS.len());
+        for (index, (actual, previous)) in
+            checksums.iter().zip(PRE_OWNER_AWARE_CHECKSUMS).enumerate()
+        {
+            assert_ne!(
+                actual,
+                previous,
+                "migration version {} reused its pre-owner-aware durable checksum",
+                index + 1
+            );
+        }
     }
 }
