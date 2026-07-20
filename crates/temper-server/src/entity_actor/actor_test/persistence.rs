@@ -363,7 +363,12 @@ reset_on = ["Progress"]
                     "from_status": "Running",
                     "to_status": "Running",
                     "timestamp": reset_at,
-                    "params": {}
+                    "params": {},
+                    "__temper_state_timeout_clock": {
+                        "kind": "active",
+                        "reset_at": reset_at,
+                        "reset_version": 101
+                    }
                 }),
             )],
         )

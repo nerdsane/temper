@@ -3,32 +3,35 @@
 use super::*;
 
 impl EntityActor {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn reply_to_short_circuited_action(
         &self,
         table: &TransitionTable,
-        actor_key: &str,
-        name: &str,
-        cross_entity_booleans: &BTreeMap<String, bool>,
-        idempotency_key: Option<&str>,
+        request: &EntityActionRequest,
         state: &EntityState,
-        state_timeout_precondition: Option<&StateTimeoutPrecondition>,
         ctx: &mut ActorContext<Self>,
     ) -> bool {
         // ADR-0048 sub-decision 5: actor-side idempotency dedup. A
         // dispatch-layer retry can reach this actor after the original caller
         // times out, so return the cached response rather than re-executing.
-        if let (Some(key), Some(cache)) = (idempotency_key, self.idempotency_cache.as_ref())
-            && let Some(cached) = cache.get(actor_key, key)
-        {
-            ctx.reply(cached);
-            return true;
+        if let (Some(key), Some(cache)) = (
+            request.idempotency_key.as_deref(),
+            self.idempotency_cache.as_ref(),
+        ) {
+            let actor_key = self.persistence_id();
+            if let Some(cached) = cache.get(&actor_key, key) {
+                ctx.reply(cached);
+                return true;
+            }
         }
-        if let Some(key) = idempotency_key
+        if let Some(key) = request.idempotency_key.as_deref()
             && state.has_processed_idempotency_key(key)
         {
-            let custom_effects =
-                duplicate_idempotency_custom_effects(table, state, name, cross_entity_booleans);
+            let custom_effects = duplicate_idempotency_custom_effects(
+                table,
+                state,
+                &request.name,
+                &request.cross_entity_booleans,
+            );
             let mut response_state = state.clone();
             if !custom_effects.is_empty() {
                 prune_transient_action_fields_from_state(&mut response_state);
@@ -48,7 +51,11 @@ impl EntityActor {
         // State-timeout actions carry the state and durable clock anchor
         // observed when their timer was armed. Validate immediately before
         // transition evaluation so a newer reset makes this timeout a no-op.
-        if state_timeout_precondition_is_stale(table, state, state_timeout_precondition) {
+        if state_timeout_precondition_is_stale(
+            table,
+            state,
+            request.state_timeout_precondition.as_deref(),
+        ) {
             ctx.reply(EntityResponse {
                 success: false,
                 state: state.clone(),
@@ -100,7 +107,7 @@ impl EntityActor {
             entity_id = %state.entity_id,
             workspace_id = %workspace_id,
             status = %state.status,
-            action = %name,
+            action = %request.name,
             events_since_snapshot = state.events_since_snapshot,
             total_event_count = state.total_event_count,
             max_events_since_snapshot = MAX_EVENTS_SINCE_SNAPSHOT,

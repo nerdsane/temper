@@ -1,30 +1,31 @@
 //! Successful action telemetry, snapshotting, assertions, and reply.
 
 use super::*;
-use crate::entity_actor::effects::ProcessResult;
 
 impl EntityActor {
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn finalize_successful_action(
         &self,
-        duration_ns: u64,
-        name: &str,
         state: &mut EntityState,
-        event: EntityEvent,
-        persisted_timeout_clock: Option<PersistedStateTimeoutClock>,
-        committed_table: &TransitionTable,
-        event_count_before: usize,
-        result: ProcessResult,
-        idempotency_key: Option<&str>,
-        actor_key: &str,
+        completion: SuccessfulActionCompletion,
         ctx: &mut ActorContext<Self>,
     ) {
+        let SuccessfulActionCompletion {
+            duration_ns,
+            event,
+            persisted_timeout_clock,
+            committed_table,
+            event_count_before,
+            result,
+            idempotency_key,
+        } = completion;
+        let name = event.action.clone();
+
         // Telemetry as Views: duration covers evaluate + effects + persist.
         let wide = wide_event::from_transition(wide_event::TransitionInput {
             tenant: &self.tenant,
             entity_type: &state.entity_type,
             entity_id: &state.entity_id,
-            operation: name,
+            operation: &name,
             from_status: &event.from_status,
             to_status: &state.status,
             success: true,
@@ -39,7 +40,7 @@ impl EntityActor {
         if let Some(clock) = persisted_timeout_clock {
             apply_state_timeout_clock(state, clock);
         } else {
-            Self::update_state_timeout_clock(committed_table, state, &event);
+            Self::update_state_timeout_clock(&committed_table, state, &event);
         }
         state.push_event_bounded(event);
 
@@ -104,8 +105,10 @@ impl EntityActor {
         };
         // ADR-0048 sub-decision 5: cache the successful response so a racing
         // retry returns it instead of re-executing.
-        if let (Some(key), Some(cache)) = (idempotency_key, self.idempotency_cache.as_ref()) {
-            cache.put(actor_key, key, response.clone());
+        if let (Some(key), Some(cache)) =
+            (idempotency_key.as_deref(), self.idempotency_cache.as_ref())
+        {
+            cache.put(&self.persistence_id(), key, response.clone());
         }
         ctx.reply(response);
     }

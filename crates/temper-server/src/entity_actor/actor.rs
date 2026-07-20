@@ -58,6 +58,14 @@ use super::types::{
 };
 pub(crate) use replay::recover_entity_state_from_store;
 
+struct EntityActionRequest {
+    name: String,
+    params: serde_json::Value,
+    cross_entity_booleans: BTreeMap<String, bool>,
+    idempotency_key: Option<String>,
+    state_timeout_precondition: Option<Box<StateTimeoutPrecondition>>,
+}
+
 fn state_timeout_precondition_is_stale(
     table: &TransitionTable,
     state: &EntityState,

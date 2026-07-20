@@ -5,15 +5,20 @@ use super::*;
 mod admission;
 mod finalization;
 
+struct SuccessfulActionCompletion {
+    duration_ns: u64,
+    event: EntityEvent,
+    persisted_timeout_clock: Option<PersistedStateTimeoutClock>,
+    committed_table: TransitionTable,
+    event_count_before: usize,
+    result: crate::entity_actor::effects::ProcessResult,
+    idempotency_key: Option<String>,
+}
+
 impl EntityActor {
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn handle_action(
         &self,
-        name: String,
-        params: serde_json::Value,
-        cross_entity_booleans: BTreeMap<String, bool>,
-        idempotency_key: Option<String>,
-        state_timeout_precondition: Option<Box<StateTimeoutPrecondition>>,
+        request: EntityActionRequest,
         state: &mut EntityState,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
@@ -29,19 +34,16 @@ impl EntityActor {
         // On the next action, any hot-swapped table will be picked up.
         let table = self.table.read().expect("table lock poisoned").clone();
 
-        let actor_key = self.persistence_id();
-        if self.reply_to_short_circuited_action(
-            &table,
-            &actor_key,
-            &name,
-            &cross_entity_booleans,
-            idempotency_key.as_deref(),
-            state,
-            state_timeout_precondition.as_deref(),
-            ctx,
-        ) {
+        if self.reply_to_short_circuited_action(&table, &request, state, ctx) {
             return Ok(());
         }
+        let EntityActionRequest {
+            name,
+            params,
+            cross_entity_booleans,
+            idempotency_key,
+            state_timeout_precondition,
+        } = request;
 
         // Captured BEFORE the action applies. The retry path (ADR-0046)
         // updates these in lockstep with replay so postconditions hold
@@ -399,16 +401,16 @@ impl EntityActor {
                 .unwrap_or(0)
                 .max(0) as u64;
             self.finalize_successful_action(
-                duration_ns,
-                &name,
                 state,
-                event,
-                persisted_timeout_clock,
-                &committed_table,
-                event_count_before,
-                result,
-                idempotency_key.as_deref(),
-                &actor_key,
+                SuccessfulActionCompletion {
+                    duration_ns,
+                    event,
+                    persisted_timeout_clock,
+                    committed_table,
+                    event_count_before,
+                    result,
+                    idempotency_key,
+                },
                 ctx,
             )
             .await;

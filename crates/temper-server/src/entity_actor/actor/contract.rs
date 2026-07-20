@@ -25,11 +25,13 @@ impl Actor for EntityActor {
                 state_timeout_precondition,
             } => {
                 self.handle_action(
-                    name,
-                    params,
-                    cross_entity_booleans,
-                    idempotency_key,
-                    state_timeout_precondition,
+                    EntityActionRequest {
+                        name,
+                        params,
+                        cross_entity_booleans,
+                        idempotency_key,
+                        state_timeout_precondition,
+                    },
                     state,
                     ctx,
                 )
