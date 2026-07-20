@@ -10,7 +10,8 @@ use crate::odata::read_support::{
 use crate::storage::{EntityCatalogRow, QueryPlaneStore, QueryProjectionFieldsRow, StorageStack};
 
 struct CatalogReadFault {
-    durable_row: EntityCatalogRow,
+    durable_row: Option<EntityCatalogRow>,
+    fail_reads: bool,
 }
 
 #[async_trait]
@@ -63,13 +64,18 @@ impl QueryPlaneStore for CatalogReadFault {
         _entity_type: &str,
         entity_ids: &[String],
     ) -> Result<Option<Vec<EntityCatalogRow>>, PersistenceError> {
-        assert!(
-            entity_ids.contains(&self.durable_row.entity_id),
-            "the durable catalog-only candidate must be requested"
-        );
-        Err(PersistenceError::Storage(
-            "injected catalog read fault".to_string(),
-        ))
+        if let Some(row) = self.durable_row.as_ref() {
+            assert!(
+                entity_ids.contains(&row.entity_id),
+                "the durable catalog-only candidate must be requested"
+            );
+        }
+        if self.fail_reads {
+            return Err(PersistenceError::Storage(
+                "injected catalog read fault".to_string(),
+            ));
+        }
+        Ok(Some(self.durable_row.clone().into_iter().collect()))
     }
 
     async fn projected_entity_counts_by_tenant(
@@ -87,7 +93,7 @@ async fn catalog_fault_cannot_turn_a_catalog_only_candidate_into_actor_state() {
     let persistence_id = format!("{tenant}:Order:{entity_id}");
     let events = SimEventStore::no_faults(264);
     let query_plane = Arc::new(CatalogReadFault {
-        durable_row: EntityCatalogRow {
+        durable_row: Some(EntityCatalogRow {
             entity_id: entity_id.to_string(),
             status: "Draft".to_string(),
             fields: serde_json::json!({
@@ -97,7 +103,8 @@ async fn catalog_fault_cannot_turn_a_catalog_only_candidate_into_actor_state() {
             }),
             state: None,
             sequence_nr: 1,
-        },
+        }),
+        fail_reads: true,
     });
     let mut state = build_order_state("catalog-only-read-fault");
     state.set_storage_stack(StorageStack::new(
@@ -173,7 +180,7 @@ async fn catalog_fault_does_not_disable_journal_backed_materialization() {
     .expect("seed authoritative journal generation");
 
     let query_plane = Arc::new(CatalogReadFault {
-        durable_row: EntityCatalogRow {
+        durable_row: Some(EntityCatalogRow {
             entity_id: entity_id.to_string(),
             status: "Draft".to_string(),
             fields: serde_json::json!({
@@ -183,7 +190,8 @@ async fn catalog_fault_does_not_disable_journal_backed_materialization() {
             }),
             state: None,
             sequence_nr: 1,
-        },
+        }),
+        fail_reads: true,
     });
     let mut state = build_order_state("journal-backed-catalog-fault");
     state.set_storage_stack(StorageStack::new(
@@ -213,4 +221,52 @@ async fn catalog_fault_does_not_disable_journal_backed_materialization() {
     assert_eq!(materialized.error, None);
     assert_eq!(materialized.entities.len(), 1);
     assert_eq!(materialized.entities[0]["fields"]["Path"], journal_path);
+}
+
+#[tokio::test]
+async fn empty_catalog_does_not_bootstrap_a_projection_only_candidate() {
+    let (_guard, _clock, _ids) = install_deterministic_context(270);
+    let tenant = TenantId::default();
+    let entity_id = "ord-projection-only-ghost";
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    let events = SimEventStore::no_faults(270);
+    let query_plane = Arc::new(CatalogReadFault {
+        durable_row: None,
+        fail_reads: false,
+    });
+    let mut state = build_order_state("projection-only-catalog-miss");
+    state.set_storage_stack(StorageStack::new(
+        BackendLabel::Sim,
+        BoxedEventStore::new(events.clone()),
+        None,
+        None,
+        None,
+        None,
+        Some(query_plane),
+        None,
+        None,
+        None,
+    ));
+
+    let materialized = materialize_entity_set_entities(
+        &state,
+        &tenant,
+        "Order",
+        "Orders",
+        &[entity_id.to_string()],
+        CatalogMaterializationPolicy::JournalAbsentOnly,
+        None,
+    )
+    .await;
+
+    assert!(materialized.entities.is_empty());
+    assert_eq!(materialized.error, None);
+    assert_eq!(
+        EventStore::journal_boundary(&events, &persistence_id)
+            .await
+            .expect("journal remains readable")
+            .latest_sequence,
+        0,
+        "a read must not turn a projection-only candidate into durable actor state"
+    );
 }
