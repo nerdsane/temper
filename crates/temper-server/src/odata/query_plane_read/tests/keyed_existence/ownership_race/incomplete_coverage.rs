@@ -1,5 +1,8 @@
 use super::*;
 
+mod fault_paths;
+mod source_transitions;
+
 #[tokio::test]
 async fn incomplete_key_scan_replays_journal_not_stale_resident_actor() {
     let (_guard, _clock, _ids) = install_deterministic_context(249);
