@@ -314,7 +314,12 @@ async fn stale_timeout_is_rejected_after_concurrency_replay_observes_a_reset() {
                 "from_status": "Running",
                 "to_status": "Running",
                 "timestamp": reset_at,
-                "params": {}
+                "params": {},
+                "__temper_state_timeout_clock": {
+                    "kind": "active",
+                    "reset_at": reset_at,
+                    "reset_version": 2
+                }
             }),
             metadata: EventMetadata {
                 event_id: sim_uuid(),
