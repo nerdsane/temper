@@ -15,6 +15,7 @@ use super::dst_projection_lag::SimQueryPlane;
 use crate::storage::QueryPlaneStore;
 
 mod backend_authority;
+mod backfill_sources;
 mod contract_race;
 mod ownership_race;
 

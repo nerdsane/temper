@@ -139,3 +139,78 @@ async fn catalog_fault_cannot_turn_a_catalog_only_candidate_into_actor_state() {
         "the compatibility fallback must not write a first journal generation"
     );
 }
+
+#[tokio::test]
+async fn catalog_fault_does_not_disable_journal_backed_materialization() {
+    let (_guard, _clock, _ids) = install_deterministic_context(266);
+    let tenant = TenantId::default();
+    let workspace = "ws-journal-with-catalog-fault";
+    let journal_path = "/journal-authority";
+    let entity_id = "ord-journal-with-catalog-fault";
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    let events = SimEventStore::no_faults(266);
+
+    EventStore::append_with_index_rows(
+        &events,
+        &persistence_id,
+        0,
+        &[super::source_transitions::complete_field_update(
+            &persistence_id,
+            entity_id,
+            workspace,
+            journal_path,
+            "journal-with-catalog-fault",
+        )],
+        &[key_row(workspace, journal_path)],
+        &[],
+        IndexReconciliation {
+            keys: true,
+            key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
+            vectors: false,
+        },
+    )
+    .await
+    .expect("seed authoritative journal generation");
+
+    let query_plane = Arc::new(CatalogReadFault {
+        durable_row: EntityCatalogRow {
+            entity_id: entity_id.to_string(),
+            status: "Draft".to_string(),
+            fields: serde_json::json!({
+                "Id": entity_id,
+                "WorkspaceId": workspace,
+                "Path": "/stale-catalog",
+            }),
+            state: None,
+            sequence_nr: 1,
+        },
+    });
+    let mut state = build_order_state("journal-backed-catalog-fault");
+    state.set_storage_stack(StorageStack::new(
+        BackendLabel::Sim,
+        BoxedEventStore::new(events),
+        None,
+        None,
+        None,
+        None,
+        Some(query_plane),
+        None,
+        None,
+        None,
+    ));
+
+    let materialized = materialize_entity_set_entities(
+        &state,
+        &tenant,
+        "Order",
+        "Orders",
+        &[entity_id.to_string()],
+        CatalogMaterializationPolicy::JournalAbsentOnly,
+        None,
+    )
+    .await;
+
+    assert_eq!(materialized.error, None);
+    assert_eq!(materialized.entities.len(), 1);
+    assert_eq!(materialized.entities[0]["fields"]["Path"], journal_path);
+}
