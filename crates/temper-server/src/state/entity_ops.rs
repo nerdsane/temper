@@ -11,15 +11,13 @@ use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, Persistenc
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
-use super::dispatch::retry;
+use super::dispatch::{SPEC_GENERATION_RETRY_BUDGET, retry};
 use super::{ServerState, projection_backfill};
 use crate::entity_actor::{EntityActor, EntityEvent, EntityMsg, EntityResponse, EntityState};
 use crate::events::EntityStateChange;
 use crate::registry::{VerificationDetail, VerificationStatus};
 use crate::runtime_metrics;
 use crate::storage::DataOnlyCreateRecord;
-
-const SPEC_GENERATION_RETRY_BUDGET: usize = 3;
 
 fn actor_idle_timeout_secs() -> i64 {
     static ACTOR_IDLE_TIMEOUT: OnceLock<i64> = OnceLock::new();

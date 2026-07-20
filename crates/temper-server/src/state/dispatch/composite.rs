@@ -23,7 +23,7 @@ use crate::state::app_uniqueness::CommonsAppUniquenessError;
 use crate::state::storage_caps::{CommonsStorageCapError, CommonsStorageWrite};
 use crate::storage::BackendLabel;
 
-use super::DispatchError;
+use super::{DispatchError, SPEC_GENERATION_RETRY_BUDGET};
 
 #[path = "composite_entry_guard.rs"]
 mod entry_guard;
@@ -194,7 +194,7 @@ impl crate::state::ServerState {
                 AtomicCompositeApply::Applied(false) => break prepared,
                 AtomicCompositeApply::GenerationChanged => {
                     generation_retries += 1;
-                    if generation_retries > 3 {
+                    if generation_retries > SPEC_GENERATION_RETRY_BUDGET {
                         return Err(DispatchError::Internal(
                             "spec generation kept changing while preparing composite batch"
                                 .to_string(),

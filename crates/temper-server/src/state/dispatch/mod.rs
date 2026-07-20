@@ -21,6 +21,8 @@ mod wasm_secrets;
 
 pub use state_timeouts::StateTimeoutTracker;
 
+pub(super) const SPEC_GENERATION_RETRY_BUDGET: usize = 3;
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum WasmDispatchMode {
     Background,

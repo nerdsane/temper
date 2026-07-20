@@ -12,11 +12,13 @@ use temper_runtime::tenant::TenantId;
 
 use super::effects::PostDispatchContext;
 use super::retry;
-use super::{DispatchCommand, DispatchError, DispatchExtOptions, record_workflow_span_attrs};
+use super::{
+    DispatchCommand, DispatchError, DispatchExtOptions, SPEC_GENERATION_RETRY_BUDGET,
+    record_workflow_span_attrs,
+};
 use crate::state::admission::AdmissionOutcome;
 
 const DEFAULT_BACKGROUND_REACTION_MAX_CONCURRENCY: usize = 64;
-const SPEC_GENERATION_RETRY_BUDGET: usize = 3;
 
 struct BackgroundReactionDispatch {
     dispatcher: Arc<crate::trigger::ReactionDispatcher>,
