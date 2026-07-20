@@ -1,7 +1,10 @@
 //! Structured verification diagnostics emitted before backend execution.
 
 use crate::model::{InvariantKind, TemperModel};
-use temper_spec::automaton::SourceSpan;
+use temper_spec::automaton::{
+    Automaton, SourceSpan, compile_runtime_invariants, parse_automaton,
+    unsupported_safety_invariant_names,
+};
 
 /// Stable diagnostic code for an invariant outside the verifier's typed IR.
 pub const UNSUPPORTED_INVARIANT_CODE: &str = "TVE001";
@@ -27,8 +30,9 @@ pub struct InvariantCapabilityError {
 pub fn unsupported_invariant_errors_from_ioa(
     ioa_source: &str,
 ) -> Result<Vec<InvariantCapabilityError>, String> {
-    let model = crate::model::build_model_from_ioa(ioa_source, 0)?;
-    unsupported_invariant_errors(&model)
+    let automaton = parse_diagnostic_automaton(ioa_source)?;
+    let model = crate::model::build_model_from_automaton(&automaton, 0);
+    unsupported_invariant_errors_with_automaton(&model, &automaton)
 }
 
 /// Return explicit disclosures for safety assertions enforced only at runtime.
@@ -36,55 +40,71 @@ pub fn unsupported_invariant_errors_from_ioa(
 /// Cached verification results call this independently so skipping the cascade
 /// cannot erase the distinction between runtime enforcement and model proof.
 pub fn runtime_enforcement_warnings_from_ioa(ioa_source: &str) -> Result<Vec<String>, String> {
-    let model = crate::model::build_model_from_ioa(ioa_source, 0)?;
-    Ok(runtime_enforcement_warnings(&model))
+    let automaton = parse_diagnostic_automaton(ioa_source)?;
+    Ok(runtime_enforcement_warnings_from_automaton(&automaton))
 }
 
-pub(crate) fn runtime_enforcement_warnings(model: &TemperModel) -> Vec<String> {
-    model
-        .invariants
-        .iter()
-        .filter_map(|invariant| {
-            let InvariantKind::RuntimeEnforced(_) = &invariant.kind else {
-                return None;
-            };
-            Some(format!(
-                "invariant '{}' is enforced by runtime safety contract version {}, not model-proved",
-                invariant.name,
-                temper_spec::automaton::RUNTIME_INVARIANT_ENFORCEMENT_VERSION
-            ))
-        })
+fn parse_diagnostic_automaton(ioa_source: &str) -> Result<Automaton, String> {
+    parse_automaton(ioa_source)
+        .map_err(|error| format!("failed to parse I/O Automaton TOML: {error}"))
+}
+
+fn runtime_enforcement_warnings_from_automaton(automaton: &Automaton) -> Vec<String> {
+    compile_runtime_invariants(automaton)
+        .into_iter()
+        .map(|invariant| runtime_enforcement_warning(&invariant.name))
         .collect()
 }
 
-pub(crate) fn unsupported_invariant_errors(
+fn runtime_enforcement_warning(invariant_name: &str) -> String {
+    format!(
+        "invariant '{invariant_name}' is enforced by runtime safety contract version {}, not model-proved",
+        temper_spec::automaton::RUNTIME_INVARIANT_ENFORCEMENT_VERSION
+    )
+}
+
+fn unsupported_invariant_errors_with_automaton(
     model: &TemperModel,
+    automaton: &Automaton,
 ) -> Result<Vec<InvariantCapabilityError>, String> {
-    model
-        .invariants
-        .iter()
-        .filter_map(|invariant| {
-            let InvariantKind::Unverifiable { expression } = &invariant.kind else {
-                return None;
-            };
-            Some(invariant.source_span.map_or_else(
-                || {
-                    Err(format!(
-                        "unsupported IOA invariant '{}' is missing its assertion source span",
-                        invariant.name
-                    ))
-                },
-                |source_span| {
-                    Ok(InvariantCapabilityError {
-                        code: UNSUPPORTED_INVARIANT_CODE.to_string(),
-                        invariant: invariant.name.clone(),
-                        assertion: expression.clone(),
-                        source_span,
-                    })
-                },
-            ))
-        })
-        .collect::<Result<Vec<_>, _>>()
+    let runtime_unsupported = unsupported_safety_invariant_names(automaton);
+    let mut errors = Vec::new();
+    for declaration in &automaton.invariants {
+        let mut matches = model.invariants.iter().filter(|resolved| {
+            resolved.name == declaration.name && resolved.source_span == declaration.assert_span
+        });
+        let resolved = matches.next().ok_or_else(|| {
+            format!(
+                "verification model did not retain declared safety invariant '{}'",
+                declaration.name
+            )
+        })?;
+        if matches.next().is_some() {
+            return Err(format!(
+                "verification model retained multiple copies of declared safety invariant '{}'",
+                declaration.name
+            ));
+        }
+        let model_unsupported = matches!(resolved.kind, InvariantKind::Unverifiable { .. });
+        let runtime_unsupported = runtime_unsupported
+            .iter()
+            .any(|name| name == &declaration.name);
+        if model_unsupported || runtime_unsupported {
+            let source_span = declaration.assert_span.ok_or_else(|| {
+                format!(
+                    "unsupported IOA invariant '{}' is missing its assertion source span",
+                    declaration.name
+                )
+            })?;
+            errors.push(InvariantCapabilityError {
+                code: UNSUPPORTED_INVARIANT_CODE.to_string(),
+                invariant: declaration.name.clone(),
+                assertion: declaration.assert.clone(),
+                source_span,
+            });
+        }
+    }
+    Ok(errors)
 }
 
 #[cfg(test)]
