@@ -1,9 +1,11 @@
 //! PostgreSQL key-ownership reconciliation and coverage fencing.
 
 use sqlx::PgPool;
-use temper_runtime::persistence::{
-    EntityKeyLookup, EntityKeyRow, KeyIndexBackfillFence, PersistenceError,
-};
+use temper_runtime::persistence::{EntityKeyRow, KeyIndexBackfillFence, PersistenceError};
+
+mod query;
+
+pub(super) use query::{keyed_entity_ids, lookup};
 
 const UNKNOWN_KEY_SET_SIGNATURE: &str = "<unknown>";
 
@@ -490,45 +492,4 @@ pub(super) async fn mark_backfilled_if_revision(
         .await
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
     Ok(true)
-}
-
-pub(super) async fn keyed_entity_ids(
-    pool: &PgPool,
-    tenant: &str,
-    entity_type: &str,
-) -> Result<Vec<String>, PersistenceError> {
-    let rows: Vec<(String,)> = crate::dbm::postgres_query_as!(
-        "SELECT DISTINCT entity_id FROM entity_key_index \
-         WHERE tenant = $1 AND entity_type = $2",
-    )
-    .bind(tenant)
-    .bind(entity_type)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-    Ok(rows.into_iter().map(|(entity_id,)| entity_id).collect())
-}
-
-pub(super) async fn lookup(
-    pool: &PgPool,
-    tenant: &str,
-    entity_type: &str,
-    key_name: &str,
-    key_hash: &str,
-) -> Result<Option<EntityKeyLookup>, PersistenceError> {
-    let row: Option<(String, i64)> = crate::dbm::postgres_query_as!(
-        "SELECT entity_id, sequence_nr FROM entity_key_index \
-         WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND key_hash = $4",
-    )
-    .bind(tenant)
-    .bind(entity_type)
-    .bind(key_name)
-    .bind(key_hash)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-    Ok(row.map(|(entity_id, sequence_nr)| EntityKeyLookup {
-        entity_id,
-        sequence_nr: sequence_nr as u64,
-    }))
 }
