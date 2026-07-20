@@ -92,7 +92,7 @@ async fn verify_index_extensions(
         .query(
             "SELECT name FROM sqlite_schema
              WHERE type = 'index' AND sql IS NOT NULL
-               AND name NOT GLOB 'sqlite_*' AND tbl_name = ?1
+               AND name NOT GLOB 'sqlite_*' AND tbl_name COLLATE NOCASE = ?1
              ORDER BY name",
             [table],
         )
@@ -264,9 +264,7 @@ mod tests {
             .await
             .expect_err("SQLite-equivalent index owners must be inventoried");
         assert!(
-            error
-                .to_string()
-                .contains("events_case_folded_expression"),
+            error.to_string().contains("events_case_folded_expression"),
             "{error}"
         );
     }
