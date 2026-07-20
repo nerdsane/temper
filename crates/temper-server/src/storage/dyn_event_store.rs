@@ -39,6 +39,22 @@ where
         Box::pin(EventStore::read_events(self, persistence_id, from_sequence))
     }
 
+    fn read_events_page<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        from_sequence: u64,
+        through_sequence: u64,
+        limit: usize,
+    ) -> EventStoreFuture<'a, Result<Vec<PersistenceEnvelope>, PersistenceError>> {
+        Box::pin(EventStore::read_events_page(
+            self,
+            persistence_id,
+            from_sequence,
+            through_sequence,
+            limit,
+        ))
+    }
+
     fn journal_boundary<'a>(
         &'a self,
         persistence_id: &'a str,

@@ -275,6 +275,43 @@ async fn read_events_from_sequence() {
 }
 
 #[tokio::test]
+async fn read_events_page_applies_cursor_boundary_and_limit() {
+    let store = SimEventStore::no_faults(43);
+    let persistence_id = "default:Order:ord-page";
+    store
+        .append(
+            persistence_id,
+            0,
+            &[
+                test_envelope(0, "A"),
+                test_envelope(0, "B"),
+                test_envelope(0, "C"),
+                test_envelope(0, "D"),
+                test_envelope(0, "E"),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let page = store
+        .read_events_page(persistence_id, 1, 4, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.iter()
+            .map(|event| event.sequence_nr)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    let final_page = store
+        .read_events_page(persistence_id, 3, 4, 8)
+        .await
+        .unwrap();
+    assert_eq!(final_page.len(), 1);
+    assert_eq!(final_page[0].sequence_nr, 4);
+}
+
+#[tokio::test]
 async fn terminal_tombstone_lookup_is_not_fault_truncated() {
     let store = SimEventStore::new(
         43,

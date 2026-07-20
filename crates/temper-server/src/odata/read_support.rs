@@ -13,6 +13,7 @@ use crate::storage::{
 
 mod config;
 mod entity_set;
+mod journal_materialization;
 mod projection_repair;
 mod select_projection;
 mod shadow;
@@ -22,6 +23,8 @@ pub(super) use config::{odata_default_page_size, odata_max_entities};
 #[cfg(test)]
 use entity_set::select_entity_ids_for_materialization;
 pub(super) use entity_set::{record_entity_set_not_found, resolve_entity_set_name};
+pub(super) use journal_materialization::durable_source_absent_for_catalog_materialization;
+use journal_materialization::materialize_entity;
 use projection_repair::remove_deleted_projection;
 use select_projection::catalog_row_to_selected_entity_body;
 #[cfg(test)]
@@ -97,9 +100,16 @@ pub(super) fn catalog_row_to_entity_body(
 pub(super) enum CatalogMaterializationPolicy {
     /// Use the catalog directly when a row is available.
     Any,
-    /// Use a catalog row only for the ADR-0077 migration shape with no journal.
-    /// Journal-backed entities always recover from their authoritative stream.
+    /// Use a catalog row only for the ADR-0077 migration shape with no journal or
+    /// snapshot. Any durable entity source outranks the asynchronous catalog.
     JournalAbsentOnly,
+}
+
+/// An authoritative collection candidate could not be proved current.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum AuthoritativeMaterializationError {
+    /// The durable journal source or generation could not be stabilized.
+    JournalUnstable,
 }
 
 impl CatalogMaterializationPolicy {
@@ -108,51 +118,26 @@ impl CatalogMaterializationPolicy {
     }
 }
 
-async fn journal_absence_for_catalog_materialization(
-    state: &ServerState,
-    tenant: &TenantId,
-    entity_type: &str,
-    entity_id: &str,
-) -> Result<bool, ()> {
-    let Some((store, _)) = state.event_journal() else {
-        return Ok(false);
-    };
-    let persistence_id = format!("{}:{entity_type}:{entity_id}", tenant.as_str());
-    store
-        .journal_boundary(&persistence_id)
-        .await
-        .map(|boundary| boundary.latest_sequence == 0)
-        .map_err(|error| {
-            tracing::warn!(
-                error = %error,
-                tenant = %tenant,
-                entity_type,
-                entity_id,
-                "failed to fence catalog-only materialization against the journal"
-            );
-        })
-}
-
 async fn try_load_catalog_rows(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
     entity_ids: &[String],
-) -> BTreeMap<String, EntityCatalogRow> {
+) -> Result<BTreeMap<String, EntityCatalogRow>, temper_runtime::persistence::PersistenceError> {
     let Some(query_plane) = state.query_plane_store() else {
-        return BTreeMap::new();
+        return Ok(BTreeMap::new());
     };
     match load_catalog_rows_by_id(&query_plane, tenant.as_str(), entity_type, entity_ids).await {
-        Ok(CatalogRowsLoad::Available(rows)) => rows,
-        Ok(CatalogRowsLoad::Unsupported) => BTreeMap::new(),
+        Ok(CatalogRowsLoad::Available(rows)) => Ok(rows),
+        Ok(CatalogRowsLoad::Unsupported) => Ok(BTreeMap::new()),
         Err(error) => {
             tracing::warn!(
                 error = %error,
                 tenant = %tenant,
                 entity_type = %entity_type,
-                "catalog fast-read failed; falling back to actor materialization"
+                "catalog fast-read failed"
             );
-            BTreeMap::new()
+            Err(error)
         }
     }
 }
@@ -163,9 +148,9 @@ async fn try_load_selected_catalog_rows(
     entity_type: &str,
     entity_ids: &[String],
     selected_fields: &[String],
-) -> BTreeMap<String, EntityCatalogRow> {
+) -> Result<BTreeMap<String, EntityCatalogRow>, temper_runtime::persistence::PersistenceError> {
     let Some(query_plane) = state.query_plane_store() else {
-        return BTreeMap::new();
+        return Ok(BTreeMap::new());
     };
     match load_selected_catalog_rows_by_id(
         &query_plane,
@@ -176,7 +161,7 @@ async fn try_load_selected_catalog_rows(
     )
     .await
     {
-        Ok(CatalogRowsLoad::Available(rows)) => rows,
+        Ok(CatalogRowsLoad::Available(rows)) => Ok(rows),
         Ok(CatalogRowsLoad::Unsupported) => {
             try_load_catalog_rows(state, tenant, entity_type, entity_ids).await
         }
@@ -278,7 +263,9 @@ pub(super) async fn try_load_entity_body_from_catalog(
         return None;
     }
     let ids = [key.to_string()];
-    let rows = try_load_catalog_rows(state, tenant, entity_type, &ids).await;
+    let rows = try_load_catalog_rows(state, tenant, entity_type, &ids)
+        .await
+        .ok()?;
     let row = rows.into_iter().next().map(|(_, r)| r)?;
     maybe_spawn_catalog_shadow_check(state, tenant, entity_type, &row);
     let mut body = catalog_row_to_entity_body(entity_type, entity_set_name, row);
@@ -296,7 +283,7 @@ pub(super) async fn materialize_entity_set_entities(
     selected_catalog_fields: Option<&[String]>,
 ) -> MaterializedEntitySet {
     let selected_catalog_fields_owned = selected_catalog_fields.map(Vec::from);
-    let mut catalog_hits: BTreeMap<String, EntityCatalogRow> = if catalog_policy.uses_catalog() {
+    let catalog_rows = if catalog_policy.uses_catalog() {
         match selected_catalog_fields {
             Some(select) => {
                 try_load_selected_catalog_rows(state, tenant, entity_type, entity_ids, select).await
@@ -304,12 +291,14 @@ pub(super) async fn materialize_entity_set_entities(
             None => try_load_catalog_rows(state, tenant, entity_type, entity_ids).await,
         }
     } else {
-        BTreeMap::new()
+        Ok(BTreeMap::new())
     };
+    let catalog_unavailable = catalog_rows.is_err();
     let mut shadow_budget = CatalogShadowReadBudget::for_entity_set();
+    let mut catalog_hits: BTreeMap<String, EntityCatalogRow> = catalog_rows.unwrap_or_default();
 
     let concurrency = entity_set_materialization_concurrency();
-    let entities = stream::iter(entity_ids.iter().cloned())
+    let outcomes = stream::iter(entity_ids.iter().cloned())
         .map(|id| {
             let catalog_row = catalog_hits.remove(&id);
             if catalog_policy == CatalogMaterializationPolicy::Any
@@ -334,7 +323,7 @@ pub(super) async fn materialize_entity_set_entities(
                     let catalog_allowed = match catalog_policy {
                         CatalogMaterializationPolicy::Any => true,
                         CatalogMaterializationPolicy::JournalAbsentOnly => {
-                            match journal_absence_for_catalog_materialization(
+                            match durable_source_absent_for_catalog_materialization(
                                 &state,
                                 &tenant,
                                 &entity_type,
@@ -343,36 +332,41 @@ pub(super) async fn materialize_entity_set_entities(
                             .await
                             {
                                 Ok(absent) => absent,
-                                Err(()) => return None,
+                                Err(error) => return Err(error),
                             }
                         }
                     };
                     if !catalog_allowed {
-                        return materialize_entity_from_actor(
+                        return materialize_entity(
                             &state,
                             &tenant,
                             &entity_type,
                             &entity_set_name,
                             &id,
+                            catalog_policy,
                         )
                         .await;
                     }
-                    if row.status == "Deleted" {
-                        remove_deleted_projection(&state, &tenant, &entity_type, &id).await;
-                        return None;
-                    }
-                    let mut entity = match selected_catalog_fields.as_deref() {
-                        Some(select) => catalog_row_to_selected_entity_body(
-                            &entity_type,
-                            &entity_set_name,
-                            row,
-                            select,
-                        ),
-                        None => catalog_row_to_entity_body(&entity_type, &entity_set_name, row),
+                    let catalog_entity = if row.status == "Deleted" {
+                        if catalog_policy == CatalogMaterializationPolicy::Any {
+                            remove_deleted_projection(&state, &tenant, &entity_type, &id).await;
+                        }
+                        None
+                    } else {
+                        let mut entity = match selected_catalog_fields.as_deref() {
+                            Some(select) => catalog_row_to_selected_entity_body(
+                                &entity_type,
+                                &entity_set_name,
+                                row,
+                                select,
+                            ),
+                            None => catalog_row_to_entity_body(&entity_type, &entity_set_name, row),
+                        };
+                        hydrate_blob_refs_for_tenant(&state, &tenant, &mut entity).await;
+                        Some(entity)
                     };
-                    hydrate_blob_refs_for_tenant(&state, &tenant, &mut entity).await;
                     if catalog_policy == CatalogMaterializationPolicy::JournalAbsentOnly {
-                        match journal_absence_for_catalog_materialization(
+                        match durable_source_absent_for_catalog_materialization(
                             &state,
                             &tenant,
                             &entity_type,
@@ -382,105 +376,76 @@ pub(super) async fn materialize_entity_set_entities(
                         {
                             Ok(true) => {}
                             Ok(false) => {
-                                return materialize_entity_from_actor(
+                                return materialize_entity(
                                     &state,
                                     &tenant,
                                     &entity_type,
                                     &entity_set_name,
                                     &id,
+                                    catalog_policy,
                                 )
                                 .await;
                             }
-                            Err(()) => return None,
+                            Err(error) => return Err(error),
                         }
                     }
-                    return Some(entity);
+                    return Ok(catalog_entity);
                 }
-                materialize_entity_from_actor(&state, &tenant, &entity_type, &entity_set_name, &id)
-                    .await
+                if catalog_unavailable
+                    && catalog_policy == CatalogMaterializationPolicy::JournalAbsentOnly
+                    && durable_source_absent_for_catalog_materialization(
+                        &state,
+                        &tenant,
+                        &entity_type,
+                        &id,
+                    )
+                    .await?
+                {
+                    return Err(AuthoritativeMaterializationError::JournalUnstable);
+                }
+                materialize_entity(
+                    &state,
+                    &tenant,
+                    &entity_type,
+                    &entity_set_name,
+                    &id,
+                    catalog_policy,
+                )
+                .await
             }
         })
         .buffered(concurrency)
         .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        .await;
+    let mut entities = Vec::with_capacity(outcomes.len());
+    let mut error = None;
+    for outcome in outcomes {
+        match outcome {
+            Ok(Some(entity)) => entities.push(entity),
+            Ok(None) => {}
+            Err(materialization_error) => {
+                error.get_or_insert(materialization_error);
+            }
+        }
+    }
 
     MaterializedEntitySet {
         entities,
+        error,
         catalog_shadow_check_budget: shadow_budget.configured(),
         catalog_shadow_check_scheduled: shadow_budget.scheduled(),
     }
 }
 
-async fn materialize_entity_from_actor(
-    state: &ServerState,
-    tenant: &TenantId,
-    entity_type: &str,
-    entity_set_name: &str,
-    entity_id: &str,
-) -> Option<serde_json::Value> {
-    match state
-        .get_tenant_entity_state(tenant, entity_type, entity_id)
-        .await
-    {
-        Ok(response) if response.state.status == "Deleted" => {
-            remove_deleted_projection(state, tenant, entity_type, entity_id).await;
-            None
-        }
-        Ok(response) => {
-            if let Some(query_plane) = state.query_plane_store() {
-                let fields =
-                    state.query_projection_fields(tenant, entity_type, &response.state.fields);
-                let projected_state = state.query_projection_state(&response.state);
-                if let Err(error) = query_plane
-                    .upsert_projection(
-                        tenant.as_str(),
-                        entity_type,
-                        entity_id,
-                        &response.state.status,
-                        &fields,
-                        &projected_state,
-                        response.state.sequence_nr,
-                    )
-                    .await
-                {
-                    tracing::debug!(
-                        error = %error,
-                        tenant = %tenant,
-                        entity_type,
-                        entity_id,
-                        "failed to repair query projection after actor materialization fallback"
-                    );
-                }
-            }
-            let mut entity = serde_json::to_value(&response.state).unwrap_or_default();
-            hydrate_blob_refs_for_tenant(state, tenant, &mut entity).await;
-            if let Some(object) = entity.as_object_mut() {
-                object.insert(
-                    "@odata.id".into(),
-                    serde_json::json!(format!("{entity_set_name}('{entity_id}')")),
-                );
-            }
-            Some(entity)
-        }
-        Err(error) => {
-            tracing::debug!(
-                error = %error,
-                tenant = %tenant,
-                entity_type,
-                entity_id,
-                "failed to materialize entity for OData collection"
-            );
-            None
-        }
-    }
-}
-
+/// Materialized collection candidates plus an authoritative-source failure, if any.
 pub(super) struct MaterializedEntitySet {
+    /// Successfully materialized live entity bodies.
     pub(super) entities: Vec<serde_json::Value>,
+    /// First failure that prevents the partial bodies from being served as complete.
+    pub(super) error: Option<AuthoritativeMaterializationError>,
+    /// Configured catalog shadow-read budget for telemetry.
     pub(super) catalog_shadow_check_budget: usize,
+    /// Catalog shadow reads actually scheduled for telemetry.
     pub(super) catalog_shadow_check_scheduled: usize,
 }
 

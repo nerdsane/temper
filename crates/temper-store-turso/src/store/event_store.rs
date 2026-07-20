@@ -472,6 +472,75 @@ impl EventStore for TursoEventStore {
         Ok(out)
     }
 
+    #[instrument(skip_all, fields(persistence_id, otel.name = "turso.read_events_page"))]
+    async fn read_events_page(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        through_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        assert!(limit > 0, "event page limit must be positive");
+        assert!(
+            through_sequence >= from_sequence,
+            "event page boundary must not precede its cursor"
+        );
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let from_sequence = i64::try_from(from_sequence).map_err(|_| {
+            PersistenceError::Storage("event page cursor exceeds SQLite integer".to_string())
+        })?;
+        let through_sequence = i64::try_from(through_sequence).map_err(|_| {
+            PersistenceError::Storage("event page boundary exceeds SQLite integer".to_string())
+        })?;
+        let limit = i64::try_from(limit).map_err(|_| {
+            PersistenceError::Storage("event page limit exceeds SQLite integer".to_string())
+        })?;
+        let conn = self.configured_connection().await?;
+
+        let mut rows = conn
+            .query(
+                "SELECT sequence_nr, event_type, payload, metadata
+                 FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
+                   AND sequence_nr > ?4 AND sequence_nr <= ?5
+                 ORDER BY sequence_nr ASC
+                 LIMIT ?6",
+                params![
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    from_sequence,
+                    through_sequence,
+                    limit
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::with_capacity(limit as usize);
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            let sequence_nr = row.get::<i64>(0).map_err(storage_error)? as u64;
+            let event_type = row.get::<String>(1).map_err(storage_error)?;
+            let payload_json = row.get::<String>(2).map_err(storage_error)?;
+            let metadata_json = row.get::<Option<String>>(3).map_err(storage_error)?;
+            let payload = serde_json::from_str(&payload_json)
+                .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+            let metadata_json = metadata_json.ok_or_else(|| {
+                PersistenceError::Serialization("missing event metadata".to_string())
+            })?;
+            let metadata = serde_json::from_str(&metadata_json)
+                .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+            out.push(PersistenceEnvelope {
+                sequence_nr,
+                event_type,
+                payload,
+                metadata,
+            });
+        }
+        Ok(out)
+    }
+
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.journal_boundary"))]
     async fn journal_boundary(
         &self,

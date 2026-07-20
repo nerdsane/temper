@@ -136,11 +136,13 @@ newer key set. The next full pass retries from current state.
 
 The monotonic revision fences the durable entity universe as well as the key
 signature. A snapshot or catalog writer takes the same type-then-stream lock order as
-repair. If that mutation is not already represented at an equal-or-newer sequence in
-the entity journal, it advances the current signature's revision and removes the
-watermark in the same transaction. Ordinary post-append snapshots and projections
-are journal-dominated and do not churn coverage. Consequently an entity that appears
-after repair enumeration cannot be hidden by a stale conditional publication.
+repair. Every changed snapshot advances the current signature's revision and removes
+the watermark in the same transaction, because its exact bytes contribute legacy
+baseline fields even at or below the journal high-water; identical snapshot writes do
+not churn the epoch. Catalog projections remain compatibility-only once represented
+at an equal-or-newer journal sequence, so those journal-dominated mutations can reuse
+the append fence. Consequently an entity or snapshot generation that appears after
+repair enumeration cannot be hidden by a stale conditional publication.
 
 A current claim already held by another live stream is not a skippable row. Both
 authoritative stores reject the repair before mutation, the caller records the entity
@@ -158,7 +160,13 @@ equivalent to missing state and never falls back to the catalog; it fails the ty
 closed until strict recovery succeeds. Catalog fallback is permitted only when the
 separately observed journal sequence is exactly zero, so a schema-incompatible or
 otherwise unreconstructable journal can never be replaced by same-generation stale
-catalog state. Tombstone-aware live enumeration governs every
+catalog state. Once that sequence is nonzero, backfill replays the journal from its
+first event. A valid snapshot may contribute legacy baseline fields that older
+journal envelopes never recorded, but journal events overlay that baseline and own
+lifecycle. The repair carries the snapshot's exact presence, sequence, and serialized
+bytes into the store transaction, so an equal-sequence snapshot rewrite rejects the
+row before mutation instead of mixing source generations. Tombstone-aware live
+enumeration governs every
 replay and catalog result: a terminal journal tombstone outranks any later stale live
 snapshot or catalog row, whose sequence can fence the purge but whose fields can never
 restore ownership. Tombstone detection uses the durable lifecycle (`to_status = "Deleted"`)
@@ -170,14 +178,42 @@ when that object key is absent. Non-object JSON payloads cannot carry structured
 lifecycle metadata and therefore use the same legacy inference in Rust, PostgreSQL,
 and Turso.
 
-Recovery reads an exact journal boundary containing both the first terminal sequence
-and the latest durable sequence before choosing a snapshot. A live snapshot at or
-after an older tombstone is rejected without becoming the actor's accepted snapshot
-boundary. Replay then consumes the complete journal: the first tombstone changes
-state to `Deleted`, while any legacy/corrupt suffix advances the durable sequence but
-applies no effects. A truncated replay that does not reach the exact high-water fails
-closed. Repair tracks a rejected snapshot's durable sequence separately from actor
-snapshot bookkeeping so the store fence still detects a newer derived write.
+Ownership recovery captures both the journal boundary and the exact snapshot bytes.
+For a snapshot-only migration entity, the decoded snapshot is the complete source and
+is materialized without spawning an actor or appending a bootstrap event. When a
+journal exists, the snapshot's validated fields are only the legacy baseline and the
+complete journal is replayed over them: the first tombstone changes state to
+`Deleted`, while any legacy/corrupt suffix advances the durable sequence but applies
+no effects. The snapshot bytes and journal high-water are both re-read before return;
+a changed source retries, and a truncated replay that does not reach the exact
+high-water fails closed.
+
+Coverage-complete keyed hits, incomplete-coverage reconciliation scans, and backfill
+all use that same stable source algorithm. Journal replay reads ascending pages bounded
+by the captured inclusive high-water and a fixed per-read page budget applied inside
+each storage backend. Every page must contain the exact contiguous sequence range
+promised by the captured boundary; a short, gapped, undecodable, or failed page is
+uncertainty, not absence. Paging bounds allocation without imposing the snapshot-tail
+budget on a valid long-lived stream, so a stream with more than 10,000 lifetime events
+remains readable while ordinary actor hydration retains its bounded unsnapshotted-tail rule.
+The runtime composite audit record is recognized by both its event type and its
+decodable audit payload. Because domain actions may legally share the
+`CompositeEvent` name, an event-type match alone never suppresses ordinary replay;
+an undecodable collision fails strict ownership recovery instead of silently
+advancing the fence.
+
+Asynchronous projection repair is part of the same durable-source stabilization attempt:
+the reconstructed live row is upserted, or the terminal row removed, before the
+closing journal-and-snapshot read. A rename, tombstone, or same-sequence snapshot
+rewrite that crosses repair changes that closing boundary and forces a full retry; no
+derived mutation runs after the successful fence. Catalog compatibility requires both
+journal and snapshot absence, checked before and after materialization for complete
+keyed hits as well as incomplete scans and for both live and deleted rows. Exhausted faults or races propagate a
+typed unstable-ownership result to the OData layer rather than returning a partial or
+false-empty success. A catalog load error does not disable a nonempty authoritative
+journal, which continues through strict replay. For a journal-absent compatibility
+candidate, however, that same error is uncertainty: it cannot be converted into "row
+absent" and then replaced by a newly spawned actor's empty compatibility state.
 
 The backfill calls the exact primitive for current entities whose key is
 all-null/non-scalar and for definitively skippable deleted/phantom streams, so stale
@@ -270,9 +306,13 @@ authoritative and uses budgeted journal/actor materialization.
 - Fault-truncated terminal replay, stale-live-snapshot rejection, duplicate-delete
   delivery, and non-idempotent action retry prove recovery reaches the exact durable
   high-water without reapplying effects.
-- Sim and real-Postgres races prove snapshot/catalog-only writers invalidate an
-  in-flight coverage epoch while journal-dominated projection writes do not, and
-  prove an equal-sequence journal source change rejects snapshot-derived repair.
+- Equal-sequence complete and incomplete keyed reads, schema-incompatible events,
+  long-lived paged replay, deleted-catalog source transitions, and a tombstone racing
+  projection repair prove every ownership read closes on one journal generation.
+- Sim and real-Postgres races prove changed snapshots and catalog-only writers
+  invalidate an in-flight coverage epoch while identical snapshots and
+  journal-dominated projection writes do not, and prove an equal-sequence journal
+  source change rejects snapshot-derived repair.
 - A live local server flow demonstrates release and reclaim through the actual API.
 - Restarted normal, count-bearing, and ordered keyed reads return only the current
   owner while a lagging tombstone projection is repaired; the same options never

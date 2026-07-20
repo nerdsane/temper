@@ -195,6 +195,23 @@ impl EventStore for BoundaryMutationStore {
         EventStore::read_events(&self.inner, persistence_id, from_sequence).await
     }
 
+    async fn read_events_page(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        through_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        EventStore::read_events_page(
+            &self.inner,
+            persistence_id,
+            from_sequence,
+            through_sequence,
+            limit,
+        )
+        .await
+    }
+
     async fn journal_boundary(
         &self,
         persistence_id: &str,
@@ -412,5 +429,9 @@ async fn incomplete_scan_retries_when_journal_advances_after_replay() {
     assert_eq!(current.entities.len(), 1);
     assert_eq!(current.entities[0]["fields"]["Path"], raced_path);
     assert_eq!(current.entities[0]["sequence_nr"], 2);
-    assert_eq!(boundary_calls.load(Ordering::SeqCst), 5);
+    assert_eq!(
+        boundary_calls.load(Ordering::SeqCst),
+        6,
+        "each replay generation must be closed both before and after projection repair"
+    );
 }

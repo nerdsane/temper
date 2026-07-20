@@ -11,7 +11,10 @@ mod snapshot_queue;
 pub mod types;
 
 pub use actor::EntityActor;
-pub(crate) use actor::recover_entity_state_from_store;
+pub(crate) use actor::{
+    CapturedEntitySnapshot, StableEntitySource, recover_entity_state_from_stable_sources,
+    recover_entity_state_from_store, stable_entity_source_is_current,
+};
 pub use effects::{
     ProcessResult, ScheduledAction, apply_effects, apply_new_state_fallback, build_eval_context,
     process_action, process_action_with_xref, sync_fields,

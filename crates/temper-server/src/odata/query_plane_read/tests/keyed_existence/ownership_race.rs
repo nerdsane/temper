@@ -65,11 +65,17 @@ async fn seed_owner(
     path: &str,
 ) {
     let persistence_id = format!("{tenant}:Order:{entity_id}");
+    let mut initial_event = field_update_event(&persistence_id, path, "seed-owner");
+    initial_event.payload["fields"] = serde_json::json!({
+        "Id": entity_id,
+        "WorkspaceId": workspace,
+        "Path": path,
+    });
     EventStore::append_with_index_rows(
         store,
         &persistence_id,
         0,
-        &[field_update_event(&persistence_id, path, "seed-owner")],
+        &[initial_event],
         &[key_row(workspace, path)],
         &[],
         IndexReconciliation {
@@ -264,6 +270,28 @@ impl EventStore for AbaTransferStore {
         EventStore::read_events(&self.inner, persistence_id, from_sequence).await
     }
 
+    async fn read_events_page(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        through_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        if persistence_id == self.a_persistence_id()
+            && !self.moved_once.swap(true, Ordering::SeqCst)
+        {
+            self.transfer(false).await?;
+        }
+        EventStore::read_events_page(
+            &self.inner,
+            persistence_id,
+            from_sequence,
+            through_sequence,
+            limit,
+        )
+        .await
+    }
+
     async fn save_snapshot(
         &self,
         persistence_id: &str,
@@ -277,11 +305,6 @@ impl EventStore for AbaTransferStore {
         &self,
         persistence_id: &str,
     ) -> Result<Option<(u64, Vec<u8>)>, PersistenceError> {
-        if persistence_id == self.a_persistence_id()
-            && !self.moved_once.swap(true, Ordering::SeqCst)
-        {
-            self.transfer(false).await?;
-        }
         EventStore::load_snapshot(&self.inner, persistence_id).await
     }
 

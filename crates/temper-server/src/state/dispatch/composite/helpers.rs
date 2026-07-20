@@ -362,7 +362,8 @@ pub(super) fn composite_batch_persistence_error(error: PersistenceError) -> Disp
         PersistenceError::ConcurrencyViolation { .. }
         | PersistenceError::KeyContractChanged { .. }
         | PersistenceError::JournalBoundaryChanged { .. }
-        | PersistenceError::EntityLivenessChanged { .. } => {
+        | PersistenceError::EntityLivenessChanged { .. }
+        | PersistenceError::SnapshotGenerationChanged => {
             DispatchError::Conflict(format!("composite batch persistence conflict: {error}"))
         }
         PersistenceError::Serialization(_) | PersistenceError::Storage(_) => {

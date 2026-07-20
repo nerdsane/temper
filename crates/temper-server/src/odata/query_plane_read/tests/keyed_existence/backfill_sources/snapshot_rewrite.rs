@@ -44,6 +44,23 @@ impl EventStore for SnapshotRewriteDuringBackfillStore {
         EventStore::read_events(&self.inner, persistence_id, from_sequence).await
     }
 
+    async fn read_events_page(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        through_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        EventStore::read_events_page(
+            &self.inner,
+            persistence_id,
+            from_sequence,
+            through_sequence,
+            limit,
+        )
+        .await
+    }
+
     async fn save_snapshot(
         &self,
         persistence_id: &str,
@@ -57,16 +74,7 @@ impl EventStore for SnapshotRewriteDuringBackfillStore {
         &self,
         persistence_id: &str,
     ) -> Result<Option<(u64, Vec<u8>)>, PersistenceError> {
-        let captured = EventStore::load_snapshot(&self.inner, persistence_id).await?;
-        if persistence_id == self.persistence_id && !self.rewritten.swap(true, Ordering::SeqCst) {
-            let sequence_nr = captured
-                .as_ref()
-                .map(|(sequence_nr, _)| *sequence_nr)
-                .expect("rewrite fixture requires a captured snapshot");
-            EventStore::save_snapshot(&self.inner, persistence_id, sequence_nr, &self.replacement)
-                .await?;
-        }
-        Ok(captured)
+        EventStore::load_snapshot(&self.inner, persistence_id).await
     }
 
     async fn list_entity_ids(
@@ -101,6 +109,19 @@ impl EventStore for SnapshotRewriteDuringBackfillStore {
         contract_fence: KeyIndexBackfillFence<'_>,
         key_rows: &[EntityKeyRow],
     ) -> Result<(), PersistenceError> {
+        if !self.rewritten.swap(true, Ordering::SeqCst) {
+            let sequence_nr = EventStore::load_snapshot(&self.inner, &self.persistence_id)
+                .await?
+                .map(|(sequence_nr, _)| sequence_nr)
+                .expect("rewrite fixture requires a captured snapshot");
+            EventStore::save_snapshot(
+                &self.inner,
+                &self.persistence_id,
+                sequence_nr,
+                &self.replacement,
+            )
+            .await?;
+        }
         EventStore::backfill_entity_keys(
             &self.inner,
             tenant,

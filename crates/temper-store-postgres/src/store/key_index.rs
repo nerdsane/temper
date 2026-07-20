@@ -3,11 +3,13 @@
 use sqlx::PgPool;
 use temper_runtime::persistence::{EntityKeyRow, KeyIndexBackfillFence, PersistenceError};
 
+mod coverage;
 mod query;
 
+pub(crate) use coverage::{
+    DerivedWriteSource, invalidate_key_coverage_for_derived_write, reconcile_key_contract_state,
+};
 pub(super) use query::{keyed_entity_ids, lookup};
-
-const UNKNOWN_KEY_SET_SIGNATURE: &str = "<unknown>";
 
 /// Serialize every journal mutation and sequence-fenced derived-index repair for one
 /// persistence stream. Advisory transaction locks avoid a new coordination table;
@@ -40,154 +42,6 @@ pub(crate) async fn lock_key_contract(
     entity_type: &str,
 ) -> Result<(), PersistenceError> {
     lock_event_stream(tx, &key_contract_lock_key(tenant, entity_type)).await
-}
-
-/// Record the key signature used by a durable write. A changed or previously
-/// unknown contract advances the monotonic revision and invalidates coverage in the
-/// same transaction as the journal append.
-pub(crate) async fn reconcile_key_contract_state(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant: &str,
-    entity_type: &str,
-    key_set_signature: Option<&str>,
-) -> Result<u64, PersistenceError> {
-    let supplied = key_set_signature.unwrap_or(UNKNOWN_KEY_SET_SIGNATURE);
-    let existing: Option<(String, i64)> = crate::dbm::postgres_query_as!(
-        "SELECT key_set, revision FROM key_index_contract_state \
-         WHERE tenant = $1 AND entity_type = $2 FOR UPDATE",
-    )
-    .bind(tenant)
-    .bind(entity_type)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-
-    if let Some((current, revision)) = existing {
-        if current == supplied {
-            return Ok(revision as u64);
-        }
-        let next = revision.checked_add(1).ok_or_else(|| {
-            PersistenceError::Storage(format!(
-                "key contract revision overflow for {tenant}:{entity_type}"
-            ))
-        })?;
-        crate::dbm::postgres_query!(
-            "UPDATE key_index_contract_state \
-             SET key_set = $3, revision = $4, updated_at = now() \
-             WHERE tenant = $1 AND entity_type = $2",
-        )
-        .bind(tenant)
-        .bind(entity_type)
-        .bind(supplied)
-        .bind(next)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        crate::dbm::postgres_query!(
-            "DELETE FROM key_index_backfill_watermark \
-             WHERE tenant = $1 AND entity_type = $2",
-        )
-        .bind(tenant)
-        .bind(entity_type)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        return Ok(next as u64);
-    }
-
-    crate::dbm::postgres_query!(
-        "INSERT INTO key_index_contract_state (tenant, entity_type, key_set, revision) \
-         VALUES ($1, $2, $3, 1)",
-    )
-    .bind(tenant)
-    .bind(entity_type)
-    .bind(supplied)
-    .execute(&mut **tx)
-    .await
-    .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-    // A legacy watermark without contract state cannot prove that intervening writes
-    // used the same definition. Withhold it until one fenced repair completes.
-    crate::dbm::postgres_query!(
-        "DELETE FROM key_index_backfill_watermark \
-         WHERE tenant = $1 AND entity_type = $2",
-    )
-    .bind(tenant)
-    .bind(entity_type)
-    .execute(&mut **tx)
-    .await
-    .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-    Ok(1)
-}
-
-/// Advance the current reconciliation epoch when a durable snapshot or catalog
-/// mutation is not already represented by the same stream's journal.
-///
-/// Callers hold the type contract lock and the entity stream lock. The signature
-/// remains unchanged; only the monotonic revision advances, invalidating an
-/// enumeration that began before a snapshot/catalog-only entity appeared or
-/// changed. Normal projections at or below the journal high-water are already
-/// covered by append fencing and do not churn the epoch.
-pub(crate) async fn invalidate_key_coverage_for_derived_write(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant: &str,
-    entity_type: &str,
-    entity_id: &str,
-    durable_sequence: Option<u64>,
-) -> Result<(), PersistenceError> {
-    if let Some(durable_sequence) = durable_sequence {
-        let journal_sequence: Option<i64> = crate::dbm::postgres_query_scalar!(
-            "SELECT MAX(sequence_nr) FROM events \
-             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
-        )
-        .bind(tenant)
-        .bind(entity_type)
-        .bind(entity_id)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        if journal_sequence.is_some_and(|sequence| sequence as u64 >= durable_sequence) {
-            return Ok(());
-        }
-    }
-
-    let current: Option<(String, i64)> = crate::dbm::postgres_query_as!(
-        "SELECT key_set, revision FROM key_index_contract_state \
-         WHERE tenant = $1 AND entity_type = $2 FOR UPDATE",
-    )
-    .bind(tenant)
-    .bind(entity_type)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-    let Some((_, revision)) = current else {
-        return Ok(());
-    };
-    let next = revision.checked_add(1).ok_or_else(|| {
-        PersistenceError::Storage(format!(
-            "key reconciliation revision overflow for {tenant}:{entity_type}"
-        ))
-    })?;
-    crate::dbm::postgres_query!(
-        "UPDATE key_index_contract_state \
-         SET revision = $3, updated_at = now() \
-         WHERE tenant = $1 AND entity_type = $2",
-    )
-    .bind(tenant)
-    .bind(entity_type)
-    .bind(next)
-    .execute(&mut **tx)
-    .await
-    .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-    crate::dbm::postgres_query!(
-        "DELETE FROM key_index_backfill_watermark \
-         WHERE tenant = $1 AND entity_type = $2",
-    )
-    .bind(tenant)
-    .bind(entity_type)
-    .execute(&mut **tx)
-    .await
-    .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-    Ok(())
 }
 
 pub(super) async fn backfill_entity_keys(
@@ -235,6 +89,29 @@ pub(super) async fn backfill_entity_keys(
 
     let lock_key = event_stream_lock_key(tenant, entity_type, entity_id);
     lock_event_stream(&mut tx, &lock_key).await?;
+
+    let current_snapshot: Option<(i64, Vec<u8>)> = crate::dbm::postgres_query_as!(
+        "SELECT sequence_nr, state FROM snapshots \
+         WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+    )
+    .bind(tenant)
+    .bind(entity_type)
+    .bind(entity_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+    let snapshot_matches = match (contract_fence.expected_snapshot, current_snapshot.as_ref()) {
+        (None, None) => true,
+        (Some(expected), Some((sequence_nr, state))) => {
+            *sequence_nr >= 0
+                && *sequence_nr as u64 == expected.sequence_nr
+                && state.as_slice() == expected.state
+        }
+        _ => false,
+    };
+    if !snapshot_matches {
+        return Err(PersistenceError::SnapshotGenerationChanged);
+    }
 
     // Migration-era entities can be represented only by a snapshot or catalog
     // projection. Fence against the newest durable representation, not merely the

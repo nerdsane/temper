@@ -1,5 +1,5 @@
 use super::*;
-use temper_runtime::persistence::{EntityKeyRow, KeyIndexBackfillFence};
+use temper_runtime::persistence::{EntityKeyRow, KeyIndexBackfillFence, SnapshotBackfillFence};
 
 #[tokio::test]
 async fn append_batch_reconciles_keys_and_rolls_back_conflicting_claims() {
@@ -126,6 +126,7 @@ async fn key_reconciliation_includes_snapshot_and_key_only_owners() {
                 contract_revision: repair_revision,
                 expected_journal_sequence: 0,
                 expected_entity_live: false,
+                expected_snapshot: None,
             },
             &[orphan],
         )
@@ -172,6 +173,10 @@ async fn key_reconciliation_includes_snapshot_and_key_only_owners() {
                 contract_revision: repair_revision,
                 expected_journal_sequence: 0,
                 expected_entity_live: true,
+                expected_snapshot: Some(SnapshotBackfillFence {
+                    sequence_nr: 5,
+                    state: b"snapshot-only",
+                }),
             },
             std::slice::from_ref(&snapshot_key),
         )
@@ -194,6 +199,10 @@ async fn key_reconciliation_includes_snapshot_and_key_only_owners() {
                 contract_revision: repair_revision,
                 expected_journal_sequence: 0,
                 expected_entity_live: true,
+                expected_snapshot: Some(SnapshotBackfillFence {
+                    sequence_nr: 5,
+                    state: b"snapshot-only",
+                }),
             },
             std::slice::from_ref(&snapshot_key),
         )
@@ -258,6 +267,10 @@ async fn journal_source_fence_rejects_equal_sequence_snapshot_repair() {
                 contract_revision: repair_revision,
                 expected_journal_sequence: 0,
                 expected_entity_live: true,
+                expected_snapshot: Some(SnapshotBackfillFence {
+                    sequence_nr: 1,
+                    state: b"snapshot-only",
+                }),
             },
             std::slice::from_ref(&snapshot_key),
         )

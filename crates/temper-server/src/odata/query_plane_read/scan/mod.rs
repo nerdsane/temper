@@ -183,7 +183,7 @@ pub(super) async fn materialize_and_authorize_ids(
     catalog_policy: CatalogMaterializationPolicy,
     counters: &mut ScanCounters,
     authorization: QueryPlaneReadAuthorization,
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, QueryPlaneReadError> {
     counters.candidate_count += entity_ids.len();
     let materialized = materialize_entity_set_entities(
         request.state,
@@ -195,14 +195,17 @@ pub(super) async fn materialize_and_authorize_ids(
         None,
     )
     .await;
+    if materialized.error.is_some() {
+        return Err(QueryPlaneReadError::KeyOwnershipUnstable);
+    }
     counters.materialized_count += materialized.entities.len();
     counters.catalog_shadow_check_budget += materialized.catalog_shadow_check_budget;
     counters.catalog_shadow_check_scheduled += materialized.catalog_shadow_check_scheduled;
-    materialized
+    Ok(materialized
         .entities
         .into_iter()
         .filter(|entity| is_authorized_entity(request, entity, authorization))
-        .collect()
+        .collect())
 }
 
 pub(super) async fn materialize_filter_and_authorize_ids(
@@ -211,7 +214,7 @@ pub(super) async fn materialize_filter_and_authorize_ids(
     catalog_policy: CatalogMaterializationPolicy,
     counters: &mut ScanCounters,
     authorization: QueryPlaneReadAuthorization,
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, QueryPlaneReadError> {
     counters.candidate_count += entity_ids.len();
     let materialized = materialize_entity_set_entities(
         request.state,
@@ -223,6 +226,9 @@ pub(super) async fn materialize_filter_and_authorize_ids(
         None,
     )
     .await;
+    if materialized.error.is_some() {
+        return Err(QueryPlaneReadError::KeyOwnershipUnstable);
+    }
     counters.materialized_count += materialized.entities.len();
     counters.catalog_shadow_check_budget += materialized.catalog_shadow_check_budget;
     counters.catalog_shadow_check_scheduled += materialized.catalog_shadow_check_scheduled;
@@ -237,8 +243,8 @@ pub(super) async fn materialize_filter_and_authorize_ids(
         materialized.entities
     };
 
-    entities
+    Ok(entities
         .into_iter()
         .filter(|entity| is_authorized_entity(request, entity, authorization))
-        .collect()
+        .collect())
 }

@@ -76,6 +76,15 @@ pub trait DynEventStore: Send + Sync {
         from_sequence: u64,
     ) -> EventStoreFuture<'a, Result<Vec<PersistenceEnvelope>, PersistenceError>>;
 
+    /// Read one storage-bounded event page through an inclusive captured boundary.
+    fn read_events_page<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        from_sequence: u64,
+        through_sequence: u64,
+        limit: usize,
+    ) -> EventStoreFuture<'a, Result<Vec<PersistenceEnvelope>, PersistenceError>>;
+
     fn journal_boundary<'a>(
         &'a self,
         persistence_id: &'a str,
@@ -295,6 +304,19 @@ impl BoxedEventStore {
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
         self.0.read_events(persistence_id, from_sequence).await
+    }
+
+    /// Read one storage-bounded page within a caller-captured journal boundary.
+    pub async fn read_events_page(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        through_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        self.0
+            .read_events_page(persistence_id, from_sequence, through_sequence, limit)
+            .await
     }
 
     /// Return the exact high-water and terminal boundary for one persistence stream.

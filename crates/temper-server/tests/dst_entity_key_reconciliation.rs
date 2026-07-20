@@ -58,6 +58,7 @@ async fn dst_orphan_to_live_repair_is_liveness_fenced() {
                     contract_revision: repair_revision,
                     expected_journal_sequence: 0,
                     expected_entity_live: false,
+                    expected_snapshot: None,
                 },
                 std::slice::from_ref(&live_key),
             )
@@ -99,6 +100,7 @@ async fn dst_orphan_to_live_repair_is_liveness_fenced() {
                     contract_revision: repair_revision,
                     expected_journal_sequence: 1,
                     expected_entity_live: false,
+                    expected_snapshot: None,
                 },
                 &[],
             )
@@ -196,6 +198,7 @@ async fn dst_action_named_tombstone_outranks_newer_snapshot() {
                     contract_revision: repair_revision,
                     expected_journal_sequence: 2,
                     expected_entity_live: true,
+                    expected_snapshot: None,
                 },
                 &[],
             )
@@ -227,6 +230,7 @@ async fn dst_action_named_tombstone_outranks_newer_snapshot() {
                     contract_revision: repair_revision,
                     expected_journal_sequence: 2,
                     expected_entity_live: false,
+                    expected_snapshot: None,
                 },
                 &[],
             )
@@ -386,6 +390,7 @@ async fn dst_stale_backfill_cannot_overwrite_newer_live_ownership() {
                     contract_revision: repair_revision,
                     expected_journal_sequence: 1,
                     expected_entity_live: true,
+                    expected_snapshot: None,
                 },
                 std::slice::from_ref(&old_path),
             )
@@ -427,6 +432,7 @@ async fn dst_stale_backfill_cannot_overwrite_newer_live_ownership() {
                     contract_revision: repair_revision,
                     expected_journal_sequence: 2,
                     expected_entity_live: true,
+                    expected_snapshot: None,
                 },
                 std::slice::from_ref(&new_path),
             )
@@ -584,6 +590,7 @@ async fn dst_cross_stream_contract_change_fences_repair_rows() {
                     contract_revision: stale_revision,
                     expected_journal_sequence: 1,
                     expected_entity_live: true,
+                    expected_snapshot: None,
                 },
                 std::slice::from_ref(&stale_row),
             )
@@ -667,6 +674,7 @@ async fn dst_conflicting_backfill_claim_fails_without_partial_mutation() {
                     contract_revision: repair_revision,
                     expected_journal_sequence: 1,
                     expected_entity_live: true,
+                    expected_snapshot: None,
                 },
                 std::slice::from_ref(&claimed),
             )

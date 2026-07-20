@@ -45,29 +45,19 @@ pub(super) fn reconcile_key_contract_locked(
     }
 }
 
-/// Invalidate an in-flight coverage proof when a snapshot-only durable mutation
-/// expands or advances the entity universe outside the event journal.
+/// Invalidate an in-flight coverage proof when a snapshot mutation changes the
+/// durable state used to derive ownership.
 ///
-/// A normal post-append snapshot is already represented by a journal sequence and
-/// does not change coverage. Keeping the current signature while advancing its
-/// revision makes publication ABA-safe without turning every snapshot into a
-/// contract change.
-pub(super) fn invalidate_coverage_for_derived_write_locked(
+/// Even at or below the journal high-water, snapshot bytes are the recovery
+/// baseline for legacy fields. Keeping the current signature while advancing its
+/// revision makes publication ABA-safe without turning a snapshot change into a
+/// contract change. Identical snapshot writes are filtered by the caller.
+pub(super) fn invalidate_coverage_for_snapshot_write_locked(
     inner: &mut SimEventStoreInner,
     persistence_id: &str,
-    durable_sequence: u64,
 ) -> Result<(), PersistenceError> {
     let (tenant, entity_type, _) =
         parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
-    let journal_dominates = inner
-        .journals
-        .get(persistence_id)
-        .and_then(|journal| journal.last())
-        .is_some_and(|event| event.sequence_nr >= durable_sequence);
-    if journal_dominates {
-        return Ok(());
-    }
-
     let type_key = (tenant.to_string(), entity_type.to_string());
     let Some((signature, revision)) = inner.key_index_contract.get(&type_key).cloned() else {
         return Ok(());
@@ -114,6 +104,19 @@ pub(super) fn backfill_entity_keys(
     }
 
     let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+    let snapshot_matches = match (
+        contract_fence.expected_snapshot,
+        inner.snapshots.get(&persistence_id),
+    ) {
+        (None, None) => true,
+        (Some(expected), Some((sequence_nr, state))) => {
+            *sequence_nr == expected.sequence_nr && state.as_slice() == expected.state
+        }
+        _ => false,
+    };
+    if !snapshot_matches {
+        return Err(PersistenceError::SnapshotGenerationChanged);
+    }
     let journal_sequence = inner
         .journals
         .get(&persistence_id)

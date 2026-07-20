@@ -94,6 +94,9 @@ pub enum PersistenceError {
         /// Journal high-water observed under the store's stream lock.
         actual: u64,
     },
+    /// A key-index repair's exact snapshot source changed before mutation.
+    #[error("snapshot generation changed during key repair")]
+    SnapshotGenerationChanged,
     /// Event serialization or deserialization failed.
     #[error("serialization error: {0}")]
     Serialization(String),

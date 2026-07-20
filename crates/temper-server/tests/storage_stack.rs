@@ -139,6 +139,19 @@ impl EventStore for RecordingEventStore {
         Ok(vec![test_envelope(1)])
     }
 
+    async fn read_events_page(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        through_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        let mut events = EventStore::read_events(self, persistence_id, from_sequence).await?;
+        events.retain(|event| event.sequence_nr <= through_sequence);
+        events.truncate(limit);
+        Ok(events)
+    }
+
     async fn save_snapshot(
         &self,
         persistence_id: &str,

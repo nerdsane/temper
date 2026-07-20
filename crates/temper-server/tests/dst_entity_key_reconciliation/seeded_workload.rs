@@ -164,6 +164,7 @@ async fn run_reconciliation_workload(seed: u64) -> ReconciliationTrace {
                     contract_revision: first_repair_revision,
                     expected_journal_sequence: stale_sequence,
                     expected_entity_live: true,
+                    expected_snapshot: None,
                 },
                 &stale_rows,
             )
@@ -233,6 +234,7 @@ async fn run_reconciliation_workload(seed: u64) -> ReconciliationTrace {
                 contract_revision: final_revision,
                 expected_journal_sequence: 2,
                 expected_entity_live: true,
+                expected_snapshot: None,
             },
             &final_rows,
         )

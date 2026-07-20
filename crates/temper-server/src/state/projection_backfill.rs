@@ -8,10 +8,12 @@ use crate::runtime_metrics;
 
 use super::ServerState;
 
+mod entity_load;
 mod key_index;
 mod replay_parity;
 mod vector_index;
 
+use entity_load::{EntityLoadOutcome, load_entity_current_fields};
 pub(super) use key_index::populate_key_index_from_snapshots;
 pub(super) use replay_parity::verify_query_projection_replay_parity;
 pub(super) use vector_index::populate_vector_index_from_snapshots;
@@ -33,92 +35,6 @@ pub(super) fn transition_table_for(
             .get(entity_type)
             .map(|table| (**table).clone())
     })
-}
-
-/// Outcome of loading one entity's current state for an index backfill (ADR-0153,
-/// ADR-0155). Shared by the key and vector backfills so they classify entities the
-/// same way — the distinction is the watermark soundness gate.
-pub(super) enum EntityLoadOutcome {
-    /// Loaded — index it from these fields, fenced at the replayed journal sequence.
-    Fields {
-        fields: serde_json::Value,
-        sequence_nr: u64,
-        journal_sequence: u64,
-    },
-    /// Durably deleted. Tombstone replay is authoritative even if an asynchronous
-    /// catalog row still contains the entity's former live fields.
-    Deleted {
-        sequence_nr: u64,
-        journal_sequence: u64,
-    },
-    /// No replayable events or valid snapshot state. This can be a true key-only
-    /// phantom, or a migration-era entity whose catalog is its durable state.
-    Missing {
-        sequence_nr: u64,
-        journal_sequence: u64,
-    },
-    /// The entity exists (it was enumerated from the durable store) but its current
-    /// state could not be loaded — no transition table to replay with, an unreadable
-    /// snapshot, or a replay error. Indexing it is impossible, so the type must NOT be
-    /// watermarked; otherwise a read would treat a present-but-unindexed entity as
-    /// authoritatively covered. This is the soundness gate.
-    LoadFailed,
-}
-
-/// Load one entity's CURRENT state for an index backfill: snapshot if present and
-/// readable, else strict event replay (so a field mutated after the last snapshot is
-/// indexed at its current value, and a journal read failure fails the watermark
-/// rather than silently "starting fresh").
-pub(super) async fn load_entity_current_fields(
-    tenant: &TenantId,
-    entity_type: &str,
-    entity_id: &str,
-    table: Option<&temper_jit::TransitionTable>,
-    store: &crate::storage::BoxedEventStore,
-    backend: crate::storage::BackendLabel,
-    blob_store: Option<&crate::blob_store::BlobStore>,
-) -> EntityLoadOutcome {
-    let Some(table) = table else {
-        return EntityLoadOutcome::LoadFailed;
-    };
-    let persistence_id = format!("{}:{entity_type}:{entity_id}", tenant.as_str());
-    let journal_sequence = match store.journal_boundary(&persistence_id).await {
-        Ok(boundary) => boundary.latest_sequence,
-        Err(_) => return EntityLoadOutcome::LoadFailed,
-    };
-    let durable_snapshot_sequence = match store.load_snapshot(&persistence_id).await {
-        Ok(Some((sequence_nr, _))) => sequence_nr,
-        Ok(None) => 0,
-        Err(_) => return EntityLoadOutcome::LoadFailed,
-    };
-    match recover_entity_state_from_store(
-        tenant.as_str(),
-        entity_type,
-        entity_id,
-        table,
-        store,
-        backend,
-        &serde_json::json!({}),
-        blob_store,
-        true, // strict: a journal read failure → Err → LoadFailed (don't watermark)
-    )
-    .await
-    {
-        Err(_) => EntityLoadOutcome::LoadFailed,
-        Ok(state) if state.status == "Deleted" => EntityLoadOutcome::Deleted {
-            sequence_nr: state.sequence_nr.max(durable_snapshot_sequence),
-            journal_sequence,
-        },
-        Ok(state) if state.total_event_count == 0 => EntityLoadOutcome::Missing {
-            sequence_nr: state.sequence_nr.max(durable_snapshot_sequence),
-            journal_sequence,
-        },
-        Ok(state) => EntityLoadOutcome::Fields {
-            fields: state.fields,
-            sequence_nr: state.sequence_nr.max(durable_snapshot_sequence),
-            journal_sequence,
-        },
-    }
 }
 
 /// Backfill the broad `entity_field_index` (every field of every entity) so the native

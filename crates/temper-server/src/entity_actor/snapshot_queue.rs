@@ -308,6 +308,16 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn read_events_page(
+            &self,
+            _persistence_id: &str,
+            _from_sequence: u64,
+            _through_sequence: u64,
+            _limit: usize,
+        ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+            Ok(Vec::new())
+        }
+
         async fn save_snapshot(
             &self,
             _persistence_id: &str,

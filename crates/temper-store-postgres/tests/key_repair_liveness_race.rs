@@ -104,6 +104,7 @@ fn stale_orphan_classification_cannot_delete_a_concurrent_live_claim() {
                     contract_revision: repair_revision,
                     expected_journal_sequence: 1,
                     expected_entity_live: false,
+                    expected_snapshot: None,
                 },
                 &[],
             )

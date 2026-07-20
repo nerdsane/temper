@@ -7,7 +7,7 @@
 
 use super::*;
 use temper_runtime::persistence::{
-    EventMetadata, EventStore, KeyIndexBackfillFence, PersistenceEnvelope,
+    EventMetadata, EventStore, KeyIndexBackfillFence, PersistenceEnvelope, SnapshotBackfillFence,
 };
 use temper_store_sim::{SimEventStore, SimFaultConfig};
 
@@ -880,6 +880,11 @@ async fn key_index_backfill_reconciles_existing_rows_and_still_watermarks() {
     }
     // Pre-key ord-a directly (a prior partial pass / co-commit already keyed it).
     let ord_a_sequence = current_sequence(&store, &tenant, "Order", "ord-a").await;
+    let (ord_a_snapshot_sequence, ord_a_snapshot) = store
+        .load_snapshot(&format!("{tenant}:Order:ord-a"))
+        .await
+        .expect("load ord-a snapshot")
+        .expect("ord-a snapshot exists");
     let repair_revision = store
         .begin_key_index_backfill(tenant.as_str(), "Order", ORDER_KEY_SET_SIGNATURE)
         .await
@@ -895,6 +900,10 @@ async fn key_index_backfill_reconciles_existing_rows_and_still_watermarks() {
                 contract_revision: repair_revision,
                 expected_journal_sequence: 1,
                 expected_entity_live: true,
+                expected_snapshot: Some(SnapshotBackfillFence {
+                    sequence_nr: ord_a_snapshot_sequence,
+                    state: &ord_a_snapshot,
+                }),
             },
             &[temper_runtime::persistence::EntityKeyRow {
                 key_name: "ws_path".to_string(),
@@ -994,6 +1003,11 @@ async fn key_index_backfill_skips_deleted_entities_without_blocking_watermark() 
         ("ord-null", all_null_stale.clone()),
     ] {
         let sequence_nr = current_sequence(&store, &tenant, "Order", entity_id).await;
+        let (snapshot_sequence, snapshot_state) = store
+            .load_snapshot(&format!("{tenant}:Order:{entity_id}"))
+            .await
+            .expect("load fixture snapshot")
+            .expect("fixture snapshot exists");
         store
             .backfill_entity_keys(
                 tenant.as_str(),
@@ -1005,6 +1019,10 @@ async fn key_index_backfill_skips_deleted_entities_without_blocking_watermark() 
                     contract_revision: stale_revision,
                     expected_journal_sequence: 1,
                     expected_entity_live: true,
+                    expected_snapshot: Some(SnapshotBackfillFence {
+                        sequence_nr: snapshot_sequence,
+                        state: &snapshot_state,
+                    }),
                 },
                 &[temper_runtime::persistence::EntityKeyRow {
                     key_name: "ws_path".to_string(),
@@ -1415,6 +1433,7 @@ async fn key_index_backfill_rekeys_existing_entities_when_a_key_is_added() {
             )
             .await
             .expect("seed snapshot");
+        let snapshot_bytes = serde_json::to_vec(&snapshot).unwrap();
         // Key it under the OLD key only (so row presence cannot be mistaken for
         // complete coverage of the new declaration).
         let old_signature = "old_key";
@@ -1433,6 +1452,10 @@ async fn key_index_backfill_rekeys_existing_entities_when_a_key_is_added() {
                     contract_revision: old_revision,
                     expected_journal_sequence: 1,
                     expected_entity_live: true,
+                    expected_snapshot: Some(SnapshotBackfillFence {
+                        sequence_nr: 1,
+                        state: &snapshot_bytes,
+                    }),
                 },
                 &[temper_runtime::persistence::EntityKeyRow {
                     key_name: "old_key".to_string(),

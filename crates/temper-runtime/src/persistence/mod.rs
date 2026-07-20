@@ -6,7 +6,7 @@ mod types;
 pub use batch::{PersistenceAppend, PersistenceAppendResult};
 pub use index::{
     EntityKeyLookup, EntityKeyRow, EntityVectorCandidate, EntityVectorRow, IndexReconciliation,
-    KeyIndexBackfillFence, pack_f32_le, unpack_f32_le,
+    KeyIndexBackfillFence, SnapshotBackfillFence, pack_f32_le, unpack_f32_le,
 };
 pub use types::{JournalBoundary, PersistenceEnvelope, PersistenceError, storage_error};
 
@@ -247,7 +247,8 @@ pub trait EventStore: Send + Sync + 'static {
     /// Reconcile declared key-index rows for an **existing** entity (ADR-0153,
     /// ADR-0171), without appending a journal event. The store first validates that
     /// `contract_fence` still identifies the tenant/type contract, exact journal
-    /// boundary, and entity liveness under which replay derived `key_rows`, then
+    /// boundary, exact snapshot generation, and entity liveness under which replay
+    /// derived `key_rows`, then
     /// validates `expected_sequence`. Only while all fences hold does it DELETE every existing
     /// row for `(tenant, entity_type, entity_id)` and INSERT `key_rows`. Idempotent,
     /// and an empty set purges stale ownership for deleted or currently unkeyable
@@ -255,6 +256,7 @@ pub trait EventStore: Send + Sync + 'static {
     /// [`PersistenceError::KeyContractChanged`]; a concurrent journal-source change
     /// fails with [`PersistenceError::JournalBoundaryChanged`]; a concurrent liveness
     /// change fails with [`PersistenceError::EntityLivenessChanged`]; a concurrent
+    /// snapshot change fails with [`PersistenceError::SnapshotGenerationChanged`]; a concurrent
     /// durable sequence advance fails with [`PersistenceError::ConcurrencyViolation`]. Used to populate and repair
     /// `entity_key_index` before a keyed read can treat absence as authoritative. The
     /// default is a no-op (non-indexing backends).
@@ -439,6 +441,19 @@ pub trait EventStore: Send + Sync + 'static {
         &self,
         persistence_id: &str,
         from_sequence: u64,
+    ) -> impl std::future::Future<Output = Result<Vec<PersistenceEnvelope>, PersistenceError>> + Send;
+
+    /// Read one bounded, ascending journal page after `from_sequence` and no later
+    /// than the inclusive `through_sequence` captured by the caller.
+    ///
+    /// Implementations must apply `limit` at the storage boundary rather than
+    /// fetching an unbounded suffix first. Callers must pass a positive limit.
+    fn read_events_page(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        through_sequence: u64,
+        limit: usize,
     ) -> impl std::future::Future<Output = Result<Vec<PersistenceEnvelope>, PersistenceError>> + Send;
 
     /// Return the exact durable high-water and terminal lifecycle boundary for one

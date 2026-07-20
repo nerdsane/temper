@@ -3,6 +3,7 @@ use crate::migration::run_migrations;
 use sqlx::PgPool;
 use temper_runtime::persistence::{
     EntityKeyRow, EventStore, IndexReconciliation, KeyIndexBackfillFence, PersistenceAppend,
+    SnapshotBackfillFence,
 };
 
 fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
@@ -165,6 +166,7 @@ fn entity_key_index_present_absent_and_atomic_reject() {
                     contract_revision: repair_revision,
                     expected_journal_sequence: 1,
                     expected_entity_live: true,
+                    expected_snapshot: None,
                 },
                 std::slice::from_ref(&key),
             )
@@ -338,6 +340,7 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
                     contract_revision: repair_revision,
                     expected_journal_sequence: 0,
                     expected_entity_live: false,
+                    expected_snapshot: None,
                 },
                 std::slice::from_ref(&key),
             )
@@ -375,6 +378,7 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
                     contract_revision: repair_revision,
                     expected_journal_sequence: 0,
                     expected_entity_live: false,
+                    expected_snapshot: None,
                 },
                 std::slice::from_ref(&key),
             )
@@ -404,6 +408,7 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
                     contract_revision: repair_revision,
                     expected_journal_sequence: 0,
                     expected_entity_live: false,
+                    expected_snapshot: None,
                 },
                 &[],
             )
@@ -520,6 +525,7 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
                     contract_revision: target_revision,
                     expected_journal_sequence: 1,
                     expected_entity_live: true,
+                    expected_snapshot: None,
                 },
                 std::slice::from_ref(&obsolete_row),
             )
@@ -758,17 +764,24 @@ fn entity_listing_and_key_repair_union_every_durable_source() {
                     contract_revision: repair_revision,
                     expected_journal_sequence: 1,
                     expected_entity_live: true,
+                    expected_snapshot: Some(SnapshotBackfillFence {
+                        sequence_nr: 3,
+                        state: b"newer-stale-live-snapshot",
+                    }),
                 },
                 &[],
             )
             .await;
-        assert!(matches!(
-            stale_live_repair,
-            Err(PersistenceError::EntityLivenessChanged {
-                expected_live: true,
-                actual_live: false,
-            })
-        ));
+        assert!(
+            matches!(
+                &stale_live_repair,
+                Err(PersistenceError::EntityLivenessChanged {
+                    expected_live: true,
+                    actual_live: false,
+                })
+            ),
+            "unexpected stale-live repair result: {stale_live_repair:?}"
+        );
 
         let repair_ids = store
             .list_entity_ids_for_key_reconciliation(&tenant, entity_type)

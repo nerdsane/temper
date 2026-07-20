@@ -47,6 +47,23 @@ impl EventStore for ContractChangingLookupStore {
         EventStore::read_events(&self.inner, persistence_id, from_sequence).await
     }
 
+    async fn read_events_page(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        through_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        EventStore::read_events_page(
+            &self.inner,
+            persistence_id,
+            from_sequence,
+            through_sequence,
+            limit,
+        )
+        .await
+    }
+
     async fn save_snapshot(
         &self,
         persistence_id: &str,

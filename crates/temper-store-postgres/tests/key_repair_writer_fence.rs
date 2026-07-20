@@ -3,7 +3,7 @@
 use futures::future::{Either, select};
 use temper_runtime::persistence::{
     EntityKeyRow, EventMetadata, EventStore, IndexReconciliation, KeyIndexBackfillFence,
-    PersistenceEnvelope, PersistenceError,
+    PersistenceEnvelope, PersistenceError, SnapshotBackfillFence,
 };
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_store_postgres::PostgresEventStore;
@@ -258,6 +258,10 @@ fn journal_source_fence_rejects_equal_sequence_snapshot_repair() {
                     contract_revision: repair_revision,
                     expected_journal_sequence: 0,
                     expected_entity_live: true,
+                    expected_snapshot: Some(SnapshotBackfillFence {
+                        sequence_nr: 1,
+                        state: b"snapshot-only",
+                    }),
                 },
                 std::slice::from_ref(&snapshot_key),
             )
@@ -283,5 +287,95 @@ fn journal_source_fence_rejects_equal_sequence_snapshot_repair() {
                 .expect("lookup rejected snapshot ownership"),
             None
         );
+    });
+}
+
+#[test]
+fn same_sequence_snapshot_content_rewrite_rejects_repair() {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+    sqlx::test_block_on(async {
+        let pool = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("connect to Postgres");
+        temper_store_postgres::migration::run_migrations(&pool)
+            .await
+            .expect("run Postgres migrations");
+        let store = PostgresEventStore::new(pool.clone());
+        let tenant = format!("arn238-snapshot-content-fence-{}", sim_uuid());
+        let entity_type = "Doc";
+        let entity_id = "same-sequence-rewrite";
+        let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+        let repair_signature = "v4:path";
+        let captured_snapshot = br#"{"fields":{"WorkspaceId":"before"}}"#;
+        let replacement_snapshot = br#"{"fields":{"WorkspaceId":"after"}}"#;
+        let timestamp = sim_now();
+
+        store
+            .append(
+                &persistence_id,
+                0,
+                &[PersistenceEnvelope {
+                    sequence_nr: 1,
+                    event_type: "Create".to_string(),
+                    payload: serde_json::json!({}),
+                    metadata: EventMetadata {
+                        event_id: sim_uuid(),
+                        causation_id: sim_uuid(),
+                        correlation_id: sim_uuid(),
+                        timestamp,
+                        actor_id: persistence_id.clone(),
+                    },
+                }],
+            )
+            .await
+            .expect("seed journal generation");
+        store
+            .save_snapshot(&persistence_id, 1, captured_snapshot)
+            .await
+            .expect("seed captured snapshot bytes");
+        let repair_revision = store
+            .begin_key_index_backfill(&tenant, entity_type, repair_signature)
+            .await
+            .expect("begin snapshot-derived repair");
+
+        let updated = sqlx::query(
+            "UPDATE snapshots SET state = $4, created_at = now() \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(&tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .bind(replacement_snapshot.as_slice())
+        .execute(&pool)
+        .await
+        .expect("replace persisted snapshot bytes outside the store writer");
+        assert_eq!(updated.rows_affected(), 1);
+
+        let result = store
+            .backfill_entity_keys(
+                &tenant,
+                entity_type,
+                entity_id,
+                1,
+                KeyIndexBackfillFence {
+                    key_set_signature: repair_signature,
+                    contract_revision: repair_revision,
+                    expected_journal_sequence: 1,
+                    expected_entity_live: true,
+                    expected_snapshot: Some(SnapshotBackfillFence {
+                        sequence_nr: 1,
+                        state: captured_snapshot,
+                    }),
+                },
+                &[],
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(PersistenceError::SnapshotGenerationChanged)
+        ));
     });
 }

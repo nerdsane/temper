@@ -205,14 +205,18 @@ pub(in crate::odata::query_plane_read) async fn try_native_page_read(
         }
 
         let page_len = page.entity_ids.len();
-        let authorized = materialize_filter_and_authorize_ids(
+        let authorized = match materialize_filter_and_authorize_ids(
             request,
             &page.entity_ids,
             CatalogMaterializationPolicy::Any,
             &mut counters,
             authorization,
         )
-        .await;
+        .await
+        {
+            Ok(authorized) => authorized,
+            Err(error) => return Some(Err(error)),
+        };
         for entity in authorized {
             let index = authorized_seen;
             authorized_seen += 1;

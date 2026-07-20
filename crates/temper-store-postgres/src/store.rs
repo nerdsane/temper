@@ -23,8 +23,8 @@ use crate::metrics::{
 use crate::segments;
 
 pub(crate) use key_index::{
-    event_stream_lock_key, invalidate_key_coverage_for_derived_write, lock_event_stream,
-    lock_key_contract, reconcile_key_contract_state,
+    DerivedWriteSource, event_stream_lock_key, invalidate_key_coverage_for_derived_write,
+    lock_event_stream, lock_key_contract, reconcile_key_contract_state,
 };
 
 const EVENT_APPEND_OPERATION: &str = "event_append";
@@ -883,6 +883,63 @@ impl EventStore for PostgresEventStore {
             .collect()
     }
 
+    async fn read_events_page(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        through_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        assert!(limit > 0, "event page limit must be positive");
+        assert!(
+            through_sequence >= from_sequence,
+            "event page boundary must not precede its cursor"
+        );
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let from_sequence = i64::try_from(from_sequence).map_err(|_| {
+            PersistenceError::Storage("event page cursor exceeds PostgreSQL bigint".to_string())
+        })?;
+        let through_sequence = i64::try_from(through_sequence).map_err(|_| {
+            PersistenceError::Storage("event page boundary exceeds PostgreSQL bigint".to_string())
+        })?;
+        let limit = i64::try_from(limit).map_err(|_| {
+            PersistenceError::Storage("event page limit exceeds PostgreSQL bigint".to_string())
+        })?;
+
+        let rows: Vec<(i64, String, serde_json::Value, serde_json::Value)> =
+            crate::dbm::postgres_query_as!(
+                "SELECT sequence_nr, event_type, payload, metadata \
+                 FROM events \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+                   AND sequence_nr > $4 AND sequence_nr <= $5 \
+                 ORDER BY sequence_nr ASC \
+                 LIMIT $6",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .bind(from_sequence)
+            .bind(through_sequence)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+
+        rows.into_iter()
+            .map(|(sequence_nr, event_type, payload, metadata)| {
+                let metadata = serde_json::from_value(metadata)
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+                Ok(PersistenceEnvelope {
+                    sequence_nr: sequence_nr as u64,
+                    event_type,
+                    payload,
+                    metadata,
+                })
+            })
+            .collect()
+    }
+
     async fn journal_boundary(
         &self,
         persistence_id: &str,
@@ -954,7 +1011,7 @@ impl EventStore for PostgresEventStore {
                 tenant,
                 entity_type,
                 entity_id,
-                Some(sequence_nr),
+                DerivedWriteSource::Snapshot,
             )
             .await?;
         }

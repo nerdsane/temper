@@ -162,13 +162,12 @@ async fn complete_key_lookup_does_not_revive_a_mismatched_snapshot_from_catalog(
     .await
     .expect("restore migrated complete-coverage marker");
 
-    let result = expect_read(
-        read_path(&state, &tenant, workspace, stale_path).await,
-        "mismatched snapshot source must remain readable as authoritative absence",
-    );
     assert!(
-        result.entities.is_empty(),
-        "an already-present snapshot must outrank a matching stale catalog/key generation"
+        matches!(
+            read_path(&state, &tenant, workspace, stale_path).await,
+            Err(QueryPlaneReadError::KeyOwnershipUnstable)
+        ),
+        "an already-present snapshot must outrank a matching stale catalog/key generation and fail the inconsistent owner closed"
     );
 }
 
@@ -210,12 +209,11 @@ async fn complete_key_lookup_does_not_revive_a_deleted_snapshot_from_catalog() {
     .await
     .expect("restore migrated complete-coverage marker");
 
-    let result = expect_read(
-        read_path(&state, &tenant, workspace, path).await,
-        "deleted snapshot source must remain readable as authoritative absence",
-    );
     assert!(
-        result.entities.is_empty(),
-        "a terminal snapshot must never be revived by a stale live catalog row"
+        matches!(
+            read_path(&state, &tenant, workspace, path).await,
+            Err(QueryPlaneReadError::KeyOwnershipUnstable)
+        ),
+        "a terminal snapshot must never be revived by a stale live catalog row and must fail the inconsistent owner closed"
     );
 }

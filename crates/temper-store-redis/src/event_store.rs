@@ -16,8 +16,8 @@ use fred::prelude::*;
 use fred::types::scripts::Script;
 use serde::{Deserialize, Serialize};
 use temper_runtime::persistence::{
-    EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
-    storage_error,
+    EventStore, JournalBoundary, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
+    PersistenceError, storage_error,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -51,6 +51,8 @@ redis.call('SADD', entities_key, entity_ref)
 
 return {1, new_seq}
 "#;
+
+const JOURNAL_BOUNDARY_PAGE_SIZE: usize = 1_024;
 
 /// Redis-backed event store.
 #[derive(Clone)]
@@ -358,6 +360,104 @@ impl EventStore for RedisEventStore {
         }
         out.sort_by_key(|e| e.sequence_nr);
         Ok(out)
+    }
+
+    async fn read_events_page(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        through_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        assert!(limit > 0, "event page limit must be positive");
+        assert!(
+            through_sequence >= from_sequence,
+            "event page boundary must not precede its cursor"
+        );
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let events_key = Self::events_key(tenant, entity_type, entity_id);
+        let remaining = through_sequence.saturating_sub(from_sequence);
+        if remaining == 0 {
+            return Ok(Vec::new());
+        }
+        let page_len = remaining.min(limit as u64);
+        let start_index = i64::try_from(from_sequence).map_err(|_| {
+            PersistenceError::Storage("event page cursor exceeds Redis list index".to_string())
+        })?;
+        let end_sequence = from_sequence.saturating_add(page_len);
+        let end_index = i64::try_from(end_sequence.saturating_sub(1)).map_err(|_| {
+            PersistenceError::Storage("event page boundary exceeds Redis list index".to_string())
+        })?;
+        let encoded_events: Vec<String> = self
+            .client
+            .lrange(&events_key, start_index, end_index)
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::with_capacity(encoded_events.len());
+        for encoded in encoded_events {
+            let event = serde_json::from_str::<PersistenceEnvelope>(&encoded)
+                .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+            out.push(event);
+        }
+        out.sort_by_key(|event| event.sequence_nr);
+        Ok(out)
+    }
+
+    async fn journal_boundary(
+        &self,
+        persistence_id: &str,
+    ) -> Result<JournalBoundary, PersistenceError> {
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let sequence_key = Self::seq_key(tenant, entity_type, entity_id);
+        let latest_sequence = self
+            .client
+            .get::<Option<String>, _>(&sequence_key)
+            .await
+            .map_err(storage_error)?
+            .as_deref()
+            .unwrap_or("0")
+            .parse::<u64>()
+            .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+        let mut cursor = 0_u64;
+        let mut first_terminal_sequence = None;
+        while cursor < latest_sequence && first_terminal_sequence.is_none() {
+            let remaining = latest_sequence - cursor;
+            let page_len = usize::try_from(remaining.min(JOURNAL_BOUNDARY_PAGE_SIZE as u64))
+                .expect("bounded Redis journal page length fits usize");
+            let page = self
+                .read_events_page(persistence_id, cursor, latest_sequence, page_len)
+                .await?;
+            if page.len() != page_len {
+                return Err(PersistenceError::Storage(format!(
+                    "Redis journal boundary expected {page_len} events after sequence {cursor}, received {}",
+                    page.len()
+                )));
+            }
+            for (offset, event) in page.iter().enumerate() {
+                let expected_sequence = cursor + offset as u64 + 1;
+                if event.sequence_nr != expected_sequence {
+                    return Err(PersistenceError::Storage(format!(
+                        "Redis journal boundary expected sequence {expected_sequence}, received {}",
+                        event.sequence_nr
+                    )));
+                }
+                if event.transitions_to_deleted() {
+                    first_terminal_sequence = Some(event.sequence_nr);
+                    break;
+                }
+            }
+            cursor = page
+                .last()
+                .map(|event| event.sequence_nr)
+                .expect("validated non-empty Redis journal page");
+        }
+        Ok(JournalBoundary {
+            latest_sequence,
+            first_terminal_sequence,
+        })
     }
 
     async fn save_snapshot(

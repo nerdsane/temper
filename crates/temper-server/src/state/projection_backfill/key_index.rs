@@ -15,6 +15,7 @@ enum KeyRepairDisposition {
         fields: Option<serde_json::Value>,
         sequence_nr: u64,
         journal_sequence: u64,
+        snapshot: Option<crate::entity_actor::CapturedEntitySnapshot>,
     },
     Unresolved,
 }
@@ -39,6 +40,17 @@ fn loaded_journal_sequence(outcome: &EntityLoadOutcome) -> Option<u64> {
         | EntityLoadOutcome::Missing {
             journal_sequence, ..
         } => Some(*journal_sequence),
+        EntityLoadOutcome::LoadFailed => None,
+    }
+}
+
+fn loaded_snapshot(
+    outcome: &EntityLoadOutcome,
+) -> Option<&crate::entity_actor::CapturedEntitySnapshot> {
+    match outcome {
+        EntityLoadOutcome::Fields { snapshot, .. }
+        | EntityLoadOutcome::Deleted { snapshot, .. }
+        | EntityLoadOutcome::Missing { snapshot, .. } => snapshot.as_ref(),
         EntityLoadOutcome::LoadFailed => None,
     }
 }
@@ -191,10 +203,12 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                     fields,
                     sequence_nr,
                     journal_sequence,
+                    snapshot,
                 } if is_live => KeyRepairDisposition::Reconcile {
                     fields: Some(fields),
                     sequence_nr,
                     journal_sequence,
+                    snapshot,
                 },
                 EntityLoadOutcome::LoadFailed => KeyRepairDisposition::Unresolved,
                 EntityLoadOutcome::Missing {
@@ -203,6 +217,7 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                 outcome => match loaded_journal_sequence(&outcome) {
                     None => KeyRepairDisposition::Unresolved,
                     Some(observed_journal_sequence) => {
+                        let captured_snapshot = loaded_snapshot(&outcome).cloned();
                         // ADR-0077 migrations can leave the query-plane catalog as the
                         // only durable representation. Use it only when replay did not
                         // produce current fields; the sequence fence below rejects a
@@ -246,6 +261,7 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                                         fields: None,
                                         sequence_nr,
                                         journal_sequence: observed_journal_sequence,
+                                        snapshot: captured_snapshot,
                                     },
                                     None => KeyRepairDisposition::Unresolved,
                                 }
@@ -254,6 +270,7 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                                 EntityLoadOutcome::Deleted {
                                     sequence_nr,
                                     journal_sequence,
+                                    snapshot,
                                 } => KeyRepairDisposition::Reconcile {
                                     fields: None,
                                     sequence_nr: sequence_nr.max(
@@ -262,6 +279,7 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                                             .unwrap_or(0),
                                     ),
                                     journal_sequence,
+                                    snapshot,
                                 },
                                 _ => match row {
                                     Some(row) if row.status == "Deleted" => {
@@ -269,12 +287,14 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                                             fields: None,
                                             sequence_nr: row.sequence_nr,
                                             journal_sequence: observed_journal_sequence,
+                                            snapshot: captured_snapshot,
                                         }
                                     }
                                     Some(row) => KeyRepairDisposition::Reconcile {
                                         fields: Some(row.fields),
                                         sequence_nr: row.sequence_nr,
                                         journal_sequence: observed_journal_sequence,
+                                        snapshot: captured_snapshot,
                                     },
                                     None => {
                                         tracing::warn!(
@@ -295,6 +315,7 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                     fields,
                     sequence_nr,
                     journal_sequence,
+                    snapshot,
                 } => {
                     let mut key_rows = Vec::new();
                     if let Some(field_map) = fields.as_ref().and_then(serde_json::Value::as_object)
@@ -326,6 +347,12 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                                 contract_revision: repair_revision,
                                 expected_journal_sequence: journal_sequence,
                                 expected_entity_live: is_live,
+                                expected_snapshot: snapshot.as_ref().map(|snapshot| {
+                                    temper_runtime::persistence::SnapshotBackfillFence {
+                                        sequence_nr: snapshot.sequence_nr,
+                                        state: &snapshot.state,
+                                    }
+                                }),
                             },
                             &key_rows,
                         )

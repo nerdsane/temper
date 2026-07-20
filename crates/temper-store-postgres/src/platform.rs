@@ -14,8 +14,8 @@ use crate::metrics::{
     record_postgres_transaction_begin_duration, record_postgres_transaction_commit_duration,
 };
 use crate::store::{
-    event_stream_lock_key, invalidate_key_coverage_for_derived_write, lock_event_stream,
-    lock_key_contract,
+    DerivedWriteSource, event_stream_lock_key, invalidate_key_coverage_for_derived_write,
+    lock_event_stream, lock_key_contract,
 };
 
 mod rows;
@@ -777,7 +777,9 @@ impl PostgresEventStore {
                 tenant,
                 entity_type,
                 entity_id,
-                Some(sequence_nr),
+                DerivedWriteSource::Catalog {
+                    durable_sequence: Some(sequence_nr),
+                },
             )
             .await?;
         }
@@ -911,7 +913,9 @@ impl PostgresEventStore {
                 tenant,
                 entity_type,
                 entity_id,
-                removed_catalog_sequence.map(|sequence| sequence as u64),
+                DerivedWriteSource::Catalog {
+                    durable_sequence: removed_catalog_sequence.map(|sequence| sequence as u64),
+                },
             )
             .await?;
         }

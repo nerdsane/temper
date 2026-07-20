@@ -39,6 +39,19 @@ pub struct KeyIndexBackfillFence<'a> {
     /// Whether authoritative enumeration classified the entity as live. The store
     /// revalidates this under the same stream lock as exact key reconciliation.
     pub expected_entity_live: bool,
+    /// Exact snapshot generation whose legacy fields participated in state
+    /// reconstruction. Presence, sequence, and bytes are revalidated together;
+    /// `None` proves that no snapshot participated.
+    pub expected_snapshot: Option<SnapshotBackfillFence<'a>>,
+}
+
+/// Exact derived snapshot generation used as a legacy baseline during key repair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotBackfillFence<'a> {
+    /// Snapshot sequence captured before reconstruction.
+    pub sequence_nr: u64,
+    /// Exact serialized snapshot bytes captured before reconstruction.
+    pub state: &'a [u8],
 }
 
 /// A derived vector-index row to co-commit with an append (ADR-0155).

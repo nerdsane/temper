@@ -21,7 +21,7 @@ use temper_runtime::persistence::{
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
-use key_index::{invalidate_coverage_for_derived_write_locked, reconcile_key_contract_locked};
+use key_index::{invalidate_coverage_for_snapshot_write_locked, reconcile_key_contract_locked};
 
 /// Fault injection configuration for simulation.
 ///
@@ -1045,6 +1045,52 @@ impl EventStore for SimEventStore {
         Ok(events)
     }
 
+    async fn read_events_page(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        through_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        assert!(limit > 0, "event page limit must be positive");
+        assert!(
+            through_sequence >= from_sequence,
+            "event page boundary must not precede its cursor"
+        );
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+
+        if let Some(remaining) = inner.pending_read_failures.get_mut(persistence_id) {
+            *remaining -= 1;
+            let cleared = *remaining == 0;
+            if cleared {
+                inner.pending_read_failures.remove(persistence_id);
+            }
+            return Err(PersistenceError::Storage(format!(
+                "injected read failure for {persistence_id}"
+            )));
+        }
+
+        let journal = match inner.journals.get(persistence_id) {
+            Some(journal) => journal,
+            None => return Ok(Vec::new()),
+        };
+        let mut events = journal
+            .iter()
+            .filter(|event| {
+                event.sequence_nr > from_sequence && event.sequence_nr <= through_sequence
+            })
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let read_truncation_probability = inner.faults.read_truncation_prob;
+        if !events.is_empty() && inner.rng.chance(read_truncation_probability) {
+            let truncate_at = (inner.rng.next_u64() as usize) % events.len();
+            events.truncate(truncate_at.max(1));
+        }
+        Ok(events)
+    }
+
     async fn journal_boundary(
         &self,
         persistence_id: &str,
@@ -1086,7 +1132,7 @@ impl EventStore for SimEventStore {
                     *stored_sequence != sequence_nr || stored.as_slice() != snapshot
                 });
         if changed {
-            invalidate_coverage_for_derived_write_locked(&mut inner, persistence_id, sequence_nr)?;
+            invalidate_coverage_for_snapshot_write_locked(&mut inner, persistence_id)?;
         }
 
         inner
