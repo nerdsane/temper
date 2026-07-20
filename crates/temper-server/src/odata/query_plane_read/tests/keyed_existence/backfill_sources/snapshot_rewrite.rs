@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::*;
 use crate::storage::{BackendLabel, BoxedEventStore, StorageStack};
@@ -14,6 +14,8 @@ struct SnapshotRewriteDuringBackfillStore {
     replacement: Vec<u8>,
     rewritten: Arc<AtomicBool>,
     rewrite_on_snapshot_load: bool,
+    rewrite_on_append: bool,
+    append_attempts: Arc<AtomicUsize>,
 }
 
 impl EventStore for SnapshotRewriteDuringBackfillStore {
@@ -28,6 +30,43 @@ impl EventStore for SnapshotRewriteDuringBackfillStore {
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
         EventStore::append(&self.inner, persistence_id, expected_sequence, events).await
+    }
+
+    async fn append_with_index_rows(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: &[EntityKeyRow],
+        vector_rows: &[temper_runtime::persistence::EntityVectorRow],
+        reconciliation: IndexReconciliation,
+    ) -> Result<u64, PersistenceError> {
+        if persistence_id == self.persistence_id {
+            self.append_attempts.fetch_add(1, Ordering::SeqCst);
+            if self.rewrite_on_append && !self.rewritten.swap(true, Ordering::SeqCst) {
+                let sequence_nr = EventStore::load_snapshot(&self.inner, persistence_id)
+                    .await?
+                    .map(|(sequence_nr, _)| sequence_nr)
+                    .expect("append rewrite fixture requires a captured snapshot");
+                EventStore::save_snapshot(
+                    &self.inner,
+                    persistence_id,
+                    sequence_nr,
+                    &self.replacement,
+                )
+                .await?;
+            }
+        }
+        EventStore::append_with_index_rows(
+            &self.inner,
+            persistence_id,
+            expected_sequence,
+            events,
+            key_rows,
+            vector_rows,
+            reconciliation,
+        )
+        .await
     }
 
     async fn append_batch(
@@ -237,6 +276,8 @@ async fn same_sequence_snapshot_rewrite_invalidates_the_backfill_row() {
         replacement: legacy_snapshot(entity_id, after_workspace, "/snapshot-path"),
         rewritten: Arc::new(AtomicBool::new(false)),
         rewrite_on_snapshot_load: false,
+        rewrite_on_append: false,
+        append_attempts: Arc::new(AtomicUsize::new(0)),
     };
     let mut state = build_order_state("snapshot-rewrite-backfill");
     state.set_storage_stack(StorageStack::new(
@@ -333,6 +374,8 @@ async fn actor_recovery_retries_a_same_sequence_snapshot_rewrite_before_upgrade(
         replacement: legacy_snapshot(entity_id, after_workspace, "/snapshot-generation"),
         rewritten: rewritten.clone(),
         rewrite_on_snapshot_load: true,
+        rewrite_on_append: false,
+        append_attempts: Arc::new(AtomicUsize::new(0)),
     });
     let table = state
         .registry
@@ -363,4 +406,170 @@ async fn actor_recovery_retries_a_same_sequence_snapshot_rewrite_before_upgrade(
         "recovery must retry the replacement snapshot instead of overwriting it with a stale provenance upgrade"
     );
     assert_eq!(recovered.fields["Path"], journal_path);
+}
+
+async fn actor_append_rewrite_fixture(
+    seed: u64,
+    entity_id: &str,
+    system_name: &str,
+) -> (
+    ServerState,
+    SimEventStore,
+    Arc<AtomicBool>,
+    Arc<AtomicUsize>,
+) {
+    let tenant = TenantId::default();
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    let inner = SimEventStore::no_faults(seed);
+    EventStore::save_snapshot(
+        &inner,
+        &persistence_id,
+        1,
+        &legacy_snapshot(entity_id, "ws-before-append", "/journal-generation"),
+    )
+    .await
+    .expect("seed actor snapshot before append race");
+    EventStore::append(
+        &inner,
+        &persistence_id,
+        0,
+        &[journal_path_delta(
+            &persistence_id,
+            "/journal-generation",
+            "append-race-journal-generation",
+        )],
+    )
+    .await
+    .expect("seed equal-sequence journal generation");
+
+    let rewritten = Arc::new(AtomicBool::new(false));
+    let append_attempts = Arc::new(AtomicUsize::new(0));
+    let store = SnapshotRewriteDuringBackfillStore {
+        inner: inner.clone(),
+        persistence_id,
+        replacement: legacy_snapshot(entity_id, "ws-after-append", "/journal-generation"),
+        rewritten: rewritten.clone(),
+        rewrite_on_snapshot_load: false,
+        rewrite_on_append: true,
+        append_attempts: append_attempts.clone(),
+    };
+    let mut state = build_order_state(system_name);
+    state.set_storage_stack(StorageStack::new(
+        BackendLabel::Sim,
+        BoxedEventStore::new(store),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ));
+    (state, inner, rewritten, append_attempts)
+}
+
+#[tokio::test]
+async fn field_update_retries_when_snapshot_rewrites_inside_the_append_boundary() {
+    let (_guard, _clock, _ids) = install_deterministic_context(280);
+    let tenant = TenantId::default();
+    let entity_id = "ord-field-update-append-rewrite";
+    let (state, inner, rewritten, append_attempts) =
+        actor_append_rewrite_fixture(280, entity_id, "field-update-append-rewrite").await;
+
+    let updated = state
+        .update_tenant_entity_fields(
+            &tenant,
+            "Order",
+            entity_id,
+            serde_json::json!({"Path": "/after-field-update"}),
+            false,
+            Some("field-update-append-rewrite".to_string()),
+        )
+        .await
+        .expect("field update must recover and retry the rewritten generation");
+
+    assert!(rewritten.load(Ordering::SeqCst));
+    assert_eq!(append_attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(updated.state.fields["WorkspaceId"], "ws-after-append");
+    assert_eq!(updated.state.fields["Path"], "/after-field-update");
+    assert_eq!(
+        EventStore::lookup_by_key(
+            &inner,
+            tenant.as_str(),
+            "Order",
+            "ws_path",
+            &ws_path_hash("ws-after-append", "/after-field-update"),
+        )
+        .await
+        .expect("lookup recovered field-update ownership")
+        .as_deref(),
+        Some(entity_id)
+    );
+    assert_eq!(
+        EventStore::lookup_by_key(
+            &inner,
+            tenant.as_str(),
+            "Order",
+            "ws_path",
+            &ws_path_hash("ws-before-append", "/after-field-update"),
+        )
+        .await
+        .expect("lookup stale field-update ownership"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn domain_action_retries_when_snapshot_rewrites_inside_the_append_boundary() {
+    let (_guard, _clock, _ids) = install_deterministic_context(281);
+    let tenant = TenantId::default();
+    let entity_id = "ord-domain-action-append-rewrite";
+    let (state, inner, rewritten, append_attempts) =
+        actor_append_rewrite_fixture(281, entity_id, "domain-action-append-rewrite").await;
+    let agent = AgentContext::for_service("arn238-domain-action-append-rewrite");
+
+    let updated = state
+        .dispatch_tenant_action(
+            &tenant,
+            "Order",
+            entity_id,
+            "AddItem",
+            serde_json::json!({}),
+            &agent,
+        )
+        .await
+        .expect("domain action dispatch must complete after source-fence retry");
+
+    assert!(updated.success, "domain action failed: {:?}", updated.error);
+    assert!(rewritten.load(Ordering::SeqCst));
+    assert_eq!(append_attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(updated.state.fields["WorkspaceId"], "ws-after-append");
+    assert_eq!(updated.state.fields["Path"], "/journal-generation");
+    assert_eq!(updated.state.item_count, 1);
+    assert_eq!(
+        EventStore::lookup_by_key(
+            &inner,
+            tenant.as_str(),
+            "Order",
+            "ws_path",
+            &ws_path_hash("ws-after-append", "/journal-generation"),
+        )
+        .await
+        .expect("lookup recovered domain-action ownership")
+        .as_deref(),
+        Some(entity_id)
+    );
+    assert_eq!(
+        EventStore::lookup_by_key(
+            &inner,
+            tenant.as_str(),
+            "Order",
+            "ws_path",
+            &ws_path_hash("ws-before-append", "/journal-generation"),
+        )
+        .await
+        .expect("lookup stale domain-action ownership"),
+        None
+    );
 }
