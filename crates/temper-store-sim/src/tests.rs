@@ -213,6 +213,55 @@ async fn snapshot_save_records_history_and_rotates_segments() {
 }
 
 #[tokio::test]
+async fn delayed_snapshot_splits_durable_tail_and_equal_rewrite_preserves_topology() {
+    let store = SimEventStore::no_faults(282);
+    let pid = "default:Order:delayed-segment-snapshot";
+    let events = (1..=10)
+        .map(|sequence| test_envelope(sequence, "Updated"))
+        .collect::<Vec<_>>();
+
+    store.append(pid, 0, &events).await.unwrap();
+    store.save_snapshot(pid, 5, b"snapshot-a").await.unwrap();
+
+    let expected = vec![
+        SimEventSegment {
+            segment_index: 0,
+            start_sequence_nr: 1,
+            end_sequence_nr: Some(5),
+            snapshot_sequence: Some(5),
+            event_count: 5,
+            sealed: true,
+        },
+        SimEventSegment {
+            segment_index: 1,
+            start_sequence_nr: 6,
+            end_sequence_nr: Some(10),
+            snapshot_sequence: None,
+            event_count: 5,
+            sealed: false,
+        },
+    ];
+    assert_eq!(
+        store.dump_segments(pid),
+        expected,
+        "a delayed snapshot must split and retain the already-durable tail"
+    );
+
+    let topology_before_rewrite = store.dump_segments(pid);
+    store.save_snapshot(pid, 5, b"snapshot-b").await.unwrap();
+    assert_eq!(
+        store.dump_segments(pid),
+        topology_before_rewrite,
+        "same-sequence source replacement must not rotate segment topology"
+    );
+    assert_eq!(store.snapshot_history_len(pid), 1);
+    assert_eq!(
+        store.load_snapshot(pid).await.unwrap(),
+        Some((5, b"snapshot-b".to_vec()))
+    );
+}
+
+#[tokio::test]
 async fn load_snapshot_returns_none_when_empty() {
     let store = SimEventStore::no_faults(42);
     let snap = store

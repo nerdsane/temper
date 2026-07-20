@@ -193,3 +193,130 @@ fn same_sequence_snapshot_rewrite_invalidates_published_key_coverage() {
         );
     });
 }
+
+#[test]
+fn delayed_snapshot_splits_durable_tail_and_equal_rewrite_preserves_topology() {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+    sqlx::test_block_on(async {
+        let pool = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("connect to Postgres");
+        temper_store_postgres::migration::run_migrations(&pool)
+            .await
+            .expect("run Postgres migrations");
+        let store = PostgresEventStore::new(pool.clone());
+        let tenant = format!("arn238-delayed-segment-snapshot-{}", sim_uuid());
+        let entity_type = "Doc";
+        let entity_id = "delayed-segment-snapshot";
+        let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+        let timestamp = sim_now();
+        let events = (1..=10)
+            .map(|sequence| PersistenceEnvelope {
+                sequence_nr: sequence,
+                event_type: "Updated".to_string(),
+                payload: serde_json::json!({"sequence": sequence}),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp,
+                    actor_id: persistence_id.clone(),
+                },
+            })
+            .collect::<Vec<_>>();
+        store
+            .append(&persistence_id, 0, &events)
+            .await
+            .expect("append durable tail before delayed snapshot");
+
+        store
+            .save_snapshot(&persistence_id, 5, b"snapshot-a")
+            .await
+            .expect("save delayed snapshot boundary");
+
+        let segment_rows = || async {
+            sqlx::query_as::<_, (i64, i64, Option<i64>, Option<i64>, i64, bool)>(
+                "SELECT segment_index, start_sequence_nr, end_sequence_nr, \
+                        snapshot_sequence, event_count, sealed_at IS NOT NULL \
+                 FROM event_segments \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+                 ORDER BY segment_index",
+            )
+            .bind(&tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .fetch_all(&pool)
+            .await
+            .expect("read event segment topology")
+        };
+        let event_rows = || async {
+            sqlx::query_as::<_, (i64, i64)>(
+                "SELECT sequence_nr, segment_index FROM events \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+                 ORDER BY sequence_nr",
+            )
+            .bind(&tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .fetch_all(&pool)
+            .await
+            .expect("read event segment assignments")
+        };
+        let segment_versions = || async {
+            sqlx::query_as::<_, (i64, String)>(
+                "SELECT segment_index, xmin::text FROM event_segments \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+                 ORDER BY segment_index",
+            )
+            .bind(&tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .fetch_all(&pool)
+            .await
+            .expect("read event segment row versions")
+        };
+
+        let expected_segments = vec![
+            (0, 1, Some(5), Some(5), 5, true),
+            (1, 6, Some(10), None, 5, false),
+        ];
+        assert_eq!(
+            segment_rows().await,
+            expected_segments,
+            "a delayed snapshot must retain the already-durable tail in the open successor"
+        );
+        let expected_events = (1..=10)
+            .map(|sequence| (sequence, if sequence <= 5 { 0 } else { 1 }))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            event_rows().await,
+            expected_events,
+            "events after the delayed boundary must move to the successor segment"
+        );
+
+        let segments_before_rewrite = segment_rows().await;
+        let events_before_rewrite = event_rows().await;
+        let segment_versions_before_rewrite = segment_versions().await;
+        store
+            .save_snapshot(&persistence_id, 5, b"snapshot-b")
+            .await
+            .expect("replace same-sequence snapshot bytes");
+        assert_eq!(segment_rows().await, segments_before_rewrite);
+        assert_eq!(event_rows().await, events_before_rewrite);
+        assert_eq!(
+            segment_versions().await,
+            segment_versions_before_rewrite,
+            "same-sequence source replacement must not rewrite segment rows"
+        );
+        assert_eq!(
+            store
+                .load_snapshot(&persistence_id)
+                .await
+                .expect("load replaced snapshot"),
+            Some((5, b"snapshot-b".to_vec()))
+        );
+    });
+}
