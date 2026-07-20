@@ -1,8 +1,9 @@
-use libsql::Connection;
+use libsql::{Connection, params};
 
 use super::{create_events, ledger_count, scalar_i64, schema_kind, temporary_connection};
 use crate::migrations::catalog::{MIGRATIONS, Migration, MigrationStep};
 use crate::migrations::runner::{migrate, migrate_catalog};
+use crate::store::ots::PERSIST_OTS_TRAJECTORY_SQL;
 
 const TIGHTEN_EVENTS_STEPS: &[MigrationStep] = &[MigrationStep::Sql(
     "ALTER TABLE events ADD COLUMN required_value TEXT NOT NULL DEFAULT 'x'",
@@ -125,6 +126,108 @@ async fn sqlite_x_named_trigger_cannot_bypass_inventory() {
         Some("trigger")
     );
     assert_eq!(ledger_count(&connection).await, 0);
+}
+
+#[tokio::test]
+async fn probe_identity_bypass_trigger_prevents_readiness() {
+    let (_directory, connection) = temporary_connection("probe-identity-bypass-trigger").await;
+    migrate(&connection).await.expect("install current catalog");
+    connection
+        .execute(
+            "CREATE TRIGGER reject_non_probe_tenant BEFORE INSERT ON ots_trajectories
+             WHEN NEW.tenant <> '__temper_trigger_probe__'
+             BEGIN SELECT RAISE(FAIL, 'real tenant blocked'); END",
+            (),
+        )
+        .await
+        .expect("create trigger that recognizes the probe tenant");
+
+    let runtime_error = connection
+        .execute(
+            PERSIST_OTS_TRAJECTORY_SQL,
+            params![
+                "real-trajectory",
+                "tenant-a",
+                "agent-a",
+                "session-a",
+                "outcome-a",
+                1_i64,
+                "{}",
+            ],
+        )
+        .await
+        .expect_err("the trigger must reproduce the real-write failure");
+    assert!(
+        runtime_error.to_string().contains("real tenant blocked"),
+        "{runtime_error}"
+    );
+
+    let error = migrate(&connection)
+        .await
+        .expect_err("a trigger that distinguishes probe inputs must prevent readiness");
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("migration 7"), "{diagnostic}");
+    assert!(
+        diagnostic.contains("reject_non_probe_tenant"),
+        "{diagnostic}"
+    );
+    assert_eq!(ledger_count(&connection).await, MIGRATIONS.len() as i64);
+}
+
+#[tokio::test]
+async fn unmodeled_ots_trigger_mutation_prevents_readiness() {
+    let (_directory, connection) = temporary_connection("unmodeled-ots-trigger-mutation").await;
+    migrate(&connection).await.expect("install current catalog");
+    connection
+        .execute(
+            "CREATE TRIGGER mutate_ots_entity_type AFTER INSERT ON ots_trajectories
+             BEGIN
+                 UPDATE ots_trajectories
+                 SET entity_type = 'trigger-corruption'
+                 WHERE trajectory_id = NEW.trajectory_id;
+             END",
+            (),
+        )
+        .await
+        .expect("create trigger that mutates an unasserted OTS column");
+
+    connection
+        .execute(
+            PERSIST_OTS_TRAJECTORY_SQL,
+            params![
+                "mutated-trajectory",
+                "tenant-a",
+                "agent-a",
+                "session-a",
+                "outcome-a",
+                1_i64,
+                "{}",
+            ],
+        )
+        .await
+        .expect("the trigger leaves the currently asserted production fields writable");
+    assert_eq!(
+        scalar_text(
+            &connection,
+            "SELECT entity_type FROM ots_trajectories
+             WHERE trajectory_id = 'mutated-trajectory'",
+        )
+        .await
+        .as_deref(),
+        Some("trigger-corruption"),
+        "the trigger must reproduce an unasserted mutation"
+    );
+
+    let error = migrate(&connection)
+        .await
+        .expect_err("a trigger outside the supported audit contract must prevent readiness");
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("migration 7"), "{diagnostic}");
+    assert!(
+        diagnostic.contains("mutate_ots_entity_type"),
+        "{diagnostic}"
+    );
+    assert_eq!(ledger_count(&connection).await, MIGRATIONS.len() as i64);
 }
 
 #[tokio::test]
@@ -426,4 +529,14 @@ async fn trigger_sql(connection: &Connection, trigger: &str) -> String {
         .expect("trigger SQL row")
         .get::<String>(0)
         .expect("decode trigger SQL")
+}
+
+async fn scalar_text(connection: &Connection, sql: &str) -> Option<String> {
+    let mut rows = connection.query(sql, ()).await.expect("query text scalar");
+    rows.next()
+        .await
+        .expect("read text scalar")
+        .expect("text scalar row")
+        .get::<Option<String>>(0)
+        .expect("decode text scalar")
 }
