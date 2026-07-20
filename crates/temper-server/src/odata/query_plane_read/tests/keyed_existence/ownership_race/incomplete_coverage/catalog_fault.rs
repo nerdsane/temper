@@ -270,3 +270,126 @@ async fn empty_catalog_does_not_bootstrap_a_projection_only_candidate() {
         "a read must not turn a projection-only candidate into durable actor state"
     );
 }
+
+#[tokio::test]
+async fn snapshot_only_source_outranks_stale_catalog_compatibility() {
+    let (_guard, _clock, _ids) = install_deterministic_context(271);
+    let tenant = TenantId::default();
+    let entity_id = "ord-snapshot-over-catalog";
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    let events = SimEventStore::no_faults(271);
+    EventStore::save_snapshot(
+        &events,
+        &persistence_id,
+        2,
+        &snapshot(entity_id, "ws-snapshot", "/snapshot-authority"),
+    )
+    .await
+    .expect("seed snapshot-only durable source");
+    let query_plane = Arc::new(CatalogReadFault {
+        durable_row: Some(EntityCatalogRow {
+            entity_id: entity_id.to_string(),
+            status: "Draft".to_string(),
+            fields: serde_json::json!({
+                "Id": entity_id,
+                "WorkspaceId": "ws-catalog",
+                "Path": "/stale-catalog",
+            }),
+            state: None,
+            sequence_nr: 3,
+        }),
+        fail_reads: false,
+    });
+    let mut state = build_order_state("snapshot-over-stale-catalog");
+    state.set_storage_stack(StorageStack::new(
+        BackendLabel::Sim,
+        BoxedEventStore::new(events),
+        None,
+        None,
+        None,
+        None,
+        Some(query_plane),
+        None,
+        None,
+        None,
+    ));
+
+    let materialized = materialize_entity_set_entities(
+        &state,
+        &tenant,
+        "Order",
+        "Orders",
+        &[entity_id.to_string()],
+        CatalogMaterializationPolicy::JournalAbsentOnly,
+        None,
+    )
+    .await;
+
+    assert_eq!(materialized.error, None);
+    assert_eq!(materialized.entities.len(), 1);
+    assert_eq!(
+        materialized.entities[0]["fields"]["WorkspaceId"],
+        "ws-snapshot"
+    );
+    assert_eq!(
+        materialized.entities[0]["fields"]["Path"],
+        "/snapshot-authority"
+    );
+}
+
+#[tokio::test]
+async fn incompatible_snapshot_cannot_be_masked_by_catalog_compatibility() {
+    let (_guard, _clock, _ids) = install_deterministic_context(272);
+    let tenant = TenantId::default();
+    let entity_id = "ord-invalid-snapshot-catalog";
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    let events = SimEventStore::no_faults(272);
+    EventStore::save_snapshot(&events, &persistence_id, 1, b"not a valid entity snapshot")
+        .await
+        .expect("seed incompatible snapshot source");
+    let query_plane = Arc::new(CatalogReadFault {
+        durable_row: Some(EntityCatalogRow {
+            entity_id: entity_id.to_string(),
+            status: "Draft".to_string(),
+            fields: serde_json::json!({
+                "Id": entity_id,
+                "WorkspaceId": "ws-catalog",
+                "Path": "/catalog-must-not-mask-snapshot",
+            }),
+            state: None,
+            sequence_nr: 1,
+        }),
+        fail_reads: false,
+    });
+    let mut state = build_order_state("invalid-snapshot-catalog-mask");
+    state.set_storage_stack(StorageStack::new(
+        BackendLabel::Sim,
+        BoxedEventStore::new(events),
+        None,
+        None,
+        None,
+        None,
+        Some(query_plane),
+        None,
+        None,
+        None,
+    ));
+
+    let materialized = materialize_entity_set_entities(
+        &state,
+        &tenant,
+        "Order",
+        "Orders",
+        &[entity_id.to_string()],
+        CatalogMaterializationPolicy::JournalAbsentOnly,
+        None,
+    )
+    .await;
+
+    assert!(materialized.entities.is_empty());
+    assert_eq!(
+        materialized.error,
+        Some(AuthoritativeMaterializationError::JournalUnstable),
+        "an incompatible snapshot must fail closed instead of serving stale catalog state"
+    );
+}
