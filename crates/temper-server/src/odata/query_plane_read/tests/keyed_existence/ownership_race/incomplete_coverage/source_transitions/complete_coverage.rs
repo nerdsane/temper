@@ -1,4 +1,68 @@
+use std::sync::Arc;
+
 use super::*;
+
+fn build_complete_state_with_catalog(
+    system_name: &str,
+    seed: u64,
+) -> (ServerState, SimEventStore, Arc<SimQueryPlane>) {
+    let store = SimEventStore::no_faults(seed);
+    let query_plane = Arc::new(SimQueryPlane::default());
+    let mut state = build_order_state(system_name);
+    let mut storage = StorageStack::from_sim(store.clone(), None);
+    storage.query_plane = Some(query_plane.clone());
+    state.set_storage_stack(storage);
+    (state, store, query_plane)
+}
+
+async fn seed_live_catalog(
+    query_plane: &SimQueryPlane,
+    tenant: &TenantId,
+    entity_id: &str,
+    workspace: &str,
+    path: &str,
+    sequence_nr: u64,
+) {
+    let fields = serde_json::json!({
+        "Id": entity_id,
+        "WorkspaceId": workspace,
+        "Path": path,
+    });
+    QueryPlaneStore::upsert_projection(
+        query_plane,
+        tenant.as_str(),
+        "Order",
+        entity_id,
+        "Draft",
+        &fields,
+        &serde_json::json!({
+            "entity_type": "Order",
+            "entity_id": entity_id,
+            "status": "Draft",
+            "fields": fields,
+            "sequence_nr": sequence_nr,
+        }),
+        sequence_nr,
+    )
+    .await
+    .expect("seed stale live catalog generation");
+}
+
+fn deleted_snapshot(entity_id: &str, workspace: &str, path: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "entity_type": "Order",
+        "entity_id": entity_id,
+        "status": "Deleted",
+        "item_count": 0,
+        "fields": {
+            "Id": entity_id,
+            "Status": "Deleted",
+            "WorkspaceId": workspace,
+            "Path": path,
+        },
+    }))
+    .expect("serialize deleted snapshot")
+}
 
 #[tokio::test]
 async fn complete_key_lookup_prefers_equal_sequence_journal_over_snapshot_source() {
@@ -57,4 +121,101 @@ async fn complete_key_lookup_prefers_equal_sequence_journal_over_snapshot_source
     assert_eq!(current.entities[0]["entity_id"], entity_id);
     assert_eq!(current.entities[0]["fields"]["Path"], journal_path);
     assert_eq!(current.entities[0]["sequence_nr"], 1);
+}
+
+#[tokio::test]
+async fn complete_key_lookup_does_not_revive_a_mismatched_snapshot_from_catalog() {
+    let (_guard, _clock, _ids) = install_deterministic_context(274);
+    let tenant = TenantId::default();
+    let workspace = "ws-complete-snapshot-mismatch";
+    let stale_path = "/stale-catalog-owner";
+    let current_path = "/current-snapshot-owner";
+    let entity_id = "ord-complete-snapshot-mismatch";
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    let (state, store, query_plane) =
+        build_complete_state_with_catalog("complete-snapshot-mismatch", 274);
+
+    EventStore::save_snapshot(
+        &store,
+        &persistence_id,
+        3,
+        &snapshot(entity_id, workspace, stale_path),
+    )
+    .await
+    .expect("seed stale snapshot ownership generation");
+    state.populate_key_index_from_snapshots(&tenant).await;
+    EventStore::save_snapshot(
+        &store,
+        &persistence_id,
+        2,
+        &snapshot(entity_id, workspace, current_path),
+    )
+    .await
+    .expect("replace ownership with an older imported snapshot generation");
+    seed_live_catalog(&query_plane, &tenant, entity_id, workspace, stale_path, 3).await;
+    EventStore::mark_key_index_backfilled(
+        &store,
+        tenant.as_str(),
+        "Order",
+        ORDER_KEY_SET_SIGNATURE,
+    )
+    .await
+    .expect("restore migrated complete-coverage marker");
+
+    let result = expect_read(
+        read_path(&state, &tenant, workspace, stale_path).await,
+        "mismatched snapshot source must remain readable as authoritative absence",
+    );
+    assert!(
+        result.entities.is_empty(),
+        "an already-present snapshot must outrank a matching stale catalog/key generation"
+    );
+}
+
+#[tokio::test]
+async fn complete_key_lookup_does_not_revive_a_deleted_snapshot_from_catalog() {
+    let (_guard, _clock, _ids) = install_deterministic_context(275);
+    let tenant = TenantId::default();
+    let workspace = "ws-complete-deleted-snapshot";
+    let path = "/deleted-snapshot-owner";
+    let entity_id = "ord-complete-deleted-snapshot";
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    let (state, store, query_plane) =
+        build_complete_state_with_catalog("complete-deleted-snapshot", 275);
+
+    EventStore::save_snapshot(
+        &store,
+        &persistence_id,
+        3,
+        &snapshot(entity_id, workspace, path),
+    )
+    .await
+    .expect("seed stale live snapshot ownership");
+    state.populate_key_index_from_snapshots(&tenant).await;
+    EventStore::save_snapshot(
+        &store,
+        &persistence_id,
+        3,
+        &deleted_snapshot(entity_id, workspace, path),
+    )
+    .await
+    .expect("replace durable source with a terminal snapshot");
+    seed_live_catalog(&query_plane, &tenant, entity_id, workspace, path, 3).await;
+    EventStore::mark_key_index_backfilled(
+        &store,
+        tenant.as_str(),
+        "Order",
+        ORDER_KEY_SET_SIGNATURE,
+    )
+    .await
+    .expect("restore migrated complete-coverage marker");
+
+    let result = expect_read(
+        read_path(&state, &tenant, workspace, path).await,
+        "deleted snapshot source must remain readable as authoritative absence",
+    );
+    assert!(
+        result.entities.is_empty(),
+        "a terminal snapshot must never be revived by a stale live catalog row"
+    );
 }

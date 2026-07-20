@@ -58,6 +58,55 @@ fn same_sequence_snapshot_rewrite_invalidates_published_key_coverage() {
         );
 
         store
+            .save_snapshot(&persistence_id, 1, b"before")
+            .await
+            .expect("repeat identical snapshot write");
+        assert_eq!(
+            store
+                .key_index_reconciliation_revision(&tenant, entity_type)
+                .await
+                .expect("read unchanged snapshot coverage epoch"),
+            revision,
+            "identical snapshot bytes and sequence must not churn the coverage epoch"
+        );
+        assert_eq!(
+            store
+                .key_index_backfilled_types(&tenant)
+                .await
+                .expect("read preserved snapshot coverage watermark"),
+            vec![(entity_type.to_string(), signature.to_string())],
+            "identical snapshot writes must preserve published coverage"
+        );
+
+        store
+            .upsert_query_projection(
+                &tenant,
+                entity_type,
+                "snapshot-rewrite",
+                "Ready",
+                &serde_json::json!({"Path": "/journal-dominated"}),
+                1,
+            )
+            .await
+            .expect("write catalog projection represented by the journal");
+        assert_eq!(
+            store
+                .key_index_reconciliation_revision(&tenant, entity_type)
+                .await
+                .expect("read unchanged catalog coverage epoch"),
+            revision,
+            "a catalog projection at the journal high-water must reuse the append fence"
+        );
+        assert_eq!(
+            store
+                .key_index_backfilled_types(&tenant)
+                .await
+                .expect("read preserved catalog coverage watermark"),
+            vec![(entity_type.to_string(), signature.to_string())],
+            "journal-dominated catalog writes must preserve published coverage"
+        );
+
+        store
             .save_snapshot(&persistence_id, 1, b"after")
             .await
             .expect("rewrite snapshot bytes at the journal high-water");

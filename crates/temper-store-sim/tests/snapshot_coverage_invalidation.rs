@@ -45,6 +45,27 @@ async fn same_sequence_snapshot_rewrite_invalidates_published_key_coverage() {
     );
 
     store
+        .save_snapshot(&persistence_id, 1, b"before")
+        .await
+        .expect("repeat identical snapshot write");
+    assert_eq!(
+        store
+            .key_index_reconciliation_revision(tenant, entity_type)
+            .await
+            .expect("read unchanged coverage epoch"),
+        revision,
+        "identical snapshot bytes and sequence must not churn the coverage epoch"
+    );
+    assert_eq!(
+        store
+            .key_index_backfilled_types(tenant)
+            .await
+            .expect("read preserved coverage watermark"),
+        vec![(entity_type.to_string(), signature.to_string())],
+        "identical snapshot writes must preserve published coverage"
+    );
+
+    store
         .save_snapshot(&persistence_id, 1, b"after")
         .await
         .expect("rewrite snapshot bytes at the journal high-water");
