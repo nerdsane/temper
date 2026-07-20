@@ -225,3 +225,49 @@ fn schema_query_error(context: &str, error: libsql::Error) -> PersistenceError {
         "Turso schema introspection failed while attempting to {context}: {error} ({error:?})"
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use libsql::Builder;
+
+    use super::{SchemaSnapshot, verify_index_extensions};
+
+    #[tokio::test]
+    async fn case_folded_index_owner_is_inventoried() {
+        let directory = tempfile::tempdir().expect("temporary database directory");
+        let database = Builder::new_local(directory.path().join("case-folded-index-owner.db"))
+            .build()
+            .await
+            .expect("build temporary database");
+        let connection = database.connect().expect("connect temporary database");
+        connection
+            .execute("CREATE TABLE EVENTS(payload TEXT NOT NULL)", ())
+            .await
+            .expect("create differently cased table owner");
+        connection
+            .execute(
+                "CREATE INDEX events_case_folded_expression
+                 ON EVENTS(json_extract(payload, 'invalid-path'))",
+                (),
+            )
+            .await
+            .expect("create expression index with differently cased owner");
+        let expected = SchemaSnapshot {
+            tables: BTreeMap::new(),
+            indexes: BTreeMap::new(),
+            triggers: BTreeMap::new(),
+        };
+
+        let error = verify_index_extensions(&connection, "events", &expected)
+            .await
+            .expect_err("SQLite-equivalent index owners must be inventoried");
+        assert!(
+            error
+                .to_string()
+                .contains("events_case_folded_expression"),
+            "{error}"
+        );
+    }
+}
