@@ -231,6 +231,38 @@ async fn cyclic_inline_callbacks_exhaust_a_propagated_budget() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn acyclic_inline_callbacks_preserve_valid_workflow_depth() {
+    let state = callback_chain_state();
+    let tenant = TenantId::default();
+    let agent_ctx = AgentContext::default();
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        state.dispatch_tenant_action_ext(
+            &tenant,
+            "CallbackChain",
+            "chain-inline-1",
+            "Start",
+            serde_json::json!({}),
+            DispatchExtOptions {
+                agent_ctx: &agent_ctx,
+                await_integration: true,
+                await_reactions: true,
+            },
+        ),
+    )
+    .await
+    .expect("an acyclic inline callback chain must complete within its logical budget")
+    .expect("the durable transition should dispatch");
+
+    assert!(response.success, "valid inline callbacks must not exhaust the budget");
+    assert_eq!(
+        response.state.status, "Complete",
+        "a valid three-callback inline workflow must complete synchronously"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn acyclic_background_callbacks_preserve_valid_workflow_depth() {
     let state = callback_chain_state();
     let tenant = TenantId::default();
