@@ -151,9 +151,7 @@ impl crate::state::ServerState {
         let Some(hash) = module_hash else {
             let error_str = format!("WASM module '{}' not found", module_name);
             record_wasm_error_on_span(active_span, &error_str);
-            return self
-                .handle_module_not_found(ctx, integration, &module_name)
-                .await;
+            return Box::pin(self.handle_module_not_found(ctx, integration, &module_name)).await;
         };
         instrument_wasm_dispatch_phase_result(
             active_parent_span.clone(),

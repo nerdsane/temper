@@ -56,6 +56,11 @@ fn agent_ctx_for_composite_wasm_result(
 }
 
 const HTTP_CALL_AUTHZ_DENIED_PREFIX: &str = "authorization denied for http_call";
+// Callback dispatch is bounded independently of the worker's stack size; the
+// integration pipeline decrements this budget before every nested transition.
+// Two nested transitions retain multi-step recovery while remaining safe on
+// the runtime's minimum supported 2 MiB worker stack in debug builds.
+const WASM_CALLBACK_BUDGET: u8 = 2;
 const MONTY_REPL_MODULE: &str = "monty_repl";
 const WASM_DISPATCH_PHASE_MODULE_CACHE: &str = "dispatch.wasm.phase.module_cache";
 const WASM_DISPATCH_PHASE_REPLAY_INPUT_INJECTION: &str =
@@ -79,6 +84,10 @@ const WASM_DISPATCH_PHASE_LLMOBS_SUBMIT: &str = "dispatch.wasm.phase.llmobs_subm
 
 fn http_call_authz_denied_error(reason: &str) -> String {
     format!("{HTTP_CALL_AUTHZ_DENIED_PREFIX}: {reason}")
+}
+
+fn wasm_callback_budget_exhausted_error() -> String {
+    format!("WASM callback budget exhausted after {WASM_CALLBACK_BUDGET} nested callbacks")
 }
 
 fn is_http_call_authz_denial(error: &str) -> bool {

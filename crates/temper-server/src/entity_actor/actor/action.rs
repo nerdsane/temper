@@ -175,16 +175,19 @@ impl EntityActor {
                             let retry_table =
                                 self.table.read().expect("table lock poisoned").clone();
 
-                            // Rollback speculative state.
-                            *state = state_before.clone();
-
-                            // Catch up to the authoritative sequence.
-                            Self::replay_events(
+                            // Rebuild from a fresh initial state plus the
+                            // authoritative snapshot/journal. Replaying the
+                            // full journal into `state_before` would apply
+                            // every pre-existing non-idempotent effect twice
+                            // whenever no snapshot exists.
+                            *state = recover_entity_state_from_store(
+                                &self.tenant,
+                                &self.entity_type,
+                                &self.entity_id,
                                 &retry_table,
                                 store,
                                 backend,
-                                state,
-                                &self.tenant,
+                                &self.initial_fields,
                                 self.blob_store.as_ref(),
                                 // A retry must not re-run the action from
                                 // state that may be missing a committed tail.

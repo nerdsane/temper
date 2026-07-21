@@ -1,6 +1,6 @@
 use super::{
-    WasmDispatchCtx, WasmDispatchMode, WasmEntityRef, is_http_call_authz_denial,
-    record_wasm_error_on_current_span,
+    WASM_CALLBACK_BUDGET, WasmDispatchCtx, WasmDispatchMode, WasmEntityRef,
+    is_http_call_authz_denial, record_wasm_error_on_current_span,
 };
 use crate::entity_actor::EntityResponse;
 use crate::request_context::AgentContext;
@@ -11,6 +11,28 @@ use temper_observe::wide_event;
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 use tracing::{Instrument, instrument};
+
+fn next_wasm_callback_context(
+    agent_ctx: &AgentContext,
+    mode: WasmDispatchMode,
+) -> Result<AgentContext, String> {
+    let remaining = agent_ctx
+        .wasm_callback_budget_remaining
+        .unwrap_or(WASM_CALLBACK_BUDGET)
+        .min(WASM_CALLBACK_BUDGET);
+    let Some(next_remaining) = remaining.checked_sub(1) else {
+        return Err(super::wasm_callback_budget_exhausted_error());
+    };
+
+    let mut callback_ctx = match mode {
+        WasmDispatchMode::Inline => agent_ctx.clone(),
+        WasmDispatchMode::Background => {
+            AgentContext::for_service_inheriting("wasm-runtime", agent_ctx)
+        }
+    };
+    callback_ctx.wasm_callback_budget_remaining = Some(next_remaining);
+    Ok(callback_ctx)
+}
 
 impl crate::state::ServerState {
     /// Record a WASM invocation (persist log entry + emit observability events).
@@ -130,9 +152,14 @@ impl crate::state::ServerState {
                 params["decision_id"] = serde_json::json!(did);
                 params["authz_denied"] = serde_json::json!(true);
             }
-            return self
-                .dispatch_wasm_callback(ctx.entity_ref, cb, params, ctx.agent_ctx, ctx.mode)
-                .await;
+            return Box::pin(self.dispatch_wasm_callback(
+                ctx.entity_ref,
+                cb,
+                params,
+                ctx.agent_ctx,
+                ctx.mode,
+            ))
+            .await;
         }
 
         // No declared recovery: propagate the failure instead of swallowing it
@@ -151,13 +178,16 @@ impl crate::state::ServerState {
         agent_ctx: &AgentContext,
         mode: WasmDispatchMode,
     ) -> Result<Option<EntityResponse>, String> {
+        let callback_ctx = next_wasm_callback_context(agent_ctx, mode)?;
         match mode {
             WasmDispatchMode::Inline => {
                 // Preserve inline semantics through nested WASM callbacks.
                 // A public action may dispatch a validation callback that has
                 // its own WASM trigger; returning before that nested trigger
                 // commits lets concurrent requests observe stale detailed
-                // fields while counters advance.
+                // fields while counters advance. Every recursive edge above
+                // this core dispatch is heap-erased, keeping the same-thread
+                // simulation context while bounding the poll stack.
                 let resp = self
                     .dispatch_tenant_action_core(
                         entity_ref.tenant,
@@ -165,7 +195,7 @@ impl crate::state::ServerState {
                         entity_ref.entity_id,
                         callback_action,
                         callback_params,
-                        agent_ctx,
+                        &callback_ctx,
                         true,
                         None,
                     )
@@ -174,7 +204,6 @@ impl crate::state::ServerState {
                 Ok(Some(resp))
             }
             WasmDispatchMode::Background => {
-                let callback_ctx = AgentContext::for_service_inheriting("wasm-runtime", agent_ctx);
                 self.dispatch_tenant_action(
                     entity_ref.tenant,
                     entity_ref.entity_type,

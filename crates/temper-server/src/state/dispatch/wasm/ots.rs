@@ -160,9 +160,14 @@ impl crate::state::ServerState {
                 "error": error_str,
                 "integration": integration.name.clone(),
             });
-            return self
-                .dispatch_wasm_callback(ctx.entity_ref, cb, params, ctx.agent_ctx, ctx.mode)
-                .await;
+            return Box::pin(self.dispatch_wasm_callback(
+                ctx.entity_ref,
+                cb,
+                params,
+                ctx.agent_ctx,
+                ctx.mode,
+            ))
+            .await;
         }
         Ok(None)
     }

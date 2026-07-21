@@ -108,7 +108,7 @@ async fn cyclic_inline_callbacks_exhaust_a_propagated_budget() {
     );
     assert_eq!(
         response.state.counters.get("callbacks"),
-        Some(&16),
-        "the callback budget permits exactly sixteen nested transitions"
+        Some(&2),
+        "the callback budget permits exactly two nested transitions"
     );
 }

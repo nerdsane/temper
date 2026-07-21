@@ -131,16 +131,15 @@ impl crate::state::ServerState {
                 if let Some(reason) = denial_tracker.take_denial() {
                     let error_str = http_call_authz_denied_error(&reason);
                     record_wasm_error_on_current_span(&error_str);
-                    return self
-                        .handle_wasm_failure(
-                            ctx,
-                            &integration.name,
-                            module_name,
-                            &integration.on_failure,
-                            error_str,
-                            result.duration_ms,
-                        )
-                        .await;
+                    return Box::pin(self.handle_wasm_failure(
+                        ctx,
+                        &integration.name,
+                        module_name,
+                        &integration.on_failure,
+                        error_str,
+                        result.duration_ms,
+                    ))
+                    .await;
                 }
 
                 if integration.llm {
@@ -238,13 +237,13 @@ impl crate::state::ServerState {
                         ctx,
                         module_name,
                         WASM_DISPATCH_PHASE_DISPATCH_CALLBACK,
-                        self.dispatch_wasm_callback(
+                        Box::pin(self.dispatch_wasm_callback(
                             ctx.entity_ref,
                             callback_action,
                             callback_params,
                             ctx.agent_ctx,
                             ctx.mode,
-                        ),
+                        )),
                     )
                     .await?;
                     if let Some(resp) = callback_response {
@@ -299,14 +298,14 @@ impl crate::state::ServerState {
                 // `on_failure` recovery or — when none is declared — returns
                 // `Err` so the failure is never silently treated as success
                 // (ADR-0152).
-                self.handle_wasm_failure(
+                Box::pin(self.handle_wasm_failure(
                     ctx,
                     &integration.name,
                     module_name,
                     &integration.on_failure,
                     error_str,
                     result.duration_ms,
-                )
+                ))
                 .await
             }
             Err(e) => {
@@ -350,14 +349,14 @@ impl crate::state::ServerState {
                 // exhaustion, or panic also leaves the integration's effect
                 // unrealized. `handle_wasm_failure` records it and propagates
                 // `Err` when no `on_failure` is declared (ADR-0152).
-                self.handle_wasm_failure(
+                Box::pin(self.handle_wasm_failure(
                     ctx,
                     &integration.name,
                     module_name,
                     &integration.on_failure,
                     error_str,
                     0,
-                )
+                ))
                 .await
             }
         }
