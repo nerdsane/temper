@@ -13,12 +13,14 @@ async fn request_cancellation_cannot_abort_committed_file_reconciliation() {
     let file_id = "fl-cancelled-after-commit";
     let persistence_id = format!("default:File:{file_id}");
 
-    store.inject_append_delay(&persistence_id, std::time::Duration::from_secs(10));
-    store.inject_append_delay(&persistence_id, std::time::Duration::from_secs(20));
+    let initial_append_delay =
+        store.inject_observed_append_delay(&persistence_id, std::time::Duration::from_secs(10));
+    let racing_append_delay =
+        store.inject_observed_append_delay(&persistence_id, std::time::Duration::from_secs(20));
     let request_state = state.clone();
     let request_tenant = tenant.clone();
     let request_file_id = file_id.to_string();
-    let request = tokio::spawn(async move {
+    let mut request = tokio::spawn(async move {
         let body = b"durable bytes survive request cancellation".to_vec();
         let agent = AgentContext::for_service("cancelled-file-request");
         request_state
@@ -32,15 +34,13 @@ async fn request_cancellation_cannot_abort_committed_file_reconciliation() {
             )
             .await
     });
-    for _ in 0..128 {
-        if store.pending_append_delays(&persistence_id) == 1 {
-            break;
+    tokio::select! {
+        observed = initial_append_delay => {
+            observed.expect("the synthetic File append must consume its controlled delay");
         }
-        assert!(
-            !request.is_finished(),
-            "File request finished before its append delay"
-        );
-        tokio::task::yield_now().await;
+        result = &mut request => {
+            panic!("File request finished before its append delay: {result:?}");
+        }
     }
     assert_eq!(
         store.pending_append_delays(&persistence_id),
@@ -55,7 +55,7 @@ async fn request_cancellation_cannot_abort_committed_file_reconciliation() {
     let action_state = state.clone();
     let action_tenant = tenant.clone();
     let action_file_id = file_id.to_string();
-    let actor_action = tokio::spawn(async move {
+    let mut actor_action = tokio::spawn(async move {
         let agent = AgentContext::for_service("cancelled-file-racing-actor");
         action_state
             .dispatch_tenant_action(
@@ -75,19 +75,16 @@ async fn request_cancellation_cannot_abort_committed_file_reconciliation() {
             )
             .await
     });
-    for _ in 0..128 {
-        if store.pending_append_delays(&persistence_id) == 0 {
-            break;
+    tokio::select! {
+        observed = racing_append_delay => {
+            observed.expect("the racing actor append must consume its controlled delay");
         }
-        assert!(
-            !actor_action.is_finished(),
-            "actor append finished before its delay"
-        );
-        assert!(
-            !request.is_finished(),
-            "File request finished before its commit"
-        );
-        tokio::task::yield_now().await;
+        result = &mut actor_action => {
+            panic!("actor action finished before its append delay: {result:?}");
+        }
+        result = &mut request => {
+            panic!("File request finished before its commit: {result:?}");
+        }
     }
     assert_eq!(store.pending_append_delays(&persistence_id), 0);
 

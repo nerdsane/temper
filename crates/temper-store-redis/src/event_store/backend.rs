@@ -58,6 +58,7 @@ impl EventStore for RedisEventStore {
             typed_live_entities_key,
             tombstones_key,
             index_complete_key,
+            Self::entity_index_event_cursor_key(tenant, &args[1]),
         ];
         let result: Vec<i64> = self
             .append_script
@@ -374,12 +375,10 @@ impl EventStore for RedisEventStore {
             .await
             .map_err(storage_error)?;
 
-        let mut entity_refs = Vec::with_capacity(members.len());
-        for encoded in members {
-            let entity_ref: EntityRef = serde_json::from_str(&encoded)
-                .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-            entity_refs.push(entity_ref);
-        }
+        let entity_refs = Self::decode_entity_refs(members)?;
+        let mut entity_refs = self
+            .revalidate_live_entities(tenant, entity_refs, true)
+            .await?;
         entity_refs.sort();
         entity_refs.dedup();
         Ok(entity_refs
@@ -394,7 +393,8 @@ impl EventStore for RedisEventStore {
         entity_type: &str,
     ) -> Result<Vec<String>, PersistenceError> {
         self.ensure_entity_index_complete(tenant).await?;
-        self.client
+        let entity_ids: Vec<String> = self
+            .client
             .zrange(
                 Self::typed_live_entities_key(tenant, entity_type),
                 0,
@@ -405,7 +405,20 @@ impl EventStore for RedisEventStore {
                 false,
             )
             .await
-            .map_err(storage_error)
+            .map_err(storage_error)?;
+        let entity_refs = entity_ids
+            .into_iter()
+            .map(|entity_id| EntityRef {
+                entity_type: entity_type.to_string(),
+                entity_id,
+            })
+            .collect();
+        Ok(self
+            .revalidate_live_entities(tenant, entity_refs, true)
+            .await?
+            .into_iter()
+            .map(|entity_ref| entity_ref.entity_id)
+            .collect())
     }
 
     async fn list_entity_ids_limited(
@@ -444,9 +457,18 @@ impl EventStore for RedisEventStore {
                 )
                 .await
                 .map_err(storage_error)?;
-            return Ok(ids
+            let entity_refs = ids
                 .into_iter()
-                .map(|entity_id| (entity_type.to_string(), entity_id))
+                .map(|entity_id| EntityRef {
+                    entity_type: entity_type.to_string(),
+                    entity_id,
+                })
+                .collect();
+            return Ok(self
+                .revalidate_live_entities(tenant, entity_refs, false)
+                .await?
+                .into_iter()
+                .map(|entity_ref| (entity_ref.entity_type, entity_ref.entity_id))
                 .collect());
         }
 
@@ -463,13 +485,12 @@ impl EventStore for RedisEventStore {
             )
             .await
             .map_err(storage_error)?;
-        members
+        let entity_refs = Self::decode_entity_refs(members)?;
+        Ok(self
+            .revalidate_live_entities(tenant, entity_refs, false)
+            .await?
             .into_iter()
-            .map(|encoded| {
-                serde_json::from_str::<EntityRef>(&encoded)
-                    .map(|entity_ref| (entity_ref.entity_type, entity_ref.entity_id))
-                    .map_err(|error| PersistenceError::Serialization(error.to_string()))
-            })
-            .collect()
+            .map(|entity_ref| (entity_ref.entity_type, entity_ref.entity_id))
+            .collect())
     }
 }

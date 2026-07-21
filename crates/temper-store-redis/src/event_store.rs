@@ -30,7 +30,8 @@ mod segments;
 ///
 /// KEYS[1] = seq_key, KEYS[2] = events_key, KEYS[3] = entities_key,
 /// KEYS[4] = tenant live index, KEYS[5] = typed live index,
-/// KEYS[6] = tombstone set, KEYS[7] = index-complete marker
+/// KEYS[6] = tombstone set, KEYS[7] = index-complete marker,
+/// KEYS[8] = this entity's last classified journal sequence
 /// ARGV[1] = expected_seq (string-encoded integer)
 /// ARGV[2] = entity_ref_json (for SADD into entities set)
 /// ARGV[3] = entity_id, ARGV[4] = whether this append contains a tombstone
@@ -45,6 +46,7 @@ local live_entities_key = KEYS[4]
 local typed_live_entities_key = KEYS[5]
 local tombstones_key = KEYS[6]
 local index_complete_key = KEYS[7]
+local classified_sequence_key = KEYS[8]
 local expected = tonumber(ARGV[1])
 local entity_ref = ARGV[2]
 local entity_id = ARGV[3]
@@ -72,6 +74,17 @@ if is_tombstone then
 elseif redis.call('SISMEMBER', tombstones_key, entity_ref) == 0 then
     redis.call('ZADD', live_entities_key, 0, entity_ref)
     redis.call('ZADD', typed_live_entities_key, 0, entity_id)
+end
+
+-- Current writers classify liveness in the same transaction as the journal
+-- append. Legacy writers do not advance this cursor, so readers can detect and
+-- reclassify only the journal suffix written during a mixed-version rollout.
+-- Advance only from an exact classified head. A missing or stale cursor means
+-- a legacy writer may have added an unclassified suffix that must remain
+-- visible to readers even if this current writer appends again first.
+local classified = tonumber(redis.call('GET', classified_sequence_key) or '-1')
+if current == 0 or classified == current then
+    redis.call('SET', classified_sequence_key, tostring(new_seq))
 end
 
 -- The first append creates a complete index. A pre-existing historical set

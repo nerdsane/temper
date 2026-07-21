@@ -54,7 +54,10 @@ if complete then
         redis.call('ZADD', KEYS[2], 0, entity_ref)
         redis.call('ZADD', KEYS[3], 0, entity_id)
     end
-    redis.call('DEL', KEYS[6])
+    -- Retain the classified journal head. Current writers advance it
+    -- atomically; a legacy writer leaves it behind, making an update to an
+    -- already-known journal observable without rescanning the prefix.
+    redis.call('SET', KEYS[6], tostring(journal_length))
     redis.call('ZREM', KEYS[5], entity_ref)
 else
     redis.call('SET', KEYS[6], tostring(next_cursor))
@@ -84,7 +87,10 @@ return redis.call('ZRANGE', KEYS[2], 0, 0)
 ///
 /// A mixed-version writer that adds a historical reference without updating
 /// the new indexes changes the cardinality equation and invalidates the marker,
-/// restarting a bounded SSCAN. Live and tombstone indexes are disjoint.
+/// restarting a bounded SSCAN. The marker proves structural coverage only:
+/// listing paths also compare each candidate's classified journal cursor so a
+/// legacy update to an existing reference cannot hide behind equal cardinality.
+/// Live and tombstone indexes are disjoint.
 pub(super) const FINALIZE_ENTITY_INDEX_LUA: &str = r#"
 local historical = redis.call('SCARD', KEYS[1])
 local covered = redis.call('ZCARD', KEYS[2]) + redis.call('SCARD', KEYS[3])
@@ -109,7 +115,19 @@ return 0
 "#;
 
 impl RedisEventStore {
-    fn entity_index_event_cursor_key(tenant: &str, encoded_ref: &str) -> String {
+    pub(super) fn decode_entity_refs(
+        members: Vec<String>,
+    ) -> Result<Vec<EntityRef>, PersistenceError> {
+        members
+            .into_iter()
+            .map(|encoded| {
+                serde_json::from_str(&encoded)
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))
+            })
+            .collect()
+    }
+
+    pub(super) fn entity_index_event_cursor_key(tenant: &str, encoded_ref: &str) -> String {
         format!(
             "{}:entity_index_event_cursor:{tenant}:{encoded_ref}",
             crate::keys::PREFIX
@@ -121,7 +139,7 @@ impl RedisEventStore {
         tenant: &str,
         encoded_ref: String,
         event_budget: usize,
-    ) -> Result<bool, PersistenceError> {
+    ) -> Result<(bool, bool), PersistenceError> {
         let entity_ref: EntityRef = serde_json::from_str(&encoded_ref)
             .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
         let result: Vec<i64> = self
@@ -145,11 +163,58 @@ impl RedisEventStore {
             .await
             .map_err(storage_error)?;
         match result.as_slice() {
-            [complete, _terminal] => Ok(*complete == 1),
+            [complete, terminal] => Ok((*complete == 1, *terminal == 1)),
             other => Err(PersistenceError::Storage(format!(
                 "unexpected Redis entity migration result: {other:?}"
             ))),
         }
+    }
+
+    /// Reclassify journal events not observed by the writer that maintained the
+    /// live indexes. Exhaustive callers drain all bounded chunks; bounded callers
+    /// return a retryable error rather than publishing a partially checked member.
+    pub(super) async fn revalidate_live_entity(
+        &self,
+        tenant: &str,
+        entity_ref: &EntityRef,
+        exhaustive: bool,
+    ) -> Result<bool, PersistenceError> {
+        let encoded_ref = serde_json::to_string(entity_ref)
+            .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+        loop {
+            let (complete, terminal) = self
+                .migrate_entity_ref(tenant, encoded_ref.clone(), ENTITY_EVENT_SCAN_BUDGET)
+                .await?;
+            if terminal {
+                return Ok(false);
+            }
+            if complete {
+                return Ok(true);
+            }
+            if !exhaustive {
+                return Err(PersistenceError::Storage(
+                    "legacy Redis live-entity reclassification incomplete; retry".to_string(),
+                ));
+            }
+        }
+    }
+
+    pub(super) async fn revalidate_live_entities(
+        &self,
+        tenant: &str,
+        entity_refs: Vec<EntityRef>,
+        exhaustive: bool,
+    ) -> Result<Vec<EntityRef>, PersistenceError> {
+        let mut live = Vec::with_capacity(entity_refs.len());
+        for entity_ref in entity_refs {
+            if self
+                .revalidate_live_entity(tenant, &entity_ref, exhaustive)
+                .await?
+            {
+                live.push(entity_ref);
+            }
+        }
+        Ok(live)
     }
 
     async fn validate_or_finalize_entity_index(

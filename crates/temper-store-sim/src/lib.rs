@@ -21,6 +21,8 @@ use temper_runtime::tenant::parse_persistence_id_parts;
 mod event_store;
 mod faults;
 
+use faults::SimAppendDelay;
+
 fn is_entity_tombstone(event: &PersistenceEnvelope) -> bool {
     match event
         .payload
@@ -167,7 +169,7 @@ struct SimEventStoreInner {
     /// Used by dispatch retry tests to deterministically model "the actor
     /// persisted the transition, but the caller's ask timeout expired before
     /// the reply arrived".
-    pending_append_delays: BTreeMap<String, VecDeque<Duration>>,
+    pending_append_delays: BTreeMap<String, VecDeque<SimAppendDelay>>,
     /// One-shot atomic-batch append delays keyed by a member persistence ID.
     ///
     /// A batch consumes at most one delay: the first queued delay found while
@@ -297,7 +299,10 @@ impl SimEventStore {
             .pending_append_delays
             .entry(persistence_id.to_string())
             .or_default()
-            .push_back(delay);
+            .push_back(SimAppendDelay {
+                duration: delay,
+                consumed: None,
+            });
     }
 
     /// Return how many deterministic append delays remain queued for an actor.

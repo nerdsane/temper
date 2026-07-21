@@ -2,7 +2,39 @@
 
 use super::*;
 
+#[derive(Debug)]
+pub(super) struct SimAppendDelay {
+    pub(super) duration: Duration,
+    pub(super) consumed: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
 impl SimEventStore {
+    /// Delay the next append and return a signal that resolves when it consumes the delay.
+    ///
+    /// This is the race-free synchronization primitive for fault campaigns that
+    /// must admit another operation only after an append enters its controlled
+    /// persistence window.
+    pub fn inject_observed_append_delay(
+        &self,
+        persistence_id: &str,
+        delay: Duration,
+    ) -> tokio::sync::oneshot::Receiver<()> {
+        let (consumed, observed) = tokio::sync::oneshot::channel();
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner
+            .pending_append_delays
+            .entry(persistence_id.to_string())
+            .or_default()
+            .push_back(SimAppendDelay {
+                duration: delay,
+                consumed: Some(consumed),
+            });
+        observed
+    }
+
     /// Fail the next `count` typed entity-list operations, then recover.
     pub fn fail_next_typed_lists(&self, tenant: &str, entity_type: &str, count: usize) {
         let key = (tenant.to_string(), entity_type.to_string());

@@ -40,10 +40,13 @@ impl SimEventStore {
             }
             delay
         };
-        if let Some(delay) = append_delay
-            && !delay.is_zero()
-        {
-            tokio::time::sleep(delay).await;
+        if let Some(delay) = append_delay {
+            if let Some(consumed) = delay.consumed {
+                let _ = consumed.send(());
+            }
+            if !delay.duration.is_zero() {
+                tokio::time::sleep(delay.duration).await;
+            }
         }
 
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
