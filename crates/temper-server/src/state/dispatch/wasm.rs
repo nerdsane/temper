@@ -1,5 +1,7 @@
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use opentelemetry::trace::{Status, TraceContextExt};
@@ -59,11 +61,11 @@ const HTTP_CALL_AUTHZ_DENIED_PREFIX: &str = "authorization denied for http_call"
 // Match the verifier's transitive trigger bound so runtime callbacks preserve
 // every chain the verified model permits while still terminating cycles.
 const WASM_CALLBACK_BUDGET: u32 = temper_spec::automaton::MAX_TRIGGER_DEPTH;
-// Inline callbacks remain on the current task and retain its simulation
-// context. Two nested transitions are safe on the runtime's minimum supported
-// 2 MiB worker stack in debug builds; background task boundaries reset only
-// this stack budget while continuing to consume the logical budget above.
-const WASM_INLINE_CALLBACK_BUDGET: u32 = 2;
+// Tokio workers default to a 2 MiB stack. Keep a full MiB available at each
+// bounded recursive callback poll; stacker switches stacks on the same thread,
+// so simulated time/ID context and awaited ordering remain unchanged.
+const WASM_CALLBACK_STACK_RED_ZONE_BYTES: usize = 1024 * 1024;
+const WASM_CALLBACK_STACK_SEGMENT_BYTES: usize = 2 * 1024 * 1024;
 const MONTY_REPL_MODULE: &str = "monty_repl";
 const WASM_DISPATCH_PHASE_MODULE_CACHE: &str = "dispatch.wasm.phase.module_cache";
 const WASM_DISPATCH_PHASE_REPLAY_INPUT_INJECTION: &str =
@@ -93,10 +95,31 @@ fn wasm_callback_budget_exhausted_error() -> String {
     format!("WASM callback budget exhausted after {WASM_CALLBACK_BUDGET} callbacks")
 }
 
-fn wasm_inline_callback_budget_exhausted_error() -> String {
-    format!(
-        "WASM callback budget exhausted after {WASM_INLINE_CALLBACK_BUDGET} inline callbacks on one task"
-    )
+struct WasmCallbackFuture<F> {
+    inner: F,
+}
+
+impl<F> Future for WasmCallbackFuture<F>
+where
+    F: Future + Unpin,
+{
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        stacker::maybe_grow(
+            WASM_CALLBACK_STACK_RED_ZONE_BYTES,
+            WASM_CALLBACK_STACK_SEGMENT_BYTES,
+            || Pin::new(&mut this.inner).poll(cx),
+        )
+    }
+}
+
+fn with_wasm_callback_stack<F>(inner: F) -> WasmCallbackFuture<F>
+where
+    F: Future + Unpin,
+{
+    WasmCallbackFuture { inner }
 }
 
 fn is_http_call_authz_denial(error: &str) -> bool {

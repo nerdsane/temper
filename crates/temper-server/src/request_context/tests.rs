@@ -145,7 +145,6 @@ fn service_context_inherits_workflow_trace_context() {
         workflow_run_id: Some("wf-job-1".to_string()),
         idempotency_key: Some("parent-key".to_string()),
         wasm_callback_budget_remaining: Some(7),
-        wasm_inline_callback_budget_remaining: Some(1),
         ..AgentContext::default()
     };
 
@@ -167,7 +166,6 @@ fn service_context_inherits_workflow_trace_context() {
     assert_eq!(service.workflow_run_id.as_deref(), Some("wf-job-1"));
     assert!(service.idempotency_key.is_none());
     assert_eq!(service.wasm_callback_budget_remaining, Some(7));
-    assert_eq!(service.wasm_inline_callback_budget_remaining, None);
 }
 
 #[test]

@@ -223,10 +223,12 @@ async fn cyclic_inline_callbacks_exhaust_a_propagated_budget() {
         error.contains("WASM callback budget exhausted"),
         "unexpected terminal error: {error}"
     );
+    let expected_callbacks = usize::try_from(temper_spec::automaton::MAX_TRIGGER_DEPTH)
+        .expect("the trigger-depth budget fits in usize");
     assert_eq!(
         response.state.counters.get("callbacks"),
-        Some(&2),
-        "the callback budget permits exactly two nested transitions"
+        Some(&expected_callbacks),
+        "inline cycles terminate at the shared logical callback budget"
     );
 }
 
@@ -255,7 +257,10 @@ async fn acyclic_inline_callbacks_preserve_valid_workflow_depth() {
     .expect("an acyclic inline callback chain must complete within its logical budget")
     .expect("the durable transition should dispatch");
 
-    assert!(response.success, "valid inline callbacks must not exhaust the budget");
+    assert!(
+        response.success,
+        "valid inline callbacks must not exhaust the budget"
+    );
     assert_eq!(
         response.state.status, "Complete",
         "a valid three-callback inline workflow must complete synchronously"

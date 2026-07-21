@@ -1,6 +1,6 @@
 use super::{
-    WASM_CALLBACK_BUDGET, WASM_INLINE_CALLBACK_BUDGET, WasmDispatchCtx, WasmDispatchMode,
-    WasmEntityRef, is_http_call_authz_denial, record_wasm_error_on_current_span,
+    WASM_CALLBACK_BUDGET, WasmDispatchCtx, WasmDispatchMode, WasmEntityRef,
+    is_http_call_authz_denial, record_wasm_error_on_current_span,
 };
 use crate::entity_actor::EntityResponse;
 use crate::request_context::AgentContext;
@@ -31,21 +31,6 @@ fn next_wasm_callback_context(
         }
     };
     callback_ctx.wasm_callback_budget_remaining = Some(next_logical_remaining);
-    match mode {
-        WasmDispatchMode::Inline => {
-            let inline_remaining = agent_ctx
-                .wasm_inline_callback_budget_remaining
-                .unwrap_or(WASM_INLINE_CALLBACK_BUDGET)
-                .min(WASM_INLINE_CALLBACK_BUDGET);
-            let Some(next_inline_remaining) = inline_remaining.checked_sub(1) else {
-                return Err(super::wasm_inline_callback_budget_exhausted_error());
-            };
-            callback_ctx.wasm_inline_callback_budget_remaining = Some(next_inline_remaining);
-        }
-        WasmDispatchMode::Background => {
-            callback_ctx.wasm_inline_callback_budget_remaining = None;
-        }
-    }
     Ok(callback_ctx)
 }
 
@@ -200,22 +185,19 @@ impl crate::state::ServerState {
                 // A public action may dispatch a validation callback that has
                 // its own WASM trigger; returning before that nested trigger
                 // commits lets concurrent requests observe stale detailed
-                // fields while counters advance. Every recursive edge above
-                // this core dispatch is heap-erased, keeping the same-thread
-                // simulation context while bounding the poll stack.
-                let resp = self
-                    .dispatch_tenant_action_core(
-                        entity_ref.tenant,
-                        entity_ref.entity_type,
-                        entity_ref.entity_id,
-                        callback_action,
-                        callback_params,
-                        &callback_ctx,
-                        true,
-                        None,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?;
+                // fields while counters advance.
+                let resp = super::with_wasm_callback_stack(self.dispatch_tenant_action_core(
+                    entity_ref.tenant,
+                    entity_ref.entity_type,
+                    entity_ref.entity_id,
+                    callback_action,
+                    callback_params,
+                    &callback_ctx,
+                    true,
+                    None,
+                ))
+                .await
+                .map_err(|e| e.to_string())?;
                 Ok(Some(resp))
             }
             WasmDispatchMode::Background => {

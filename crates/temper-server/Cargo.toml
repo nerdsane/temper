@@ -58,6 +58,7 @@ lru = { workspace = true }
 sha2 = { workspace = true }
 hmac = "0.12"
 libc = { workspace = true }
+stacker = "0.1.23"
 # ADR-0055: CPU profile capture. pprof-rs is used because crates.io
 # `datadog-profiling` is currently an empty placeholder (see ADR for
 # details). `flamegraph` feature brings in inferno for SVG rendering.
