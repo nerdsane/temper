@@ -481,6 +481,10 @@ mod tests;
 mod timeout_clock_tests;
 
 #[cfg(all(test, feature = "sim"))]
+#[path = "actor_timeout_clock_rollout_tests.rs"]
+mod timeout_clock_rollout_tests;
+
+#[cfg(all(test, feature = "sim"))]
 #[path = "actor_timeout_clock_migration_tests.rs"]
 mod timeout_clock_migration_tests;
 
