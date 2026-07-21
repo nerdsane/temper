@@ -21,7 +21,6 @@ fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnv
 /// ADR-0153 live verification: the real postgres store honors the same
 /// negative-existence + atomicity invariants the DST proved in SimEventStore.
 /// Gated on DATABASE_URL (skips otherwise); isolated by a unique tenant.
-
 #[path = "store_projection_test/keys.rs"]
 mod keys;
 #[path = "store_projection_test/queries.rs"]

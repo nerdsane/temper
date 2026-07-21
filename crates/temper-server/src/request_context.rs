@@ -64,12 +64,18 @@ pub struct AgentContext {
     /// `Idempotency-Key` header. Threaded into `EntityMsg::Action` so the
     /// actor can dedupe duplicate asks produced by dispatch-layer retries.
     pub idempotency_key: Option<String>,
-    /// Remaining nested WASM callback dispatches for this logical action.
+    /// Remaining WASM callback dispatches for this logical action chain.
     ///
     /// `None` means the platform default budget has not been consumed yet.
     /// Internal callback dispatch clamps and decrements this value before
     /// propagating the context to the next action.
-    pub wasm_callback_budget_remaining: Option<u8>,
+    pub wasm_callback_budget_remaining: Option<u32>,
+    /// Remaining contiguous inline WASM callbacks on the current task stack.
+    ///
+    /// Background callback dispatch resets this budget because the next
+    /// integration runs on a fresh task, while preserving the logical chain
+    /// budget above.
+    pub wasm_inline_callback_budget_remaining: Option<u32>,
     /// Generic, client-supplied observability metadata.
     ///
     /// Producers should namespace their keys, for example
@@ -98,6 +104,7 @@ impl AgentContext {
             workflow_run_id: None,
             idempotency_key: None,
             wasm_callback_budget_remaining: None,
+            wasm_inline_callback_budget_remaining: None,
             observation_metadata: BTreeMap::new(),
         }
     }
@@ -134,6 +141,7 @@ impl AgentContext {
             workflow_run_id: None,
             idempotency_key: None,
             wasm_callback_budget_remaining: None,
+            wasm_inline_callback_budget_remaining: None,
             observation_metadata: BTreeMap::new(),
         }
     }
@@ -153,6 +161,8 @@ impl AgentContext {
     /// agent, but they still belong to the same logical workflow trace.
     pub fn for_service_inheriting(service_name: &str, parent: &AgentContext) -> Self {
         let mut inherited = Self::for_service(service_name).inherit_observability_from(parent);
+        // Logical callback chains cross service/task boundaries. The inline
+        // budget describes only the current task stack and must start fresh.
         inherited.wasm_callback_budget_remaining = parent.wasm_callback_budget_remaining;
         inherited
     }
@@ -266,6 +276,7 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
         workflow_run_id,
         idempotency_key,
         wasm_callback_budget_remaining: None,
+        wasm_inline_callback_budget_remaining: None,
         observation_metadata: observation_metadata::extract(headers),
     }
 }

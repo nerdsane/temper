@@ -288,9 +288,11 @@ async fn cyclic_background_callbacks_exhaust_the_propagated_logical_budget() {
         &["Failed"],
     )
     .await;
+    let expected_callbacks = usize::try_from(temper_spec::automaton::MAX_TRIGGER_DEPTH)
+        .expect("the trigger-depth budget fits in usize");
     assert_eq!(
         final_state.counters.get("callbacks"),
-        Some(&16),
+        Some(&expected_callbacks),
         "background cycles terminate at the propagated logical callback budget"
     );
 }

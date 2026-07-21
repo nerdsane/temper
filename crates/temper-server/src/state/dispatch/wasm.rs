@@ -56,11 +56,14 @@ fn agent_ctx_for_composite_wasm_result(
 }
 
 const HTTP_CALL_AUTHZ_DENIED_PREFIX: &str = "authorization denied for http_call";
-// Callback dispatch is bounded independently of the worker's stack size; the
-// integration pipeline decrements this budget before every nested transition.
-// Two nested transitions retain multi-step recovery while remaining safe on
-// the runtime's minimum supported 2 MiB worker stack in debug builds.
-const WASM_CALLBACK_BUDGET: u8 = 2;
+// Match the verifier's transitive trigger bound so runtime callbacks preserve
+// every chain the verified model permits while still terminating cycles.
+const WASM_CALLBACK_BUDGET: u32 = temper_spec::automaton::MAX_TRIGGER_DEPTH;
+// Inline callbacks remain on the current task and retain its simulation
+// context. Two nested transitions are safe on the runtime's minimum supported
+// 2 MiB worker stack in debug builds; background task boundaries reset only
+// this stack budget while continuing to consume the logical budget above.
+const WASM_INLINE_CALLBACK_BUDGET: u32 = 2;
 const MONTY_REPL_MODULE: &str = "monty_repl";
 const WASM_DISPATCH_PHASE_MODULE_CACHE: &str = "dispatch.wasm.phase.module_cache";
 const WASM_DISPATCH_PHASE_REPLAY_INPUT_INJECTION: &str =
@@ -87,7 +90,13 @@ fn http_call_authz_denied_error(reason: &str) -> String {
 }
 
 fn wasm_callback_budget_exhausted_error() -> String {
-    format!("WASM callback budget exhausted after {WASM_CALLBACK_BUDGET} nested callbacks")
+    format!("WASM callback budget exhausted after {WASM_CALLBACK_BUDGET} callbacks")
+}
+
+fn wasm_inline_callback_budget_exhausted_error() -> String {
+    format!(
+        "WASM callback budget exhausted after {WASM_INLINE_CALLBACK_BUDGET} inline callbacks on one task"
+    )
 }
 
 fn is_http_call_authz_denial(error: &str) -> bool {
