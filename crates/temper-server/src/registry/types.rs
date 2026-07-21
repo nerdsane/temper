@@ -5,11 +5,23 @@ use std::sync::Arc;
 
 use temper_jit::swap::SwapController;
 use temper_jit::table::TransitionTable;
+use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::{Automaton, Integration, Webhook};
 use temper_spec::cross_invariant::{CrossInvariantSpec, DeletePolicy};
 use temper_spec::csdl::CsdlDocument;
 
 use crate::trigger::types::ReactionRule;
+
+/// One successfully published transition-table version.
+#[derive(Debug, Clone)]
+pub(crate) struct RegistryTableChange {
+    /// Tenant whose table changed.
+    pub(crate) tenant: TenantId,
+    /// Entity type whose table changed.
+    pub(crate) entity_type: String,
+    /// Monotonic version installed by the swap controller.
+    pub(crate) version: u64,
+}
 
 /// Verification status for a single entity type.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -197,6 +209,41 @@ impl std::fmt::Debug for EntitySpec {
 }
 
 impl EntitySpec {
+    /// Build an entity spec whose public swap primitive publishes both local
+    /// table-version and server-wide reconciliation notifications.
+    pub(super) fn new(
+        tenant: TenantId,
+        entity_type: String,
+        automaton: Automaton,
+        integrations: Vec<Integration>,
+        table: TransitionTable,
+        ioa_source: String,
+        registry_table_change_tx: tokio::sync::broadcast::Sender<RegistryTableChange>,
+    ) -> Self {
+        let (table_version_tx, _) = tokio::sync::watch::channel(1);
+        let table_version_for_observer = table_version_tx.clone();
+        let tenant_for_observer = tenant.clone();
+        let entity_type_for_observer = entity_type.clone();
+        let swap = Arc::new(SwapController::new(table));
+        swap.install_swap_observer(Arc::new(move |version| {
+            table_version_for_observer.send_replace(version);
+            let _ = registry_table_change_tx.send(RegistryTableChange {
+                tenant: tenant_for_observer.clone(),
+                entity_type: entity_type_for_observer.clone(),
+                version,
+            });
+        }))
+        .expect("a new swap controller has an unpoisoned observer lock");
+
+        Self {
+            automaton,
+            integrations,
+            swap,
+            table_version_tx,
+            ioa_source,
+        }
+    }
+
     /// Get a snapshot of the current transition table.
     ///
     /// This reads through the [`SwapController`] — if a hot-swap happened,

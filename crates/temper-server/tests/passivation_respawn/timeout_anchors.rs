@@ -73,6 +73,8 @@ on_timeout = "TimeoutFail"
 
 #[path = "timeout_anchors/hotswap.rs"]
 mod hotswap;
+#[path = "timeout_anchors/hotswap_reconciliation.rs"]
+mod hotswap_reconciliation;
 #[path = "timeout_anchors/snapshot.rs"]
 mod snapshot;
 #[path = "timeout_anchors/startup.rs"]

@@ -380,6 +380,7 @@ impl ServerState {
     /// then serve from the index on subsequent calls.
     #[instrument(skip_all, fields(otel.name = "entity.list_entity_ids_lazy", tenant = %tenant, entity_type))]
     pub async fn list_entity_ids_lazy(&self, tenant: &TenantId, entity_type: &str) -> Vec<String> {
+        self.ensure_registry_timeout_reconciliation_started();
         let index_key = format!("{tenant}:{entity_type}");
         let already_hydrated = self
             .entity_index_hydrated

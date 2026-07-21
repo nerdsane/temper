@@ -33,6 +33,8 @@ mod lifecycle;
 mod lookups;
 mod maintenance;
 mod mutations;
+#[path = "registry_timeout_reconciliation.rs"]
+mod registry_timeout_reconciliation;
 mod status;
 
 fn actor_idle_timeout_secs() -> i64 {

@@ -224,11 +224,13 @@ fn state_clock_pair(
 
 /// Apply one present, current-format clock during replay.
 ///
-/// The first present payload after legacy history is an authoritative
-/// checkpoint and may retain an older reset identity. Once authority exists,
-/// a clock may only stay identical, clear, or establish a new identity at the
-/// current envelope sequence. An inactive historical outcome is migrated
-/// deterministically when the current table has since added a timeout.
+/// The first present payload after a legacy boundary is an authoritative
+/// checkpoint and may retain an older reset identity. Within one uninterrupted
+/// current-format run, a clock may only stay identical, clear, or establish a
+/// new identity at the current envelope sequence. A later legacy writer ends
+/// that run; replay derives its event under the current table and lets the next
+/// present payload establish fresh authority. An inactive historical outcome
+/// is migrated deterministically when the current table has since added a timeout.
 pub(crate) fn apply_replayed_state_timeout_clock(
     persistence_id: &str,
     table: &TransitionTable,

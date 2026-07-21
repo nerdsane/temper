@@ -39,6 +39,8 @@ pub struct StateTimeoutTracker {
     /// ADR-0049: per-entity-type count of armed-but-unfired timers.
     /// Emitted as `temper_scheduler_pending_timers` by the canary loop.
     pending_by_type: Mutex<BTreeMap<String, u64>>,
+    /// Single lifecycle owner for the registry-wide timeout reconciler.
+    registry_reconciliation_lifetime: Mutex<Option<tokio::sync::watch::Sender<bool>>>,
     #[cfg(test)]
     reconciliation_failures: Mutex<u64>,
 }
@@ -71,6 +73,34 @@ pub(crate) struct InactiveStateTimeoutFence {
 impl StateTimeoutTracker {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Claim the single registry timeout reconciler and return its shutdown signal.
+    pub(crate) fn begin_registry_reconciliation(
+        &self,
+    ) -> Option<tokio::sync::watch::Receiver<bool>> {
+        let mut lifetime = self
+            .registry_reconciliation_lifetime
+            .lock()
+            .expect("registry reconciliation lifetime poisoned");
+        if lifetime.is_some() {
+            return None;
+        }
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        *lifetime = Some(sender);
+        Some(receiver)
+    }
+
+    /// Release the registry timeout reconciler claim after its task exits.
+    pub(crate) fn finish_registry_reconciliation(&self) {
+        let sender = self
+            .registry_reconciliation_lifetime
+            .lock()
+            .expect("registry reconciliation lifetime poisoned")
+            .take();
+        if let Some(sender) = sender {
+            sender.send_replace(true);
+        }
     }
 
     /// Register the first-mailbox hydration barrier before an actor is visible.

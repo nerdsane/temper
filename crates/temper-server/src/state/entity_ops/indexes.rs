@@ -208,6 +208,7 @@ impl ServerState {
     /// transitions must be re-armed even when no request arrives after restart.
     #[instrument(skip_all, fields(otel.name = "entity.populate_index_from_store", tenant = %tenant))]
     pub async fn populate_index_from_store(&self, tenant: &TenantId) {
+        self.ensure_registry_timeout_reconciliation_started();
         let Some((store, _backend)) = self.event_journal() else {
             return;
         };

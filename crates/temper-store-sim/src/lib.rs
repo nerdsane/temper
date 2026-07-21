@@ -19,6 +19,7 @@ use temper_runtime::persistence::{
 use temper_runtime::tenant::parse_persistence_id_parts;
 
 mod event_store;
+mod faults;
 
 fn is_entity_tombstone(event: &PersistenceEnvelope) -> bool {
     match event
@@ -159,6 +160,8 @@ struct SimEventStoreInner {
     /// (e.g. proving the key-index backfill treats an unreadable entity as
     /// `LoadFailed` and does not watermark its type). See `fail_next_reads`.
     pending_read_failures: BTreeMap<String, usize>,
+    /// One-shot typed-list failures keyed by `(tenant, entity_type)`.
+    pending_typed_list_failures: BTreeMap<(String, String), usize>,
     /// One-shot append delays per `persistence_id`.
     ///
     /// Used by dispatch retry tests to deterministically model "the actor
@@ -222,6 +225,7 @@ impl SimEventStore {
                 faults,
                 pending_concurrency_violations: BTreeMap::new(),
                 pending_read_failures: BTreeMap::new(),
+                pending_typed_list_failures: BTreeMap::new(),
                 pending_append_delays: BTreeMap::new(),
                 pending_append_batch_delays: BTreeMap::new(),
                 pending_snapshot_delays: BTreeMap::new(),

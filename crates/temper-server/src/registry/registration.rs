@@ -96,6 +96,7 @@ impl SpecRegistry {
     ) -> Result<(), RegistryError> {
         let tenant = tenant.into();
         let tenant_name = tenant.to_string();
+        let table_change_tx = self.table_change_tx.clone();
         let cross_invariants = cross_invariants_source
             .as_ref()
             .filter(|s| !s.trim().is_empty())
@@ -169,9 +170,6 @@ impl SpecRegistry {
                 if let Some(existing_spec) = existing_config.entities.get_mut(*entity_type) {
                     // Hot-swap: write new table into the SAME RwLock that actors hold.
                     let result = existing_spec.swap_controller().swap(table);
-                    if let SwapResult::Success { new_version, .. } = &result {
-                        existing_spec.table_version_tx.send_replace(*new_version);
-                    }
                     tracing::info!(
                         entity_type,
                         ?result,
@@ -183,17 +181,23 @@ impl SpecRegistry {
                     existing_spec.ioa_source = ioa_source.to_string();
                 } else {
                     // New entity type — create fresh EntitySpec.
-                    let (table_version_tx, _) = tokio::sync::watch::channel(1);
                     existing_config.entities.insert(
                         entity_type.to_string(),
-                        EntitySpec {
+                        EntitySpec::new(
+                            tenant.clone(),
+                            entity_type.to_string(),
                             automaton,
                             integrations,
-                            swap: Arc::new(SwapController::new(table)),
-                            table_version_tx,
-                            ioa_source: ioa_source.to_string(),
-                        },
+                            table,
+                            ioa_source.to_string(),
+                            table_change_tx.clone(),
+                        ),
                     );
+                    let _ = table_change_tx.send(RegistryTableChange {
+                        tenant: tenant.clone(),
+                        entity_type: entity_type.to_string(),
+                        version: 1,
+                    });
                 }
             }
 
@@ -246,16 +250,17 @@ impl SpecRegistry {
                 })?;
                 let table = TransitionTable::from_automaton(&automaton);
                 let integrations = automaton.integrations.clone();
-                let (table_version_tx, _) = tokio::sync::watch::channel(1);
                 entities.insert(
                     entity_type.to_string(),
-                    EntitySpec {
+                    EntitySpec::new(
+                        tenant.clone(),
+                        entity_type.to_string(),
                         automaton,
                         integrations,
-                        swap: Arc::new(SwapController::new(table)),
-                        table_version_tx,
-                        ioa_source: ioa_source.to_string(),
-                    },
+                        table,
+                        ioa_source.to_string(),
+                        table_change_tx.clone(),
+                    ),
                 );
             }
 
@@ -265,8 +270,9 @@ impl SpecRegistry {
                 .collect();
 
             let webhook_routes = build_webhook_routes(&entities);
+            let registered_entity_types: Vec<_> = entities.keys().cloned().collect();
             self.tenants.insert(
-                tenant,
+                tenant.clone(),
                 TenantConfig {
                     csdl: Arc::new(csdl),
                     csdl_xml: Arc::new(csdl_xml),
@@ -280,6 +286,13 @@ impl SpecRegistry {
                     verification,
                 },
             );
+            for entity_type in registered_entity_types {
+                let _ = table_change_tx.send(RegistryTableChange {
+                    tenant: tenant.clone(),
+                    entity_type,
+                    version: 1,
+                });
+            }
         }
 
         Ok(())

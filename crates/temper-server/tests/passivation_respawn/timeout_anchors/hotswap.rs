@@ -257,6 +257,7 @@ async fn direct_swap_controller_arms_first_timeout_without_traffic() {
     let sim_store = SimEventStore::no_faults(seed);
     let tenant = TenantId::default();
     let entity_id = "direct-swap-first-timeout";
+    let actor_key = format!("{tenant}:InitialTimedTask:{entity_id}");
     let state = common::build_single_tenant_state_with_store(
         sim_store.clone(),
         "direct-swap-first-timeout",
@@ -290,6 +291,25 @@ async fn direct_swap_controller_arms_first_timeout_without_traffic() {
         state.state_timeout_tracker.pending_snapshot(),
         vec![("InitialTimedTask".to_string(), 1)],
         "the documented direct swap API must publish the same timeout notification"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(600)).await;
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+        if sim_store.total_events() == 2 {
+            break;
+        }
+    }
+    let journal = sim_store
+        .read_events(&actor_key, 0)
+        .await
+        .expect("read direct-swap timeout journal");
+    assert_eq!(
+        journal
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Created", "TimeoutFail"]
     );
 }
 
@@ -349,6 +369,25 @@ async fn lazy_durable_entity_arms_first_timeout_after_registry_hotswap() {
             .unwrap()
             .contains_key(&actor_key),
         "timeout reconciliation must materialize the durable entity"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(600)).await;
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+        if sim_store.total_events() == 2 {
+            break;
+        }
+    }
+    let journal = sim_store
+        .read_events(&actor_key, 0)
+        .await
+        .expect("read lazy durable hot-swap journal");
+    assert_eq!(
+        journal
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Created", "TimeoutFail"]
     );
 }
 

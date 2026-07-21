@@ -109,11 +109,11 @@ impl EntityActor {
                         decode_entity_event_clock(persistence_id, env.sequence_nr, &env.payload)
                             .map_err(ActorError::custom)?;
                     if timeout_clock_authoritative && persisted_clock.is_none() {
-                        return Err(ActorError::custom(format!(
-                            "missing persisted state-timeout clock at sequence {} after an \
-                             authoritative checkpoint for {persistence_id}",
-                            env.sequence_nr
-                        )));
+                        tracing::warn!(
+                            entity = %state.entity_id,
+                            sequence_nr = env.sequence_nr,
+                            "legacy state-timeout clock payload follows an authoritative checkpoint; deriving this rollout boundary under the current table"
+                        );
                     }
                     let parsed_event = serde_json::from_value::<EntityEvent>(env.payload.clone());
 

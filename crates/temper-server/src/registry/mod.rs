@@ -13,7 +13,6 @@ use std::sync::{Arc, RwLock};
 
 use tracing::instrument;
 
-use temper_jit::swap::{SwapController, SwapResult};
 use temper_jit::table::TransitionTable;
 use temper_runtime::tenant::TenantId;
 use temper_spec::FieldInvariant;
@@ -46,11 +45,22 @@ fn merge_reaction_rules(
 /// Multi-tenant specification registry.
 ///
 /// Thread-safe for concurrent reads. Registration is done at startup;
-/// hot-swap via [`SwapController`](temper_jit::SwapController) can update
+/// hot-swap via [`SwapController`](temper_jit::swap::SwapController) can update
 /// individual tables without replacing the entire registry.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SpecRegistry {
     tenants: BTreeMap<TenantId, TenantConfig>,
+    table_change_tx: tokio::sync::broadcast::Sender<RegistryTableChange>,
+}
+
+impl Default for SpecRegistry {
+    fn default() -> Self {
+        let (table_change_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: bounded spec-version fanout
+        Self {
+            tenants: BTreeMap::new(),
+            table_change_tx,
+        }
+    }
 }
 
 impl SpecRegistry {
@@ -82,7 +92,8 @@ impl SpecRegistry {
     /// Get a live reference to the transition table's `RwLock`.
     ///
     /// Unlike [`get_table()`](Self::get_table) which returns a cloned snapshot,
-    /// this returns the `Arc<RwLock<TransitionTable>>` from the [`SwapController`].
+    /// this returns the `Arc<RwLock<TransitionTable>>` from the
+    /// [`SwapController`](temper_jit::swap::SwapController).
     /// Actors holding this reference will see hot-swapped tables on their next read.
     pub fn get_table_live(
         &self,
@@ -105,6 +116,45 @@ impl SpecRegistry {
             .get(tenant)
             .and_then(|tc| tc.entities.get(entity_type))
             .map(EntitySpec::subscribe_table_versions)
+    }
+
+    /// Subscribe to successfully published registry table changes.
+    pub(crate) fn subscribe_table_changes(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<RegistryTableChange> {
+        self.table_change_tx.subscribe()
+    }
+
+    /// Return every current timed type with its authoritative table version.
+    pub(crate) fn timed_table_changes(&self) -> Vec<RegistryTableChange> {
+        self.tenants
+            .iter()
+            .flat_map(|(tenant, config)| {
+                config
+                    .entities
+                    .iter()
+                    .filter(|(_, spec)| !spec.table().state_timeouts.is_empty())
+                    .map(move |(entity_type, spec)| RegistryTableChange {
+                        tenant: tenant.clone(),
+                        entity_type: entity_type.clone(),
+                        version: spec.swap_controller().version(),
+                    })
+            })
+            .collect()
+    }
+
+    /// Return the current timed table change for one reconciliation target.
+    pub(crate) fn timed_table_change(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+    ) -> Option<RegistryTableChange> {
+        let spec = self.get_spec(tenant, entity_type)?;
+        (!spec.table().state_timeouts.is_empty()).then(|| RegistryTableChange {
+            tenant: tenant.clone(),
+            entity_type: entity_type.to_string(),
+            version: spec.swap_controller().version(),
+        })
     }
 
     /// Look up the entity type name for an entity set in a tenant.

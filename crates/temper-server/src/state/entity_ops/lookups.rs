@@ -40,6 +40,7 @@ impl ServerState {
     /// entities that have persisted events in this tenant.
     #[instrument(skip_all, fields(otel.name = "entity.hydrate_from_store", tenant = %tenant))]
     pub async fn hydrate_from_store(&self, tenant: &TenantId) {
+        self.ensure_registry_timeout_reconciliation_started();
         if let Some((store, _backend)) = self.event_journal() {
             match store.list_entity_ids(tenant.as_str()).await {
                 Ok(entities) => {
@@ -109,6 +110,7 @@ impl ServerState {
         entity_id: &str,
         initial_fields: serde_json::Value,
     ) -> Option<ActorRef<EntityMsg>> {
+        self.ensure_registry_timeout_reconciliation_started();
         let key = format!("{tenant}:{entity_type}:{entity_id}");
 
         // Fast-path: check actor registry under read lock.

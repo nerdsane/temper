@@ -183,7 +183,25 @@ impl SimEventStore {
         tenant: &str,
         entity_type: &str,
     ) -> Result<Vec<String>, PersistenceError> {
-        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        let failure_key = (tenant.to_string(), entity_type.to_string());
+        let pending_failures = inner
+            .pending_typed_list_failures
+            .get(&failure_key)
+            .copied()
+            .unwrap_or(0);
+        if pending_failures > 0 {
+            if pending_failures == 1 {
+                inner.pending_typed_list_failures.remove(&failure_key);
+            } else {
+                inner
+                    .pending_typed_list_failures
+                    .insert(failure_key, pending_failures - 1);
+            }
+            return Err(PersistenceError::Storage(format!(
+                "injected typed-list failure for {tenant}:{entity_type}"
+            )));
+        }
         let mut result = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
 
