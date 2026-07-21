@@ -114,6 +114,7 @@ impl ServerState {
             Ok(true) => {}
         }
 
+        let memory_only = self.event_journal().is_none();
         let entity_ids = match self
             .fresh_entity_ids_for_timeout_reconciliation(&target.tenant, &target.entity_type)
             .await
@@ -121,18 +122,37 @@ impl ServerState {
             Ok(entity_ids) => entity_ids,
             Err(error) => return ReconciliationOutcome::Retry(error),
         };
+        #[cfg(test)]
+        self.state_timeout_tracker
+            .wait_for_registry_entity_scan_release()
+            .await;
         for entity_id in entity_ids {
             match self.registry_target_is_current_and_timed(target, version) {
                 Ok(false) => return ReconciliationOutcome::Superseded,
                 Err(error) => return ReconciliationOutcome::Retry(error),
                 Ok(true) => {}
             }
-            if !self
-                .ensure_entity_actor_materialized(&target.tenant, &target.entity_type, &entity_id)
+            let materialized = if memory_only {
+                self.ensure_indexed_entity_actor_materialized(
+                    &target.tenant,
+                    &target.entity_type,
+                    &entity_id,
+                )
                 .await
+            } else {
+                self.ensure_entity_actor_materialized(
+                    &target.tenant,
+                    &target.entity_type,
+                    &entity_id,
+                )
+                .await
+            };
+            if !materialized
+                && (!memory_only
+                    || self.entity_exists(&target.tenant, &target.entity_type, &entity_id))
             {
                 return ReconciliationOutcome::Retry(format!(
-                    "could not materialize durable entity {entity_id}"
+                    "could not materialize current entity {entity_id}"
                 ));
             }
         }

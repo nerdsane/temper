@@ -197,7 +197,18 @@ impl ServerState {
     /// Check if an entity exists in the index.
     pub fn entity_exists(&self, tenant: &TenantId, entity_type: &str, entity_id: &str) -> bool {
         let index_key = format!("{tenant}:{entity_type}");
-        let index = self.entity_index.read().unwrap();
+        let index = match self.entity_index.read() {
+            Ok(index) => index,
+            Err(poisoned) => {
+                tracing::error!(
+                    tenant = %tenant,
+                    entity_type,
+                    entity_id,
+                    "entity index lock poisoned while checking existence; recovering guarded state"
+                );
+                poisoned.into_inner()
+            }
+        };
         index
             .get(&index_key)
             .is_some_and(|ids| ids.contains(entity_id))
@@ -299,6 +310,38 @@ impl ServerState {
         entity_type: &str,
         entity_id: &str,
     ) -> bool {
+        self.ensure_entity_actor_materialized_guarded(tenant, entity_type, entity_id, false)
+            .await
+    }
+
+    /// Reconcile a memory-only entity without recreating a concurrently removed ID.
+    pub(super) async fn ensure_indexed_entity_actor_materialized(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> bool {
+        self.ensure_entity_actor_materialized_guarded(tenant, entity_type, entity_id, true)
+            .await
+    }
+
+    async fn ensure_entity_actor_materialized_guarded(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        require_entity_index: bool,
+    ) -> bool {
+        if require_entity_index {
+            // Readiness already performs the authoritative state read and
+            // timeout reconciliation. Avoid a second ask whose drain retry
+            // could cross the same removal fence and recreate the entity.
+            return self
+                .get_or_spawn_indexed_actor_when_ready(tenant, entity_type, entity_id)
+                .await
+                .is_some();
+        }
+
         const MATERIALIZATION_ATTEMPT_BUDGET: usize = 3;
 
         for _ in 0..MATERIALIZATION_ATTEMPT_BUDGET {

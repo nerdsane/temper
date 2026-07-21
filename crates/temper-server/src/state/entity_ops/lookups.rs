@@ -102,7 +102,6 @@ impl ServerState {
     }
 
     /// Get or spawn an entity actor with initial fields for a specific tenant.
-    #[instrument(skip_all, fields(otel.name = "entity.get_or_spawn_tenant_actor_with_fields", tenant = %tenant, entity_type, entity_id))]
     pub fn get_or_spawn_tenant_actor_with_fields(
         &self,
         tenant: &TenantId,
@@ -110,12 +109,35 @@ impl ServerState {
         entity_id: &str,
         initial_fields: serde_json::Value,
     ) -> Option<ActorRef<EntityMsg>> {
+        self.get_or_spawn_tenant_actor_with_fields_guarded(
+            tenant,
+            entity_type,
+            entity_id,
+            initial_fields,
+            false,
+        )
+    }
+
+    /// Spawn an actor while optionally requiring its memory-only index entry
+    /// to remain present under the actor-publication fence.
+    #[instrument(skip_all, fields(otel.name = "entity.get_or_spawn_tenant_actor_with_fields", tenant = %tenant, entity_type, entity_id))]
+    pub(super) fn get_or_spawn_tenant_actor_with_fields_guarded(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        initial_fields: serde_json::Value,
+        require_entity_index: bool,
+    ) -> Option<ActorRef<EntityMsg>> {
         self.ensure_registry_timeout_reconciliation_started();
         let key = format!("{tenant}:{entity_type}:{entity_id}");
 
         // Fast-path: check actor registry under read lock.
         {
             let registry = self.actor_registry.read().unwrap();
+            if require_entity_index && !self.entity_exists(tenant, entity_type, entity_id) {
+                return None;
+            }
             if let Some(actor_ref) = registry.get(&key) {
                 if actor_ref.is_draining() {
                     return None;
@@ -174,7 +196,25 @@ impl ServerState {
         // This prevents duplicate actors when concurrent requests race to create
         // the same (tenant, entity_type, entity_id) key.
         let (actor_ref, timeout_hydration, hydration_completion) = {
-            let mut registry = self.actor_registry.write().unwrap();
+            let mut registry = match self.actor_registry.write() {
+                Ok(registry) => registry,
+                Err(poisoned) => {
+                    tracing::error!(
+                        tenant = %tenant,
+                        entity_type,
+                        entity_id,
+                        "actor registry lock poisoned while publishing actor; recovering guarded state"
+                    );
+                    poisoned.into_inner()
+                }
+            };
+            // The actor-registry lock is also the publication fence used by
+            // eviction. Holding it while checking the memory-only existence
+            // authority prevents a stale reconciliation scan from recreating
+            // an entity after synchronous removal erased its index entry.
+            if require_entity_index && !self.entity_exists(tenant, entity_type, entity_id) {
+                return None;
+            }
             if let Some(existing) = registry.get(&key) {
                 if existing.is_draining() {
                     return None;
@@ -213,6 +253,42 @@ impl ServerState {
                 actor_ref.id().uid,
             );
             registry.insert(key.clone(), actor_ref.clone());
+
+            // Publish the actor and its collection index under the same fence.
+            // Eviction takes these locks in this order, so it can observe
+            // either the complete incarnation or no incarnation; a stale
+            // spawn tail cannot restore the index after guarded cleanup.
+            let index_key = format!("{tenant}:{entity_type}");
+            let index_published = match self.entity_index.write() {
+                Ok(mut index) => {
+                    let ids = index.entry(index_key).or_default();
+                    ids.insert(entity_id.to_string());
+                    ids.contains(entity_id)
+                }
+                Err(poisoned) => {
+                    tracing::error!(
+                        tenant = %tenant,
+                        entity_type,
+                        entity_id,
+                        "entity index lock poisoned while publishing actor; recovering guarded state"
+                    );
+                    let mut index = poisoned.into_inner();
+                    let ids = index.entry(index_key).or_default();
+                    ids.insert(entity_id.to_string());
+                    ids.contains(entity_id)
+                }
+            };
+            debug_assert!(
+                index_published,
+                "published actor must already have its collection index entry"
+            );
+            debug_assert!(
+                matches!(
+                    self.actor_registry.try_write(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ),
+                "actor publication fence must remain held through index publication"
+            );
             (actor_ref, timeout_hydration, hydration_completion)
         };
 
@@ -228,15 +304,6 @@ impl ServerState {
             hydration_completion,
         );
 
-        // Track in entity index for collection queries
-        {
-            let index_key = format!("{tenant}:{entity_type}");
-            let mut index = self.entity_index.write().unwrap();
-            index
-                .entry(index_key)
-                .or_default()
-                .insert(entity_id.to_string());
-        }
         self.touch_actor_access(&key);
         runtime_metrics::record_server_state_metrics(self);
 

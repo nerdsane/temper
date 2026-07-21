@@ -43,6 +43,15 @@ pub struct StateTimeoutTracker {
     registry_reconciliation_lifetime: Mutex<Option<tokio::sync::watch::Sender<bool>>>,
     #[cfg(test)]
     reconciliation_failures: Mutex<u64>,
+    #[cfg(test)]
+    registry_scan_gate: Mutex<Option<RegistryScanGate>>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct RegistryScanGate {
+    captured: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
 }
 
 #[derive(Debug, Default)]
@@ -353,6 +362,42 @@ impl StateTimeoutTracker {
             .reconciliation_failures
             .lock()
             .expect("state_timeout tracker poisoned")
+    }
+
+    #[cfg(test)]
+    /// Pause one registry reconciliation after it captures authoritative IDs.
+    pub(crate) fn pause_next_registry_entity_scan(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (captured, captured_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let mut gate = self
+            .registry_scan_gate
+            .lock()
+            .expect("registry scan gate poisoned");
+        assert!(gate.is_none(), "only one registry scan gate may be armed");
+        *gate = Some(RegistryScanGate {
+            captured,
+            release: release_rx,
+        });
+        (captured_rx, release)
+    }
+
+    #[cfg(test)]
+    /// Enter and await the armed deterministic registry-scan test gate, if any.
+    pub(crate) async fn wait_for_registry_entity_scan_release(&self) {
+        let gate = self
+            .registry_scan_gate
+            .lock()
+            .expect("registry scan gate poisoned")
+            .take();
+        if let Some(gate) = gate {
+            let _ = gate.captured.send(());
+            let _ = gate.release.await;
+        }
     }
 
     /// Increment the pending-timer count for `entity_type`. Called at arm.

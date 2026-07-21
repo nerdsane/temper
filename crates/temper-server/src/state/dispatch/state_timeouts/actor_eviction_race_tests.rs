@@ -196,7 +196,7 @@ async fn eviction_keeps_replacement_publication_fenced_through_index_cleanup() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn synchronous_remove_entity_compatibility_path_completes_uid_safe_cleanup() {
+async fn memory_only_reconciliation_cannot_resurrect_synchronously_removed_entity() {
     let (_guard, _clock, _ids) = install_deterministic_context(246);
     let tenant = TenantId::default();
     let entity_id = "synchronous-remove-compatibility";
@@ -214,6 +214,13 @@ async fn synchronous_remove_entity_compatibility_path_completes_uid_safe_cleanup
         .get_or_spawn_tenant_actor(&tenant, "Ticket", entity_id)
         .expect("spawn compatibility actor");
     assert!(server.entity_exists(&tenant, "Ticket", entity_id));
+    assert!(
+        server
+            .state_timeout_tracker
+            .begin_registry_reconciliation()
+            .is_none(),
+        "the no-store timeout reconciliation worker must own the initial timed sweep"
+    );
 
     server.remove_entity(&tenant, "Ticket", entity_id);
 
@@ -237,6 +244,86 @@ async fn synchronous_remove_entity_compatibility_path_completes_uid_safe_cleanup
             .contains_key(&actor_key)
     );
     assert!(!server.entity_exists(&tenant, "Ticket", entity_id));
+
+    // Cross the reconciler's first retry window. A stale scan must neither
+    // restore the index nor publish a replacement actor or timeout owner.
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !server
+            .actor_registry
+            .read()
+            .expect("actor registry lock")
+            .contains_key(&actor_key)
+    );
+    assert!(!server.entity_exists(&tenant, "Ticket", entity_id));
+    assert!(server.state_timeout_tracker.pending_snapshot().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_memory_only_scan_cannot_cross_index_only_removal_fence() {
+    let (_guard, _clock, _ids) = install_deterministic_context(257);
+    let tenant = TenantId::default();
+    let entity_id = "stale-index-only-removal";
+    let actor_key = format!("{tenant}:Ticket:{entity_id}");
+    let mut registry = SpecRegistry::new();
+    registry.register_tenant(
+        tenant.as_str(),
+        parse_csdl(TICKET_CSDL).expect("ticket CSDL parses"),
+        TICKET_CSDL.to_string(),
+        &[("Ticket", TIMED_TICKET_IOA)],
+    );
+    let server = ServerState::from_registry(ActorSystem::new("stale-index-only"), registry);
+    server
+        .entity_index
+        .write()
+        .expect("entity index lock")
+        .entry(format!("{tenant}:Ticket"))
+        .or_default()
+        .insert(entity_id.to_string());
+    assert!(
+        !server
+            .actor_registry
+            .read()
+            .expect("actor registry lock")
+            .contains_key(&actor_key),
+        "the memory-only entity begins passivated and index-only"
+    );
+
+    let (scan_captured, release_scan) = server
+        .state_timeout_tracker
+        .pause_next_registry_entity_scan();
+    server.ensure_registry_timeout_reconciliation_started();
+    scan_captured
+        .await
+        .expect("reconciler captures the stale index snapshot");
+
+    // Removal's no-actor decision and index deletion share the publication
+    // fence. The paused stale scan can resume only after absence is committed.
+    server.remove_entity(&tenant, "Ticket", entity_id);
+    assert!(!server.entity_exists(&tenant, "Ticket", entity_id));
+    release_scan
+        .send(())
+        .expect("release the stale reconciliation scan");
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+
+    assert!(
+        !server
+            .actor_registry
+            .read()
+            .expect("actor registry lock")
+            .contains_key(&actor_key)
+    );
+    assert!(!server.entity_exists(&tenant, "Ticket", entity_id));
+    assert!(server.state_timeout_tracker.pending_snapshot().is_empty());
 }
 
 #[tokio::test(start_paused = true)]

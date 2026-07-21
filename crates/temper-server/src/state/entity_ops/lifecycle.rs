@@ -18,17 +18,36 @@ impl ServerState {
         entity_id: &str,
         initial_fields: serde_json::Value,
     ) -> Option<ActorRef<EntityMsg>> {
+        self.get_or_spawn_tenant_actor_with_fields_when_ready_guarded(
+            tenant,
+            entity_type,
+            entity_id,
+            initial_fields,
+            false,
+        )
+        .await
+    }
+
+    async fn get_or_spawn_tenant_actor_with_fields_when_ready_guarded(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        initial_fields: serde_json::Value,
+        require_entity_index: bool,
+    ) -> Option<ActorRef<EntityMsg>> {
         const READINESS_RETRY_BUDGET: usize = 3;
 
         let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
         let mut retried_absence = false;
         let mut readiness_retries = 0_usize;
         loop {
-            if let Some(actor_ref) = self.get_or_spawn_tenant_actor_with_fields(
+            if let Some(actor_ref) = self.get_or_spawn_tenant_actor_with_fields_guarded(
                 tenant,
                 entity_type,
                 entity_id,
                 initial_fields.clone(),
+                require_entity_index,
             ) {
                 let actor_uid = actor_ref.id().uid;
                 self.state_timeout_tracker
@@ -128,6 +147,23 @@ impl ServerState {
         .await
     }
 
+    /// Materialize a memory-only actor only while its authoritative index entry exists.
+    pub(super) async fn get_or_spawn_indexed_actor_when_ready(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Option<ActorRef<EntityMsg>> {
+        self.get_or_spawn_tenant_actor_with_fields_when_ready_guarded(
+            tenant,
+            entity_type,
+            entity_id,
+            serde_json::json!({}),
+            true,
+        )
+        .await
+    }
+
     pub(crate) async fn ask_actor_with_drain_retry<R, F>(
         &self,
         tenant: &TenantId,
@@ -188,66 +224,84 @@ impl ServerState {
     #[instrument(skip_all, fields(otel.name = "entity.remove_entity", tenant = %tenant, entity_type, entity_id))]
     pub fn remove_entity(&self, tenant: &TenantId, entity_type: &str, entity_id: &str) {
         let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
-        let actor_ref = self
-            .actor_registry
-            .read()
-            .ok()
-            .and_then(|registry| registry.get(&actor_key).cloned());
-        let expected_actor_uid = actor_ref.as_ref().map(|actor_ref| actor_ref.id().uid);
-        if let Some(actor_ref) = actor_ref {
-            if let Err(error) = actor_ref.stop() {
-                tracing::warn!(
-                    tenant = %tenant,
-                    entity_type,
-                    entity_id,
-                    actor_uid = %actor_ref.id().uid,
-                    error = %error,
-                    "synchronous entity eviction left the live incarnation registered because its stop barrier was not admitted"
-                );
-                return;
-            }
-
-            if actor_ref.is_stopped() {
-                let _ = self.remove_entity_actor_incarnation_if_current(
-                    tenant,
-                    entity_type,
-                    entity_id,
-                    expected_actor_uid,
-                    true,
-                );
-                return;
-            }
-
-            let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-                tracing::warn!(
-                    tenant = %tenant,
-                    entity_type,
-                    entity_id,
-                    actor_uid = %actor_ref.id().uid,
-                    "synchronous entity eviction committed its stop barrier outside a Tokio runtime; guarded cleanup remains registry-visible"
-                );
-                return;
+        let actor_ref = {
+            let registry = match self.actor_registry.write() {
+                Ok(registry) => registry,
+                Err(poisoned) => {
+                    tracing::error!(
+                        tenant = %tenant,
+                        entity_type,
+                        entity_id,
+                        "actor registry lock poisoned while claiming synchronous removal; recovering guarded state"
+                    );
+                    poisoned.into_inner()
+                }
             };
-            let state = self.clone();
-            let tenant = tenant.clone();
-            let entity_type = entity_type.to_string();
-            let entity_id = entity_id.to_string();
-            let actor_uid = actor_ref.id().uid;
-            runtime.spawn(async move {
-                // determinism-ok: one bounded cleanup task per accepted compatibility stop
-                let _ = state
-                    .stop_and_remove_entity_if_current(&tenant, &entity_type, &entity_id, actor_uid)
-                    .await;
-            });
+            let actor_ref = registry.get(&actor_key).cloned();
+            if actor_ref.is_none() {
+                self.remove_entity_bookkeeping(tenant, entity_type, entity_id, true);
+                debug_assert!(
+                    !self.entity_exists(tenant, entity_type, entity_id),
+                    "index-only removal must finish before releasing publication"
+                );
+                debug_assert!(
+                    matches!(
+                        self.actor_registry.try_write(),
+                        Err(std::sync::TryLockError::WouldBlock)
+                    ),
+                    "index-only removal must retain the actor-publication fence"
+                );
+            }
+            actor_ref
+        };
+        let Some(actor_ref) = actor_ref else {
+            runtime_metrics::record_server_state_metrics(self);
+            return;
+        };
+        let actor_uid = actor_ref.id().uid;
+        if let Err(error) = actor_ref.stop() {
+            tracing::warn!(
+                tenant = %tenant,
+                entity_type,
+                entity_id,
+                actor_uid = %actor_uid,
+                error = %error,
+                "synchronous entity eviction left the live incarnation registered because its stop barrier was not admitted"
+            );
             return;
         }
-        let _ = self.remove_entity_actor_incarnation_if_current(
-            tenant,
-            entity_type,
-            entity_id,
-            expected_actor_uid,
-            true,
-        );
+
+        if actor_ref.is_stopped() {
+            let _ = self.remove_entity_actor_incarnation_if_current(
+                tenant,
+                entity_type,
+                entity_id,
+                Some(actor_uid),
+                true,
+            );
+            return;
+        }
+
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                tenant = %tenant,
+                entity_type,
+                entity_id,
+                actor_uid = %actor_uid,
+                "synchronous entity eviction committed its stop barrier outside a Tokio runtime; guarded cleanup remains registry-visible"
+            );
+            return;
+        };
+        let state = self.clone();
+        let tenant = tenant.clone();
+        let entity_type = entity_type.to_string();
+        let entity_id = entity_id.to_string();
+        runtime.spawn(async move {
+            // determinism-ok: one bounded cleanup task per accepted compatibility stop
+            let _ = state
+                .stop_and_remove_entity_if_current(&tenant, &entity_type, &entity_id, actor_uid)
+                .await;
+        });
     }
 
     /// Drain an entity actor, then remove it from the registry and index.
@@ -390,6 +444,20 @@ impl ServerState {
         }
         registry.remove(&actor_key);
 
+        self.remove_entity_bookkeeping(tenant, entity_type, entity_id, remove_from_entity_index);
+        drop(registry);
+        runtime_metrics::record_server_state_metrics(self);
+        true
+    }
+
+    fn remove_entity_bookkeeping(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        remove_from_entity_index: bool,
+    ) {
+        let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
         match self.last_accessed.write() {
             Ok(mut last_accessed) => {
                 last_accessed.remove(&actor_key);
@@ -425,8 +493,5 @@ impl ServerState {
                 }
             }
         }
-        drop(registry);
-        runtime_metrics::record_server_state_metrics(self);
-        true
     }
 }
