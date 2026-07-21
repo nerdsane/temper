@@ -192,12 +192,14 @@ async fn replayed_remote_reset_replaces_the_cancelled_local_deadline() {
         params: serde_json::json!({}),
         idempotency_key: None,
     };
+    let mut persisted_heartbeat = persisted_event(&persistence_id, 3, heartbeat);
+    persisted_heartbeat.payload["__temper_state_timeout_clock"] = serde_json::json!({
+        "kind": "active",
+        "reset_at": reset_at,
+        "reset_version": 3,
+    });
     store
-        .append(
-            &persistence_id,
-            2,
-            &[persisted_event(&persistence_id, 3, heartbeat)],
-        )
+        .append(&persistence_id, 2, &[persisted_heartbeat])
         .await
         .expect("competing replica commits a same-state reset");
 
