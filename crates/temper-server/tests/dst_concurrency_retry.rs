@@ -368,3 +368,88 @@ async fn stale_timeout_is_rejected_after_concurrency_replay_observes_a_reset() {
         Some("Heartbeat")
     );
 }
+
+#[tokio::test]
+async fn retry_response_matches_fresh_replay_after_authoritative_tail() {
+    let seed = 221;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let (store, sim) = sim_store_with_handle(seed);
+    let table = order_table();
+    let entity_id = "order-replay-parity";
+    let persistence_id = format!("default:Order:{entity_id}");
+    let system = ActorSystem::new("retry-replay-parity");
+    let actor_ref = spawn_order(&system, table.clone(), store.clone(), entity_id);
+    wait_ready(&actor_ref).await;
+
+    let first = dispatch_action(
+        &actor_ref,
+        "AddItem",
+        serde_json::json!({"ProductId": "first", "Quantity": 1}),
+    )
+    .await;
+    assert!(first.success);
+    assert_eq!(first.state.item_count, 1);
+    assert_eq!(first.state.sequence_nr, 2);
+
+    let competing_at = sim_now();
+    sim.append(
+        &persistence_id,
+        2,
+        &[PersistenceEnvelope {
+            sequence_nr: 0,
+            event_type: "AddItem".to_string(),
+            payload: serde_json::json!({
+                "action": "AddItem",
+                "from_status": "Draft",
+                "to_status": "Draft",
+                "timestamp": competing_at,
+                "params": {"ProductId": "competing", "Quantity": 1},
+                "__temper_state_timeout_clock": {"kind": "inactive"}
+            }),
+            metadata: EventMetadata {
+                event_id: sim_uuid(),
+                causation_id: sim_uuid(),
+                correlation_id: sim_uuid(),
+                timestamp: competing_at,
+                actor_id: persistence_id.clone(),
+            },
+        }],
+    )
+    .await
+    .expect("a competing writer appends a non-idempotent effect");
+
+    let retried = dispatch_action(
+        &actor_ref,
+        "AddItem",
+        serde_json::json!({"ProductId": "retried", "Quantity": 1}),
+    )
+    .await;
+    assert!(
+        retried.success,
+        "the stale actor should catch up and commit: {:?}",
+        retried.error
+    );
+
+    let fresh_actor = EntityActor::with_persistence(
+        "Order",
+        entity_id,
+        table,
+        serde_json::json!({}),
+        store,
+        BackendLabel::Sim,
+    )
+    .with_tenant("default");
+    let fresh_ref = system.spawn(fresh_actor, "order-replay-parity-fresh");
+    let fresh: EntityResponse = fresh_ref
+        .ask(EntityMsg::GetState, Duration::from_secs(5))
+        .await
+        .expect("fresh actor should replay the committed journal");
+
+    assert_eq!(fresh.state.sequence_nr, 4);
+    assert_eq!(fresh.state.item_count, 3);
+    assert_eq!(
+        serde_json::to_value(&retried.state).expect("retry state serializes"),
+        serde_json::to_value(&fresh.state).expect("fresh state serializes"),
+        "retry response must equal state rebuilt from the same journal"
+    );
+}
