@@ -224,6 +224,25 @@ pub async fn assert_p16_event_replay_fidelity(harness: &SimPlatformHarness) -> R
                     _ => continue,
                 };
 
+                // The first envelope is the actor's synthetic bootstrap event,
+                // not a domain transition declared by the IOA. Validate its
+                // provenance and initial-state target before replaying rules.
+                let from_state = event
+                    .payload
+                    .get("from_status")
+                    .and_then(serde_json::Value::as_str);
+                if event.sequence_nr == 1 && action == "Created" && from_state == Some("") {
+                    if to_state != table.initial_state {
+                        return Err(format!(
+                            "P16: entity {persistence_id} bootstrap event targets '{to_state}' \
+                             but spec initial state is '{}'",
+                            table.initial_state
+                        ));
+                    }
+                    current_state = to_state.to_string();
+                    continue;
+                }
+
                 // Verify the TransitionTable has a valid rule for this transition.
                 let valid = table.rules.iter().any(|rule| {
                     if rule.name != action {
