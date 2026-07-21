@@ -55,15 +55,18 @@ impl crate::state::ServerState {
                 continue;
             };
 
-            if let Some(resp) = self
-                .dispatch_single_integration(
-                    &ctx,
-                    &integration,
-                    req.entity_state,
-                    req.action_params,
-                    &base_gate,
-                )
-                .await?
+            // The single-integration future contains the full invocation and
+            // callback pipeline. Keep that state heap-backed so a blocking
+            // callback cannot exhaust the runtime worker's stack in debug
+            // builds while nested dispatch is being polled.
+            if let Some(resp) = Box::pin(self.dispatch_single_integration(
+                &ctx,
+                &integration,
+                req.entity_state,
+                req.action_params,
+                &base_gate,
+            ))
+            .await?
             {
                 last_response = Some(resp);
             }
