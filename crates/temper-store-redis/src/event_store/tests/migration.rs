@@ -169,3 +169,77 @@ async fn completion_marker_revalidates_a_mixed_version_new_entity() {
         ]
     );
 }
+
+#[tokio::test]
+async fn completed_index_reclassifies_a_mixed_version_tombstone() {
+    let Some(store) = make_store().await else {
+        eprintln!("REDIS_URL not set, skipping test");
+        return;
+    };
+    let tenant = format!("legacy-tombstone-revalidation-{}", uuid::Uuid::new_v4());
+    let entity_type = "Order";
+    let entity_id = "known-before-legacy-delete";
+    store
+        .append(
+            &format!("{tenant}:{entity_type}:{entity_id}"),
+            0,
+            &[test_envelope("Created", serde_json::json!({}))],
+        )
+        .await
+        .expect("seed current indexed writer");
+    assert_eq!(
+        store.list_entity_ids(&tenant).await.unwrap(),
+        vec![(entity_type.to_string(), entity_id.to_string())]
+    );
+    assert!(store.entity_index_is_complete(&tenant).await.unwrap());
+
+    // Reproduce the old append script during a rolling upgrade: it advances
+    // the existing journal and historical set, but knows nothing about the
+    // live or tombstone indexes introduced by the new writer.
+    let mut deleted = test_envelope("Deleted", serde_json::Value::Null);
+    deleted.sequence_nr = 2;
+    let encoded = serde_json::to_string(&deleted).expect("encode legacy tombstone");
+    let _: i64 = store
+        .client
+        .rpush(
+            RedisEventStore::events_key(&tenant, entity_type, entity_id),
+            encoded,
+        )
+        .await
+        .expect("append legacy tombstone");
+    let _: () = store
+        .client
+        .set(
+            RedisEventStore::seq_key(&tenant, entity_type, entity_id),
+            "2",
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect("advance legacy sequence");
+    let entity_ref = serde_json::to_string(&EntityRef {
+        entity_type: entity_type.to_string(),
+        entity_id: entity_id.to_string(),
+    })
+    .expect("encode entity reference");
+    let _: i64 = store
+        .client
+        .sadd(RedisEventStore::tenant_entities_key(&tenant), entity_ref)
+        .await
+        .expect("retain historical entity reference");
+
+    assert_eq!(
+        store.list_entity_ids(&tenant).await.unwrap(),
+        Vec::<(String, String)>::new(),
+        "a completed index must not trust cardinality after a legacy writer tombstones a known journal"
+    );
+    assert_eq!(
+        store
+            .list_entity_ids_by_type(&tenant, entity_type)
+            .await
+            .unwrap(),
+        Vec::<String>::new(),
+        "typed listings must remove the stale live member too"
+    );
+}
