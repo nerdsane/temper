@@ -255,7 +255,12 @@ async fn retry_uses_one_live_table_for_replay_evaluation_and_commit() {
                     "from_status": "Running",
                     "to_status": "Running",
                     "timestamp": harness.reset_at,
-                    "params": {}
+                    "params": {},
+                    "__temper_state_timeout_clock": {
+                        "kind": "active",
+                        "reset_at": harness.reset_at,
+                        "reset_version": harness.reset_version
+                    }
                 }),
                 metadata: EventMetadata {
                     event_id: sim_uuid(),
