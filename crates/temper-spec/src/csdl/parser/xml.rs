@@ -38,12 +38,18 @@ pub(super) fn local_name_end(element: &BytesEnd) -> String {
     full.rsplit(':').next().unwrap_or(full).to_string()
 }
 
+/// Read an attribute, decoding XML entity and character references.
+///
+/// `Attribute::value` is the raw, still-escaped bytes. Returning those directly
+/// would surface `&amp;` and `&#xA;` as literal text and make parse/emit/parse
+/// double-escape, so the value is unescaped here.
 pub(super) fn attr_str(element: &BytesStart, name: &str) -> Option<String> {
     element
         .attributes()
         .flatten()
         .find(|attribute| std::str::from_utf8(attribute.key.as_ref()).unwrap_or("") == name)
-        .and_then(|attribute| String::from_utf8(attribute.value.to_vec()).ok())
+        .and_then(|attribute| attribute.unescape_value().ok())
+        .map(|value| value.into_owned())
 }
 
 pub(super) fn required_attr(element: &BytesStart, name: &str) -> Result<String, CsdlParseError> {
