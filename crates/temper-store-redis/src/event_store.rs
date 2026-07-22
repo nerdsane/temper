@@ -31,7 +31,8 @@ mod segments;
 /// KEYS[1] = seq_key, KEYS[2] = events_key, KEYS[3] = entities_key,
 /// KEYS[4] = tenant live index, KEYS[5] = typed live index,
 /// KEYS[6] = tombstone set, KEYS[7] = index-complete marker,
-/// KEYS[8] = this entity's last classified journal sequence
+/// KEYS[8] = this entity's last classified journal sequence,
+/// KEYS[9] = entity references discovered by the current index protocol
 /// ARGV[1] = expected_seq (string-encoded integer)
 /// ARGV[2] = entity_ref_json (for SADD into entities set)
 /// ARGV[3] = entity_id, ARGV[4] = whether this append contains a tombstone
@@ -47,6 +48,7 @@ local typed_live_entities_key = KEYS[5]
 local tombstones_key = KEYS[6]
 local index_complete_key = KEYS[7]
 local classified_sequence_key = KEYS[8]
+local discovered_entities_key = KEYS[9]
 local expected = tonumber(ARGV[1])
 local entity_ref = ARGV[2]
 local entity_id = ARGV[3]
@@ -85,6 +87,7 @@ end
 local classified = tonumber(redis.call('GET', classified_sequence_key) or '-1')
 if current == 0 or classified == current then
     redis.call('SET', classified_sequence_key, tostring(new_seq))
+    redis.call('SADD', discovered_entities_key, entity_ref)
 end
 
 -- The first append creates a complete index. A pre-existing historical set
@@ -300,6 +303,14 @@ impl RedisEventStore {
             "{}:entity_index_scan_complete:{tenant}",
             crate::keys::PREFIX
         )
+    }
+
+    fn entity_index_discovered_key(tenant: &str) -> String {
+        format!("{}:entity_index_discovered:{tenant}", crate::keys::PREFIX)
+    }
+
+    fn entity_index_scan_spill_key(tenant: &str) -> String {
+        format!("{}:entity_index_scan_spill:{tenant}", crate::keys::PREFIX)
     }
 
     fn trajectory_key(tenant: &str) -> String {

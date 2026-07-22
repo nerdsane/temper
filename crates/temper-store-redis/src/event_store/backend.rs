@@ -59,6 +59,7 @@ impl EventStore for RedisEventStore {
             tombstones_key,
             index_complete_key,
             Self::entity_index_event_cursor_key(tenant, &args[1]),
+            Self::entity_index_discovered_key(tenant),
         ];
         let result: Vec<i64> = self
             .append_script

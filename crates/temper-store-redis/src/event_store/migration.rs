@@ -6,6 +6,7 @@ use super::{EntityRef, RedisEventStore};
 
 const ENTITY_EVENT_SCAN_BUDGET: usize = 64;
 const ENTITY_REF_SCAN_BUDGET: usize = 64;
+const ENTITY_REF_SCAN_PAGE_MAX: usize = 128;
 
 /// Migrate at most one bounded journal chunk for one historical entity.
 ///
@@ -66,18 +67,46 @@ end
 return {complete and 1 or 0, terminal and 1 or 0}
 "#;
 
-/// Park one SSCAN page server-side and return at most one pending reference.
+/// Park one capped scan page and return at most one pending reference.
+///
+/// Compact Sets are checked before `SSCAN`, which otherwise returns the entire
+/// encoding regardless of `COUNT`. Accepted pages are capped before any loop,
+/// durably spilled, and only then advance the cursor. Later calls drain a
+/// bounded slice from that spill, so every accepted cursor page makes monotonic
+/// progress without changing the legacy `SMEMBERS` view.
 pub(super) const MIGRATE_INDEX_PAGE_LUA: &str = r#"
 local budget = math.max(1, tonumber(ARGV[1]))
-if redis.call('ZCARD', KEYS[2]) == 0 and redis.call('EXISTS', KEYS[4]) == 0 then
-    local cursor = redis.call('GET', KEYS[3]) or '0'
-    local page = redis.call('SSCAN', KEYS[1], cursor, 'COUNT', budget)
-    redis.call('SET', KEYS[3], page[1])
-    if page[1] == '0' then
-        redis.call('SET', KEYS[4], '1')
+local page_max = math.max(1, tonumber(ARGV[2]))
+if redis.call('ZCARD', KEYS[2]) == 0 then
+    if redis.call('LLEN', KEYS[6]) == 0 and redis.call('EXISTS', KEYS[4]) == 0 then
+        local encoding = redis.call('OBJECT', 'ENCODING', KEYS[1])
+        local historical = redis.call('SCARD', KEYS[1])
+        if (encoding == 'listpack' or encoding == 'intset') and historical > page_max then
+            return redis.error_reply('legacy Redis compact entity set exceeds migration page budget; offline migration required')
+        end
+
+        local cursor = redis.call('GET', KEYS[3]) or '0'
+        -- COUNT remains a hint, so request the minimum unit and enforce the
+        -- independent hard ceiling below. Normal hash-table pages are then a
+        -- few members while compact encodings are covered by the guard above.
+        local page = redis.call('SSCAN', KEYS[1], cursor, 'COUNT', 1)
+        if #page[2] > page_max then
+            return redis.error_reply('legacy Redis entity scan page exceeds migration page budget; offline migration required')
+        end
+        for _, member in ipairs(page[2]) do
+            redis.call('RPUSH', KEYS[6], member)
+        end
+        redis.call('SET', KEYS[3], page[1])
+        if page[1] == '0' then
+            redis.call('SET', KEYS[4], '1')
+        end
     end
-    for _, member in ipairs(page[2]) do
-        redis.call('ZADD', KEYS[2], 0, member)
+
+    local sampled = redis.call('LPOP', KEYS[6], budget) or {}
+    for _, member in ipairs(sampled) do
+        if redis.call('SADD', KEYS[5], member) == 1 then
+            redis.call('ZADD', KEYS[2], 0, member)
+        end
     end
 end
 return redis.call('ZRANGE', KEYS[2], 0, 0)
@@ -86,8 +115,8 @@ return redis.call('ZRANGE', KEYS[2], 0, 0)
 /// Validate or publish the completion marker atomically.
 ///
 /// A mixed-version writer that adds a historical reference without updating
-/// the new indexes changes the cardinality equation and invalidates the marker,
-/// restarting a bounded SSCAN. The marker proves structural coverage only:
+/// the new indexes changes the discovered-membership equation and invalidates
+/// the marker. The marker proves structural coverage only:
 /// listing paths also compare each candidate's classified journal cursor so a
 /// legacy update to an existing reference cannot hide behind equal cardinality.
 /// Live and tombstone indexes are disjoint.
@@ -95,10 +124,17 @@ pub(super) const FINALIZE_ENTITY_INDEX_LUA: &str = r#"
 local historical = redis.call('SCARD', KEYS[1])
 local covered = redis.call('ZCARD', KEYS[2]) + redis.call('SCARD', KEYS[3])
 local pending = redis.call('ZCARD', KEYS[4])
-local consistent = historical == covered and pending == 0
+local discovered = redis.call('SCARD', KEYS[8])
+local spill = redis.call('LLEN', KEYS[9])
+local scan_complete = redis.call('EXISTS', KEYS[6]) ~= 0
+local consistent = historical == discovered and discovered == covered
+    and pending == 0 and spill == 0
 
 if redis.call('EXISTS', KEYS[7]) ~= 0 and not consistent then
     redis.call('DEL', KEYS[7])
+end
+
+if scan_complete and spill == 0 and pending == 0 and not consistent then
     redis.call('DEL', KEYS[6])
     redis.call('SET', KEYS[5], '0')
 end
@@ -107,7 +143,7 @@ if redis.call('EXISTS', KEYS[7]) ~= 0 and consistent then
     return 1
 end
 
-if redis.call('EXISTS', KEYS[6]) ~= 0 and consistent then
+if scan_complete and consistent then
     redis.call('SET', KEYS[7], '2')
     return 1
 end
@@ -233,6 +269,8 @@ impl RedisEventStore {
                     Self::entity_index_cursor_key(tenant),
                     Self::entity_index_scan_complete_key(tenant),
                     Self::entity_index_complete_key(tenant),
+                    Self::entity_index_discovered_key(tenant),
+                    Self::entity_index_scan_spill_key(tenant),
                 ],
                 Vec::<String>::new(),
             )
@@ -269,7 +307,7 @@ impl RedisEventStore {
             return Ok(true);
         }
 
-        let budget = budget.min(u32::MAX as usize).max(1);
+        let budget = budget.clamp(1, ENTITY_REF_SCAN_PAGE_MAX);
         let members: Vec<String> = self
             .migrate_index_page_script
             .evalsha_with_reload(
@@ -279,8 +317,10 @@ impl RedisEventStore {
                     Self::entity_index_pending_key(tenant),
                     Self::entity_index_cursor_key(tenant),
                     Self::entity_index_scan_complete_key(tenant),
+                    Self::entity_index_discovered_key(tenant),
+                    Self::entity_index_scan_spill_key(tenant),
                 ],
-                vec![budget.to_string()],
+                vec![budget.to_string(), ENTITY_REF_SCAN_PAGE_MAX.to_string()],
             )
             .await
             .map_err(storage_error)?;
