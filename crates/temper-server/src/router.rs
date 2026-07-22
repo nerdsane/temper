@@ -1,5 +1,9 @@
 //! Axum router construction for the Temper Data API.
 
+mod tenant_generation;
+
+use tenant_generation::{publication_in_progress_response, stable_tenant_generation};
+
 use axum::Router;
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderName};
 use axum::http::{Method, StatusCode};
@@ -73,7 +77,11 @@ pub fn build_router(state: ServerState) -> Router {
                 .patch(odata::handle_odata_patch)
                 .put(odata::handle_odata_put)
                 .delete(odata::handle_odata_delete),
-        );
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            stable_tenant_generation,
+        ));
 
     let router = Router::new()
         .nest("/tdata", tdata)
@@ -203,6 +211,17 @@ async fn http_endpoint_fallback(
             }
         }
     };
+    let Some(generation_guard) = state.try_begin_tenant_request(&tenant_id).await else {
+        return publication_in_progress_response();
+    };
+    if state.spec_publication_gated(&tenant_id) {
+        return publication_in_progress_response();
+    }
+    let generation_lease = crate::state::TenantGenerationLease::new(
+        &tenant_id,
+        generation_guard,
+        state.tenant_generation_version(&tenant_id),
+    );
 
     let table = state.http_endpoint_tables.table_for(&tenant_id).await;
     let matched = table.match_request(method.as_str(), uri.path()).await;
@@ -211,7 +230,17 @@ async fn http_endpoint_fallback(
         return http_404_response(uri.path());
     };
 
-    dispatch_matched_route(state, tenant_id, method, uri, headers, _body, route).await
+    dispatch_matched_route(
+        state,
+        tenant_id,
+        method,
+        uri,
+        headers,
+        _body,
+        route,
+        generation_lease,
+    )
+    .await
 }
 
 /// Tenant for a header-less HttpEndpoint request: the registered
@@ -239,6 +268,10 @@ fn http_endpoint_fallback_tenant<'a>(tenant_ids: &[&'a TenantId]) -> Option<&'a 
 /// body that drains the guest's response-body handle, fire the
 /// WASM invocation, await the head, and stitch it into the
 /// response.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "matched HTTP route dispatch carries the captured request generation"
+)]
 async fn dispatch_matched_route(
     state: ServerState,
     tenant_id: TenantId,
@@ -247,6 +280,7 @@ async fn dispatch_matched_route(
     headers: HeaderMap,
     body: Body,
     route: crate::http_endpoint::MatchedRoute,
+    generation_lease: crate::state::TenantGenerationLease,
 ) -> Response {
     use temper_wasm::http_stream::HttpResponseHead;
     use temper_wasm::types::{HttpDispatchContext, WasmInvocationContext};
@@ -289,7 +323,9 @@ async fn dispatch_matched_route(
     // ADR-0057 inbound exchange end-to-end streaming — without it,
     // even SDK-streaming guests are bounded by the buffered limit.
     let pump_streams = streams.clone();
+    let pump_generation = generation_lease.clone();
     tokio::spawn(async move {
+        let _generation = pump_generation;
         use tokio_stream::StreamExt as _;
         let mut stream = body.into_data_stream();
         while let Some(chunk_result) = stream.next().await {
@@ -436,11 +472,14 @@ async fn dispatch_matched_route(
             route.route.requires_auth,
             action_bridge,
             result,
+            generation_lease,
         )
         .await;
     }
 
+    let invoke_generation = generation_lease.clone();
     let invoke_task = tokio::spawn(async move {
+        let _generation = invoke_generation;
         match engine
             .invoke_with_blobs(
                 &invoke_hash,
@@ -509,7 +548,9 @@ async fn dispatch_matched_route(
     // Build the axum response whose body drains the
     // kernel_response_body handle.
     let drain_streams = streams.clone();
+    let response_generation = generation_lease;
     let body_stream = async_stream::stream! {
+        let _generation = response_generation;
         loop {
             match drain_streams.read(kernel_response_body).await {
                 Ok(chunk) if chunk.is_empty() => break,
@@ -527,6 +568,10 @@ async fn dispatch_matched_route(
         .expect("response builder")
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "action bridge result carries the captured request generation"
+)]
 async fn dispatch_action_bridge_result(
     state: ServerState,
     tenant_id: TenantId,
@@ -535,6 +580,7 @@ async fn dispatch_action_bridge_result(
     requires_auth: bool,
     bridge: crate::http_endpoint::HttpActionBridge,
     result: temper_wasm::types::WasmInvocationResult,
+    generation_lease: crate::state::TenantGenerationLease,
 ) -> Response {
     let callback_params = result.callback_params.clone();
     let refs = bridge_git_receive_pack_refs(&callback_params);
@@ -565,6 +611,7 @@ async fn dispatch_action_bridge_result(
     let action_params = bridge_action_params(&callback_params);
 
     let mut agent_ctx = crate::request_context::extract_agent_context(&headers);
+    agent_ctx = agent_ctx.with_tenant_generation_lease(generation_lease);
     let explicit_principal = headers.contains_key("x-temper-principal-kind")
         || headers.contains_key("x-temper-principal-id")
         || headers.contains_key("x-temper-principal-scopes");

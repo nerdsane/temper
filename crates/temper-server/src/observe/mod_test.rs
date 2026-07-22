@@ -476,6 +476,116 @@ async fn wasm_upload_accepts_json_base64_body() {
 }
 
 #[tokio::test]
+async fn wasm_upload_cannot_cross_a_stable_tenant_generation() {
+    let state = test_state_with_turso().await;
+    let tenant = TenantId::default();
+    let app = build_app_with_state(state.clone());
+    let stable_reader = state.begin_tenant_request(&tenant).await;
+
+    let blocked = app
+        .clone()
+        .oneshot(
+            Request::post("/api/wasm/modules/generation_fenced")
+                .header("X-Tenant-Id", "default")
+                .header("X-Temper-Principal-Kind", "admin")
+                .body(Body::from(VALID_EMPTY_WASM.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        state
+            .wasm_module_registry
+            .read()
+            .expect("WASM registry lock poisoned")
+            .get_hash(&tenant, "generation_fenced")
+            .is_none()
+    );
+
+    drop(stable_reader);
+    let published = app
+        .oneshot(
+            Request::post("/api/wasm/modules/generation_fenced")
+                .header("X-Tenant-Id", "default")
+                .header("X-Temper-Principal-Kind", "admin")
+                .body(Body::from(VALID_EMPTY_WASM.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(published.status(), StatusCode::OK);
+    assert!(
+        state
+            .wasm_module_registry
+            .read()
+            .expect("WASM registry lock poisoned")
+            .get_hash(&tenant, "generation_fenced")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn wasm_read_cannot_observe_an_armed_tenant_generation() {
+    let state = test_state_with_turso().await;
+    let tenant = TenantId::default();
+    let app = build_app_with_state(state.clone());
+    let uploaded = app
+        .clone()
+        .oneshot(
+            Request::post("/api/wasm/modules/read_generation_fenced")
+                .header("X-Tenant-Id", "default")
+                .header("X-Temper-Principal-Kind", "admin")
+                .body(Body::from(VALID_EMPTY_WASM.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(uploaded.status(), StatusCode::OK);
+
+    let mut publication = state
+        .begin_spec_publication(&tenant)
+        .await
+        .expect("acquire publication writer");
+    let intent = ServerState::spec_publication_intent(
+        "observe-wasm-read-generation-test",
+        [("module", b"read_generation_fenced".as_slice())],
+    );
+    state
+        .arm_spec_publication(&mut publication, &tenant, &intent)
+        .expect("arm publication writer");
+
+    let blocked = app
+        .clone()
+        .oneshot(
+            Request::get("/observe/wasm/modules/read_generation_fenced")
+                .header("X-Tenant-Id", "default")
+                .header("X-Temper-Principal-Kind", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    state
+        .complete_spec_publication(&mut publication, &tenant)
+        .expect("complete publication generation");
+    drop(publication);
+    let visible = app
+        .oneshot(
+            Request::get("/observe/wasm/modules/read_generation_fenced")
+                .header("X-Tenant-Id", "default")
+                .header("X-Temper-Principal-Kind", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(visible.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn approved_wasm_upload_decision_allows_agent_retry() {
     let state = test_state_with_turso().await;
     install_admin_policy(&state);
@@ -1980,6 +2090,138 @@ async fn test_load_dir_registers_specs() {
         !entity_types.is_empty(),
         "registry should have entity types for test-tenant"
     );
+}
+
+#[tokio::test]
+async fn test_load_dir_policy_survives_canonical_generation_recovery() {
+    let state = test_state_with_turso().await;
+    let tenant = "load-dir-policy-recovery";
+    let primary = r#"permit(principal, action == Action::"primary_only", resource);"#;
+    let bundled = r#"permit(principal, action == Action::"bundled_only", resource);"#;
+    state
+        .policy_store()
+        .expect("policy store")
+        .save_policy(tenant, "primary", primary, "test")
+        .await
+        .expect("seed canonical primary");
+    state
+        .authz
+        .reload_tenant_policies(tenant, primary)
+        .expect("activate primary");
+    state
+        .tenant_policies
+        .write()
+        .unwrap()
+        .insert(tenant.to_string(), primary.to_string());
+
+    let app = Router::new()
+        .nest("/observe", build_observe_router())
+        .nest("/api", crate::api::build_api_router())
+        .with_state(state.clone());
+    let specs_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-fixtures/specs");
+    let body = serde_json::json!({
+        "tenant": tenant,
+        "specs_dir": specs_dir.to_str().unwrap(),
+        "merge": true,
+        "cedar_policies": bundled,
+    });
+    let response = app
+        .oneshot(
+            Request::post("/api/specs/load-dir")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let rows = state
+        .policy_store()
+        .expect("policy store")
+        .load_policies_for_tenant(tenant)
+        .await
+        .expect("load canonical generation");
+    assert!(rows.iter().any(|row| row.policy_id == "primary"));
+    assert!(rows.iter().any(|row| {
+        row.policy_id.starts_with("observe-load-dir-")
+            && row.created_by.starts_with("observe:load-dir:")
+            && row.cedar_text.contains("bundled_only")
+    }));
+
+    state
+        .authz
+        .reload_tenant_policies_named(tenant, &[])
+        .expect("clear live generation before recovery");
+    crate::authz::load_and_activate_tenant_policies(&state, tenant).await;
+    let recovered = state
+        .authz
+        .get_tenant_policy_text(tenant)
+        .expect("recover canonical generation");
+    assert!(recovered.contains("primary_only"));
+    assert!(recovered.contains("bundled_only"));
+}
+
+#[tokio::test]
+async fn test_load_dir_replaces_its_owned_policy_in_live_and_recovered_generations() {
+    let state = test_state_with_turso().await;
+    let tenant = "load-dir-policy-replacement";
+    let allow_a = r#"permit(principal, action == Action::"allow_a", resource);"#;
+    let allow_b = r#"permit(principal, action == Action::"allow_b", resource);"#;
+    let app = Router::new()
+        .nest("/observe", build_observe_router())
+        .nest("/api", crate::api::build_api_router())
+        .with_state(state.clone());
+    let specs_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-fixtures/specs");
+    let request = |cedar_policies: &str| {
+        let body = serde_json::json!({
+            "tenant": tenant,
+            "specs_dir": specs_dir.to_str().unwrap(),
+            "merge": true,
+            "cedar_policies": cedar_policies,
+        });
+        Request::post("/api/specs/load-dir")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap()
+    };
+
+    assert_eq!(
+        app.clone()
+            .oneshot(request(allow_a))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.oneshot(request(allow_b)).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let live = state
+        .authz
+        .get_tenant_policy_text(tenant)
+        .expect("live replacement policy");
+    assert!(!live.contains("allow_a"), "replaced grant remained live");
+    assert!(live.contains("allow_b"));
+
+    state
+        .authz
+        .reload_tenant_policies_named(tenant, &[])
+        .expect("clear live generation before recovery");
+    crate::authz::load_and_activate_tenant_policies(&state, tenant).await;
+    let recovered = state
+        .authz
+        .get_tenant_policy_text(tenant)
+        .expect("recovered replacement policy");
+    assert!(
+        !recovered.contains("allow_a"),
+        "replaced grant returned after recovery"
+    );
+    assert!(recovered.contains("allow_b"));
 }
 
 #[tokio::test]

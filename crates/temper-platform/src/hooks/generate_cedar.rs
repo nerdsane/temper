@@ -4,11 +4,22 @@ use temper_server::ServerState;
 ///
 /// Reads agent_id, action_name, resource_type, resource_id, scope, tenant,
 /// and scope_matrix from the GovernanceDecision entity's merged fields.
-pub(super) fn handle_generate_cedar_from_fields(
+pub(super) async fn handle_generate_cedar_from_fields(
     entity_id: &str,
     fields: &serde_json::Value,
     server: &ServerState,
 ) -> Result<(), String> {
+    if fields
+        .get("policy_already_published")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        tracing::debug!(
+            entity_id,
+            "GenerateCedarPolicy hook skipped because the API already published this policy"
+        );
+        return Ok(());
+    }
     let agent_id = fields
         .get("agent_id")
         .and_then(|v| v.as_str())
@@ -88,22 +99,18 @@ pub(super) fn handle_generate_cedar_from_fields(
         "GenerateCedarPolicy hook: generated policy, validating and loading"
     );
 
-    {
-        let Ok(mut policies) = server.tenant_policies.write() else {
-            return Err("tenant_policies lock poisoned".to_string());
-        };
-        let entry = policies.entry(tenant.to_string()).or_default();
-        if !entry.is_empty() {
-            entry.push('\n');
-        }
-        entry.push_str(&generated_policy);
-
-        let tenant_text = entry.clone();
-        if let Err(e) = server.authz.reload_tenant_policies(tenant, &tenant_text) {
-            tracing::error!(error = %e, "GenerateCedarPolicy: failed to reload policies");
-            return Err(format!("Failed to reload policies: {e}"));
-        }
-    }
+    let created_by = fields
+        .get("decided_by")
+        .and_then(|value| value.as_str())
+        .unwrap_or("governance-decision");
+    temper_server::authz::publish_policy_entry_generation(
+        server,
+        tenant,
+        &format!("decision:{entity_id}"),
+        &generated_policy,
+        created_by,
+    )
+    .await?;
 
     tracing::info!(
         entity_id,

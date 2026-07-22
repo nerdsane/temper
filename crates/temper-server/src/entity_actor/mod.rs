@@ -11,9 +11,12 @@ mod snapshot_queue;
 pub mod types;
 
 pub use actor::EntityActor;
+#[cfg(test)]
+pub(crate) use actor::recover_entity_state_from_store;
 pub(crate) use actor::{
-    CapturedEntitySnapshot, StableEntitySource, recover_entity_state_from_stable_sources,
-    recover_entity_state_from_store, stable_entity_source_is_current,
+    CapturedEntitySnapshot, EntityRecoveryContext, StableEntitySource,
+    recover_entity_state_from_stable_sources, stable_entity_source_is_current,
+    state_materialization_envelope,
 };
 pub use effects::{
     ProcessResult, ScheduledAction, apply_effects, apply_new_state_fallback, build_eval_context,
@@ -21,4 +24,5 @@ pub use effects::{
 };
 pub use sim_handler::EntityActorHandler;
 pub(crate) use snapshot_queue::SnapshotWriteQueue;
+pub(crate) use types::EntityPassivationSnapshot;
 pub use types::{EntityEvent, EntityMsg, EntityResponse, EntityState};

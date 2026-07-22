@@ -15,7 +15,7 @@ use temper_runtime::ActorSystem;
 use temper_runtime::scheduler::sim_uuid;
 use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::parse_csdl;
-use temper_store_turso::TursoEventStore;
+use temper_store_turso::{QueryProjectionUpsert, TursoEventStore};
 
 mod dst_projection_lag;
 mod keyed_existence;
@@ -26,6 +26,9 @@ const CSDL_XML: &str = include_str!("../../../../../test-fixtures/specs/model.cs
 const ORDER_IOA: &str = include_str!("../../../../../test-fixtures/specs/order.ioa.toml");
 const ORDER_KEY_SET_SIGNATURE: &str = "v3|7:ws_path[11:WorkspaceId4:Path]";
 const DIRECTORY_KEY_SET_SIGNATURE: &str = "v3|11:name_parent[4:Name11:WorkspaceId8:ParentId]";
+// determinism-ok: test-only admission prevents libSQL local transactions in
+// independent proof fixtures from tripping the process-wide native driver.
+static TURSO_QUERY_PROOF_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn build_order_state(system_name: &str) -> ServerState {
     let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
@@ -85,6 +88,47 @@ async fn upsert_order_projection(
         )
         .await
         .expect("upsert projection");
+}
+
+async fn upsert_order_projections(
+    store: &TursoEventStore,
+    tenant: &TenantId,
+    projections: Vec<(String, serde_json::Value, u64)>,
+) {
+    // Keep each statement well below SQLite's parameter/expression budgets while
+    // avoiding thousands of independent transactions when these proof fixtures
+    // run concurrently with the rest of the query-plane suite.
+    for batch in projections.chunks(200) {
+        let batch = batch
+            .iter()
+            .map(|(entity_id, fields, sequence_nr)| {
+                let mut fields = fields.clone();
+                fields["Id"] = serde_json::json!(entity_id);
+                let state = serde_json::json!({
+                    "entity_type": "Order",
+                    "entity_id": entity_id,
+                    "status": "Created",
+                    "fields": fields,
+                    "sequence_nr": sequence_nr,
+                    "events": [],
+                });
+                QueryProjectionUpsert {
+                    entity_type: "Order".to_string(),
+                    entity_id: entity_id.clone(),
+                    status: "Created".to_string(),
+                    fields: fields.clone(),
+                    state,
+                    indexed_fields: fields,
+                    sequence_nr: *sequence_nr,
+                    known_new: true,
+                }
+            })
+            .collect::<Vec<_>>();
+        store
+            .upsert_query_projections(tenant.as_str(), &batch)
+            .await
+            .expect("batch upsert projections");
+    }
 }
 
 #[test]
@@ -254,6 +298,9 @@ async fn row_authorized_count_over_budget_returns_413() {
         QueryPlaneReadError::KeyOwnershipUnstable => {
             panic!("this non-keyed count does not use declared-key ownership")
         }
+        QueryPlaneReadError::ProjectionUnstable => {
+            panic!("the in-memory query plane has no durable dirty markers")
+        }
     }
 }
 
@@ -292,6 +339,89 @@ async fn row_authorized_first_page_can_stop_after_proof() {
     assert_eq!(
         result.telemetry.strategy,
         QueryPlaneReadStrategy::ReadSourceCursor
+    );
+}
+
+#[tokio::test]
+async fn dirty_projection_repair_makes_bounded_progress_before_retrying() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-query-plane-bounded-dirty-repair-{}.db",
+        sim_uuid()
+    ));
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let mut state = build_order_state("query-plane-bounded-dirty-repair");
+    state.set_storage_stack(StorageStack::from_turso(store.clone()));
+    create_orders(&state, 11).await;
+    let tenant = TenantId::default();
+
+    for index in 0..11 {
+        store
+            .remove_query_projection(tenant.as_str(), "Order", &format!("ord-{index:02}"))
+            .await
+            .expect("create a durable projection gap");
+    }
+    assert_eq!(
+        store
+            .dirty_query_projection_entity_ids(tenant.as_str(), "Order", 20)
+            .await
+            .expect("read initial dirty set")
+            .len(),
+        11
+    );
+
+    let security_ctx = SecurityContext::system();
+    let query_options = QueryOptions {
+        filter: Some(FilterExpr::BinaryOp {
+            left: Box::new(FilterExpr::Property("Id".to_string())),
+            op: BinaryOperator::Eq,
+            right: Box::new(FilterExpr::Literal(ODataValue::String(
+                "ord-10".to_string(),
+            ))),
+        }),
+        top: Some(1),
+        ..QueryOptions::default()
+    };
+    let request = || QueryPlaneReadRequest {
+        state: &state,
+        tenant: &tenant,
+        security_ctx: &security_ctx,
+        entity_type: "Order",
+        entity_set_name: "Orders",
+        query_options: &query_options,
+        budget: QueryPlaneReadBudget {
+            default_page_size: 1,
+            max_entities: 1,
+        },
+    };
+
+    assert!(matches!(
+        read_entity_set_page(request()).await,
+        Err(QueryPlaneReadError::ProjectionUnstable)
+    ));
+    assert_eq!(
+        store
+            .dirty_query_projection_entity_ids(tenant.as_str(), "Order", 20)
+            .await
+            .expect("read dirty set after bounded repair"),
+        vec!["ord-10".to_string()],
+        "a retryable over-budget response must still repair one bounded batch"
+    );
+
+    let result = match read_entity_set_page(request()).await {
+        Ok(result) => result,
+        Err(_) => panic!("the next read should finish the remaining bounded repair"),
+    };
+    assert_eq!(result.entities.len(), 1);
+    assert_eq!(result.entities[0]["entity_id"].as_str(), Some("ord-10"));
+    assert!(
+        store
+            .dirty_query_projection_entity_ids(tenant.as_str(), "Order", 1)
+            .await
+            .expect("read final dirty set")
+            .is_empty()
     );
 }
 
@@ -527,19 +657,20 @@ fn id_eq_filter(entity_id: &str) -> FilterExpr {
     }
 }
 
-/// ARN-89: an exact-match resolution must surface a just-committed entity even
-/// when its asynchronously-projected row has not yet landed.
+/// ARN-89: an exact-match resolution must surface a durable entity whose
+/// projection was lost before the dirty ledger existed.
 ///
 /// Reproduces the NEW case the fix covers: another Order is present in BOTH the
 /// in-memory index and the turso projection (so catalog `coverage.missing == 0`),
 /// while the TARGET Order is durable in the journal — reachable only via
 /// `list_entity_ids_lazy` — and absent from the in-memory index AND the
-/// projection. The pre-fix code trusted the empty native page (since coverage
+/// projection, with the exact source dirty marker cleared to model that legacy
+/// crash gap. The pre-fix code trusted the empty native page (since coverage
 /// looked complete for the indexed Order) and returned empty. The fix detects
 /// the pure equality conjunction, distrusts the empty page, and reconciles
 /// against authoritative state.
 #[tokio::test]
-async fn exact_match_read_is_consistent_when_projection_queued() {
+async fn exact_match_read_reconciles_an_untracked_projection_gap() {
     let db_path =
         std::env::temp_dir().join(format!("temper-query-plane-exact-lag-{}.db", sim_uuid()));
     let _ = std::fs::remove_file(&db_path);
@@ -582,6 +713,26 @@ async fn exact_match_read_is_consistent_when_projection_queued() {
         .remove_query_projection(tenant.as_str(), "Order", "ord-target")
         .await
         .expect("evict target projection to simulate projection lag");
+    let target_persistence_id = format!("{tenant}:Order:ord-target");
+    let target_boundary =
+        temper_runtime::persistence::EventStore::journal_boundary(&store, &target_persistence_id)
+            .await
+            .expect("capture target journal boundary");
+    assert!(
+        store
+            .clear_query_projection_dirty_if_source(
+                tenant.as_str(),
+                "Order",
+                "ord-target",
+                temper_runtime::persistence::ProjectionSourceFence {
+                    expected_journal_sequence: target_boundary.latest_sequence,
+                    expected_snapshot: None,
+                },
+            )
+            .await
+            .expect("clear the exact dirty generation"),
+        "the fixture must model a pre-ledger projection gap"
+    );
 
     // Fresh reader process: empty in-memory index (a server restart). Touch only
     // `ord-present` so the index holds exactly that one Order, while `ord-target`

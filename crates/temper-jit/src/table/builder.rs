@@ -129,6 +129,7 @@ impl TransitionTable {
                     properties: k.properties.clone(),
                 })
                 .collect(),
+            key_contract_activation_epoch: 0,
             vectors: automaton
                 .vectors
                 .iter()

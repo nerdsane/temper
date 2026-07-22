@@ -19,7 +19,7 @@ use tracing::instrument;
 use temper_runtime::tenant::TenantId;
 
 use super::{PolicyAuthed, decisions_access, empty_decision_list, format_decision_list};
-use crate::authz::{persist_and_activate_policy, require_observe_auth};
+use crate::authz::require_observe_auth;
 use crate::request_context::AgentContext;
 use crate::state::{DecisionStatus, PendingDecision, ServerState};
 
@@ -72,7 +72,7 @@ pub(crate) async fn handle_list_decisions(
 pub(crate) async fn handle_approve_decision(
     State(state): State<ServerState>,
     Path((tenant, id)): Path<(String, String)>,
-    _auth: PolicyAuthed,
+    mut auth: PolicyAuthed,
     axum::Json(body): axum::Json<ApproveBody>,
 ) -> impl IntoResponse {
     let scope = body.scope;
@@ -129,35 +129,21 @@ pub(crate) async fn handle_approve_decision(
     let generated_policy = decision.generate_policy_from_matrix(&scope);
     let evolution_record_id = decision.evolution_record_id.clone();
 
-    // Validate the generated policy combined with existing enabled policies.
-    let prospective = {
-        let policies = state.tenant_policies.read().unwrap(); // ci-ok: infallible lock
-        let existing = policies.get(&tenant).cloned().unwrap_or_default();
-        if existing.is_empty() {
-            generated_policy.clone()
-        } else {
-            format!("{existing}\n{generated_policy}")
-        }
-    };
-    if let Err(resp) = super::validate_and_reload_policies(&state, &tenant, &prospective) {
-        return resp;
-    }
-
-    // Persist the individual policy to the granular `policies` table.
     let decided_by_ref = body.decided_by.as_deref().unwrap_or("unknown");
-    persist_and_activate_policy(
+    let expected_generation = auth.release_for_publication();
+    let auth_headers = auth.headers().clone();
+    if let Err(response) = super::policies::publish_policy_upsert(
         &state,
         &tenant,
         &format!("decision:{id}"),
         &generated_policy,
         decided_by_ref,
+        Some(expected_generation),
+        Some(&auth_headers),
     )
-    .await;
-
-    // Update in-memory map to reflect the new policy.
+    .await
     {
-        let mut policies = state.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-        policies.insert(tenant.clone(), prospective);
+        return response;
     }
 
     // Mark decision approved only after policy reload succeeds.
@@ -170,7 +156,12 @@ pub(crate) async fn handle_approve_decision(
 
     // Persist updated decision synchronously.
     if let Err(e) = state.persist_pending_decision(&approved_decision).await {
-        tracing::warn!(id = %id, error = %e, "failed to persist approved decision");
+        tracing::error!(id = %id, error = %e, "failed to persist approved decision");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to persist approved decision: {e}"),
+        )
+            .into_response();
     }
     let _ = state
         .observe_refresh_tx
@@ -235,6 +226,7 @@ pub(crate) async fn handle_approve_decision(
                         "decided_by": decided_by,
                         "scope": "narrow",
                         "generated_policy": generated_policy,
+                        "policy_already_published": true,
                     }),
                     &AgentContext::for_service("platform-dispatch"),
                 )
@@ -322,7 +314,12 @@ pub(crate) async fn handle_deny_decision(
 
     // Persist updated decision synchronously.
     if let Err(e) = state.persist_pending_decision(&denied_decision).await {
-        tracing::warn!(error = %e, "failed to persist denied decision");
+        tracing::error!(id = %id, error = %e, "failed to persist denied decision");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to persist denied decision: {e}"),
+        )
+            .into_response();
     }
     let _ = state
         .observe_refresh_tx

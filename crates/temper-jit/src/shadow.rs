@@ -116,6 +116,7 @@ mod tests {
             states: vec!["Draft".into(), "Submitted".into(), "Cancelled".into()],
             initial_state: "Draft".into(),
             keys: vec![],
+            key_contract_activation_epoch: 0,
             vectors: vec![],
             rules: vec![
                 TransitionRule {

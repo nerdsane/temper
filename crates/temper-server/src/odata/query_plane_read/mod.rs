@@ -127,9 +127,9 @@ async fn read_entity_set_page_with_authorization(
     }
 
     // Declared-key ownership is co-committed with the journal and is therefore more
-    // authoritative than the asynchronously maintained field projection. Resolve it
-    // before trying a native page so a stale/coverage-gap projection cannot re-add a
-    // tombstoned former owner or turn a bounded point lookup back into a type scan.
+    // authoritative than the asynchronously maintained field projection. Resolve and
+    // close a complete-coverage point read before touching unrelated catalog/EAV repair
+    // debt; its owner body is independently fenced against journal/snapshot state.
     let mut keyed = resolve_keyed_candidates(&request).await;
     if let KeyedCandidateResolution::Authoritative(proof) = &keyed {
         match read_fenced_keyed_candidate(&request, proof.clone(), authorization).await? {
@@ -139,6 +139,28 @@ async fn read_entity_set_page_with_authorization(
             }
         }
     }
+
+    // Every remaining plan can trust or fall back through catalog/EAV state, so it
+    // must first close the type's bounded durable repair ledger. A complete keyed
+    // hit/miss returned above never observes those projections and cannot be starved
+    // by unrelated dirty entities.
+    crate::state::source_fenced_projection::repair_dirty_projections_before_read(
+        request.state,
+        request.tenant,
+        request.entity_type,
+        request.budget.scan_candidate_budget(),
+    )
+    .await
+    .map_err(|error| {
+        tracing::warn!(
+            tenant = %request.tenant,
+            entity_type = request.entity_type,
+            error = %error,
+            "query projection repair did not reach a stable source generation"
+        );
+        QueryPlaneReadError::ProjectionUnstable
+    })?;
+
     let keyed_query = !matches!(&keyed, KeyedCandidateResolution::NotApplicable);
     let native_plan = native_candidate_page_plan(&request);
     // Set when an empty native page for an exact-match resolution is treated as

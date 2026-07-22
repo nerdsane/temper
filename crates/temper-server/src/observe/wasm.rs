@@ -2,14 +2,14 @@
 //!
 //! Upload, download, delete, and list WASM integration modules.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use axum::extract::Path;
-use axum::extract::{Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use temper_runtime::tenant::TenantId;
 
 use tracing::instrument;
 
@@ -18,7 +18,120 @@ use crate::authz::{
     require_observe_auth,
 };
 use crate::odata::extract_tenant;
-use crate::state::ServerState;
+use crate::state::{ServerState, SpecPublicationGuard};
+
+mod list;
+
+pub use list::{handle_list_wasm_invocations, handle_list_wasm_modules};
+
+async fn begin_wasm_generation_mutation(
+    state: &ServerState,
+    tenant: &TenantId,
+) -> Result<SpecPublicationGuard, (StatusCode, String)> {
+    let guard = state
+        .begin_spec_publication(tenant)
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("tenant runtime generation is busy: {error}"),
+            )
+        })?;
+    Ok(guard)
+}
+
+async fn begin_wasm_generation_read(
+    state: &ServerState,
+    tenant: &TenantId,
+) -> Result<tokio::sync::OwnedRwLockReadGuard<()>, StatusCode> {
+    if state.spec_publication_gated(tenant) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let guard = state
+        .try_begin_tenant_request(tenant)
+        .await
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    if state.spec_publication_gated(tenant) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    Ok(guard)
+}
+
+async fn authorize_wasm_mutation(
+    state: &ServerState,
+    headers: &HeaderMap,
+    tenant: &TenantId,
+    module_name: &str,
+) -> Result<(), (StatusCode, String)> {
+    let mut resource_attrs = BTreeMap::new();
+    resource_attrs.insert(
+        "id".to_string(),
+        serde_json::Value::String(module_name.to_string()),
+    );
+    resource_attrs.insert(
+        "module_name".to_string(),
+        serde_json::Value::String(module_name.to_string()),
+    );
+    if let Some(response) = require_governed_mutation_auth(
+        state,
+        headers,
+        GovernedMutationAuth {
+            tenant: tenant.as_str(),
+            action: "manage_wasm",
+            resource_type: "WasmModule",
+            resource_id: module_name,
+            resource_attrs,
+            module_name: Some(module_name),
+            from_status: None,
+        },
+    )
+    .await
+    {
+        return Err(response);
+    }
+    Ok(())
+}
+
+fn known_wasm_tenants(state: &ServerState) -> Result<BTreeSet<String>, StatusCode> {
+    let mut tenants = state
+        .registry
+        .read()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .tenant_ids()
+        .into_iter()
+        .map(|tenant| tenant.as_str().to_string())
+        .collect::<BTreeSet<_>>();
+    tenants.extend(
+        state
+            .wasm_module_registry
+            .read()
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+            .all_modules()
+            .into_iter()
+            .map(|(tenant, _, _)| tenant.to_string()),
+    );
+    Ok(tenants)
+}
+
+async fn begin_all_wasm_generation_reads(
+    state: &ServerState,
+    tenants: &BTreeSet<String>,
+) -> Result<Vec<tokio::sync::OwnedRwLockReadGuard<()>>, StatusCode> {
+    let mut guards = Vec::with_capacity(tenants.len());
+    for tenant in tenants {
+        guards.push(begin_wasm_generation_read(state, &TenantId::new(tenant)).await?);
+    }
+    Ok(guards)
+}
+
+fn wasm_authorization_tenant(headers: &HeaderMap) -> String {
+    headers
+        .get("x-tenant-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|tenant| !tenant.is_empty())
+        .unwrap_or("system")
+        .to_string()
+}
 
 #[derive(Deserialize)]
 struct WasmModuleUploadJson {
@@ -99,32 +212,7 @@ pub async fn handle_upload_wasm_module(
     body: axum::body::Bytes,
 ) -> Result<Json<WasmModuleUploadResponse>, (StatusCode, String)> {
     let tenant = extract_tenant(&headers, &state)?;
-    let mut resource_attrs = BTreeMap::new();
-    resource_attrs.insert(
-        "id".to_string(),
-        serde_json::Value::String(module_name.clone()),
-    );
-    resource_attrs.insert(
-        "module_name".to_string(),
-        serde_json::Value::String(module_name.clone()),
-    );
-    if let Some(resp) = require_governed_mutation_auth(
-        &state,
-        &headers,
-        GovernedMutationAuth {
-            tenant: tenant.as_str(),
-            action: "manage_wasm",
-            resource_type: "WasmModule",
-            resource_id: &module_name,
-            resource_attrs,
-            module_name: Some(&module_name),
-            from_status: None,
-        },
-    )
-    .await
-    {
-        return Err(resp);
-    }
+    authorize_wasm_mutation(&state, &headers, &tenant, &module_name).await?;
 
     let module_bytes = decode_wasm_upload_body(&headers, body)?;
 
@@ -153,6 +241,23 @@ pub async fn handle_upload_wasm_module(
             )
         })?;
 
+    // Serialize the durable row and live module-name mapping with spec/app
+    // publication. Compilation above is content-addressed cache warming only;
+    // no tenant-visible generation changes before this writer is held.
+    let mut generation_writer = begin_wasm_generation_mutation(&state, &tenant).await?;
+    authorize_wasm_mutation(&state, &headers, &tenant, &module_name).await?;
+    let intent = ServerState::spec_publication_intent(
+        "direct-wasm-upload-v1",
+        [
+            ("module-name", module_name.as_bytes()),
+            ("sha256", hash.as_bytes()),
+            ("wasm-bytes", module_bytes.as_ref()),
+        ],
+    );
+    state
+        .arm_spec_publication(&mut generation_writer, &tenant, &intent)
+        .map_err(|error| (StatusCode::CONFLICT, error))?;
+
     // Persist to durable storage first — if durability fails, refuse the upload.
     // This ensures the module survives restarts before we expose it in memory.
     // source="upload" so the os-apps install pipeline won't clobber this row at
@@ -168,7 +273,6 @@ pub async fn handle_upload_wasm_module(
         .await
     {
         tracing::error!(error = %e, "failed to persist WASM module to durable store");
-        state.wasm_engine.evict(&hash);
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("failed to persist WASM module: {e}"),
@@ -177,9 +281,17 @@ pub async fn handle_upload_wasm_module(
 
     // Register in module registry after durability is confirmed.
     {
-        let mut wasm_reg = state.wasm_module_registry.write().unwrap();
+        let mut wasm_reg = state.wasm_module_registry.write().map_err(|error| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("WASM registry lock poisoned: {error}"),
+            )
+        })?;
         wasm_reg.register(&tenant, &module_name, &hash);
     }
+    state
+        .complete_spec_publication_retry(&mut generation_writer, &tenant)
+        .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error))?;
 
     let size_bytes = module_bytes.len();
     tracing::info!(
@@ -237,6 +349,7 @@ pub async fn handle_get_wasm_module_info(
     Path(module_name): Path<String>,
 ) -> Result<Json<WasmModuleInfoResponse>, StatusCode> {
     let tenant = extract_tenant(&headers, &state).map_err(|(s, _)| s)?;
+    let _generation = begin_wasm_generation_read(&state, &tenant).await?;
 
     let hash = {
         let wasm_reg = state.wasm_module_registry.read().unwrap();
@@ -269,34 +382,14 @@ pub async fn handle_delete_wasm_module(
     Path(module_name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let tenant = extract_tenant(&headers, &state)?;
-    let mut resource_attrs = BTreeMap::new();
-    resource_attrs.insert(
-        "id".to_string(),
-        serde_json::Value::String(module_name.clone()),
-    );
-    resource_attrs.insert(
-        "module_name".to_string(),
-        serde_json::Value::String(module_name.clone()),
-    );
-    if let Some(resp) = require_governed_mutation_auth(
-        &state,
-        &headers,
-        GovernedMutationAuth {
-            tenant: tenant.as_str(),
-            action: "manage_wasm",
-            resource_type: "WasmModule",
-            resource_id: &module_name,
-            resource_attrs,
-            module_name: Some(&module_name),
-            from_status: None,
-        },
-    )
-    .await
-    {
-        return Err(resp);
-    }
+    authorize_wasm_mutation(&state, &headers, &tenant, &module_name).await?;
 
-    // Get hash before removing from registry (for cache eviction)
+    let mut generation_writer = begin_wasm_generation_mutation(&state, &tenant).await?;
+    authorize_wasm_mutation(&state, &headers, &tenant, &module_name).await?;
+    let retrying_exact_delete = state.spec_publication_gated(&tenant);
+
+    // Get hash after joining the tenant-generation writer, before removing it
+    // from the registry for cache eviction.
     let hash = {
         let wasm_reg = state.wasm_module_registry.read().unwrap();
         wasm_reg
@@ -304,13 +397,21 @@ pub async fn handle_delete_wasm_module(
             .map(|s| s.to_string())
     };
 
-    if hash.is_none() {
+    if hash.is_none() && !retrying_exact_delete {
         tracing::warn!("WASM module not found for deletion");
         return Err((
             StatusCode::NOT_FOUND,
             format!("WASM module '{module_name}' not found for tenant '{tenant}'"),
         ));
     }
+
+    let intent = ServerState::spec_publication_intent(
+        "direct-wasm-delete-v1",
+        [("module-name", module_name.as_bytes())],
+    );
+    state
+        .arm_spec_publication(&mut generation_writer, &tenant, &intent)
+        .map_err(|error| (StatusCode::CONFLICT, error))?;
 
     // Delete from durable storage first — if durability fails, refuse the delete
     // so memory stays consistent with the durable store.
@@ -327,7 +428,12 @@ pub async fn handle_delete_wasm_module(
 
     // Remove from in-memory registry after durability is confirmed.
     {
-        let mut wasm_reg = state.wasm_module_registry.write().unwrap();
+        let mut wasm_reg = state.wasm_module_registry.write().map_err(|error| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("WASM registry lock poisoned: {error}"),
+            )
+        })?;
         wasm_reg.remove(&tenant, &module_name);
     }
 
@@ -335,6 +441,9 @@ pub async fn handle_delete_wasm_module(
     if let Some(ref hash) = hash {
         state.wasm_engine.evict(hash);
     }
+    state
+        .complete_spec_publication_retry(&mut generation_writer, &tenant)
+        .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error))?;
 
     tracing::info!(
         tenant = %tenant,
@@ -346,137 +455,4 @@ pub async fn handle_delete_wasm_module(
         "deleted": true,
         "module_name": module_name,
     })))
-}
-
-/// GET /observe/wasm/modules — list all modules (with stats).
-///
-/// Admin/System principals see all tenants; others are scoped to `X-Tenant-Id`.
-#[instrument(skip_all, fields(otel.name = "GET /observe/wasm/modules"))]
-pub async fn handle_list_wasm_modules(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_wasm", "WasmModule")?;
-    let tenant_scope = observe_tenant_scope(&state, &headers)?;
-
-    // Collect invocation stats via fan-out across all tenant stores.
-    let invocation_stats: std::collections::BTreeMap<String, (usize, usize, Option<String>)> = {
-        let mut stats: std::collections::BTreeMap<String, (usize, usize, Option<String>)> =
-            std::collections::BTreeMap::new();
-        let stores = state.collect_all_metadata_stores().await;
-        for store in &stores {
-            if let Ok(rows) = store.load_recent_wasm_invocations(10_000).await {
-                for row in rows {
-                    let module = row.module_name.clone();
-                    let success = row.success;
-                    let ts = Some(row.created_at.clone());
-                    let (total, s_count, last_ts) = stats.entry(module).or_insert((0, 0, None));
-                    *total += 1;
-                    if success {
-                        *s_count += 1;
-                    }
-                    if ts.is_some() {
-                        *last_ts = ts;
-                    }
-                }
-            }
-        }
-        stats
-    };
-
-    let modules: Vec<WasmModuleListEntry> = {
-        let wasm_reg = state.wasm_module_registry.read().unwrap(); // ci-ok: infallible lock
-
-        let make_entry = |tenant: &str, name: &str, hash: &str| {
-            let cached = state.wasm_engine.is_cached(hash);
-            let (total_invocations, success_count, last_invoked_at) =
-                invocation_stats.get(name).cloned().unwrap_or((0, 0, None));
-            let success_rate = if total_invocations > 0 {
-                success_count as f64 / total_invocations as f64
-            } else {
-                0.0
-            };
-            WasmModuleListEntry {
-                tenant: tenant.to_string(),
-                module_name: name.to_string(),
-                sha256_hash: hash.to_string(),
-                cached,
-                total_invocations,
-                success_count,
-                success_rate,
-                last_invoked_at,
-            }
-        };
-
-        let mut entries: Vec<WasmModuleListEntry> = wasm_reg
-            .all_modules()
-            .into_iter()
-            .filter(|(tenant, _, _)| {
-                tenant_scope
-                    .as_ref()
-                    .is_none_or(|scope| scope.as_str() == *tenant)
-            })
-            .map(|(tenant, name, hash)| make_entry(tenant, name, hash))
-            .collect();
-
-        // Include built-in modules (visible to all tenants, no tenant scope filter).
-        for (name, hash) in wasm_reg.all_builtins() {
-            entries.push(make_entry("builtin", name, hash));
-        }
-
-        entries
-    };
-
-    let total = modules.len();
-    Ok(Json(serde_json::json!({
-        "modules": modules,
-        "total": total,
-    })))
-}
-
-/// GET /observe/wasm/invocations — query WASM invocation history.
-#[instrument(skip_all, fields(otel.name = "GET /observe/wasm/invocations"))]
-pub async fn handle_list_wasm_invocations(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    Query(params): Query<InvocationQueryParams>,
-) -> Result<Json<WasmInvocationResponse>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_wasm", "WasmModule")?;
-    let limit = params.limit.unwrap_or(100).min(10_000);
-
-    let stores = state.collect_all_metadata_stores().await;
-    let mut all_filtered: Vec<serde_json::Value> = Vec::new();
-    for store in &stores {
-        match store.load_recent_wasm_invocations(limit as i64).await {
-            Ok(rows) => {
-                let filtered: Vec<serde_json::Value> = rows
-                    .into_iter()
-                    .filter(|e| {
-                        if let Some(ref mn) = params.module_name
-                            && e.module_name != *mn
-                        {
-                            return false;
-                        }
-                        if let Some(s) = params.success
-                            && e.success != s
-                        {
-                            return false;
-                        }
-                        true
-                    })
-                    .map(|e| serde_json::to_value(&e).unwrap_or_default())
-                    .collect();
-                all_filtered.extend(filtered);
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, backend = store.backend_name(), "failed to query WASM invocations");
-            }
-        }
-    }
-
-    let total = all_filtered.len();
-    Ok(Json(WasmInvocationResponse {
-        invocations: all_filtered,
-        total,
-    }))
 }

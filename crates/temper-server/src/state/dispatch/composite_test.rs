@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde_json::json;
 use temper_runtime::ActorSystem;
 #[cfg(feature = "sim")]
-use temper_runtime::persistence::EventStore;
+use temper_runtime::persistence::{EventStore, PersistenceError};
 use temper_spec::csdl::parse_csdl;
 #[cfg(feature = "sim")]
 use temper_store_sim::SimEventStore;
@@ -217,6 +217,18 @@ params = ["Reason"]
 target_entity = "Child"
 action = "Create"
 generated_from = "child"
+
+[[action]]
+name = "CreateChildWithEffect"
+kind = "Composite"
+from = ["Active"]
+to = "Active"
+params = ["Reason"]
+
+[[action.sub_writes]]
+target_entity = "Child"
+action = "CreateWithEffect"
+generated_from = "child"
 "#;
 
 const CHILD_IOA: &str = r#"
@@ -224,6 +236,11 @@ const CHILD_IOA: &str = r#"
 name = "Child"
 states = ["Draft", "Active", "Deleted"]
 initial = "Draft"
+
+[[state]]
+name = "revision"
+type = "counter"
+initial = "0"
 
 [[key]]
 name = "child_name"
@@ -235,6 +252,7 @@ kind = "input"
 from = ["Draft"]
 to = "Active"
 params = ["Name"]
+effect = [{ type = "increment", var = "revision" }]
 
 [[action]]
 name = "Delete"
@@ -242,6 +260,14 @@ kind = "input"
 from = ["Active"]
 to = "Deleted"
 params = []
+
+[[action]]
+name = "CreateWithEffect"
+kind = "input"
+from = ["Draft"]
+to = "Active"
+params = ["Name"]
+effect = [{ type = "schedule", action = "Delete", delay_seconds = 2700 }]
 "#;
 
 const APP_IOA: &str = r#"
@@ -350,6 +376,200 @@ fn composite_test_state_with_store(store: SimEventStore) -> ServerState {
         StorageStack::from_sim(store, None),
     )
     .expect("test state should build")
+}
+
+#[cfg(feature = "sim")]
+#[derive(Clone)]
+struct PauseFirstAtomicStableLoadStore {
+    inner: SimEventStore,
+    target_boundary_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    reached: std::sync::Arc<tokio::sync::Notify>,
+    resume: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[cfg(feature = "sim")]
+impl PauseFirstAtomicStableLoadStore {
+    fn new(inner: SimEventStore) -> Self {
+        Self {
+            inner,
+            target_boundary_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            reached: std::sync::Arc::new(tokio::sync::Notify::new()),
+            resume: std::sync::Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    async fn wait_until_first_atomic_load_is_paused(&self) {
+        self.reached.notified().await;
+    }
+
+    fn resume_first_atomic_load(&self) {
+        self.resume.notify_one();
+    }
+}
+
+#[cfg(feature = "sim")]
+impl EventStore for PauseFirstAtomicStableLoadStore {
+    fn append(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[temper_runtime::persistence::PersistenceEnvelope],
+    ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send {
+        self.inner.append(persistence_id, expected_sequence, events)
+    }
+
+    fn append_batch(
+        &self,
+        appends: &[temper_runtime::persistence::PersistenceAppend],
+    ) -> impl std::future::Future<
+        Output = Result<
+            Vec<temper_runtime::persistence::PersistenceAppendResult>,
+            PersistenceError,
+        >,
+    > + Send {
+        self.inner.append_batch(appends)
+    }
+
+    fn batch_idempotency_committed(
+        &self,
+        claim: &temper_runtime::persistence::PersistenceBatchIdempotency,
+    ) -> impl std::future::Future<Output = Result<bool, PersistenceError>> + Send {
+        self.inner.batch_idempotency_committed(claim)
+    }
+
+    fn read_events(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+    ) -> impl std::future::Future<
+        Output = Result<Vec<temper_runtime::persistence::PersistenceEnvelope>, PersistenceError>,
+    > + Send {
+        self.inner.read_events(persistence_id, from_sequence)
+    }
+
+    fn read_events_page(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        through_sequence: u64,
+        limit: usize,
+    ) -> impl std::future::Future<
+        Output = Result<Vec<temper_runtime::persistence::PersistenceEnvelope>, PersistenceError>,
+    > + Send {
+        self.inner
+            .read_events_page(persistence_id, from_sequence, through_sequence, limit)
+    }
+
+    async fn journal_boundary(
+        &self,
+        persistence_id: &str,
+    ) -> Result<temper_runtime::persistence::JournalBoundary, PersistenceError> {
+        if persistence_id == "default:Child:concurrent-exact-child" {
+            let call = self
+                .target_boundary_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 2 {
+                self.reached.notify_one();
+                self.resume.notified().await;
+            }
+        }
+        self.inner.journal_boundary(persistence_id).await
+    }
+
+    fn save_snapshot(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+    ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send {
+        self.inner
+            .save_snapshot(persistence_id, sequence_nr, snapshot)
+    }
+
+    fn save_snapshot_if_source(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+        source: &temper_runtime::persistence::SnapshotSourceFence,
+        key_contract: Option<&str>,
+    ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send {
+        self.inner.save_snapshot_if_source(
+            persistence_id,
+            sequence_nr,
+            snapshot,
+            source,
+            key_contract,
+        )
+    }
+
+    fn load_snapshot(
+        &self,
+        persistence_id: &str,
+    ) -> impl std::future::Future<Output = Result<Option<(u64, Vec<u8>)>, PersistenceError>> + Send
+    {
+        self.inner.load_snapshot(persistence_id)
+    }
+
+    fn list_entity_ids(
+        &self,
+        tenant: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<(String, String)>, PersistenceError>> + Send
+    {
+        self.inner.list_entity_ids(tenant)
+    }
+
+    fn list_entity_ids_by_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<String>, PersistenceError>> + Send {
+        self.inner.list_entity_ids_by_type(tenant, entity_type)
+    }
+}
+
+#[cfg(feature = "sim")]
+fn composite_test_state_with_paused_atomic_load_store(
+    store: PauseFirstAtomicStableLoadStore,
+) -> ServerState {
+    let mut state = composite_test_state();
+    state.set_storage_stack(StorageStack::new(
+        crate::storage::BackendLabel::Sim,
+        crate::storage::BoxedEventStore::new(store),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ));
+    state
+}
+
+#[cfg(feature = "sim")]
+fn composite_registry_test_state_with_store(store: SimEventStore) -> ServerState {
+    let csdl = parse_csdl(COMPOSITE_CSDL).expect("test CSDL should parse");
+    let mut registry = crate::registry::SpecRegistry::new();
+    registry.register_tenant(
+        "default",
+        csdl,
+        COMPOSITE_CSDL.to_string(),
+        &[
+            ("Parent", PARENT_IOA),
+            ("Child", CHILD_IOA),
+            ("App", APP_IOA),
+            ("Blob", BLOB_IOA),
+            ("Ref", REF_IOA),
+        ],
+    );
+    let mut state = ServerState::from_registry(
+        ActorSystem::new("composite-registry-dispatch-test"),
+        registry,
+    );
+    state.set_storage_stack(StorageStack::from_sim(store, None));
+    state
 }
 
 #[tokio::test]
@@ -952,6 +1172,628 @@ async fn composite_atomic_batch_records_parent_composite_event_once() {
         store.dump_journal(parent_pid).len(),
         parent_journal.len(),
         "duplicate composite callback must not append a second CompositeEvent"
+    );
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn composite_exact_retry_is_content_bound_and_repairs_runtime_convergence() {
+    let store = SimEventStore::no_faults(401);
+    let state = composite_test_state_with_store(store.clone());
+    let tenant = TenantId::default();
+    let mut agent = AgentContext::for_service("composite-retry-test");
+    agent.idempotency_key = Some("stable-parent-operation".to_string());
+    let child_id = "child-content-bound-retry";
+    let callback = json!({
+        "sub_writes": [{
+            "entity_type": "Child",
+            "entity_id": child_id,
+            "action": "Create",
+            "params": { "Name": "original value" }
+        }]
+    });
+    state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            "parent-content-bound-retry",
+            "CreateChild",
+            &callback,
+            &agent,
+        )
+        .await
+        .expect("first composite must commit");
+    let child_pid = format!("default:Child:{child_id}");
+    let first_journal_len = store.dump_journal(&child_pid).len();
+
+    state.cache_entity_status(child_pid.clone(), "StaleProjection".to_string());
+    state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            "parent-content-bound-retry",
+            "CreateChild",
+            &callback,
+            &agent,
+        )
+        .await
+        .expect("exact retry must finish post-commit convergence");
+    assert_eq!(store.dump_journal(&child_pid).len(), first_journal_len);
+    assert_eq!(
+        state
+            .entity_state_cache
+            .lock()
+            .expect("state cache lock")
+            .get(&child_pid)
+            .map(|(status, _)| status.as_str()),
+        Some("Active"),
+        "an exact durable retry must refresh derived runtime state"
+    );
+
+    let error = state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            "parent-content-bound-retry",
+            "CreateChild",
+            &json!({
+                "sub_writes": [{
+                    "entity_type": "Child",
+                    "entity_id": child_id,
+                    "action": "Create",
+                    "params": { "Name": "different value" }
+                }]
+            }),
+            &agent,
+        )
+        .await
+        .expect_err("one parent idempotency key cannot authorize different sub-write values");
+    assert!(error.to_string().contains("different intent"));
+    assert_eq!(store.dump_journal(&child_pid).len(), first_journal_len);
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn composite_exact_retry_uses_durable_claim_after_actor_history_ages_out() {
+    let store = SimEventStore::no_faults(402);
+    let state = composite_test_state_with_store(store.clone());
+    let tenant = TenantId::default();
+    let mut agent = AgentContext::for_service("composite-aged-retry-test");
+    agent.idempotency_key = Some("aged-parent-operation".to_string());
+    let child_id = "child-aged-content-bound-retry";
+    let callback = json!({
+        "sub_writes": [{
+            "entity_type": "Child",
+            "entity_id": child_id,
+            "action": "Create",
+            "params": { "Name": "durable value" }
+        }]
+    });
+
+    state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            "parent-aged-content-bound-retry",
+            "CreateChild",
+            &callback,
+            &agent,
+        )
+        .await
+        .expect("first composite must commit");
+    let child_pid = format!("default:Child:{child_id}");
+    let expected_sequence = store.dump_journal(&child_pid).len() as u64;
+    let aged_events = (0..=crate::entity_actor::types::MAX_DURABLE_IDEMPOTENCY_KEYS_PER_ENTITY)
+        .map(|index| {
+            composite_envelope(
+                &child_pid,
+                &crate::entity_actor::EntityEvent {
+                    action: "AgedHistory".to_string(),
+                    from_status: "Active".to_string(),
+                    to_status: "Active".to_string(),
+                    timestamp: temper_runtime::scheduler::sim_now(),
+                    params: json!({"index": index}),
+                    idempotency_key: Some(format!("aged-history-{index}")),
+                },
+            )
+            .expect("encode aged event")
+        })
+        .collect::<Vec<_>>();
+    store
+        .append(&child_pid, expected_sequence, &aged_events)
+        .await
+        .expect("advance child beyond bounded actor idempotency history");
+    state.stop_and_remove_entity(&tenant, "Child", child_id);
+    state.cache_entity_status(child_pid.clone(), "StaleProjection".to_string());
+    let journal_len = store.dump_journal(&child_pid).len();
+
+    state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            "parent-aged-content-bound-retry",
+            "CreateChild",
+            &callback,
+            &agent,
+        )
+        .await
+        .expect("durable claim must bypass current-state guards after actor history eviction");
+
+    assert_eq!(store.dump_journal(&child_pid).len(), journal_len);
+    assert_eq!(
+        state
+            .entity_state_cache
+            .lock()
+            .expect("state cache lock")
+            .get(&child_pid)
+            .map(|(status, _)| status.as_str()),
+        Some("Active"),
+        "exact replay must still repair derived runtime convergence"
+    );
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn malformed_effectful_composite_reservation_fails_closed() {
+    let store = SimEventStore::no_faults(4_012);
+    let state = composite_test_state_with_store(store.clone());
+    let tenant = TenantId::default();
+    let agent = AgentContext::for_service("malformed-composite-reservation-test");
+    let parent_idempotency = "malformed-effectful-reservation";
+    let parent = AtomicCompositeParent {
+        tenant: &tenant,
+        entity_type: "Parent",
+        entity_id: "parent-malformed-reservation",
+        action: "CreateChildWithEffect",
+        idempotency: parent_idempotency,
+        record_event: true,
+        agent_ctx: &agent,
+    };
+    let mut intended = build_composite_event(
+        &tenant,
+        parent.entity_type,
+        parent.entity_id,
+        parent.action,
+        parent.idempotency,
+        &[],
+    );
+    intended.intent_hash = "exact-intent".to_string();
+    let persistence_id =
+        ServerState::effectful_composite_reservation_persistence_id(parent, &intended);
+    store
+        .append(
+            &persistence_id,
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: COMPOSITE_EVENT_TYPE.to_string(),
+                payload: json!({"schema": "malformed-composite-reservation"}),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: persistence_id.clone(),
+                },
+            }],
+        )
+        .await
+        .expect("seed malformed reserved composite intent");
+    let (event_store, _) = state.event_journal().expect("sim event journal");
+
+    let error = state
+        .effectful_composite_reservation_exists(&event_store, parent, &intended)
+        .await
+        .expect_err("reserved composite corruption must block effect replay");
+    assert!(
+        error
+            .to_string()
+            .contains("malformed composite reservation")
+    );
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn composite_effectful_subwrite_is_durably_content_bound() {
+    let store = SimEventStore::no_faults(403);
+    let state = composite_test_state_with_store(store.clone());
+    let tenant = TenantId::default();
+    let mut agent = AgentContext::for_service("composite-effect-retry-test");
+    agent.idempotency_key = Some("effectful-parent-operation".to_string());
+    let child_id = "child-effect-content-bound";
+    let child_pid = format!("default:Child:{child_id}");
+    let bootstrap = crate::entity_actor::EntityEvent {
+        action: "Created".to_string(),
+        from_status: String::new(),
+        to_status: "Draft".to_string(),
+        timestamp: sim_now(),
+        params: json!({}),
+        idempotency_key: None,
+    };
+    store
+        .append(
+            &child_pid,
+            0,
+            &[composite_envelope(&child_pid, &bootstrap)
+                .expect("encode effectful child bootstrap")],
+        )
+        .await
+        .expect("seed an existing Draft child for the non-Create action");
+    let callback = json!({
+        "sub_writes": [{
+            "entity_type": "Child",
+            "entity_id": child_id,
+            "action": "CreateWithEffect",
+            "params": { "Name": "original effect value" }
+        }]
+    });
+    let metadata = state
+        .composite_metadata_for(&tenant, "Parent", "CreateChildWithEffect")
+        .expect("load composite metadata")
+        .expect("effectful composite metadata");
+    let parent_idempotency = composite_parent_idempotency(&agent, &callback);
+    let parent = AtomicCompositeParent {
+        tenant: &tenant,
+        entity_type: "Parent",
+        entity_id: "parent-effect-content-bound",
+        action: "CreateChildWithEffect",
+        idempotency: &parent_idempotency,
+        record_event: metadata.record_parent_event,
+        agent_ctx: &agent,
+    };
+    let sub_writes = parse_sub_writes(&callback).expect("parse effectful sub-write");
+    let batch_claim = composite_batch_claim(
+        parent,
+        &prepare_composite_intent_sub_writes(parent, &sub_writes, &metadata),
+    )
+    .expect("build effectful batch claim");
+
+    state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            "parent-effect-content-bound",
+            "CreateChildWithEffect",
+            &callback,
+            &agent,
+        )
+        .await
+        .expect("effectful composite must commit atomically");
+    assert!(
+        !store
+            .batch_idempotency_committed(&batch_claim)
+            .await
+            .expect("read effectful batch claim"),
+        "non-durable post-commit effects must use actor idempotency instead of an atomic batch claim"
+    );
+    let journal_len = store.dump_journal(&child_pid).len();
+
+    let error = state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            "parent-effect-content-bound",
+            "CreateChildWithEffect",
+            &json!({
+                "sub_writes": [{
+                    "entity_type": "Child",
+                    "entity_id": child_id,
+                    "action": "CreateWithEffect",
+                    "params": { "Name": "different effect value" }
+                }]
+            }),
+            &agent,
+        )
+        .await
+        .expect_err("effectful retry with different content must conflict");
+    assert!(error.to_string().contains("different intent"));
+    assert_eq!(store.dump_journal(&child_pid).len(), journal_len);
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn delayed_composite_batch_cannot_borrow_reactivated_key_epoch() {
+    let store = SimEventStore::no_faults(299);
+    let state = composite_registry_test_state_with_store(store.clone());
+    let tenant = TenantId::default();
+    let child_live_table = state
+        .registry
+        .read()
+        .expect("registry lock")
+        .get_table_live(&tenant, "Child")
+        .expect("Child table");
+    let original_table = child_live_table.read().expect("table lock").clone();
+    let signature_a = crate::key_index::declared_key_set_signature(&original_table.keys);
+    let old_epoch = store
+        .activate_key_index_contract(tenant.as_str(), "Child", &signature_a, false)
+        .await
+        .expect("activate original Child contract");
+    store
+        .mark_key_index_backfilled(tenant.as_str(), "Child", &signature_a)
+        .await
+        .expect("publish original Child readiness");
+    child_live_table
+        .write()
+        .expect("table lock")
+        .key_contract_activation_epoch = old_epoch;
+
+    let callback_params = json!({
+        "sub_writes": [{
+            "entity_type": "Child",
+            "entity_id": "child-stale-composite",
+            "action": "Create",
+            "params": { "Name": "must-not-resurrect" }
+        }]
+    });
+    let agent = AgentContext::for_service("composite-epoch-test");
+    let pause = store.inject_precommit_batch_pause();
+    let composite_future = state.apply_composite_integration_result(
+        &tenant,
+        "Parent",
+        "parent-stale-composite",
+        "CreateChild",
+        &callback_params,
+        &agent,
+    );
+    tokio::pin!(composite_future);
+    tokio::select! {
+        result = &mut composite_future => panic!("composite crossed pre-commit barrier: {result:?}"),
+        () = pause.wait_until_reached() => {}
+    }
+
+    let signature_none = crate::key_index::declared_key_set_signature(&[]);
+    let empty_epoch = store
+        .activate_key_index_contract(tenant.as_str(), "Child", &signature_none, true)
+        .await
+        .expect("activate empty Child contract");
+    let mut empty_table = original_table.clone();
+    empty_table.keys.clear();
+    empty_table.key_contract_activation_epoch = empty_epoch;
+    *child_live_table.write().expect("table lock") = empty_table;
+
+    let current_epoch = store
+        .activate_key_index_contract(tenant.as_str(), "Child", &signature_a, false)
+        .await
+        .expect("reactivate Child contract");
+    let mut current_table = original_table;
+    current_table.key_contract_activation_epoch = current_epoch;
+    *child_live_table.write().expect("table lock") = current_table;
+
+    pause.resume();
+    let error = composite_future
+        .await
+        .expect_err("staged old-epoch composite must reject atomically");
+    assert!(error.to_string().contains("activation is stale"));
+    assert!(
+        store
+            .dump_journal("default:Parent:parent-stale-composite")
+            .is_empty()
+    );
+    assert!(
+        store
+            .dump_journal("default:Child:child-stale-composite")
+            .is_empty()
+    );
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn composite_parent_audit_respects_the_raw_replay_tail_budget() {
+    let store = SimEventStore::no_faults(296);
+    let parent_pid = "default:Parent:parent-at-budget";
+    let events = (0..crate::entity_actor::types::MAX_EVENTS_SINCE_SNAPSHOT)
+        .map(|_| {
+            let event = crate::entity_actor::EntityEvent {
+                action: "CreateChild".to_string(),
+                from_status: "Active".to_string(),
+                to_status: "Active".to_string(),
+                timestamp: sim_now(),
+                params: json!({}),
+                idempotency_key: None,
+            };
+            PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: event.action.clone(),
+                payload: serde_json::to_value(event).expect("serialize parent event"),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: parent_pid.to_string(),
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+    store
+        .append(parent_pid, 0, &events)
+        .await
+        .expect("seed parent at raw replay-tail cap");
+
+    let state = composite_test_state_with_store(store.clone());
+    let error = state
+        .apply_composite_integration_result(
+            &TenantId::default(),
+            "Parent",
+            "parent-at-budget",
+            "CreateChild",
+            &json!({
+                "sub_writes": [{
+                    "entity_type": "Child",
+                    "entity_id": "child-must-not-append",
+                    "action": "Create",
+                    "params": {"Name": "blocked by parent budget"}
+                }]
+            }),
+            &AgentContext::for_service("composite-test"),
+        )
+        .await
+        .expect_err("parent audit at the cap must reject the whole composite")
+        .to_string();
+
+    assert!(error.contains("parent audit would exceed the event budget"));
+    assert_eq!(
+        store.dump_journal(parent_pid).len(),
+        crate::entity_actor::types::MAX_EVENTS_SINCE_SNAPSHOT
+    );
+    assert!(
+        store
+            .dump_journal("default:Child:child-must-not-append")
+            .is_empty(),
+        "the atomic child write must not commit after the parent budget rejects"
+    );
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn composite_first_write_materializes_snapshot_only_counter_for_restart() {
+    let store = SimEventStore::no_faults(288);
+    let tenant = TenantId::default();
+    let child_id = "snapshot-only-composite-child";
+    let child_pid = format!("default:Child:{child_id}");
+    let snapshot = serde_json::to_vec(&json!({
+        "entity_type": "Child",
+        "entity_id": child_id,
+        "status": "Draft",
+        "item_count": 0,
+        "counters": {"revision": 10},
+        "booleans": {},
+        "lists": {},
+        "fields": {
+            "Id": "legacy-wrong-child-id",
+            "Name": "snapshot baseline",
+            "Status": "LegacyWrongStatus"
+        },
+        "events": [],
+        "total_event_count": 10,
+        "events_since_snapshot": 0,
+        "last_snapshot_sequence_nr": 5,
+        "sequence_nr": 5,
+        "processed_idempotency_keys": {}
+    }))
+    .expect("serialize snapshot-only composite target");
+    store
+        .save_snapshot(&child_pid, 5, &snapshot)
+        .await
+        .expect("seed snapshot-only composite target");
+
+    let state = composite_test_state_with_store(store.clone());
+    state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            "snapshot-only-composite-parent",
+            "CreateChild",
+            &json!({
+                "sub_writes": [{
+                    "entity_type": "Child",
+                    "entity_id": child_id,
+                    "action": "Create",
+                    "params": {"Name": "after composite"}
+                }]
+            }),
+            &AgentContext::for_service("composite-test"),
+        )
+        .await
+        .expect("apply composite write to snapshot-only target");
+
+    let journal = store.dump_journal(&child_pid);
+    assert_eq!(
+        journal
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Temper.Internal.StateMaterialization.v1", "Create"]
+    );
+    assert_eq!(journal[0].payload["state"]["fields"]["Id"], child_id);
+    assert_eq!(journal[0].payload["state"]["fields"]["Status"], "Draft");
+    let restarted = composite_test_state_with_store(store);
+    let child = restarted
+        .get_tenant_entity_state(&tenant, "Child", child_id)
+        .await
+        .expect("restart snapshot-only composite target");
+    assert_eq!(child.state.counters.get("revision"), Some(&11));
+    assert_eq!(
+        child.state.fields.get("Name"),
+        Some(&json!("after composite"))
+    );
+    assert_eq!(child.state.sequence_nr, 2);
+    assert_eq!(child.state.fields["Id"], child_id);
+    assert_eq!(child.state.fields["Status"], "Active");
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn snapshot_only_parent_composite_restart_does_not_fabricate_created_event() {
+    let store = SimEventStore::no_faults(290);
+    let tenant = TenantId::default();
+    let parent_id = "snapshot-only-composite-parent";
+    let parent_pid = format!("default:Parent:{parent_id}");
+    let snapshot = serde_json::to_vec(&json!({
+        "entity_type": "Parent",
+        "entity_id": parent_id,
+        "status": "Active",
+        "item_count": 0,
+        "counters": {},
+        "booleans": {},
+        "lists": {},
+        "fields": {"Id": parent_id, "Status": "Active"},
+        "events": [],
+        "total_event_count": 0,
+        "events_since_snapshot": 0,
+        "last_snapshot_sequence_nr": 5,
+        "sequence_nr": 5,
+        "processed_idempotency_keys": {}
+    }))
+    .expect("serialize snapshot-only parent");
+    store
+        .save_snapshot(&parent_pid, 5, &snapshot)
+        .await
+        .expect("seed snapshot-only parent");
+
+    let state = composite_test_state_with_store(store.clone());
+    state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            parent_id,
+            "CreateChild",
+            &json!({
+                "sub_writes": [{
+                    "entity_type": "Child",
+                    "entity_id": "snapshot-parent-child",
+                    "action": "Create",
+                    "params": {"Name": "child"}
+                }]
+            }),
+            &AgentContext::for_service("composite-test"),
+        )
+        .await
+        .expect("apply composite against snapshot-only parent");
+
+    assert_eq!(
+        store
+            .dump_journal(&parent_pid)
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "Temper.Internal.StateMaterialization.v1",
+            COMPOSITE_EVENT_TYPE
+        ],
+        "reloading a materialized parent with only composite audit history must not bootstrap Created"
+    );
+    let restarted = composite_test_state_with_store(store.clone());
+    let parent = restarted
+        .get_tenant_entity_state(&tenant, "Parent", parent_id)
+        .await
+        .expect("restart snapshot-only composite parent");
+    assert_eq!(parent.state.sequence_nr, 2);
+    assert_eq!(parent.state.total_event_count, 0);
+    assert_eq!(
+        store.dump_journal(&parent_pid).len(),
+        2,
+        "a second restart must not fabricate a domain Created event"
     );
 }
 
@@ -1621,6 +2463,94 @@ async fn composite_atomic_batch_handles_concurrent_multi_entity_results() {
             Some(&json!(format!("app-{composite_idx}")))
         );
     }
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn concurrent_exact_composite_retries_converge_on_the_durable_claim() {
+    let inner = SimEventStore::no_faults(406);
+    let store = PauseFirstAtomicStableLoadStore::new(inner.clone());
+    let state = composite_test_state_with_paused_atomic_load_store(store.clone());
+    let tenant = TenantId::default();
+    let mut agent = AgentContext::for_service("concurrent-exact-composite-test");
+    agent.idempotency_key = Some("concurrent-exact-parent-key".to_string());
+    let callback = json!({
+        "sub_writes": [{
+            "entity_type": "Child",
+            "entity_id": "concurrent-exact-child",
+            "action": "Create",
+            "params": {"Name": "committed exactly once"}
+        }]
+    });
+
+    let paused_state = state.clone();
+    let paused_tenant = tenant.clone();
+    let paused_agent = agent.clone();
+    let paused_callback = callback.clone();
+    let paused = tokio::spawn(async move {
+        paused_state
+            .apply_composite_integration_result(
+                &paused_tenant,
+                "Parent",
+                "concurrent-exact-parent",
+                "CreateChild",
+                &paused_callback,
+                &paused_agent,
+            )
+            .await
+    });
+    store.wait_until_first_atomic_load_is_paused().await;
+
+    let winner_state = state.clone();
+    let winner_tenant = tenant.clone();
+    let winner_agent = agent.clone();
+    let winner_callback = callback.clone();
+    let winner = tokio::spawn(async move {
+        winner_state
+            .apply_composite_integration_result(
+                &winner_tenant,
+                "Parent",
+                "concurrent-exact-parent",
+                "CreateChild",
+                &winner_callback,
+                &winner_agent,
+            )
+            .await
+    });
+    // Without per-claim serialization the peer reaches durable commit while
+    // this callback is paused after preflight. With serialization it remains
+    // queued; the bounded yields merely let either deterministic schedule make
+    // progress before the captured source resumes.
+    for _ in 0..256 {
+        if !inner
+            .dump_journal("default:Child:concurrent-exact-child")
+            .is_empty()
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    store.resume_first_atomic_load();
+    let winner = winner
+        .await
+        .expect("concurrent exact callback should join")
+        .expect("concurrent exact callback should commit or replay");
+    assert!(winner);
+    let replay = paused
+        .await
+        .expect("paused exact callback should join")
+        .expect("paused exact callback must replay the committed durable claim");
+    assert!(replay);
+
+    assert_eq!(
+        inner
+            .dump_journal("default:Child:concurrent-exact-child")
+            .iter()
+            .filter(|event| event.event_type == "Create")
+            .count(),
+        1,
+        "both successful callbacks must converge on one durable child transition"
+    );
 }
 
 #[tokio::test]

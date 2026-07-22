@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use sqlx::{Acquire, Postgres, Row, Transaction};
-use temper_runtime::persistence::PersistenceError;
+use temper_runtime::persistence::{PersistenceError, ProjectionSourceFence};
 
 use crate::PostgresEventStore;
 use crate::metrics::{
@@ -14,11 +14,16 @@ use crate::metrics::{
     record_postgres_transaction_begin_duration, record_postgres_transaction_commit_duration,
 };
 use crate::store::{
-    DerivedWriteSource, event_stream_lock_key, invalidate_key_coverage_for_derived_write,
-    lock_event_stream, lock_key_contract,
+    DerivedWriteSource, clear_query_projection_dirty, event_stream_lock_key,
+    invalidate_key_coverage_for_derived_write, lock_event_stream, lock_key_contract,
+    mark_query_projection_dirty,
 };
 
+mod query_projection_read;
+mod query_projection_repair;
+mod query_projection_write;
 mod rows;
+mod spec_publication;
 use rows::*;
 
 const DISTINCT_RESOURCE_IDS_BUDGET: usize = 100;
@@ -35,6 +40,36 @@ const QUERY_PROJECTION_REMOVE_OPERATION: &str = "query_projection_remove";
 
 pub(crate) type ScalarFieldIndex = BTreeMap<String, String>;
 type CatalogProjectionFingerprint = (String, String, i64);
+
+async fn projection_snapshot_source_matches(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+    source: ProjectionSourceFence<'_>,
+) -> Result<bool, PersistenceError> {
+    let current_snapshot: Option<(i64, Vec<u8>)> = crate::dbm::postgres_query_as!(
+        "SELECT sequence_nr, state FROM snapshots \
+         WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+         FOR UPDATE",
+    )
+    .bind(tenant)
+    .bind(entity_type)
+    .bind(entity_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(storage_error)?;
+    Ok(
+        match (source.expected_snapshot, current_snapshot.as_ref()) {
+            (None, None) => true,
+            (Some(expected), Some((sequence_nr, state))) => {
+                u64::try_from(*sequence_nr).ok() == Some(expected.sequence_nr)
+                    && state.as_slice() == expected.state
+            }
+            _ => false,
+        },
+    )
+}
 
 pub(crate) fn canonical_projection_status<'a>(
     fallback: &'a str,
@@ -257,6 +292,19 @@ pub struct PostgresPolicyRow {
     pub created_at: String,
     pub created_by: String,
     pub enabled: bool,
+}
+
+/// One entry in an atomically published tenant policy generation.
+#[derive(Debug, Clone)]
+pub struct PostgresPolicyGenerationWrite<'a> {
+    /// Stable row identifier within the tenant.
+    pub policy_id: &'a str,
+    /// Raw Cedar source for the row.
+    pub cedar_text: &'a str,
+    /// Whether the row participates in the live generation.
+    pub enabled: bool,
+    /// Identity responsible for the row mutation.
+    pub created_by: &'a str,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -524,569 +572,6 @@ impl PostgresEventStore {
         Ok(())
     }
 
-    pub async fn upsert_query_projection(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        entity_id: &str,
-        status: &str,
-        fields: &serde_json::Value,
-        sequence_nr: u64,
-    ) -> Result<(), PersistenceError> {
-        let state = serde_json::json!({
-            "entity_type": entity_type,
-            "entity_id": entity_id,
-            "status": status,
-            "item_count": 0,
-            "counters": {},
-            "booleans": {},
-            "lists": {},
-            "fields": fields,
-            "events": [],
-            "total_event_count": sequence_nr,
-            "sequence_nr": sequence_nr
-        });
-        self.upsert_query_projection_with_state(
-            tenant,
-            entity_type,
-            entity_id,
-            status,
-            fields,
-            &state,
-            sequence_nr,
-        )
-        .await
-    }
-
-    #[expect(clippy::too_many_arguments, reason = "projection upsert boundary")]
-    pub async fn upsert_query_projection_with_state(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        entity_id: &str,
-        status: &str,
-        fields: &serde_json::Value,
-        state: &serde_json::Value,
-        sequence_nr: u64,
-    ) -> Result<(), PersistenceError> {
-        let status = canonical_projection_status(status, state);
-        let projection_hash = json_hash(fields);
-        let (new_index, indexed_fields, skipped_fields) = scalar_index_fields(fields);
-        let mut transaction_timer =
-            PostgresTransactionTimer::start(QUERY_PROJECTION_UPSERT_OPERATION);
-        let acquire_started = Instant::now();
-        let mut conn = match self.pool().acquire().await {
-            Ok(conn) => {
-                record_postgres_pool_acquire_duration(
-                    acquire_started.elapsed(),
-                    QUERY_PROJECTION_UPSERT_OPERATION,
-                    "ok",
-                );
-                conn
-            }
-            Err(e) => {
-                record_postgres_pool_acquire_duration(
-                    acquire_started.elapsed(),
-                    QUERY_PROJECTION_UPSERT_OPERATION,
-                    "error",
-                );
-                return Err(storage_error(e));
-            }
-        };
-        let begin_started = Instant::now();
-        let mut tx = match conn.begin().await {
-            Ok(tx) => {
-                record_postgres_transaction_begin_duration(
-                    begin_started.elapsed(),
-                    QUERY_PROJECTION_UPSERT_OPERATION,
-                    "ok",
-                );
-                tx
-            }
-            Err(e) => {
-                record_postgres_transaction_begin_duration(
-                    begin_started.elapsed(),
-                    QUERY_PROJECTION_UPSERT_OPERATION,
-                    "error",
-                );
-                return Err(storage_error(e));
-            }
-        };
-
-        lock_key_contract(&mut tx, tenant, entity_type).await?;
-        let stream_lock_key = event_stream_lock_key(tenant, entity_type, entity_id);
-        lock_event_stream(&mut tx, &stream_lock_key).await?;
-
-        let previous_catalog: Option<CatalogProjectionFingerprint> =
-            crate::dbm::postgres_query_as!(
-                "SELECT status, projection_hash, sequence_nr \
-                 FROM entity_catalog \
-                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
-                 FOR UPDATE",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(entity_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(storage_error)?;
-
-        let new_sequence_nr = sequence_nr as i64;
-        let previous_catalog = if previous_catalog
-            .as_ref()
-            .is_some_and(|(_, _, existing_sequence)| *existing_sequence > new_sequence_nr)
-        {
-            let commit_started = Instant::now();
-            tx.commit().await.map_err(|e| {
-                record_postgres_transaction_commit_duration(
-                    commit_started.elapsed(),
-                    QUERY_PROJECTION_UPSERT_OPERATION,
-                    "error",
-                );
-                storage_error(e)
-            })?;
-            record_postgres_transaction_commit_duration(
-                commit_started.elapsed(),
-                QUERY_PROJECTION_UPSERT_OPERATION,
-                "ok",
-            );
-            record_postgres_projection_index_fields(
-                QUERY_PROJECTION_UPSERT_OPERATION,
-                entity_type,
-                indexed_fields,
-                skipped_fields,
-            );
-            record_postgres_projection_index_reconciliation(
-                QUERY_PROJECTION_UPSERT_OPERATION,
-                "stale_skipped",
-            );
-            transaction_timer.set_outcome("stale_skipped");
-            return Ok(());
-        } else if previous_catalog.is_some() {
-            update_query_projection_catalog_row(
-                &mut tx,
-                QueryProjectionCatalogUpdate {
-                    tenant,
-                    entity_type,
-                    entity_id,
-                    status,
-                    fields,
-                    state,
-                    sequence_nr,
-                    projection_hash: projection_hash.as_str(),
-                },
-            )
-            .await?;
-            previous_catalog
-        } else {
-            let inserted: Option<i32> = crate::dbm::postgres_query_scalar!(
-                "INSERT INTO entity_catalog \
-                 (tenant, entity_type, entity_id, status, fields, state, sequence_nr, projection_version, projection_hash, updated_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, 2, $8, now()) \
-                 ON CONFLICT (tenant, entity_type, entity_id) DO NOTHING \
-                 RETURNING 1",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(entity_id)
-            .bind(status)
-            .bind(fields)
-            .bind(state)
-            .bind(sequence_nr as i64)
-            .bind(projection_hash.as_str())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(storage_error)?;
-
-            if inserted.is_some() {
-                None
-            } else {
-                let raced_catalog: Option<CatalogProjectionFingerprint> =
-                    crate::dbm::postgres_query_as!(
-                        "SELECT status, projection_hash, sequence_nr \
-                         FROM entity_catalog \
-                         WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
-                         FOR UPDATE",
-                    )
-                    .bind(tenant)
-                    .bind(entity_type)
-                    .bind(entity_id)
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(storage_error)?;
-                if raced_catalog
-                    .as_ref()
-                    .is_some_and(|(_, _, existing_sequence)| *existing_sequence > new_sequence_nr)
-                {
-                    let commit_started = Instant::now();
-                    tx.commit().await.map_err(|e| {
-                        record_postgres_transaction_commit_duration(
-                            commit_started.elapsed(),
-                            QUERY_PROJECTION_UPSERT_OPERATION,
-                            "error",
-                        );
-                        storage_error(e)
-                    })?;
-                    record_postgres_transaction_commit_duration(
-                        commit_started.elapsed(),
-                        QUERY_PROJECTION_UPSERT_OPERATION,
-                        "ok",
-                    );
-                    record_postgres_projection_index_fields(
-                        QUERY_PROJECTION_UPSERT_OPERATION,
-                        entity_type,
-                        indexed_fields,
-                        skipped_fields,
-                    );
-                    record_postgres_projection_index_reconciliation(
-                        QUERY_PROJECTION_UPSERT_OPERATION,
-                        "stale_skipped",
-                    );
-                    transaction_timer.set_outcome("stale_skipped");
-                    return Ok(());
-                }
-                update_query_projection_catalog_row(
-                    &mut tx,
-                    QueryProjectionCatalogUpdate {
-                        tenant,
-                        entity_type,
-                        entity_id,
-                        status,
-                        fields,
-                        state,
-                        sequence_nr,
-                        projection_hash: projection_hash.as_str(),
-                    },
-                )
-                .await?;
-                raced_catalog
-            }
-        };
-
-        let catalog_changed =
-            previous_catalog
-                .as_ref()
-                .is_none_or(|(old_status, old_hash, old_sequence)| {
-                    old_status.as_str() != status
-                        || old_hash.as_str() != projection_hash.as_str()
-                        || *old_sequence != new_sequence_nr
-                });
-        if catalog_changed {
-            invalidate_key_coverage_for_derived_write(
-                &mut tx,
-                tenant,
-                entity_type,
-                entity_id,
-                DerivedWriteSource::Catalog {
-                    durable_sequence: Some(sequence_nr),
-                },
-            )
-            .await?;
-        }
-
-        let should_reconcile_index =
-            previous_catalog
-                .as_ref()
-                .is_none_or(|(old_status, old_hash, _)| {
-                    old_status.as_str() != status || old_hash.as_str() != projection_hash.as_str()
-                });
-        let reconciliation_path = if should_reconcile_index {
-            if previous_catalog.is_some() {
-                "diff"
-            } else {
-                "insert"
-            }
-        } else {
-            "skipped_unchanged"
-        };
-
-        if should_reconcile_index {
-            reconcile_query_projection_field_index(
-                &mut tx,
-                tenant,
-                entity_type,
-                entity_id,
-                status,
-                &new_index,
-            )
-            .await?;
-        }
-
-        let commit_started = Instant::now();
-        tx.commit().await.map_err(|e| {
-            record_postgres_transaction_commit_duration(
-                commit_started.elapsed(),
-                QUERY_PROJECTION_UPSERT_OPERATION,
-                "error",
-            );
-            storage_error(e)
-        })?;
-        record_postgres_transaction_commit_duration(
-            commit_started.elapsed(),
-            QUERY_PROJECTION_UPSERT_OPERATION,
-            "ok",
-        );
-        record_postgres_projection_index_fields(
-            QUERY_PROJECTION_UPSERT_OPERATION,
-            entity_type,
-            indexed_fields,
-            skipped_fields,
-        );
-        record_postgres_projection_index_reconciliation(
-            QUERY_PROJECTION_UPSERT_OPERATION,
-            reconciliation_path,
-        );
-        transaction_timer.set_outcome("ok");
-        Ok(())
-    }
-
-    pub async fn remove_query_projection(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        entity_id: &str,
-    ) -> Result<(), PersistenceError> {
-        let mut transaction_timer =
-            PostgresTransactionTimer::start(QUERY_PROJECTION_REMOVE_OPERATION);
-        let acquire_started = Instant::now();
-        let mut conn = match self.pool().acquire().await {
-            Ok(conn) => {
-                record_postgres_pool_acquire_duration(
-                    acquire_started.elapsed(),
-                    QUERY_PROJECTION_REMOVE_OPERATION,
-                    "ok",
-                );
-                conn
-            }
-            Err(e) => {
-                record_postgres_pool_acquire_duration(
-                    acquire_started.elapsed(),
-                    QUERY_PROJECTION_REMOVE_OPERATION,
-                    "error",
-                );
-                return Err(storage_error(e));
-            }
-        };
-        let begin_started = Instant::now();
-        let mut tx = match conn.begin().await {
-            Ok(tx) => {
-                record_postgres_transaction_begin_duration(
-                    begin_started.elapsed(),
-                    QUERY_PROJECTION_REMOVE_OPERATION,
-                    "ok",
-                );
-                tx
-            }
-            Err(e) => {
-                record_postgres_transaction_begin_duration(
-                    begin_started.elapsed(),
-                    QUERY_PROJECTION_REMOVE_OPERATION,
-                    "error",
-                );
-                return Err(storage_error(e));
-            }
-        };
-        lock_key_contract(&mut tx, tenant, entity_type).await?;
-        let stream_lock_key = event_stream_lock_key(tenant, entity_type, entity_id);
-        lock_event_stream(&mut tx, &stream_lock_key).await?;
-        let removed_catalog_sequence: Option<i64> = crate::dbm::postgres_query_scalar!(
-            "DELETE FROM entity_catalog \
-             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
-             RETURNING sequence_nr",
-        )
-        .bind(tenant)
-        .bind(entity_type)
-        .bind(entity_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(storage_error)?;
-        let removed_fields = crate::dbm::postgres_query!("DELETE FROM entity_field_index WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3")
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(entity_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(storage_error)?;
-        if removed_catalog_sequence.is_some() || removed_fields.rows_affected() > 0 {
-            invalidate_key_coverage_for_derived_write(
-                &mut tx,
-                tenant,
-                entity_type,
-                entity_id,
-                DerivedWriteSource::Catalog {
-                    durable_sequence: removed_catalog_sequence.map(|sequence| sequence as u64),
-                },
-            )
-            .await?;
-        }
-        let commit_started = Instant::now();
-        tx.commit().await.map_err(|e| {
-            record_postgres_transaction_commit_duration(
-                commit_started.elapsed(),
-                QUERY_PROJECTION_REMOVE_OPERATION,
-                "error",
-            );
-            storage_error(e)
-        })?;
-        record_postgres_transaction_commit_duration(
-            commit_started.elapsed(),
-            QUERY_PROJECTION_REMOVE_OPERATION,
-            "ok",
-        );
-        transaction_timer.set_outcome("ok");
-        Ok(())
-    }
-
-    pub async fn query_field_index(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        where_clause: &str,
-        params: Vec<String>,
-    ) -> Result<Vec<String>, PersistenceError> {
-        let clause = postgres_placeholders(where_clause, params.len() + 2);
-        let sql = format!(
-            "SELECT entity_id FROM entity_catalog \
-             WHERE tenant = $1 AND entity_type = $2 AND ({clause}) \
-             ORDER BY entity_id"
-        );
-        let tagged_sql = crate::dbm::tag_sql(&sql);
-        let mut query = sqlx::query_scalar::<_, String>(tagged_sql.as_ref())
-            .bind(tenant)
-            .bind(entity_type);
-        for param in params {
-            query = query.bind(param);
-        }
-        query.fetch_all(self.pool()).await.map_err(storage_error)
-    }
-
-    pub async fn load_query_projection_fields_many(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        entity_ids: &[String],
-        field_names: &[&str],
-    ) -> Result<Vec<PostgresProjectedEntityFieldsRow>, PersistenceError> {
-        if entity_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let requested_fields: BTreeSet<String> = field_names
-            .iter()
-            .map(|field| (*field).to_string())
-            .collect();
-        let field_names = requested_fields.iter().cloned().collect::<Vec<_>>();
-        let rows = crate::dbm::postgres_query!(
-            "SELECT c.entity_id, c.status, f.field_name, f.field_value \
-             FROM entity_catalog c \
-             LEFT JOIN entity_field_index f \
-               ON c.tenant = f.tenant \
-              AND c.entity_type = f.entity_type \
-              AND c.entity_id = f.entity_id \
-              AND f.field_name = ANY($4) \
-             WHERE c.tenant = $1 \
-               AND c.entity_type = $2 \
-               AND c.entity_id = ANY($3) \
-             ORDER BY c.entity_id, f.field_name",
-        )
-        .bind(tenant)
-        .bind(entity_type)
-        .bind(entity_ids)
-        .bind(&field_names)
-        .fetch_all(self.pool())
-        .await
-        .map_err(storage_error)?;
-
-        let mut by_entity = BTreeMap::<String, PostgresProjectedEntityFieldsRow>::new();
-        for row in rows {
-            let entity_id: String = row.get("entity_id");
-            let status: String = row.get("status");
-            let field_name: Option<String> = row.get("field_name");
-            let field_value: Option<String> = row.get("field_value");
-            let entry = by_entity.entry(entity_id.clone()).or_insert_with(|| {
-                PostgresProjectedEntityFieldsRow {
-                    entity_id: entity_id.clone(),
-                    status,
-                    fields: requested_fields
-                        .iter()
-                        .map(|field| (field.clone(), None))
-                        .collect(),
-                }
-            });
-            if let Some(field_name) = field_name
-                && requested_fields.contains(&field_name)
-            {
-                entry.fields.insert(field_name, field_value);
-            }
-        }
-
-        Ok(entity_ids
-            .iter()
-            .filter_map(|entity_id| by_entity.remove(entity_id))
-            .collect())
-    }
-
-    pub async fn projected_entity_counts_by_tenant(
-        &self,
-    ) -> Result<Vec<(String, u64)>, PersistenceError> {
-        let rows: Vec<(String, i64)> = crate::dbm::postgres_query_as!(
-            "SELECT tenant, COUNT(*)::bigint FROM entity_catalog GROUP BY tenant ORDER BY tenant",
-        )
-        .fetch_all(self.pool())
-        .await
-        .map_err(storage_error)?;
-        Ok(rows
-            .into_iter()
-            .map(|(tenant, count)| (tenant, count as u64))
-            .collect())
-    }
-
-    /// Batch-load full entity catalog rows for a list of entity IDs.
-    ///
-    /// Returns only rows that exist in the catalog. IDs without a row in the
-    /// projection are silently omitted from the result, leaving the caller
-    /// free to fall back to the actor path on a per-id basis.
-    pub async fn load_entity_catalog_rows_pg(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        entity_ids: &[String],
-    ) -> Result<Vec<crate::platform::PostgresEntityCatalogRow>, PersistenceError> {
-        if entity_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let rows: Vec<(
-            String,
-            String,
-            serde_json::Value,
-            Option<serde_json::Value>,
-            i64,
-        )> = crate::dbm::postgres_query_as!(
-            "SELECT entity_id, status, fields, state, sequence_nr \
-             FROM entity_catalog \
-             WHERE tenant = $1 AND entity_type = $2 AND entity_id = ANY($3) \
-             ORDER BY entity_id",
-        )
-        .bind(tenant)
-        .bind(entity_type)
-        .bind(entity_ids)
-        .fetch_all(self.pool())
-        .await
-        .map_err(storage_error)?;
-        Ok(rows
-            .into_iter()
-            .map(|(entity_id, status, fields, state, seq)| {
-                crate::platform::PostgresEntityCatalogRow {
-                    entity_id,
-                    status,
-                    fields,
-                    state,
-                    sequence_nr: seq.max(0) as u64,
-                }
-            })
-            .collect())
-    }
-
     pub async fn upsert_spec(
         &self,
         tenant: &str,
@@ -1236,6 +721,73 @@ impl PostgresEventStore {
         .map_err(storage_error)
     }
 
+    /// Load one tenant's compatibility policy projection.
+    pub async fn load_tenant_policy(
+        &self,
+        tenant: &str,
+    ) -> Result<Option<String>, PersistenceError> {
+        crate::dbm::postgres_query_scalar!(
+            "SELECT policy_text FROM tenant_policies WHERE tenant = $1"
+        )
+        .bind(tenant)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(storage_error)
+    }
+
+    /// Atomically replace both representations of one tenant policy generation.
+    pub async fn replace_policy_generation(
+        &self,
+        tenant: &str,
+        entries: &[PostgresPolicyGenerationWrite<'_>],
+        compatibility_text: &str,
+    ) -> Result<(), PersistenceError> {
+        let mut policy_ids = BTreeSet::new();
+        for entry in entries {
+            if entry.policy_id.is_empty() || !policy_ids.insert(entry.policy_id) {
+                return Err(PersistenceError::Storage(format!(
+                    "policy generation for tenant '{tenant}' contains an empty or duplicate policy id"
+                )));
+            }
+        }
+
+        let mut tx = self.pool().begin().await.map_err(storage_error)?;
+        crate::dbm::postgres_query!("DELETE FROM policies WHERE tenant = $1")
+            .bind(tenant)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        for entry in entries {
+            let policy_hash = compute_policy_hash(entry.cedar_text);
+            crate::dbm::postgres_query!(
+                "INSERT INTO policies \
+                 (tenant, policy_id, cedar_text, policy_hash, created_at, created_by, enabled) \
+                 VALUES ($1, $2, $3, $4, now(), $5, $6)"
+            )
+            .bind(tenant)
+            .bind(entry.policy_id)
+            .bind(entry.cedar_text)
+            .bind(policy_hash)
+            .bind(entry.created_by)
+            .bind(entry.enabled)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        }
+        crate::dbm::postgres_query!(
+            "INSERT INTO tenant_policies (tenant, policy_text, updated_at) \
+             VALUES ($1, $2, now()) \
+             ON CONFLICT (tenant) DO UPDATE SET \
+                 policy_text = EXCLUDED.policy_text, updated_at = now()"
+        )
+        .bind(tenant)
+        .bind(compatibility_text)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+        tx.commit().await.map_err(storage_error)
+    }
+
     pub async fn save_policy(
         &self,
         tenant: &str,
@@ -1244,8 +796,8 @@ impl PostgresEventStore {
         created_by: &str,
     ) -> Result<bool, PersistenceError> {
         let policy_hash = compute_policy_hash(cedar_text);
-        let existing_hash: Option<String> = crate::dbm::postgres_query_scalar!(
-            "SELECT policy_hash FROM policies WHERE tenant = $1 AND policy_id = $2",
+        let existing: Option<(String, bool)> = crate::dbm::postgres_query_as!(
+            "SELECT policy_hash, enabled FROM policies WHERE tenant = $1 AND policy_id = $2",
         )
         .bind(tenant)
         .bind(policy_id)
@@ -1253,7 +805,10 @@ impl PostgresEventStore {
         .await
         .map_err(storage_error)?;
 
-        if existing_hash.as_deref() == Some(policy_hash.as_str()) {
+        if existing
+            .as_ref()
+            .is_some_and(|(hash, enabled)| hash == &policy_hash && *enabled)
+        {
             return Ok(false);
         }
 
@@ -1265,7 +820,8 @@ impl PostgresEventStore {
                  cedar_text = EXCLUDED.cedar_text, \
                  policy_hash = EXCLUDED.policy_hash, \
                  created_by = EXCLUDED.created_by, \
-                 created_at = now()",
+                 created_at = now(), \
+                 enabled = true",
         )
         .bind(tenant)
         .bind(policy_id)
@@ -1344,6 +900,34 @@ impl PostgresEventStore {
         .bind(policy_id)
         .bind(cedar_text)
         .bind(&policy_hash)
+        .bind(created_by)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Atomically replace the text and enabled state of one Cedar policy.
+    pub async fn replace_policy(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        cedar_text: &str,
+        enabled: bool,
+        created_by: &str,
+    ) -> Result<bool, PersistenceError> {
+        let policy_hash = compute_policy_hash(cedar_text);
+        let result = crate::dbm::postgres_query!(
+            "UPDATE policies \
+             SET cedar_text = $3, policy_hash = $4, enabled = $5, \
+                 created_by = $6, created_at = now() \
+             WHERE tenant = $1 AND policy_id = $2",
+        )
+        .bind(tenant)
+        .bind(policy_id)
+        .bind(cedar_text)
+        .bind(&policy_hash)
+        .bind(enabled)
         .bind(created_by)
         .execute(self.pool())
         .await

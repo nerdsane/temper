@@ -1,11 +1,16 @@
 //! [`EventStore`] trait implementation for Turso/libSQL.
 
+mod append;
+mod append_batch;
+mod source_validation;
+
 use libsql::{TransactionBehavior, Value, params, params_from_iter};
 use std::time::Duration;
 use temper_runtime::persistence::{
     EntityVectorCandidate, EntityVectorRow, EventMetadata, EventStore, IndexReconciliation,
-    JournalBoundary, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
-    PersistenceError, pack_f32_le, storage_error, unpack_f32_le,
+    JournalBoundary, PersistenceAppend, PersistenceAppendResult, PersistenceBatchIdempotency,
+    PersistenceEnvelope, PersistenceError, SnapshotSourceFence, is_state_materialization_event_for,
+    is_state_materialization_payload_for, pack_f32_le, storage_error, unpack_f32_le,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 use tracing::{error, instrument, warn};
@@ -19,18 +24,100 @@ use crate::retry::{is_transient_write_error, retry_delay_ms};
 
 const APPEND_BATCH_INSERT_CHUNK_ROWS: usize = 400;
 
+fn append_retires_snapshot(
+    expected_sequence: u64,
+    events: &[PersistenceEnvelope],
+    snapshot_source: &SnapshotSourceFence,
+    entity_type: &str,
+    entity_id: &str,
+) -> bool {
+    expected_sequence == 0
+        && matches!(snapshot_source, SnapshotSourceFence::Exact { .. })
+        && events
+            .first()
+            .is_some_and(|event| is_state_materialization_event_for(event, entity_type, entity_id))
+}
+
 struct PreparedEventInsert {
     tenant: String,
     entity_type: String,
     entity_id: String,
     sequence_nr: u64,
+    segment_index: i64,
     event_type: String,
     payload_json: String,
     metadata_json: String,
     expected_sequence: u64,
 }
 
+pub(super) async fn mark_query_projection_dirty(
+    tx: &libsql::Transaction,
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<(), PersistenceError> {
+    let updated_at = temper_runtime::scheduler::sim_now().to_rfc3339();
+    tx.execute(
+        "INSERT INTO query_projection_dirty (tenant, entity_type, entity_id, updated_at) \
+         VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(tenant, entity_type, entity_id) \
+         DO UPDATE SET updated_at = excluded.updated_at",
+        params![tenant, entity_type, entity_id, updated_at],
+    )
+    .await
+    .map_err(storage_error)?;
+    Ok(())
+}
+
+pub(super) async fn clear_query_projection_dirty(
+    tx: &libsql::Transaction,
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<(), PersistenceError> {
+    tx.execute(
+        "DELETE FROM query_projection_dirty \
+         WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+        params![tenant, entity_type, entity_id],
+    )
+    .await
+    .map_err(storage_error)?;
+    Ok(())
+}
+
 impl EventStore for TursoEventStore {
+    async fn batch_idempotency_committed(
+        &self,
+        claim: &PersistenceBatchIdempotency,
+    ) -> Result<bool, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT intent_hash FROM persistence_batch_idempotency
+                 WHERE persistence_id = ?1 AND idempotency_key = ?2",
+                params![
+                    claim.persistence_id.as_str(),
+                    claim.idempotency_key.as_str()
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+        let committed_hash = match rows.next().await.map_err(storage_error)? {
+            Some(row) => Some(row.get::<String>(0).map_err(storage_error)?),
+            None => None,
+        };
+        let Some(committed_hash) = committed_hash else {
+            return Ok(false);
+        };
+        if committed_hash != claim.intent_hash {
+            return Err(PersistenceError::Storage(format!(
+                "atomic batch idempotency key '{}' was reused with a different intent",
+                claim.idempotency_key
+            )));
+        }
+        Ok(true)
+    }
+
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.append"))]
     async fn append(
         &self,
@@ -38,77 +125,13 @@ impl EventStore for TursoEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
-        if events.is_empty() {
-            return Ok(expected_sequence);
-        }
-
-        // Retry transient Hrana BLOCKED / stream errors with backoff (ADR-0056).
-        // Each attempt is a complete append unit. Single-event appends use an
-        // atomic conditional insert; multi-event appends open a transaction.
-        // Event-store's UNIQUE (entity_type, entity_id, sequence_nr) makes
-        // retries safe — if a prior attempt partially committed before erroring,
-        // the retry's pre-check detects it as ConcurrencyViolation
-        // (non-transient, propagates to caller via normal event-store contract).
-        let attempt_timeout = append_attempt_timeout();
-        let total_attempts = append_max_attempts();
-        let mut last_err: Option<PersistenceError> = None;
-        let bypass_write_gate = events.len() == 1;
-        for attempt in 0..total_attempts {
-            if attempt > 0 {
-                tokio::time::sleep(Duration::from_millis(retry_delay_ms(attempt - 1))).await;
-            }
-            let _high_priority_marker = if bypass_write_gate {
-                Some(self.mark_high_priority_write("turso.append"))
-            } else {
-                None
-            };
-            let _write_permit = if bypass_write_gate {
-                None
-            } else {
-                Some(
-                    self.acquire_write_permit("turso.append", WritePriority::High)
-                        .await?,
-                )
-            };
-            let attempt_result = tokio::time::timeout(
-                attempt_timeout,
-                self.append_inner(persistence_id, expected_sequence, events),
-            )
-            .await
-            .unwrap_or_else(|_| {
-                warn!(
-                    persistence_id,
-                    attempt,
-                    timeout_ms = attempt_timeout.as_millis() as u64,
-                    "turso.append attempt timed out"
-                );
-                Err(PersistenceError::Storage(format!(
-                    "turso.append timed out after {}ms",
-                    attempt_timeout.as_millis()
-                )))
-            });
-
-            match attempt_result {
-                Ok(seq) => {
-                    if attempt > 0 {
-                        record_turso_write_retry("turso.append", attempt as u64, "succeeded");
-                    }
-                    return Ok(seq);
-                }
-                Err(err) => {
-                    let transient = match &err {
-                        PersistenceError::Storage(msg) => is_transient_write_error(msg),
-                        _ => false,
-                    };
-                    if !transient {
-                        return Err(err);
-                    }
-                    last_err = Some(err);
-                }
-            }
-        }
-        record_turso_write_retry("turso.append", total_attempts as u64, "exhausted");
-        Err(last_err.expect("retry loop captured at least one error"))
+        self.append_with_snapshot_source(
+            persistence_id,
+            expected_sequence,
+            events,
+            &SnapshotSourceFence::Unchecked,
+        )
+        .await
     }
 
     async fn lookup_by_key(
@@ -167,7 +190,12 @@ impl EventStore for TursoEventStore {
         // The journal append is the durable event (keys are not maintained on Turso,
         // per the note above).
         let new_seq = self
-            .append(persistence_id, expected_sequence, events)
+            .append_with_snapshot_source(
+                persistence_id,
+                expected_sequence,
+                events,
+                &reconciliation.snapshot_source,
+            )
             .await?;
         // Write-behind vector maintenance: reconcile the entity's rows (delete stale,
         // insert current — an empty `vector_rows` purges a deleted/cleared entity),
@@ -361,17 +389,21 @@ impl EventStore for TursoEventStore {
         if appends.is_empty() {
             return Ok(Vec::new());
         }
-        if let [append] = appends {
+        if let [append] = appends
+            && append.batch_idempotency.is_none()
+        {
             let sequence_nr = self
-                .append(
+                .append_with_snapshot_source(
                     &append.persistence_id,
                     append.expected_sequence,
                     &append.events,
+                    &append.snapshot_source,
                 )
                 .await?;
             return Ok(vec![PersistenceAppendResult {
                 persistence_id: append.persistence_id.clone(),
                 sequence_nr,
+                batch_already_applied: false,
             }]);
         }
 
@@ -584,8 +616,30 @@ impl EventStore for TursoEventStore {
         sequence_nr: u64,
         snapshot: &[u8],
     ) -> Result<(), PersistenceError> {
+        self.save_snapshot_if_source(
+            persistence_id,
+            sequence_nr,
+            snapshot,
+            &SnapshotSourceFence::Unchecked,
+            None,
+        )
+        .await
+    }
+
+    #[instrument(skip_all, fields(persistence_id, otel.name = "turso.save_snapshot_if_source"))]
+    async fn save_snapshot_if_source(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+        source: &SnapshotSourceFence,
+        _key_contract: Option<&str>,
+    ) -> Result<(), PersistenceError> {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let sequence_nr = i64::try_from(sequence_nr).map_err(|_| {
+            PersistenceError::Storage("snapshot sequence exceeds SQLite integer".to_string())
+        })?;
         let _write_permit = self
             .acquire_write_permit("turso.save_snapshot", WritePriority::Low)
             .await?;
@@ -594,6 +648,88 @@ impl EventStore for TursoEventStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(storage_error)?;
+
+        Self::validate_snapshot_source(&tx, tenant, entity_type, entity_id, source).await?;
+
+        let mut journal_generation_rows = tx
+            .query(
+                "SELECT MAX(sequence_nr),
+                        (SELECT event_type FROM events
+                         WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
+                           AND sequence_nr = 1),
+                        (SELECT payload FROM events
+                         WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
+                           AND sequence_nr = 1)
+                 FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                params![tenant, entity_type, entity_id],
+            )
+            .await
+            .map_err(storage_error)?;
+        let (journal_hwm, first_event_type, first_event_payload) = match journal_generation_rows
+            .next()
+            .await
+            .map_err(storage_error)?
+        {
+            Some(row) => (
+                row.get::<Option<i64>>(0).map_err(storage_error)?,
+                row.get::<Option<String>>(1).map_err(storage_error)?,
+                row.get::<Option<String>>(2).map_err(storage_error)?,
+            ),
+            None => (None, None, None),
+        };
+        drop(journal_generation_rows);
+        let first_is_materialization = first_event_payload
+            .as_deref()
+            .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            .is_some_and(|payload| {
+                is_state_materialization_payload_for(
+                    first_event_type.as_deref().unwrap_or_default(),
+                    &payload,
+                    entity_type,
+                    entity_id,
+                )
+            });
+        if matches!(source, SnapshotSourceFence::Unchecked)
+            && journal_hwm.is_some()
+            && first_is_materialization
+        {
+            tx.commit().await.map_err(storage_error)?;
+            return Ok(());
+        }
+
+        let mut current_rows = tx
+            .query(
+                "SELECT sequence_nr, snapshot
+                 FROM snapshots
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                params![tenant, entity_type, entity_id],
+            )
+            .await
+            .map_err(storage_error)?;
+        let current_snapshot = match current_rows.next().await.map_err(storage_error)? {
+            Some(row) => Some((
+                row.get::<i64>(0).map_err(storage_error)?,
+                row.get::<Vec<u8>>(1).map_err(storage_error)?,
+            )),
+            None => None,
+        };
+        drop(current_rows);
+        let snapshot_is_noop =
+            current_snapshot
+                .as_ref()
+                .is_some_and(|(stored_sequence, stored_snapshot)| {
+                    *stored_sequence > sequence_nr
+                        || (*stored_sequence == sequence_nr
+                            && stored_snapshot.as_slice() == snapshot)
+                });
+        if snapshot_is_noop {
+            tx.commit().await.map_err(storage_error)?;
+            return Ok(());
+        }
+        let same_sequence_replacement = current_snapshot
+            .as_ref()
+            .is_some_and(|(stored_sequence, _)| *stored_sequence == sequence_nr);
 
         tx.execute(
             "INSERT INTO snapshots (tenant, entity_type, entity_id, sequence_nr, snapshot)
@@ -607,7 +743,7 @@ impl EventStore for TursoEventStore {
                 tenant,
                 entity_type,
                 entity_id,
-                sequence_nr as i64,
+                sequence_nr,
                 snapshot.to_vec()
             ],
         )
@@ -623,19 +759,61 @@ impl EventStore for TursoEventStore {
                 tenant,
                 entity_type,
                 entity_id,
-                sequence_nr as i64,
+                sequence_nr,
                 snapshot.to_vec()
             ],
         )
         .await
         .map_err(storage_error)?;
 
+        mark_query_projection_dirty(&tx, tenant, entity_type, entity_id).await?;
+
+        if same_sequence_replacement {
+            tx.commit().await.map_err(storage_error)?;
+            return Ok(());
+        }
+
+        let Some(journal_hwm) = journal_hwm else {
+            // Snapshots may exist before this store has received any journal event.
+            // They do not establish event-history boundaries. Remove any topology
+            // left by the legacy behavior and let the first append create segment 0.
+            tx.execute(
+                "DELETE FROM event_segments
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                params![tenant, entity_type, entity_id],
+            )
+            .await
+            .map_err(storage_error)?;
+            tx.commit().await.map_err(storage_error)?;
+            return Ok(());
+        };
+        if sequence_nr == 0 || sequence_nr > journal_hwm {
+            // A snapshot can describe state ahead of this store's journal (for
+            // example, during migration), or the initial state before sequence 1.
+            // It remains durable snapshot state, but cannot seal a journal range
+            // that has not been written here.
+            tx.commit().await.map_err(storage_error)?;
+            return Ok(());
+        }
+
         let mut segment_rows = tx
             .query(
-                "SELECT COALESCE(MAX(segment_index), 0)
-                 FROM events
-                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND sequence_nr <= ?4",
-                params![tenant, entity_type, entity_id, sequence_nr as i64],
+                "SELECT COALESCE(
+                    (SELECT segment_index
+                     FROM events
+                     WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
+                       AND sequence_nr <= ?4
+                     ORDER BY sequence_nr DESC
+                     LIMIT 1),
+                    (SELECT segment_index
+                     FROM event_segments
+                     WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
+                       AND sealed_at IS NULL
+                     ORDER BY segment_index DESC
+                     LIMIT 1),
+                    0
+                 )",
+                params![tenant, entity_type, entity_id, sequence_nr],
             )
             .await
             .map_err(storage_error)?;
@@ -645,51 +823,119 @@ impl EventStore for TursoEventStore {
         };
         drop(segment_rows);
 
+        let mut start_rows = tx
+            .query(
+                "SELECT start_sequence_nr
+                 FROM event_segments
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
+                   AND segment_index = ?4",
+                params![tenant, entity_type, entity_id, current_segment],
+            )
+            .await
+            .map_err(storage_error)?;
+        let current_start = match start_rows.next().await.map_err(storage_error)? {
+            Some(row) => row.get::<i64>(0).map_err(storage_error)?,
+            None => 1,
+        };
+        drop(start_rows);
+
+        let next_segment = current_segment.checked_add(1).ok_or_else(|| {
+            PersistenceError::Storage("event segment index exceeds SQLite integer".to_string())
+        })?;
+        let next_sequence = sequence_nr.checked_add(1).ok_or_else(|| {
+            PersistenceError::Storage("snapshot sequence exceeds SQLite integer".to_string())
+        })?;
+
+        // A delayed snapshot may bisect an already-durable open segment. Move the
+        // complete tail to its successor before sealing the boundary segment.
+        tx.execute(
+            "UPDATE events
+             SET segment_index = ?5
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
+               AND sequence_nr > ?4",
+            params![tenant, entity_type, entity_id, sequence_nr, next_segment],
+        )
+        .await
+        .map_err(storage_error)?;
+
+        let mut tail_rows = tx
+            .query(
+                "SELECT MAX(sequence_nr)
+                 FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
+                   AND sequence_nr > ?4",
+                params![tenant, entity_type, entity_id, sequence_nr],
+            )
+            .await
+            .map_err(storage_error)?;
+        let tail_end = match tail_rows.next().await.map_err(storage_error)? {
+            Some(row) => row.get::<Option<i64>>(0).map_err(storage_error)?,
+            None => None,
+        };
+        drop(tail_rows);
+
+        // A newer snapshot supersedes every later open-segment shape. Tail events
+        // were coalesced above, so stale successor metadata can be rebuilt exactly.
+        tx.execute(
+            "DELETE FROM event_segments
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
+               AND segment_index > ?4",
+            params![tenant, entity_type, entity_id, current_segment],
+        )
+        .await
+        .map_err(storage_error)?;
+
+        let current_event_count = if sequence_nr >= current_start {
+            sequence_nr - current_start + 1
+        } else {
+            0
+        };
         tx.execute(
             "INSERT INTO event_segments
-             (tenant, entity_type, entity_id, segment_index, start_sequence_nr, end_sequence_nr, snapshot_sequence, event_count, sealed_at)
-             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, ?5, datetime('now'))
-             ON CONFLICT(tenant, entity_type, entity_id, segment_index) DO NOTHING",
+             (tenant, entity_type, entity_id, segment_index, start_sequence_nr,
+              end_sequence_nr, snapshot_sequence, event_count, sealed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, datetime('now'))
+             ON CONFLICT(tenant, entity_type, entity_id, segment_index)
+             DO UPDATE SET
+                start_sequence_nr = excluded.start_sequence_nr,
+                end_sequence_nr = excluded.end_sequence_nr,
+                snapshot_sequence = excluded.snapshot_sequence,
+                event_count = excluded.event_count,
+                sealed_at = excluded.sealed_at",
             params![
                 tenant,
                 entity_type,
                 entity_id,
                 current_segment,
-                sequence_nr as i64
+                current_start,
+                sequence_nr,
+                current_event_count
             ],
         )
         .await
         .map_err(storage_error)?;
 
-        tx.execute(
-            "UPDATE event_segments
-             SET end_sequence_nr = ?5,
-                 snapshot_sequence = ?5,
-                 sealed_at = datetime('now'),
-                 event_count = MAX(?5 - start_sequence_nr + 1, 0)
-             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND segment_index = ?4",
-            params![
-                tenant,
-                entity_type,
-                entity_id,
-                current_segment,
-                sequence_nr as i64
-            ],
-        )
-        .await
-        .map_err(storage_error)?;
-
+        let tail_event_count = tail_end.map_or(0, |end| end - sequence_nr);
         tx.execute(
             "INSERT INTO event_segments
-             (tenant, entity_type, entity_id, segment_index, start_sequence_nr)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(tenant, entity_type, entity_id, segment_index) DO NOTHING",
+             (tenant, entity_type, entity_id, segment_index, start_sequence_nr,
+              end_sequence_nr, snapshot_sequence, event_count, sealed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, NULL)
+             ON CONFLICT(tenant, entity_type, entity_id, segment_index)
+             DO UPDATE SET
+                start_sequence_nr = excluded.start_sequence_nr,
+                end_sequence_nr = excluded.end_sequence_nr,
+                snapshot_sequence = NULL,
+                event_count = excluded.event_count,
+                sealed_at = NULL",
             params![
                 tenant,
                 entity_type,
                 entity_id,
-                current_segment + 1,
-                sequence_nr as i64 + 1
+                next_segment,
+                next_sequence,
+                tail_end,
+                tail_event_count
             ],
         )
         .await
@@ -854,585 +1100,5 @@ impl EventStore for TursoEventStore {
             ));
         }
         Ok(out)
-    }
-}
-
-impl TursoEventStore {
-    /// List tenants with at least one persisted event.
-    #[instrument(skip_all, fields(otel.name = "turso.list_event_tenants"))]
-    pub async fn list_event_tenants(&self) -> Result<Vec<String>, PersistenceError> {
-        let conn = self.configured_connection().await?;
-        let mut rows = conn
-            .query("SELECT DISTINCT tenant FROM events ORDER BY tenant", ())
-            .await
-            .map_err(storage_error)?;
-
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
-            out.push(row.get::<String>(0).map_err(storage_error)?);
-        }
-        Ok(out)
-    }
-
-    /// List tenants appearing in any tenant-scoped storage table.
-    #[instrument(skip_all, fields(otel.name = "turso.list_storage_tenants"))]
-    pub async fn list_storage_tenants(&self) -> Result<Vec<String>, PersistenceError> {
-        let conn = self.configured_connection().await?;
-        let mut rows = conn
-            .query(
-                "SELECT tenant FROM events \
-                 UNION SELECT tenant FROM event_segments \
-                 UNION SELECT tenant FROM snapshot_history \
-                 UNION SELECT tenant FROM specs \
-                 UNION SELECT tenant FROM trajectories \
-                 UNION SELECT tenant FROM tenant_constraints \
-                 UNION SELECT tenant FROM wasm_modules \
-                 UNION SELECT tenant FROM wasm_invocation_logs \
-                 UNION SELECT tenant FROM pending_decisions \
-                 UNION SELECT tenant FROM tenant_policies \
-                 UNION SELECT tenant FROM policies \
-                 UNION SELECT tenant_id AS tenant FROM tenant_installed_apps \
-                 UNION SELECT tenant FROM policy_denial_patterns \
-                 UNION SELECT tenant FROM tenant_secrets \
-                 UNION SELECT tenant FROM design_time_events \
-                 UNION SELECT tenant FROM ots_trajectories \
-                 UNION SELECT tenant FROM entity_catalog \
-                 ORDER BY tenant",
-                (),
-            )
-            .await
-            .map_err(storage_error)?;
-
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
-            let tenant = row.get::<String>(0).map_err(storage_error)?;
-            if !tenant.trim().is_empty() {
-                out.push(tenant);
-            }
-        }
-        Ok(out)
-    }
-
-    /// Single-attempt implementation of [`EventStore::append`]. Callers go
-    /// through the public `append` which wraps this in retry-with-backoff
-    /// (ADR-0056). Kept as an inherent `async fn` on the concrete type so the
-    /// transactional body can borrow `self` cleanly across retries without
-    /// fighting `FnMut` + future-lifetime rules.
-    ///
-    /// Safe to retry after a transient transport failure: the UNIQUE
-    /// constraint on `events.(entity_type, entity_id, sequence_nr)` means a
-    /// prior-attempt partial commit is detected as `ConcurrencyViolation`,
-    /// which the retry layer treats as non-transient and propagates to the
-    /// caller via the normal event-store contract.
-    async fn append_inner(
-        &self,
-        persistence_id: &str,
-        expected_sequence: u64,
-        events: &[PersistenceEnvelope],
-    ) -> Result<u64, PersistenceError> {
-        if events.is_empty() {
-            return Ok(expected_sequence);
-        }
-
-        if let [event] = events {
-            return self
-                .append_single_event_inner(persistence_id, expected_sequence, event)
-                .await;
-        }
-
-        let (tenant, entity_type, entity_id) =
-            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
-        let conn = self.configured_connection().await?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(storage_error)?;
-
-        let select_start = std::time::Instant::now();
-        let rows_result = tx
-            .query(
-                "SELECT COALESCE(MAX(sequence_nr), 0)
-                 FROM events
-                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
-                params![tenant, entity_type, entity_id],
-            )
-            .await;
-        record_turso_query_duration(
-            select_start.elapsed(),
-            "query",
-            "transaction",
-            rows_result.is_ok(),
-        );
-        let mut rows = rows_result.map_err(storage_error)?;
-
-        let current_seq = match rows.next().await.map_err(storage_error)? {
-            Some(row) => row.get::<i64>(0).map_err(storage_error)? as u64,
-            None => 0,
-        };
-        drop(rows);
-
-        if current_seq != expected_sequence {
-            tracing::error!(
-                expected = expected_sequence,
-                actual = current_seq,
-                "concurrency violation on append"
-            );
-            let _ = tx.rollback().await;
-            return Err(PersistenceError::ConcurrencyViolation {
-                expected: expected_sequence,
-                actual: current_seq,
-            });
-        }
-
-        let segment_index = {
-            let mut segment_rows = tx
-                .query(
-                    "SELECT segment_index
-                     FROM event_segments
-                     WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND sealed_at IS NULL
-                     ORDER BY segment_index DESC
-                     LIMIT 1",
-                    params![tenant, entity_type, entity_id],
-                )
-                .await
-                .map_err(storage_error)?;
-            if let Some(row) = segment_rows.next().await.map_err(storage_error)? {
-                row.get::<i64>(0).map_err(storage_error)?
-            } else {
-                drop(segment_rows);
-                let mut max_rows = tx
-                    .query(
-                        "SELECT COALESCE(MAX(segment_index), 0)
-                         FROM events
-                         WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
-                        params![tenant, entity_type, entity_id],
-                    )
-                    .await
-                    .map_err(storage_error)?;
-                let idx = match max_rows.next().await.map_err(storage_error)? {
-                    Some(row) => row.get::<i64>(0).map_err(storage_error)?,
-                    None => 0,
-                };
-                drop(max_rows);
-                tx.execute(
-                    "INSERT INTO event_segments
-                     (tenant, entity_type, entity_id, segment_index, start_sequence_nr)
-                     VALUES (?1, ?2, ?3, ?4, ?5)
-                     ON CONFLICT(tenant, entity_type, entity_id, segment_index) DO NOTHING",
-                    params![
-                        tenant,
-                        entity_type,
-                        entity_id,
-                        idx,
-                        ((current_seq + 1).max(1)) as i64
-                    ],
-                )
-                .await
-                .map_err(storage_error)?;
-                idx
-            }
-        };
-
-        let mut new_seq = expected_sequence;
-        for event in events {
-            new_seq += 1;
-            let payload_json = serde_json::to_string(&event.payload).map_err(|e| {
-                tracing::error!(error = %e, "failed to serialize event payload");
-                PersistenceError::Serialization(e.to_string())
-            })?;
-            let metadata_json = serde_json::to_string(&event.metadata).map_err(|e| {
-                tracing::error!(error = %e, "failed to serialize event metadata");
-                PersistenceError::Serialization(e.to_string())
-            })?;
-
-            let insert_start = std::time::Instant::now();
-            let insert_result = tx
-                .execute(
-                    "INSERT INTO events
-                     (tenant, entity_type, entity_id, sequence_nr, segment_index, event_type, payload, metadata)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
-                        tenant,
-                        entity_type,
-                        entity_id,
-                        new_seq as i64,
-                        segment_index,
-                        event.event_type.as_str(),
-                        payload_json,
-                        metadata_json
-                    ],
-                )
-                .await;
-            record_turso_query_duration(
-                insert_start.elapsed(),
-                "execute",
-                "transaction",
-                insert_result.is_ok(),
-            );
-
-            if let Err(e) = insert_result {
-                let msg = e.to_string();
-                tracing::error!(error = %e, "event insert failed");
-                let _ = tx.rollback().await;
-                if msg.contains("UNIQUE constraint failed") || msg.contains("UNIQUE") {
-                    return Err(PersistenceError::ConcurrencyViolation {
-                        expected: expected_sequence,
-                        actual: new_seq,
-                    });
-                }
-                return Err(PersistenceError::Storage(msg));
-            }
-        }
-
-        if new_seq > expected_sequence {
-            tx.execute(
-                "UPDATE event_segments
-                 SET end_sequence_nr = ?5, event_count = MAX(?5 - start_sequence_nr + 1, 0)
-                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND segment_index = ?4",
-                params![
-                    tenant,
-                    entity_type,
-                    entity_id,
-                    segment_index,
-                    new_seq as i64
-                ],
-            )
-            .await
-            .map_err(storage_error)?;
-        }
-
-        tx.commit().await.map_err(storage_error)?;
-        Ok(new_seq)
-    }
-
-    async fn append_batch_inner(
-        &self,
-        appends: &[PersistenceAppend],
-    ) -> Result<Vec<PersistenceAppendResult>, PersistenceError> {
-        let mut seen = std::collections::BTreeSet::new();
-        for append in appends {
-            if !seen.insert(append.persistence_id.as_str()) {
-                return Err(PersistenceError::Storage(format!(
-                    "duplicate persistence_id '{}' in append_batch",
-                    append.persistence_id
-                )));
-            }
-        }
-
-        let conn = self.configured_connection().await?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(storage_error)?;
-
-        let mut parsed = Vec::with_capacity(appends.len());
-        for append in appends {
-            let (tenant, entity_type, entity_id) =
-                parse_persistence_id_parts(&append.persistence_id)
-                    .map_err(PersistenceError::Storage)?;
-
-            if append.expected_sequence == 0 && !append.events.is_empty() {
-                parsed.push((
-                    tenant.to_string(),
-                    entity_type.to_string(),
-                    entity_id.to_string(),
-                ));
-                continue;
-            }
-
-            let select_start = std::time::Instant::now();
-            let rows_result = tx
-                .query(
-                    "SELECT COALESCE(MAX(sequence_nr), 0)
-                     FROM events
-                     WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
-                    params![tenant, entity_type, entity_id],
-                )
-                .await;
-            record_turso_query_duration(
-                select_start.elapsed(),
-                "query",
-                "transaction",
-                rows_result.is_ok(),
-            );
-            let mut rows = rows_result.map_err(storage_error)?;
-
-            let current_seq = match rows.next().await.map_err(storage_error)? {
-                Some(row) => row.get::<i64>(0).map_err(storage_error)? as u64,
-                None => 0,
-            };
-            drop(rows);
-
-            if current_seq != append.expected_sequence {
-                tracing::error!(
-                    expected = append.expected_sequence,
-                    actual = current_seq,
-                    persistence_id = %append.persistence_id,
-                    "concurrency violation on append_batch"
-                );
-                let _ = tx.rollback().await;
-                return Err(PersistenceError::ConcurrencyViolation {
-                    expected: append.expected_sequence,
-                    actual: current_seq,
-                });
-            }
-            parsed.push((
-                tenant.to_string(),
-                entity_type.to_string(),
-                entity_id.to_string(),
-            ));
-        }
-
-        let mut results = Vec::with_capacity(appends.len());
-        let mut event_rows = Vec::new();
-        for (append, (tenant, entity_type, entity_id)) in appends.iter().zip(parsed.iter()) {
-            let mut new_seq = append.expected_sequence;
-            for event in &append.events {
-                new_seq += 1;
-                let payload_json = serde_json::to_string(&event.payload).map_err(|e| {
-                    tracing::error!(error = %e, "failed to serialize event payload");
-                    PersistenceError::Serialization(e.to_string())
-                })?;
-                let metadata_json = serde_json::to_string(&event.metadata).map_err(|e| {
-                    tracing::error!(error = %e, "failed to serialize event metadata");
-                    PersistenceError::Serialization(e.to_string())
-                })?;
-
-                event_rows.push(PreparedEventInsert {
-                    tenant: tenant.clone(),
-                    entity_type: entity_type.clone(),
-                    entity_id: entity_id.clone(),
-                    sequence_nr: new_seq,
-                    event_type: event.event_type.clone(),
-                    payload_json,
-                    metadata_json,
-                    expected_sequence: append.expected_sequence,
-                });
-            }
-            results.push(PersistenceAppendResult {
-                persistence_id: append.persistence_id.clone(),
-                sequence_nr: new_seq,
-            });
-        }
-
-        for chunk in event_rows.chunks(APPEND_BATCH_INSERT_CHUNK_ROWS) {
-            if chunk.is_empty() {
-                continue;
-            }
-
-            let mut insert_sql = String::from(
-                "INSERT INTO events \
-                 (tenant, entity_type, entity_id, sequence_nr, event_type, payload, metadata) \
-                 VALUES ",
-            );
-            let mut insert_values = Vec::with_capacity(chunk.len() * 7);
-            for (index, row) in chunk.iter().enumerate() {
-                if index > 0 {
-                    insert_sql.push_str(", ");
-                }
-                insert_sql.push_str("(?, ?, ?, ?, ?, ?, ?)");
-                insert_values.push(Value::from(row.tenant.clone()));
-                insert_values.push(Value::from(row.entity_type.clone()));
-                insert_values.push(Value::from(row.entity_id.clone()));
-                insert_values.push(Value::from(row.sequence_nr as i64));
-                insert_values.push(Value::from(row.event_type.clone()));
-                insert_values.push(Value::from(row.payload_json.clone()));
-                insert_values.push(Value::from(row.metadata_json.clone()));
-            }
-
-            let insert_start = std::time::Instant::now();
-            let insert_result = tx
-                .execute(&insert_sql, params_from_iter(insert_values))
-                .await;
-            record_turso_query_duration(
-                insert_start.elapsed(),
-                "execute",
-                "transaction",
-                insert_result.is_ok(),
-            );
-
-            if let Err(e) = insert_result {
-                let msg = e.to_string();
-                tracing::error!(error = %e, "event batch insert failed");
-                let _ = tx.rollback().await;
-                if msg.contains("UNIQUE constraint failed") || msg.contains("UNIQUE") {
-                    let first = &chunk[0];
-                    return Err(PersistenceError::ConcurrencyViolation {
-                        expected: first.expected_sequence,
-                        actual: first.sequence_nr,
-                    });
-                }
-                return Err(PersistenceError::Storage(msg));
-            }
-        }
-
-        tx.commit().await.map_err(storage_error)?;
-        Ok(results)
-    }
-
-    /// Atomic fast path for the common event-store case: one entity action
-    /// produces one event. On remote Turso this avoids holding an explicit
-    /// Hrana transaction across BEGIN/SELECT/INSERT/COMMIT round trips.
-    async fn append_single_event_inner(
-        &self,
-        persistence_id: &str,
-        expected_sequence: u64,
-        event: &PersistenceEnvelope,
-    ) -> Result<u64, PersistenceError> {
-        let (tenant, entity_type, entity_id) =
-            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
-        let new_seq = expected_sequence + 1;
-        let payload_json = serde_json::to_string(&event.payload).map_err(|e| {
-            tracing::error!(error = %e, "failed to serialize event payload");
-            PersistenceError::Serialization(e.to_string())
-        })?;
-        let metadata_json = serde_json::to_string(&event.metadata).map_err(|e| {
-            tracing::error!(error = %e, "failed to serialize event metadata");
-            PersistenceError::Serialization(e.to_string())
-        })?;
-
-        let conn = self.configured_connection().await?;
-        let segment_index = {
-            let mut rows = conn
-                .query(
-                    "SELECT segment_index
-                     FROM event_segments
-                     WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND sealed_at IS NULL
-                     ORDER BY segment_index DESC
-                     LIMIT 1",
-                    params![tenant, entity_type, entity_id],
-                )
-                .await
-                .map_err(storage_error)?;
-            if let Some(row) = rows.next().await.map_err(storage_error)? {
-                row.get::<i64>(0).map_err(storage_error)?
-            } else {
-                drop(rows);
-                let mut max_rows = conn
-                    .query(
-                        "SELECT COALESCE(MAX(segment_index), 0)
-                         FROM events
-                         WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
-                        params![tenant, entity_type, entity_id],
-                    )
-                    .await
-                    .map_err(storage_error)?;
-                let idx = match max_rows.next().await.map_err(storage_error)? {
-                    Some(row) => row.get::<i64>(0).map_err(storage_error)?,
-                    None => 0,
-                };
-                drop(max_rows);
-                conn.execute(
-                    "INSERT INTO event_segments
-                     (tenant, entity_type, entity_id, segment_index, start_sequence_nr)
-                     VALUES (?1, ?2, ?3, ?4, ?5)
-                     ON CONFLICT(tenant, entity_type, entity_id, segment_index) DO NOTHING",
-                    params![
-                        tenant,
-                        entity_type,
-                        entity_id,
-                        idx,
-                        ((expected_sequence + 1).max(1)) as i64
-                    ],
-                )
-                .await
-                .map_err(storage_error)?;
-                idx
-            }
-        };
-        let insert_result = conn
-            .execute(
-                "INSERT INTO events
-                 (tenant, entity_type, entity_id, sequence_nr, segment_index, event_type, payload, metadata)
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
-                 WHERE (
-                     SELECT COALESCE(MAX(sequence_nr), 0)
-                     FROM events
-                     WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
-                 ) = ?9",
-                params![
-                    tenant,
-                    entity_type,
-                    entity_id,
-                    new_seq as i64,
-                    segment_index,
-                    event.event_type.as_str(),
-                    payload_json,
-                    metadata_json,
-                    expected_sequence as i64
-                ],
-            )
-            .await;
-
-        let affected = match insert_result {
-            Ok(affected) => affected,
-            Err(e) => {
-                let msg = e.to_string();
-                tracing::error!(error = %e, "single event insert failed");
-                if msg.contains("UNIQUE constraint failed") || msg.contains("UNIQUE") {
-                    let actual = current_sequence(&conn, tenant, entity_type, entity_id).await?;
-                    return Err(PersistenceError::ConcurrencyViolation {
-                        expected: expected_sequence,
-                        actual,
-                    });
-                }
-                return Err(PersistenceError::Storage(msg));
-            }
-        };
-
-        if affected == 1 {
-            conn.execute(
-                "UPDATE event_segments
-                 SET end_sequence_nr = ?5, event_count = MAX(?5 - start_sequence_nr + 1, 0)
-                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND segment_index = ?4",
-                params![
-                    tenant,
-                    entity_type,
-                    entity_id,
-                    segment_index,
-                    new_seq as i64
-                ],
-            )
-            .await
-            .map_err(storage_error)?;
-            return Ok(new_seq);
-        }
-
-        let actual = current_sequence(&conn, tenant, entity_type, entity_id).await?;
-        tracing::error!(
-            expected = expected_sequence,
-            actual,
-            affected,
-            "concurrency violation on single event append"
-        );
-        Err(PersistenceError::ConcurrencyViolation {
-            expected: expected_sequence,
-            actual,
-        })
-    }
-}
-
-async fn current_sequence(
-    conn: &super::instrumentation::InstrumentedConnection,
-    tenant: &str,
-    entity_type: &str,
-    entity_id: &str,
-) -> Result<u64, PersistenceError> {
-    let mut rows = conn
-        .query(
-            "SELECT COALESCE(MAX(sequence_nr), 0)
-             FROM events
-             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
-            params![tenant, entity_type, entity_id],
-        )
-        .await
-        .map_err(storage_error)?;
-
-    match rows.next().await.map_err(storage_error)? {
-        Some(row) => row
-            .get::<i64>(0)
-            .map_err(storage_error)
-            .map(|seq| seq as u64),
-        None => Ok(0),
     }
 }

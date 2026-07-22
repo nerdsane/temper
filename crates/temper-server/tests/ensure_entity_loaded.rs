@@ -1,7 +1,8 @@
 use temper_runtime::ActorSystem;
 use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
-use temper_runtime::scheduler::sim_now;
+use temper_runtime::scheduler::{install_deterministic_context, sim_now};
 use temper_runtime::tenant::TenantId;
+use temper_store_sim::{SimEventStore, SimFaultConfig};
 use temper_store_turso::TursoEventStore;
 
 use temper_server::registry::SpecRegistry;
@@ -25,6 +26,41 @@ fn build_state_with_turso(system_name: &str, store: TursoEventStore) -> ServerSt
     let mut state = ServerState::from_registry(ActorSystem::new(system_name), registry);
     state.set_storage_stack(StorageStack::from_turso(store));
     state
+}
+
+fn build_state_with_sim(system_name: &str, store: SimEventStore) -> ServerState {
+    let mut registry = SpecRegistry::new();
+    let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
+    registry.register_tenant(
+        "tenant-a",
+        csdl,
+        CSDL_XML.to_string(),
+        &[("Order", ORDER_IOA)],
+    );
+
+    let mut state = ServerState::from_registry(ActorSystem::new(system_name), registry);
+    state.set_storage_stack(StorageStack::from_sim(store, None));
+    state
+}
+
+fn snapshot_only_state(entity_id: &str, status: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "entity_type": "Order",
+        "entity_id": entity_id,
+        "status": status,
+        "item_count": 0,
+        "counters": {},
+        "booleans": {},
+        "lists": {},
+        "fields": {"Id": entity_id, "Status": status},
+        "events": [],
+        "total_event_count": 5,
+        "events_since_snapshot": 0,
+        "last_snapshot_sequence_nr": 5,
+        "sequence_nr": 5,
+        "processed_idempotency_keys": {}
+    }))
+    .unwrap()
 }
 
 #[tokio::test]
@@ -102,6 +138,118 @@ async fn ensure_entity_loaded_returns_true_for_indexed_entity_without_persistenc
         loaded,
         "indexed in-memory entity should be considered loaded"
     );
+}
+
+#[tokio::test]
+async fn ensure_entity_loaded_hydrates_cold_snapshot_only_entity() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-ensure-snapshot-only-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let store = TursoEventStore::new(&format!("file:{}", db_path.display()), None)
+        .await
+        .unwrap();
+    let tenant = TenantId::new("tenant-a");
+    let entity_id = "ord-snapshot-only";
+    store
+        .save_snapshot(
+            &format!("{tenant}:Order:{entity_id}"),
+            5,
+            &snapshot_only_state(entity_id, "Draft"),
+        )
+        .await
+        .unwrap();
+    let state = build_state_with_turso("test-ensure-snapshot-only", store);
+
+    assert!(
+        state
+            .ensure_entity_loaded(&tenant, "Order", entity_id)
+            .await
+    );
+    assert!(state.entity_exists(&tenant, "Order", entity_id));
+    let hydrated = state
+        .get_tenant_entity_state(&tenant, "Order", entity_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        hydrated.state.sequence_nr, 0,
+        "snapshot-only state starts a new journal generation at sequence zero"
+    );
+    assert_eq!(
+        hydrated.state.total_event_count, 5,
+        "snapshot logical history remains intact while journal coordinates reset"
+    );
+    assert_eq!(hydrated.state.status, "Draft");
+}
+
+#[tokio::test]
+async fn ensure_entity_loaded_rejects_deleted_snapshot_only_entity() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-ensure-deleted-snapshot-only-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let store = TursoEventStore::new(&format!("file:{}", db_path.display()), None)
+        .await
+        .unwrap();
+    let tenant = TenantId::new("tenant-a");
+    let entity_id = "ord-deleted-snapshot-only";
+    store
+        .save_snapshot(
+            &format!("{tenant}:Order:{entity_id}"),
+            5,
+            &snapshot_only_state(entity_id, "Deleted"),
+        )
+        .await
+        .unwrap();
+    let state = build_state_with_turso("test-ensure-deleted-snapshot-only", store);
+
+    assert!(
+        !state
+            .ensure_entity_loaded(&tenant, "Order", entity_id)
+            .await
+    );
+    assert!(!state.entity_exists(&tenant, "Order", entity_id));
+}
+
+#[tokio::test]
+async fn ensure_entity_loaded_rehydrates_same_sequence_snapshot_replacement() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-ensure-replaced-snapshot-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let store = TursoEventStore::new(&format!("file:{}", db_path.display()), None)
+        .await
+        .unwrap();
+    let tenant = TenantId::new("tenant-a");
+    let entity_id = "ord-replaced-snapshot";
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    store
+        .save_snapshot(&persistence_id, 5, &snapshot_only_state(entity_id, "Draft"))
+        .await
+        .unwrap();
+    let state = build_state_with_turso("test-ensure-replaced-snapshot", store.clone());
+    assert!(
+        state
+            .ensure_entity_loaded(&tenant, "Order", entity_id)
+            .await
+    );
+
+    store
+        .save_snapshot(
+            &persistence_id,
+            5,
+            &snapshot_only_state(entity_id, "Deleted"),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        !state
+            .ensure_entity_loaded(&tenant, "Order", entity_id)
+            .await,
+        "a resident actor hydrated from the replaced live snapshot must not hide the Deleted generation"
+    );
+    assert!(!state.entity_exists(&tenant, "Order", entity_id));
 }
 
 #[tokio::test]
@@ -233,21 +381,13 @@ async fn delete_writes_tombstone_and_deleted_entity_stays_out_of_list_after_rest
 
 #[tokio::test]
 async fn delete_failure_does_not_remove_live_entity_from_index() {
-    let db_path = std::env::temp_dir().join(format!(
-        "temper-delete-tombstone-failure-{}.db",
-        uuid::Uuid::new_v4()
-    ));
-    let db_url = format!("file:{}", db_path.display());
-    let store = TursoEventStore::new(&db_url, None)
-        .await
-        .expect("create local turso db");
+    let (_guard, _clock, _ids) = install_deterministic_context(909);
+    let store = SimEventStore::no_faults(909);
 
     let tenant = TenantId::new("tenant-a");
     let entity_type = "Order";
     let entity_id = "ord-delete-failure";
-    let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
-
-    let state = build_state_with_turso("test-delete-tombstone-failure", store.clone());
+    let state = build_state_with_sim("test-delete-tombstone-failure", store.clone());
     state
         .get_or_create_tenant_entity(
             &tenant,
@@ -258,31 +398,10 @@ async fn delete_failure_does_not_remove_live_entity_from_index() {
         .await
         .expect("create entity");
 
-    // Force delete persistence to fail by appending an external event first,
-    // so the actor's expected sequence is stale.
-    let expected_sequence = store
-        .read_events(&persistence_id, 0)
-        .await
-        .expect("read seeded events")
-        .last()
-        .map(|event| event.sequence_nr)
-        .expect("created event sequence present");
-    let external = PersistenceEnvelope {
-        sequence_nr: 0,
-        event_type: "ExternalWrite".to_string(),
-        payload: serde_json::json!({"action": "ExternalWrite"}),
-        metadata: EventMetadata {
-            event_id: uuid::Uuid::new_v4(),
-            causation_id: uuid::Uuid::new_v4(),
-            correlation_id: uuid::Uuid::new_v4(),
-            timestamp: sim_now(),
-            actor_id: "concurrency-racer".to_string(),
-        },
-    };
-    store
-        .append(&persistence_id, expected_sequence, &[external])
-        .await
-        .expect("append external race event");
+    store.restore_faults(SimFaultConfig {
+        write_failure_prob: 1.0,
+        ..SimFaultConfig::none()
+    });
 
     let response = state
         .delete_tenant_entity(&tenant, entity_type, entity_id)
@@ -313,8 +432,6 @@ async fn delete_failure_does_not_remove_live_entity_from_index() {
         live.state.status, "Deleted",
         "failed delete must not advance state to Deleted"
     );
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]

@@ -371,7 +371,13 @@ impl crate::state::ServerState {
         let action = _action.to_string();
         let custom_effects = custom_effects.to_vec();
         let entity_state = _entity_state.clone();
-        let agent_ctx = agent_ctx.clone();
+        let agent_ctx = agent_ctx
+            .fork_tenant_generation_lease(&tenant)
+            .unwrap_or_else(|| {
+                let mut detached = agent_ctx.clone();
+                detached.detach_tenant_generation_lease();
+                detached
+            });
         let action_params = action_params.clone();
         let workflow_root_entity_type = workflow_root_type(&agent_ctx, &entity_type);
         let workflow_root_entity_id = workflow_root_id(&agent_ctx, &entity_id);
@@ -388,6 +394,18 @@ impl crate::state::ServerState {
         tokio::spawn(
             async move {
                 // determinism-ok: async integration side-effects run outside simulation core
+                let Some(agent_ctx) = state
+                    .activate_immediate_tenant_work(&tenant, agent_ctx)
+                    .await
+                else {
+                    tracing::error!(
+                        tenant = %tenant,
+                        entity_type = %entity_type,
+                        entity_id = %entity_id,
+                        "WASM integrations could not enter a complete runtime generation"
+                    );
+                    return;
+                };
                 let req = WasmDispatchRequest {
                     tenant: &tenant,
                     entity_type: &entity_type,
@@ -414,6 +432,7 @@ impl crate::state::ServerState {
                         &entity_id,
                         &action,
                         &e,
+                        &agent_ctx,
                     );
                 }
             }
@@ -423,69 +442,5 @@ impl crate::state::ServerState {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use temper_runtime::ActorSystem;
-    use temper_spec::csdl::parse_csdl;
-
-    fn test_state() -> crate::state::ServerState {
-        let csdl_xml = include_str!("../../../../../test-fixtures/specs/model.csdl.xml");
-        let csdl = parse_csdl(csdl_xml).expect("CSDL should parse");
-        crate::state::ServerState::new(
-            ActorSystem::new("dispatch-wasm-authz-test"),
-            csdl,
-            csdl_xml.to_string(),
-        )
-    }
-
-    #[test]
-    fn wasm_authz_gate_evaluates_cedar_when_policy_set_is_empty() {
-        let state = test_state();
-        state
-            .authz
-            .reload_policies("")
-            .expect("empty policy set should parse");
-
-        let gate = state.wasm_authz_gate();
-        let decision = gate.authorize_http_call(
-            "api.example.com",
-            "GET",
-            "https://api.example.com/v1/ping",
-            &WasmAuthzContext::test_fixture(),
-        );
-
-        assert_eq!(
-            decision,
-            WasmAuthzDecision::Deny("no matching permit policy".to_string())
-        );
-    }
-
-    #[test]
-    fn wasm_authz_gate_allows_when_cedar_policy_matches() {
-        let state = test_state();
-        state
-            .authz
-            .reload_policies(
-                r#"
-                permit(
-                    principal is Agent,
-                    action == Action::"http_call",
-                    resource is HttpEndpoint
-                ) when {
-                    context.module == "stripe_charge"
-                };
-                "#,
-            )
-            .expect("policy should parse");
-
-        let gate = state.wasm_authz_gate();
-        let decision = gate.authorize_http_call(
-            "api.stripe.com",
-            "POST",
-            "https://api.stripe.com/v1/charges",
-            &WasmAuthzContext::test_fixture(),
-        );
-
-        assert_eq!(decision, WasmAuthzDecision::Allow);
-    }
-}
+#[path = "mod_test.rs"]
+mod tests;

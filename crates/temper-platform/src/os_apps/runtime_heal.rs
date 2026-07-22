@@ -78,7 +78,7 @@ fn tenant_has_app_spec_tables_for_bundle(
         .all(|(entity_type, _)| registry.get_table(&tenant_id, entity_type).is_some())
 }
 
-fn repair_app_runtime_metadata_from_bundle(
+async fn repair_app_runtime_metadata_from_bundle(
     state: &PlatformState,
     tenant: &str,
     app_name: &str,
@@ -99,24 +99,54 @@ fn repair_app_runtime_metadata_from_bundle(
         .map(|(entity_type, ioa_source)| (entity_type.as_str(), ioa_source.as_str()))
         .collect();
     let tenant_id = TenantId::new(tenant);
+    let target_digest = super::reconcile::digest_app_bundle(app_name, bundle);
+    let publication_intent = temper_server::ServerState::spec_publication_intent(
+        "os-app-bundle",
+        [("bundle", target_digest.bundle_digest.as_bytes())],
+    );
+    let mut publication_guard = state.server.begin_spec_publication(&tenant_id).await?;
+    if !tenant_has_app_spec_content_for_bundle(state, tenant, bundle)
+        || !tenant_has_app_spec_tables_for_bundle(state, tenant, bundle)
+    {
+        return Err(format!(
+            "OS app '{app_name}' spec generation changed while runtime repair waited"
+        ));
+    }
+    state
+        .server
+        .arm_spec_publication(&mut publication_guard, &tenant_id, &publication_intent)?;
+    // The matching bundle digest proves these specs are already durable. Fence
+    // their exact key contracts before restoring the missing live metadata.
+    let mut cutover = state
+        .server
+        .prepare_key_index_contracts_for_spec_activation(&publication_guard, &tenant_id, &specs)
+        .await?;
 
     {
         let mut registry = state.registry.write().expect("Spec registry lock poisoned");
         registry
-            .try_register_tenant_with_reactions_and_constraints(
-                tenant_id,
+            .try_register_tenant_with_reactions_constraints_and_key_epochs(
+                tenant_id.clone(),
                 csdl,
                 csdl_xml.to_string(),
                 &specs,
                 Vec::new(),
                 bundle.cross_invariants_toml.clone(),
                 true,
+                &cutover.activation_epochs,
             )
             .map_err(|error| {
                 format!("Failed to restore runtime metadata for os-app '{app_name}': {error}")
             })?;
     }
+    state
+        .server
+        .finish_key_index_contract_activation(&mut publication_guard, &tenant_id, &mut cutover)
+        .await?;
     state.server.rebuild_reaction_dispatcher();
+    state
+        .server
+        .complete_spec_publication(&mut publication_guard, &tenant_id)?;
     tracing::info!(
         tenant,
         app = %app_name,
@@ -225,7 +255,9 @@ pub(crate) async fn restore_app_specs_from_matching_digest(
         return false;
     }
 
-    if let Err(error) = repair_app_runtime_metadata_from_bundle(state, tenant, app_name, bundle) {
+    if let Err(error) =
+        repair_app_runtime_metadata_from_bundle(state, tenant, app_name, bundle).await
+    {
         tracing::warn!(
             tenant,
             app = %app_name,

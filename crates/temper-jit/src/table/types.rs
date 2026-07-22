@@ -53,6 +53,10 @@ pub struct TransitionTable {
     /// ADR-0153: declared unique/alternate keys the kernel indexes for
     /// negative-existence reads. Empty when the spec declared no `[[key]]`.
     pub keys: Vec<DeclaredKey>,
+    /// Monotonic durable activation epoch for the declared-key contract.
+    /// Runtime registration fills this after storage fences the spec swap.
+    #[serde(skip)]
+    pub key_contract_activation_epoch: u64,
     /// ADR-0155: declared vector access paths the kernel indexes for exact-scan
     /// kNN reads (`Temper.Nearest`). Empty when the spec declared no `[[vector]]`.
     #[serde(default)]
@@ -172,6 +176,7 @@ impl<'de> Deserialize<'de> for TransitionTable {
             initial_state: raw.initial_state,
             rules: raw.rules,
             keys: raw.keys,
+            key_contract_activation_epoch: 0,
             vectors: raw.vectors,
             state_var_metadata: raw.state_var_metadata,
             composite_actions: raw.composite_actions,
@@ -287,6 +292,7 @@ mod tests {
             states: vec!["Draft".to_string(), "Active".to_string()],
             initial_state: "Draft".to_string(),
             keys: vec![],
+            key_contract_activation_epoch: 0,
             vectors: vec![],
             rules: vec![
                 TransitionRule {

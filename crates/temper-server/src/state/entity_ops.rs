@@ -1,25 +1,35 @@
 //! Entity lifecycle methods for ServerState (spawn, query, delete, index).
 
+mod actor_resolution;
+mod entity_loading;
+mod field_updates;
+mod generation_access;
+mod key_activation;
 mod key_index_coverage;
+mod status_resolution;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 
+use sha2::{Digest, Sha256};
 use tracing::{Instrument, instrument};
 
 use temper_observe::wide_event;
 use temper_runtime::persistence::{
-    EventMetadata, IndexReconciliation, PersistenceEnvelope, PersistenceError,
+    EventMetadata, IndexReconciliation, PersistenceEnvelope, PersistenceError, SnapshotSourceFence,
 };
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
 use super::dispatch::retry;
-use super::{ServerState, projection_backfill};
-use crate::entity_actor::{EntityActor, EntityEvent, EntityMsg, EntityResponse, EntityState};
+use super::{ServerState, SpecPublicationGuard, projection_backfill};
+use crate::entity_actor::{
+    EntityActor, EntityEvent, EntityMsg, EntityPassivationSnapshot, EntityResponse, EntityState,
+};
 use crate::events::EntityStateChange;
 use crate::registry::{VerificationDetail, VerificationStatus};
+use crate::request_context::AgentContext;
 use crate::runtime_metrics;
 use crate::storage::DataOnlyCreateRecord;
 
@@ -32,10 +42,6 @@ fn actor_idle_timeout_secs() -> i64 {
             .filter(|v| *v > 0)
             .unwrap_or(300)
     })
-}
-
-fn is_deleted_envelope(event: &PersistenceEnvelope) -> bool {
-    event.transitions_to_deleted()
 }
 
 fn record_projection_update_started(
@@ -151,7 +157,45 @@ pub(crate) struct AuthzResourceSnapshot {
     pub(crate) resource_attrs: BTreeMap<String, serde_json::Value>,
 }
 
+/// Fenced key-ownership work prepared before a registry publication. Callers
+/// publish tables with [`Self::activation_epochs`], then finish the cutover to
+/// evict old actors, publish coverage readiness, and reopen actor spawn.
+#[derive(Debug)]
+pub struct KeyContractActivationCutover {
+    /// Durable activation epoch assigned to each published or removed type.
+    pub activation_epochs: BTreeMap<String, u64>,
+    candidate_tables: Vec<(String, temper_jit::TransitionTable)>,
+    prepared_coverage: Vec<projection_backfill::PreparedKeyIndexCoverage>,
+    affected_entity_types: std::collections::BTreeSet<String>,
+}
+
+impl KeyContractActivationCutover {
+    fn empty() -> Self {
+        Self {
+            activation_epochs: BTreeMap::new(),
+            candidate_tables: Vec::new(),
+            prepared_coverage: Vec::new(),
+            affected_entity_types: std::collections::BTreeSet::new(),
+        }
+    }
+}
+
 impl ServerState {
+    /// Arm a publication immediately before durable persistence. From this
+    /// point, cancellation or any publication error intentionally leaves the
+    /// tenant fail-closed until a serialized retry completes the cutover: a
+    /// failed commit acknowledgement cannot prove that no commit occurred.
+    pub fn arm_spec_publication(
+        &self,
+        publication_guard: &mut SpecPublicationGuard,
+        tenant: &TenantId,
+        intent_fingerprint: &str,
+    ) -> Result<(), String> {
+        publication_guard.arm(tenant, intent_fingerprint)?;
+        self.evict_tenant_actors(tenant);
+        Ok(())
+    }
+
     fn touch_actor_access(&self, actor_key: &str) {
         if let Ok(mut last_accessed) = self.last_accessed.write() {
             last_accessed.insert(actor_key.to_string(), sim_now());
@@ -452,32 +496,6 @@ impl ServerState {
         }
     }
 
-    /// Populate the durable query-plane projections for collection reads.
-    ///
-    /// Two-phase approach:
-    /// 1. **Snapshot pass** — cheap: deserialises snapshots for entities that have them.
-    /// 2. **Persistence replay pass** — reconstructs state directly from the event log.
-    ///
-    /// Runs once as a background task after startup.  New entities created after
-    /// boot are indexed via `run_post_dispatch_effects` step 8.
-    #[instrument(skip_all, fields(otel.name = "entity.populate_field_index", tenant = %tenant))]
-    pub async fn populate_field_index_from_snapshots(&self, tenant: &TenantId) {
-        projection_backfill::populate_field_index_from_snapshots(self, tenant).await;
-    }
-
-    /// Backfill `entity_key_index` for declared-key entity types (ADR-0153), so a
-    /// keyed read can authoritatively prove absence for pre-existing entities.
-    ///
-    /// Independent of [`Self::populate_field_index_from_snapshots`]: the declared
-    /// key is `K` (1–3) tiny rows per entity, far cheaper than the broad `S`-wide
-    /// field-index re-scan, so it is gated and scheduled on its own rather than
-    /// riding the expensive projection backfill. Runs once as a background task;
-    /// entities written after boot are keyed inline at write time.
-    #[instrument(skip_all, fields(otel.name = "entity.populate_key_index", tenant = %tenant))]
-    pub async fn populate_key_index_from_snapshots(&self, tenant: &TenantId) {
-        projection_backfill::populate_key_index_from_snapshots(self, tenant).await;
-    }
-
     /// ADR-0155: backfill `entity_vector_index` for pre-existing entities of every
     /// vector-declaring type and record the watermark. Idempotent; entities written
     /// after boot maintain their vectors inline (co-commit) or write-behind.
@@ -556,148 +574,6 @@ impl ServerState {
                 }
             }
         }
-    }
-
-    /// Get or spawn an entity actor (legacy single-tenant).
-    #[deprecated(note = "Use `get_or_spawn_tenant_actor` with explicit tenant")]
-    pub fn get_or_spawn_actor(
-        &self,
-        entity_type: &str,
-        entity_id: &str,
-    ) -> Option<ActorRef<EntityMsg>> {
-        self.get_or_spawn_tenant_actor(&TenantId::default(), entity_type, entity_id)
-    }
-
-    /// Get or spawn an entity actor for a specific tenant.
-    pub fn get_or_spawn_tenant_actor(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-    ) -> Option<ActorRef<EntityMsg>> {
-        self.get_or_spawn_tenant_actor_with_fields(
-            tenant,
-            entity_type,
-            entity_id,
-            serde_json::json!({}),
-        )
-    }
-
-    /// Get or spawn an entity actor with initial fields for a specific tenant.
-    #[instrument(skip_all, fields(otel.name = "entity.get_or_spawn_tenant_actor_with_fields", tenant = %tenant, entity_type, entity_id))]
-    pub fn get_or_spawn_tenant_actor_with_fields(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        initial_fields: serde_json::Value,
-    ) -> Option<ActorRef<EntityMsg>> {
-        let key = format!("{tenant}:{entity_type}:{entity_id}");
-
-        // Fast-path: check actor registry under read lock.
-        {
-            let registry = self.actor_registry.read().unwrap();
-            if let Some(actor_ref) = registry.get(&key) {
-                self.touch_actor_access(&key);
-                return Some(actor_ref.clone());
-            }
-        }
-
-        // Look up live transition table reference: try SpecRegistry first,
-        // fall back to legacy map (wrapped in a fresh RwLock for compat).
-        let table = {
-            let reg = self.registry.read().unwrap();
-            reg.get_table_live(tenant, entity_type)
-        }
-        .or_else(|| {
-            // Legacy single-tenant: wrap the static Arc<TransitionTable> in a
-            // new RwLock. Hot-swap doesn't apply to legacy mode, but the actor
-            // API is uniform. One clone per entity spawn (cheap).
-            self.transition_tables
-                .get(entity_type)
-                .map(|t| Arc::new(RwLock::new((**t).clone())))
-        })?;
-
-        // Build actor instance (spawn guarded below to avoid duplicate races).
-        // ADR-0048 sub-decision 5: every actor gets the shared idempotency
-        // cache so it can dedupe duplicate asks produced by retry storms.
-        let tenant_blob_store = self.blob_store_for_tenant(tenant).ok();
-        let snapshot_queue = self
-            .snapshot_write_queue
-            .lock()
-            .ok()
-            .and_then(|slot| slot.clone());
-        let actor = match self.event_journal() {
-            Some((store, backend)) => EntityActor::with_persistence(
-                entity_type,
-                entity_id,
-                table,
-                initial_fields,
-                store,
-                backend,
-            )
-            .with_tenant(tenant.as_str())
-            .with_snapshot_queue(snapshot_queue)
-            .with_idempotency_cache(self.idempotency_cache.clone())
-            .with_blob_store(tenant_blob_store.clone()),
-            None => EntityActor::new(entity_type, entity_id, table, initial_fields)
-                .with_tenant(tenant.as_str())
-                .with_idempotency_cache(self.idempotency_cache.clone())
-                .with_blob_store(tenant_blob_store),
-        };
-
-        // Slow-path: atomically re-check and spawn under write lock.
-        // This prevents duplicate actors when concurrent requests race to create
-        // the same (tenant, entity_type, entity_id) key.
-        let actor_ref = {
-            let mut registry = self.actor_registry.write().unwrap();
-            if let Some(existing) = registry.get(&key) {
-                return Some(existing.clone());
-            }
-            let actor_ref = self.actor_system.spawn(actor, &key);
-            registry.insert(key.clone(), actor_ref.clone());
-            actor_ref
-        };
-
-        // Track in entity index for collection queries
-        {
-            let index_key = format!("{tenant}:{entity_type}");
-            let mut index = self.entity_index.write().unwrap();
-            index
-                .entry(index_key)
-                .or_default()
-                .insert(entity_id.to_string());
-        }
-        self.touch_actor_access(&key);
-        runtime_metrics::record_server_state_metrics(self);
-
-        Some(actor_ref)
-    }
-
-    /// Remove an entity from the index and actor registry.
-    #[instrument(skip_all, fields(otel.name = "entity.remove_entity", tenant = %tenant, entity_type, entity_id))]
-    pub fn remove_entity(&self, tenant: &TenantId, entity_type: &str, entity_id: &str) {
-        let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
-
-        // Remove from actor registry
-        {
-            let mut registry = self.actor_registry.write().unwrap();
-            registry.remove(&actor_key);
-        }
-        {
-            let mut last_accessed = self.last_accessed.write().unwrap();
-            last_accessed.remove(&actor_key);
-        }
-
-        // Remove from entity index
-        {
-            let index_key = format!("{tenant}:{entity_type}");
-            let mut index = self.entity_index.write().unwrap();
-            if let Some(ids) = index.get_mut(&index_key) {
-                ids.remove(entity_id);
-            }
-        }
-        runtime_metrics::record_server_state_metrics(self);
     }
 
     /// Stop and evict an entity actor plus its in-memory indexes.
@@ -814,149 +690,6 @@ impl ServerState {
         }
     }
 
-    /// Get the current state of an entity actor (legacy single-tenant).
-    #[deprecated(note = "Use `get_tenant_entity_state` with explicit tenant")]
-    pub async fn get_entity_state(
-        &self,
-        entity_type: &str,
-        entity_id: &str,
-    ) -> Result<EntityResponse, String> {
-        self.get_tenant_entity_state(&TenantId::default(), entity_type, entity_id)
-            .await
-    }
-
-    /// Get the current state of an entity actor for a specific tenant.
-    #[instrument(skip_all, fields(otel.name = "entity.get_tenant_entity_state", tenant = %tenant, entity_type, entity_id))]
-    pub async fn get_tenant_entity_state(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-    ) -> Result<EntityResponse, String> {
-        let actor_ref = self
-            .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
-            .ok_or_else(|| {
-                format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
-            })?;
-
-        // ADR-0048: retry transient ask failures (AskTimeout, MailboxFull)
-        // so a single slow actor reply does not surface as HTTP 500.
-        let policy = self.dispatch_retry_policy();
-        retry::ask_with_backoff::<_, EntityResponse, _>(&actor_ref, || EntityMsg::GetState, &policy)
-            .await
-            .result
-            .map_err(|e| format!("Actor query failed: {e}"))
-    }
-
-    /// Create a new entity with initial fields and return its state.
-    #[instrument(skip_all, fields(otel.name = "entity.get_or_create_tenant_entity", tenant = %tenant, entity_type, entity_id))]
-    pub async fn get_or_create_tenant_entity(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        initial_fields: serde_json::Value,
-    ) -> Result<EntityResponse, String> {
-        let actor_ref = self
-            .get_or_spawn_tenant_actor_with_fields(tenant, entity_type, entity_id, initial_fields)
-            .ok_or_else(|| {
-                format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
-            })?;
-
-        let policy = self.dispatch_retry_policy();
-        let response = retry::ask_with_backoff::<_, EntityResponse, _>(
-            &actor_ref,
-            || EntityMsg::GetState,
-            &policy,
-        )
-        .await
-        .result
-        .map_err(|e| format!("Actor query failed: {e}"))?;
-
-        // Broadcast entity creation event for SSE subscribers
-        let seq = self.next_entity_event_sequence(tenant.as_str(), entity_type, entity_id);
-        let change = EntityStateChange {
-            seq,
-            entity_type: entity_type.to_string(),
-            entity_id: entity_id.to_string(),
-            action: "Created".to_string(),
-            status: response.state.status.clone(),
-            tenant: tenant.to_string(),
-            agent_id: None,
-            session_id: None,
-            intent: None,
-            observation_metadata: None,
-        };
-        self.record_entity_observe_event_with_seq(
-            tenant.as_str(),
-            entity_type,
-            entity_id,
-            seq,
-            "state_change",
-            serde_json::to_value(&change).unwrap_or_default(),
-        );
-        let _ = self.event_tx.send(change);
-
-        if let Some(query_plane) = self.query_plane_store() {
-            let status = response.state.status.clone();
-            let fields = self.query_projection_fields(tenant, entity_type, &response.state.fields);
-            let projected_state = self.query_projection_state(&response.state);
-            let sequence_nr = response.state.sequence_nr;
-            let operation = "upsert";
-            let source = "create";
-            record_projection_update_started(tenant, entity_type, operation, source);
-            let projection_started_at = Instant::now(); // determinism-ok: production-only projection duration metric
-            if let Err(e) = query_plane
-                .upsert_projection(
-                    tenant.as_str(),
-                    entity_type,
-                    entity_id,
-                    &status,
-                    &fields,
-                    &projected_state,
-                    sequence_nr,
-                )
-                .await
-            {
-                record_projection_update_error(
-                    tenant,
-                    entity_type,
-                    operation,
-                    source,
-                    projection_started_at,
-                );
-                // Surface the projection failure instead of swallowing it.
-                // Previously this was a `warn` followed by `Ok(response)`,
-                // which produced HTTP 201 even when the entity wasn't
-                // discoverable via $filter — silently corrupting any caller
-                // that does write-then-read-back. Returning Err propagates
-                // up through the OData write handler to a 5xx so the client
-                // knows to retry. The event is already durable in the
-                // events table; on retry the actor's idempotent UPSERT into
-                // entity_catalog/entity_field_index will succeed (or fail
-                // again loudly).
-                tracing::error!(
-                    error = %e,
-                    tenant = %tenant,
-                    entity_type = %entity_type,
-                    entity_id = %entity_id,
-                    "failed to update query projection during create"
-                );
-                return Err(format!("query projection write failed during create: {e}"));
-            }
-            record_projection_update_success(
-                tenant,
-                entity_type,
-                operation,
-                source,
-                sequence_nr,
-                projection_started_at,
-            );
-        }
-
-        Ok(response)
-    }
-
     /// Create a durable data-only entity without spawning an actor.
     ///
     /// This path is only eligible for transition tables with no rules. It
@@ -970,6 +703,9 @@ impl ServerState {
         entity_id: &str,
         initial_fields: serde_json::Value,
     ) -> Result<Option<EntityResponse>, String> {
+        if self.key_contract_activation_gated(tenant, entity_type) {
+            return Ok(None);
+        }
         if !initial_fields.is_object() {
             return Ok(None);
         }
@@ -1058,8 +794,10 @@ impl ServerState {
         created_projection_state.sequence_nr = 1;
         created_projection_state.push_event_bounded(created.clone());
         let projection_state = self.query_projection_state(&created_projection_state);
-        let reconcile_keys = !table.keys.is_empty();
-        let key_set_signature = crate::key_index::declared_key_set_signature(&table.keys);
+        // The empty declared-key contract is authoritative too: it releases
+        // ownership rows from a previously keyed version of this entity type.
+        let reconcile_keys = true;
+        let key_set_signature = crate::key_index::declared_key_write_contract(&table);
         let key_rows = crate::key_index::derive_entity_key_rows(&table.keys, &state.fields, true);
         if let Some(native_store) = self.data_only_create_store() {
             let operation = "native_create";
@@ -1100,7 +838,10 @@ impl ServerState {
                         projection_started_at,
                     );
                 }
-                Err(PersistenceError::ConcurrencyViolation { .. }) => {
+                Err(
+                    PersistenceError::ConcurrencyViolation { .. }
+                    | PersistenceError::SnapshotGenerationChanged,
+                ) => {
                     record_projection_update_error(
                         tenant,
                         entity_type,
@@ -1143,6 +884,7 @@ impl ServerState {
                         keys: reconcile_keys,
                         key_set_signature: Some(key_set_signature),
                         vectors: false,
+                        snapshot_source: SnapshotSourceFence::Absent,
                     },
                 )
                 .await;
@@ -1159,7 +901,10 @@ impl ServerState {
                 Ok(new_seq) => {
                     state.sequence_nr = new_seq;
                 }
-                Err(PersistenceError::ConcurrencyViolation { .. }) => {
+                Err(
+                    PersistenceError::ConcurrencyViolation { .. }
+                    | PersistenceError::SnapshotGenerationChanged,
+                ) => {
                     return Ok(None);
                 }
                 Err(e) => {
@@ -1258,100 +1003,6 @@ impl ServerState {
         }))
     }
 
-    /// Update fields on an existing entity.
-    #[instrument(skip_all, fields(otel.name = "entity.update_tenant_entity_fields", tenant = %tenant, entity_type, entity_id))]
-    pub async fn update_tenant_entity_fields(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        fields: serde_json::Value,
-        replace: bool,
-        idempotency_key: Option<String>,
-    ) -> Result<EntityResponse, String> {
-        let actor_ref = self
-            .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
-            .ok_or_else(|| {
-                format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
-            })?;
-
-        let policy = self.dispatch_retry_policy();
-        let fields_for_retry = fields;
-        let idempotency_key =
-            idempotency_key.unwrap_or_else(|| format!("field-update:{}", sim_uuid()));
-        let response = retry::ask_with_backoff::<_, EntityResponse, _>(
-            &actor_ref,
-            || EntityMsg::UpdateFields {
-                fields: fields_for_retry.clone(),
-                replace,
-                idempotency_key: idempotency_key.clone(),
-            },
-            &policy,
-        )
-        .await
-        .result
-        .map_err(|e| format!("Actor update failed: {e}"))?;
-
-        if !response.success {
-            return Err(response
-                .error
-                .clone()
-                .unwrap_or_else(|| "field update was rejected".to_string()));
-        }
-
-        if let Some(query_plane) = self.query_plane_store() {
-            let status = response.state.status.clone();
-            let fields = self.query_projection_fields(tenant, entity_type, &response.state.fields);
-            let projected_state = self.query_projection_state(&response.state);
-            let sequence_nr = response.state.sequence_nr;
-            let operation = "upsert";
-            let source = "field_update";
-            record_projection_update_started(tenant, entity_type, operation, source);
-            let projection_started_at = Instant::now(); // determinism-ok: production-only projection duration metric
-            if let Err(e) = query_plane
-                .upsert_projection(
-                    tenant.as_str(),
-                    entity_type,
-                    entity_id,
-                    &status,
-                    &fields,
-                    &projected_state,
-                    sequence_nr,
-                )
-                .await
-            {
-                record_projection_update_error(
-                    tenant,
-                    entity_type,
-                    operation,
-                    source,
-                    projection_started_at,
-                );
-                // Same reasoning as create: don't ack a write that won't be
-                // visible via $filter. Propagate so OData returns 5xx and
-                // clients can retry against the idempotent upsert.
-                tracing::error!(
-                    error = %e,
-                    tenant = %tenant,
-                    entity_type = %entity_type,
-                    entity_id = %entity_id,
-                    "failed to update query projection during field update"
-                );
-                return Err(format!("query projection write failed during update: {e}"));
-            }
-            record_projection_update_success(
-                tenant,
-                entity_type,
-                operation,
-                source,
-                sequence_nr,
-                projection_started_at,
-            );
-        }
-
-        Ok(response)
-    }
-
     /// Delete an entity.
     #[instrument(skip_all, fields(otel.name = "entity.delete_tenant_entity", tenant = %tenant, entity_type, entity_id))]
     pub async fn delete_tenant_entity(
@@ -1435,75 +1086,6 @@ impl ServerState {
             .is_some_and(|ids| ids.contains(entity_id))
     }
 
-    /// Ensure an entity is present in memory by lazily hydrating from the
-    /// event store when needed.
-    #[instrument(skip_all, fields(otel.name = "entity.ensure_entity_loaded", tenant = %tenant, entity_type, entity_id))]
-    pub async fn ensure_entity_loaded(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-    ) -> bool {
-        let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
-        let journal = self.event_journal();
-
-        if self.entity_exists(tenant, entity_type, entity_id) {
-            let Some((store, _backend)) = journal.as_ref() else {
-                return true;
-            };
-
-            let events = match store.read_events(&persistence_id, 0).await {
-                Ok(events) if !events.is_empty() => events,
-                _ => return true,
-            };
-
-            if events.last().is_some_and(is_deleted_envelope) {
-                self.remove_entity(tenant, entity_type, entity_id);
-                return false;
-            }
-
-            return true;
-        }
-
-        let Some((store, _backend)) = journal.as_ref() else {
-            return false;
-        };
-
-        let events = match store.read_events(&persistence_id, 0).await {
-            Ok(events) if !events.is_empty() => events,
-            _ => return false,
-        };
-
-        if events.last().is_some_and(is_deleted_envelope) {
-            self.remove_entity(tenant, entity_type, entity_id);
-            return false;
-        }
-
-        let Some(actor_ref) = self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id) else {
-            return false;
-        };
-
-        let policy = self.dispatch_retry_policy();
-        let outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
-            &actor_ref,
-            || EntityMsg::GetState,
-            &policy,
-        )
-        .await;
-        match outcome.result {
-            Ok(response) if response.state.status == "Deleted" => {
-                let _ = actor_ref.stop();
-                self.remove_entity(tenant, entity_type, entity_id);
-                false
-            }
-            Ok(_) => true,
-            Err(_) => {
-                self.remove_entity(tenant, entity_type, entity_id);
-                false
-            }
-        }
-    }
-
     /// List entity IDs for a type, guaranteeing completeness against the
     /// durable event store.
     ///
@@ -1573,11 +1155,19 @@ impl ServerState {
         let policy = self.dispatch_retry_policy();
         let journal = self.event_journal();
         for (actor_key, actor_ref) in candidates {
+            if temper_runtime::tenant::parse_persistence_id_parts(&actor_key)
+                .ok()
+                .is_some_and(|(tenant, entity_type, _)| {
+                    self.key_contract_activation_gated(&TenantId::new(tenant), entity_type)
+                })
+            {
+                continue;
+            }
             // ADR-0048: retry transient failures so passivation is not skipped
             // by a single AskTimeout under load.
-            let snapshot_outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
+            let snapshot_outcome = retry::ask_with_backoff::<_, EntityPassivationSnapshot, _>(
                 &actor_ref,
-                || EntityMsg::GetState,
+                || EntityMsg::GetPassivationSnapshot,
                 &policy,
             )
             .await;
@@ -1585,29 +1175,58 @@ impl ServerState {
                 && let Ok(response) = snapshot_outcome.result
                 && response.state.sequence_nr > 0
             {
-                // Snapshot excludes bounded in-memory recent event history.
-                let mut snapshot_value = match serde_json::to_value(&response.state) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!(actor_key = %actor_key, error = %e, "failed to encode snapshot value");
-                        serde_json::Value::Null
+                let journal_provenance = match store.journal_boundary(&actor_key).await {
+                    Ok(boundary) if boundary.latest_sequence == 0 => Some(None),
+                    Ok(boundary) if boundary.latest_sequence == response.state.sequence_nr => {
+                        Some(Some(boundary.latest_sequence))
+                    }
+                    Ok(boundary) => {
+                        tracing::warn!(
+                            actor_key = %actor_key,
+                            actor_sequence = response.state.sequence_nr,
+                            journal_sequence = boundary.latest_sequence,
+                            "skipping passivation snapshot because actor and journal differ"
+                        );
+                        None
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            actor_key = %actor_key,
+                            error = %error,
+                            "skipping passivation snapshot because journal provenance is unavailable"
+                        );
+                        None
                     }
                 };
-                if let Some(obj) = snapshot_value.as_object_mut() {
-                    obj.remove("events");
-                }
-                if !snapshot_value.is_null()
-                    && let Ok(snapshot_bytes) = serde_json::to_vec(&snapshot_value)
-                    && let Err(e) = store
-                        .save_snapshot(&actor_key, response.state.sequence_nr, &snapshot_bytes)
-                        .await
-                {
-                    tracing::warn!(
-                        actor_key = %actor_key,
-                        seq = response.state.sequence_nr,
-                        error = %e,
-                        "failed to save snapshot during passivation"
-                    );
+                if let Some(journal_sequence) = journal_provenance {
+                    match EntityActor::serialize_snapshot_state(&response.state, journal_sequence) {
+                        Ok(snapshot_bytes) => {
+                            if let Err(e) = store
+                                .save_snapshot_if_source(
+                                    &actor_key,
+                                    response.state.sequence_nr,
+                                    &snapshot_bytes,
+                                    &response.snapshot_source,
+                                    Some(&response.key_contract),
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    actor_key = %actor_key,
+                                    seq = response.state.sequence_nr,
+                                    error = %e,
+                                    "failed to save snapshot during passivation"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                actor_key = %actor_key,
+                                error = %e,
+                                "failed to encode snapshot during passivation"
+                            );
+                        }
+                    }
                 }
             }
 
@@ -1738,40 +1357,6 @@ impl ServerState {
                     })
                 }
             }
-        }
-    }
-}
-
-/// Resolve the current status of an entity.
-///
-/// Fast path: check the `entity_state_cache` (populated on every successful dispatch).
-/// Slow path: fall back to `get_tenant_entity_state()` (async actor ask) and backfill cache.
-impl ServerState {
-    #[instrument(skip_all, fields(otel.name = "entity.resolve_entity_status", tenant = %tenant, entity_type, entity_id))]
-    pub async fn resolve_entity_status(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-    ) -> Option<String> {
-        // Fast path: check cache (LruCache::get requires &mut, so use Mutex).
-        let cache_key = format!("{tenant}:{entity_type}:{entity_id}");
-        if let Ok(mut cache) = self.entity_state_cache.lock()
-            && let Some((status, _timestamp)) = cache.get(&cache_key)
-        {
-            return Some(status.clone());
-        }
-
-        // Slow path: actor ask + backfill
-        if let Ok(response) = self
-            .get_tenant_entity_state(tenant, entity_type, entity_id)
-            .await
-        {
-            let status = response.state.status.clone();
-            self.cache_entity_status(cache_key, status.clone());
-            Some(status)
-        } else {
-            None
         }
     }
 }

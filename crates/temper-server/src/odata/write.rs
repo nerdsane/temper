@@ -32,8 +32,8 @@ use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::identity::ResolvedIdentity;
 use crate::request_context::{AgentContext, extract_agent_context, remote_parent_context};
 use crate::response::{ODataResponse, odata_error};
-use crate::state::ServerState;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
+use crate::state::{ServerState, TenantGenerationLease};
 
 type ODataWriteError = Box<axum::response::Response>;
 
@@ -223,6 +223,7 @@ async fn authorize_existing_mutation(
 pub async fn handle_odata_post(
     State(state): State<ServerState>,
     resolved_id: Option<Extension<ResolvedIdentity>>,
+    generation_lease: Option<Extension<TenantGenerationLease>>,
     headers: HeaderMap,
     axum::extract::Path(path): axum::extract::Path<String>,
     Query(query_params): Query<std::collections::BTreeMap<String, String>>,
@@ -237,10 +238,14 @@ pub async fn handle_odata_post(
         tracing::Span::current().set_parent(remote_parent);
     }
     let resolved_identity = resolved_id.map(|Extension(id)| id);
+    let generation_lease = generation_lease.map(|Extension(lease)| lease);
     // Enrich agent context with credential-resolved identity (ADR-0033).
     if let Some(ref identity) = resolved_identity {
         agent_ctx.agent_id = Some(identity.agent_instance_id.clone());
         agent_ctx.agent_type = Some(identity.agent_type_name.clone());
+    }
+    if let Some(lease) = generation_lease.as_ref() {
+        agent_ctx = agent_ctx.with_tenant_generation_lease(lease.clone());
     }
     let await_integration = query_params
         .get("await_integration")
@@ -688,6 +693,7 @@ pub async fn handle_odata_post(
                 await_integration,
                 idempotency_key.clone(),
                 resolved_identity.as_ref(),
+                generation_lease.as_ref(),
             )
             .await
         }

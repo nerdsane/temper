@@ -25,14 +25,21 @@ pub(crate) struct StableEntitySource {
 }
 
 impl StableEntitySource {
-    /// Newest durable sequence represented by this source generation.
+    /// Authoritative sequence represented by this source generation.
+    ///
+    /// A non-empty journal is a distinct generation whose coordinates start at
+    /// one, so it owns the sequence even when a retired migration snapshot used
+    /// a numerically larger coordinate. Snapshot sequence is authoritative only
+    /// while the journal is empty.
     pub(crate) fn durable_sequence(&self) -> u64 {
-        self.journal_sequence.max(
+        if self.journal_sequence > 0 {
+            self.journal_sequence
+        } else {
             self.snapshot
                 .as_ref()
                 .map(|snapshot| snapshot.sequence_nr)
-                .unwrap_or(0),
-        )
+                .unwrap_or(0)
+        }
     }
 }
 
@@ -54,16 +61,18 @@ async fn load_snapshot_strict(
         return Ok(None);
     };
     let mut state = EntityActor::build_initial_state(entity_type, entity_id, table, initial_fields);
-    if !EntityActor::apply_snapshot_bytes(&mut state, sequence_nr, &bytes) {
+    if EntityActor::apply_snapshot_bytes(&mut state, sequence_nr, &bytes).is_none() {
         return Err(ActorError::custom(format!(
             "incompatible durable snapshot schema for {entity_type}:{entity_id} at sequence {sequence_nr}"
         )));
     }
-    if state.entity_type != entity_type || state.entity_id != entity_id {
-        return Err(ActorError::custom(format!(
-            "durable snapshot identity mismatch for {entity_type}:{entity_id} at sequence {sequence_nr}"
-        )));
-    }
+    super::validate_and_normalize_snapshot_state(
+        &mut state,
+        entity_type,
+        entity_id,
+        table,
+        sequence_nr,
+    )?;
     Ok(Some((
         CapturedEntitySnapshot {
             sequence_nr,
@@ -107,36 +116,34 @@ pub(crate) async fn stable_entity_source_is_current(
 /// Recover one entity from a stable snapshot/journal source generation.
 ///
 /// A snapshot-only generation is materialized directly. Once a journal exists,
-/// its full history owns lifecycle and current deltas, while a valid snapshot's
-/// fields provide the legacy baseline for values older envelopes did not record.
-/// Both sources are re-read byte-for-byte/high-water-for-high-water before return.
-#[allow(clippy::too_many_arguments)]
+/// a journal-provenance snapshot is the exact replay baseline and only its
+/// unsnapshotted tail is applied. Legacy or terminal-hiding snapshots use the
+/// same strict full-history migration path as ordinary actor recovery. Both
+/// sources are re-read byte-for-byte/high-water-for-high-water before return.
 pub(crate) async fn recover_entity_state_from_stable_sources(
-    tenant: &str,
-    entity_type: &str,
-    entity_id: &str,
-    table: &TransitionTable,
-    store: &BoxedEventStore,
-    backend: BackendLabel,
-    initial_fields: &serde_json::Value,
-    blob_store: Option<&crate::blob_store::BlobStore>,
+    context: EntityRecoveryContext<'_>,
 ) -> Result<StableEntitySource, ActorError> {
-    let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+    let persistence_id = format!(
+        "{}:{}:{}",
+        context.tenant, context.entity_type, context.entity_id
+    );
     for _attempt in 1..=MAX_STABLE_SOURCE_ATTEMPTS {
-        let initial_boundary = store
+        let initial_boundary = context
+            .store
             .journal_boundary(&persistence_id)
             .await
             .map_err(|error| {
                 ActorError::custom(format!(
-                    "failed to read durable journal source for {entity_type}:{entity_id}: {error}"
+                    "failed to read durable journal source for {}:{}: {error}",
+                    context.entity_type, context.entity_id
                 ))
             })?;
         let loaded_snapshot = load_snapshot_strict(
-            entity_type,
-            entity_id,
-            table,
-            store,
-            initial_fields,
+            context.entity_type,
+            context.entity_id,
+            context.table,
+            context.store,
+            context.initial_fields,
             &persistence_id,
         )
         .await?;
@@ -152,20 +159,26 @@ pub(crate) async fn recover_entity_state_from_stable_sources(
                 snapshot,
             }
         } else {
-            let journal_initial_fields = snapshot_state
-                .as_ref()
-                .map(|state| state.fields.clone())
-                .unwrap_or_else(|| initial_fields.clone());
-            let state = recover_entity_state_from_journal_through(
-                tenant,
-                entity_type,
-                entity_id,
-                table,
-                store,
-                backend,
-                &journal_initial_fields,
-                blob_store,
-                initial_boundary,
+            let captured_source = CapturedReplaySource {
+                journal_boundary: initial_boundary,
+                snapshot: snapshot.clone(),
+            };
+            let mut state = EntityActor::build_initial_state(
+                context.entity_type,
+                context.entity_id,
+                context.table,
+                context.initial_fields,
+            );
+            replay_events(
+                context,
+                &mut state,
+                ReplayPolicy {
+                    strict_journal_read: true,
+                    load_snapshot: true,
+                    strict_event_decode: true,
+                    replay_full_journal: false,
+                },
+                Some(&captured_source),
             )
             .await?;
             StableEntitySource {
@@ -174,11 +187,12 @@ pub(crate) async fn recover_entity_state_from_stable_sources(
                 snapshot,
             }
         };
-        if stable_entity_source_is_current(store, &persistence_id, &source).await? {
+        if stable_entity_source_is_current(context.store, &persistence_id, &source).await? {
             return Ok(source);
         }
     }
     Err(ActorError::custom(format!(
-        "durable source generation for {entity_type}:{entity_id} did not stabilize after {MAX_STABLE_SOURCE_ATTEMPTS} attempts"
+        "durable source generation for {}:{} did not stabilize after {MAX_STABLE_SOURCE_ATTEMPTS} attempts",
+        context.entity_type, context.entity_id
     )))
 }

@@ -3,6 +3,10 @@
 //! Each function represents an explicit phase of the startup pipeline.
 //! The `run` coordinator in `mod.rs` calls these in sequence.
 
+mod hydration;
+
+pub(super) use hydration::hydrate_entities;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -11,7 +15,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use temper_platform::state::PlatformState;
-use temper_runtime::tenant::TenantId;
 use temper_server::authz::load_and_activate_tenant_policies;
 use temper_server::registry::SpecRegistry;
 use temper_server::registry_bootstrap::{
@@ -211,83 +214,15 @@ pub(super) fn load_webhooks(apps: &[(String, String)]) -> Option<Arc<WebhookDisp
     }
 }
 
-/// Phase 5: Hydrate entities from the event store for each tenant.
-pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, String)]) {
-    if state.server.storage_stack.is_none() {
-        return;
-    }
-    let eager_hydrate = std::env::var("TEMPER_EAGER_HYDRATE") // determinism-ok: read once at startup
-        .ok()
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "on" | "yes"
-            )
-        })
-        .unwrap_or(false);
-    let mut all_tenants = Vec::new();
-    for (tenant, _dir) in apps {
-        let tenant_id = TenantId::new(tenant.as_str());
-        if eager_hydrate {
-            state.server.hydrate_from_store(&tenant_id).await;
-        } else {
-            state.server.populate_index_from_store(&tenant_id).await;
-        }
-        all_tenants.push(tenant_id);
-    }
-    // In TenantRouted mode, also hydrate all registered tenants.
-    if let Some(provider) = state
-        .server
-        .storage_stack
-        .as_ref()
-        .and_then(|stack| stack.turso.clone())
-    {
-        for tenant in provider.connected_tenants().await {
-            let tenant_id = TenantId::new(&tenant);
-            if eager_hydrate {
-                state.server.hydrate_from_store(&tenant_id).await;
-            } else {
-                state.server.populate_index_from_store(&tenant_id).await;
-            }
-            all_tenants.push(tenant_id);
-        }
-    }
-
-    // Background task: backfill the declared-key index, then the broad field index,
-    // from snapshots — after the entity index is populated so pre-existing entities
-    // are covered.
-    let server = state.server.clone();
-    tokio::spawn(async move {
-        // ADR-0153: the cheap declared-key backfill first (K = 1-3 rows per entity).
-        // It keys pre-existing entities and sets the per-(tenant,type) watermark, so
-        // their point reads resolve present/absent in O(log n) instead of the
-        // full-type scan that 413s at tenant scale — independent of the heavy
-        // field-index re-scan. No-op on backends that don't co-commit keys (those
-        // never become authoritative, so a keyed miss stays scan-safe).
-        for tenant_id in &all_tenants {
-            server.populate_key_index_from_snapshots(tenant_id).await;
-        }
-        // ADR-0155: backfill the declared-vector index (parse + upsert one row per
-        // declared path per entity), so pre-existing / write-behind entities are
-        // rankable by Temper.Nearest and the per-type watermark is set.
-        for tenant_id in &all_tenants {
-            server.populate_vector_index_from_snapshots(tenant_id).await;
-        }
-        // Then the broad field index for OData filter push-down.
-        for tenant_id in all_tenants {
-            server.populate_field_index_from_snapshots(&tenant_id).await;
-        }
-    });
-}
-
 /// Phase 6: Recover Cedar policies from persistent storage.
 ///
 /// Two-pass recovery:
 /// 1. Legacy pass: reads from `tenant_policies` (flat blob per tenant) for
 ///    backward compatibility with data written before this migration.
 /// 2. New pass: reads from `policies` (per-entry rows with hash tracking) via
-///    [`load_and_activate_tenant_policies`].  The new table takes precedence for
-///    any tenant that has entries there, overwriting what the legacy pass loaded.
+///    [`load_and_activate_tenant_policies`]. Any granular generation replaces
+///    the compatibility aggregate; the aggregate is migrated only when no
+///    granular rows exist.
 pub(super) async fn recover_cedar_policies(state: &PlatformState) {
     let Some(stack) = state.server.storage_stack.as_ref() else {
         return;
@@ -341,7 +276,8 @@ pub(super) async fn recover_cedar_policies(state: &PlatformState) {
     }
 
     // New pass: load from `policies` table (per-entry rows with hash tracking).
-    // Overwrites legacy data for any tenant that has entries in the new table.
+    // Granular rows are canonical and overwrite the legacy compatibility pass;
+    // only tenants without any granular generation migrate the aggregate.
     // `load_and_activate_tenant_policies` logs via tracing on success; no-ops silently.
     // Collect registered tenants; silently skip if registry lock is poisoned (unreachable in practice).
     let tenants: Vec<String> = state
@@ -385,7 +321,7 @@ pub(super) async fn recover_secrets(state: &PlatformState) {
 
     // Collect known tenants from the registry.
     let tenants: Vec<String> = {
-        let reg = state.registry.read().unwrap(); // ci-ok: infallible lock
+        let reg = state.registry.read().expect("registry lock poisoned");
         reg.tenant_ids()
             .into_iter()
             .map(|t| t.as_str().to_string())
@@ -478,13 +414,6 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
                 temper_platform::persist_agent_verification(&turso, &tenant, &hashes, &cache).await;
             }
         }
-    }
-
-    // Auto-register operator credential for the global API key (ADR-0033).
-    // This ensures the bearer auth middleware resolves the global key as a
-    // verified "operator" identity instead of falling through as anonymous.
-    if let Some(ref api_key) = state.api_token {
-        temper_platform::bootstrap_operator_credential(state, api_key, "default").await;
     }
 }
 
@@ -628,7 +557,66 @@ mod tests {
     use temper_spec::csdl::parse_csdl;
     use temper_store_turso::TursoEventStore;
 
-    use super::bootstrap_installed_apps;
+    use super::{bootstrap_installed_apps, recover_cedar_policies};
+
+    const LEGACY_POLICY: &str = r#"permit(principal, action == Action::"legacy_only", resource);"#;
+    const GRANULAR_POLICY: &str =
+        r#"permit(principal, action == Action::"granular_only", resource);"#;
+
+    #[tokio::test]
+    async fn cedar_recovery_prefers_granular_generation_over_legacy_cache() {
+        let tenant = "bootstrap-policy-migration";
+        let bundle = get_os_app("temper-fs").expect("temper-fs app bundle should load");
+        let csdl_xml = bundle.csdl.clone().expect("temper-fs should have CSDL");
+        let csdl = parse_csdl(&csdl_xml).expect("temper-fs CSDL should parse");
+        let spec_refs: Vec<(&str, &str)> = bundle
+            .specs
+            .iter()
+            .map(|(entity_type, source)| (entity_type.as_str(), source.as_str()))
+            .collect();
+
+        let mut state = PlatformState::new(None);
+        state
+            .registry
+            .write()
+            .unwrap()
+            .register_tenant(tenant, csdl, csdl_xml, &spec_refs);
+
+        let db_path = std::env::temp_dir().join(format!(
+            "temper-bootstrap-policy-{}.db",
+            temper_runtime::scheduler::sim_uuid()
+        ));
+        let db_url = format!("file:{}", db_path.display());
+        let turso = TursoEventStore::new(&db_url, None)
+            .await
+            .expect("turso store should initialize");
+        turso
+            .upsert_tenant_policy(tenant, LEGACY_POLICY)
+            .await
+            .expect("legacy policy should persist");
+        turso
+            .save_policy(tenant, "decision:new", GRANULAR_POLICY, "test")
+            .await
+            .expect("granular policy should persist");
+        state
+            .server
+            .set_storage_stack(StorageStack::from_turso(turso.clone()));
+
+        recover_cedar_policies(&state).await;
+
+        let active = state
+            .server
+            .authz
+            .get_tenant_policy_text(tenant)
+            .expect("tenant generation should activate");
+        assert!(!active.contains("legacy_only"));
+        assert!(active.contains("granular_only"));
+        let rows = turso
+            .load_policies_for_tenant(tenant)
+            .await
+            .expect("canonical policy rows should load");
+        assert!(rows.iter().all(|row| row.policy_id != "primary"));
+    }
 
     #[tokio::test]
     async fn bootstrap_installed_apps_replays_persisted_app_when_registry_specs_are_stale() {

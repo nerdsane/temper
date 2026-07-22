@@ -152,6 +152,25 @@ impl EventStore for SnapshotRewriteDuringBackfillStore {
         EventStore::list_entity_ids_for_key_reconciliation(&self.inner, tenant, entity_type).await
     }
 
+    async fn list_key_reconciliation_page(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        after_entity_id: Option<&str>,
+        through_entity_id: &str,
+        limit: usize,
+    ) -> Result<Vec<temper_runtime::persistence::KeyReconciliationEntity>, PersistenceError> {
+        EventStore::list_key_reconciliation_page(
+            &self.inner,
+            tenant,
+            entity_type,
+            after_entity_id,
+            through_entity_id,
+            limit,
+        )
+        .await
+    }
+
     async fn backfill_entity_keys(
         &self,
         tenant: &str,
@@ -387,14 +406,16 @@ async fn actor_recovery_retries_a_same_sequence_snapshot_rewrite_before_upgrade(
         .expect("table lock")
         .clone();
     let recovered = crate::entity_actor::recover_entity_state_from_store(
-        tenant.as_str(),
-        "Order",
-        entity_id,
-        &table,
-        &store,
-        BackendLabel::Sim,
-        &serde_json::json!({}),
-        None,
+        crate::entity_actor::EntityRecoveryContext {
+            tenant: tenant.as_str(),
+            entity_type: "Order",
+            entity_id,
+            table: &table,
+            store: &store,
+            backend: BackendLabel::Sim,
+            initial_fields: &serde_json::json!({}),
+            blob_store: None,
+        },
         false,
     )
     .await

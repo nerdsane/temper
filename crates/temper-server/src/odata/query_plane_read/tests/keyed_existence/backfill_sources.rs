@@ -144,6 +144,7 @@ async fn key_backfill_prefers_journal_over_equal_sequence_snapshot_source() {
             keys: true,
             key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
             vectors: false,
+            snapshot_source: Default::default(),
         },
     )
     .await

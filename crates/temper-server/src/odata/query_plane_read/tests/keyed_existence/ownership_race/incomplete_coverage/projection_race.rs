@@ -8,7 +8,7 @@ use crate::entity_actor::EntityEvent;
 use crate::storage::{
     BackendLabel, BoxedEventStore, EntityCatalogRow, QueryPlaneStore, QueryProjectionFieldsRow,
 };
-use temper_runtime::persistence::PersistenceError;
+use temper_runtime::persistence::{PersistenceError, ProjectionSourceFence};
 
 #[derive(Clone)]
 struct TombstoneOnUpsertQueryPlane {
@@ -42,6 +42,24 @@ impl TombstoneOnUpsertQueryPlane {
             },
         }
     }
+
+    async fn source_matches(
+        &self,
+        source: ProjectionSourceFence<'_>,
+    ) -> Result<bool, PersistenceError> {
+        let boundary = EventStore::journal_boundary(&self.events, &self.persistence_id).await?;
+        if boundary.latest_sequence != source.expected_journal_sequence {
+            return Ok(false);
+        }
+        let snapshot = EventStore::load_snapshot(&self.events, &self.persistence_id).await?;
+        Ok(match (source.expected_snapshot, snapshot.as_ref()) {
+            (None, None) => true,
+            (Some(expected), Some((sequence_nr, state))) => {
+                expected.sequence_nr == *sequence_nr && expected.state == state.as_slice()
+            }
+            _ => false,
+        })
+    }
 }
 
 #[async_trait]
@@ -68,6 +86,7 @@ impl QueryPlaneStore for TombstoneOnUpsertQueryPlane {
                     keys: true,
                     key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
                     vectors: false,
+                    snapshot_source: Default::default(),
                 },
             )
             .await?;
@@ -87,6 +106,53 @@ impl QueryPlaneStore for TombstoneOnUpsertQueryPlane {
         .await
     }
 
+    async fn upsert_projection_if_source(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+        source: ProjectionSourceFence<'_>,
+    ) -> Result<bool, PersistenceError> {
+        if !self.fired.swap(true, Ordering::SeqCst) {
+            EventStore::append_with_index_rows(
+                &self.events,
+                &self.persistence_id,
+                source.expected_journal_sequence,
+                &[self.tombstone()],
+                &[],
+                &[],
+                IndexReconciliation {
+                    keys: true,
+                    key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
+                    vectors: false,
+                    snapshot_source: Default::default(),
+                },
+            )
+            .await?;
+            QueryPlaneStore::remove_projection(self.inner.as_ref(), tenant, entity_type, entity_id)
+                .await?;
+        }
+        if !self.source_matches(source).await? {
+            return Ok(false);
+        }
+        QueryPlaneStore::upsert_projection(
+            self.inner.as_ref(),
+            tenant,
+            entity_type,
+            entity_id,
+            status,
+            fields,
+            state,
+            sequence_nr,
+        )
+        .await?;
+        Ok(true)
+    }
+
     async fn remove_projection(
         &self,
         tenant: &str,
@@ -95,6 +161,52 @@ impl QueryPlaneStore for TombstoneOnUpsertQueryPlane {
     ) -> Result<(), PersistenceError> {
         QueryPlaneStore::remove_projection(self.inner.as_ref(), tenant, entity_type, entity_id)
             .await
+    }
+
+    async fn remove_projection_if_source(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        source: ProjectionSourceFence<'_>,
+    ) -> Result<bool, PersistenceError> {
+        if !self.source_matches(source).await? {
+            return Ok(false);
+        }
+        QueryPlaneStore::remove_projection(self.inner.as_ref(), tenant, entity_type, entity_id)
+            .await?;
+        Ok(true)
+    }
+
+    async fn remove_projection_if_exact(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<bool, PersistenceError> {
+        let rows = QueryPlaneStore::load_entity_catalog_rows(
+            self.inner.as_ref(),
+            tenant,
+            entity_type,
+            &[entity_id.to_string()],
+        )
+        .await?
+        .unwrap_or_default();
+        let exact = rows.first().is_some_and(|row| {
+            row.status == status
+                && &row.fields == fields
+                && row.state.as_ref() == Some(state)
+                && row.sequence_nr == sequence_nr
+        });
+        if exact {
+            QueryPlaneStore::remove_projection(self.inner.as_ref(), tenant, entity_type, entity_id)
+                .await?;
+        }
+        Ok(exact)
     }
 
     async fn query_field_index(
@@ -179,6 +291,7 @@ async fn tombstone_between_replay_and_projection_repair_is_replayed_before_retur
             keys: true,
             key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
             vectors: false,
+            snapshot_source: Default::default(),
         },
     )
     .await

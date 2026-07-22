@@ -23,8 +23,11 @@ pub(super) use config::{odata_default_page_size, odata_max_entities};
 #[cfg(test)]
 use entity_set::select_entity_ids_for_materialization;
 pub(super) use entity_set::{record_entity_set_not_found, resolve_entity_set_name};
-pub(super) use journal_materialization::durable_source_absent_for_catalog_materialization;
 use journal_materialization::materialize_entity;
+pub(super) use journal_materialization::{
+    ExactEntityMaterialization, durable_source_absent_for_catalog_materialization,
+    materialize_exact_entity,
+};
 use projection_repair::remove_deleted_projection;
 use select_projection::catalog_row_to_selected_entity_body;
 #[cfg(test)]

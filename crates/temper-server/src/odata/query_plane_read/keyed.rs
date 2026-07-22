@@ -7,7 +7,7 @@ use super::types::{
     QueryPlaneReadError, QueryPlaneReadRequest, QueryPlaneReadResult, QueryPlaneReadStrategy,
 };
 use crate::blobs::hydrate_blob_refs_for_tenant;
-use crate::entity_actor::recover_entity_state_from_stable_sources;
+use crate::entity_actor::{EntityRecoveryContext, recover_entity_state_from_stable_sources};
 use crate::odata::read_support::{
     catalog_row_to_entity_body, durable_source_absent_for_catalog_materialization,
 };
@@ -55,6 +55,8 @@ pub(super) enum FencedKeyedRead {
 async fn materialize_owner_from_durable_sources(
     request: &QueryPlaneReadRequest<'_>,
     owner: &EntityKeyLookup,
+    key_name: &str,
+    key_hash: &str,
 ) -> Result<Option<serde_json::Value>, QueryPlaneReadError> {
     let Some((store, backend)) = request.state.event_journal() else {
         return Err(QueryPlaneReadError::KeyOwnershipUnstable);
@@ -78,21 +80,21 @@ async fn materialize_owner_from_durable_sources(
     })
     .ok_or(QueryPlaneReadError::KeyOwnershipUnstable)?;
     let blob_store = request.state.blob_store_for_tenant(request.tenant).ok();
-    let source = recover_entity_state_from_stable_sources(
-        request.tenant.as_str(),
-        request.entity_type,
-        &owner.entity_id,
-        &table,
-        &store,
+    let source = recover_entity_state_from_stable_sources(EntityRecoveryContext {
+        tenant: request.tenant.as_str(),
+        entity_type: request.entity_type,
+        entity_id: &owner.entity_id,
+        table: &table,
+        store: &store,
         backend,
-        &serde_json::json!({}),
-        blob_store.as_ref(),
-    )
+        initial_fields: &serde_json::json!({}),
+        blob_store: blob_store.as_ref(),
+    })
     .await
     .map_err(|_| QueryPlaneReadError::KeyOwnershipUnstable)?;
     let durable_sequence = source.durable_sequence();
     let Some(recovered) = source.state else {
-        return materialize_catalog_only_owner(request, owner).await;
+        return materialize_catalog_only_owner(request, owner, key_name, key_hash).await;
     };
 
     // The key row and journal sequence are co-committed. Requiring equality
@@ -100,7 +102,20 @@ async fn materialize_owner_from_durable_sources(
     // stable owner row at N, and detects an index that failed to reconcile a
     // later journal append.
     if durable_sequence != owner.sequence_nr || recovered.status == "Deleted" {
-        return materialize_catalog_only_owner(request, owner).await;
+        return materialize_catalog_only_owner(request, owner, key_name, key_hash).await;
+    }
+
+    // Sequence equality is insufficient for snapshot-backed generations: an
+    // imported snapshot may replace bytes at the same aggregate sequence while
+    // a stale key row retains that number. Close the ownership proof against the
+    // recovered fields as well, so a same-sequence source rewrite cannot certify
+    // the stale indexed owner.
+    let owns_requested_key =
+        crate::key_index::derive_entity_key_rows(&table.keys, &recovered.fields, true)
+            .iter()
+            .any(|row| row.key_name == key_name && row.key_hash == key_hash);
+    if !owns_requested_key {
+        return Ok(None);
     }
 
     let mut body =
@@ -126,6 +141,8 @@ async fn materialize_owner_from_durable_sources(
 async fn materialize_catalog_only_owner(
     request: &QueryPlaneReadRequest<'_>,
     owner: &EntityKeyLookup,
+    key_name: &str,
+    key_hash: &str,
 ) -> Result<Option<serde_json::Value>, QueryPlaneReadError> {
     if !durable_source_absent_for_catalog_materialization(
         request.state,
@@ -159,7 +176,26 @@ async fn materialize_catalog_only_owner(
     if row.sequence_nr != owner.sequence_nr || row.status == "Deleted" {
         return Ok(None);
     }
+    let keys = request
+        .state
+        .declared_keys_for(request.tenant, request.entity_type);
+    let row_owns_requested_key = crate::key_index::derive_entity_key_rows(&keys, &row.fields, true)
+        .iter()
+        .any(|row| row.key_name == key_name && row.key_hash == key_hash);
+    if !row_owns_requested_key {
+        return Ok(None);
+    }
     let mut body = catalog_row_to_entity_body(request.entity_type, request.entity_set_name, row);
+    let body_owns_requested_key = body
+        .get("fields")
+        .map(|fields| crate::key_index::derive_entity_key_rows(&keys, fields, true))
+        .is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row.key_name == key_name && row.key_hash == key_hash)
+        });
+    if !body_owns_requested_key {
+        return Ok(None);
+    }
     hydrate_blob_refs_for_tenant(request.state, request.tenant, &mut body).await;
     if !durable_source_absent_for_catalog_materialization(
         request.state,
@@ -315,7 +351,15 @@ pub(super) async fn read_fenced_keyed_candidate(
 
     for _ in 0..MAX_OWNERSHIP_READ_ATTEMPTS {
         let body = match expected_owner.as_ref() {
-            Some(owner) => materialize_owner_from_durable_sources(request, owner).await?,
+            Some(owner) => {
+                materialize_owner_from_durable_sources(
+                    request,
+                    owner,
+                    &proof.key_name,
+                    &proof.key_hash,
+                )
+                .await?
+            }
             None => None,
         };
         let body_matches_generation = expected_owner.is_none() || body.is_some();

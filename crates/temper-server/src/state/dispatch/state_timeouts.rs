@@ -137,6 +137,15 @@ impl StateTimeoutTracker {
             .unwrap_or(0)
     }
 
+    fn clear_if_current(&self, key: &EntityKey, expected: u64) -> bool {
+        let mut seqs = self.seqs.lock().expect("state_timeout tracker poisoned");
+        if seqs.get(key).copied() != Some(expected) {
+            return false;
+        }
+        seqs.remove(key);
+        true
+    }
+
     /// Increment the pending-timer count for `entity_type`. Called at arm.
     pub fn inc_pending(&self, entity_type: &str) {
         let mut map = self
@@ -221,7 +230,7 @@ impl crate::state::ServerState {
             .back()
             .map(|e| e.from_status.clone())
             .unwrap_or_default();
-        let state_changed = pre_state != post_state;
+        let state_changed = ctx.action != "__RuntimeGenerationChanged" && pre_state != post_state;
         let key = EntityKey::new(ctx.tenant, ctx.entity_type, ctx.entity_id);
 
         // 1. Invalidate any outstanding timer for the prior state.
@@ -318,7 +327,10 @@ impl crate::state::ServerState {
             let entity_id = ctx.entity_id.to_string();
             let target_state = st.state.clone();
             let target_action = st.on_timeout.clone();
-            let agent_ctx = ctx.agent_ctx.clone();
+            let mut agent_ctx = ctx.agent_ctx.clone();
+            let armed_generation = agent_ctx
+                .detach_tenant_generation_lease()
+                .unwrap_or_else(|| self.tenant_generation_version(ctx.tenant));
             let key_for_task = key.clone();
             let entity_type_for_dec = ctx.entity_type.to_string();
             let workflow_root_entity_type = agent_ctx
@@ -365,11 +377,51 @@ impl crate::state::ServerState {
                 );
 
                 async move {
+                    let Some(agent_ctx) = state
+                        .activate_immediate_tenant_work(&tenant, agent_ctx)
+                        .await
+                    else {
+                        tracker.dec_pending(&entity_type_for_dec);
+                        tracing::error!(
+                            tenant = %tenant,
+                            entity_type = %entity_type,
+                            entity_id = %entity_id,
+                            target_action = %target_action,
+                            "state timeout could not enter a complete runtime generation"
+                        );
+                        return;
+                    };
                     // Sequence-based cancellation check. A newer arm (or a
                     // state change that bumped the seq on exit) renders
                     // this timer a no-op.
                     if tracker.current(&key_for_task) != armed_seq {
                         tracker.dec_pending(&entity_type_for_dec);
+                        return;
+                    }
+
+                    if state.tenant_generation_version(&tenant) != armed_generation {
+                        if !tracker.clear_if_current(&key_for_task, armed_seq) {
+                            tracker.dec_pending(&entity_type_for_dec);
+                            return;
+                        }
+                        tracker.dec_pending(&entity_type_for_dec);
+                        if let Ok(current) = state
+                            .get_tenant_entity_state(&tenant, &entity_type, &entity_id)
+                            .await
+                        {
+                            let refresh_params = serde_json::json!({});
+                            let refresh_ctx = PostDispatchContext {
+                                tenant: &tenant,
+                                entity_type: &entity_type,
+                                entity_id: &entity_id,
+                                action: "__RuntimeGenerationChanged",
+                                agent_ctx: &agent_ctx,
+                                dispatch_idempotency_key: None,
+                                action_params: &refresh_params,
+                                await_integration: false,
+                            };
+                            state.arm_state_timeouts_if_needed(&refresh_ctx, &current);
+                        }
                         return;
                     }
 
@@ -1196,5 +1248,71 @@ queue_timeout_seconds = 30
                 "AssignAgent must be rejected from InProgress (state machine integrity check)"
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn state_timeout_rearms_under_the_complete_replacement_generation() {
+        let csdl = parse_csdl(TICKET_CSDL).expect("CSDL parses");
+        let mut registry = SpecRegistry::new();
+        registry.register_tenant(
+            "default",
+            csdl,
+            TICKET_CSDL.to_string(),
+            &[("Ticket", TICKET_WITH_TIMEOUT_IOA)],
+        );
+        let state = ServerState::from_registry(
+            ActorSystem::new("state-timeout-generation-rearm"),
+            registry,
+        );
+        let tenant = temper_runtime::tenant::TenantId::default();
+        let agent_ctx = AgentContext::for_service("timeout-scheduler");
+        let response = state
+            .get_or_create_tenant_entity(
+                &tenant,
+                "Ticket",
+                "rearmed-timeout",
+                serde_json::json!({}),
+            )
+            .await
+            .expect("create ticket");
+        let ctx = PostDispatchContext {
+            tenant: &tenant,
+            entity_type: "Ticket",
+            entity_id: "rearmed-timeout",
+            action: "__Created",
+            agent_ctx: &agent_ctx,
+            dispatch_idempotency_key: None,
+            action_params: &serde_json::json!({}),
+            await_integration: false,
+        };
+        state.arm_state_timeouts_if_needed(&ctx, &response);
+
+        let mut publication = state
+            .begin_spec_publication(&tenant)
+            .await
+            .expect("acquire publication writer");
+        let intent = ServerState::spec_publication_intent(
+            "state-timeout-generation-test",
+            [("ticket", TICKET_WITH_TIMEOUT_IOA.as_bytes())],
+        );
+        state
+            .arm_spec_publication(&mut publication, &tenant, &intent)
+            .expect("arm replacement generation");
+        state
+            .complete_spec_publication(&mut publication, &tenant)
+            .expect("publish replacement generation");
+        drop(publication);
+
+        // A snapshot without retained entry history conservatively receives a
+        // fresh one-second budget after the generation-aware rearm.
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let after = state
+            .get_tenant_entity_state(&tenant, "Ticket", "rearmed-timeout")
+            .await
+            .expect("load ticket after generation-aware timeout rearm");
+        assert_eq!(
+            after.state.status, "InProgress",
+            "the durable timeout obligation must rearm under the replacement generation instead of being dropped"
+        );
     }
 }

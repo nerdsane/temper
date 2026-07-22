@@ -4,10 +4,12 @@
 //! recovery accelerators, so this queue moves their writes off the actor hot
 //! path while preserving the latest accepted sequence per persistence stream.
 
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use temper_runtime::persistence::{PersistenceError, SnapshotSourceFence};
 use tokio::sync::Notify;
 use tracing::Instrument;
 
@@ -21,7 +23,39 @@ struct QueuedSnapshotWrite {
     persistence_id: String,
     sequence_nr: u64,
     snapshot: Vec<u8>,
+    source: SnapshotSourceFence,
+    key_contract: Option<String>,
     enqueued_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SnapshotWriteBoundary {
+    activation_epoch: u64,
+    sequence_nr: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AppliedSnapshotWrite {
+    boundary: SnapshotWriteBoundary,
+    snapshot_sha256: [u8; 32],
+}
+
+fn activation_epoch(key_contract: Option<&str>) -> u64 {
+    key_contract
+        .and_then(|contract| temper_runtime::persistence::decode_activated_key_contract(contract).1)
+        .unwrap_or(0)
+}
+
+fn boundary_precedes(
+    existing_contract: Option<&str>,
+    existing_sequence: u64,
+    incoming_contract: Option<&str>,
+    incoming_sequence: u64,
+) -> bool {
+    let existing_epoch = activation_epoch(existing_contract);
+    let incoming_epoch = activation_epoch(incoming_contract);
+    existing_epoch < incoming_epoch
+        || (existing_epoch == incoming_epoch && existing_sequence < incoming_sequence)
 }
 
 #[derive(Debug, Default)]
@@ -41,7 +75,7 @@ pub(crate) enum SnapshotEnqueueOutcome {
 pub(crate) struct SnapshotWriteQueue {
     store: BoxedEventStore,
     pending: Arc<Mutex<PendingSnapshotWrites>>,
-    applied_sequences: Arc<Mutex<BTreeMap<String, u64>>>,
+    applied_snapshots: Arc<Mutex<BTreeMap<String, AppliedSnapshotWrite>>>,
     notify: Arc<Notify>,
     capacity: usize,
     drain_batch: usize,
@@ -52,7 +86,7 @@ impl SnapshotWriteQueue {
         let queue = Arc::new(Self {
             store,
             pending: Arc::new(Mutex::new(PendingSnapshotWrites::default())),
-            applied_sequences: Arc::new(Mutex::new(BTreeMap::new())),
+            applied_snapshots: Arc::new(Mutex::new(BTreeMap::new())),
             notify: Arc::new(Notify::new()),
             capacity: snapshot_queue_capacity(),
             drain_batch: snapshot_drain_batch(),
@@ -66,7 +100,7 @@ impl SnapshotWriteQueue {
         Self {
             store,
             pending: Arc::new(Mutex::new(PendingSnapshotWrites::default())),
-            applied_sequences: Arc::new(Mutex::new(BTreeMap::new())),
+            applied_snapshots: Arc::new(Mutex::new(BTreeMap::new())),
             notify: Arc::new(Notify::new()),
             capacity,
             drain_batch,
@@ -78,10 +112,29 @@ impl SnapshotWriteQueue {
         persistence_id: String,
         sequence_nr: u64,
         snapshot: Vec<u8>,
+        source: SnapshotSourceFence,
+        key_contract: Option<String>,
     ) -> SnapshotEnqueueOutcome {
+        if matches!(
+            &source,
+            SnapshotSourceFence::Exact {
+                sequence_nr: source_sequence,
+                ..
+            } if *source_sequence > sequence_nr
+        ) {
+            crate::runtime_metrics::record_snapshot_write_stale_skipped();
+            return SnapshotEnqueueOutcome::StaleSkipped;
+        }
         let mut pending = self.pending.lock().expect("snapshot queue mutex poisoned");
         let existing = pending.writes.get(&persistence_id);
-        if existing.is_some_and(|existing| existing.sequence_nr >= sequence_nr) {
+        if existing.is_some_and(|existing| {
+            !boundary_precedes(
+                existing.key_contract.as_deref(),
+                existing.sequence_nr,
+                key_contract.as_deref(),
+                sequence_nr,
+            )
+        }) {
             crate::runtime_metrics::record_snapshot_write_stale_skipped();
             return SnapshotEnqueueOutcome::StaleSkipped;
         }
@@ -106,6 +159,8 @@ impl SnapshotWriteQueue {
                 persistence_id,
                 sequence_nr,
                 snapshot,
+                source,
+                key_contract,
                 enqueued_at: Instant::now(),
             },
         );
@@ -116,20 +171,72 @@ impl SnapshotWriteQueue {
         outcome
     }
 
+    #[cfg(test)]
     pub(crate) fn applied_sequence(&self, persistence_id: &str) -> Option<u64> {
-        self.applied_sequences
+        self.applied_snapshots
             .lock()
             .expect("snapshot applied sequence mutex poisoned")
             .get(persistence_id)
-            .copied()
+            .map(|applied| applied.boundary.sequence_nr)
     }
 
+    pub(crate) fn applied_sequence_for_contract(
+        &self,
+        persistence_id: &str,
+        key_contract: Option<&str>,
+    ) -> Option<u64> {
+        let incoming_epoch = activation_epoch(key_contract);
+        self.applied_snapshots
+            .lock()
+            .expect("snapshot applied sequence mutex poisoned")
+            .get(persistence_id)
+            .filter(|applied| applied.boundary.activation_epoch >= incoming_epoch)
+            .map(|applied| applied.boundary.sequence_nr)
+    }
+
+    pub(crate) async fn applied_source_for_contract(
+        &self,
+        persistence_id: &str,
+        key_contract: Option<&str>,
+    ) -> Option<SnapshotSourceFence> {
+        let incoming_epoch = activation_epoch(key_contract);
+        let applied = self
+            .applied_snapshots
+            .lock()
+            .expect("snapshot applied source mutex poisoned")
+            .get(persistence_id)
+            .filter(|applied| applied.boundary.activation_epoch == incoming_epoch)
+            .cloned()?;
+        let (sequence_nr, state) = self.store.load_snapshot(persistence_id).await.ok()??;
+        let digest: [u8; 32] = Sha256::digest(&state).into();
+        if sequence_nr != applied.boundary.sequence_nr || digest != applied.snapshot_sha256 {
+            return None;
+        }
+        Some(SnapshotSourceFence::Exact { sequence_nr, state })
+    }
+
+    #[cfg(test)]
     pub(crate) fn pending_sequence(&self, persistence_id: &str) -> Option<u64> {
         self.pending
             .lock()
             .expect("snapshot queue mutex poisoned")
             .writes
             .get(persistence_id)
+            .map(|write| write.sequence_nr)
+    }
+
+    pub(crate) fn pending_sequence_for_contract(
+        &self,
+        persistence_id: &str,
+        key_contract: Option<&str>,
+    ) -> Option<u64> {
+        let incoming_epoch = activation_epoch(key_contract);
+        self.pending
+            .lock()
+            .expect("snapshot queue mutex poisoned")
+            .writes
+            .get(persistence_id)
+            .filter(|write| activation_epoch(write.key_contract.as_deref()) >= incoming_epoch)
             .map(|write| write.sequence_nr)
     }
 
@@ -167,7 +274,7 @@ impl SnapshotWriteQueue {
         writes
     }
 
-    async fn apply(&self, write: QueuedSnapshotWrite) {
+    async fn apply(&self, mut write: QueuedSnapshotWrite) {
         let span = tracing::info_span!(
             "dispatch.phase.snapshot.queued",
             otel.name = "dispatch.phase.snapshot.queued",
@@ -181,9 +288,38 @@ impl SnapshotWriteQueue {
             crate::runtime_metrics::record_snapshot_write_queue_wait(
                 started_at.duration_since(write.enqueued_at),
             );
+            if let Some(applied_source) = self
+                .applied_source_for_contract(&write.persistence_id, write.key_contract.as_deref())
+                .await
+            {
+                let SnapshotSourceFence::Exact {
+                    sequence_nr: applied_sequence,
+                    ..
+                } = &applied_source
+                else {
+                    unreachable!("an applied snapshot source is always exact");
+                };
+                if *applied_sequence > write.sequence_nr {
+                    crate::runtime_metrics::record_snapshot_write_stale_skipped();
+                    return;
+                }
+                let supplied_sequence = match &write.source {
+                    SnapshotSourceFence::Exact { sequence_nr, .. } => Some(*sequence_nr),
+                    SnapshotSourceFence::Absent | SnapshotSourceFence::Unchecked => None,
+                };
+                if supplied_sequence.is_none_or(|sequence_nr| *applied_sequence >= sequence_nr) {
+                    write.source = applied_source;
+                }
+            }
             let result = self
                 .store
-                .save_snapshot(&write.persistence_id, write.sequence_nr, &write.snapshot)
+                .save_snapshot_if_source(
+                    &write.persistence_id,
+                    write.sequence_nr,
+                    &write.snapshot,
+                    &write.source,
+                    write.key_contract.as_deref(),
+                )
                 .await;
             let result_label = if result.is_ok() { "ok" } else { "error" };
             crate::runtime_metrics::record_snapshot_write_duration(
@@ -200,7 +336,31 @@ impl SnapshotWriteQueue {
                     crate::runtime_metrics::record_snapshot_write_applied_sequence(
                         write.sequence_nr,
                     );
-                    self.record_applied_sequence(&write.persistence_id, write.sequence_nr);
+                    self.record_applied_snapshot(
+                        &write.persistence_id,
+                        write.sequence_nr,
+                        &write.snapshot,
+                        write.key_contract.as_deref(),
+                    );
+                }
+                Err(PersistenceError::SnapshotGenerationChanged) => {
+                    crate::runtime_metrics::record_snapshot_write_stale_skipped();
+                    tracing::warn!(
+                        persistence_id = %write.persistence_id,
+                        sequence_nr = write.sequence_nr,
+                        "discarding queued snapshot because its source generation changed"
+                    );
+                }
+                Err(
+                    PersistenceError::KeyContractNotActive { .. }
+                    | PersistenceError::KeyContractActivationStale { .. },
+                ) => {
+                    crate::runtime_metrics::record_snapshot_write_stale_skipped();
+                    tracing::warn!(
+                        persistence_id = %write.persistence_id,
+                        sequence_nr = write.sequence_nr,
+                        "discarding queued snapshot because its key contract is stale"
+                    );
                 }
                 Err(e) => {
                     crate::runtime_metrics::record_snapshot_write_error();
@@ -219,15 +379,43 @@ impl SnapshotWriteQueue {
         .await;
     }
 
-    fn record_applied_sequence(&self, persistence_id: &str, sequence_nr: u64) {
+    fn record_applied_snapshot(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+        key_contract: Option<&str>,
+    ) {
         let mut applied = self
-            .applied_sequences
+            .applied_snapshots
             .lock()
             .expect("snapshot applied sequence mutex poisoned");
-        let entry = applied.entry(persistence_id.to_string()).or_insert(0);
-        if sequence_nr > *entry {
-            *entry = sequence_nr;
+        let incoming = AppliedSnapshotWrite {
+            boundary: SnapshotWriteBoundary {
+                activation_epoch: activation_epoch(key_contract),
+                sequence_nr,
+            },
+            snapshot_sha256: Sha256::digest(snapshot).into(),
+        };
+        let entry = applied
+            .entry(persistence_id.to_string())
+            .or_insert_with(|| incoming.clone());
+        if entry.boundary.activation_epoch < incoming.boundary.activation_epoch
+            || (entry.boundary.activation_epoch == incoming.boundary.activation_epoch
+                && entry.boundary.sequence_nr < incoming.boundary.sequence_nr)
+        {
+            *entry = incoming;
         }
+    }
+
+    #[cfg(test)]
+    fn record_applied_sequence(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        key_contract: Option<&str>,
+    ) {
+        self.record_applied_snapshot(persistence_id, sequence_nr, &[], key_contract);
     }
 
     fn requeue_failed_write(&self, write: QueuedSnapshotWrite) {
@@ -235,7 +423,14 @@ impl SnapshotWriteQueue {
         if pending
             .writes
             .get(&write.persistence_id)
-            .is_some_and(|existing| existing.sequence_nr >= write.sequence_nr)
+            .is_some_and(|existing| {
+                !boundary_precedes(
+                    existing.key_contract.as_deref(),
+                    existing.sequence_nr,
+                    write.key_contract.as_deref(),
+                    write.sequence_nr,
+                )
+            })
         {
             crate::runtime_metrics::record_snapshot_write_queue_depth(pending.writes.len() as u64);
             return;
@@ -264,153 +459,5 @@ fn snapshot_drain_batch() -> usize {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use temper_runtime::persistence::{
-        EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
-        PersistenceError,
-    };
-
-    #[derive(Default)]
-    struct RecordingEventStore {
-        saves: AtomicUsize,
-    }
-
-    impl EventStore for RecordingEventStore {
-        async fn append(
-            &self,
-            _persistence_id: &str,
-            expected_sequence: u64,
-            events: &[PersistenceEnvelope],
-        ) -> Result<u64, PersistenceError> {
-            Ok(expected_sequence + events.len() as u64)
-        }
-
-        async fn append_batch(
-            &self,
-            appends: &[PersistenceAppend],
-        ) -> Result<Vec<PersistenceAppendResult>, PersistenceError> {
-            Ok(appends
-                .iter()
-                .map(|append| PersistenceAppendResult {
-                    persistence_id: append.persistence_id.clone(),
-                    sequence_nr: append.expected_sequence + append.events.len() as u64,
-                })
-                .collect())
-        }
-
-        async fn read_events(
-            &self,
-            _persistence_id: &str,
-            _from_sequence: u64,
-        ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
-            Ok(Vec::new())
-        }
-
-        async fn read_events_page(
-            &self,
-            _persistence_id: &str,
-            _from_sequence: u64,
-            _through_sequence: u64,
-            _limit: usize,
-        ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
-            Ok(Vec::new())
-        }
-
-        async fn save_snapshot(
-            &self,
-            _persistence_id: &str,
-            _sequence_nr: u64,
-            _snapshot: &[u8],
-        ) -> Result<(), PersistenceError> {
-            self.saves.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        async fn load_snapshot(
-            &self,
-            _persistence_id: &str,
-        ) -> Result<Option<(u64, Vec<u8>)>, PersistenceError> {
-            Ok(None)
-        }
-
-        async fn list_entity_ids(
-            &self,
-            _tenant: &str,
-        ) -> Result<Vec<(String, String)>, PersistenceError> {
-            Ok(Vec::new())
-        }
-
-        async fn list_entity_ids_by_type(
-            &self,
-            _tenant: &str,
-            _entity_type: &str,
-        ) -> Result<Vec<String>, PersistenceError> {
-            Ok(Vec::new())
-        }
-    }
-
-    #[test]
-    fn enqueue_coalesces_newer_snapshot_for_same_stream() {
-        let queue = SnapshotWriteQueue::new_for_test(
-            BoxedEventStore::new(RecordingEventStore::default()),
-            10,
-            10,
-        );
-
-        assert_eq!(
-            queue.enqueue("tenant:Session:s-1".to_string(), 1, vec![1]),
-            SnapshotEnqueueOutcome::Enqueued
-        );
-        assert_eq!(
-            queue.enqueue("tenant:Session:s-1".to_string(), 2, vec![2]),
-            SnapshotEnqueueOutcome::Coalesced
-        );
-
-        let writes = queue.take_batch();
-        assert_eq!(writes.len(), 1);
-        assert_eq!(writes[0].sequence_nr, 2);
-        assert_eq!(writes[0].snapshot, vec![2]);
-    }
-
-    #[test]
-    fn enqueue_skips_stale_snapshot_before_store_access() {
-        let queue = SnapshotWriteQueue::new_for_test(
-            BoxedEventStore::new(RecordingEventStore::default()),
-            10,
-            10,
-        );
-
-        assert_eq!(
-            queue.enqueue("tenant:Session:s-1".to_string(), 3, vec![3]),
-            SnapshotEnqueueOutcome::Enqueued
-        );
-        assert_eq!(
-            queue.enqueue("tenant:Session:s-1".to_string(), 2, vec![2]),
-            SnapshotEnqueueOutcome::StaleSkipped
-        );
-
-        let writes = queue.take_batch();
-        assert_eq!(writes.len(), 1);
-        assert_eq!(writes[0].sequence_nr, 3);
-    }
-
-    #[test]
-    fn enqueue_rejects_new_stream_when_capacity_is_exhausted() {
-        let queue = SnapshotWriteQueue::new_for_test(
-            BoxedEventStore::new(RecordingEventStore::default()),
-            1,
-            10,
-        );
-
-        assert_eq!(
-            queue.enqueue("tenant:Session:s-1".to_string(), 1, vec![1]),
-            SnapshotEnqueueOutcome::Enqueued
-        );
-        assert_eq!(
-            queue.enqueue("tenant:Session:s-2".to_string(), 1, vec![1]),
-            SnapshotEnqueueOutcome::Full
-        );
-    }
-}
+#[path = "snapshot_queue_test.rs"]
+mod tests;

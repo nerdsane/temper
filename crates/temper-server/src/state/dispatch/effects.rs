@@ -520,7 +520,8 @@ impl crate::state::ServerState {
             let et = entity_type.to_string();
             let eid = entity_id.to_string();
             let action = sched.action.clone();
-            let ctx = agent_ctx.clone();
+            let mut ctx = agent_ctx.clone();
+            ctx.detach_tenant_generation_lease();
             let delay = std::time::Duration::from_secs(sched.delay_seconds);
             let workflow_root_entity_type = ctx
                 .workflow_root_entity_type
@@ -547,6 +548,16 @@ impl crate::state::ServerState {
                 // determinism-ok: timer delivery is a background side-effect
                 async move {
                     tokio::time::sleep(delay).await; // determinism-ok: scheduled delay
+                    let Some(ctx) = state.activate_immediate_tenant_work(&t, ctx).await else {
+                        tracing::error!(
+                            tenant = %t,
+                            entity_type = %et,
+                            entity_id = %eid,
+                            action = %action,
+                            "scheduled action could not enter a complete runtime generation"
+                        );
+                        return;
+                    };
                     let _ = state
                         .dispatch_tenant_action(
                             &t,
@@ -727,13 +738,16 @@ impl crate::state::ServerState {
             && let Some(handler) = &self.custom_effect_handler
         {
             for effect_name in &response.custom_effects {
-                if let Err(e) = handler.handle(
-                    effect_name,
-                    ctx.entity_type,
-                    ctx.entity_id,
-                    &response.state.fields,
-                    self,
-                ) {
+                if let Err(e) = handler
+                    .handle(
+                        effect_name,
+                        ctx.entity_type,
+                        ctx.entity_id,
+                        &response.state.fields,
+                        self,
+                    )
+                    .await
+                {
                     tracing::error!(
                         effect = %effect_name,
                         entity_type = ctx.entity_type,
@@ -741,6 +755,17 @@ impl crate::state::ServerState {
                         error = %e,
                         "custom effect handler failed"
                     );
+                    return EntityResponse {
+                        success: false,
+                        state: response.state.clone(),
+                        error: Some(format!(
+                            "custom effect '{effect_name}' failed after the action commit: {e}"
+                        )),
+                        custom_effects: response.custom_effects.clone(),
+                        scheduled_actions: response.scheduled_actions.clone(),
+                        spawn_requests: response.spawn_requests.clone(),
+                        spec_governed: response.spec_governed,
+                    };
                 }
             }
         }

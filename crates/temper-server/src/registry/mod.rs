@@ -138,7 +138,10 @@ impl SpecRegistry {
     /// submission are preserved.  This is the correct mode for
     /// `load-inline` (agent `submit_specs`), where the agent only submits
     /// its own entities and should not wipe platform types.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "atomic publication must receive the complete registry generation payload"
+    )]
     #[instrument(skip_all, fields(otel.name = "registry.try_register_tenant_with_reactions_and_constraints"))]
     pub fn try_register_tenant_with_reactions_and_constraints(
         &mut self,
@@ -149,6 +152,34 @@ impl SpecRegistry {
         reactions: Vec<ReactionRule>,
         cross_invariants_source: Option<String>,
         merge: bool,
+    ) -> Result<(), RegistryError> {
+        self.try_register_tenant_with_reactions_constraints_and_key_epochs(
+            tenant,
+            csdl,
+            csdl_xml,
+            ioa_sources,
+            reactions,
+            cross_invariants_source,
+            merge,
+            &BTreeMap::new(),
+        )
+    }
+
+    /// Register specs whose declared-key contracts were already fenced in
+    /// durable storage, attaching each monotonic activation epoch to the table
+    /// before it becomes visible to actors.
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(skip_all, fields(otel.name = "registry.try_register_tenant_with_key_epochs"))]
+    pub fn try_register_tenant_with_reactions_constraints_and_key_epochs(
+        &mut self,
+        tenant: impl Into<TenantId>,
+        csdl: CsdlDocument,
+        csdl_xml: String,
+        ioa_sources: &[(&str, &str)],
+        reactions: Vec<ReactionRule>,
+        cross_invariants_source: Option<String>,
+        merge: bool,
+        key_contract_activation_epochs: &BTreeMap<String, u64>,
     ) -> Result<(), RegistryError> {
         let tenant = tenant.into();
         let tenant_name = tenant.to_string();
@@ -179,7 +210,69 @@ impl SpecRegistry {
             }
         }
 
+        // Parse and compile the full submission before mutating live tenant
+        // metadata. This prevents partial registration and leaves no fallible
+        // source work after durable key-contract activation.
+        let mut compiled_specs = Vec::with_capacity(ioa_sources.len());
+        for (entity_type, ioa_source) in ioa_sources {
+            let automaton =
+                automaton::parse_automaton(ioa_source).map_err(|e| RegistryError::IoaParse {
+                    tenant: tenant_name.clone(),
+                    entity_type: (*entity_type).to_string(),
+                    source: e.to_string(),
+                })?;
+            let mut table = TransitionTable::from_automaton(&automaton);
+            table.key_contract_activation_epoch = key_contract_activation_epochs
+                .get(*entity_type)
+                .copied()
+                .unwrap_or(0);
+            let integrations = automaton.integrations.clone();
+            compiled_specs.push((
+                (*entity_type).to_string(),
+                (*ioa_source).to_string(),
+                automaton,
+                integrations,
+                table,
+            ));
+        }
+
         if let Some(existing_config) = self.tenants.get_mut(&tenant) {
+            let tenant_has_activated_contracts = existing_config
+                .entities
+                .values()
+                .any(|spec| spec.table().key_contract_activation_epoch > 0);
+            for (entity_type, _, _, _, table) in &compiled_specs {
+                if key_contract_activation_epochs.contains_key(entity_type) {
+                    continue;
+                }
+                let attempted_signature = crate::key_index::declared_key_set_signature(&table.keys);
+                match existing_config.entities.get(entity_type) {
+                    Some(existing)
+                        if existing.table().key_contract_activation_epoch > 0
+                            && crate::key_index::declared_key_set_signature(
+                                &existing.table().keys,
+                            ) != attempted_signature =>
+                    {
+                        return Err(RegistryError::KeyContractActivationRequired {
+                            tenant: tenant_name.clone(),
+                            entity_type: entity_type.clone(),
+                            current_signature: Some(crate::key_index::declared_key_set_signature(
+                                &existing.table().keys,
+                            )),
+                            attempted_signature,
+                        });
+                    }
+                    None if tenant_has_activated_contracts => {
+                        return Err(RegistryError::KeyContractActivationRequired {
+                            tenant: tenant_name.clone(),
+                            entity_type: entity_type.clone(),
+                            current_signature: None,
+                            attempted_signature,
+                        });
+                    }
+                    _ => {}
+                }
+            }
             // Hot-reload path: swap tables on existing entities, add new ones.
             if merge {
                 // Merge mode: combine incoming CSDL/entity-set-map with existing.
@@ -211,18 +304,12 @@ impl SpecRegistry {
                 existing_config.cross_invariants_source = cross_invariants_source;
             }
 
-            for (entity_type, ioa_source) in ioa_sources {
-                let automaton = automaton::parse_automaton(ioa_source).map_err(|e| {
-                    RegistryError::IoaParse {
-                        tenant: tenant_name.clone(),
-                        entity_type: (*entity_type).to_string(),
-                        source: e.to_string(),
+            for (entity_type, ioa_source, automaton, integrations, mut table) in compiled_specs {
+                if let Some(existing_spec) = existing_config.entities.get_mut(&entity_type) {
+                    if !key_contract_activation_epochs.contains_key(&entity_type) {
+                        table.key_contract_activation_epoch =
+                            existing_spec.table().key_contract_activation_epoch;
                     }
-                })?;
-                let table = TransitionTable::from_automaton(&automaton);
-                let integrations = automaton.integrations.clone();
-
-                if let Some(existing_spec) = existing_config.entities.get_mut(*entity_type) {
                     // Hot-swap: write new table into the SAME RwLock that actors hold.
                     let result = existing_spec.swap_controller().swap(table);
                     tracing::info!(
@@ -233,16 +320,16 @@ impl SpecRegistry {
                     // Update metadata on the existing spec.
                     existing_spec.automaton = automaton;
                     existing_spec.integrations = integrations;
-                    existing_spec.ioa_source = ioa_source.to_string();
+                    existing_spec.ioa_source = ioa_source;
                 } else {
                     // New entity type — create fresh EntitySpec.
                     existing_config.entities.insert(
-                        entity_type.to_string(),
+                        entity_type,
                         EntitySpec {
                             automaton,
                             integrations,
                             swap: Arc::new(SwapController::new(table)),
-                            ioa_source: ioa_source.to_string(),
+                            ioa_source,
                         },
                     );
                 }
@@ -278,23 +365,14 @@ impl SpecRegistry {
         } else {
             // First registration: create new TenantConfig.
             let mut entities = BTreeMap::new();
-            for (entity_type, ioa_source) in ioa_sources {
-                let automaton = automaton::parse_automaton(ioa_source).map_err(|e| {
-                    RegistryError::IoaParse {
-                        tenant: tenant_name.clone(),
-                        entity_type: (*entity_type).to_string(),
-                        source: e.to_string(),
-                    }
-                })?;
-                let table = TransitionTable::from_automaton(&automaton);
-                let integrations = automaton.integrations.clone();
+            for (entity_type, ioa_source, automaton, integrations, table) in compiled_specs {
                 entities.insert(
-                    entity_type.to_string(),
+                    entity_type,
                     EntitySpec {
                         automaton,
                         integrations,
                         swap: Arc::new(SwapController::new(table)),
-                        ioa_source: ioa_source.to_string(),
+                        ioa_source,
                     },
                 );
             }

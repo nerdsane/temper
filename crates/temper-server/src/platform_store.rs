@@ -8,6 +8,12 @@
 
 use std::collections::BTreeMap;
 
+#[cfg(feature = "sim")]
+mod sim;
+
+#[cfg(feature = "sim")]
+pub use sim::*;
+
 // ---------------------------------------------------------------------------
 // Row / update types
 // ---------------------------------------------------------------------------
@@ -27,6 +33,87 @@ pub struct SpecRow {
     pub content_hash: String,
     /// Whether this spec has been committed (WAL-style commit flag).
     pub committed: bool,
+}
+
+/// One spec row in an atomic durable publication.
+#[derive(Debug, Clone, Copy)]
+pub struct SpecPublication<'a> {
+    /// Entity type owning this specification.
+    pub entity_type: &'a str,
+    /// IOA source published for the entity type.
+    pub ioa_source: &'a str,
+    /// Tenant CSDL generation paired with this publication.
+    pub csdl_xml: &'a str,
+    /// Stable digest of the IOA source.
+    pub content_hash: &'a str,
+}
+
+/// Durable omission semantics for an atomic spec publication.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum SpecPublicationMode {
+    /// Upsert submitted rows and preserve every omitted durable spec.
+    Merge,
+    /// Make the submitted entity types the tenant's complete durable set.
+    Replace,
+}
+
+/// Tenant-constraint mutation included in an atomic spec publication.
+#[derive(Debug, Clone, Copy)]
+pub enum TenantConstraintsPublication<'a> {
+    /// Leave the durable tenant constraint row unchanged.
+    Preserve,
+    /// Replace the row, or delete it when the payload is `None`.
+    Replace(Option<&'a str>),
+}
+
+/// Tenant Cedar-policy mutation included in an atomic spec publication.
+#[derive(Debug, Clone, Copy)]
+pub enum TenantPolicyPublication<'a> {
+    /// Leave the durable tenant policy unchanged.
+    Preserve,
+    /// Replace the durable tenant policy with this complete policy set.
+    Replace(&'a str),
+}
+
+/// OS-app metadata committed in the same transaction as its spec generation.
+#[derive(Debug, Clone, Copy)]
+pub struct OsAppPublication<'a> {
+    /// Complete target digest metadata and in-progress publication context.
+    pub record: &'a InstalledAppRecord,
+    /// Policy owner whose complete row set is replaced by this app generation.
+    pub policy_owner: Option<&'a str>,
+    /// Granular policy rows committed beside the aggregate tenant policy.
+    pub policy_entries: &'a [PolicyEntryPublication<'a>],
+}
+
+/// Complete granular Cedar row generation replaced atomically with specs.
+#[derive(Debug, Clone, Copy)]
+pub struct PolicyGenerationPublication<'a> {
+    /// Stable owner whose prior row set is replaced.
+    pub policy_owner: &'a str,
+    /// Complete next row set owned by `policy_owner`.
+    pub policy_entries: &'a [PolicyEntryPublication<'a>],
+}
+
+/// One granular Cedar policy row in an atomic OS-app publication.
+#[derive(Debug, Clone, Copy)]
+pub struct PolicyEntryPublication<'a> {
+    pub policy_id: &'a str,
+    pub cedar_text: &'a str,
+    pub created_by: &'a str,
+}
+
+/// WASM module bytes committed in the same durable generation as specs.
+#[derive(Debug, Clone, Copy)]
+pub struct WasmPublication<'a> {
+    /// Tenant-local module name.
+    pub module_name: &'a str,
+    /// Validated module bytes.
+    pub wasm_bytes: &'a [u8],
+    /// SHA-256 digest of `wasm_bytes`.
+    pub sha256_hash: &'a str,
+    /// Durable provenance (`upload` or `bundled`).
+    pub source: &'a str,
 }
 
 /// Update payload for [`PlatformStore::persist_spec_verification()`].
@@ -67,6 +154,7 @@ pub struct PolicyEntryRow {
     pub tenant: String,
     pub policy_id: String,
     pub cedar_text: String,
+    pub created_by: String,
     pub enabled: bool,
 }
 
@@ -118,6 +206,24 @@ pub trait PlatformStore: Send + Sync {
         csdl_xml: &str,
         content_hash: &str,
     ) -> Result<(), String>;
+
+    /// Atomically publish spec rows and return every durable type removed by a
+    /// replace-mode registration.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "atomic publication carries every durable tenant-generation component"
+    )]
+    async fn publish_specs(
+        &self,
+        tenant: &str,
+        specs: &[SpecPublication<'_>],
+        mode: SpecPublicationMode,
+        constraints: TenantConstraintsPublication<'_>,
+        policy: TenantPolicyPublication<'_>,
+        os_app: Option<OsAppPublication<'_>>,
+        policy_generation: Option<PolicyGenerationPublication<'_>>,
+        wasm_modules: &[WasmPublication<'_>],
+    ) -> Result<Vec<String>, String>;
 
     /// Load all persisted specs (for startup recovery).
     async fn load_specs(&self) -> Result<Vec<SpecRow>, String>;
@@ -251,6 +357,104 @@ impl PlatformStore for TursoEventStore {
             .map_err(|e| e.to_string())
     }
 
+    async fn publish_specs(
+        &self,
+        tenant: &str,
+        specs: &[SpecPublication<'_>],
+        mode: SpecPublicationMode,
+        constraints: TenantConstraintsPublication<'_>,
+        policy: TenantPolicyPublication<'_>,
+        os_app: Option<OsAppPublication<'_>>,
+        policy_generation: Option<PolicyGenerationPublication<'_>>,
+        wasm_modules: &[WasmPublication<'_>],
+    ) -> Result<Vec<String>, String> {
+        let rows = specs
+            .iter()
+            .map(|spec| {
+                (
+                    spec.entity_type,
+                    spec.ioa_source,
+                    spec.csdl_xml,
+                    spec.content_hash,
+                )
+            })
+            .collect::<Vec<_>>();
+        let constraints = match constraints {
+            TenantConstraintsPublication::Preserve => None,
+            TenantConstraintsPublication::Replace(source) => Some(source),
+        };
+        let policy = match policy {
+            TenantPolicyPublication::Preserve => None,
+            TenantPolicyPublication::Replace(source) => Some(source),
+        };
+        let granular_policy = policy_generation
+            .map(|publication| (publication.policy_owner, publication.policy_entries))
+            .or_else(|| {
+                os_app.and_then(|publication| {
+                    publication
+                        .policy_owner
+                        .map(|owner| (owner, publication.policy_entries))
+                })
+            });
+        let policy_owner = granular_policy.map(|(owner, _)| owner);
+        let policy_entries = granular_policy
+            .map(|(_, entries)| {
+                entries
+                    .iter()
+                    .map(|entry| (entry.policy_id, entry.cedar_text, entry.created_by))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let os_app = os_app.map(|publication| TursoInstalledAppRow {
+            tenant_id: publication.record.tenant.clone(),
+            app_name: publication.record.app_name.clone(),
+            source_kind: publication.record.source_kind.clone(),
+            app_ref: publication.record.app_ref.clone(),
+            version_hash: publication.record.version_hash.clone(),
+            pinned_version_hash: publication.record.pinned_version_hash.clone(),
+            current_version_hash: publication.record.current_version_hash.clone(),
+            follow_policy: publication.record.follow_policy.clone(),
+            closure_id: publication.record.closure_id.clone(),
+            registry_url: publication.record.registry_url.clone(),
+            registry_tenant: publication.record.registry_tenant.clone(),
+            app_version: publication.record.app_version.clone(),
+            bundle_digest: publication.record.bundle_digest.clone(),
+            spec_digest: publication.record.spec_digest.clone(),
+            policy_digest: publication.record.policy_digest.clone(),
+            wasm_digest: publication.record.wasm_digest.clone(),
+            content_digest: publication.record.content_digest.clone(),
+            seed_digest: publication.record.seed_digest.clone(),
+            installed_at: publication.record.installed_at.clone().unwrap_or_default(),
+            last_reconciled_at: publication.record.last_reconciled_at.clone(),
+            status: publication.record.status.clone(),
+        });
+        let wasm_rows = wasm_modules
+            .iter()
+            .map(|module| {
+                (
+                    module.module_name,
+                    module.wasm_bytes,
+                    module.sha256_hash,
+                    module.source,
+                )
+            })
+            .collect::<Vec<_>>();
+        TursoEventStore::publish_specs(
+            self,
+            tenant,
+            &rows,
+            mode == SpecPublicationMode::Replace,
+            constraints,
+            policy,
+            os_app.as_ref(),
+            &wasm_rows,
+            policy_owner,
+            &policy_entries,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+
     async fn load_specs(&self) -> Result<Vec<SpecRow>, String> {
         let rows = self.load_specs().await.map_err(|e| e.to_string())?;
         Ok(rows
@@ -336,6 +540,7 @@ impl PlatformStore for TursoEventStore {
                 tenant: row.tenant,
                 policy_id: row.policy_id,
                 cedar_text: row.cedar_text,
+                created_by: row.created_by,
                 enabled: row.enabled,
             })
             .collect())
@@ -507,6 +712,104 @@ impl PlatformStore for PostgresEventStore {
             .map_err(|e| e.to_string())
     }
 
+    async fn publish_specs(
+        &self,
+        tenant: &str,
+        specs: &[SpecPublication<'_>],
+        mode: SpecPublicationMode,
+        constraints: TenantConstraintsPublication<'_>,
+        policy: TenantPolicyPublication<'_>,
+        os_app: Option<OsAppPublication<'_>>,
+        policy_generation: Option<PolicyGenerationPublication<'_>>,
+        wasm_modules: &[WasmPublication<'_>],
+    ) -> Result<Vec<String>, String> {
+        let rows = specs
+            .iter()
+            .map(|spec| {
+                (
+                    spec.entity_type,
+                    spec.ioa_source,
+                    spec.csdl_xml,
+                    spec.content_hash,
+                )
+            })
+            .collect::<Vec<_>>();
+        let constraints = match constraints {
+            TenantConstraintsPublication::Preserve => None,
+            TenantConstraintsPublication::Replace(source) => Some(source),
+        };
+        let policy = match policy {
+            TenantPolicyPublication::Preserve => None,
+            TenantPolicyPublication::Replace(source) => Some(source),
+        };
+        let granular_policy = policy_generation
+            .map(|publication| (publication.policy_owner, publication.policy_entries))
+            .or_else(|| {
+                os_app.and_then(|publication| {
+                    publication
+                        .policy_owner
+                        .map(|owner| (owner, publication.policy_entries))
+                })
+            });
+        let policy_owner = granular_policy.map(|(owner, _)| owner);
+        let policy_entries = granular_policy
+            .map(|(_, entries)| {
+                entries
+                    .iter()
+                    .map(|entry| (entry.policy_id, entry.cedar_text, entry.created_by))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let os_app = os_app.map(|publication| PostgresInstalledAppRow {
+            tenant: publication.record.tenant.clone(),
+            app_name: publication.record.app_name.clone(),
+            source_kind: publication.record.source_kind.clone(),
+            app_ref: publication.record.app_ref.clone(),
+            version_hash: publication.record.version_hash.clone(),
+            pinned_version_hash: publication.record.pinned_version_hash.clone(),
+            current_version_hash: publication.record.current_version_hash.clone(),
+            follow_policy: publication.record.follow_policy.clone(),
+            closure_id: publication.record.closure_id.clone(),
+            registry_url: publication.record.registry_url.clone(),
+            registry_tenant: publication.record.registry_tenant.clone(),
+            app_version: publication.record.app_version.clone(),
+            bundle_digest: publication.record.bundle_digest.clone(),
+            spec_digest: publication.record.spec_digest.clone(),
+            policy_digest: publication.record.policy_digest.clone(),
+            wasm_digest: publication.record.wasm_digest.clone(),
+            content_digest: publication.record.content_digest.clone(),
+            seed_digest: publication.record.seed_digest.clone(),
+            installed_at: publication.record.installed_at.clone().unwrap_or_default(),
+            last_reconciled_at: publication.record.last_reconciled_at.clone(),
+            status: publication.record.status.clone(),
+        });
+        let wasm_rows = wasm_modules
+            .iter()
+            .map(|module| {
+                (
+                    module.module_name,
+                    module.wasm_bytes,
+                    module.sha256_hash,
+                    module.source,
+                )
+            })
+            .collect::<Vec<_>>();
+        PostgresEventStore::publish_specs(
+            self,
+            tenant,
+            &rows,
+            mode == SpecPublicationMode::Replace,
+            constraints,
+            policy,
+            os_app.as_ref(),
+            &wasm_rows,
+            policy_owner,
+            &policy_entries,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+
     async fn load_specs(&self) -> Result<Vec<SpecRow>, String> {
         let rows = self.load_specs().await.map_err(|e| e.to_string())?;
         Ok(rows
@@ -596,6 +899,7 @@ impl PlatformStore for PostgresEventStore {
                 tenant: row.tenant,
                 policy_id: row.policy_id,
                 cedar_text: row.cedar_text,
+                created_by: row.created_by,
                 enabled: row.enabled,
             })
             .collect())
@@ -749,548 +1053,5 @@ impl PlatformStore for PostgresEventStore {
         self.upsert_wasm_module(tenant, name, bytes, hash, source)
             .await
             .map_err(|e| e.to_string())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SimPlatformStore (behind cfg(feature = "sim"))
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "sim")]
-pub use sim_platform_store::*;
-
-#[cfg(feature = "sim")]
-mod sim_platform_store {
-    use super::*;
-    use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::{Arc, Mutex};
-    use temper_store_sim::DeterministicRng;
-
-    /// Fault injection configuration for platform store simulation.
-    ///
-    /// Controls the probability of injected failures during platform store
-    /// operations. All probabilities are in \[0.0, 1.0\].
-    #[derive(Debug, Clone)]
-    pub struct SimPlatformFaultConfig {
-        /// Probability of a write failure on spec upsert.
-        pub spec_write_failure_prob: f64,
-        /// Probability of a read failure on spec load.
-        pub spec_read_failure_prob: f64,
-        /// Probability of a write failure on policy upsert.
-        pub policy_write_failure_prob: f64,
-        /// Probability of a read failure on policy load.
-        pub policy_read_failure_prob: f64,
-        /// Probability of a failure recording an installed app.
-        pub app_record_failure_prob: f64,
-        /// Probability of a failure listing installed apps.
-        pub app_list_failure_prob: f64,
-        /// Probability of a write failure on pending decision upsert.
-        pub decision_write_failure_prob: f64,
-        /// Probability of a read failure on pending decision load.
-        pub decision_read_failure_prob: f64,
-        /// Probability of a failure when deleting a spec (cleanup path).
-        pub cleanup_failure_prob: f64,
-        /// Probability of a read failure on WASM module load.
-        pub wasm_read_failure_prob: f64,
-    }
-
-    impl SimPlatformFaultConfig {
-        /// No fault injection — all operations succeed.
-        pub fn none() -> Self {
-            Self {
-                spec_write_failure_prob: 0.0,
-                spec_read_failure_prob: 0.0,
-                policy_write_failure_prob: 0.0,
-                policy_read_failure_prob: 0.0,
-                app_record_failure_prob: 0.0,
-                app_list_failure_prob: 0.0,
-                decision_write_failure_prob: 0.0,
-                decision_read_failure_prob: 0.0,
-                cleanup_failure_prob: 0.0,
-                wasm_read_failure_prob: 0.0,
-            }
-        }
-
-        /// Heavy fault injection for stress testing.
-        pub fn heavy() -> Self {
-            Self {
-                spec_write_failure_prob: 0.05,
-                spec_read_failure_prob: 0.02,
-                policy_write_failure_prob: 0.05,
-                policy_read_failure_prob: 0.02,
-                app_record_failure_prob: 0.03,
-                app_list_failure_prob: 0.02,
-                decision_write_failure_prob: 0.04,
-                decision_read_failure_prob: 0.02,
-                cleanup_failure_prob: 0.03,
-                wasm_read_failure_prob: 0.02,
-            }
-        }
-    }
-
-    impl Default for SimPlatformFaultConfig {
-        fn default() -> Self {
-            Self::none()
-        }
-    }
-
-    /// In-memory, deterministic platform store for DST.
-    ///
-    /// Implements [`PlatformStore`] trait. All operations resolve immediately.
-    /// Fault injection controlled by [`DeterministicRng`].
-    ///
-    /// Uses `BTreeMap`/`BTreeSet` exclusively (no `HashMap`/`HashSet`) for
-    /// deterministic iteration order.
-    #[derive(Clone)]
-    pub struct SimPlatformStore {
-        inner: Arc<Mutex<SimPlatformStoreInner>>,
-    }
-
-    struct SimPlatformStoreInner {
-        /// Deterministic RNG for fault injection.
-        rng: DeterministicRng,
-        /// Fault injection configuration.
-        faults: SimPlatformFaultConfig,
-        /// Specs keyed by (tenant, entity_type).
-        specs: BTreeMap<(String, String), SpecRow>,
-        /// Verification cache: (tenant, entity_type) -> (content_hash, verified).
-        verification_cache: BTreeMap<(String, String), (String, bool)>,
-        /// Cedar policies keyed by tenant.
-        policies: BTreeMap<String, String>,
-        /// Granular Cedar policy rows keyed by (tenant, policy_id).
-        policy_entries: BTreeMap<(String, String), PolicyEntryRow>,
-        /// Cross-invariant definitions keyed by tenant.
-        constraints: BTreeMap<String, String>,
-        /// Installed apps: (tenant, app_name).
-        installed_apps: BTreeSet<(String, String)>,
-        /// Installed app digest metadata keyed by (tenant, app_name).
-        installed_app_records: BTreeMap<(String, String), InstalledAppRecord>,
-        /// Pending decisions: id -> JSON data.
-        pending_decisions: BTreeMap<String, (String, String, String)>,
-        /// WASM modules keyed by (tenant, module_name).
-        wasm_modules: BTreeMap<(String, String), WasmModuleRow>,
-    }
-
-    impl SimPlatformStore {
-        /// Create a new `SimPlatformStore` with the given seed and fault config.
-        pub fn new(seed: u64, faults: SimPlatformFaultConfig) -> Self {
-            Self {
-                inner: Arc::new(Mutex::new(SimPlatformStoreInner {
-                    rng: DeterministicRng::new(seed),
-                    faults,
-                    specs: BTreeMap::new(),
-                    verification_cache: BTreeMap::new(),
-                    policies: BTreeMap::new(),
-                    policy_entries: BTreeMap::new(),
-                    constraints: BTreeMap::new(),
-                    installed_apps: BTreeSet::new(),
-                    installed_app_records: BTreeMap::new(),
-                    pending_decisions: BTreeMap::new(),
-                    wasm_modules: BTreeMap::new(),
-                })),
-            }
-        }
-
-        /// Create a `SimPlatformStore` with no fault injection.
-        pub fn no_faults(seed: u64) -> Self {
-            Self::new(seed, SimPlatformFaultConfig::none())
-        }
-
-        /// Temporarily disable all fault injection.
-        ///
-        /// Returns the previous config so it can be restored. Useful for
-        /// invariant checks that must read the store reliably.
-        pub fn disable_faults(&self) -> SimPlatformFaultConfig {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-            let prev = inner.faults.clone();
-            inner.faults = SimPlatformFaultConfig::none();
-            prev
-        }
-
-        /// Restore a previously saved fault config.
-        pub fn restore_faults(&self, faults: SimPlatformFaultConfig) {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-            inner.faults = faults;
-        }
-
-        /// Seed a granular policy row for recovery tests.
-        pub fn insert_policy_entry_for_test(
-            &self,
-            tenant: &str,
-            policy_id: &str,
-            cedar_text: &str,
-            enabled: bool,
-        ) {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-            inner.policy_entries.insert(
-                (tenant.to_string(), policy_id.to_string()),
-                PolicyEntryRow {
-                    tenant: tenant.to_string(),
-                    policy_id: policy_id.to_string(),
-                    cedar_text: cedar_text.to_string(),
-                    enabled,
-                },
-            );
-        }
-    }
-
-    impl std::fmt::Debug for SimPlatformStore {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            let inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-            f.debug_struct("SimPlatformStore")
-                .field("specs", &inner.specs.len())
-                .field("policies", &inner.policies.len())
-                .field("policy_entries", &inner.policy_entries.len())
-                .field("installed_apps", &inner.installed_apps.len())
-                .field("wasm_modules", &inner.wasm_modules.len())
-                .finish()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl PlatformStore for SimPlatformStore {
-        async fn upsert_spec(
-            &self,
-            tenant: &str,
-            entity_type: &str,
-            ioa_source: &str,
-            csdl_xml: &str,
-            content_hash: &str,
-        ) -> Result<(), String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-
-            let prob = inner.faults.spec_write_failure_prob;
-            if inner.rng.chance(prob) {
-                return Err("SimPlatformStore: injected spec write failure".into());
-            }
-
-            let key = (tenant.to_string(), entity_type.to_string());
-            inner.specs.insert(
-                key,
-                SpecRow {
-                    tenant: tenant.to_string(),
-                    entity_type: entity_type.to_string(),
-                    ioa_source: ioa_source.to_string(),
-                    csdl_xml: Some(csdl_xml.to_string()),
-                    content_hash: content_hash.to_string(),
-                    committed: false,
-                },
-            );
-            Ok(())
-        }
-
-        async fn load_specs(&self) -> Result<Vec<SpecRow>, String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-
-            let prob = inner.faults.spec_read_failure_prob;
-            if inner.rng.chance(prob) {
-                return Err("SimPlatformStore: injected spec read failure".into());
-            }
-
-            Ok(inner
-                .specs
-                .values()
-                .filter(|s| s.committed)
-                .cloned()
-                .collect())
-        }
-
-        async fn delete_spec(&self, tenant: &str, entity_type: &str) -> Result<(), String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-            let prob = inner.faults.cleanup_failure_prob;
-            if inner.rng.chance(prob) {
-                return Err("SimPlatformStore: injected cleanup failure".into());
-            }
-            inner
-                .specs
-                .remove(&(tenant.to_string(), entity_type.to_string()));
-            Ok(())
-        }
-
-        async fn commit_specs(&self, tenant: &str) -> Result<(), String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-            for spec in inner.specs.values_mut() {
-                if spec.tenant == tenant {
-                    spec.committed = true;
-                }
-            }
-            Ok(())
-        }
-
-        async fn delete_uncommitted_specs(&self) -> Result<usize, String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-            let before = inner.specs.len();
-            inner.specs.retain(|_, s| s.committed);
-            Ok(before - inner.specs.len())
-        }
-
-        async fn load_verification_cache(
-            &self,
-            tenant: &str,
-        ) -> Result<BTreeMap<String, (String, bool)>, String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-
-            let prob = inner.faults.spec_read_failure_prob;
-            if inner.rng.chance(prob) {
-                return Err("SimPlatformStore: injected verification cache read failure".into());
-            }
-
-            let mut cache = BTreeMap::new();
-            for ((t, et), (hash, verified)) in &inner.verification_cache {
-                if t == tenant {
-                    cache.insert(et.clone(), (hash.clone(), *verified));
-                }
-            }
-            Ok(cache)
-        }
-
-        async fn persist_spec_verification(
-            &self,
-            tenant: &str,
-            entity_type: &str,
-            update: SpecVerificationUpdate<'_>,
-        ) -> Result<(), String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-
-            let prob = inner.faults.spec_write_failure_prob;
-            if inner.rng.chance(prob) {
-                return Err("SimPlatformStore: injected verification write failure".into());
-            }
-
-            let key = (tenant.to_string(), entity_type.to_string());
-            inner
-                .verification_cache
-                .insert(key, (update.status.to_string(), update.verified));
-            Ok(())
-        }
-
-        async fn upsert_tenant_policy(
-            &self,
-            tenant: &str,
-            policy_text: &str,
-        ) -> Result<(), String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-
-            let prob = inner.faults.policy_write_failure_prob;
-            if inner.rng.chance(prob) {
-                return Err("SimPlatformStore: injected policy write failure".into());
-            }
-
-            inner
-                .policies
-                .insert(tenant.to_string(), policy_text.to_string());
-            Ok(())
-        }
-
-        async fn upsert_tenant_constraints(
-            &self,
-            tenant: &str,
-            cross_invariants_toml: &str,
-        ) -> Result<(), String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-
-            let prob = inner.faults.policy_write_failure_prob;
-            if inner.rng.chance(prob) {
-                return Err("SimPlatformStore: injected constraints write failure".into());
-            }
-
-            inner
-                .constraints
-                .insert(tenant.to_string(), cross_invariants_toml.to_string());
-            Ok(())
-        }
-
-        async fn load_tenant_policies(&self) -> Result<Vec<(String, String)>, String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-
-            let prob = inner.faults.policy_read_failure_prob;
-            if inner.rng.chance(prob) {
-                return Err("SimPlatformStore: injected policy read failure".into());
-            }
-
-            Ok(inner
-                .policies
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect())
-        }
-
-        async fn load_policy_entries(&self) -> Result<Vec<PolicyEntryRow>, String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-
-            let prob = inner.faults.policy_read_failure_prob;
-            if inner.rng.chance(prob) {
-                return Err("SimPlatformStore: injected granular policy read failure".into());
-            }
-
-            Ok(inner.policy_entries.values().cloned().collect())
-        }
-
-        async fn is_app_installed(&self, tenant: &str, app_name: &str) -> Result<bool, String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-
-            let prob = inner.faults.app_list_failure_prob;
-            if inner.rng.chance(prob) {
-                return Err("SimPlatformStore: injected app query failure".into());
-            }
-
-            Ok(inner
-                .installed_apps
-                .contains(&(tenant.to_string(), app_name.to_string())))
-        }
-
-        async fn record_installed_app(&self, tenant: &str, app_name: &str) -> Result<(), String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-
-            let prob = inner.faults.app_record_failure_prob;
-            if inner.rng.chance(prob) {
-                return Err("SimPlatformStore: injected app record failure".into());
-            }
-
-            inner
-                .installed_apps
-                .insert((tenant.to_string(), app_name.to_string()));
-            Ok(())
-        }
-
-        async fn record_installed_app_metadata(
-            &self,
-            record: &InstalledAppRecord,
-        ) -> Result<(), String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-
-            let prob = inner.faults.app_record_failure_prob;
-            if inner.rng.chance(prob) {
-                return Err("SimPlatformStore: injected app metadata record failure".into());
-            }
-
-            let key = (record.tenant.clone(), record.app_name.clone());
-            inner.installed_apps.insert(key.clone());
-            inner.installed_app_records.insert(key, record.clone());
-            Ok(())
-        }
-
-        async fn get_installed_app(
-            &self,
-            tenant: &str,
-            app_name: &str,
-        ) -> Result<Option<InstalledAppRecord>, String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-
-            let prob = inner.faults.app_list_failure_prob;
-            if inner.rng.chance(prob) {
-                return Err("SimPlatformStore: injected app metadata read failure".into());
-            }
-
-            Ok(inner
-                .installed_app_records
-                .get(&(tenant.to_string(), app_name.to_string()))
-                .cloned())
-        }
-
-        async fn list_all_installed_apps(&self) -> Result<Vec<(String, String)>, String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-
-            let prob = inner.faults.app_list_failure_prob;
-            if inner.rng.chance(prob) {
-                return Err("SimPlatformStore: injected app list failure".into());
-            }
-
-            Ok(inner.installed_apps.iter().cloned().collect())
-        }
-
-        async fn upsert_pending_decision(
-            &self,
-            id: &str,
-            tenant: &str,
-            status: &str,
-            data: &str,
-        ) -> Result<(), String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-
-            let prob = inner.faults.decision_write_failure_prob;
-            if inner.rng.chance(prob) {
-                return Err("SimPlatformStore: injected decision write failure".into());
-            }
-
-            inner.pending_decisions.insert(
-                id.to_string(),
-                (tenant.to_string(), status.to_string(), data.to_string()),
-            );
-            Ok(())
-        }
-
-        async fn load_pending_decisions(&self, limit: usize) -> Result<Vec<String>, String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-
-            let prob = inner.faults.decision_read_failure_prob;
-            if inner.rng.chance(prob) {
-                return Err("SimPlatformStore: injected decision read failure".into());
-            }
-
-            Ok(inner
-                .pending_decisions
-                .values()
-                .rev()
-                .take(limit)
-                .map(|(_, _, data)| data.clone())
-                .collect())
-        }
-
-        async fn load_all_wasm_modules(&self, tenant: &str) -> Result<Vec<WasmModuleRow>, String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-
-            let prob = inner.faults.wasm_read_failure_prob;
-            if inner.rng.chance(prob) {
-                return Err("SimPlatformStore: injected WASM read failure".into());
-            }
-
-            Ok(inner
-                .wasm_modules
-                .values()
-                .filter(|m| m.tenant == tenant)
-                .cloned()
-                .collect())
-        }
-
-        async fn load_wasm_modules_all_tenants(&self) -> Result<Vec<WasmModuleRow>, String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-
-            let prob = inner.faults.wasm_read_failure_prob;
-            if inner.rng.chance(prob) {
-                return Err("SimPlatformStore: injected WASM read failure".into());
-            }
-
-            Ok(inner.wasm_modules.values().cloned().collect())
-        }
-
-        async fn upsert_wasm_module(
-            &self,
-            tenant: &str,
-            name: &str,
-            bytes: &[u8],
-            hash: &str,
-            source: &str,
-        ) -> Result<(), String> {
-            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-
-            let prob = inner.faults.spec_write_failure_prob;
-            if inner.rng.chance(prob) {
-                return Err("SimPlatformStore: injected WASM write failure".into());
-            }
-
-            let key = (tenant.to_string(), name.to_string());
-            inner.wasm_modules.insert(
-                key,
-                WasmModuleRow {
-                    tenant: tenant.to_string(),
-                    module_name: name.to_string(),
-                    wasm_bytes: bytes.to_vec(),
-                    sha256_hash: hash.to_string(),
-                    source: source.to_string(),
-                },
-            );
-            Ok(())
-        }
     }
 }

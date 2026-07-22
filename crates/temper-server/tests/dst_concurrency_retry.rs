@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
+use temper_runtime::persistence::EventStore;
 use temper_runtime::scheduler::install_deterministic_context;
 use temper_server::storage::{BackendLabel, BoxedEventStore};
 use temper_server::{EntityActor, EntityMsg, EntityResponse};
@@ -45,6 +46,26 @@ async fn dispatch_action(
                 params,
                 cross_entity_booleans: BTreeMap::new(),
                 idempotency_key: None,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("actor should respond")
+}
+
+async fn dispatch_action_with_key(
+    actor_ref: &temper_runtime::actor::ActorRef<EntityMsg>,
+    action: &str,
+    params: serde_json::Value,
+    idempotency_key: &str,
+) -> EntityResponse {
+    actor_ref
+        .ask(
+            EntityMsg::Action {
+                name: action.to_string(),
+                params,
+                cross_entity_booleans: BTreeMap::new(),
+                idempotency_key: Some(idempotency_key.to_string()),
             },
             Duration::from_secs(5),
         )
@@ -161,6 +182,84 @@ async fn dst_retry_does_not_reapply_preexisting_effects() {
         "the preexisting AddItem effect must be replayed exactly once"
     );
     assert_eq!(sim.dump_journal(&persistence_id).len(), 3);
+}
+
+/// Two stale actor replicas can race the first journal write from a
+/// snapshot-only generation. The loser must treat the idempotency key recovered
+/// from the winner as the committed result, not append the action again.
+#[tokio::test]
+async fn dst_snapshot_handoff_retry_deduplicates_the_winning_action() {
+    let seed = 289;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let (store, sim) = sim_store_with_handle(seed);
+    let entity_id = "snapshot-handoff-idempotency-race";
+    let persistence_id = format!("default:Order:{entity_id}");
+    let snapshot = serde_json::to_vec(&serde_json::json!({
+        "entity_type": "Order",
+        "entity_id": entity_id,
+        "status": "Draft",
+        "item_count": 0,
+        "counters": {},
+        "booleans": {},
+        "lists": {},
+        "fields": {"Id": entity_id, "Status": "Draft"},
+        "events": [],
+        "total_event_count": 0,
+        "events_since_snapshot": 0,
+        "last_snapshot_sequence_nr": 5,
+        "sequence_nr": 5,
+        "processed_idempotency_keys": {}
+    }))
+    .expect("serialize snapshot-only source");
+    sim.save_snapshot(&persistence_id, 5, &snapshot)
+        .await
+        .expect("seed snapshot-only source");
+
+    let system = ActorSystem::new("dst-snapshot-handoff-idempotency-race");
+    let first = spawn_order(&system, order_table(), store.clone(), entity_id);
+    let second = system.spawn(
+        EntityActor::with_persistence(
+            "Order",
+            entity_id,
+            order_table(),
+            serde_json::json!({}),
+            store,
+            BackendLabel::Sim,
+        )
+        .with_tenant("default"),
+        "snapshot-handoff-idempotency-race-replica",
+    );
+    wait_ready(&first).await;
+    wait_ready(&second).await;
+
+    let winner = dispatch_action_with_key(
+        &first,
+        "AddItem",
+        serde_json::json!({}),
+        "same-first-journal-action",
+    )
+    .await;
+    assert!(winner.success);
+    assert_eq!(winner.state.item_count, 1);
+
+    let loser = dispatch_action_with_key(
+        &second,
+        "AddItem",
+        serde_json::json!({}),
+        "same-first-journal-action",
+    )
+    .await;
+    assert!(loser.success);
+    assert_eq!(loser.state.item_count, 1);
+    assert_eq!(loser.state.total_event_count, 1);
+    assert_eq!(
+        sim.dump_journal(&persistence_id)
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Temper.Internal.StateMaterialization.v1", "AddItem"],
+        "the stale replica must not append the winner's idempotent action twice"
+    );
 }
 
 // -------------------------------------------------------------------------

@@ -8,12 +8,14 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
-use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::Serialize;
 use temper_runtime::tenant::TenantId;
-use temper_server::state::WasmModuleSource;
+use temper_server::platform_store::{
+    InstalledAppRecord, OsAppPublication, PolicyEntryPublication, SpecPublication,
+    SpecPublicationMode, TenantConstraintsPublication, TenantPolicyPublication, WasmPublication,
+};
+use temper_server::state::{SpecPublicationGuard, WasmModuleSource};
 use temper_spec::automaton;
 use temper_spec::csdl::{emit_csdl_xml, merge_csdl, parse_csdl};
 
@@ -23,7 +25,9 @@ use crate::state::PlatformState;
 mod agent_bootstrap;
 mod app_catalog;
 mod closure_bootstrap;
+mod discovery;
 mod entity_aliases;
+mod install;
 mod policy_rows;
 mod reconcile;
 mod runtime_heal;
@@ -39,15 +43,28 @@ pub use closure_bootstrap::{
     bootstrap_closure_manifest, os_app_closure_for_roots, parse_bootstrap_manifest_str,
     startup_os_app_closure,
 };
+use discovery::{
+    app_relative_path, effective_app_deployment_mode, find_cedar_policies,
+    find_commons_cedar_policies, find_csdl, find_ioa_files,
+};
 use entity_aliases::{
     content_sha256, ensure_created_file_initialized, ensure_entity_field_aliases,
     file_already_contains, slug_fragment,
+};
+pub use install::install_os_app;
+#[cfg(test)]
+use install::install_os_app_with_plan;
+use install::{
+    UploadedWasmReplacementContext, activate_wasm_generation, append_installed_app_record_intent,
+    bundled_wasm_replaces_existing, finalize_os_app_publication, uploaded_wasm_replacement_context,
+    validate_os_app_publication_candidate,
 };
 #[cfg(test)]
 pub(super) use policy_rows::os_app_policy_row_id;
 pub use reconcile::{os_app_bundle_digest, reconcile_os_app, resolve_os_app_install_order};
 pub(crate) use reconcile::{
-    tenant_has_active_policies_for_bundle, tenant_has_registered_wasm_for_bundle,
+    reconcile_os_app_under_guard, tenant_has_active_policies_for_bundle,
+    tenant_has_registered_wasm_for_bundle,
 };
 pub(crate) use runtime_heal::{
     restore_app_specs_from_matching_digest, tenant_has_ready_app_specs_for_bundle,
@@ -200,153 +217,6 @@ struct SeedFile {
 // Backward-compatible type aliases.
 pub type OsAppEntry = AppEntry;
 pub type OsAppBundle = AppBundle;
-
-/// Find all IOA spec files in an app directory.
-///
-/// Handles both layouts:
-/// - Root-level: `app-name/*.ioa.toml` + `app-name/model.csdl.xml`
-/// - Specs subdir: `app-name/specs/*.ioa.toml` + `app-name/specs/model.csdl.xml`
-///
-/// Returns `(entity_type_hint, path)` pairs. The entity type is extracted
-/// from the IOA file's `[automaton] name` field, not the filename.
-fn find_ioa_files(app_dir: &Path) -> Vec<(String, PathBuf)> {
-    let mut results = Vec::new();
-    let mut seen_names = std::collections::HashSet::new();
-
-    // Scan root first (takes priority for dedup).
-    scan_dir_for_ioa(app_dir, &mut results, &mut seen_names);
-
-    // Then scan specs/ subdirectory.
-    let specs_dir = app_dir.join("specs");
-    if specs_dir.is_dir() {
-        scan_dir_for_ioa(&specs_dir, &mut results, &mut seen_names);
-    }
-
-    results
-}
-
-/// Scan a single directory for `*.ioa.toml` files.
-fn scan_dir_for_ioa(
-    dir: &Path,
-    results: &mut Vec<(String, PathBuf)>,
-    seen: &mut std::collections::HashSet<String>,
-) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut files: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".ioa.toml"))
-        .collect();
-    files.sort_by_key(|e| e.file_name());
-
-    for entry in files {
-        let path = entry.path();
-        let fname = entry.file_name().to_string_lossy().to_string();
-        // Use filename as dedup key.
-        if !seen.insert(fname) {
-            continue;
-        }
-        results.push((String::new(), path));
-    }
-}
-
-/// Find the CSDL model file in an app directory.
-fn find_csdl(app_dir: &Path) -> Option<PathBuf> {
-    // Root-level first.
-    let root = app_dir.join("model.csdl.xml");
-    if root.exists() {
-        return Some(root);
-    }
-    // Then specs/.
-    let specs = app_dir.join("specs").join("model.csdl.xml");
-    if specs.exists() {
-        return Some(specs);
-    }
-    // Then a dedicated csdl/ directory.
-    let csdl_dir = app_dir.join("csdl");
-    if csdl_dir.is_dir() {
-        let Ok(entries) = std::fs::read_dir(&csdl_dir) else {
-            return None;
-        };
-        let mut files: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".csdl.xml"))
-            .map(|e| e.path())
-            .collect();
-        files.sort();
-        if let Some(first) = files.into_iter().next() {
-            return Some(first);
-        }
-    }
-    None
-}
-
-/// Find all Cedar policy files in an app directory.
-fn find_cedar_policies(app_dir: &Path) -> Vec<PathBuf> {
-    let policies_dir = app_dir.join("policies");
-    if !policies_dir.is_dir() {
-        return Vec::new();
-    }
-    let Ok(entries) = std::fs::read_dir(&policies_dir) else {
-        return Vec::new();
-    };
-    let mut files: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".cedar"))
-        .map(|e| e.path())
-        .collect();
-    files.sort();
-    files
-}
-
-fn find_commons_cedar_policies(app_dir: &Path) -> Vec<PathBuf> {
-    let policies_dir = app_dir.join("policies").join("commons");
-    if !policies_dir.is_dir() {
-        return Vec::new();
-    }
-    let Ok(entries) = std::fs::read_dir(&policies_dir) else {
-        return Vec::new();
-    };
-    let mut files: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".cedar"))
-        .map(|e| e.path())
-        .collect();
-    files.sort();
-    files
-}
-
-fn app_relative_path(app_dir: &Path, path: &Path) -> String {
-    path.strip_prefix(app_dir)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
-fn effective_app_deployment_mode(manifest: &AppManifest) -> AppDeploymentMode {
-    let app_key = manifest
-        .name
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    let specific_key = format!("TEMPER_OS_APP_{app_key}_MODE");
-    let raw = std::env::var(&specific_key)
-        .or_else(|_| std::env::var("TEMPER_OS_APP_MODE"))
-        .ok();
-
-    match raw.as_deref().map(str::trim) {
-        Some("commons") | Some("Commons") | Some("COMMONS") => AppDeploymentMode::Commons,
-        Some("operator") | Some("Operator") | Some("OPERATOR") => AppDeploymentMode::Operator,
-        _ => manifest.mode,
-    }
-}
 
 /// Find compiled WASM module binaries in an app directory.
 ///
@@ -1064,45 +934,13 @@ fn local_os_app_dependency_name(dependency: &str) -> Option<String> {
     }
 }
 
-/// Install an OS app into a tenant (workspace).
-///
-/// Reads app files from disk, runs the verification cascade, registers
-/// specs in the SpecRegistry, loads Cedar policies, and **persists
-/// everything to the platform DB** so specs survive redeployments.
-///
-/// **Write ordering:** Turso first, then memory. If Turso persistence fails
-/// the operation returns an error *before* touching in-memory state, so the
-/// registry and Cedar engine stay consistent with the durable store.
-pub async fn install_os_app(
-    state: &PlatformState,
-    tenant: &str,
-    app_name: &str,
-) -> Result<InstallResult, String> {
-    let order = resolve_os_app_install_order(&[app_name.to_string()])?;
-
-    let mut final_result = None;
-    for app in order {
-        let result = install_os_app_without_dependencies(state, tenant, &app).await?;
-        if app == app_name {
-            final_result = Some(result);
-        }
-    }
-    final_result.ok_or_else(|| format!("OS app '{app_name}' produced no install result"))
-}
-
-async fn install_os_app_without_dependencies(
-    state: &PlatformState,
-    tenant: &str,
-    app_name: &str,
-) -> Result<InstallResult, String> {
-    install_os_app_with_plan(state, tenant, app_name, OsAppInstallPlan::all()).await
-}
-
-pub(super) async fn install_os_app_with_plan(
+pub(super) async fn install_os_app_with_plan_under_guard(
     state: &PlatformState,
     tenant: &str,
     app_name: &str,
     plan: OsAppInstallPlan,
+    publication_record_override: Option<InstalledAppRecord>,
+    publication_guard: &mut SpecPublicationGuard,
 ) -> Result<InstallResult, String> {
     let app_dir = {
         let cat = catalog().read().unwrap(); // ci-ok: infallible lock
@@ -1117,9 +955,6 @@ pub(super) async fn install_os_app_with_plan(
             app_dir.display()
         )
     })?;
-    if bundle.deployment_mode == AppDeploymentMode::Commons {
-        state.server.enable_commons_guardrails(tenant);
-    }
     let tenant_id = TenantId::new(tenant);
     let upload_replacement = if plan.wasm && !bundle.wasm_modules.is_empty() {
         uploaded_wasm_replacement_context(state, tenant, app_name, &bundle).await
@@ -1138,7 +973,7 @@ pub(super) async fn install_os_app_with_plan(
     // Classify each bundle spec as added / updated / skipped, and compute the
     // merged CSDL only when the reconcile plan needs spec work.
     let (mut added, mut updated, mut skipped, merged_csdl) = if plan.specs {
-        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+        let registry = state.registry.read().expect("registry lock poisoned");
         let mut added = Vec::new();
         let mut updated = Vec::new();
         let mut skipped = Vec::new();
@@ -1186,105 +1021,345 @@ pub(super) async fn install_os_app_with_plan(
     updated.sort();
     skipped.sort();
 
-    // Build the full Cedar policy text for this tenant (existing + new).
-    let combined_policy = if plan.policies && !bundle.cedar_policies.is_empty() {
-        let existing = cached_or_active_tenant_policy_text(state, tenant);
-        Some(merge_bundle_policies(&existing, &bundle.cedar_policies))
+    let activation_spec_sources = bundle
+        .specs
+        .iter()
+        .map(|(entity_type, source)| (entity_type.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    // Build the complete policy generation from durable granular rows while
+    // replacing this app's owned rows as one transaction. The aggregate blob
+    // remains a legacy/read cache; granular rows are the canonical source once
+    // any exist.
+    let mut atomic_policy_entries = Vec::new();
+    let policy_owner = format!("os-app:{app_name}");
+    let combined_policy = if plan.policies {
+        let existing_policy = cached_or_active_tenant_policy_text(state, tenant);
+        let durable_rows = if let Some(store) = state
+            .server
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.platform.clone())
+        {
+            store.load_policy_entries().await.map_err(|error| {
+                format!("Failed to load durable Cedar policy rows for '{app_name}': {error}")
+            })?
+        } else {
+            Vec::new()
+        };
+        let mut complete_rows = durable_rows
+            .iter()
+            .filter(|row| row.tenant == tenant && row.enabled)
+            .filter(|row| row.created_by != policy_owner)
+            .map(|row| (row.policy_id.clone(), row.cedar_text.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let tenant_has_granular_rows = durable_rows.iter().any(|row| row.tenant == tenant);
+        if !tenant_has_granular_rows && !existing_policy.trim().is_empty() {
+            atomic_policy_entries.push(policy_rows::OwnedPolicyEntry {
+                policy_id: "primary".to_string(),
+                cedar_text: existing_policy.trim().to_string(),
+                created_by: "legacy-migration".to_string(),
+            });
+            complete_rows.insert("primary".to_string(), existing_policy.trim().to_string());
+        }
+        let bundle_entries = policy_rows::bundle_policy_entries(app_name, &bundle);
+        for entry in &bundle_entries {
+            complete_rows.insert(entry.policy_id.clone(), entry.cedar_text.clone());
+        }
+        atomic_policy_entries.extend(bundle_entries);
+        Some(merge_bundle_policies(
+            "",
+            &complete_rows.into_values().collect::<Vec<_>>(),
+        ))
     } else {
         None
     };
 
-    // ── Step 1: Persist to Turso FIRST (if available). ──────────────
-    // If any write fails, bail before touching in-memory state.
-    if let Some(turso) = state
+    let existing_policy = cached_or_active_tenant_policy_text(state, tenant);
+    let complete_policy = combined_policy.as_deref().unwrap_or(&existing_policy);
+    let (complete_specs, complete_csdl, complete_constraints) = {
+        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+        let existing = registry.get_tenant(&tenant_id);
+        let mut specs = existing
+            .map(|config| {
+                config
+                    .entities
+                    .iter()
+                    .map(|(entity_type, spec)| (entity_type.clone(), spec.ioa_source.clone()))
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        if plan.specs {
+            specs.extend(bundle.specs.iter().cloned());
+        }
+        let csdl = merged_csdl
+            .clone()
+            .or_else(|| existing.map(|config| config.csdl_xml.as_ref().clone()));
+        let constraints = if plan.specs {
+            bundle
+                .cross_invariants_toml
+                .clone()
+                .or_else(|| existing.and_then(|config| config.cross_invariants_source.clone()))
+        } else {
+            existing.and_then(|config| config.cross_invariants_source.clone())
+        };
+        (specs, csdl, constraints)
+    };
+    let existing_sources =
+        if !bundle.wasm_modules.is_empty() || !bundle.wasm_module_configs.is_empty() {
+            state.server.load_wasm_module_sources(tenant).await?
+        } else {
+            BTreeMap::new()
+        };
+    validate_os_app_publication_candidate(
+        state,
+        tenant,
+        app_name,
+        plan,
+        &bundle,
+        &complete_specs,
+        complete_csdl.as_deref(),
+        complete_constraints.as_deref(),
+        complete_policy,
+        &existing_sources,
+        &upload_replacement,
+    )?;
+
+    let mut effective_wasm_hashes = BTreeMap::new();
+    let mut durable_wasm_publications = Vec::new();
+    if plan.wasm {
+        for (module_name, wasm_bytes) in &bundle.wasm_modules {
+            let bundled_hash = temper_wasm::WasmEngine::hash_module(wasm_bytes);
+            let replace_uploaded_module = bundled_wasm_replaces_existing(
+                module_name,
+                wasm_bytes,
+                &bundle,
+                &existing_sources,
+                &upload_replacement,
+            );
+            let preserve_upload = existing_sources.get(module_name).is_some_and(|existing| {
+                existing.source == "upload"
+                    && existing.sha256_hash != bundled_hash
+                    && !replace_uploaded_module
+            });
+            if preserve_upload {
+                let existing = existing_sources
+                    .get(module_name)
+                    .expect("preserved upload source checked above");
+                effective_wasm_hashes.insert(module_name.clone(), existing.sha256_hash.clone());
+            } else {
+                effective_wasm_hashes.insert(module_name.clone(), bundled_hash.clone());
+                durable_wasm_publications.push((
+                    module_name.as_str(),
+                    wasm_bytes.as_slice(),
+                    bundled_hash,
+                    if replace_uploaded_module {
+                        "bundled-replace-upload"
+                    } else {
+                        "bundled"
+                    },
+                ));
+            }
+        }
+    }
+    let durable_wasm_publication_refs = durable_wasm_publications
+        .iter()
+        .map(
+            |(module_name, wasm_bytes, sha256_hash, source)| WasmPublication {
+                module_name,
+                wasm_bytes,
+                sha256_hash,
+                source,
+            },
+        )
+        .collect::<Vec<_>>();
+
+    let bundle_digest = reconcile::digest_app_bundle(app_name, &bundle);
+    let default_publication_record = InstalledAppRecord {
+        tenant: tenant.to_string(),
+        app_name: app_name.to_string(),
+        source_kind: "local".to_string(),
+        app_ref: String::new(),
+        version_hash: String::new(),
+        pinned_version_hash: String::new(),
+        current_version_hash: String::new(),
+        follow_policy: "pinned".to_string(),
+        closure_id: String::new(),
+        registry_url: String::new(),
+        registry_tenant: String::new(),
+        app_version: bundle_digest.app_version.clone(),
+        bundle_digest: bundle_digest.bundle_digest.clone(),
+        spec_digest: bundle_digest.spec_digest.clone(),
+        policy_digest: bundle_digest.policy_digest.clone(),
+        wasm_digest: bundle_digest.wasm_digest.clone(),
+        content_digest: bundle_digest.content_digest.clone(),
+        seed_digest: bundle_digest.seed_digest.clone(),
+        installed_at: None,
+        last_reconciled_at: None,
+        status: upload_replacement.publication_status(),
+    };
+    let publication_record = match publication_record_override {
+        Some(mut record) => {
+            if record.tenant != tenant || record.app_name != app_name {
+                return Err(format!(
+                    "OS app publication provenance identifies {}:{} while installing {tenant}:{app_name}",
+                    record.tenant, record.app_name
+                ));
+            }
+            record.app_version = bundle_digest.app_version.clone();
+            record.bundle_digest = bundle_digest.bundle_digest.clone();
+            record.spec_digest = bundle_digest.spec_digest.clone();
+            record.policy_digest = bundle_digest.policy_digest.clone();
+            record.wasm_digest = bundle_digest.wasm_digest.clone();
+            record.content_digest = bundle_digest.content_digest.clone();
+            record.seed_digest = bundle_digest.seed_digest.clone();
+            record.status = upload_replacement.publication_status();
+            record
+        }
+        None => default_publication_record,
+    };
+    let mut intent_components = vec![
+        (
+            "bundle".to_string(),
+            bundle_digest.bundle_digest.as_bytes().to_vec(),
+        ),
+        (
+            "csdl".to_string(),
+            complete_csdl.as_deref().unwrap_or("").as_bytes().to_vec(),
+        ),
+        (
+            "constraints".to_string(),
+            complete_constraints
+                .as_deref()
+                .unwrap_or("")
+                .as_bytes()
+                .to_vec(),
+        ),
+        ("policy".to_string(), complete_policy.as_bytes().to_vec()),
+        (
+            "commons_guardrails".to_string(),
+            (state.server.commons_guardrails_enabled(&tenant_id)
+                || bundle.deployment_mode == AppDeploymentMode::Commons)
+                .to_string()
+                .into_bytes(),
+        ),
+    ];
+    append_installed_app_record_intent(&mut intent_components, &publication_record);
+    intent_components.extend(
+        complete_specs.iter().map(|(entity_type, source)| {
+            (format!("spec:{entity_type}"), source.as_bytes().to_vec())
+        }),
+    );
+    for (module_name, effective_hash) in &effective_wasm_hashes {
+        intent_components.push((
+            format!("wasm:{module_name}"),
+            effective_hash.as_bytes().to_vec(),
+        ));
+    }
+    let intent_refs = intent_components
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_slice()))
+        .collect::<Vec<_>>();
+    let publication_intent = temper_server::ServerState::spec_publication_intent(
+        "os-app-runtime-generation",
+        intent_refs,
+    );
+
+    // ── Step 1: Persist before touching in-memory state. ─────────────
+    state
         .server
-        .storage_stack
-        .as_ref()
-        .and_then(|stack| stack.turso.as_ref())
-        .and_then(|provider| provider.platform_store())
-    {
-        if plan.specs
-            && let Some(ref merged) = merged_csdl
-        {
-            // Collect only this app's specs with their content hashes for a
-            // single transactional write. Existing tenant specs are preserved by
-            // the merged CSDL, but no longer re-written on every app install.
-            let owned: Vec<(String, String, String, String)> = bundle
-                .specs
-                .iter()
-                .map(|(et, ioa)| {
-                    let hash = temper_store_turso::spec_content_hash(ioa);
-                    (et.clone(), ioa.clone(), merged.clone(), hash)
-                })
-                .collect();
-            let refs: Vec<(&str, &str, &str, &str)> = owned
-                .iter()
-                .map(|(et, ioa, csdl, h)| (et.as_str(), ioa.as_str(), csdl.as_str(), h.as_str()))
-                .collect();
-            turso
-                .upsert_specs_and_commit(tenant, &refs, combined_policy.as_deref(), app_name)
-                .await
-                .map_err(|e| format!("Failed to persist and commit specs: {e}"))?;
-        } else if let Some(ref policy_text) = combined_policy {
-            turso
-                .upsert_tenant_policy(tenant, policy_text)
-                .await
-                .map_err(|e| format!("Failed to persist Cedar policy: {e}"))?;
-            turso
-                .record_installed_app(tenant, app_name)
-                .await
-                .map_err(|e| format!("Failed to record os-app installation: {e}"))?;
-        }
-        if plan.specs
-            && let Some(ref cross_invariants_toml) = bundle.cross_invariants_toml
-        {
-            turso
-                .upsert_tenant_constraints(tenant, cross_invariants_toml)
-                .await
-                .map_err(|e| format!("Failed to persist cross-invariants: {e}"))?;
-        }
-    } else if let Some(ps) = state
+        .arm_spec_publication(publication_guard, &tenant_id, &publication_intent)?;
+    if let Some(ps) = state
         .server
         .storage_stack
         .as_ref()
         .and_then(|stack| stack.platform.clone())
     {
-        if plan.specs
-            && let Some(ref merged) = merged_csdl
-        {
-            for (entity_type, ioa_source) in &bundle.specs {
-                let hash = temper_store_turso::spec_content_hash(ioa_source);
-                ps.upsert_spec(tenant, entity_type, ioa_source, merged, &hash)
-                    .await
-                    .map_err(|e| format!("Failed to persist spec {entity_type}: {e}"))?;
-            }
-        }
-        if let Some(ref policy_text) = combined_policy {
-            ps.upsert_tenant_policy(tenant, policy_text)
-                .await
-                .map_err(|e| format!("Failed to persist Cedar policy: {e}"))?;
-        }
-        if plan.specs
-            && let Some(ref cross_invariants_toml) = bundle.cross_invariants_toml
-        {
-            ps.upsert_tenant_constraints(tenant, cross_invariants_toml)
-                .await
-                .map_err(|e| format!("Failed to persist cross-invariants: {e}"))?;
-        }
-        ps.record_installed_app(tenant, app_name)
+        let publications = if plan.specs {
+            bundle
+                .specs
+                .iter()
+                .map(|(entity_type, ioa_source)| {
+                    (
+                        entity_type,
+                        ioa_source,
+                        temper_store_turso::spec_content_hash(ioa_source),
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let publication_refs = publications
+            .iter()
+            .map(|(entity_type, ioa_source, content_hash)| SpecPublication {
+                entity_type,
+                ioa_source,
+                csdl_xml: merged_csdl.as_deref().unwrap_or(""),
+                content_hash,
+            })
+            .collect::<Vec<_>>();
+        let policy_entry_refs = atomic_policy_entries
+            .iter()
+            .map(|entry| PolicyEntryPublication {
+                policy_id: &entry.policy_id,
+                cedar_text: &entry.cedar_text,
+                created_by: &entry.created_by,
+            })
+            .collect::<Vec<_>>();
+        let constraints = if plan.specs {
+            bundle
+                .cross_invariants_toml
+                .as_deref()
+                .map(|source| TenantConstraintsPublication::Replace(Some(source)))
+                .unwrap_or(TenantConstraintsPublication::Preserve)
+        } else {
+            TenantConstraintsPublication::Preserve
+        };
+        if let Err(error) = ps
+            .publish_specs(
+                tenant,
+                &publication_refs,
+                SpecPublicationMode::Merge,
+                constraints,
+                combined_policy
+                    .as_deref()
+                    .map(TenantPolicyPublication::Replace)
+                    .unwrap_or(TenantPolicyPublication::Preserve),
+                Some(OsAppPublication {
+                    record: &publication_record,
+                    policy_owner: plan.policies.then_some(policy_owner.as_str()),
+                    policy_entries: &policy_entry_refs,
+                }),
+                None,
+                &durable_wasm_publication_refs,
+            )
             .await
-            .map_err(|e| format!("Failed to record os-app installation: {e}"))?;
-        if plan.specs {
-            // Commit only when this path used individual spec writes.
-            ps.commit_specs(tenant)
-                .await
-                .map_err(|e| format!("Failed to commit specs: {e}"))?;
+        {
+            return Err(format!(
+                "Failed to atomically publish os-app bundle: {error}"
+            ));
         }
     }
 
-    if plan.policies {
-        policy_rows::persist_bundle_policy_rows(state, tenant, app_name, &bundle).await?;
-    }
+    // Durable spec publication is the crash boundary. Any returned error can be
+    // outcome-ambiguous, so the armed tenant remains fail-closed until a retry
+    // or startup recovery finishes. Only after acknowledged persistence do we
+    // atomically activate/purge the key contract and attach its epoch to the
+    // replacement live table.
+    let mut key_contract_cutover = if plan.specs {
+        Some(
+            state
+                .server
+                .prepare_key_index_contracts_for_spec_activation(
+                    publication_guard,
+                    &tenant_id,
+                    &activation_spec_sources,
+                )
+                .await?,
+        )
+    } else {
+        None
+    };
 
     // ── Step 2: Bootstrap into memory (verification + registry). ────
     // Only process specs whose content has changed (added or updated);
@@ -1334,6 +1409,12 @@ pub(super) async fn install_os_app_with_plan(
                     verified_cache: &verified_cache,
                     cross_invariants_source: bundle.cross_invariants_toml.as_deref(),
                     verification_mode: bootstrap::BootstrapSpecVerificationMode::TrustBundle,
+                    key_contract_activation_epochs: Some(
+                        &key_contract_cutover
+                            .as_ref()
+                            .expect("spec reconcile prepared key-contract cutover")
+                            .activation_epochs,
+                    ),
                 },
             );
 
@@ -1359,6 +1440,16 @@ pub(super) async fn install_os_app_with_plan(
         // newly bootstrapped trigger graph is active for subsequent traffic.
         state.server.rebuild_reaction_dispatcher();
     }
+    if let Some(key_contract_cutover) = key_contract_cutover.as_mut() {
+        state
+            .server
+            .finish_key_index_contract_activation(
+                publication_guard,
+                &tenant_id,
+                key_contract_cutover,
+            )
+            .await?;
+    }
 
     // App installs can add or change cross-entity reactions. Refresh the live
     // dispatcher immediately so the newly registered tenant config takes effect
@@ -1369,174 +1460,47 @@ pub(super) async fn install_os_app_with_plan(
 
     // ── Step 3: Load Cedar policies into memory. ────────────────────
     if let Some(ref policy_text) = combined_policy {
-        if let Err(e) = state
+        state
             .server
             .authz
             .reload_tenant_policies(tenant, policy_text)
-        {
-            tracing::warn!(
-                tenant,
-                error = %e,
-                "Failed to reload tenant Cedar policies after os-app install"
-            );
-        } else {
-            let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-            policies.insert(tenant.to_string(), policy_text.clone());
-        }
+            .map_err(|error| {
+                format!("Failed to activate tenant Cedar policies for os-app '{app_name}': {error}")
+            })?;
+        let mut policies = state
+            .server
+            .tenant_policies
+            .write()
+            .expect("tenant policy lock poisoned");
+        policies.insert(tenant.to_string(), policy_text.clone());
     }
 
-    // ── Step 4: Persist/register WASM modules, warming only eager modules. ──
-    //
-    // Source-aware preservation: if a (tenant, module) row in the durable store
-    // has source='upload' (i.e., a hot upload from `POST /api/wasm/modules/{name}`),
-    // preserve uploads newer than the installed app record. Replace uploads when
-    // the bundle digest changed or durable metadata predates the app record.
-    let mut wasm_registered = Vec::new();
-    let mut wasm_skipped = Vec::new();
-    let mut wasm_failures = Vec::new();
-    if plan.wasm {
-        let existing_sources = match state.server.load_wasm_module_sources(tenant).await {
-            Ok(map) => map,
-            Err(e) => {
-                tracing::warn!(
-                    tenant,
-                    error = %e,
-                    "Failed to load existing WASM modules; install pipeline will not honor hot-upload preservation this cycle"
-                );
-                std::collections::BTreeMap::new()
-            }
-        };
-
-        for (module_name, wasm_bytes) in &bundle.wasm_modules {
-            let module_started = Instant::now();
-            let module_config = bundle.wasm_module_configs.get(module_name);
-            let hash = temper_wasm::WasmEngine::hash_module(wasm_bytes);
-            let required = module_config.is_some_and(WasmModuleManifest::is_required);
-            let replace_uploaded_module =
-                existing_sources.get(module_name).is_some_and(|existing| {
-                    upload_replacement.should_replace(existing)
-                        || (required && existing.source == "upload" && existing.sha256_hash != hash)
-                });
-            if let Some(existing) = existing_sources.get(module_name)
-                && existing.source == "upload"
-                && existing.sha256_hash != hash
-            {
-                if replace_uploaded_module {
-                    tracing::info!(
-                        tenant,
-                        module = %module_name,
-                        bundled_hash = %hash,
-                        upload_hash = %existing.sha256_hash,
-                        "Replacing stale hot-uploaded WASM module during os-app reconcile"
-                    );
-                } else {
-                    tracing::info!(
-                        tenant,
-                        module = %module_name,
-                        bundled_hash = %hash,
-                        upload_hash = %existing.sha256_hash,
-                        "Skipping bundled install: hot-uploaded module preserved"
-                    );
-                    wasm_skipped.push(module_name.clone());
-                    continue;
-                }
-            }
-
-            let upsert_result = if replace_uploaded_module {
-                state
-                    .server
-                    .upsert_bundled_wasm_module_replacing_upload(
-                        tenant,
-                        module_name,
-                        wasm_bytes,
-                        &hash,
-                    )
-                    .await
-            } else {
-                state
-                    .server
-                    .upsert_wasm_module(tenant, module_name, wasm_bytes, &hash, "bundled")
-                    .await
-            };
-            if let Err(e) = upsert_result {
-                tracing::warn!(
-                    tenant,
-                    module = %module_name,
-                    error = %e,
-                    "Failed to persist WASM module to durable store (continuing in-memory only)"
-                );
-            }
-            {
-                let mut wasm_reg = state.server.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
-                wasm_reg.register(&tenant_id, module_name, &hash);
-            }
-
-            if matches!(
-                module_config.map(|config| config.startup_loading),
-                Some(WasmStartupLoading::Eager)
-            ) && let Err(e) = state.server.wasm_engine.compile_and_cache(wasm_bytes)
-            {
-                wasm_failures.push(module_name.clone());
-                tracing::warn!(
-                    tenant,
-                    module = %module_name,
-                    error = %e,
-                    "Failed to eagerly compile WASM module from OS app"
-                );
-            }
-
-            tracing::info!(
-                tenant,
-                module = %module_name,
-                hash = %hash,
-                size = wasm_bytes.len(),
-                duration_ms = module_started.elapsed().as_millis() as u64,
-                startup_loading = ?module_config
-                    .map(|config| config.startup_loading)
-                    .unwrap_or_default(),
-                "WASM module registered from OS app"
-            );
-            wasm_registered.push(module_name.clone());
-        }
-
-        for (module_name, module_config) in &bundle.wasm_module_configs {
-            if bundle.wasm_modules.contains_key(module_name) {
-                continue;
-            }
-            match module_config.criticality {
-                WasmModuleCriticality::Optional => {
-                    wasm_skipped.push(module_name.clone());
-                    tracing::warn!(
-                        tenant,
-                        module = %module_name,
-                        "Configured optional WASM module artifact is missing from the app bundle"
-                    );
-                }
-                WasmModuleCriticality::PlatformRequired | WasmModuleCriticality::AppRequired => {
-                    wasm_failures.push(module_name.clone());
-                    tracing::error!(
-                        tenant,
-                        module = %module_name,
-                        criticality = ?module_config.criticality,
-                        "Configured required WASM module artifact is missing from the app bundle"
-                    );
-                }
-            }
-        }
-    }
-
-    tracing::info!(
-        "Installed os-app '{app_name}' for tenant '{tenant}': added={added:?} updated={updated:?} skipped={skipped:?} wasm={wasm_registered:?}"
-    );
-
-    // ARN-68: re-key changed-key-set types after registration (boot-race fix; see the helper + ADR-0153).
-    if plan.specs && (!added.is_empty() || !updated.is_empty()) {
-        reconcile::spawn_key_index_rekey_after_spec_change(state, &tenant_id);
-    }
+    // ── Step 4: Activate the durable WASM generation in memory. ──────────
+    let wasm_activation = activate_wasm_generation(
+        state,
+        tenant,
+        app_name,
+        plan,
+        &bundle,
+        &tenant_id,
+        &effective_wasm_hashes,
+        &existing_sources,
+        &upload_replacement,
+    )
+    .await?;
+    let wasm_registered = wasm_activation.registered;
+    let wasm_skipped = wasm_activation.skipped;
+    let wasm_failures = wasm_activation.failures;
+    let publication_agent_ctx = state.server.spec_publication_dispatch_context(
+        publication_guard,
+        &tenant_id,
+        "platform-bootstrap",
+    )?;
 
     // ── Step 5: Bootstrap App entity + APP.md. ──────────────────────────
     let (agents_bootstrapped, skills_bootstrapped, adrs_bootstrapped) = if plan.content {
-        let app_id = bootstrap_app_entity(state, &tenant_id, tenant, app_name).await;
+        let app_id =
+            bootstrap_app_entity(state, &tenant_id, tenant, app_name, &publication_agent_ctx).await;
 
         // ── Step 6: Bootstrap agents (returns name→uuid map). ──────────
         let (agents_bootstrapped, agent_uuid_map) = agent_bootstrap::bootstrap_agents(
@@ -1545,19 +1509,86 @@ pub(super) async fn install_os_app_with_plan(
             tenant,
             &bundle.agents,
             app_id.as_deref(),
+            &publication_agent_ctx,
         )
         .await;
 
         // ── Step 7: Bootstrap skills (agent-scoped + system). ──────────
-        let skills_bootstrapped =
-            bootstrap_skills(state, &tenant_id, tenant, &bundle.skills, &agent_uuid_map).await;
+        let skills_bootstrapped = bootstrap_skills(
+            state,
+            &tenant_id,
+            tenant,
+            &bundle.skills,
+            &agent_uuid_map,
+            &publication_agent_ctx,
+        )
+        .await;
 
         // ── Step 7b: Bootstrap system files (e.g. mode-instructions). ─
-        system_files::bootstrap_system_files(state, &tenant_id, tenant, &bundle.system_files).await;
+        let system_files_bootstrapped = system_files::bootstrap_system_files(
+            state,
+            &tenant_id,
+            tenant,
+            &bundle.system_files,
+            &publication_agent_ctx,
+        )
+        .await;
 
         // ── Step 8: Bootstrap ADRs into TemperFS. ─────────────────────
-        let adrs_bootstrapped =
-            bootstrap_adrs(state, &tenant_id, tenant, app_name, &bundle.adrs).await;
+        let adrs_bootstrapped = bootstrap_adrs(
+            state,
+            &tenant_id,
+            tenant,
+            app_name,
+            &bundle.adrs,
+            &publication_agent_ctx,
+        )
+        .await?;
+
+        let app_entity_required = state
+            .registry
+            .read()
+            .expect("OS app registry lock poisoned")
+            .get_spec(&tenant_id, "App")
+            .is_some();
+        let mut incomplete = Vec::new();
+        if app_entity_required && app_id.is_none() {
+            incomplete.push("App entity".to_string());
+        }
+        if agents_bootstrapped.len() != bundle.agents.len() {
+            incomplete.push(format!(
+                "agents {}/{}",
+                agents_bootstrapped.len(),
+                bundle.agents.len()
+            ));
+        }
+        if skills_bootstrapped.len() != bundle.skills.len() {
+            incomplete.push(format!(
+                "skills {}/{}",
+                skills_bootstrapped.len(),
+                bundle.skills.len()
+            ));
+        }
+        if system_files_bootstrapped.len() != bundle.system_files.len() {
+            incomplete.push(format!(
+                "system files {}/{}",
+                system_files_bootstrapped.len(),
+                bundle.system_files.len()
+            ));
+        }
+        if adrs_bootstrapped.len() != bundle.adrs.len() {
+            incomplete.push(format!(
+                "ADRs {}/{}",
+                adrs_bootstrapped.len(),
+                bundle.adrs.len()
+            ));
+        }
+        if !incomplete.is_empty() {
+            return Err(format!(
+                "OS app '{app_name}' content bootstrap is incomplete: {}",
+                incomplete.join(", ")
+            ));
+        }
 
         (agents_bootstrapped, skills_bootstrapped, adrs_bootstrapped)
     } else {
@@ -1566,12 +1597,65 @@ pub(super) async fn install_os_app_with_plan(
 
     // ── Step 9: Create seed instances. ───────────────────────────────
     let seed_created = if plan.seed {
-        bootstrap_seed_data(state, &tenant_id, tenant, &bundle.seed_instances).await
+        let created = bootstrap_seed_data(
+            state,
+            &tenant_id,
+            tenant,
+            &bundle.seed_instances,
+            &publication_agent_ctx,
+        )
+        .await;
+        if created.len() != bundle.seed_instances.len() {
+            return Err(format!(
+                "OS app '{app_name}' seed bootstrap is incomplete: {}/{} instances ready",
+                created.len(),
+                bundle.seed_instances.len()
+            ));
+        }
+        created
     } else {
         Vec::new()
     };
 
-    reconcile::record_app_install_metadata_for_bundle(state, tenant, app_name, &bundle).await;
+    let platform_store = state
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.platform.clone());
+    let mut installed_record = publication_record;
+    installed_record.status = "installed".to_string();
+    let terminal_metadata_write = async move {
+        if let Some(store) = platform_store {
+            store
+                .record_installed_app_metadata(&installed_record)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "OS app '{app_name}' completed runtime/content work but failed to finalize durable install metadata: {error}"
+                    )
+                })?;
+        }
+        Ok(())
+    };
+    finalize_os_app_publication(
+        state,
+        publication_guard,
+        &tenant_id,
+        || {
+            // ARN-68: schedule changed-key-set and vector projection repair
+            // after the complete runtime/content/seed cutover but before the
+            // cancellable terminal metadata acknowledgement.
+            if plan.specs && (!added.is_empty() || !updated.is_empty()) {
+                reconcile::spawn_key_index_rekey_after_spec_change(state, &tenant_id);
+            }
+        },
+        terminal_metadata_write,
+    )
+    .await?;
+
+    tracing::info!(
+        "Installed os-app '{app_name}' for tenant '{tenant}': added={added:?} updated={updated:?} skipped={skipped:?} wasm={wasm_registered:?}"
+    );
 
     Ok(InstallResult {
         added,
@@ -1587,80 +1671,6 @@ pub(super) async fn install_os_app_with_plan(
     })
 }
 
-#[derive(Debug, Clone, Default)]
-struct UploadedWasmReplacementContext {
-    bundle_wasm_digest_changed: bool,
-    app_recorded_at: Option<DateTime<Utc>>,
-}
-
-impl UploadedWasmReplacementContext {
-    fn should_replace(&self, existing: &WasmModuleSource) -> bool {
-        if existing.source != "upload" {
-            return false;
-        }
-        if self.bundle_wasm_digest_changed {
-            return true;
-        }
-        let Some(app_recorded_at) = self.app_recorded_at else {
-            return false;
-        };
-        let Some(updated_at) = existing
-            .updated_at
-            .as_deref()
-            .and_then(parse_persisted_timestamp)
-        else {
-            return false;
-        };
-        updated_at < app_recorded_at
-    }
-}
-
-fn parse_persisted_timestamp(value: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value)
-        .map(|dt| dt.with_timezone(&Utc))
-        .or_else(|_| {
-            NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").map(|dt| dt.and_utc())
-        })
-        .ok()
-}
-
-async fn uploaded_wasm_replacement_context(
-    state: &PlatformState,
-    tenant: &str,
-    app_name: &str,
-    bundle: &AppBundle,
-) -> UploadedWasmReplacementContext {
-    let Some(ps) = state
-        .server
-        .storage_stack
-        .as_ref()
-        .and_then(|stack| stack.platform.clone())
-    else {
-        return UploadedWasmReplacementContext::default();
-    };
-    let digest = reconcile::digest_app_bundle(app_name, bundle);
-    match ps.get_installed_app(tenant, app_name).await {
-        Ok(Some(record)) => UploadedWasmReplacementContext {
-            bundle_wasm_digest_changed: record.wasm_digest != digest.wasm_digest,
-            app_recorded_at: record
-                .last_reconciled_at
-                .as_deref()
-                .or(record.installed_at.as_deref())
-                .and_then(parse_persisted_timestamp),
-        },
-        Ok(None) => UploadedWasmReplacementContext::default(),
-        Err(error) => {
-            tracing::warn!(
-                tenant,
-                app = %app_name,
-                error = %error,
-                "Failed to read OS app metadata while deciding WASM hot-upload replacement"
-            );
-            UploadedWasmReplacementContext::default()
-        }
-    }
-}
-
 // ── Bootstrap helpers (entity creation during install) ───────────────
 
 /// Bootstrap an App entity for the installed OS app.
@@ -1672,6 +1682,7 @@ async fn bootstrap_app_entity(
     tenant_id: &TenantId,
     tenant: &str,
     app_name: &str,
+    agent_ctx: &temper_server::request_context::AgentContext,
 ) -> Option<String> {
     // Check if App entity type is registered.
     let has_apps = {
@@ -1687,15 +1698,13 @@ async fn bootstrap_app_entity(
         return None;
     }
 
-    let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
-
     // Look for an existing App entity with this name.
     let existing_ids = state.server.list_entity_ids_lazy(tenant_id, "App").await;
     let mut existing_app_id = None;
     for id in &existing_ids {
         if let Ok(resp) = state
             .server
-            .get_tenant_entity_state(tenant_id, "App", id)
+            .get_tenant_entity_state_in_generation(tenant_id, "App", id, agent_ctx)
             .await
             && let Some(name) = state_field_str(&resp.state.fields, &["Name", "name"])
             && name.eq_ignore_ascii_case(app_name)
@@ -1730,7 +1739,7 @@ async fn bootstrap_app_entity(
                 && registry.get_spec(tenant_id, "Workspace").is_some()
         };
         if has_fs {
-            if let Err(e) = ensure_app_docs_workspace(state, tenant_id, &agent_ctx).await {
+            if let Err(e) = ensure_app_docs_workspace(state, tenant_id, agent_ctx).await {
                 tracing::warn!(tenant, app = %app_name, error = %e, "Failed to ensure app docs workspace");
             } else {
                 let app_slug = slug_fragment(app_name);
@@ -1739,7 +1748,7 @@ async fn bootstrap_app_entity(
                 if let Err(e) = ensure_directory(
                     state,
                     tenant_id,
-                    &agent_ctx,
+                    agent_ctx,
                     DirectoryBootstrapTarget {
                         directory_id: &app_dir_id,
                         name: app_name,
@@ -1757,7 +1766,7 @@ async fn bootstrap_app_entity(
                     if let Err(e) = ensure_markdown_file(
                         state,
                         tenant_id,
-                        &agent_ctx,
+                        agent_ctx,
                         MarkdownFileBootstrapTarget {
                             file_id: &file_id_str,
                             name: "APP.md",
@@ -1794,7 +1803,7 @@ async fn bootstrap_app_entity(
                     "version": version,
                     "app_guide_file_id": app_guide_file_id,
                 }),
-                agent_ctx: &agent_ctx,
+                agent_ctx,
                 await_integration: false,
                 await_reactions: true,
             })
@@ -1807,7 +1816,13 @@ async fn bootstrap_app_entity(
     let new_app_id = format!("ap-{}", temper_runtime::scheduler::sim_uuid());
     match state
         .server
-        .get_or_create_tenant_entity(tenant_id, "App", &new_app_id, serde_json::json!({}))
+        .get_or_create_tenant_entity_in_generation(
+            tenant_id,
+            "App",
+            &new_app_id,
+            serde_json::json!({}),
+            agent_ctx,
+        )
         .await
     {
         Ok(_) => {
@@ -1826,7 +1841,7 @@ async fn bootstrap_app_entity(
                         "version": version,
                         "app_guide_file_id": app_guide_file_id,
                     }),
-                    agent_ctx: &agent_ctx,
+                    agent_ctx,
                     await_integration: false,
                     await_reactions: true,
                 })
@@ -1869,6 +1884,7 @@ async fn bootstrap_skills(
     tenant: &str,
     skills: &[AppSkillDefinition],
     agent_uuid_map: &BTreeMap<String, String>,
+    agent_ctx: &temper_server::request_context::AgentContext,
 ) -> Vec<String> {
     if skills.is_empty() {
         return Vec::new();
@@ -1889,10 +1905,8 @@ async fn bootstrap_skills(
         return Vec::new();
     }
 
-    let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
-
     // Ensure workspace exists.
-    if let Err(e) = ensure_app_docs_workspace(state, tenant_id, &agent_ctx).await {
+    if let Err(e) = ensure_app_docs_workspace(state, tenant_id, agent_ctx).await {
         tracing::warn!(tenant, error = %e, "Failed to ensure app docs workspace for skill bootstrap");
         return Vec::new();
     }
@@ -1901,7 +1915,7 @@ async fn bootstrap_skills(
     if let Err(e) = ensure_directory(
         state,
         tenant_id,
-        &agent_ctx,
+        agent_ctx,
         DirectoryBootstrapTarget {
             directory_id: "os-system-root",
             name: "system",
@@ -1920,7 +1934,7 @@ async fn bootstrap_skills(
     if let Err(e) = ensure_directory(
         state,
         tenant_id,
-        &agent_ctx,
+        agent_ctx,
         DirectoryBootstrapTarget {
             directory_id: "os-system-skills-root",
             name: "skills",
@@ -1939,7 +1953,7 @@ async fn bootstrap_skills(
     if let Err(e) = ensure_directory(
         state,
         tenant_id,
-        &agent_ctx,
+        agent_ctx,
         DirectoryBootstrapTarget {
             directory_id: "os-agents-root",
             name: "agents",
@@ -1996,7 +2010,7 @@ async fn bootstrap_skills(
                 if let Err(e) = ensure_directory(
                     state,
                     tenant_id,
-                    &agent_ctx,
+                    agent_ctx,
                     DirectoryBootstrapTarget {
                         directory_id: &agent_dir_id,
                         name: agent_name,
@@ -2018,7 +2032,7 @@ async fn bootstrap_skills(
                 if let Err(e) = ensure_directory(
                     state,
                     tenant_id,
-                    &agent_ctx,
+                    agent_ctx,
                     DirectoryBootstrapTarget {
                         directory_id: &agent_skills_dir_id,
                         name: "skills",
@@ -2045,7 +2059,7 @@ async fn bootstrap_skills(
         if let Err(e) = ensure_directory(
             state,
             tenant_id,
-            &agent_ctx,
+            agent_ctx,
             DirectoryBootstrapTarget {
                 directory_id: &dir_id,
                 name: &slug,
@@ -2064,7 +2078,7 @@ async fn bootstrap_skills(
         if let Err(e) = ensure_markdown_file(
             state,
             tenant_id,
-            &agent_ctx,
+            agent_ctx,
             MarkdownFileBootstrapTarget {
                 file_id: &file_id,
                 name: "SKILL.md",
@@ -2092,7 +2106,7 @@ async fn bootstrap_skills(
             if let Err(e) = ensure_markdown_file(
                 state,
                 tenant_id,
-                &agent_ctx,
+                agent_ctx,
                 MarkdownFileBootstrapTarget {
                     file_id: &comp_file_id,
                     name: comp_file_name,
@@ -2142,9 +2156,10 @@ async fn bootstrap_adrs(
     tenant: &str,
     app_name: &str,
     adrs: &[AdrEntry],
-) -> Vec<String> {
+    agent_ctx: &temper_server::request_context::AgentContext,
+) -> Result<Vec<String>, String> {
     if adrs.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let has_workspace = {
@@ -2166,18 +2181,21 @@ async fn bootstrap_adrs(
             count = adrs.len(),
             "Skipping ADR bootstrap — TemperFS types not registered (install temper-fs first)"
         );
-        return Vec::new();
+        return Err(format!(
+            "ADR bootstrap for OS app '{app_name}' requires Workspace, Directory, and File"
+        ));
     }
 
-    let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
-    if let Err(error) = ensure_app_docs_workspace(state, tenant_id, &agent_ctx).await {
+    if let Err(error) = ensure_app_docs_workspace(state, tenant_id, agent_ctx).await {
         tracing::warn!(
             tenant,
             app = %app_name,
             error = %error,
             "Failed to ensure app docs workspace for ADR bootstrap"
         );
-        return Vec::new();
+        return Err(format!(
+            "failed to ensure app docs workspace for ADR bootstrap: {error}"
+        ));
     }
 
     let app_slug = slug_fragment(app_name);
@@ -2186,7 +2204,7 @@ async fn bootstrap_adrs(
     if let Err(error) = ensure_directory(
         state,
         tenant_id,
-        &agent_ctx,
+        agent_ctx,
         DirectoryBootstrapTarget {
             directory_id: &app_dir_id,
             name: app_name,
@@ -2203,7 +2221,9 @@ async fn bootstrap_adrs(
             error = %error,
             "Failed to ensure app ADR directory"
         );
-        return Vec::new();
+        return Err(format!(
+            "failed to ensure app ADR directory '{app_dir_path}': {error}"
+        ));
     }
 
     let adrs_dir_id = format!("os-app-docs-dir-{app_slug}-adrs");
@@ -2211,7 +2231,7 @@ async fn bootstrap_adrs(
     if let Err(error) = ensure_directory(
         state,
         tenant_id,
-        &agent_ctx,
+        agent_ctx,
         DirectoryBootstrapTarget {
             directory_id: &adrs_dir_id,
             name: "adrs",
@@ -2228,7 +2248,9 @@ async fn bootstrap_adrs(
             error = %error,
             "Failed to ensure app ADR subdirectory"
         );
-        return Vec::new();
+        return Err(format!(
+            "failed to ensure app ADR directory '{adrs_dir_path}': {error}"
+        ));
     }
 
     let mut bootstrapped = Vec::new();
@@ -2236,10 +2258,10 @@ async fn bootstrap_adrs(
         let file_slug = slug_fragment(&adr.name);
         let file_id = format!("os-app-adr-{app_slug}-{file_slug}");
         let file_path = format!("{adrs_dir_path}/{}", adr.file_name);
-        match ensure_markdown_file(
+        ensure_markdown_file(
             state,
             tenant_id,
-            &agent_ctx,
+            agent_ctx,
             MarkdownFileBootstrapTarget {
                 file_id: &file_id,
                 name: &adr.file_name,
@@ -2250,21 +2272,16 @@ async fn bootstrap_adrs(
             adr.content.as_bytes(),
         )
         .await
-        {
-            Ok(()) => bootstrapped.push(file_path),
-            Err(error) => {
-                tracing::warn!(
-                    tenant,
-                    app = %app_name,
-                    adr = %adr.file_name,
-                    error = %error,
-                    "Failed to bootstrap ADR into TemperFS"
-                );
-            }
-        }
+        .map_err(|error| {
+            format!(
+                "failed to bootstrap ADR '{}' into TemperFS: {error}",
+                adr.file_name
+            )
+        })?;
+        bootstrapped.push(file_path);
     }
 
-    bootstrapped
+    Ok(bootstrapped)
 }
 
 pub(super) async fn ensure_app_docs_workspace(
@@ -2274,16 +2291,22 @@ pub(super) async fn ensure_app_docs_workspace(
 ) -> Result<(), String> {
     if !state
         .server
-        .ensure_entity_loaded(tenant_id, "Workspace", APP_DOCS_WORKSPACE_ID)
+        .ensure_entity_loaded_in_generation(
+            tenant_id,
+            "Workspace",
+            APP_DOCS_WORKSPACE_ID,
+            agent_ctx,
+        )
         .await
     {
         state
             .server
-            .get_or_create_tenant_entity(
+            .get_or_create_tenant_entity_in_generation(
                 tenant_id,
                 "Workspace",
                 APP_DOCS_WORKSPACE_ID,
                 serde_json::json!({}),
+                agent_ctx,
             )
             .await
             .map_err(|e| format!("failed to create app docs workspace entity: {e}"))?;
@@ -2337,7 +2360,7 @@ pub(super) async fn ensure_directory(
 ) -> Result<(), String> {
     if state
         .server
-        .ensure_entity_loaded(tenant_id, "Directory", target.directory_id)
+        .ensure_entity_loaded_in_generation(tenant_id, "Directory", target.directory_id, agent_ctx)
         .await
     {
         ensure_entity_field_aliases(
@@ -2351,6 +2374,7 @@ pub(super) async fn ensure_directory(
                 "ParentId": target.parent_id,
                 "WorkspaceId": target.workspace_id,
             }),
+            agent_ctx,
         )
         .await?;
         return Ok(());
@@ -2358,11 +2382,12 @@ pub(super) async fn ensure_directory(
 
     state
         .server
-        .get_or_create_tenant_entity(
+        .get_or_create_tenant_entity_in_generation(
             tenant_id,
             "Directory",
             target.directory_id,
             serde_json::json!({}),
+            agent_ctx,
         )
         .await
         .map_err(|e| {
@@ -2461,7 +2486,7 @@ pub(super) async fn ensure_markdown_file(
     });
     let existed = state
         .server
-        .ensure_entity_loaded(tenant_id, "File", target.file_id)
+        .ensure_entity_loaded_in_generation(tenant_id, "File", target.file_id, agent_ctx)
         .await;
     if !existed {
         state
@@ -2511,10 +2536,18 @@ pub(super) async fn ensure_markdown_file(
         create_fields.clone(),
     )
     .await?;
-    ensure_entity_field_aliases(state, tenant_id, "File", target.file_id, canonical_fields).await?;
+    ensure_entity_field_aliases(
+        state,
+        tenant_id,
+        "File",
+        target.file_id,
+        canonical_fields,
+        agent_ctx,
+    )
+    .await?;
 
     let desired_hash = content_sha256(content);
-    if file_already_contains(state, tenant_id, target.file_id, &desired_hash).await? {
+    if file_already_contains(state, tenant_id, target.file_id, &desired_hash, agent_ctx).await? {
         return Ok(());
     }
 
@@ -2546,12 +2579,12 @@ async fn bootstrap_seed_data(
     tenant_id: &TenantId,
     tenant: &str,
     instances: &[SeedInstance],
+    agent_ctx: &temper_server::request_context::AgentContext,
 ) -> Vec<String> {
     if instances.is_empty() {
         return Vec::new();
     }
 
-    let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
     let mut created = Vec::new();
 
     for instance in instances {
@@ -2581,19 +2614,18 @@ async fn bootstrap_seed_data(
             )
         });
 
-        // Check if entity already exists (idempotent).
-        if state
+        // Create the entity once, then replay the declared seed actions with
+        // stable idempotency keys so an interrupted install can resume.
+        let exists = state
             .server
-            .entity_exists(tenant_id, &instance.entity_type, &entity_id)
-        {
+            .entity_exists(tenant_id, &instance.entity_type, &entity_id);
+        if exists {
             tracing::debug!(
                 tenant,
                 entity_type = %instance.entity_type,
                 entity_id = %entity_id,
-                "Seed entity already exists — skipping"
+                "Seed entity already exists — resuming declared actions"
             );
-            created.push(format!("{}({})", instance.entity_type, entity_id));
-            continue;
         }
 
         // Create entity with initial fields.
@@ -2603,65 +2635,89 @@ async fn bootstrap_seed_data(
             instance.fields.clone()
         };
 
-        match state
-            .server
-            .get_or_create_tenant_entity(
-                tenant_id,
-                &instance.entity_type,
-                &entity_id,
-                initial_fields,
-            )
-            .await
+        if !exists
+            && let Err(e) = state
+                .server
+                .get_or_create_tenant_entity_in_generation(
+                    tenant_id,
+                    &instance.entity_type,
+                    &entity_id,
+                    initial_fields,
+                    agent_ctx,
+                )
+                .await
         {
-            Ok(_) => {
-                // Dispatch each action in order.
-                for action in &instance.actions {
-                    let params = if action.params.is_null() {
-                        serde_json::json!({})
-                    } else {
-                        action.params.clone()
-                    };
-                    if let Err(e) = state
-                        .server
-                        .dispatch(temper_server::state::DispatchCommand {
-                            tenant: tenant_id,
-                            entity_type: &instance.entity_type,
-                            entity_id: &entity_id,
-                            action: &action.name,
-                            params,
-                            agent_ctx: &agent_ctx,
-                            await_integration: false,
-                            await_reactions: true,
-                        })
-                        .await
-                    {
-                        tracing::warn!(
-                            tenant,
-                            entity_type = %instance.entity_type,
-                            entity_id = %entity_id,
-                            action = %action.name,
-                            error = %e,
-                            "Failed to dispatch seed action"
-                        );
-                    }
+            tracing::warn!(
+                tenant,
+                entity_type = %instance.entity_type,
+                entity_id = %entity_id,
+                error = %e,
+                "Failed to create seed entity"
+            );
+            continue;
+        }
+
+        let mut actions_ready = true;
+        for (action_index, action) in instance.actions.iter().enumerate() {
+            let params = if action.params.is_null() {
+                serde_json::json!({})
+            } else {
+                action.params.clone()
+            };
+            let mut action_ctx = agent_ctx.clone();
+            action_ctx.idempotency_key = Some(format!(
+                "os-seed:{}:{}:{action_index}:{}",
+                instance.entity_type, entity_id, action.name
+            ));
+            match state
+                .server
+                .dispatch(temper_server::state::DispatchCommand {
+                    tenant: tenant_id,
+                    entity_type: &instance.entity_type,
+                    entity_id: &entity_id,
+                    action: &action.name,
+                    params,
+                    agent_ctx: &action_ctx,
+                    await_integration: false,
+                    await_reactions: true,
+                })
+                .await
+            {
+                Ok(response) if response.success => {}
+                Ok(response) => {
+                    actions_ready = false;
+                    tracing::warn!(
+                        tenant,
+                        entity_type = %instance.entity_type,
+                        entity_id = %entity_id,
+                        action = %action.name,
+                        error = response.error.as_deref().unwrap_or("seed action rejected"),
+                        "Failed to dispatch seed action"
+                    );
+                    break;
                 }
-                tracing::info!(
-                    tenant,
-                    entity_type = %instance.entity_type,
-                    entity_id = %entity_id,
-                    "Seed entity created"
-                );
-                created.push(format!("{}({})", instance.entity_type, entity_id));
+                Err(e) => {
+                    actions_ready = false;
+                    tracing::warn!(
+                        tenant,
+                        entity_type = %instance.entity_type,
+                        entity_id = %entity_id,
+                        action = %action.name,
+                        error = %e,
+                        "Failed to dispatch seed action"
+                    );
+                    break;
+                }
             }
-            Err(e) => {
-                tracing::warn!(
-                    tenant,
-                    entity_type = %instance.entity_type,
-                    entity_id = %entity_id,
-                    error = %e,
-                    "Failed to create seed entity"
-                );
-            }
+        }
+        if actions_ready {
+            tracing::info!(
+                tenant,
+                entity_type = %instance.entity_type,
+                entity_id = %entity_id,
+                "Seed entity ready"
+            );
+            created.push(format!("{}({})", instance.entity_type, entity_id));
         }
     }
     created

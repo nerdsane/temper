@@ -7,12 +7,20 @@ use crate::state::PlatformState;
 
 use super::{AgentDefinition, content_sha256, state_field_str};
 
+mod soul_refresh;
+
+#[cfg(test)]
+pub(super) use soul_refresh::decide_agent_soul_refresh;
+pub(super) use soul_refresh::{AgentSoulRefreshDecision, bootstrapped_agent_soul_entity_id};
+use soul_refresh::{inspect_agent_soul_refresh, slugify_bootstrapped_agent_name};
+
 pub(super) async fn bootstrap_agents(
     state: &PlatformState,
     tenant_id: &TenantId,
     tenant: &str,
     agents: &[AgentDefinition],
     app_id: Option<&str>,
+    agent_ctx: &temper_server::request_context::AgentContext,
 ) -> (Vec<String>, BTreeMap<String, String>) {
     let mut bootstrapped = Vec::new();
     let mut agent_uuid_map: BTreeMap<String, String> = BTreeMap::new();
@@ -51,14 +59,12 @@ pub(super) async fn bootstrap_agents(
         registry.get_spec(tenant_id, "Agent").is_some()
     };
 
-    let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
-
     for agent in agents {
         let stable_soul_id = bootstrapped_agent_soul_entity_id(&agent.name);
 
         if let Ok(resp) = state
             .server
-            .get_tenant_entity_state(tenant_id, "Soul", &stable_soul_id)
+            .get_tenant_entity_state_in_generation(tenant_id, "Soul", &stable_soul_id, agent_ctx)
             .await
         {
             if let Some(file_id) = resp
@@ -69,7 +75,15 @@ pub(super) async fn bootstrap_agents(
                 .and_then(|v| v.as_str())
             {
                 let desired_hash = content_sha256(agent.content.as_bytes());
-                match inspect_agent_soul_refresh(state, tenant_id, file_id, &desired_hash).await {
+                match inspect_agent_soul_refresh(
+                    state,
+                    tenant_id,
+                    file_id,
+                    &desired_hash,
+                    agent_ctx,
+                )
+                .await
+                {
                     Ok(AgentSoulRefreshDecision::AlreadyCurrent) => {
                         tracing::debug!(
                             tenant,
@@ -92,7 +106,7 @@ pub(super) async fn bootstrap_agents(
                         if let Err(error) = ensure_inline_file_uploaded(
                             state,
                             tenant_id,
-                            &agent_ctx,
+                            agent_ctx,
                             file_id,
                             &format!("{}.soul.md", slugify_bootstrapped_agent_name(&agent.name)),
                             agent.content.as_bytes(),
@@ -125,7 +139,7 @@ pub(super) async fn bootstrap_agents(
             agent_uuid_map.insert(agent.name.clone(), stable_soul_id.clone());
             bootstrapped.push(agent.name.clone());
             if has_agents && let Some(app_id) = app_id {
-                set_agent_source_app(state, tenant_id, tenant, &agent_ctx, &agent.name, app_id)
+                set_agent_source_app(state, tenant_id, tenant, agent_ctx, &agent.name, app_id)
                     .await;
             }
             continue;
@@ -136,7 +150,7 @@ pub(super) async fn bootstrap_agents(
         for id in &existing_ids {
             if let Ok(resp) = state
                 .server
-                .get_tenant_entity_state(tenant_id, "Soul", id)
+                .get_tenant_entity_state_in_generation(tenant_id, "Soul", id, agent_ctx)
                 .await
                 && let Some(name) = state_field_str(&resp.state.fields, &["Name", "name"])
                 && name.eq_ignore_ascii_case(&agent.name)
@@ -149,7 +163,14 @@ pub(super) async fn bootstrap_agents(
                     .and_then(|v| v.as_str())
                 {
                     let desired_hash = content_sha256(agent.content.as_bytes());
-                    match inspect_agent_soul_refresh(state, tenant_id, file_id, &desired_hash).await
+                    match inspect_agent_soul_refresh(
+                        state,
+                        tenant_id,
+                        file_id,
+                        &desired_hash,
+                        agent_ctx,
+                    )
+                    .await
                     {
                         Ok(AgentSoulRefreshDecision::AlreadyCurrent) => {
                             tracing::debug!(
@@ -171,7 +192,7 @@ pub(super) async fn bootstrap_agents(
                             if let Err(error) = ensure_inline_file_uploaded(
                                 state,
                                 tenant_id,
-                                &agent_ctx,
+                                agent_ctx,
                                 file_id,
                                 &format!("{}.soul.md", agent.name.to_lowercase().replace(' ', "-")),
                                 agent.content.as_bytes(),
@@ -209,7 +230,7 @@ pub(super) async fn bootstrap_agents(
             bootstrapped.push(agent.name.clone());
 
             if has_agents && let Some(app_id) = app_id {
-                set_agent_source_app(state, tenant_id, tenant, &agent_ctx, &agent.name, app_id)
+                set_agent_source_app(state, tenant_id, tenant, agent_ctx, &agent.name, app_id)
                     .await;
             }
             continue;
@@ -223,7 +244,7 @@ pub(super) async fn bootstrap_agents(
         if let Err(error) = ensure_inline_file_uploaded(
             state,
             tenant_id,
-            &agent_ctx,
+            agent_ctx,
             &temp_file_id,
             &file_name,
             agent.content.as_bytes(),
@@ -242,7 +263,13 @@ pub(super) async fn bootstrap_agents(
         let new_soul_id = stable_soul_id;
         match state
             .server
-            .get_or_create_tenant_entity(tenant_id, "Soul", &new_soul_id, json!({}))
+            .get_or_create_tenant_entity_in_generation(
+                tenant_id,
+                "Soul",
+                &new_soul_id,
+                json!({}),
+                agent_ctx,
+            )
             .await
         {
             Ok(_) => {
@@ -259,7 +286,7 @@ pub(super) async fn bootstrap_agents(
                             "description": agent.description,
                             "content_file_id": temp_file_id,
                         }),
-                        agent_ctx: &agent_ctx,
+                        agent_ctx,
                         await_integration: false,
                         await_reactions: true,
                     })
@@ -281,7 +308,7 @@ pub(super) async fn bootstrap_agents(
                         entity_id: &soul_id,
                         action: "Publish",
                         params: json!({}),
-                        agent_ctx: &agent_ctx,
+                        agent_ctx,
                         await_integration: false,
                         await_reactions: true,
                     })
@@ -292,7 +319,7 @@ pub(super) async fn bootstrap_agents(
                 bootstrapped.push(agent.name.clone());
 
                 if has_agents && let Some(app_id) = app_id {
-                    set_agent_source_app(state, tenant_id, tenant, &agent_ctx, &agent.name, app_id)
+                    set_agent_source_app(state, tenant_id, tenant, agent_ctx, &agent.name, app_id)
                         .await;
                 }
             }
@@ -322,7 +349,7 @@ async fn set_agent_source_app(
     for id in &agent_ids {
         if let Ok(resp) = state
             .server
-            .get_tenant_entity_state(tenant_id, "Agent", id)
+            .get_tenant_entity_state_in_generation(tenant_id, "Agent", id, agent_ctx)
             .await
             && let Some(name) = state_field_str(&resp.state.fields, &["Name", "name"])
             && name.eq_ignore_ascii_case(agent_name)
@@ -378,7 +405,7 @@ async fn ensure_inline_file_uploaded(
 ) -> Result<(), String> {
     if !state
         .server
-        .ensure_entity_loaded(tenant_id, "File", file_id)
+        .ensure_entity_loaded_in_generation(tenant_id, "File", file_id, agent_ctx)
         .await
     {
         state
@@ -398,7 +425,7 @@ async fn ensure_inline_file_uploaded(
 
     let response = state
         .server
-        .get_tenant_entity_state(tenant_id, "File", file_id)
+        .get_tenant_entity_state_in_generation(tenant_id, "File", file_id, agent_ctx)
         .await
         .map_err(|e| format!("failed to load File('{file_id}') actor: {e}"))?;
 
@@ -432,68 +459,4 @@ async fn ensure_inline_file_uploaded(
         .map_err(|e| format!("failed to upload File('{file_id}') content: {e}"))?;
 
     Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum AgentSoulRefreshDecision {
-    Upload,
-    AlreadyCurrent,
-    PreserveCustomized,
-}
-
-fn slugify_bootstrapped_agent_name(name: &str) -> String {
-    name.trim().to_lowercase().replace(' ', "-")
-}
-
-pub(super) fn bootstrapped_agent_soul_entity_id(name: &str) -> String {
-    format!(
-        "sl-bootstrap-agent-soul-{}",
-        slugify_bootstrapped_agent_name(name)
-    )
-}
-
-async fn inspect_agent_soul_refresh(
-    state: &PlatformState,
-    tenant_id: &TenantId,
-    file_id: &str,
-    desired_hash: &str,
-) -> Result<AgentSoulRefreshDecision, String> {
-    let response = state
-        .server
-        .get_tenant_entity_state(tenant_id, "File", file_id)
-        .await
-        .map_err(|e| format!("failed to inspect File('{file_id}'): {e}"))?;
-
-    let has_content = response
-        .state
-        .booleans
-        .get("has_content")
-        .copied()
-        .unwrap_or(false);
-    let current_hash = response
-        .state
-        .fields
-        .get("content_hash")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-
-    Ok(decide_agent_soul_refresh(
-        has_content,
-        current_hash,
-        desired_hash,
-    ))
-}
-
-pub(super) fn decide_agent_soul_refresh(
-    has_content: bool,
-    current_hash: &str,
-    desired_hash: &str,
-) -> AgentSoulRefreshDecision {
-    if !has_content || current_hash.is_empty() {
-        AgentSoulRefreshDecision::Upload
-    } else if current_hash == desired_hash {
-        AgentSoulRefreshDecision::AlreadyCurrent
-    } else {
-        AgentSoulRefreshDecision::PreserveCustomized
-    }
 }

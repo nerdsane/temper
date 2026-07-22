@@ -273,6 +273,7 @@ async fn covered_composite_hit_materializes_authoritative_body_not_stale_catalog
             keys: true,
             key_set_signature: Some(signature.clone()),
             vectors: false,
+            snapshot_source: Default::default(),
         },
     )
     .await
@@ -452,6 +453,8 @@ async fn oversized_incomplete_composite_lookup_returns_query_too_large() {
             key_rows: Vec::new(),
             reconcile_keys: false,
             key_set_signature: None,
+            snapshot_source: Default::default(),
+            batch_idempotency: None,
         })
         .collect::<Vec<_>>();
     EventStore::append_batch(&store, &appends)

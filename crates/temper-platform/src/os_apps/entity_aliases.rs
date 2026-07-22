@@ -12,7 +12,7 @@ pub(super) async fn ensure_created_file_initialized(
 ) -> Result<(), String> {
     let response = state
         .server
-        .get_tenant_entity_state(tenant_id, "File", file_id)
+        .get_tenant_entity_state_in_generation(tenant_id, "File", file_id, agent_ctx)
         .await
         .map_err(|e| format!("failed to inspect File('{file_id}') status: {e}"))?;
     if response.state.status != "Created" {
@@ -42,10 +42,11 @@ pub(super) async fn ensure_entity_field_aliases(
     entity_type: &str,
     entity_id: &str,
     aliases: serde_json::Value,
+    agent_ctx: &temper_server::request_context::AgentContext,
 ) -> Result<(), String> {
     let current = state
         .server
-        .get_tenant_entity_state(tenant_id, entity_type, entity_id)
+        .get_tenant_entity_state_in_generation(tenant_id, entity_type, entity_id, agent_ctx)
         .await
         .map_err(|e| format!("failed to inspect {entity_type}('{entity_id}') aliases: {e}"))?;
 
@@ -64,13 +65,14 @@ pub(super) async fn ensure_entity_field_aliases(
 
     state
         .server
-        .update_tenant_entity_fields(
+        .update_tenant_entity_fields_in_generation(
             tenant_id,
             entity_type,
             entity_id,
             serde_json::Value::Object(updates),
             false,
             None,
+            agent_ctx,
         )
         .await
         .map(|_| ())
@@ -82,10 +84,11 @@ pub(super) async fn file_already_contains(
     tenant_id: &TenantId,
     file_id: &str,
     desired_hash: &str,
+    agent_ctx: &temper_server::request_context::AgentContext,
 ) -> Result<bool, String> {
     let response = state
         .server
-        .get_tenant_entity_state(tenant_id, "File", file_id)
+        .get_tenant_entity_state_in_generation(tenant_id, "File", file_id, agent_ctx)
         .await
         .map_err(|e| format!("failed to inspect File('{file_id}'): {e}"))?;
 

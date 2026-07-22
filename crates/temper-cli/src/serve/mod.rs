@@ -137,10 +137,17 @@ pub async fn run(
         println!("  Secrets vault: configured");
     }
 
-    // Phase 6: Entity hydration
-    bootstrap::hydrate_entities(&state, &apps).await;
+    // Phase 6: Publish every startup spec before activating durable key
+    // contracts or hydrating actors. The later hydration phase unions the full
+    // registry, activates each table's monotonic epoch, and only then permits
+    // entity dispatch.
+    bootstrap::bootstrap_tenants(&state, &apps).await;
+    bootstrap::bootstrap_installed_apps(&state, &os_app_installs).await?;
 
-    // Phase 7: Recovery (Cedar policies + WASM modules + secrets)
+    // Phase 7: Contract activation and entity hydration.
+    bootstrap::hydrate_entities(&state, &apps).await?;
+
+    // Phase 8: Recovery (Cedar policies + WASM modules + secrets)
     bootstrap::recover_cedar_policies(&state).await;
     bootstrap::recover_wasm_modules(&state).await;
     bootstrap::recover_secrets(&state).await;
@@ -238,10 +245,11 @@ pub async fn run(
         println!();
     }
 
-    // Phase 8: Bootstrap system + agent tenants
-    bootstrap::bootstrap_tenants(&state, &apps).await;
-    // Phase 8b: Restore persisted apps + apply CLI `--app` requests.
-    bootstrap::bootstrap_installed_apps(&state, &os_app_installs).await?;
+    // Entity-creating bootstrap work runs only after all durable contracts have
+    // been activated and their epochs attached to the live tables.
+    if let Some(ref api_key) = state.api_token {
+        temper_platform::bootstrap_operator_credential(&state, api_key, "default").await;
+    }
     if actor_runtime == ActorRuntimeBackend::Postgres {
         pg_actor_runtime_cancel = Some(
             actor_runtime::install_postgres_actor_runtime(

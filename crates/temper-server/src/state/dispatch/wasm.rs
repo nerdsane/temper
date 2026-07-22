@@ -347,8 +347,12 @@ impl crate::state::ServerState {
         &self,
         req: &WasmDispatchRequest<'_>,
     ) -> Result<Option<EntityResponse>, String> {
+        let generation_agent_ctx = self
+            .dispatch_context_in_generation(req.tenant, req.agent_ctx)
+            .await
+            .map_err(|error| error.to_string())?;
         record_workflow_span_attrs(
-            req.agent_ctx,
+            &generation_agent_ctx,
             req.entity_type,
             req.entity_id,
             Some(req.action),
@@ -368,7 +372,7 @@ impl crate::state::ServerState {
                 entity_id: req.entity_id,
             },
             action: req.action,
-            agent_ctx: req.agent_ctx,
+            agent_ctx: &generation_agent_ctx,
             dispatch_idempotency_key: req.dispatch_idempotency_key,
             mode: req.mode,
         };

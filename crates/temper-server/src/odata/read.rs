@@ -25,7 +25,9 @@ use super::query_plane_read::{
     read_entity_set_for_internal_resolution, read_entity_set_from_query_plane,
 };
 use super::read_support::{
-    record_entity_set_not_found, resolve_entity_set_name, try_load_entity_body_from_catalog,
+    ExactEntityMaterialization, durable_source_absent_for_catalog_materialization,
+    materialize_exact_entity, record_entity_set_not_found, resolve_entity_set_name,
+    try_load_entity_body_from_catalog,
 };
 use super::response::annotate_entity;
 use super::stream_fast_path::try_file_stream_fast_path;
@@ -207,13 +209,10 @@ fn resource_not_found_response(set_name: &str, key: &str) -> Response {
 
 /// Load a single entity body for OData read handlers.
 ///
-/// Tries the durable `entity_catalog` projection first when a query-plane
-/// store is configured or the `TEMPER_ODATA_CATALOG_FAST_READ` flag is on. On
-/// a hit, returns a body whose shape matches the actor's serialized
-/// `EntityState` — blob refs already hydrated. On miss (no catalog row,
-/// catalog disabled, or backend error), falls back to the actor path: validate
-/// the entity exists in the in-memory index, then load via
-/// `get_tenant_entity_state`.
+/// Closes the read against its journal/snapshot generation before considering
+/// the asynchronous `entity_catalog`. The catalog may supply a body only for an
+/// ADR-0077 migration entity proven to have neither durable source. On catalog
+/// miss, falls back to the actor path.
 ///
 /// The catalog-first path bypasses the in-memory index, so it survives
 /// cold starts and bulk-imported entities (data on disk but not yet
@@ -225,11 +224,36 @@ async fn load_existing_entity_body(
     set_name: &str,
     key: &str,
 ) -> Result<serde_json::Value, Response> {
+    let catalog_compatibility = if state.event_journal().is_some() {
+        match materialize_exact_entity(state, tenant, entity_type, set_name, key).await {
+            Ok(ExactEntityMaterialization::Present(body)) => return Ok(body),
+            Ok(ExactEntityMaterialization::NotFound) => {
+                return Err(resource_not_found_response(set_name, key));
+            }
+            Ok(ExactEntityMaterialization::CatalogCompatible) => true,
+            Err(_) => return Err(QueryPlaneReadError::ProjectionUnstable.into_response()),
+        }
+    } else {
+        false
+    };
+
     let prefer_catalog = state.query_plane_store().is_some();
     if let Some(body) =
         try_load_entity_body_from_catalog(state, tenant, entity_type, set_name, key, prefer_catalog)
             .await
     {
+        if body.get("status").and_then(serde_json::Value::as_str) == Some("Deleted") {
+            return Err(resource_not_found_response(set_name, key));
+        }
+        if catalog_compatibility
+            && !matches!(
+                durable_source_absent_for_catalog_materialization(state, tenant, entity_type, key,)
+                    .await,
+                Ok(true)
+            )
+        {
+            return Err(QueryPlaneReadError::ProjectionUnstable.into_response());
+        }
         return Ok(body);
     }
 

@@ -23,10 +23,10 @@ use crate::storage::{
     QueryProjectionFieldsRow, StorageStack,
 };
 use async_trait::async_trait;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use temper_runtime::persistence::{
-    EntityKeyRow, EventMetadata, PersistenceEnvelope, PersistenceError,
+    EntityKeyRow, EventMetadata, PersistenceEnvelope, PersistenceError, ProjectionSourceFence,
 };
 use temper_runtime::scheduler::{install_deterministic_context, sim_now, sim_uuid};
 use temper_store_sim::SimEventStore;
@@ -42,6 +42,20 @@ const DST_SEEDS: u64 = 64;
 pub(super) struct SimQueryPlane {
     // (entity_type, entity_id) -> catalog row
     catalog: Mutex<BTreeMap<(String, String), EntityCatalogRow>>,
+    dirty: Mutex<BTreeSet<(String, String)>>,
+}
+
+impl SimQueryPlane {
+    pub(super) fn mark_dirty(&self, entity_type: &str, entity_id: &str) {
+        self.dirty
+            .lock()
+            .unwrap()
+            .insert((entity_type.to_string(), entity_id.to_string()));
+    }
+
+    pub(super) fn dirty_count(&self) -> usize {
+        self.dirty.lock().unwrap().len()
+    }
 }
 
 #[async_trait]
@@ -69,6 +83,34 @@ impl QueryPlaneStore for SimQueryPlane {
         Ok(())
     }
 
+    async fn upsert_projection_if_source(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+        _source: ProjectionSourceFence<'_>,
+    ) -> Result<bool, PersistenceError> {
+        self.upsert_projection(
+            tenant,
+            entity_type,
+            entity_id,
+            status,
+            fields,
+            state,
+            sequence_nr,
+        )
+        .await?;
+        self.dirty
+            .lock()
+            .unwrap()
+            .remove(&(entity_type.to_string(), entity_id.to_string()));
+        Ok(true)
+    }
+
     async fn remove_projection(
         &self,
         _tenant: &str,
@@ -80,6 +122,60 @@ impl QueryPlaneStore for SimQueryPlane {
             .unwrap()
             .remove(&(entity_type.to_string(), entity_id.to_string()));
         Ok(())
+    }
+
+    async fn remove_projection_if_source(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        _source: ProjectionSourceFence<'_>,
+    ) -> Result<bool, PersistenceError> {
+        self.remove_projection(tenant, entity_type, entity_id)
+            .await?;
+        self.dirty
+            .lock()
+            .unwrap()
+            .remove(&(entity_type.to_string(), entity_id.to_string()));
+        Ok(true)
+    }
+
+    async fn clear_projection_dirty_if_source(
+        &self,
+        _tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        _source: ProjectionSourceFence<'_>,
+    ) -> Result<bool, PersistenceError> {
+        self.dirty
+            .lock()
+            .unwrap()
+            .remove(&(entity_type.to_string(), entity_id.to_string()));
+        Ok(true)
+    }
+
+    async fn remove_projection_if_exact(
+        &self,
+        _tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<bool, PersistenceError> {
+        let key = (entity_type.to_string(), entity_id.to_string());
+        let mut catalog = self.catalog.lock().unwrap();
+        let exact = catalog.get(&key).is_some_and(|row| {
+            row.status == status
+                && &row.fields == fields
+                && row.state.as_ref() == Some(state)
+                && row.sequence_nr == sequence_nr
+        });
+        if exact {
+            catalog.remove(&key);
+        }
+        Ok(exact)
     }
 
     async fn query_field_index(
@@ -138,6 +234,24 @@ impl QueryPlaneStore for SimQueryPlane {
     ) -> Result<Option<Vec<(String, u64)>>, PersistenceError> {
         Ok(None)
     }
+
+    async fn dirty_projection_entity_ids(
+        &self,
+        _tenant: &str,
+        entity_type: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<String>>, PersistenceError> {
+        Ok(Some(
+            self.dirty
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(dirty_type, _)| dirty_type == entity_type)
+                .take(limit)
+                .map(|(_, entity_id)| entity_id.clone())
+                .collect(),
+        ))
+    }
 }
 
 fn envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
@@ -153,6 +267,21 @@ fn envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope
             actor_id: "dst-lag".to_string(),
         },
     }
+}
+
+fn create_envelope(params: serde_json::Value) -> PersistenceEnvelope {
+    let event = crate::entity_actor::EntityEvent {
+        action: "Create".to_string(),
+        from_status: "Draft".to_string(),
+        to_status: "Draft".to_string(),
+        timestamp: sim_now(),
+        params,
+        idempotency_key: None,
+    };
+    envelope(
+        "Create",
+        serde_json::to_value(event).expect("serialize create event"),
+    )
 }
 
 fn doc_key_hash(workspace: &str, path: &str) -> String {
@@ -238,7 +367,7 @@ async fn dst_projection_lag_413_eliminated_by_keyed_index() {
         for i in 0..16usize {
             let pid = format!("{tenant}:Order:noise-{seed}-{i:02}");
             events
-                .append(&pid, 0, &[envelope("Create", serde_json::json!({}))])
+                .append(&pid, 0, &[create_envelope(serde_json::json!({}))])
                 .await
                 .unwrap();
         }
@@ -251,8 +380,7 @@ async fn dst_projection_lag_413_eliminated_by_keyed_index() {
             .append_with_keys(
                 &target_pid,
                 0,
-                &[envelope(
-                    "Create",
+                &[create_envelope(
                     serde_json::json!({ "WorkspaceId": ws, "Path": target_path }),
                 )],
                 &[EntityKeyRow {
@@ -479,7 +607,7 @@ async fn dst_tombstone_never_resolves_declared_key_after_restart() {
     }
 }
 
-/// Rollout/migration shape: an entity was keyed before ADR-0171, its delete journal
+/// Rollout/migration shape: an entity was keyed before ADR-0192, its delete journal
 /// event committed without exact key reconciliation, and projection removal was
 /// crash-lost. Until the v3 repair reaches this stream, neither the stale key hit nor
 /// the pre-delete live catalog row may expose the durable tombstone.

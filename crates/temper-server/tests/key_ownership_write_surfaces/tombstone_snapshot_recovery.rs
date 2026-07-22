@@ -1,7 +1,7 @@
 //! Recovery regression for a terminal tombstone hidden behind a newer stale snapshot.
 
 use super::*;
-use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope};
+use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
 use temper_runtime::scheduler::sim_now;
 use temper_server::entity_actor::types::EntityEvent;
 use temper_store_sim::SimFaultConfig;
@@ -262,4 +262,95 @@ async fn actor_recovery_never_accepts_live_state_when_tombstone_replay_truncates
         "stale-snapshot-retry",
     );
     assert_eq!(state(&recovered).await.state.status, "Deleted");
+}
+
+/// The first terminal journal event is irreversible even if a legacy writer
+/// left a later non-terminal suffix. An already-indexed entity must be removed
+/// from memory without treating the final envelope as renewed liveness.
+#[tokio::test]
+async fn ensure_loaded_rejects_indexed_entity_with_suffix_after_tombstone() {
+    let (_guard, _clock, _ids) = install_deterministic_context(301);
+    let tenant = TenantId::default();
+    let sim = SimEventStore::no_faults(301);
+    let mut registry = SpecRegistry::new();
+    registry.register_tenant(
+        tenant.as_str(),
+        parse_csdl(CSDL_XML).expect("CSDL parse"),
+        CSDL_XML.to_string(),
+        &[("Doc", DOC_IOA)],
+    );
+    let mut server = ServerState::from_registry(
+        ActorSystem::new("arn238-terminal-suffix-ensure-loaded"),
+        registry,
+    );
+    server.set_storage_stack(StorageStack::from_sim(sim.clone(), None));
+    let created = server
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Doc",
+            "terminal-suffix",
+            serde_json::json!({"WorkspaceId": "ws", "Path": "/terminal"}),
+        )
+        .await
+        .expect("create indexed entity");
+    assert!(server.entity_exists(&tenant, "Doc", "terminal-suffix"));
+
+    let persistence_id = "default:Doc:terminal-suffix";
+    let timestamp = sim_now();
+    sim.append(
+        persistence_id,
+        created.state.sequence_nr,
+        &[
+            PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "Delete".to_string(),
+                payload: serde_json::to_value(EntityEvent {
+                    action: "Delete".to_string(),
+                    from_status: "Ready".to_string(),
+                    to_status: "Deleted".to_string(),
+                    timestamp,
+                    params: serde_json::json!({}),
+                    idempotency_key: None,
+                })
+                .expect("serialize terminal event"),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp,
+                    actor_id: persistence_id.to_string(),
+                },
+            },
+            PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "LegacySuffix".to_string(),
+                payload: serde_json::to_value(EntityEvent {
+                    action: "LegacySuffix".to_string(),
+                    from_status: "Deleted".to_string(),
+                    to_status: "Ready".to_string(),
+                    timestamp,
+                    params: serde_json::json!({}),
+                    idempotency_key: None,
+                })
+                .expect("serialize legacy suffix"),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp,
+                    actor_id: persistence_id.to_string(),
+                },
+            },
+        ],
+    )
+    .await
+    .expect("seed legacy suffix after terminal event");
+
+    assert!(
+        !server
+            .ensure_entity_loaded(&tenant, "Doc", "terminal-suffix")
+            .await,
+        "the first terminal boundary must override a later legacy suffix"
+    );
+    assert!(!server.entity_exists(&tenant, "Doc", "terminal-suffix"));
 }

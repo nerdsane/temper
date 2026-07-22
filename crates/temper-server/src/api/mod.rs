@@ -234,7 +234,42 @@ pub(crate) async fn require_policy_auth(
 /// produces (403 + `AuthorizationDenied` JSON including the decision id).
 /// The tenant is read from the request parts by name, so handlers keep their
 /// own `Path<String>` / `Path<(String, String)>` extractors untouched.
-pub(crate) struct PolicyAuthed;
+pub(crate) struct PolicyAuthed {
+    headers: HeaderMap,
+    generation: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+    captured_generation: u64,
+}
+
+impl PolicyAuthed {
+    pub(crate) fn headers(&self) -> &HeaderMap {
+        &self.headers
+    }
+
+    /// Release the stable authorization generation before a policy publisher
+    /// takes the write side of the same tenant barrier.
+    pub(crate) fn release_for_publication(&mut self) -> u64 {
+        self.generation.take();
+        self.captured_generation
+    }
+}
+
+fn is_policy_publication_retry(parts: &Parts) -> bool {
+    let path = parts.uri.path();
+    let tenant_policy = path.contains("/tenants/")
+        && path.contains("/policies")
+        && matches!(
+            parts.method,
+            axum::http::Method::POST
+                | axum::http::Method::PUT
+                | axum::http::Method::PATCH
+                | axum::http::Method::DELETE
+        );
+    let decision_approval = path.contains("/tenants/")
+        && path.contains("/decisions/")
+        && path.ends_with("/approve")
+        && parts.method == axum::http::Method::POST;
+    tenant_policy || decision_approval
+}
 
 impl FromRequestParts<ServerState> for PolicyAuthed {
     type Rejection = axum::response::Response;
@@ -252,9 +287,61 @@ impl FromRequestParts<ServerState> for PolicyAuthed {
             // {tenant} path parameter; reaching this branch is a routing bug.
             return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         };
+        let tenant_id = temper_runtime::tenant::TenantId::new(tenant);
+        let generation = if state.spec_publication_gated(&tenant_id) {
+            if !is_policy_publication_retry(parts) {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Tenant runtime generation has an unresolved publication",
+                )
+                    .into_response());
+            }
+            let guard = state
+                .try_begin_tenant_request(&tenant_id)
+                .await
+                .ok_or_else(|| {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Tenant runtime generation is busy",
+                    )
+                        .into_response()
+                })?;
+            if !state.spec_publication_gated(&tenant_id) {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Tenant runtime generation changed during retry admission",
+                )
+                    .into_response());
+            }
+            Some(guard)
+        } else {
+            let guard = state
+                .try_begin_tenant_request(&tenant_id)
+                .await
+                .ok_or_else(|| {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Tenant runtime generation is busy",
+                    )
+                        .into_response()
+                })?;
+            if state.spec_publication_gated(&tenant_id) {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Tenant runtime generation has an unresolved publication",
+                )
+                    .into_response());
+            }
+            Some(guard)
+        };
+        let captured_generation = state.tenant_generation_version(&tenant_id);
         match require_policy_auth(state, &parts.headers, tenant).await {
             Some(resp) => Err(resp),
-            None => Ok(Self),
+            None => Ok(Self {
+                headers: parts.headers.clone(),
+                generation,
+                captured_generation,
+            }),
         }
     }
 }

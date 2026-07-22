@@ -1,15 +1,19 @@
 use std::sync::{Arc, RwLock};
 
-use temper_runtime::persistence::{
-    EventMetadata, IndexReconciliation, PersistenceEnvelope, PersistenceError,
-};
-use temper_runtime::scheduler::{sim_now, sim_uuid};
+use temper_runtime::persistence::{IndexReconciliation, PersistenceError};
+use temper_runtime::scheduler::sim_now;
 
-use crate::entity_actor::{EntityEvent, EntityResponse, EntityState, process_action_with_xref};
+use crate::entity_actor::{EntityEvent, EntityResponse};
 use crate::events::EntityStateChange;
 
 use super::file_writes::content_hash_and_native_blob_key;
 use super::{FileStreamContentError, ServerState};
+
+mod synthetic;
+
+use synthetic::{
+    apply_synthetic_file_action, initial_file_state, push_synthetic_event, synthetic_envelope,
+};
 
 impl ServerState {
     /// Create a brand-new TemperFS `File` and persist its first stream bytes as
@@ -54,7 +58,10 @@ impl ServerState {
         mime_type: &str,
         agent_ctx: &crate::request_context::AgentContext,
     ) -> Result<crate::entity_actor::EntityResponse, FileStreamContentError> {
-        if self.ensure_entity_loaded(tenant, "File", file_id).await {
+        if self
+            .ensure_entity_loaded_in_generation(tenant, "File", file_id, agent_ctx)
+            .await
+        {
             return Err(FileStreamContentError::ActionRejected(format!(
                 "File('{file_id}') already exists; use File $value update for existing content"
             )));
@@ -75,7 +82,7 @@ impl ServerState {
             .and_then(|value| value.as_str())
             .unwrap_or_default()
             .to_string();
-        self.reject_write_if_workspace_not_active(tenant, &workspace_id)
+        self.reject_write_if_workspace_not_active(tenant, &workspace_id, agent_ctx)
             .await?;
 
         let (content_hash, blob_key) = content_hash_and_native_blob_key(body);
@@ -150,13 +157,15 @@ impl ServerState {
             .map(|(idx, event)| synthetic_envelope(&persistence_id, (idx + 1) as u64, event))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let reconcile_keys = !table.keys.is_empty();
+        // Exact reconciliation participates even for a no-key contract so a
+        // hot spec change cannot strand ownership rows from the prior version.
+        let reconcile_keys = true;
         let key_rows = crate::key_index::derive_entity_key_rows(
             &table.keys,
             &state.fields,
             state.status != "Deleted",
         );
-        let key_set_signature = crate::key_index::declared_key_set_signature(&table.keys);
+        let key_set_signature = crate::key_index::declared_key_write_contract(&table);
         match store
             .append_with_index_rows(
                 &persistence_id,
@@ -168,12 +177,16 @@ impl ServerState {
                     keys: reconcile_keys,
                     key_set_signature: Some(key_set_signature),
                     vectors: false,
+                    snapshot_source: temper_runtime::persistence::SnapshotSourceFence::Absent,
                 },
             )
             .await
         {
             Ok(sequence_nr) => state.sequence_nr = sequence_nr,
-            Err(PersistenceError::ConcurrencyViolation { .. }) => {
+            Err(
+                PersistenceError::ConcurrencyViolation { .. }
+                | PersistenceError::SnapshotGenerationChanged,
+            ) => {
                 return Err(FileStreamContentError::ActionRejected(format!(
                     "File('{file_id}') already exists; use File $value update for existing content"
                 )));
@@ -340,10 +353,27 @@ impl ServerState {
             let file_id = file_id.to_string();
             let to_state = response.state.status.clone();
             let fields = response.state.fields.clone();
-            let agent_ctx = agent_ctx.clone();
+            let agent_ctx = agent_ctx
+                .fork_tenant_generation_lease(&tenant)
+                .unwrap_or_else(|| {
+                    let mut detached = agent_ctx.clone();
+                    detached.detach_tenant_generation_lease();
+                    detached
+                });
             tokio::spawn(async move {
                 // determinism-ok: post-commit reaction side effects mirror the
                 // existing non-awaited File `$value` update behavior.
+                let Some(agent_ctx) = state
+                    .activate_immediate_tenant_work(&tenant, agent_ctx)
+                    .await
+                else {
+                    tracing::error!(
+                        tenant = %tenant,
+                        entity_id = %file_id,
+                        "File initial-write reactions could not enter a complete runtime generation"
+                    );
+                    return;
+                };
                 dispatcher
                     .dispatch_reactions(
                         &state,
@@ -360,93 +390,4 @@ impl ServerState {
             });
         }
     }
-}
-
-fn initial_file_state(
-    file_id: &str,
-    table: &temper_jit::table::TransitionTable,
-    initial_fields: serde_json::Value,
-) -> EntityState {
-    let mut fields = initial_fields;
-    if let Some(obj) = fields.as_object_mut() {
-        obj.entry("Id".to_string())
-            .or_insert(serde_json::Value::String(file_id.to_string()));
-        obj.entry("Status".to_string())
-            .or_insert(serde_json::Value::String(table.initial_state.clone()));
-    }
-
-    EntityState {
-        entity_type: "File".to_string(),
-        entity_id: file_id.to_string(),
-        status: table.initial_state.clone(),
-        item_count: 0,
-        counters: std::collections::BTreeMap::new(),
-        booleans: std::collections::BTreeMap::new(),
-        lists: std::collections::BTreeMap::new(),
-        fields,
-        events: std::collections::VecDeque::new(),
-        total_event_count: 0,
-        events_since_snapshot: 0,
-        last_snapshot_sequence_nr: 0,
-        sequence_nr: 0,
-        processed_idempotency_keys: std::collections::BTreeMap::new(),
-    }
-}
-
-fn apply_synthetic_file_action(
-    state: &mut EntityState,
-    table: &temper_jit::table::TransitionTable,
-    action: &str,
-    params: serde_json::Value,
-    cross_entity_booleans: &std::collections::BTreeMap<String, bool>,
-) -> Result<EntityEvent, FileStreamContentError> {
-    let result = process_action_with_xref(state, table, action, &params, cross_entity_booleans);
-    if !result.overflow_blobs.is_empty() {
-        return Err(FileStreamContentError::State(format!(
-            "File.{action} produced field-overflow blobs on the atomic initial content path"
-        )));
-    }
-    if !result.success {
-        return Err(FileStreamContentError::ActionRejected(
-            result
-                .error
-                .unwrap_or_else(|| format!("File.{action} rejected")),
-        ));
-    }
-    result.event.ok_or_else(|| {
-        FileStreamContentError::State(format!(
-            "File.{action} succeeded without producing a durable event"
-        ))
-    })
-}
-
-fn push_synthetic_event(
-    state: &mut EntityState,
-    events: &mut Vec<EntityEvent>,
-    event: EntityEvent,
-) {
-    state.sequence_nr = state.sequence_nr.saturating_add(1);
-    state.push_event_bounded(event.clone());
-    events.push(event);
-}
-
-fn synthetic_envelope(
-    persistence_id: &str,
-    sequence_nr: u64,
-    event: &EntityEvent,
-) -> Result<PersistenceEnvelope, FileStreamContentError> {
-    let payload = serde_json::to_value(event)
-        .map_err(|e| FileStreamContentError::State(format!("failed to serialize event: {e}")))?;
-    Ok(PersistenceEnvelope {
-        sequence_nr,
-        event_type: event.action.clone(),
-        payload,
-        metadata: EventMetadata {
-            event_id: sim_uuid(),
-            causation_id: sim_uuid(),
-            correlation_id: sim_uuid(),
-            timestamp: event.timestamp,
-            actor_id: persistence_id.to_string(),
-        },
-    })
 }

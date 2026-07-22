@@ -18,8 +18,9 @@ use std::time::Duration;
 
 use sqlx::PgPool;
 use temper_runtime::persistence::{
-    EntityKeyLookup, EventStore, IndexReconciliation, JournalBoundary, PersistenceAppend,
-    PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
+    EntityKeyLookup, EventStore, IndexReconciliation, JournalBoundary, KeyReconciliationEntity,
+    PersistenceAppend, PersistenceAppendResult, PersistenceBatchIdempotency, PersistenceEnvelope,
+    PersistenceError, SnapshotSourceFence,
 };
 use temper_store_postgres::{PostgresEventStore, PostgresPolicyRow, PostgresTrajectoryInsert};
 use temper_store_turso::{
@@ -36,6 +37,7 @@ use crate::platform_store::SimPlatformStore;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 
 mod dyn_event_store;
+mod policy_store;
 mod published_artifacts;
 mod query_plane_impls;
 mod query_plane_read;
@@ -69,6 +71,11 @@ pub trait DynEventStore: Send + Sync {
         &'a self,
         appends: &'a [PersistenceAppend],
     ) -> EventStoreFuture<'a, Result<Vec<PersistenceAppendResult>, PersistenceError>>;
+
+    fn batch_idempotency_committed<'a>(
+        &'a self,
+        claim: &'a PersistenceBatchIdempotency,
+    ) -> EventStoreFuture<'a, Result<bool, PersistenceError>>;
 
     fn read_events<'a>(
         &'a self,
@@ -185,6 +192,11 @@ pub trait DynEventStore: Send + Sync {
         tenant: &'a str,
     ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>>;
 
+    /// Return every durable tenant/type with an activated key contract.
+    fn key_index_activated_contracts(
+        &self,
+    ) -> EventStoreFuture<'_, Result<Vec<(String, String)>, PersistenceError>>;
+
     /// Return the revision fencing reconciliation for an entity type's key index.
     fn key_index_reconciliation_revision<'a>(
         &'a self,
@@ -199,6 +211,23 @@ pub trait DynEventStore: Send + Sync {
         entity_type: &'a str,
         key_set: &'a str,
     ) -> EventStoreFuture<'a, Result<u64, PersistenceError>>;
+
+    /// Establish the new contract before publishing its spec, atomically
+    /// purging all prior type rows when the new contract is empty.
+    fn activate_key_index_contract<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        key_set: &'a str,
+        purge_existing_rows: bool,
+    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>>;
+
+    /// Atomically activate every changed key contract in one spec publication.
+    fn activate_key_index_contracts<'a>(
+        &'a self,
+        tenant: &'a str,
+        activations: &'a [temper_runtime::persistence::KeyContractActivation],
+    ) -> EventStoreFuture<'a, Result<std::collections::BTreeMap<String, u64>, PersistenceError>>;
 
     /// Mark a key contract complete only if its reconciliation revision is unchanged.
     fn mark_key_index_backfilled_if_revision<'a>(
@@ -222,6 +251,15 @@ pub trait DynEventStore: Send + Sync {
         snapshot: &'a [u8],
     ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
 
+    fn save_snapshot_if_source<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        sequence_nr: u64,
+        snapshot: &'a [u8],
+        source: &'a SnapshotSourceFence,
+        key_contract: Option<&'a str>,
+    ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
+
     fn load_snapshot<'a>(
         &'a self,
         persistence_id: &'a str,
@@ -243,6 +281,21 @@ pub trait DynEventStore: Send + Sync {
         tenant: &'a str,
         entity_type: &'a str,
     ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
+
+    fn key_reconciliation_boundary<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+    ) -> EventStoreFuture<'a, Result<Option<String>, PersistenceError>>;
+
+    fn list_key_reconciliation_page<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        after_entity_id: Option<&'a str>,
+        through_entity_id: &'a str,
+        limit: usize,
+    ) -> EventStoreFuture<'a, Result<Vec<KeyReconciliationEntity>, PersistenceError>>;
 
     fn list_entity_ids_limited<'a>(
         &'a self,
@@ -296,6 +349,13 @@ impl BoxedEventStore {
         appends: &[PersistenceAppend],
     ) -> Result<Vec<PersistenceAppendResult>, PersistenceError> {
         self.0.append_batch(appends).await
+    }
+
+    pub async fn batch_idempotency_committed(
+        &self,
+        claim: &PersistenceBatchIdempotency,
+    ) -> Result<bool, PersistenceError> {
+        self.0.batch_idempotency_committed(claim).await
     }
 
     pub async fn read_events(
@@ -477,6 +537,13 @@ impl BoxedEventStore {
         self.0.key_index_backfilled_types(tenant).await
     }
 
+    /// Return every durable tenant/type with an activated key contract.
+    pub async fn key_index_activated_contracts(
+        &self,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        self.0.key_index_activated_contracts().await
+    }
+
     /// Return the revision fencing reconciliation for an entity type's key index.
     pub async fn key_index_reconciliation_revision(
         &self,
@@ -497,6 +564,30 @@ impl BoxedEventStore {
     ) -> Result<u64, PersistenceError> {
         self.0
             .begin_key_index_backfill(tenant, entity_type, key_set)
+            .await
+    }
+
+    /// Establish a key contract before the corresponding spec becomes live.
+    pub async fn activate_key_index_contract(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        key_set: &str,
+        purge_existing_rows: bool,
+    ) -> Result<u64, PersistenceError> {
+        self.0
+            .activate_key_index_contract(tenant, entity_type, key_set, purge_existing_rows)
+            .await
+    }
+
+    /// Atomically activate every changed key contract in one spec publication.
+    pub async fn activate_key_index_contracts(
+        &self,
+        tenant: &str,
+        activations: &[temper_runtime::persistence::KeyContractActivation],
+    ) -> Result<std::collections::BTreeMap<String, u64>, PersistenceError> {
+        self.0
+            .activate_key_index_contracts(tenant, activations)
             .await
     }
 
@@ -532,6 +623,19 @@ impl BoxedEventStore {
             .await
     }
 
+    pub async fn save_snapshot_if_source(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+        source: &SnapshotSourceFence,
+        key_contract: Option<&str>,
+    ) -> Result<(), PersistenceError> {
+        self.0
+            .save_snapshot_if_source(persistence_id, sequence_nr, snapshot, source, key_contract)
+            .await
+    }
+
     pub async fn load_snapshot(
         &self,
         persistence_id: &str,
@@ -563,6 +667,37 @@ impl BoxedEventStore {
     ) -> Result<Vec<String>, PersistenceError> {
         self.0
             .list_entity_ids_for_key_reconciliation(tenant, entity_type)
+            .await
+    }
+
+    /// Read one bounded, deterministic repair page with durable liveness.
+    pub async fn list_key_reconciliation_page(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        after_entity_id: Option<&str>,
+        through_entity_id: &str,
+        limit: usize,
+    ) -> Result<Vec<KeyReconciliationEntity>, PersistenceError> {
+        self.0
+            .list_key_reconciliation_page(
+                tenant,
+                entity_type,
+                after_entity_id,
+                through_entity_id,
+                limit,
+            )
+            .await
+    }
+
+    /// Capture the inclusive terminal candidate for a bounded repair scan.
+    pub async fn key_reconciliation_boundary(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Option<String>, PersistenceError> {
+        self.0
+            .key_reconciliation_boundary(tenant, entity_type)
             .await
     }
 
@@ -610,6 +745,19 @@ pub struct PolicyStoreRow {
     pub created_at: String,
     pub created_by: String,
     pub enabled: bool,
+}
+
+/// One row in a complete tenant Cedar policy generation.
+#[derive(Clone, Debug)]
+pub struct PolicyGenerationWrite {
+    /// Stable identifier within the tenant generation.
+    pub policy_id: String,
+    /// Raw Cedar policy source.
+    pub cedar_text: String,
+    /// Whether the row participates in the live generation.
+    pub enabled: bool,
+    /// Identity responsible for the latest row mutation.
+    pub created_by: String,
 }
 
 impl From<TursoPolicyRow> for PolicyStoreRow {
@@ -661,7 +809,8 @@ pub struct DataOnlyCreateRecord<'a> {
     pub event: &'a PersistenceEnvelope,
     /// Complete declared-key row set derived from the initial durable state.
     pub key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
-    /// Whether this entity type declares keys and requires exact ownership.
+    /// Whether this write authoritatively reconciles exact ownership. This is
+    /// true for spec-governed writes even when the current key set is empty.
     pub reconcile_keys: bool,
     /// Versioned signature of the current declared-key contract, including the
     /// empty signature for a no-key type.
@@ -696,6 +845,22 @@ pub trait BackendNamedStore: Send + Sync {
 /// Granular Cedar policy persistence capability.
 #[async_trait::async_trait]
 pub trait PolicyStore: Send + Sync {
+    /// Atomically replace the canonical granular rows and compatibility text.
+    ///
+    /// An empty `entries` slice is an explicit empty generation: implementations
+    /// must still persist `compatibility_text` so restart cannot promote an older
+    /// aggregate after the final granular row is removed.
+    async fn replace_policy_generation(
+        &self,
+        tenant: &str,
+        entries: &[PolicyGenerationWrite],
+        compatibility_text: &str,
+    ) -> Result<(), String>;
+
+    /// Load the legacy aggregate projection for one tenant, including an
+    /// explicitly persisted empty string.
+    async fn load_policy_compatibility_text(&self, tenant: &str) -> Result<Option<String>, String>;
+
     async fn save_policy(
         &self,
         tenant: &str,
@@ -720,6 +885,21 @@ pub trait PolicyStore: Send + Sync {
         tenant: &str,
         policy_id: &str,
         cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, String>;
+
+    /// Atomically replace both mutable fields of one policy row.
+    ///
+    /// This is the durable half of a policy-generation cutover. Callers must
+    /// not emulate it with separate text and enabled writes because a fault
+    /// between those statements would make the persisted generation
+    /// unrecoverable as a single unit.
+    async fn replace_policy(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        cedar_text: &str,
+        enabled: bool,
         created_by: &str,
     ) -> Result<bool, String>;
 
@@ -1415,218 +1595,6 @@ impl TursoStoreProvider for TenantRoutedTursoStoreProvider {
 
     async fn ensure_tenant(&self, tenant_id: &str) -> Result<bool, PersistenceError> {
         self.router.ensure_tenant(tenant_id).await
-    }
-}
-
-#[async_trait::async_trait]
-impl PolicyStore for PostgresEventStore {
-    async fn save_policy(
-        &self,
-        tenant: &str,
-        policy_id: &str,
-        cedar_text: &str,
-        created_by: &str,
-    ) -> Result<bool, String> {
-        self.save_policy(tenant, policy_id, cedar_text, created_by)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn load_policies_for_tenant(&self, tenant: &str) -> Result<Vec<PolicyStoreRow>, String> {
-        self.load_policies_for_tenant(tenant)
-            .await
-            .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
-            .map_err(|e| e.to_string())
-    }
-
-    async fn load_all_policies(&self) -> Result<Vec<PolicyStoreRow>, String> {
-        self.load_all_policies()
-            .await
-            .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
-            .map_err(|e| e.to_string())
-    }
-
-    async fn toggle_policy_enabled(
-        &self,
-        tenant: &str,
-        policy_id: &str,
-        enabled: bool,
-    ) -> Result<bool, String> {
-        self.toggle_policy_enabled(tenant, policy_id, enabled)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn update_policy_text(
-        &self,
-        tenant: &str,
-        policy_id: &str,
-        cedar_text: &str,
-        created_by: &str,
-    ) -> Result<bool, String> {
-        self.update_policy_text(tenant, policy_id, cedar_text, created_by)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn delete_policy(&self, tenant: &str, policy_id: &str) -> Result<(), String> {
-        self.delete_policy(tenant, policy_id)
-            .await
-            .map_err(|e| e.to_string())
-    }
-}
-
-#[async_trait::async_trait]
-impl PolicyStore for TursoEventStore {
-    async fn save_policy(
-        &self,
-        tenant: &str,
-        policy_id: &str,
-        cedar_text: &str,
-        created_by: &str,
-    ) -> Result<bool, String> {
-        self.save_policy(tenant, policy_id, cedar_text, created_by)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn load_policies_for_tenant(&self, tenant: &str) -> Result<Vec<PolicyStoreRow>, String> {
-        self.load_policies_for_tenant(tenant)
-            .await
-            .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
-            .map_err(|e| e.to_string())
-    }
-
-    async fn load_all_policies(&self) -> Result<Vec<PolicyStoreRow>, String> {
-        self.load_all_policies()
-            .await
-            .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
-            .map_err(|e| e.to_string())
-    }
-
-    async fn toggle_policy_enabled(
-        &self,
-        tenant: &str,
-        policy_id: &str,
-        enabled: bool,
-    ) -> Result<bool, String> {
-        self.toggle_policy_enabled(tenant, policy_id, enabled)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn update_policy_text(
-        &self,
-        tenant: &str,
-        policy_id: &str,
-        cedar_text: &str,
-        created_by: &str,
-    ) -> Result<bool, String> {
-        self.update_policy_text(tenant, policy_id, cedar_text, created_by)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn delete_policy(&self, tenant: &str, policy_id: &str) -> Result<(), String> {
-        self.delete_policy(tenant, policy_id)
-            .await
-            .map_err(|e| e.to_string())
-    }
-}
-
-#[async_trait::async_trait]
-impl PolicyStore for TenantStoreRouter {
-    async fn save_policy(
-        &self,
-        tenant: &str,
-        policy_id: &str,
-        cedar_text: &str,
-        created_by: &str,
-    ) -> Result<bool, String> {
-        let store = self
-            .store_for_tenant(tenant)
-            .await
-            .map_err(|e| e.to_string())?;
-        store
-            .save_policy(tenant, policy_id, cedar_text, created_by)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn load_policies_for_tenant(&self, tenant: &str) -> Result<Vec<PolicyStoreRow>, String> {
-        let store = self
-            .store_for_tenant(tenant)
-            .await
-            .map_err(|e| e.to_string())?;
-        store
-            .load_policies_for_tenant(tenant)
-            .await
-            .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
-            .map_err(|e| e.to_string())
-    }
-
-    async fn load_all_policies(&self) -> Result<Vec<PolicyStoreRow>, String> {
-        let mut rows: Vec<PolicyStoreRow> = self
-            .platform_store()
-            .load_all_policies()
-            .await
-            .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
-            .map_err(|e| e.to_string())?;
-        for tenant_id in self.connected_tenants().await {
-            if let Ok(store) = self.store_for_tenant(&tenant_id).await {
-                let mut tenant_rows: Vec<PolicyStoreRow> = store
-                    .load_all_policies()
-                    .await
-                    .map(|rows| rows.into_iter().map(PolicyStoreRow::from).collect())
-                    .map_err(|e| e.to_string())?;
-                rows.append(&mut tenant_rows);
-            }
-        }
-        Ok(rows)
-    }
-
-    async fn toggle_policy_enabled(
-        &self,
-        tenant: &str,
-        policy_id: &str,
-        enabled: bool,
-    ) -> Result<bool, String> {
-        let store = self
-            .store_for_tenant(tenant)
-            .await
-            .map_err(|e| e.to_string())?;
-        store
-            .toggle_policy_enabled(tenant, policy_id, enabled)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn update_policy_text(
-        &self,
-        tenant: &str,
-        policy_id: &str,
-        cedar_text: &str,
-        created_by: &str,
-    ) -> Result<bool, String> {
-        let store = self
-            .store_for_tenant(tenant)
-            .await
-            .map_err(|e| e.to_string())?;
-        store
-            .update_policy_text(tenant, policy_id, cedar_text, created_by)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn delete_policy(&self, tenant: &str, policy_id: &str) -> Result<(), String> {
-        let store = self
-            .store_for_tenant(tenant)
-            .await
-            .map_err(|e| e.to_string())?;
-        store
-            .delete_policy(tenant, policy_id)
-            .await
-            .map_err(|e| e.to_string())
     }
 }
 

@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use temper_evolution::PostgresRecordStore;
-use temper_runtime::persistence::{EventStore, PersistenceEnvelope};
+use temper_runtime::persistence::{EventStore, PersistenceEnvelope, SnapshotSourceFence};
 use temper_store_postgres::PostgresEventStore;
 use temper_store_turso::{
     FeatureRequestRow, TursoEventStore, TursoInstalledAppRow, TursoSpecRow, spec_content_hash,
@@ -319,8 +319,26 @@ async fn migrate_event_journal(
                 "state": base64::engine::general_purpose::STANDARD.encode(&snapshot),
             }));
             if !dry_run {
+                let target_source =
+                    match target
+                        .load_snapshot(&persistence_id)
+                        .await
+                        .with_context(|| {
+                            format!("failed to read target snapshot fence for {persistence_id}")
+                        })? {
+                        Some((sequence_nr, state)) => {
+                            SnapshotSourceFence::Exact { sequence_nr, state }
+                        }
+                        None => SnapshotSourceFence::Absent,
+                    };
                 target
-                    .save_snapshot(&persistence_id, sequence_nr, &snapshot)
+                    .save_snapshot_if_source(
+                        &persistence_id,
+                        sequence_nr,
+                        &snapshot,
+                        &target_source,
+                        None,
+                    )
                     .await
                     .with_context(|| {
                         format!("failed to write target snapshot for {persistence_id}")

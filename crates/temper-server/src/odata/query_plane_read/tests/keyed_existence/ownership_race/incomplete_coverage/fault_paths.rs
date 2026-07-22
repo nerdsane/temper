@@ -1,5 +1,5 @@
 use super::*;
-use crate::entity_actor::{EntityEvent, recover_entity_state_from_store};
+use crate::entity_actor::{EntityEvent, EntityRecoveryContext, recover_entity_state_from_store};
 
 async fn read_path(
     state: &ServerState,
@@ -102,6 +102,7 @@ async fn exhausted_journal_faults_return_unstable_not_authoritative_absence() {
             keys: true,
             key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
             vectors: false,
+            snapshot_source: Default::default(),
         },
     )
     .await
@@ -147,6 +148,7 @@ async fn incompatible_journal_event_returns_unstable_not_authoritative_absence()
             keys: true,
             key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
             vectors: false,
+            snapshot_source: Default::default(),
         },
     )
     .await
@@ -203,6 +205,7 @@ async fn journal_only_materialization_pages_beyond_snapshot_tail_budget() {
             keys: true,
             key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
             vectors: false,
+            snapshot_source: Default::default(),
         },
     )
     .await
@@ -250,6 +253,7 @@ async fn incomplete_scan_keeps_tombstone_terminal_through_legacy_suffix() {
             keys: true,
             key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
             vectors: false,
+            snapshot_source: Default::default(),
         },
     )
     .await
@@ -265,6 +269,7 @@ async fn incomplete_scan_keeps_tombstone_terminal_through_legacy_suffix() {
             keys: true,
             key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
             vectors: false,
+            snapshot_source: Default::default(),
         },
     )
     .await
@@ -284,6 +289,7 @@ async fn incomplete_scan_keeps_tombstone_terminal_through_legacy_suffix() {
             keys: true,
             key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
             vectors: false,
+            snapshot_source: Default::default(),
         },
     )
     .await
@@ -325,14 +331,16 @@ async fn incomplete_scan_keeps_tombstone_terminal_through_legacy_suffix() {
     };
     let (journal, backend) = state.event_journal().expect("sim event journal");
     let recovered = recover_entity_state_from_store(
-        tenant.as_str(),
-        "Order",
-        entity_id,
-        &table,
-        &journal,
-        backend,
-        &serde_json::json!({}),
-        None,
+        EntityRecoveryContext {
+            tenant: tenant.as_str(),
+            entity_type: "Order",
+            entity_id,
+            table: &table,
+            store: &journal,
+            backend,
+            initial_fields: &serde_json::json!({}),
+            blob_store: None,
+        },
         true,
     )
     .await

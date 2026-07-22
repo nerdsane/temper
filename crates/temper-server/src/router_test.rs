@@ -4,11 +4,180 @@ use axum::http::{Request, StatusCode};
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::parse_csdl;
+use temper_store_sim::SimEventStore;
 use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
 use crate::events::EntityStateChange;
+use crate::request_context::AgentContext;
 use crate::storage::StorageStack;
+
+struct SameTenantPublicationHook;
+
+#[async_trait::async_trait]
+impl crate::state::BoundActionHook for SameTenantPublicationHook {
+    fn requires_generation_handoff(&self, entity_type: &str, action: &str) -> bool {
+        entity_type == "Order" && action.rsplit('.').next().unwrap_or(action) == "CancelOrder"
+    }
+
+    async fn after_bound_action(
+        &self,
+        ctx: crate::state::BoundActionHookContext<'_>,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let publication = ctx
+            .state
+            .begin_spec_publication_after_drain(
+                ctx.tenant,
+                ctx.expected_generation.ok_or_else(|| {
+                    "same-tenant publication hook did not receive a generation token".to_string()
+                })?,
+            )
+            .await?;
+        drop(publication);
+        Ok(Some(serde_json::json!({"publicationWriter": "acquired"})))
+    }
+}
+
+struct FailOnceSameTenantPublicationHook {
+    attempts: std::sync::atomic::AtomicUsize,
+}
+
+struct CountingBoundActionHook {
+    attempts: std::sync::atomic::AtomicUsize,
+    fail_first: bool,
+}
+
+struct ReceiptFaultIdempotentHook {
+    store: SimEventStore,
+    invocations: std::sync::atomic::AtomicUsize,
+    external_effects: std::sync::atomic::AtomicUsize,
+    outputs: std::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>,
+}
+
+struct InterveningGenerationHook;
+
+#[async_trait::async_trait]
+impl crate::state::BoundActionHook for InterveningGenerationHook {
+    fn requires_generation_handoff(&self, entity_type: &str, action: &str) -> bool {
+        entity_type == "Order" && action.rsplit('.').next().unwrap_or(action) == "CancelOrder"
+    }
+
+    async fn after_bound_action(
+        &self,
+        ctx: crate::state::BoundActionHookContext<'_>,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let expected_generation = ctx.expected_generation.ok_or_else(|| {
+            "intervening-generation hook did not receive a generation token".to_string()
+        })?;
+        let mut intervening = ctx.state.begin_spec_publication(ctx.tenant).await?;
+        let intent = ServerState::spec_publication_intent(
+            "router-test-intervening-generation",
+            [("generation", b"new".as_slice())],
+        );
+        ctx.state
+            .arm_spec_publication(&mut intervening, ctx.tenant, &intent)?;
+        ctx.state
+            .complete_spec_publication_retry(&mut intervening, ctx.tenant)?;
+        drop(intervening);
+
+        ctx.state
+            .begin_spec_publication_after_drain(ctx.tenant, expected_generation)
+            .await?;
+        Ok(None)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::state::BoundActionHook for FailOnceSameTenantPublicationHook {
+    fn requires_generation_handoff(&self, entity_type: &str, action: &str) -> bool {
+        entity_type == "Order" && action.rsplit('.').next().unwrap_or(action) == "CancelOrder"
+    }
+
+    async fn after_bound_action(
+        &self,
+        ctx: crate::state::BoundActionHookContext<'_>,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let mut publication = ctx
+            .state
+            .begin_spec_publication_after_drain(
+                ctx.tenant,
+                ctx.expected_generation.ok_or_else(|| {
+                    "same-tenant publication hook did not receive a generation token".to_string()
+                })?,
+            )
+            .await?;
+        let intent = ServerState::spec_publication_intent(
+            "router-test-post-action",
+            [("generation", b"one".as_slice())],
+        );
+        ctx.state
+            .arm_spec_publication(&mut publication, ctx.tenant, &intent)?;
+        if self
+            .attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 0
+        {
+            return Err("injected post-arm publication failure".to_string());
+        }
+        ctx.state
+            .complete_spec_publication_retry(&mut publication, ctx.tenant)?;
+        Ok(Some(serde_json::json!({"publicationRetry": "completed"})))
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::state::BoundActionHook for CountingBoundActionHook {
+    fn requires_generation_handoff(&self, entity_type: &str, action: &str) -> bool {
+        entity_type == "Order" && action.rsplit('.').next().unwrap_or(action) == "CancelOrder"
+    }
+
+    async fn after_bound_action(
+        &self,
+        _ctx: crate::state::BoundActionHookContext<'_>,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let attempt = self
+            .attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if self.fail_first && attempt == 1 {
+            return Err("injected first hook failure".to_string());
+        }
+        Ok(Some(serde_json::json!({"hookAttempt": attempt})))
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::state::BoundActionHook for ReceiptFaultIdempotentHook {
+    async fn after_bound_action(
+        &self,
+        ctx: crate::state::BoundActionHookContext<'_>,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let invocation = self
+            .invocations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let output = {
+            let mut outputs = self.outputs.lock().expect("hook output lock");
+            if let Some(output) = outputs.get(ctx.operation_id) {
+                output.clone()
+            } else {
+                self.external_effects
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let output = serde_json::json!({"operationId": ctx.operation_id});
+                outputs.insert(ctx.operation_id.to_string(), output.clone());
+                output
+            }
+        };
+        if invocation == 0 {
+            self.store.restore_faults(temper_store_sim::SimFaultConfig {
+                write_failure_prob: 1.0,
+                concurrency_violation_prob: 0.0,
+                read_truncation_prob: 0.0,
+                snapshot_failure_prob: 0.0,
+            });
+        }
+        Ok(Some(output))
+    }
+}
 
 fn test_state() -> ServerState {
     let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
@@ -1520,6 +1689,762 @@ async fn test_post_bound_action() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "Cancelled");
+}
+
+#[tokio::test]
+async fn same_tenant_post_action_publication_hands_off_request_generation() {
+    let mut state = test_state_with_ioa();
+    state.bound_action_hook = Some(std::sync::Arc::new(SameTenantPublicationHook));
+    let response = build_router(state)
+        .oneshot(
+            Request::post("/tdata/Orders('same-tenant')/Temper.Example.CancelOrder")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Kind", "admin")
+                .header("Idempotency-Key", "same-tenant-publication")
+                .body(Body::from(r#"{"Reason": "publish generation"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["postAction"]["publicationWriter"], "acquired");
+}
+
+#[tokio::test]
+async fn publication_context_is_the_only_actor_path_inside_an_armed_generation() {
+    let state = test_state_with_ioa();
+    let tenant = TenantId::default();
+    let intent = ServerState::spec_publication_intent(
+        "router-test-internal-publication",
+        [("generation", b"one".as_slice())],
+    );
+    let mut publication = state
+        .begin_spec_publication(&tenant)
+        .await
+        .expect("acquire publication writer");
+    state
+        .arm_spec_publication(&mut publication, &tenant, &intent)
+        .expect("arm publication writer");
+
+    assert!(
+        state
+            .get_or_spawn_tenant_actor(&tenant, "Order", "publication-owned")
+            .is_none(),
+        "unscoped actor resolution must remain fenced while publication is armed"
+    );
+    let publication_ctx = state
+        .spec_publication_dispatch_context(&publication, &tenant, "router-test")
+        .expect("derive publication-owned dispatch context");
+    state
+        .get_or_create_tenant_entity_in_generation(
+            &tenant,
+            "Order",
+            "publication-owned",
+            serde_json::json!({}),
+            &publication_ctx,
+        )
+        .await
+        .expect("publication-owned actor resolution must use the live table");
+
+    state
+        .complete_spec_publication(&mut publication, &tenant)
+        .expect("complete first generation");
+    drop(publication);
+
+    let mut next_publication = state
+        .begin_spec_publication(&tenant)
+        .await
+        .expect("acquire next publication writer");
+    state
+        .arm_spec_publication(&mut next_publication, &tenant, &intent)
+        .expect("arm next publication writer");
+    state
+        .get_tenant_entity_state_in_generation(
+            &tenant,
+            "Order",
+            "publication-owned",
+            &publication_ctx,
+        )
+        .await
+        .expect_err("a context from the retired generation must not respawn an actor");
+
+    let next_ctx = state
+        .spec_publication_dispatch_context(&next_publication, &tenant, "router-test")
+        .expect("derive next publication-owned context");
+    state
+        .get_tenant_entity_state_in_generation(&tenant, "Order", "publication-owned", &next_ctx)
+        .await
+        .expect("the current publication generation may resolve the actor");
+    state
+        .complete_spec_publication(&mut next_publication, &tenant)
+        .expect("complete next generation");
+}
+
+#[tokio::test]
+async fn detached_work_cannot_reenter_after_its_captured_generation_retires() {
+    let state = test_state_with_ioa();
+    let tenant = TenantId::default();
+    let captured_generation = state.tenant_generation_version(&tenant);
+    let intent = ServerState::spec_publication_intent(
+        "router-test-detached-generation",
+        [("generation", b"next".as_slice())],
+    );
+    let mut publication = state
+        .begin_spec_publication(&tenant)
+        .await
+        .expect("acquire publication writer");
+    state
+        .arm_spec_publication(&mut publication, &tenant, &intent)
+        .expect("arm publication");
+    assert!(
+        state
+            .try_begin_captured_tenant_generation(&tenant, captured_generation)
+            .await
+            .is_none(),
+        "paused detached work must not enter while publication is armed"
+    );
+    state
+        .complete_spec_publication(&mut publication, &tenant)
+        .expect("complete replacement generation");
+    drop(publication);
+    assert!(
+        state
+            .try_begin_captured_tenant_generation(&tenant, captured_generation)
+            .await
+            .is_none(),
+        "old-event work must not borrow the replacement runtime generation"
+    );
+    let current_generation = state.tenant_generation_version(&tenant);
+    assert!(
+        state
+            .try_begin_captured_tenant_generation(&tenant, current_generation)
+            .await
+            .is_some(),
+        "work captured from the current generation remains admissible"
+    );
+}
+
+#[tokio::test]
+async fn captured_generation_lease_holds_the_dispatch_boundary_against_publication() {
+    let state = test_state_with_ioa();
+    let tenant = TenantId::default();
+    let captured_generation = state.tenant_generation_version(&tenant);
+    let lease = state
+        .try_begin_captured_tenant_generation(&tenant, captured_generation)
+        .await
+        .expect("captured work should re-enter the current generation");
+    let dispatch_ctx =
+        AgentContext::for_service("boundary-test").with_tenant_generation_lease(lease);
+
+    let busy = match state.begin_spec_publication(&tenant).await {
+        Ok(_) => panic!("publication crossed an active captured dispatch generation"),
+        Err(error) => error,
+    };
+    assert!(busy.contains("runtime generation is busy"));
+
+    drop(dispatch_ctx);
+    let mut publication = state
+        .begin_spec_publication(&tenant)
+        .await
+        .expect("publisher should acquire after the dispatch context drops");
+    let intent = ServerState::spec_publication_intent(
+        "boundary-held-generation",
+        [("generation", b"next".as_slice())],
+    );
+    state
+        .arm_spec_publication(&mut publication, &tenant, &intent)
+        .expect("arm replacement generation");
+    state
+        .complete_spec_publication(&mut publication, &tenant)
+        .expect("complete replacement generation");
+}
+
+#[tokio::test]
+async fn immediate_generation_fork_drains_before_publication_cutover() {
+    let state = test_state_with_ioa();
+    let tenant = TenantId::default();
+    let generation = state.tenant_generation_version(&tenant);
+    let request = state
+        .try_begin_captured_tenant_generation(&tenant, generation)
+        .await
+        .expect("capture request generation");
+    let immediate = request
+        .fork_immediate(&tenant)
+        .expect("fork immediate obligation");
+    request.release();
+
+    let busy = match state.begin_spec_publication(&tenant).await {
+        Ok(_) => panic!("publication must drain the independently forked obligation"),
+        Err(error) => error,
+    };
+    assert!(busy.contains("runtime generation is busy"));
+
+    drop(immediate);
+    state
+        .begin_spec_publication(&tenant)
+        .await
+        .expect("publication may begin after the immediate obligation completes");
+}
+
+#[tokio::test]
+async fn released_request_lease_cannot_borrow_a_publication_gate() {
+    let state = test_state_with_ioa();
+    let tenant = TenantId::default();
+    let generation = state.tenant_generation_version(&tenant);
+    let lease = state
+        .try_begin_captured_tenant_generation(&tenant, generation)
+        .await
+        .expect("capture request generation");
+    let agent_ctx = AgentContext::for_service("released-request-test")
+        .with_tenant_generation_lease(lease.clone());
+    lease.release();
+
+    let mut publication = state
+        .begin_spec_publication(&tenant)
+        .await
+        .expect("acquire publication writer after request release");
+    let intent = ServerState::spec_publication_intent(
+        "released-request-provenance",
+        [("generation", b"pending".as_slice())],
+    );
+    state
+        .arm_spec_publication(&mut publication, &tenant, &intent)
+        .expect("arm pending generation");
+
+    let error = state
+        .dispatch_tenant_action(
+            &tenant,
+            "Order",
+            "released-request",
+            "AddItem",
+            serde_json::json!({}),
+            &agent_ctx,
+        )
+        .await
+        .expect_err("released request provenance must not dispatch inside a writer gate");
+    assert!(
+        error.contains("dispatch deferred"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn publication_owned_background_work_waits_for_the_pending_generation() {
+    let state = test_state_with_ioa();
+    let tenant = TenantId::default();
+    let pending_generation = state
+        .tenant_generation_version(&tenant)
+        .checked_add(1)
+        .expect("test generation should not overflow");
+    let mut publication = state
+        .begin_spec_publication(&tenant)
+        .await
+        .expect("acquire publication writer");
+    let intent = ServerState::spec_publication_intent(
+        "queued-publication-work",
+        [("generation", b"next".as_slice())],
+    );
+    state
+        .arm_spec_publication(&mut publication, &tenant, &intent)
+        .expect("arm pending generation");
+
+    let queued_state = state.clone();
+    let queued_tenant = tenant.clone();
+    let (finished_tx, mut finished_rx) = tokio::sync::oneshot::channel();
+    let queued = tokio::spawn(async move {
+        let lease = queued_state
+            .begin_captured_tenant_generation(&queued_tenant, pending_generation)
+            .await;
+        let _ = finished_tx.send(lease.is_some());
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        matches!(
+            finished_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
+        "publication-owned effects must wait behind the writer boundary"
+    );
+
+    state
+        .complete_spec_publication(&mut publication, &tenant)
+        .expect("complete pending generation");
+    drop(publication);
+    assert!(
+        finished_rx
+            .await
+            .expect("queued background task should report its admission"),
+        "queued work should enter the exact newly published generation"
+    );
+    queued.await.expect("queued task should finish");
+}
+
+#[tokio::test]
+async fn sticky_debt_retry_cannot_enter_while_an_exact_retry_writer_is_active() {
+    let state = test_state_with_ioa();
+    let tenant = TenantId::default();
+    let intent = ServerState::spec_publication_intent(
+        "sticky-debt-retry-race",
+        [("generation", b"same".as_slice())],
+    );
+    let mut ambiguous = state
+        .begin_spec_publication(&tenant)
+        .await
+        .expect("acquire first publication writer");
+    state
+        .arm_spec_publication(&mut ambiguous, &tenant, &intent)
+        .expect("arm first publication");
+    drop(ambiguous);
+    assert!(state.spec_publication_gated(&tenant));
+
+    let first_retry_reader = state
+        .try_begin_tenant_request(&tenant)
+        .await
+        .expect("idle sticky debt should admit one stable retry reader");
+    drop(first_retry_reader);
+    let mut active_retry = state
+        .begin_spec_publication(&tenant)
+        .await
+        .expect("exact retry should acquire the writer after handoff");
+    state
+        .arm_spec_publication(&mut active_retry, &tenant, &intent)
+        .expect("exact retry should inherit the same debt");
+
+    assert!(
+        state.try_begin_tenant_request(&tenant).await.is_none(),
+        "a second retry must not read registry, Cedar, or actors during the active cutover"
+    );
+    state
+        .complete_spec_publication_retry(&mut active_retry, &tenant)
+        .expect("exact retry should discharge sticky debt");
+}
+
+#[tokio::test]
+async fn same_tenant_post_action_rejects_an_intervening_generation() {
+    let mut state = test_state_with_ioa();
+    state.bound_action_hook = Some(std::sync::Arc::new(InterveningGenerationHook));
+    let tenant = TenantId::default();
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::post("/tdata/Orders('generation-race')/Temper.Example.CancelOrder")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Kind", "admin")
+                .header("Idempotency-Key", "generation-race-publication")
+                .body(Body::from(r#"{"Reason": "publish generation"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(state.tenant_generation_version(&tenant), 1);
+}
+
+#[tokio::test]
+async fn publication_capable_action_requires_idempotency_before_transition() {
+    let mut state = test_state_with_ioa();
+    state.bound_action_hook = Some(std::sync::Arc::new(SameTenantPublicationHook));
+    let tenant = TenantId::default();
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::post("/tdata/Orders('keyless-publication')/Temper.Example.CancelOrder")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Kind", "admin")
+                .body(Body::from(r#"{"Reason": "must not transition"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!state.entity_exists(&tenant, "Order", "keyless-publication"));
+    assert!(!state.spec_publication_gated(&tenant));
+}
+
+#[tokio::test]
+async fn unproved_actor_cache_entry_cannot_be_rebound_to_bound_action() {
+    let state = test_state_with_ioa();
+    let tenant = TenantId::default();
+    let seeded = state
+        .get_or_create_tenant_entity(&tenant, "Order", "unproved-cache", serde_json::json!({}))
+        .await
+        .unwrap();
+    state
+        .idempotency_cache
+        .put("default:Order:unproved-cache", "shared-raw-key", seeded);
+
+    let response = build_router(state)
+        .oneshot(
+            Request::post("/tdata/Orders('unproved-cache')/Temper.Example.CancelOrder")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Kind", "admin")
+                .header("Idempotency-Key", "shared-raw-key")
+                .body(Body::from(r#"{"Reason": "must conflict"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn concurrent_bound_actions_cannot_rebind_one_raw_idempotency_key() {
+    let app = build_router(test_state_with_ioa());
+    let first = app.clone().oneshot(
+        Request::post("/tdata/Orders('concurrent-key')/Temper.Example.CancelOrder")
+            .header("Content-Type", "application/json")
+            .header("X-Temper-Principal-Kind", "admin")
+            .header("Idempotency-Key", "concurrent-raw-key")
+            .body(Body::from(r#"{"Reason": "first"}"#))
+            .unwrap(),
+    );
+    let second = app.oneshot(
+        Request::post("/tdata/Orders('concurrent-key')/Temper.Example.CancelOrder")
+            .header("Content-Type", "application/json")
+            .header("X-Temper-Principal-Kind", "admin")
+            .header("Idempotency-Key", "concurrent-raw-key")
+            .body(Body::from(r#"{"Reason": "second"}"#))
+            .unwrap(),
+    );
+    let (first, second) = tokio::join!(first, second);
+    let mut statuses = [first.unwrap().status(), second.unwrap().status()];
+    statuses.sort();
+
+    assert_eq!(statuses, [StatusCode::OK, StatusCode::CONFLICT]);
+}
+
+#[tokio::test]
+async fn exact_bound_action_retry_reuses_the_completed_post_action_output() {
+    let mut state = test_state_with_ioa();
+    let hook = std::sync::Arc::new(CountingBoundActionHook {
+        attempts: std::sync::atomic::AtomicUsize::new(0),
+        fail_first: false,
+    });
+    state.bound_action_hook = Some(hook.clone());
+    let app = build_router(state);
+    let request = || {
+        Request::post("/tdata/Orders('hook-once')/Temper.Example.CancelOrder")
+            .header("Content-Type", "application/json")
+            .header("X-Temper-Principal-Kind", "admin")
+            .header("Idempotency-Key", "hook-once-key")
+            .body(Body::from(r#"{"Reason": "one hook"}"#))
+            .unwrap()
+    };
+
+    let first = app.clone().oneshot(request()).await.unwrap();
+    let retry = app.oneshot(request()).await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(retry.status(), StatusCode::OK);
+    let first: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(first.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let retry: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(retry.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(retry["postAction"], first["postAction"]);
+    assert_eq!(
+        hook.attempts.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a completed post-action hook must not run again on an exact retry"
+    );
+}
+
+#[tokio::test]
+async fn completed_bound_action_hook_survives_cache_loss_and_actor_respawn() {
+    let mut state = test_state_with_ioa();
+    state.set_storage_stack(StorageStack::from_sim(SimEventStore::no_faults(409), None));
+    let hook = std::sync::Arc::new(CountingBoundActionHook {
+        attempts: std::sync::atomic::AtomicUsize::new(0),
+        fail_first: false,
+    });
+    state.bound_action_hook = Some(hook.clone());
+    let app = build_router(state.clone());
+    let request = || {
+        Request::post("/tdata/Orders('hook-restart')/Temper.Example.CancelOrder")
+            .header("Content-Type", "application/json")
+            .header("X-Temper-Principal-Kind", "admin")
+            .header("Idempotency-Key", "hook-restart-key")
+            .body(Body::from(r#"{"Reason": "durable hook"}"#))
+            .unwrap()
+    };
+
+    let first = app.clone().oneshot(request()).await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(first.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let actor_key = "default:Order:hook-restart";
+    state.idempotency_cache.clear_actor_for_test(actor_key);
+    state
+        .last_accessed
+        .write()
+        .expect("last-accessed lock")
+        .insert(
+            actor_key.to_string(),
+            temper_runtime::scheduler::sim_now() - chrono::Duration::seconds(600),
+        );
+    state.passivate_idle_actors().await;
+    assert!(
+        !state
+            .actor_registry
+            .read()
+            .expect("actor registry lock")
+            .contains_key(actor_key),
+        "fixture must remove the live actor before retry"
+    );
+
+    let retry = app.oneshot(request()).await.unwrap();
+    assert_eq!(retry.status(), StatusCode::OK);
+    let retry: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(retry.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(retry["postAction"], first["postAction"]);
+    assert_eq!(
+        hook.attempts.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a completed durable hook must not execute again after actor respawn"
+    );
+}
+
+#[tokio::test]
+async fn pending_hook_receipt_replays_one_content_idempotent_operation_after_respawn() {
+    let store = SimEventStore::no_faults(419);
+    let mut state = test_state_with_ioa();
+    state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
+    let hook = std::sync::Arc::new(ReceiptFaultIdempotentHook {
+        store: store.clone(),
+        invocations: std::sync::atomic::AtomicUsize::new(0),
+        external_effects: std::sync::atomic::AtomicUsize::new(0),
+        outputs: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+    });
+    state.bound_action_hook = Some(hook.clone());
+    let app = build_router(state.clone());
+    let request = || {
+        Request::post("/tdata/Orders('hook-receipt-fault')/Temper.Example.CancelOrder")
+            .header("Content-Type", "application/json")
+            .header("X-Temper-Principal-Kind", "admin")
+            .header("Idempotency-Key", "hook-receipt-fault-key")
+            .body(Body::from(r#"{"Reason": "receipt failure"}"#))
+            .unwrap()
+    };
+
+    assert_eq!(
+        app.clone().oneshot(request()).await.unwrap().status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the hook commits before its injected completion-receipt failure"
+    );
+    store.disable_faults();
+
+    let actor_key = "default:Order:hook-receipt-fault";
+    state.idempotency_cache.clear_actor_for_test(actor_key);
+    state
+        .last_accessed
+        .write()
+        .expect("last-accessed lock")
+        .insert(
+            actor_key.to_string(),
+            temper_runtime::scheduler::sim_now() - chrono::Duration::seconds(600),
+        );
+    state.passivate_idle_actors().await;
+
+    let recovered = app.clone().oneshot(request()).await.unwrap();
+    let exact_retry = app.oneshot(request()).await.unwrap();
+    assert_eq!(recovered.status(), StatusCode::OK);
+    assert_eq!(exact_retry.status(), StatusCode::OK);
+    let recovered: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(recovered.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let exact_retry: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(exact_retry.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(exact_retry["postAction"], recovered["postAction"]);
+    assert_eq!(
+        hook.invocations.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the pending durable intent is retried exactly once"
+    );
+    assert_eq!(
+        hook.external_effects
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the stable operation ID deduplicates the external mutation"
+    );
+}
+
+#[tokio::test]
+async fn failed_bound_action_hook_retries_once_then_caches_its_success() {
+    let mut state = test_state_with_ioa();
+    let hook = std::sync::Arc::new(CountingBoundActionHook {
+        attempts: std::sync::atomic::AtomicUsize::new(0),
+        fail_first: true,
+    });
+    state.bound_action_hook = Some(hook.clone());
+    let app = build_router(state);
+    let request = || {
+        Request::post("/tdata/Orders('hook-retry')/Temper.Example.CancelOrder")
+            .header("Content-Type", "application/json")
+            .header("X-Temper-Principal-Kind", "admin")
+            .header("Idempotency-Key", "hook-retry-key")
+            .body(Body::from(r#"{"Reason": "retry hook"}"#))
+            .unwrap()
+    };
+
+    assert_eq!(
+        app.clone().oneshot(request()).await.unwrap().status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    let recovered = app.clone().oneshot(request()).await.unwrap();
+    let retry = app.oneshot(request()).await.unwrap();
+    assert_eq!(recovered.status(), StatusCode::OK);
+    assert_eq!(retry.status(), StatusCode::OK);
+    let recovered: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(recovered.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let retry: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(retry.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(retry["postAction"], recovered["postAction"]);
+    assert_eq!(
+        hook.attempts.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "a successful hook retry must become the cached terminal result"
+    );
+}
+
+#[tokio::test]
+async fn gated_idempotent_post_action_retry_completes_exact_publication() {
+    let mut state = test_state_with_ioa();
+    state.set_storage_stack(StorageStack::from_sim(SimEventStore::no_faults(401), None));
+    state.bound_action_hook = Some(std::sync::Arc::new(FailOnceSameTenantPublicationHook {
+        attempts: std::sync::atomic::AtomicUsize::new(0),
+    }));
+    let tenant = TenantId::default();
+    let app = build_router(state.clone());
+    let request = || {
+        Request::post("/tdata/Orders('gated-retry')/Temper.Example.CancelOrder")
+            .header("Content-Type", "application/json")
+            .header("X-Temper-Principal-Kind", "admin")
+            .header("X-Temper-Principal-Id", "original-operator")
+            .header("X-Session-Id", "publication-session-one")
+            .header("Idempotency-Key", "gated-retry-1")
+            .body(Body::from(r#"{"Reason": "retry publication"}"#))
+            .unwrap()
+    };
+
+    let failed = app.clone().oneshot(request()).await.unwrap();
+    assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(state.spec_publication_gated(&tenant));
+    state
+        .idempotency_cache
+        .clear_actor_for_test("default:Order:gated-retry");
+
+    let changed_params = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Orders('gated-retry')/Temper.Example.CancelOrder")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Kind", "admin")
+                .header("X-Temper-Principal-Id", "other-operator")
+                .header("Idempotency-Key", "gated-retry-1")
+                .body(Body::from(r#"{"Reason": "different target"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let changed_params_status = changed_params.status();
+    let changed_params_body = axum::body::to_bytes(changed_params.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        changed_params_status,
+        StatusCode::CONFLICT,
+        "unexpected changed-params response: {}",
+        String::from_utf8_lossy(&changed_params_body)
+    );
+    assert!(state.spec_publication_gated(&tenant));
+
+    let changed_principal = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Orders('gated-retry')/Temper.Example.CancelOrder")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Kind", "customer")
+                .header("X-Temper-Principal-Id", "different-principal")
+                .header("Idempotency-Key", "gated-retry-1")
+                .body(Body::from(r#"{"Reason": "retry publication"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed_principal.status(), StatusCode::CONFLICT);
+    assert!(state.spec_publication_gated(&tenant));
+
+    let changed_action = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Orders('gated-retry')/Temper.Example.InitiateReturn")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Kind", "admin")
+                .header("Idempotency-Key", "gated-retry-1")
+                .body(Body::from(r#"{"Reason": "retry publication"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed_action.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(state.spec_publication_gated(&tenant));
+
+    let recovered = app
+        .oneshot(
+            Request::post("/tdata/Orders('gated-retry')/Temper.Example.CancelOrder")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Kind", "admin")
+                .header("X-Temper-Principal-Id", "recovery-operator")
+                .header("X-Session-Id", "publication-session-two")
+                .header("Idempotency-Key", "gated-retry-1")
+                .body(Body::from(r#"{"Reason": "retry publication"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recovered.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(recovered.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["postAction"]["publicationRetry"], "completed");
+    assert!(!state.spec_publication_gated(&tenant));
 }
 
 #[tokio::test]

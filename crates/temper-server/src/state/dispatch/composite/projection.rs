@@ -21,7 +21,10 @@ impl ServerState {
             .and_then(|slot| slot.clone());
         let mut projection_upserts = Vec::new();
 
-        for stream in streams.values().filter(|stream| !stream.events.is_empty()) {
+        // A durable exact retry carries no new events, but it is also the
+        // recovery path for an ambiguous post-commit failure. Re-project every
+        // captured participant so the retry completes cache/query convergence.
+        for stream in streams.values() {
             self.cache_entity_status(
                 format!("{tenant}:{}:{}", stream.entity_type, stream.entity_id),
                 stream.state.status.clone(),

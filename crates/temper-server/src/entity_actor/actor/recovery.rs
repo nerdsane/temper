@@ -2,14 +2,38 @@
 
 use super::*;
 
+mod envelope;
 mod stable_source;
 
+use envelope::apply_replayed_envelope;
 pub(crate) use stable_source::{
     CapturedEntitySnapshot, StableEntitySource, recover_entity_state_from_stable_sources,
     stable_entity_source_is_current,
 };
 
 const JOURNAL_REPLAY_PAGE_SIZE: usize = 1_024;
+const MAX_STABLE_RECOVERY_ATTEMPTS: usize = 3;
+
+/// Immutable dependencies and identity shared by entity recovery strategies.
+#[derive(Clone, Copy)]
+pub(crate) struct EntityRecoveryContext<'a> {
+    /// Tenant that owns the durable entity.
+    pub(crate) tenant: &'a str,
+    /// Durable entity type.
+    pub(crate) entity_type: &'a str,
+    /// Durable entity identifier.
+    pub(crate) entity_id: &'a str,
+    /// Transition table used to replay domain events.
+    pub(crate) table: &'a TransitionTable,
+    /// Event store that owns the durable sources.
+    pub(crate) store: &'a BoxedEventStore,
+    /// Backend label used for replay field synchronization and diagnostics.
+    pub(crate) backend: BackendLabel,
+    /// Initial fields used before applying durable state.
+    pub(crate) initial_fields: &'a serde_json::Value,
+    /// Optional overflow-blob store used while replaying fields.
+    pub(crate) blob_store: Option<&'a crate::blob_store::BlobStore>,
+}
 
 #[derive(Clone, Copy)]
 struct ReplayPolicy {
@@ -19,164 +43,77 @@ struct ReplayPolicy {
     replay_full_journal: bool,
 }
 
-async fn apply_replayed_envelope(
-    table: &TransitionTable,
-    backend: BackendLabel,
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CapturedReplaySource {
+    journal_boundary: JournalBoundary,
+    snapshot: Option<CapturedEntitySnapshot>,
+}
+
+/// Actor state and the exact snapshot generation that participated in recovery.
+pub(crate) struct RecoveredEntityState {
+    /// State reconstructed from one closed durable source generation.
+    pub(crate) state: EntityState,
+    /// Exact snapshot source the next derived append must validate atomically.
+    pub(crate) snapshot_source: SnapshotSourceFence,
+}
+
+fn validate_and_normalize_snapshot_state(
     state: &mut EntityState,
-    tenant: &str,
-    blob_store: Option<&crate::blob_store::BlobStore>,
-    envelope: &PersistenceEnvelope,
-    strict_event_decode: bool,
+    entity_type: &str,
+    entity_id: &str,
+    table: &TransitionTable,
+    sequence_nr: u64,
 ) -> Result<(), ActorError> {
-    // Deleted is terminal, but every later legacy/corrupt envelope still consumes
-    // its durable sequence so the reconstructed state reaches the captured fence.
-    if state.status == "Deleted" {
-        state.sequence_nr = envelope.sequence_nr;
-        return Ok(());
+    if state.entity_type != entity_type || state.entity_id != entity_id {
+        return Err(ActorError::custom(format!(
+            "durable snapshot identity mismatch for {entity_type}:{entity_id} at sequence {sequence_nr}"
+        )));
     }
-    // `event_type` is normally the domain action name, so CompositeEvent is not
-    // a reserved discriminator. Skip only the runtime audit schema; a domain
-    // action with the same name must continue through ordinary replay, while an
-    // undecodable payload must still fail strict authoritative recovery.
-    if envelope.event_type == COMPOSITE_EVENT_TYPE
-        && serde_json::from_value::<CompositeEvent>(envelope.payload.clone()).is_ok()
-    {
-        state.sequence_nr = envelope.sequence_nr;
-        return Ok(());
+    // `Deleted` is the runtime's terminal lifecycle marker rather than a
+    // user-declared IOA state. Snapshot writers may persist that terminal state,
+    // so validate every other status against the transition table while retaining
+    // the canonical deletion marker for tombstone/source-precedence recovery.
+    if state.status != "Deleted" && !table.states.contains(&state.status) {
+        return Err(ActorError::custom(format!(
+            "durable snapshot has invalid status '{}' for {entity_type}:{entity_id} at sequence {sequence_nr}",
+            state.status
+        )));
     }
-
-    if envelope.event_type == FIELD_UPDATE_EVENT_TYPE
-        && let Ok(update) = serde_json::from_value::<PersistedFieldUpdate>(envelope.payload.clone())
-        && update.schema == FIELD_UPDATE_SCHEMA
-    {
-        let status = state.status.clone();
-        EntityActor::apply_field_update(state, &update.fields, update.replace).map_err(
-            |error| {
-                ActorError::custom(format!(
-                    "failed to replay {} for {}:{}: {error}",
-                    envelope.event_type, state.entity_type, state.entity_id
-                ))
-            },
-        )?;
-        state.push_event_bounded(EntityEvent {
-            action: if update.replace {
-                FIELDS_REPLACED_EVENT_TYPE.to_string()
-            } else {
-                FIELDS_PATCHED_EVENT_TYPE.to_string()
-            },
-            from_status: status.clone(),
-            to_status: status,
-            timestamp: envelope.metadata.timestamp,
-            params: update.fields,
-            idempotency_key: update.idempotency_key,
-        });
-        state.sequence_nr = envelope.sequence_nr;
-        return Ok(());
-    }
-
-    let parsed_event = serde_json::from_value::<EntityEvent>(envelope.payload.clone());
-    if envelope.transitions_to_deleted() {
-        let tombstone = parsed_event.unwrap_or_else(|_| EntityEvent {
-            action: "Deleted".to_string(),
-            from_status: state.status.clone(),
-            to_status: "Deleted".to_string(),
-            timestamp: envelope.metadata.timestamp,
-            params: serde_json::json!({}),
-            idempotency_key: None,
-        });
-        state.status = tombstone.to_status.clone();
-        if let Some(fields) = state.fields.as_object_mut() {
-            fields.insert(
-                "Status".to_string(),
-                serde_json::Value::String(state.status.clone()),
-            );
-        }
-        state.push_event_bounded(tombstone);
-        state.sequence_nr = envelope.sequence_nr;
-        return Ok(());
-    }
-
-    match parsed_event {
-        Ok(event) => {
-            // The guard already passed at commit time. Replay the historical
-            // effects without re-gating, then honor the stored target state.
-            let from_status = event.from_status.clone();
-            if let Some(effects) = table.replay_effects(&state.status, &event.action) {
-                let effects = effects.to_vec();
-                let (_custom_effects, _scheduled_actions, _spawn_requests, _schedule_at_requests) =
-                    crate::entity_actor::effects::apply_effects(state, &effects, &event.params);
-            }
-            crate::entity_actor::effects::apply_new_state_fallback(
-                state,
-                &from_status,
-                &event.to_status,
-            );
-
-            let field_sync_mode =
-                EntityActor::field_sync_mode_for_backend(Some(backend), blob_store);
-            let overflow_blobs = crate::entity_actor::effects::sync_fields_with_metadata(
-                state,
-                &event.params,
-                field_sync_mode,
-                Some(&table.state_var_metadata),
-            );
-            if !overflow_blobs.is_empty()
-                && let Err(error) =
-                    EntityActor::persist_overflow_blobs(blob_store, &overflow_blobs).await
-            {
-                tracing::warn!(
-                    entity = %state.entity_id,
-                    error = %error,
-                    overflow_count = overflow_blobs.len(),
-                    "failed to persist replayed overflow blobs — blob-ref envelopes may dangle"
-                );
-            }
-            state.push_event_bounded(event);
-        }
-        Err(error) if strict_event_decode => {
-            return Err(ActorError::custom(format!(
-                "incompatible durable event schema for {}:{} at sequence {} ({}): {error}",
-                state.entity_type, state.entity_id, envelope.sequence_nr, envelope.event_type
-            )));
-        }
-        Err(error) => {
-            tracing::warn!(
-                entity = %state.entity_id,
-                event_id = %envelope.metadata.event_id,
-                sequence_nr = envelope.sequence_nr,
-                event_type = %envelope.event_type,
-                error = %error,
-                "skipping event with incompatible schema during replay"
-            );
-            tracing::warn!(
-                tenant = %tenant,
-                entity_type = %state.entity_type,
-                "event replay error"
-            );
-        }
-    }
-    state.sequence_nr = envelope.sequence_nr;
+    let fields = state.fields.as_object_mut().ok_or_else(|| {
+        ActorError::custom(format!(
+            "durable snapshot fields are not an object for {entity_type}:{entity_id} at sequence {sequence_nr}"
+        ))
+    })?;
+    fields.insert(
+        "Id".to_string(),
+        serde_json::Value::String(entity_id.to_string()),
+    );
+    fields.insert(
+        "Status".to_string(),
+        serde_json::Value::String(state.status.clone()),
+    );
     Ok(())
 }
 
 async fn replay_events(
-    table: &TransitionTable,
-    store: &BoxedEventStore,
-    backend: BackendLabel,
+    context: EntityRecoveryContext<'_>,
     state: &mut EntityState,
-    tenant: &str,
-    blob_store: Option<&crate::blob_store::BlobStore>,
     policy: ReplayPolicy,
-    captured_boundary: Option<JournalBoundary>,
+    captured_source: Option<&CapturedReplaySource>,
 ) -> Result<(), ActorError> {
     let replay_start = Instant::now(); // determinism-ok: production replay metric only
-    let persistence_id = format!("{tenant}:{}:{}", state.entity_type, state.entity_id);
-    let initial_state = state.clone();
+    let persistence_id = format!(
+        "{}:{}:{}",
+        context.tenant, state.entity_type, state.entity_id
+    );
+    let mut effective_policy = policy;
     let mut from_sequence = 0;
     let mut loaded_snapshot = false;
-    let journal_boundary = match captured_boundary {
-        Some(boundary) => boundary,
-        None => store
+    let mut snapshot_provenance = None;
+    let journal_boundary = match captured_source {
+        Some(source) => source.journal_boundary,
+        None => context
+            .store
             .journal_boundary(&persistence_id)
             .await
             .map_err(|error| {
@@ -188,17 +125,40 @@ async fn replay_events(
     };
 
     if policy.load_snapshot {
-        match store.load_snapshot(&persistence_id).await {
+        let snapshot_result = match captured_source {
+            Some(source) => Ok(source
+                .snapshot
+                .as_ref()
+                .map(|snapshot| (snapshot.sequence_nr, snapshot.state.clone()))),
+            None => context.store.load_snapshot(&persistence_id).await,
+        };
+        match snapshot_result {
             Ok(Some((snapshot_sequence, snapshot_bytes))) => {
-                if EntityActor::apply_snapshot_bytes(state, snapshot_sequence, &snapshot_bytes) {
+                if let Some(provenance) =
+                    EntityActor::apply_snapshot_bytes(state, snapshot_sequence, &snapshot_bytes)
+                {
+                    validate_and_normalize_snapshot_state(
+                        state,
+                        context.entity_type,
+                        context.entity_id,
+                        context.table,
+                        snapshot_sequence,
+                    )?;
                     from_sequence = snapshot_sequence;
                     loaded_snapshot = true;
+                    snapshot_provenance = Some(provenance);
                     tracing::info!(
                         entity = %state.entity_id,
                         seq = snapshot_sequence,
                         "loaded snapshot before replay"
                     );
                 } else {
+                    if captured_source.is_some() {
+                        return Err(ActorError::custom(format!(
+                            "incompatible durable snapshot schema for {}:{} at sequence {snapshot_sequence}",
+                            state.entity_type, state.entity_id
+                        )));
+                    }
                     tracing::warn!(
                         entity = %state.entity_id,
                         seq = snapshot_sequence,
@@ -217,34 +177,63 @@ async fn replay_events(
         }
     }
 
-    if loaded_snapshot
+    let snapshot_hides_terminal = loaded_snapshot
         && state.status != "Deleted"
-        && let Some(tombstone_sequence) = journal_boundary.first_terminal_sequence
-        && tombstone_sequence <= from_sequence
-    {
+        && journal_boundary
+            .first_terminal_sequence
+            .is_some_and(|sequence| sequence <= from_sequence);
+    let snapshot_lacks_journal_provenance = loaded_snapshot
+        && journal_boundary.latest_sequence > 0
+        && !matches!(
+            snapshot_provenance,
+            Some(SnapshotProvenance::Journal { through_sequence })
+                if through_sequence == from_sequence
+                    && through_sequence <= journal_boundary.latest_sequence
+        );
+    if snapshot_hides_terminal || snapshot_lacks_journal_provenance {
+        let mut snapshot_fields = state.fields.clone();
+        if let Some(fields) = snapshot_fields.as_object_mut() {
+            fields.insert(
+                "Status".to_string(),
+                serde_json::Value::String(context.table.initial_state.clone()),
+            );
+        }
         tracing::warn!(
             entity = %state.entity_id,
             snapshot_sequence = from_sequence,
-            tombstone_sequence,
-            "discarding live snapshot newer than terminal journal boundary"
+            journal_sequence = journal_boundary.latest_sequence,
+            snapshot_hides_terminal,
+            snapshot_lacks_journal_provenance,
+            "replaying journal from zero over an untrusted snapshot baseline"
         );
-        *state = initial_state;
+        *state = EntityActor::build_initial_state(
+            context.entity_type,
+            context.entity_id,
+            context.table,
+            &snapshot_fields,
+        );
         from_sequence = 0;
         loaded_snapshot = false;
+        effective_policy.strict_journal_read = true;
+        effective_policy.strict_event_decode = true;
+        effective_policy.replay_full_journal = true;
     }
 
     let replay_event_budget = journal_boundary
         .latest_sequence
         .saturating_sub(from_sequence);
-    if !policy.replay_full_journal && replay_event_budget > MAX_EVENTS_SINCE_SNAPSHOT as u64 {
+    if !effective_policy.replay_full_journal
+        && replay_event_budget > MAX_EVENTS_SINCE_SNAPSHOT as u64
+    {
         return Err(ActorError::custom(format!(
             "snapshot tail replay budget exceeded for {}:{} ({} > {} events since snapshot)",
             state.entity_type, state.entity_id, replay_event_budget, MAX_EVENTS_SINCE_SNAPSHOT
         )));
     }
 
-    if replay_event_budget == 0 && policy.strict_journal_read {
-        let probe = store
+    if replay_event_budget == 0 && effective_policy.strict_journal_read {
+        let probe = context
+            .store
             .read_events_page(
                 &persistence_id,
                 journal_boundary.latest_sequence,
@@ -272,7 +261,8 @@ async fn replay_events(
         let remaining = journal_boundary.latest_sequence - cursor;
         let page_len = usize::try_from(remaining.min(JOURNAL_REPLAY_PAGE_SIZE as u64))
             .expect("bounded journal page length fits usize");
-        let page = match store
+        let page = match context
+            .store
             .read_events_page(
                 &persistence_id,
                 cursor,
@@ -283,7 +273,7 @@ async fn replay_events(
         {
             Ok(page) => page,
             Err(error)
-                if policy.strict_journal_read
+                if effective_policy.strict_journal_read
                     || journal_boundary.latest_sequence > from_sequence =>
             {
                 return Err(ActorError::custom(format!(
@@ -319,13 +309,13 @@ async fn replay_events(
                 )));
             }
             apply_replayed_envelope(
-                table,
-                backend,
+                context.table,
+                context.backend,
                 state,
-                tenant,
-                blob_store,
+                context.tenant,
+                context.blob_store,
                 envelope,
-                policy.strict_event_decode,
+                effective_policy.strict_event_decode,
             )
             .await?;
         }
@@ -376,77 +366,132 @@ async fn replay_events(
     }
     crate::runtime_metrics::record_event_replay_duration(
         replay_start.elapsed(),
-        tenant,
+        context.tenant,
         &state.entity_type,
     );
+    if snapshot_hides_terminal || snapshot_lacks_journal_provenance {
+        // A legacy generation required one strict migration replay. Do not claim
+        // a durable snapshot boundary, and retain the raw journal tail that must
+        // stay within the next restart's bounded replay budget.
+        state.last_snapshot_sequence_nr = 0;
+        state.events_since_snapshot = usize::try_from(state.sequence_nr).unwrap_or(usize::MAX);
+    }
     Ok(())
 }
 
-/// Rebuild an entity's current state from its snapshot plus bounded journal tail.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn recover_entity_state_from_store(
-    tenant: &str,
-    entity_type: &str,
-    entity_id: &str,
-    table: &TransitionTable,
-    store: &BoxedEventStore,
-    backend: BackendLabel,
-    initial_fields: &serde_json::Value,
-    blob_store: Option<&crate::blob_store::BlobStore>,
-    strict_journal_read: bool,
-) -> Result<EntityState, ActorError> {
-    let mut state = EntityActor::build_initial_state(entity_type, entity_id, table, initial_fields);
-    replay_events(
-        table,
-        store,
-        backend,
-        &mut state,
-        tenant,
-        blob_store,
-        ReplayPolicy {
-            strict_journal_read,
-            load_snapshot: true,
-            strict_event_decode: false,
-            replay_full_journal: false,
-        },
-        None,
-    )
-    .await?;
-    Ok(state)
+async fn capture_replay_source(
+    context: EntityRecoveryContext<'_>,
+    persistence_id: &str,
+) -> Result<CapturedReplaySource, ActorError> {
+    let journal_boundary = context
+        .store
+        .journal_boundary(persistence_id)
+        .await
+        .map_err(|error| {
+            ActorError::custom(format!(
+                "failed to capture durable journal source for {}:{}: {error}",
+                context.entity_type, context.entity_id
+            ))
+        })?;
+    let snapshot = context
+        .store
+        .load_snapshot(persistence_id)
+        .await
+        .map_err(|error| {
+            ActorError::custom(format!(
+                "failed to capture durable snapshot source for {}:{}: {error}",
+                context.entity_type, context.entity_id
+            ))
+        })?
+        .map(|(sequence_nr, state)| CapturedEntitySnapshot { sequence_nr, state });
+    Ok(CapturedReplaySource {
+        journal_boundary,
+        snapshot,
+    })
 }
 
-/// Rebuild an entity from bounded journal pages, ignoring every derived snapshot.
-///
-/// Snapshot-only and first-journal generations can carry the same sequence. Once a
-/// journal exists, replay from zero is the only proof of which source owns it.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn recover_entity_state_from_journal_through(
-    tenant: &str,
-    entity_type: &str,
-    entity_id: &str,
-    table: &TransitionTable,
-    store: &BoxedEventStore,
-    backend: BackendLabel,
-    initial_fields: &serde_json::Value,
-    blob_store: Option<&crate::blob_store::BlobStore>,
-    journal_boundary: JournalBoundary,
-) -> Result<EntityState, ActorError> {
-    let mut state = EntityActor::build_initial_state(entity_type, entity_id, table, initial_fields);
-    replay_events(
-        table,
-        store,
-        backend,
-        &mut state,
-        tenant,
-        blob_store,
-        ReplayPolicy {
-            strict_journal_read: true,
-            load_snapshot: false,
-            strict_event_decode: true,
-            replay_full_journal: true,
+fn snapshot_source_fence(snapshot: &Option<CapturedEntitySnapshot>) -> SnapshotSourceFence {
+    match snapshot {
+        Some(snapshot) => SnapshotSourceFence::Exact {
+            sequence_nr: snapshot.sequence_nr,
+            state: snapshot.state.clone(),
         },
-        Some(journal_boundary),
+        None => SnapshotSourceFence::Absent,
+    }
+}
+
+/// Rebuild actor state from one exact snapshot/journal generation and close both
+/// sources before returning its append fence.
+pub(crate) async fn recover_entity_state_with_source_from_store(
+    context: EntityRecoveryContext<'_>,
+    strict_journal_read: bool,
+) -> Result<RecoveredEntityState, ActorError> {
+    let persistence_id = format!(
+        "{}:{}:{}",
+        context.tenant, context.entity_type, context.entity_id
+    );
+    for _attempt in 1..=MAX_STABLE_RECOVERY_ATTEMPTS {
+        let source = capture_replay_source(context, &persistence_id).await?;
+        let mut state = EntityActor::build_initial_state(
+            context.entity_type,
+            context.entity_id,
+            context.table,
+            context.initial_fields,
+        );
+        replay_events(
+            context,
+            &mut state,
+            ReplayPolicy {
+                strict_journal_read,
+                load_snapshot: true,
+                // A stable byte range is not authoritative state if an event in
+                // that range was silently skipped. Actor recovery fails closed so
+                // the next append cannot certify derived rows from partial replay.
+                strict_event_decode: true,
+                replay_full_journal: false,
+            },
+            Some(&source),
+        )
+        .await?;
+        let closed = capture_replay_source(context, &persistence_id).await?;
+        if closed == source {
+            // Snapshot sequence is an aggregate baseline, while optimistic
+            // append concurrency is owned by the journal high-water. A
+            // snapshot-only generation therefore accepts its first event at 1.
+            state.sequence_nr = source.journal_boundary.latest_sequence;
+            if state.sequence_nr == 0 && source.snapshot.is_some() {
+                // The first journal event will materialize this complete baseline.
+                // Reset replay-budget coordinates to that new journal generation;
+                // retaining a migration snapshot's aggregate sequence could defer
+                // snapshots beyond the fixed 10k event budget.
+                state.last_snapshot_sequence_nr = 0;
+                state.events_since_snapshot = 0;
+            }
+            return Ok(RecoveredEntityState {
+                state,
+                snapshot_source: snapshot_source_fence(&source.snapshot),
+            });
+        }
+        tracing::warn!(
+            entity = %context.entity_id,
+            "durable source changed during actor recovery; retrying"
+        );
+    }
+    Err(ActorError::custom(format!(
+        "durable source generation for {}:{} did not stabilize after {MAX_STABLE_RECOVERY_ATTEMPTS} attempts",
+        context.entity_type, context.entity_id
+    )))
+}
+
+/// Rebuild an entity's current state from its snapshot plus bounded journal tail.
+#[cfg(test)]
+pub(crate) async fn recover_entity_state_from_store(
+    context: EntityRecoveryContext<'_>,
+    strict_journal_read: bool,
+) -> Result<EntityState, ActorError> {
+    Ok(
+        recover_entity_state_with_source_from_store(context, strict_journal_read)
+            .await?
+            .state,
     )
-    .await?;
-    Ok(state)
 }

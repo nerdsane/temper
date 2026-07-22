@@ -4,7 +4,7 @@
 //! governed action has succeeded, then materializes the pinned Genesis commit
 //! into the platform's app installer.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
@@ -17,7 +17,7 @@ use temper_server::state::{BoundActionHook, BoundActionHookContext, DispatchComm
 
 use crate::os_apps::{
     AppManifest, InstallResult, OsAppReconcileResult, add_os_apps_dir_preferred,
-    os_app_bundle_digest, reconcile_os_app, resolve_os_app_install_order,
+    os_app_bundle_digest, reconcile_os_app_under_guard, resolve_os_app_install_order,
 };
 use crate::state::PlatformState;
 
@@ -504,27 +504,19 @@ pub async fn install_genesis_app_from_registry(
     add_os_apps_dir_preferred(cache_root.clone());
 
     let install_platform = platform.clone();
-    let reconcile_started = Instant::now();
-    let install =
-        reconcile_materialized_app_closure(&install_platform, &request.tenant, &root_ref.name)
-            .await?;
-    log_genesis_install_phase(
-        &request.app_ref,
-        "install_reconcile",
-        reconcile_started,
-        materialized.len(),
-        install.wasm_modules.len(),
-    );
     let root_closure_id = format!(
         "genesis:{}:{}",
         request.app_ref,
         root_hash.trim_start_matches('@')
     );
-
+    let mut publication_records = BTreeMap::new();
     for materialized_ref in &materialized_refs {
-        let Some(version_hash) = materialized_ref.version_hash.as_deref() else {
-            continue;
-        };
+        let version_hash = materialized_ref.version_hash.as_deref().ok_or_else(|| {
+            format!(
+                "materialized Genesis app {}/{} has no pinned version",
+                materialized_ref.owner, materialized_ref.name
+            )
+        })?;
         let app_ref = format!(
             "{}/{}@{}",
             materialized_ref.owner,
@@ -541,7 +533,7 @@ pub async fn install_genesis_app_from_registry(
                     version_hash.trim_start_matches('@')
                 )
             };
-        record_genesis_install_metadata(
+        let record = genesis_install_record(
             &install_platform,
             GenesisInstallMetadata {
                 target_tenant: &request.tenant,
@@ -554,8 +546,25 @@ pub async fn install_genesis_app_from_registry(
                 follow_policy: &follow_policy,
             },
         )
-        .await;
+        .await?;
+        publication_records.insert(materialized_ref.name.clone(), record);
     }
+    let reconcile_started = Instant::now();
+    let install = reconcile_materialized_app_closure(
+        &install_platform,
+        &request.tenant,
+        &root_ref.name,
+        None,
+        publication_records,
+    )
+    .await?;
+    log_genesis_install_phase(
+        &request.app_ref,
+        "install_reconcile",
+        reconcile_started,
+        materialized.len(),
+        install.wasm_modules.len(),
+    );
     log_genesis_install_phase(
         &request.app_ref,
         "total",
@@ -588,13 +597,33 @@ async fn reconcile_materialized_app_closure(
     platform: &PlatformState,
     tenant: &str,
     root_app_name: &str,
+    expected_generation: Option<u64>,
+    mut publication_records: BTreeMap<String, InstalledAppRecord>,
 ) -> Result<InstallResult, String> {
     let order = resolve_os_app_install_order(&[root_app_name.to_string()])?;
     let mut root_result = InstallResult::default();
+    let tenant_id = TenantId::new(tenant);
+    let mut publication_guard = match expected_generation {
+        Some(expected_generation) => {
+            platform
+                .server
+                .begin_spec_publication_after_drain(&tenant_id, expected_generation)
+                .await?
+        }
+        None => platform.server.begin_spec_publication(&tenant_id).await?,
+    };
 
     for app_name in order {
         let started = Instant::now();
-        match reconcile_os_app(platform, tenant, &app_name).await? {
+        match reconcile_os_app_under_guard(
+            platform,
+            tenant,
+            &app_name,
+            publication_records.remove(&app_name),
+            &mut publication_guard,
+        )
+        .await?
+        {
             OsAppReconcileResult::Skipped { bundle_digest, .. } => {
                 tracing::info!(
                     tenant = %tenant,
@@ -619,6 +648,13 @@ async fn reconcile_materialized_app_closure(
                 }
             }
         }
+    }
+
+    if !publication_records.is_empty() {
+        return Err(format!(
+            "Genesis publication records were not part of the resolved dependency closure: {:?}",
+            publication_records.keys().collect::<Vec<_>>()
+        ));
     }
 
     Ok(root_result)
@@ -1027,6 +1063,10 @@ async fn run_git(cwd: Option<&Path>, args: &[&str]) -> Result<String, String> {
 
 #[async_trait::async_trait]
 impl BoundActionHook for GenesisInstallHook {
+    fn requires_generation_handoff(&self, entity_type: &str, action: &str) -> bool {
+        entity_type == "App" && action.rsplit('.').next().unwrap_or(action) == "Install"
+    }
+
     async fn after_bound_action(
         &self,
         ctx: BoundActionHookContext<'_>,
@@ -1039,6 +1079,8 @@ impl BoundActionHook for GenesisInstallHook {
             action,
             params,
             state_json,
+            operation_id,
+            expected_generation,
         } = ctx;
 
         if entity_type != "App" || action.rsplit('.').next().unwrap_or(action) != "Install" {
@@ -1077,9 +1119,20 @@ impl BoundActionHook for GenesisInstallHook {
                 .unwrap_or_default(),
         )?;
         let installation_id = installation_id(entity_id, &target_tenant, &version_hash);
+        if let Ok(existing) = state
+            .get_tenant_entity_state(tenant, "AppInstallation", &installation_id)
+            .await
+        {
+            let existing_fields = &existing.state.fields;
+            if string_field(existing_fields, "HookOperationId").as_deref() == Some(operation_id)
+                && let Some(output) = existing_fields.get("HookOutput")
+            {
+                return Ok(Some(output.clone()));
+            }
+        }
 
         let cache_root = genesis_cache_root(state, &app_ref);
-        let materialized_apps = materialize_app_closure(
+        let materialized_bundles = materialize_app_closure(
             state,
             tenant,
             &cache_root,
@@ -1096,27 +1149,81 @@ impl BoundActionHook for GenesisInstallHook {
 
         let mut platform = self.platform.clone();
         platform.server = state.clone();
-        match reconcile_materialized_app_closure(&platform, &target_tenant, &name).await {
-            Ok(result) => {
-                let closure_id = format!(
+        let closure_id = format!(
+            "genesis:{}:{}",
+            app_ref,
+            version_hash.trim_start_matches('@')
+        );
+        let mut publication_records = BTreeMap::new();
+        for materialized in &materialized_bundles {
+            let materialized_app_ref = format!(
+                "{}/{}@{}",
+                materialized.owner,
+                materialized.name,
+                materialized.version_hash.trim_start_matches('@')
+            );
+            let materialized_closure_id = if materialized.name == name {
+                closure_id.clone()
+            } else {
+                format!(
                     "genesis:{}:{}",
-                    app_ref,
-                    version_hash.trim_start_matches('@')
-                );
-                record_genesis_install_metadata(
-                    &platform,
-                    GenesisInstallMetadata {
-                        target_tenant: &target_tenant,
-                        app_name: &name,
-                        app_ref: &app_ref,
-                        version_hash: &version_hash,
-                        closure_id: &closure_id,
-                        registry_url: &registry_url,
-                        registry_tenant: &registry_tenant,
-                        follow_policy: &follow_policy,
-                    },
+                    materialized_app_ref,
+                    materialized.version_hash.trim_start_matches('@')
                 )
-                .await;
+            };
+            let record = genesis_install_record(
+                &platform,
+                GenesisInstallMetadata {
+                    target_tenant: &target_tenant,
+                    app_name: &materialized.name,
+                    app_ref: &materialized_app_ref,
+                    version_hash: &materialized.version_hash,
+                    closure_id: &materialized_closure_id,
+                    registry_url: &registry_url,
+                    registry_tenant: &registry_tenant,
+                    follow_policy: &follow_policy,
+                },
+            )
+            .await?;
+            publication_records.insert(materialized.name.clone(), record);
+        }
+        let materialized_apps = materialized_bundles
+            .iter()
+            .map(|materialized| materialized.name.clone())
+            .collect::<Vec<_>>();
+        let expected_generation = (target_tenant == tenant.as_str())
+            .then_some(expected_generation)
+            .flatten();
+        match reconcile_materialized_app_closure(
+            &platform,
+            &target_tenant,
+            &name,
+            expected_generation,
+            publication_records,
+        )
+        .await
+        {
+            Ok(result) => {
+                let added_count = result.added.len();
+                let updated_count = result.updated.len();
+                let skipped_count = result.skipped.len();
+                let output = serde_json::json!({
+                    "kind": "genesis_app_install",
+                    "appRef": app_ref.clone(),
+                    "targetTenant": target_tenant.clone(),
+                    "followPolicy": follow_policy.clone(),
+                    "installationId": installation_id.clone(),
+                    "materializedPath": app_dir.clone(),
+                    "materializedApps": materialized_apps.clone(),
+                    "added": result.added,
+                    "updated": result.updated,
+                    "skipped": result.skipped,
+                    "wasmModules": result.wasm_modules,
+                    "agents": result.agents,
+                    "agentSkills": result.skills,
+                    "adrs": result.adrs_bootstrapped,
+                    "seedInstances": result.seed_instances,
+                });
                 mark_installation(
                     state,
                     tenant,
@@ -1128,45 +1235,36 @@ impl BoundActionHook for GenesisInstallHook {
                             "Installed {} into {} ({} added, {} updated, {} skipped)",
                             app_ref,
                             target_tenant,
-                            result.added.len(),
-                            result.updated.len(),
-                            result.skipped.len()
+                            added_count,
+                            updated_count,
+                            skipped_count
                         ),
-                        "InstalledAt": chrono::Utc::now().to_rfc3339(),
+                        "InstalledAt": temper_runtime::scheduler::sim_now().to_rfc3339(),
+                        "HookOperationId": operation_id,
+                        "HookOutput": output.clone(),
                     }),
                 )
-                .await;
-                Ok(Some(serde_json::json!({
-                    "kind": "genesis_app_install",
-                    "appRef": app_ref,
-                    "targetTenant": target_tenant,
-                    "followPolicy": follow_policy,
-                    "installationId": installation_id,
-                    "materializedPath": app_dir,
-                    "materializedApps": materialized_apps,
-                    "added": result.added,
-                    "updated": result.updated,
-                    "skipped": result.skipped,
-                    "wasmModules": result.wasm_modules,
-                    "agents": result.agents,
-                    "agentSkills": result.skills,
-                    "adrs": result.adrs_bootstrapped,
-                    "seedInstances": result.seed_instances,
-                })))
+                .await?;
+                Ok(Some(output))
             }
             Err(error) => {
                 let message = error.to_string();
-                mark_installation(
+                let mark_result = mark_installation(
                     state,
                     tenant,
                     &installation_id,
                     "MarkFailed",
                     serde_json::json!({
                         "Message": message,
-                        "InstalledAt": chrono::Utc::now().to_rfc3339(),
+                        "InstalledAt": temper_runtime::scheduler::sim_now().to_rfc3339(),
                     }),
                 )
                 .await;
+                if let Err(mark_error) = mark_result {
+                    return Err(format!(
+                        "Genesis App.Install failed for {app_ref}: {error}; failed to record installation failure: {mark_error}"
+                    ));
+                }
                 Err(format!("Genesis App.Install failed for {app_ref}: {error}"))
             }
         }
@@ -1239,43 +1337,33 @@ fn normalize_follow_policy(raw: &str) -> Result<String, String> {
     ))
 }
 
-async fn record_genesis_install_metadata(
+async fn genesis_install_record(
     platform: &PlatformState,
     metadata: GenesisInstallMetadata<'_>,
-) {
-    let Some(ps) = platform
+) -> Result<InstalledAppRecord, String> {
+    let ps = platform
         .server
         .storage_stack
         .as_ref()
-        .and_then(|stack| stack.platform.clone())
-    else {
-        return;
-    };
-    let Some(digest) = os_app_bundle_digest(metadata.app_name) else {
-        tracing::warn!(
-            tenant = %metadata.target_tenant,
-            app = %metadata.app_name,
-            app_ref = %metadata.app_ref,
-            "Installed Genesis app but could not compute bundle digest for durable provenance"
-        );
-        return;
-    };
+        .and_then(|stack| stack.platform.clone());
+    let digest = os_app_bundle_digest(metadata.app_name).ok_or_else(|| {
+        format!(
+            "could not compute bundle digest for Genesis app provenance {}:{}",
+            metadata.target_tenant, metadata.app_name
+        )
+    })?;
 
-    let existing_record = match ps
-        .get_installed_app(metadata.target_tenant, metadata.app_name)
-        .await
-    {
-        Ok(record) => record,
-        Err(error) => {
-            tracing::warn!(
-                tenant = %metadata.target_tenant,
-                app = %metadata.app_name,
-                app_ref = %metadata.app_ref,
-                error = %error,
-                "Failed to read existing Genesis app provenance before update"
-            );
-            None
-        }
+    let existing_record = match ps {
+        Some(store) => store
+            .get_installed_app(metadata.target_tenant, metadata.app_name)
+            .await
+            .map_err(|error| {
+                format!(
+                    "failed to read existing Genesis provenance for {}:{}: {error}",
+                    metadata.target_tenant, metadata.app_name
+                )
+            })?,
+        None => None,
     };
     let (pinned_version_hash, current_version_hash) = provenance_hashes_for_policy(
         metadata.follow_policy,
@@ -1283,7 +1371,7 @@ async fn record_genesis_install_metadata(
         existing_record.as_ref(),
     );
 
-    let record = InstalledAppRecord {
+    Ok(InstalledAppRecord {
         tenant: metadata.target_tenant.to_string(),
         app_name: digest.app_name,
         source_kind: "genesis".to_string(),
@@ -1305,17 +1393,7 @@ async fn record_genesis_install_metadata(
         installed_at: None,
         last_reconciled_at: None,
         status: "installed".to_string(),
-    };
-
-    if let Err(error) = ps.record_installed_app_metadata(&record).await {
-        tracing::warn!(
-            tenant = %metadata.target_tenant,
-            app = %metadata.app_name,
-            app_ref = %metadata.app_ref,
-            error = %error,
-            "Failed to persist Genesis app provenance"
-        );
-    }
+    })
 }
 
 fn provenance_hashes_for_policy(
@@ -1561,7 +1639,7 @@ async fn materialize_app_closure(
     tenant: &TenantId,
     cache_root: &Path,
     root: GenesisAppBundle,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<GenesisAppBundle>, String> {
     let mut stack = vec![root];
     let mut seen = BTreeSet::new();
     let mut materialized = Vec::new();
@@ -1580,7 +1658,7 @@ async fn materialize_app_closure(
             &app_dir,
         )
         .await?;
-        materialized.push(app.name.clone());
+        materialized.push(app.clone());
 
         for dependency in read_manifest_dependencies(&app_dir)?.into_iter().rev() {
             let dependency = resolve_genesis_dependency(state, tenant, &app.owner, &dependency)
@@ -1712,9 +1790,9 @@ async fn mark_installation(
     installation_id: &str,
     action: &str,
     params: Value,
-) {
+) -> Result<(), String> {
     let agent_ctx = temper_server::request_context::AgentContext::for_service("genesis-install");
-    let _ = state
+    let response = state
         .dispatch(DispatchCommand {
             tenant,
             entity_type: "AppInstallation",
@@ -1725,7 +1803,14 @@ async fn mark_installation(
             await_integration: false,
             await_reactions: true,
         })
-        .await;
+        .await
+        .map_err(|error| error.to_string())?;
+    if !response.success {
+        return Err(response
+            .error
+            .unwrap_or_else(|| format!("AppInstallation.{action} failed")));
+    }
+    Ok(())
 }
 
 async fn materialize_commit_tree(

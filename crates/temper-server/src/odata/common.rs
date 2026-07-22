@@ -64,7 +64,7 @@ pub(super) fn has_expand_options(options: &temper_odata::query::types::ExpandOpt
 /// Resolve an entity set name to an entity type for a tenant.
 ///
 /// Tries SpecRegistry first, then legacy entity_set_map.
-pub(super) fn resolve_entity_type(
+pub(crate) fn resolve_entity_type(
     state: &ServerState,
     tenant: &TenantId,
     entity_set: &str,

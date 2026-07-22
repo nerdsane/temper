@@ -1,5 +1,7 @@
 //! Spec persistence: upsert, verification updates, and startup loading.
 
+mod publication;
+
 use std::collections::BTreeMap;
 
 use libsql::{TransactionBehavior, params};

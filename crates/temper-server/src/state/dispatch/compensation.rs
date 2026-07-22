@@ -51,6 +51,7 @@ impl crate::state::ServerState {
         entity_id: &str,
         triggering_action: &str,
         error: &str,
+        agent_ctx: &AgentContext,
     ) {
         let state = self.clone();
         let tenant = tenant.clone();
@@ -58,6 +59,13 @@ impl crate::state::ServerState {
         let entity_id = entity_id.to_string();
         let triggering_action = triggering_action.to_string();
         let error = error.to_string();
+        let agent_ctx = agent_ctx
+            .fork_tenant_generation_lease(&tenant)
+            .unwrap_or_else(|| {
+                let mut detached = agent_ctx.clone();
+                detached.detach_tenant_generation_lease();
+                detached
+            });
         let span = tracing::info_span!(
             "dispatch.integration_failure_compensation",
             tenant = %tenant,
@@ -78,6 +86,7 @@ impl crate::state::ServerState {
                         &entity_id,
                         &triggering_action,
                         &error,
+                        agent_ctx,
                     )
                     .await;
             }
@@ -94,7 +103,21 @@ impl crate::state::ServerState {
         entity_id: &str,
         triggering_action: &str,
         error: &str,
+        agent_ctx: AgentContext,
     ) {
+        let Some(generation_ctx) = self.activate_immediate_tenant_work(tenant, agent_ctx).await
+        else {
+            self.surface_dropped_integration_failure(
+                tenant,
+                entity_type,
+                entity_id,
+                triggering_action,
+                "",
+                error,
+                "integration compensation could not enter a complete runtime generation",
+            );
+            return;
+        };
         let status = self
             .resolve_entity_status(tenant, entity_type, entity_id)
             .await
@@ -122,7 +145,8 @@ impl crate::state::ServerState {
             "error_message": error,
             "trigger_action": triggering_action,
         });
-        let agent_ctx = AgentContext::for_service("integration-compensation");
+        let agent_ctx =
+            AgentContext::for_service_inheriting("integration-compensation", &generation_ctx);
         match self
             .dispatch_tenant_action(tenant, entity_type, entity_id, &action, params, &agent_ctx)
             .await

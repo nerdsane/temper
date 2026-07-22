@@ -30,7 +30,7 @@ const TAG_NULL: u8 = b'0';
 
 /// Changes whenever key-row derivation/reconciliation semantics change. Including
 /// it in the durable coverage signature forces a one-time authoritative repair of
-/// rows created under an older contract (ADR-0171).
+/// rows created under an older contract (ADR-0192).
 const KEY_INDEX_DERIVATION_VERSION: &str = "v3";
 
 /// The stable signature of the key derivation contract and a type's declared key-set:
@@ -64,10 +64,25 @@ pub fn declared_key_set_signature(keys: &[DeclaredKey]) -> String {
     encoded
 }
 
+/// Contract token carried by a spec-governed writer. The stable signature
+/// drives coverage; the activation epoch rejects a delayed writer even when a
+/// hot swap cycles back to byte-identical declarations.
+pub fn declared_key_write_contract(table: &temper_jit::table::TransitionTable) -> String {
+    let key_set = declared_key_set_signature(&table.keys);
+    if table.key_contract_activation_epoch == 0 {
+        key_set
+    } else {
+        temper_runtime::persistence::encode_activated_key_contract(
+            &key_set,
+            table.key_contract_activation_epoch,
+        )
+    }
+}
+
 /// Derive an entity's complete current declared-key row set from authoritative
 /// post-transition fields. `index_entity = false` produces the exact empty set for
 /// a tombstone. Shared by ordinary actor appends and atomic composite batches so the
-/// two write paths cannot diverge on null, rename, or delete semantics (ADR-0171).
+/// two write paths cannot diverge on null, rename, or delete semantics (ADR-0192).
 pub(crate) fn derive_entity_key_rows(
     keys: &[DeclaredKey],
     fields: &serde_json::Value,

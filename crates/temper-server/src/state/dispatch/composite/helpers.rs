@@ -1,5 +1,19 @@
 use super::*;
 
+impl crate::state::ServerState {
+    pub(super) fn composite_batch_field_sync_mode(
+        &self,
+        tenant: &TenantId,
+        backend: BackendLabel,
+    ) -> FieldSyncMode {
+        match backend {
+            BackendLabel::Turso | BackendLabel::TursoRouted => FieldSyncMode::blob_refs_default(),
+            _ if self.blob_store_for_tenant(tenant).is_ok() => FieldSyncMode::blob_refs_default(),
+            _ => FieldSyncMode::InlineTruncate,
+        }
+    }
+}
+
 pub(super) fn synthetic_initial_state(
     entity_type: &str,
     entity_id: &str,
@@ -289,6 +303,21 @@ pub(super) fn composite_parent_idempotency(
     format!("implicit:{:x}", hasher.finalize())
 }
 
+pub(super) fn canonical_json(value: &Value) -> Value {
+    match value {
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), canonical_json(value)))
+                .collect::<BTreeMap<_, _>>()
+                .into_iter()
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(values.iter().map(canonical_json).collect()),
+        scalar => scalar.clone(),
+    }
+}
+
 pub(super) fn build_composite_event(
     tenant: &TenantId,
     parent_entity_type: &str,
@@ -303,6 +332,7 @@ pub(super) fn build_composite_event(
         parent_entity_id: parent_entity_id.to_string(),
         parent_action: parent_action.to_string(),
         composite_idempotency_key: parent_idempotency.to_string(),
+        intent_hash: String::new(),
         sub_writes: prepared_sub_writes
             .iter()
             .map(|write| CompositeEventSubWrite {
@@ -361,6 +391,9 @@ pub(super) fn composite_batch_persistence_error(error: PersistenceError) -> Disp
     match error {
         PersistenceError::ConcurrencyViolation { .. }
         | PersistenceError::KeyContractChanged { .. }
+        | PersistenceError::KeyContractNotActive { .. }
+        | PersistenceError::KeyContractActivationStale { .. }
+        | PersistenceError::KeyContractActivationNotReady { .. }
         | PersistenceError::JournalBoundaryChanged { .. }
         | PersistenceError::EntityLivenessChanged { .. }
         | PersistenceError::SnapshotGenerationChanged => {

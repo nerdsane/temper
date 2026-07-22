@@ -8,6 +8,7 @@ use crate::odata::read_support::{
     materialize_entity_set_entities,
 };
 use crate::storage::{EntityCatalogRow, QueryPlaneStore, QueryProjectionFieldsRow, StorageStack};
+use temper_runtime::persistence::ProjectionSourceFence;
 
 struct CatalogReadFault {
     durable_row: Option<EntityCatalogRow>,
@@ -29,6 +30,30 @@ impl QueryPlaneStore for CatalogReadFault {
         Ok(())
     }
 
+    async fn upsert_projection_if_source(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+        _source: ProjectionSourceFence<'_>,
+    ) -> Result<bool, PersistenceError> {
+        self.upsert_projection(
+            tenant,
+            entity_type,
+            entity_id,
+            status,
+            fields,
+            state,
+            sequence_nr,
+        )
+        .await?;
+        Ok(true)
+    }
+
     async fn remove_projection(
         &self,
         _tenant: &str,
@@ -36,6 +61,41 @@ impl QueryPlaneStore for CatalogReadFault {
         _entity_id: &str,
     ) -> Result<(), PersistenceError> {
         Ok(())
+    }
+
+    async fn remove_projection_if_source(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        _source: ProjectionSourceFence<'_>,
+    ) -> Result<bool, PersistenceError> {
+        self.remove_projection(tenant, entity_type, entity_id)
+            .await?;
+        Ok(true)
+    }
+
+    async fn clear_projection_dirty_if_source(
+        &self,
+        _tenant: &str,
+        _entity_type: &str,
+        _entity_id: &str,
+        _source: ProjectionSourceFence<'_>,
+    ) -> Result<bool, PersistenceError> {
+        Ok(true)
+    }
+
+    async fn remove_projection_if_exact(
+        &self,
+        _tenant: &str,
+        _entity_type: &str,
+        _entity_id: &str,
+        _status: &str,
+        _fields: &serde_json::Value,
+        _state: &serde_json::Value,
+        _sequence_nr: u64,
+    ) -> Result<bool, PersistenceError> {
+        Ok(false)
     }
 
     async fn query_field_index(
@@ -174,6 +234,7 @@ async fn catalog_fault_does_not_disable_journal_backed_materialization() {
             keys: true,
             key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
             vectors: false,
+            snapshot_source: Default::default(),
         },
     )
     .await

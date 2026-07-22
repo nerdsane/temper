@@ -82,6 +82,7 @@ async fn seed_owner(
             keys: true,
             key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
             vectors: false,
+            snapshot_source: Default::default(),
         },
     )
     .await
@@ -136,6 +137,7 @@ async fn stable_key_row_materializes_its_journal_generation_not_stale_actor() {
             keys: true,
             key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
             vectors: false,
+            snapshot_source: Default::default(),
         },
     )
     .await
@@ -225,6 +227,8 @@ impl AbaTransferStore {
                     key_rows: vec![key_row(&self.workspace, a_path)],
                     reconcile_keys: true,
                     key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
+                    snapshot_source: Default::default(),
+                    batch_idempotency: None,
                 },
                 PersistenceAppend {
                     persistence_id: b_pid.clone(),
@@ -233,6 +237,8 @@ impl AbaTransferStore {
                     key_rows: vec![key_row(&self.workspace, b_path)],
                     reconcile_keys: true,
                     key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
+                    snapshot_source: Default::default(),
+                    batch_idempotency: None,
                 },
             ],
         )

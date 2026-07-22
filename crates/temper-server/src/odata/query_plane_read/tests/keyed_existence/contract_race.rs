@@ -139,6 +139,7 @@ impl EventStore for ContractChangingLookupStore {
                     keys: true,
                     key_set_signature: Some("v3|10:contract_b[7:OtherId]".to_string()),
                     vectors: false,
+                    snapshot_source: Default::default(),
                 },
             )
             .await?;
@@ -209,6 +210,7 @@ async fn incompatible_contract_write_between_coverage_and_lookup_falls_back_to_s
             keys: true,
             key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
             vectors: false,
+            snapshot_source: Default::default(),
         },
     )
     .await

@@ -12,6 +12,10 @@ pub(crate) struct LoadDirRequest {
     /// wipe platform entity types.
     #[serde(default)]
     pub(crate) merge: bool,
+    /// Optional Cedar policy text merged into the tenant's complete policy and
+    /// committed/activated in the same guarded runtime generation.
+    #[serde(default)]
+    pub(crate) cedar_policies: Option<String>,
 }
 
 /// Request body for POST /api/specs/load-inline.

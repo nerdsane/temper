@@ -30,6 +30,16 @@ pub struct JournalBoundary {
     pub first_terminal_sequence: Option<u64>,
 }
 
+/// One bounded declared-key repair candidate and its durable liveness at the
+/// captured reconciliation revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyReconciliationEntity {
+    /// Stable entity identifier used as the pagination cursor.
+    pub entity_id: String,
+    /// Whether a non-terminal authoritative source currently represents the entity.
+    pub is_live: bool,
+}
+
 impl PersistenceEnvelope {
     /// Whether this durable event makes the entity terminally deleted.
     ///
@@ -74,6 +84,39 @@ pub enum PersistenceError {
         /// Contract revision current when the repair acquired the type fence.
         actual_revision: u64,
     },
+    /// A delayed writer used a key signature that is no longer the activated
+    /// spec contract for this entity type.
+    #[error(
+        "key contract is not active: activated '{activated_signature}', attempted '{attempted_signature}'"
+    )]
+    KeyContractNotActive {
+        /// Signature established by the latest spec activation.
+        activated_signature: String,
+        /// Signature carried by the stale durable writer.
+        attempted_signature: String,
+    },
+    /// A writer was derived before the latest activation of an otherwise
+    /// identical key signature (the A -> none -> A ABA case).
+    #[error(
+        "key contract activation is stale: active epoch {activated_epoch}, attempted {attempted_epoch:?}"
+    )]
+    KeyContractActivationStale {
+        /// Monotonic epoch established by the latest spec activation.
+        activated_epoch: u64,
+        /// Epoch captured by the writer's transition table.
+        attempted_epoch: Option<u64>,
+    },
+    /// The activated contract has not yet completed a source-fenced ownership
+    /// rebuild. Live writes stay closed until its coverage publication succeeds.
+    #[error(
+        "key contract activation is not ready: active epoch {activated_epoch}, signature '{activated_signature}'"
+    )]
+    KeyContractActivationNotReady {
+        /// Monotonic epoch waiting for its ownership rebuild to publish.
+        activated_epoch: u64,
+        /// Activated declared-key signature awaiting coverage.
+        activated_signature: String,
+    },
     /// A key-index repair's entity classification became stale before mutation.
     #[error(
         "entity liveness changed during key repair: expected live={expected_live}, got live={actual_live}"
@@ -94,8 +137,8 @@ pub enum PersistenceError {
         /// Journal high-water observed under the store's stream lock.
         actual: u64,
     },
-    /// A key-index repair's exact snapshot source changed before mutation.
-    #[error("snapshot generation changed during key repair")]
+    /// Exact snapshot source changed before a derived write acquired its stream fence.
+    #[error("snapshot generation changed before durable write")]
     SnapshotGenerationChanged,
     /// Event serialization or deserialization failed.
     #[error("serialization error: {0}")]

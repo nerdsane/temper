@@ -12,6 +12,10 @@
 ///
 /// Implementations registered on [`ServerState::custom_effect_handler`] are
 /// called by the post-dispatch effects pipeline for every custom effect name.
+/// The journal may replay a handler after an outcome-ambiguous failure, so a
+/// handler must make external mutations idempotent for the supplied entity
+/// identity and effect input.
+#[async_trait::async_trait]
 pub trait CustomEffectHandler: Send + Sync {
     /// Handle a custom effect.
     ///
@@ -20,7 +24,7 @@ pub trait CustomEffectHandler: Send + Sync {
     /// - `entity_id`: the entity instance ID
     /// - `entity_fields`: merged entity state fields (includes all params from all prior actions)
     /// - `server`: server state for dispatch, authz, etc.
-    fn handle(
+    async fn handle(
         &self,
         effect_name: &str,
         entity_type: &str,

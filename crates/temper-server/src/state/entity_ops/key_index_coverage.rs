@@ -50,6 +50,9 @@ impl ServerState {
         tenant: &TenantId,
         entity_type: &str,
     ) -> Option<String> {
+        if self.key_contract_activation_gated(tenant, entity_type) {
+            return None;
+        }
         self.ensure_key_index_watermarks_loaded(tenant).await;
         let cache_key = format!("{tenant}:{entity_type}");
         let (store, _) = self.event_journal()?;

@@ -3,7 +3,8 @@
 use temper_runtime::tenant::TenantId;
 
 use crate::entity_actor::{
-    CapturedEntitySnapshot, StableEntitySource, recover_entity_state_from_stable_sources,
+    CapturedEntitySnapshot, EntityRecoveryContext, StableEntitySource,
+    recover_entity_state_from_stable_sources,
 };
 
 /// Outcome of loading one entity's current state for an index backfill (ADR-0153,
@@ -53,21 +54,22 @@ pub(super) async fn load_entity_current_fields(
     let Some(table) = table else {
         return EntityLoadOutcome::LoadFailed;
     };
-    let source: StableEntitySource = match recover_entity_state_from_stable_sources(
-        tenant.as_str(),
-        entity_type,
-        entity_id,
-        table,
-        store,
-        backend,
-        &serde_json::json!({}),
-        blob_store,
-    )
-    .await
-    {
-        Ok(source) => source,
-        Err(_) => return EntityLoadOutcome::LoadFailed,
-    };
+    let source: StableEntitySource =
+        match recover_entity_state_from_stable_sources(EntityRecoveryContext {
+            tenant: tenant.as_str(),
+            entity_type,
+            entity_id,
+            table,
+            store,
+            backend,
+            initial_fields: &serde_json::json!({}),
+            blob_store,
+        })
+        .await
+        {
+            Ok(source) => source,
+            Err(_) => return EntityLoadOutcome::LoadFailed,
+        };
     let sequence_nr = source.durable_sequence();
     let journal_sequence = source.journal_sequence;
     let snapshot = source.snapshot;

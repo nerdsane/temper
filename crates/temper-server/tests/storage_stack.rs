@@ -126,6 +126,7 @@ impl EventStore for RecordingEventStore {
         Ok(vec![PersistenceAppendResult {
             persistence_id: appends[0].persistence_id.clone(),
             sequence_nr: appends[0].events.len() as u64,
+            batch_already_applied: false,
         }])
     }
 
@@ -212,12 +213,15 @@ async fn boxed_event_store_delegates_through_object_safe_adapter() {
                 key_rows: Vec::new(),
                 reconcile_keys: false,
                 key_set_signature: None,
+                snapshot_source: Default::default(),
+                batch_idempotency: None,
             }])
             .await
             .expect("append batch through dyn adapter"),
         vec![PersistenceAppendResult {
             persistence_id: "default:Ticket:t-1".to_string(),
             sequence_nr: 2,
+            batch_already_applied: false,
         }]
     );
     assert_eq!(

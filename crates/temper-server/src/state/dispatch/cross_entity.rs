@@ -241,7 +241,13 @@ impl crate::state::ServerState {
             let child_id = req.entity_id.clone();
             let initial_action = req.initial_action.clone();
             let parent_params = action_params.clone();
-            let agent = agent_ctx.clone();
+            let agent = agent_ctx
+                .fork_tenant_generation_lease(tenant)
+                .unwrap_or_else(|| {
+                    let mut detached = agent_ctx.clone();
+                    detached.detach_tenant_generation_lease();
+                    detached
+                });
             let copied_fields = req.copied_field_values.clone();
             let workflow_root_entity_type = agent
                 .workflow_root_entity_type
@@ -269,6 +275,15 @@ impl crate::state::ServerState {
             tokio::spawn(
                 async move {
                     // determinism-ok: spawn dispatch is a background side-effect
+                    let Some(agent) = state.activate_immediate_tenant_work(&t, agent).await else {
+                        tracing::error!(
+                            tenant = %t,
+                            child_type = %child_type,
+                            child_id = %child_id,
+                            "spawn request could not enter a complete runtime generation"
+                        );
+                        return;
+                    };
                     let mut parent_fields = serde_json::Map::new();
                     parent_fields.insert(
                         "parent_type".to_string(),

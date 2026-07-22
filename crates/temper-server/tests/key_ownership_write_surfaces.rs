@@ -8,9 +8,10 @@ use async_trait::async_trait;
 use temper_jit::table::TransitionTable;
 use temper_jit::table::types::DeclaredKey;
 use temper_runtime::ActorSystem;
-use temper_runtime::persistence::PersistenceError;
+use temper_runtime::persistence::{EventStore, PersistenceError};
 use temper_runtime::scheduler::{install_deterministic_context, sim_uuid};
 use temper_runtime::tenant::TenantId;
+use temper_server::entity_actor::EntityEvent;
 use temper_server::key_index::{canonical_key_hash, declared_key_set_signature};
 use temper_server::registry::SpecRegistry;
 use temper_server::storage::{
@@ -364,6 +365,100 @@ async fn data_only_create_co_commits_declared_keys() {
             .is_empty(),
         "a rejected duplicate must leave the journal unchanged"
     );
+}
+
+/// Key repair enumerates through a bounded cursor. An entity on page two must
+/// be reconciled before the type watermark can become authoritative.
+#[tokio::test]
+async fn key_repair_reconciles_entities_beyond_the_first_bounded_page() {
+    let (_guard, _clock, _ids) = install_deterministic_context(24_256);
+    let tenant = TenantId::default();
+    let sim = SimEventStore::no_faults(24_256);
+    let events = BoxedEventStore::new(sim.clone());
+    let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
+    let mut registry = SpecRegistry::new();
+    registry.register_tenant(
+        tenant.as_str(),
+        csdl,
+        CSDL_XML.to_string(),
+        &[("Doc", DATA_ONLY_DOC_IOA)],
+    );
+    let mut server = ServerState::from_registry(
+        ActorSystem::new("arn238-key-repair-bounded-pages"),
+        registry,
+    );
+    server.set_storage_stack(StorageStack::new(
+        BackendLabel::Sim,
+        events.clone(),
+        None,
+        None,
+        None,
+        None,
+        Some(Arc::new(NoopQueryPlane)),
+        None,
+        None,
+        None,
+    ));
+
+    for index in 0..=256_u16 {
+        let entity_id = format!("doc-{index:03}");
+        let created = EntityEvent {
+            action: "Created".to_string(),
+            from_status: String::new(),
+            to_status: "Ready".to_string(),
+            timestamp: temper_runtime::scheduler::sim_now(),
+            params: serde_json::json!({
+                "WorkspaceId": "ws-paged",
+                "Path": format!("/doc-{index:03}"),
+            }),
+            idempotency_key: None,
+        };
+        sim.append(
+            &format!("default:Doc:{entity_id}"),
+            0,
+            &[temper_runtime::persistence::PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "Created".to_string(),
+                payload: serde_json::to_value(created).expect("serialize Created event"),
+                metadata: temper_runtime::persistence::EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: temper_runtime::scheduler::sim_now(),
+                    actor_id: format!("default:Doc:{entity_id}"),
+                },
+            }],
+        )
+        .await
+        .expect("seed pre-index Doc");
+    }
+
+    server.populate_key_index_from_snapshots(&tenant).await;
+    let key_signature =
+        declared_key_set_signature(&TransitionTable::from_ioa_source(DATA_ONLY_DOC_IOA).keys);
+    assert_eq!(
+        events
+            .key_index_backfilled_types(tenant.as_str())
+            .await
+            .expect("load key coverage"),
+        vec![("Doc".to_string(), key_signature)],
+        "coverage may publish only after every bounded page is reconciled"
+    );
+    for index in [0_u16, 256] {
+        assert_eq!(
+            events
+                .lookup_by_key(
+                    tenant.as_str(),
+                    "Doc",
+                    "path",
+                    &doc_key_hash("ws-paged", &format!("/doc-{index:03}")),
+                )
+                .await
+                .expect("lookup repaired key"),
+            Some(format!("doc-{index:03}")),
+            "entity {index} must be repaired even when it is beyond page one"
+        );
+    }
 }
 
 /// A watermark covers the full ordered key definition, not merely its name.

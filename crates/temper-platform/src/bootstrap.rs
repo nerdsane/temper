@@ -93,6 +93,7 @@ pub(crate) struct BootstrapTenantSpecsOptions<'a> {
     pub(crate) verified_cache: &'a BTreeMap<String, (String, bool)>,
     pub(crate) cross_invariants_source: Option<&'a str>,
     pub(crate) verification_mode: BootstrapSpecVerificationMode,
+    pub(crate) key_contract_activation_epochs: Option<&'a BTreeMap<String, u64>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +130,7 @@ fn bootstrap_tenant_specs_inner(
         verified_cache,
         cross_invariants_source,
         verification_mode,
+        key_contract_activation_epochs,
     } = options;
 
     tracing::info!(
@@ -186,8 +188,9 @@ fn bootstrap_tenant_specs_inner(
     let tenant_id = TenantId::new(tenant);
     {
         let mut registry = state.registry.write().unwrap(); // ci-ok: infallible lock
+        let empty_key_contract_epochs = BTreeMap::new();
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_with_reactions_constraints_and_key_epochs(
                 tenant_id.clone(),
                 csdl,
                 csdl_source.to_string(),
@@ -195,6 +198,7 @@ fn bootstrap_tenant_specs_inner(
                 Vec::new(),
                 cross_invariants_source.map(str::to_string),
                 merge,
+                key_contract_activation_epochs.unwrap_or(&empty_key_contract_epochs),
             )
             .unwrap_or_else(|e| panic!("failed to register {label} specs for '{tenant}': {e}"));
         let now = temper_runtime::scheduler::sim_now().to_rfc3339();
@@ -244,6 +248,7 @@ pub fn bootstrap_system_tenant(
             verified_cache,
             cross_invariants_source: None,
             verification_mode: BootstrapSpecVerificationMode::FullCascade,
+            key_contract_activation_epochs: None,
         },
     )
 }
@@ -270,6 +275,7 @@ pub fn bootstrap_agent_specs(
             verified_cache,
             cross_invariants_source: None,
             verification_mode: BootstrapSpecVerificationMode::FullCascade,
+            key_contract_activation_epochs: None,
         },
     )
 }

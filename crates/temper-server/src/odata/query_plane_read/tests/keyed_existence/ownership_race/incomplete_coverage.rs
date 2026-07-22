@@ -46,6 +46,7 @@ async fn incomplete_key_scan_replays_journal_not_stale_resident_actor() {
             keys: true,
             key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
             vectors: false,
+            snapshot_source: Default::default(),
         },
     )
     .await

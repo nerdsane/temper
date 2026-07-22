@@ -173,6 +173,118 @@ async fn field_update_retries_when_snapshot_generation_changes_without_journal_a
     );
 }
 
+#[tokio::test]
+async fn delete_retries_against_a_same_sequence_snapshot_rewrite() {
+    let (_guard, _clock, _ids) = install_deterministic_context(287);
+    let sim = SimEventStore::no_faults(287);
+    let events = BoxedEventStore::new(sim.clone());
+    let persistence_id = "default:Doc:delete-snapshot-generation-race";
+    let legacy_snapshot = |workspace: &str| {
+        serde_json::to_vec(&serde_json::json!({
+            "entity_type": "Doc",
+            "entity_id": "delete-snapshot-generation-race",
+            "status": "Ready",
+            "item_count": 0,
+            "fields": {
+                "Id": "delete-snapshot-generation-race",
+                "Status": "Ready",
+                "WorkspaceId": workspace,
+                "Path": "/delete-me"
+            }
+        }))
+        .expect("serialize legacy snapshot")
+    };
+    let captured = legacy_snapshot("ws-before-delete");
+    events
+        .save_snapshot(persistence_id, 1, &captured)
+        .await
+        .expect("seed captured snapshot");
+    let key_set_signature = {
+        let table = TransitionTable::from_ioa_source(DOC_IOA);
+        declared_key_set_signature(&table.keys)
+    };
+    events
+        .append_with_index_rows(
+            persistence_id,
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "Temper.Internal.FieldUpdate.v1".to_string(),
+                payload: serde_json::json!({
+                    "schema": "temper.field-update.v1",
+                    "fields": {"Path": "/delete-me"},
+                    "replace": false,
+                    "idempotency_key": "delete-source-seed"
+                }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: persistence_id.to_string(),
+                },
+            }],
+            &[EntityKeyRow {
+                key_name: "path".to_string(),
+                key_hash: doc_key_hash("ws-before-delete", "/delete-me"),
+            }],
+            &[],
+            IndexReconciliation {
+                keys: true,
+                key_set_signature: Some(key_set_signature),
+                vectors: false,
+                snapshot_source: Default::default(),
+            },
+        )
+        .await
+        .expect("seed equal-sequence journal and key row");
+
+    let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(DOC_IOA)));
+    let system = ActorSystem::new("arn238-delete-snapshot-generation-race");
+    let actor = system.spawn(
+        EntityActor::with_persistence(
+            "Doc",
+            "delete-snapshot-generation-race",
+            table,
+            serde_json::json!({}),
+            events.clone(),
+            BackendLabel::Sim,
+        )
+        .with_tenant("default"),
+        "delete-snapshot-generation-race",
+    );
+    assert_eq!(
+        state(&actor).await.state.fields["WorkspaceId"],
+        "ws-before-delete"
+    );
+    events
+        .save_snapshot(persistence_id, 1, &legacy_snapshot("ws-after-delete"))
+        .await
+        .expect("replace captured snapshot generation");
+
+    let deleted: EntityResponse = actor
+        .ask(EntityMsg::Delete, Duration::from_secs(5))
+        .await
+        .expect("delete response");
+    assert!(deleted.success, "delete failed: {:?}", deleted.error);
+    assert_eq!(deleted.state.status, "Deleted");
+    assert_eq!(deleted.state.sequence_nr, 2);
+    assert_eq!(deleted.state.fields["WorkspaceId"], "ws-after-delete");
+    assert_eq!(sim.dump_journal(persistence_id).len(), 2);
+    assert_eq!(
+        events
+            .lookup_by_key(
+                "default",
+                "Doc",
+                "path",
+                &doc_key_hash("ws-before-delete", "/delete-me"),
+            )
+            .await
+            .expect("lookup purged key"),
+        None
+    );
+}
+
 /// A real intervening journal append must make PATCH rebuild from the durable
 /// stream before retrying. The retried update keeps the other writer's fields,
 /// moves exact key ownership, and leaves the actor fresh for the next message.
@@ -237,6 +349,7 @@ async fn field_update_replays_real_concurrent_append_before_retry() {
                 keys: true,
                 key_set_signature: Some(key_set_signature),
                 vectors: false,
+                snapshot_source: Default::default(),
             },
         )
         .await
@@ -329,6 +442,7 @@ async fn field_update_rejects_concurrent_delete_and_restarts_at_tombstone() {
                 keys: true,
                 key_set_signature: Some(signature),
                 vectors: false,
+                snapshot_source: Default::default(),
             },
         )
         .await
@@ -437,9 +551,9 @@ async fn internal_field_update_event_type_does_not_shadow_spec_action() {
     assert_eq!(recovered.state.fields["Marker"], "ordinary-action");
 }
 
-/// PATCH/PUT shares the bounded replay-tail budget with spec actions. At the
-/// exact cap it must refuse to append, and the unchanged stream must still
-/// hydrate successfully after restart.
+/// PATCH/PUT and terminal Delete share the bounded raw replay-tail budget with
+/// spec actions. A legacy snapshot must not reset that reconstructed budget; at
+/// the exact cap both writes refuse to append and restart remains bounded.
 #[tokio::test]
 async fn field_update_respects_replay_tail_budget_and_restart_boundary() {
     let (_guard, _clock, _ids) = install_deterministic_context(242);
@@ -465,6 +579,27 @@ async fn field_update_respects_replay_tail_budget_and_restart_boundary() {
         .append(persistence_id, 0, &envelopes)
         .await
         .expect("seed replay-tail boundary");
+    let legacy_snapshot = serde_json::to_vec(&serde_json::json!({
+        "entity_type": "BudgetDoc",
+        "entity_id": "budget",
+        "status": "Ready",
+        "item_count": 0,
+        "counters": {},
+        "booleans": {},
+        "lists": {},
+        "fields": {"Id": "budget", "Status": "Ready", "Value": "legacy"},
+        "events": [],
+        "total_event_count": 5,
+        "events_since_snapshot": 0,
+        "last_snapshot_sequence_nr": 5,
+        "sequence_nr": 5,
+        "processed_idempotency_keys": {}
+    }))
+    .expect("serialize legacy snapshot");
+    events
+        .save_snapshot(persistence_id, 5, &legacy_snapshot)
+        .await
+        .expect("seed untrusted legacy snapshot");
 
     let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(
         BUDGET_DOC_IOA,
@@ -501,6 +636,22 @@ async fn field_update_respects_replay_tail_budget_and_restart_boundary() {
             .as_deref()
             .is_some_and(|error| error.contains("Event budget exhausted"))
     );
+    assert_eq!(
+        sim.dump_journal(persistence_id).len(),
+        MAX_EVENTS_SINCE_SNAPSHOT
+    );
+    let rejected_delete: temper_server::entity_actor::EntityResponse = actor
+        .ask(EntityMsg::Delete, Duration::from_secs(5))
+        .await
+        .expect("delete response");
+    assert!(!rejected_delete.success);
+    assert!(
+        rejected_delete
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("Event budget exhausted"))
+    );
+    assert_ne!(rejected_delete.state.status, "Deleted");
     assert_eq!(
         sim.dump_journal(persistence_id).len(),
         MAX_EVENTS_SINCE_SNAPSHOT

@@ -130,24 +130,15 @@ async fn turso_state(system_name: &str) -> (ServerState, TursoEventStore, String
 /// project its test fields into the catalog.
 async fn seed_order(
     state: &ServerState,
-    store: &TursoEventStore,
+    _store: &TursoEventStore,
     tenant: &TenantId,
     id: &str,
     fields: serde_json::Value,
 ) {
-    let agent_ctx = AgentContext::for_service("paging-test");
     state
-        .dispatch_tenant_action(
-            tenant,
-            "Order",
-            id,
-            "Create",
-            serde_json::json!({}),
-            &agent_ctx,
-        )
+        .get_or_create_tenant_entity(tenant, "Order", id, fields)
         .await
         .expect("create order");
-    upsert_order_projection(store, tenant, id, fields, 1).await;
 }
 
 /// Unfiltered list: the default entity_id-ascending order paginates cleanly and

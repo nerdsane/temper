@@ -30,15 +30,15 @@ use temper_observe::wide_event;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
 use temper_runtime::persistence::{
     COMPOSITE_EVENT_TYPE, CompositeEvent, EventMetadata, IndexReconciliation, JournalBoundary,
-    PersistenceEnvelope, PersistenceError,
+    PersistenceEnvelope, PersistenceError, SnapshotSourceFence, is_state_materialization_event_for,
 };
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 use crate::storage::{BackendLabel, BoxedEventStore};
 
 use super::effects::{
-    FieldSyncMode, build_eval_context_with_xref, process_action_with_xref_and_field_mode,
-    prune_transient_action_fields_from_state,
+    FieldSyncMode, ProcessResult, ScheduledAction, SpawnRequest, build_eval_context_with_xref,
+    process_action_with_xref_and_field_mode, prune_transient_action_fields_from_state,
 };
 use super::snapshot_queue::{SnapshotEnqueueOutcome, SnapshotWriteQueue};
 use super::types::{
@@ -47,23 +47,90 @@ use super::types::{
 };
 
 mod field_updates;
+mod persistence;
 mod recovery;
+mod state_materialization;
 
+#[cfg(test)]
+pub(crate) use recovery::recover_entity_state_from_store;
 pub(crate) use recovery::{
-    CapturedEntitySnapshot, StableEntitySource, recover_entity_state_from_stable_sources,
-    recover_entity_state_from_store, stable_entity_source_is_current,
+    CapturedEntitySnapshot, EntityRecoveryContext, StableEntitySource,
+    recover_entity_state_from_stable_sources, recover_entity_state_with_source_from_store,
+    stable_entity_source_is_current,
 };
 
 use field_updates::{
     FIELD_UPDATE_EVENT_TYPE, FIELD_UPDATE_SCHEMA, FIELDS_PATCHED_EVENT_TYPE,
     FIELDS_REPLACED_EVENT_TYPE, PersistedFieldUpdate,
 };
+#[cfg(test)]
+pub(crate) use state_materialization::STATE_MATERIALIZATION_EVENT_TYPE;
+pub(crate) use state_materialization::{
+    PersistedStateMaterialization, STATE_MATERIALIZATION_SCHEMA, state_materialization_envelope,
+};
+
+const SNAPSHOT_JOURNAL_SEQUENCE_FIELD: &str = "_temper_snapshot_journal_sequence";
+const POST_DISPATCH_EFFECTS_EVENT_TYPE: &str = "Temper.Internal.PostDispatchEffects.v1";
+const POST_DISPATCH_EFFECTS_SCHEMA: &str = "temper.post-dispatch-effects.v1";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PersistedPostDispatchEffects {
+    schema: String,
+    idempotency_key: String,
+    custom_effects: Vec<String>,
+    scheduled_actions: Vec<ScheduledAction>,
+    spawn_requests: Vec<SpawnRequest>,
+    source_fields: serde_json::Value,
+    source_status: String,
+    source_sequence: u64,
+}
+
+impl PersistedPostDispatchEffects {
+    fn from_result(
+        idempotency_key: Option<&str>,
+        state: &EntityState,
+        result: &ProcessResult,
+    ) -> Option<Self> {
+        let idempotency_key = idempotency_key.filter(|key| !key.is_empty())?;
+        if result.custom_effects.is_empty()
+            && result.scheduled_actions.is_empty()
+            && result.spawn_requests.is_empty()
+        {
+            return None;
+        }
+        Some(Self {
+            schema: POST_DISPATCH_EFFECTS_SCHEMA.to_string(),
+            idempotency_key: idempotency_key.to_string(),
+            custom_effects: result.custom_effects.clone(),
+            scheduled_actions: result.scheduled_actions.clone(),
+            spawn_requests: result.spawn_requests.clone(),
+            source_fields: state.fields.clone(),
+            source_status: state.status.clone(),
+            source_sequence: 0,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SnapshotProvenance {
+    Legacy,
+    Journal { through_sequence: u64 },
+}
 
 struct PersistencePayload<'a> {
     event_type: &'a str,
     payload: serde_json::Value,
     timestamp: chrono::DateTime<chrono::Utc>,
     to_status: &'a str,
+    post_dispatch_effects: Option<PersistedPostDispatchEffects>,
+}
+
+fn durable_conflict_sequence(error: &PersistenceError, snapshot_fallback: u64) -> Option<u64> {
+    match error {
+        PersistenceError::ConcurrencyViolation { actual, .. } => Some(*actual),
+        PersistenceError::SnapshotGenerationChanged => Some(snapshot_fallback),
+        _ => None,
+    }
 }
 
 fn event_budget_workspace_id(state: &EntityState) -> String {
@@ -112,6 +179,29 @@ fn duplicate_idempotency_custom_effects(
         .unwrap_or_default()
 }
 
+fn fallback_duplicate_idempotency_response(
+    table: &TransitionTable,
+    state: &EntityState,
+    action: &str,
+    cross_entity_booleans: &BTreeMap<String, bool>,
+) -> EntityResponse {
+    let custom_effects =
+        duplicate_idempotency_custom_effects(table, state, action, cross_entity_booleans);
+    let mut response_state = state.clone();
+    if !custom_effects.is_empty() {
+        prune_transient_action_fields_from_state(&mut response_state);
+    }
+    EntityResponse {
+        success: true,
+        state: response_state,
+        error: None,
+        custom_effects,
+        scheduled_actions: vec![],
+        spawn_requests: vec![],
+        spec_governed: true,
+    }
+}
+
 /// The entity actor -- processes actions through a TransitionTable.
 /// Optionally persists events to the configured backend. Wide events are emitted
 /// via the OTEL SDK (no-op when OTEL is not initialised).
@@ -126,6 +216,13 @@ pub struct EntityActor {
     initial_fields: serde_json::Value,
     /// Optional event journal for persistence. None = in-memory only.
     event_journal: Option<BoxedEventStore>,
+    /// Exact snapshot generation that produced the actor's current durable state.
+    snapshot_source: Arc<RwLock<SnapshotSourceFence>>,
+    /// Exact declared-key activation contract that produced the actor state.
+    ///
+    /// This is actor-state provenance, not a live-table lookup: the shared table
+    /// may hot-swap before an old actor is evicted during a contract cutover.
+    state_key_contract: Arc<RwLock<String>>,
     /// Optional async snapshot writer. Event appends remain synchronous.
     snapshot_queue: Option<Arc<SnapshotWriteQueue>>,
     /// Persistence backend label used for metrics and backend-specific field sync.
@@ -141,6 +238,101 @@ pub struct EntityActor {
 }
 
 impl EntityActor {
+    async fn duplicate_idempotency_response(
+        &self,
+        table: &TransitionTable,
+        state: &EntityState,
+        action: &str,
+        cross_entity_booleans: &BTreeMap<String, bool>,
+        idempotency_key: &str,
+    ) -> Result<EntityResponse, ActorError> {
+        let Some(sequence) = state
+            .processed_idempotency_keys
+            .get(idempotency_key)
+            .copied()
+        else {
+            return Ok(fallback_duplicate_idempotency_response(
+                table,
+                state,
+                action,
+                cross_entity_booleans,
+            ));
+        };
+        let Some(store) = self.event_journal.as_ref() else {
+            return Ok(fallback_duplicate_idempotency_response(
+                table,
+                state,
+                action,
+                cross_entity_booleans,
+            ));
+        };
+        let envelopes = store
+            .read_events_page(
+                &self.persistence_id(),
+                sequence.saturating_sub(1),
+                sequence,
+                1,
+            )
+            .await
+            .map_err(|error| {
+                ActorError::custom(format!(
+                    "failed to reload durable post-dispatch effects for {}:{} idempotency key '{}': {error}",
+                    self.entity_type, self.entity_id, idempotency_key
+                ))
+            })?;
+        let Some(envelope) = envelopes.first() else {
+            return Err(ActorError::custom(format!(
+                "durable idempotency sequence {sequence} is missing for {}:{} key '{}'",
+                self.entity_type, self.entity_id, idempotency_key
+            )));
+        };
+        if envelope.sequence_nr != sequence {
+            return Err(ActorError::custom(format!(
+                "durable idempotency sequence mismatch for {}:{} key '{}' (expected {sequence}, found {})",
+                self.entity_type, self.entity_id, idempotency_key, envelope.sequence_nr
+            )));
+        }
+        if envelope.event_type != POST_DISPATCH_EFFECTS_EVENT_TYPE {
+            return Ok(fallback_duplicate_idempotency_response(
+                table,
+                state,
+                action,
+                cross_entity_booleans,
+            ));
+        }
+        let persisted = serde_json::from_value::<PersistedPostDispatchEffects>(
+            envelope.payload.clone(),
+        )
+        .map_err(|error| {
+            ActorError::custom(format!(
+                "failed to decode durable post-dispatch effects for {}:{} at sequence {sequence}: {error}",
+                self.entity_type, self.entity_id
+            ))
+        })?;
+        if persisted.schema != POST_DISPATCH_EFFECTS_SCHEMA
+            || persisted.idempotency_key != idempotency_key
+            || persisted.source_sequence != sequence
+        {
+            return Err(ActorError::custom(format!(
+                "durable post-dispatch effect identity mismatch for {}:{} key '{}' at sequence {sequence}",
+                self.entity_type, self.entity_id, idempotency_key
+            )));
+        }
+        let mut response_state = state.clone();
+        response_state.fields = persisted.source_fields;
+        response_state.status = persisted.source_status;
+        response_state.sequence_nr = persisted.source_sequence;
+        Ok(EntityResponse {
+            success: true,
+            state: response_state,
+            error: None,
+            custom_effects: persisted.custom_effects,
+            scheduled_actions: persisted.scheduled_actions,
+            spawn_requests: persisted.spawn_requests,
+            spec_governed: true,
+        })
+    }
+
     fn build_initial_state(
         entity_type: &str,
         entity_id: &str,
@@ -187,60 +379,6 @@ impl EntityActor {
         })
     }
 
-    /// Serialize actor state for snapshot persistence, excluding recent event history.
-    ///
-    /// The stored snapshot is already a segment boundary, so its hot tail budget
-    /// is reset in the payload. Lifetime sequence/count fields remain intact.
-    fn serialize_snapshot_state(state: &EntityState) -> Result<Vec<u8>, PersistenceError> {
-        let mut value = serde_json::to_value(state)
-            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-        if let Some(obj) = value.as_object_mut() {
-            obj.remove("events");
-            obj.insert("events_since_snapshot".to_string(), serde_json::json!(0));
-            obj.insert(
-                "last_snapshot_sequence_nr".to_string(),
-                serde_json::json!(state.sequence_nr),
-            );
-        }
-        serde_json::to_vec(&value).map_err(|e| PersistenceError::Serialization(e.to_string()))
-    }
-
-    /// Attempt to load actor state from snapshot payload bytes.
-    fn apply_snapshot_bytes(state: &mut EntityState, sequence_nr: u64, bytes: &[u8]) -> bool {
-        let mut value = match serde_json::from_slice::<serde_json::Value>(bytes) {
-            Ok(v) => v,
-            Err(_) => return false,
-        };
-        let Some(obj) = value.as_object_mut() else {
-            return false;
-        };
-
-        // Snapshot intentionally excludes in-memory recent history.
-        obj.insert("events".to_string(), serde_json::json!([]));
-        if !obj.contains_key("total_event_count") {
-            obj.insert(
-                "total_event_count".to_string(),
-                serde_json::json!(sequence_nr as usize),
-            );
-        }
-        obj.insert("events_since_snapshot".to_string(), serde_json::json!(0));
-        obj.insert(
-            "last_snapshot_sequence_nr".to_string(),
-            serde_json::json!(sequence_nr),
-        );
-
-        match serde_json::from_value::<EntityState>(value) {
-            Ok(mut restored) => {
-                restored.sequence_nr = sequence_nr;
-                restored.events_since_snapshot = 0;
-                restored.last_snapshot_sequence_nr = sequence_nr;
-                *state = restored;
-                true
-            }
-            Err(_) => false,
-        }
-    }
-
     /// Create a new entity actor (in-memory only, no persistence).
     pub fn new(
         entity_type: impl Into<String>,
@@ -255,6 +393,8 @@ impl EntityActor {
             table,
             initial_fields,
             event_journal: None,
+            snapshot_source: Arc::new(RwLock::new(SnapshotSourceFence::Unchecked)),
+            state_key_contract: Arc::new(RwLock::new(String::new())),
             snapshot_queue: None,
             event_backend: None,
             trace_id: sim_uuid().to_string(),
@@ -279,6 +419,8 @@ impl EntityActor {
             table,
             initial_fields,
             event_journal: Some(store),
+            snapshot_source: Arc::new(RwLock::new(SnapshotSourceFence::Unchecked)),
+            state_key_contract: Arc::new(RwLock::new(String::new())),
             snapshot_queue: None,
             event_backend: Some(backend),
             trace_id: sim_uuid().to_string(),
@@ -317,235 +459,6 @@ impl EntityActor {
         self.blob_store = blob_store;
         self
     }
-
-    async fn persist_overflow_blobs(
-        blob_store: Option<&crate::blob_store::BlobStore>,
-        blobs: &[crate::blobs::OverflowBlobWrite],
-    ) -> Result<(), String> {
-        let Some(blob_store) = blob_store else {
-            return Err("field-overflow blobs require a configured object blob store".to_string());
-        };
-        crate::blobs::put_overflow_blobs(blob_store, blobs).await
-    }
-
-    /// Persistence ID for this entity: "tenant:EntityType:EntityId".
-    fn persistence_id(&self) -> String {
-        format!("{}:{}:{}", self.tenant, self.entity_type, self.entity_id)
-    }
-
-    fn field_sync_mode_for_backend(
-        backend: Option<BackendLabel>,
-        blob_store: Option<&crate::blob_store::BlobStore>,
-    ) -> FieldSyncMode {
-        match backend {
-            Some(BackendLabel::Turso | BackendLabel::TursoRouted) => {
-                FieldSyncMode::blob_refs_default()
-            }
-            Some(_) if blob_store.is_some() => FieldSyncMode::blob_refs_default(),
-            _ => FieldSyncMode::InlineTruncate,
-        }
-    }
-
-    /// Persist an event to the configured event store.
-    async fn persist_event(
-        &self,
-        store: &BoxedEventStore,
-        backend: BackendLabel,
-        persistence_id: &str,
-        state: &mut EntityState,
-        event: &EntityEvent,
-    ) -> Result<u64, PersistenceError> {
-        let payload = serde_json::to_value(event)
-            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-        self.persist_payload(
-            store,
-            backend,
-            persistence_id,
-            state,
-            PersistencePayload {
-                event_type: &event.action,
-                payload,
-                timestamp: event.timestamp,
-                to_status: &event.to_status,
-            },
-        )
-        .await
-    }
-
-    async fn persist_payload(
-        &self,
-        store: &BoxedEventStore,
-        backend: BackendLabel,
-        persistence_id: &str,
-        state: &mut EntityState,
-        input: PersistencePayload<'_>,
-    ) -> Result<u64, PersistenceError> {
-        let PersistencePayload {
-            event_type,
-            payload,
-            timestamp,
-            to_status,
-        } = input;
-        let envelope = PersistenceEnvelope {
-            sequence_nr: state.sequence_nr + 1,
-            event_type: event_type.to_string(),
-            payload,
-            metadata: EventMetadata {
-                event_id: sim_uuid(),
-                causation_id: sim_uuid(),
-                correlation_id: sim_uuid(),
-                timestamp,
-                actor_id: persistence_id.to_string(),
-            },
-        };
-
-        // W2 / temper#146: measure append wait — the hypothesis is that
-        // writer-lock / fsync serialization is a cold-start bottleneck.
-        // ADR-0153/0155: derive the declared key rows AND the vector-index rows from
-        // the new state and co-commit them with the journal append, so a keyed read
-        // is correct without a scan and a kNN read reflects the write deterministically.
-        let (key_rows, vector_rows, reconciliation) = {
-            let table = self.table.read().expect("table lock poisoned");
-            // A keyed type owns exact reconciliation even when its current row set
-            // is empty (delete, all-null, or otherwise unkeyable). Special Delete
-            // persists the tombstone before mutating `state.status`, so the event's
-            // target status is the authoritative deletion signal here.
-            let reconcile_keys = !table.keys.is_empty();
-            let index_entity = to_status != "Deleted";
-            // The type declares vector paths → the store reconciles this entity's
-            // vector rows (delete stale + insert current) even when no row is emitted
-            // this write (a delete transition or a cleared property), so stale rows are
-            // purged instead of being ranked forever (ADR-0155).
-            let reconcile_vectors = !table.vectors.is_empty();
-            let key_rows =
-                crate::key_index::derive_entity_key_rows(&table.keys, &state.fields, index_entity);
-            let mut vector_rows = Vec::new();
-            if let Some(field_map) = state.fields.as_object() {
-                // A soft-deleted (tombstone) entity is never indexed — it emits no
-                // vector rows, so the reconcile below PURGES any it had, even though
-                // its embedding field may still be present. Mirrors how the field-index
-                // projection removes a deleted entity.
-                for decl in table.vectors.iter().filter(|_| index_entity) {
-                    // A vector is indexed only when its property parses to `dims`
-                    // floats AND its model tag is a non-empty string — otherwise the
-                    // path indexes nothing for this entity (like an incomplete key).
-                    let Some(vector) = field_map
-                        .get(&decl.property)
-                        .and_then(|v| crate::vector_index::parse_vector_property(v, decl.dims))
-                    else {
-                        continue;
-                    };
-                    let Some(model_tag) = field_map
-                        .get(&decl.model_property)
-                        .and_then(|v| v.as_str())
-                        .filter(|tag| !tag.is_empty())
-                    else {
-                        continue;
-                    };
-                    vector_rows.push(temper_runtime::persistence::EntityVectorRow {
-                        decl_name: decl.name.clone(),
-                        model_tag: model_tag.to_string(),
-                        vector,
-                    });
-                }
-            }
-            (
-                key_rows,
-                vector_rows,
-                IndexReconciliation {
-                    keys: reconcile_keys,
-                    key_set_signature: Some(crate::key_index::declared_key_set_signature(
-                        &table.keys,
-                    )),
-                    vectors: reconcile_vectors,
-                },
-            )
-        };
-        let append_start = Instant::now();
-        let result = store
-            .append_with_index_rows(
-                persistence_id,
-                state.sequence_nr,
-                &[envelope],
-                &key_rows,
-                &vector_rows,
-                reconciliation,
-            )
-            .await;
-        crate::runtime_metrics::record_event_store_append_wait(
-            backend.as_str(),
-            "append",
-            append_start.elapsed(),
-        );
-        match result {
-            Ok(new_seq) => {
-                state.sequence_nr = new_seq;
-                tracing::debug!(entity = %state.entity_id, seq = new_seq, "event persisted");
-                Ok(new_seq)
-            }
-            Err(e) => {
-                tracing::error!(
-                    entity = %state.entity_id, error = %e,
-                    "failed to persist event — state advanced but not durable"
-                );
-                Err(e)
-            }
-        }
-    }
-
-    /// Save a snapshot when the configured interval is reached.
-    async fn maybe_save_snapshot(
-        store: &BoxedEventStore,
-        snapshot_queue: Option<&Arc<SnapshotWriteQueue>>,
-        persistence_id: &str,
-        state: &mut EntityState,
-    ) -> Result<(), PersistenceError> {
-        if state.sequence_nr == 0 {
-            return Ok(());
-        }
-        if let Some(queue) = snapshot_queue
-            && let Some(applied_sequence) = queue.applied_sequence(persistence_id)
-            && applied_sequence > state.last_snapshot_sequence_nr
-        {
-            let applied_sequence = applied_sequence.min(state.sequence_nr);
-            state.last_snapshot_sequence_nr = applied_sequence;
-            state.events_since_snapshot =
-                state.sequence_nr.saturating_sub(applied_sequence) as usize;
-        }
-
-        let interval = Self::snapshot_interval();
-        let pending_sequence = snapshot_queue
-            .and_then(|queue| queue.pending_sequence(persistence_id))
-            .unwrap_or(0);
-        let latest_snapshot_boundary = state.last_snapshot_sequence_nr.max(pending_sequence);
-        if state.sequence_nr.saturating_sub(latest_snapshot_boundary) < interval {
-            return Ok(());
-        }
-
-        let snapshot = Self::serialize_snapshot_state(state)?;
-        if let Some(queue) = snapshot_queue {
-            match queue.enqueue(persistence_id.to_string(), state.sequence_nr, snapshot) {
-                SnapshotEnqueueOutcome::Enqueued
-                | SnapshotEnqueueOutcome::Coalesced
-                | SnapshotEnqueueOutcome::StaleSkipped => return Ok(()),
-                SnapshotEnqueueOutcome::Full => {
-                    tracing::warn!(
-                        entity = %state.entity_id,
-                        seq = state.sequence_nr,
-                        "snapshot write queue full; keeping replay tail open"
-                    );
-                    return Ok(());
-                }
-            }
-        }
-
-        store
-            .save_snapshot(persistence_id, state.sequence_nr, &snapshot)
-            .await?;
-        state.last_snapshot_sequence_nr = state.sequence_nr;
-        state.events_since_snapshot = 0;
-        Ok(())
-    }
 }
 
 impl Actor for EntityActor {
@@ -556,6 +469,7 @@ impl Actor for EntityActor {
         // Snapshot the table for consistent startup (initial state + replay).
         // This is a cheap clone — TransitionTable is a few Vecs of strings.
         let table = self.table.read().expect("table lock poisoned").clone();
+        self.record_state_key_contract(&table);
 
         let mut state = Self::build_initial_state(
             &self.entity_type,
@@ -568,44 +482,86 @@ impl Actor for EntityActor {
         // Re-evaluates each event through the TransitionTable to reconstruct
         // all state variables (status, counters, booleans) — not just item_count.
         if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend) {
-            state = recover_entity_state_from_store(
-                &self.tenant,
-                &self.entity_type,
-                &self.entity_id,
-                &table,
-                store,
-                backend,
-                &self.initial_fields,
-                self.blob_store.as_ref(),
-                false, // hydration: keep serving on a transient journal read failure
+            let recovered = recover_entity_state_with_source_from_store(
+                EntityRecoveryContext {
+                    tenant: &self.tenant,
+                    entity_type: &self.entity_type,
+                    entity_id: &self.entity_id,
+                    table: &table,
+                    store,
+                    backend,
+                    initial_fields: &self.initial_fields,
+                    blob_store: self.blob_store.as_ref(),
+                },
+                false, // empty captured journals may start fresh; any non-empty or unstable source fails closed
             )
             .await?;
+            *self
+                .snapshot_source
+                .write()
+                .expect("snapshot source lock poisoned") = recovered.snapshot_source;
+            state = recovered.state;
         }
 
         // Persist a bootstrap Created event for first-time entities so initial
-        // fields are durable and replayable.
-        if self.event_journal.is_some() && state.total_event_count == 0 {
-            let created = EntityEvent {
-                action: "Created".to_string(),
-                from_status: String::new(),
-                to_status: state.status.clone(),
-                timestamp: sim_now(),
-                params: self.initial_fields.clone(),
-                idempotency_key: None,
-            };
-
-            if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend)
+        // fields are durable and replayable. Snapshot-only migration baselines
+        // use the same first-journal sequence and exact source fence.
+        if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend) {
+            const MAX_BOOTSTRAP_RETRIES: u32 = 2;
+            let mut retries = 0_u32;
+            while state.sequence_nr == 0
+                && state.total_event_count == 0
+                && !matches!(
+                    &*self
+                        .snapshot_source
+                        .read()
+                        .expect("snapshot source lock poisoned"),
+                    SnapshotSourceFence::Exact { .. }
+                )
             {
-                self.persist_event(store, backend, &self.persistence_id(), &mut state, &created)
+                let state_before_created = state.clone();
+                let created = EntityEvent {
+                    action: "Created".to_string(),
+                    from_status: String::new(),
+                    to_status: state.status.clone(),
+                    timestamp: sim_now(),
+                    params: self.initial_fields.clone(),
+                    idempotency_key: None,
+                };
+                match self
+                    .persist_event(
+                        store,
+                        backend,
+                        &self.persistence_id(),
+                        &table,
+                        &state_before_created,
+                        &mut state,
+                        &created,
+                        None,
+                    )
                     .await
-                    .map_err(|e| {
-                        ActorError::custom(format!(
-                            "failed to persist bootstrap Created event for {}:{}: {}",
-                            self.entity_type, self.entity_id, e
-                        ))
-                    })?;
+                {
+                    Ok(_) => {
+                        state.push_event_bounded(created);
+                        break;
+                    }
+                    Err(error)
+                        if durable_conflict_sequence(&error, state.sequence_nr).is_some()
+                            && retries < MAX_BOOTSTRAP_RETRIES =>
+                    {
+                        state = self
+                            .recover_authoritative_state(store, backend, &table)
+                            .await?;
+                        retries += 1;
+                    }
+                    Err(error) => {
+                        return Err(ActorError::custom(format!(
+                            "failed to persist bootstrap Created event for {}:{}: {error}",
+                            self.entity_type, self.entity_id
+                        )));
+                    }
+                }
             }
-            state.push_event_bounded(created);
         }
 
         Ok(state)
@@ -654,25 +610,16 @@ impl Actor for EntityActor {
                 if let Some(key) = idempotency_key.as_deref()
                     && state.has_processed_idempotency_key(key)
                 {
-                    let custom_effects = duplicate_idempotency_custom_effects(
-                        &table,
-                        state,
-                        &name,
-                        &cross_entity_booleans,
+                    ctx.reply(
+                        self.duplicate_idempotency_response(
+                            &table,
+                            state,
+                            &name,
+                            &cross_entity_booleans,
+                            key,
+                        )
+                        .await?,
                     );
-                    let mut response_state = state.clone();
-                    if !custom_effects.is_empty() {
-                        prune_transient_action_fields_from_state(&mut response_state);
-                    }
-                    ctx.reply(EntityResponse {
-                        success: true,
-                        state: response_state,
-                        error: None,
-                        custom_effects,
-                        scheduled_actions: vec![],
-                        spawn_requests: vec![],
-                        spec_governed: true,
-                    });
                     return Ok(());
                 }
 
@@ -791,18 +738,34 @@ impl Actor for EntityActor {
                     if let (Some(store), Some(backend)) =
                         (self.event_journal.as_ref(), self.event_backend)
                     {
+                        let post_dispatch_effects = PersistedPostDispatchEffects::from_result(
+                            idempotency_key.as_deref(),
+                            state,
+                            &result,
+                        );
                         let first_persist = self
-                            .persist_event(store, backend, &self.persistence_id(), state, &event)
+                            .persist_event(
+                                store,
+                                backend,
+                                &self.persistence_id(),
+                                &table,
+                                &state_before,
+                                state,
+                                &event,
+                                post_dispatch_effects,
+                            )
                             .await;
 
                         match first_persist {
                             Ok(_) => {
                                 // Happy path — fall through to downstream telemetry.
                             }
-                            Err(PersistenceError::ConcurrencyViolation {
-                                expected: _,
-                                actual,
-                            }) => {
+                            Err(error)
+                                if durable_conflict_sequence(&error, state.sequence_nr)
+                                    .is_some() =>
+                            {
+                                let actual = durable_conflict_sequence(&error, state.sequence_nr)
+                                    .expect("guard accepted durable conflict");
                                 // ADR-0046 Sub-Decision 3: dedicated APM span
                                 // covering the retry cycle. `attempts` and
                                 // `outcome` are recorded at the end so Datadog
@@ -848,7 +811,7 @@ impl Actor for EntityActor {
                                     // onto the actor's pre-race state would apply
                                     // non-idempotent effects a second time.
                                     *state = self
-                                        .recover_authoritative_state(store, backend)
+                                        .recover_authoritative_state(store, backend, &table)
                                         .await
                                         .map_err(|error| {
                                             ActorError::custom(format!(
@@ -873,6 +836,40 @@ impl Actor for EntityActor {
                                             "action catch-up under-reached authoritative sequence for {}:{} ({} < {last_actual})",
                                             self.entity_type, self.entity_id, state.sequence_nr
                                         )));
+                                    }
+
+                                    // A competing writer may have committed this
+                                    // exact idempotency key while our stale actor
+                                    // was attempting the same action. Durable
+                                    // replay is the authority: return the already
+                                    // committed result instead of re-evaluating and
+                                    // appending the action a second time.
+                                    if let Some(key) = idempotency_key.as_deref()
+                                        && state.has_processed_idempotency_key(key)
+                                    {
+                                        let total_attempts = u64::from(1 + retry_idx);
+                                        let outcome = crate::runtime_metrics::ConcurrencyRetryOutcome::Success;
+                                        retry_span.record("attempts", total_attempts);
+                                        retry_span.record("outcome", outcome.as_str());
+                                        crate::runtime_metrics::record_entity_concurrency_retry(
+                                            &self.entity_type,
+                                            outcome,
+                                            total_attempts,
+                                        );
+                                        let response = self
+                                            .duplicate_idempotency_response(
+                                                &table,
+                                                state,
+                                                &name,
+                                                &cross_entity_booleans,
+                                                key,
+                                            )
+                                            .await?;
+                                        if let Some(cache) = self.idempotency_cache.as_ref() {
+                                            cache.put(&actor_key, key, response.clone());
+                                        }
+                                        ctx.reply(response);
+                                        return Ok(());
                                     }
 
                                     // Refresh baselines so postconditions hold
@@ -938,13 +935,23 @@ impl Actor for EntityActor {
                                     ))
                                     .await; // determinism-ok: rare retry backoff (ADR-0046)
 
+                                    let post_dispatch_effects =
+                                        PersistedPostDispatchEffects::from_result(
+                                            idempotency_key.as_deref(),
+                                            state,
+                                            &retry_result,
+                                        );
+
                                     match self
                                         .persist_event(
                                             store,
                                             backend,
                                             &self.persistence_id(),
+                                            &table,
+                                            &state_before,
                                             state,
                                             &retry_event,
+                                            post_dispatch_effects,
                                         )
                                         .await
                                     {
@@ -959,10 +966,19 @@ impl Actor for EntityActor {
                                             ));
                                             break;
                                         }
-                                        Err(PersistenceError::ConcurrencyViolation {
-                                            actual: new_actual,
-                                            ..
-                                        }) if retry_idx < MAX_RETRIES => {
+                                        Err(error)
+                                            if retry_idx < MAX_RETRIES
+                                                && durable_conflict_sequence(
+                                                    &error,
+                                                    state.sequence_nr,
+                                                )
+                                                .is_some() =>
+                                        {
+                                            let new_actual = durable_conflict_sequence(
+                                                &error,
+                                                state.sequence_nr,
+                                            )
+                                            .expect("guard accepted durable conflict");
                                             // Capture the fresh authoritative
                                             // sequence so the next iteration's
                                             // post-replay assertion checks
@@ -978,7 +994,13 @@ impl Actor for EntityActor {
                                             );
                                             continue;
                                         }
-                                        Err(PersistenceError::ConcurrencyViolation { .. }) => {
+                                        Err(error)
+                                            if durable_conflict_sequence(
+                                                &error,
+                                                state.sequence_nr,
+                                            )
+                                            .is_some() =>
+                                        {
                                             retry_final = Some((
                                                 crate::runtime_metrics::ConcurrencyRetryOutcome::Exhausted,
                                                 Some(
@@ -1073,23 +1095,41 @@ impl Actor for EntityActor {
                     wide_event::emit_metrics(&wide);
 
                     state.push_event_bounded(event);
+                    self.record_state_key_contract(&table);
 
                     let persistence_id = self.persistence_id();
-                    if let Some(ref store) = self.event_journal
-                        && let Err(e) = Self::maybe_save_snapshot(
+                    if let Some(ref store) = self.event_journal {
+                        let mut snapshot_source = self
+                            .snapshot_source
+                            .read()
+                            .expect("snapshot source lock poisoned")
+                            .clone();
+                        let key_contract = crate::key_index::declared_key_write_contract(&table);
+                        match Self::maybe_save_snapshot(
                             store,
                             self.snapshot_queue.as_ref(),
                             &persistence_id,
                             state,
+                            &mut snapshot_source,
+                            Some(&key_contract),
                         )
                         .await
-                    {
-                        tracing::warn!(
-                            entity = %state.entity_id,
-                            seq = state.sequence_nr,
-                            error = %e,
-                            "failed to persist snapshot"
-                        );
+                        {
+                            Ok(_) => {
+                                *self
+                                    .snapshot_source
+                                    .write()
+                                    .expect("snapshot source lock poisoned") = snapshot_source;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    entity = %state.entity_id,
+                                    seq = state.sequence_nr,
+                                    error = %e,
+                                    "failed to persist snapshot"
+                                );
+                            }
+                        }
                     }
 
                     // TigerStyle: Assert postconditions after every transition.
@@ -1197,6 +1237,21 @@ impl Actor for EntityActor {
                     spec_governed: true,
                 });
             }
+            EntityMsg::GetPassivationSnapshot => {
+                ctx.reply(super::types::EntityPassivationSnapshot {
+                    state: state.clone(),
+                    snapshot_source: self
+                        .snapshot_source
+                        .read()
+                        .expect("snapshot source lock poisoned")
+                        .clone(),
+                    key_contract: self
+                        .state_key_contract
+                        .read()
+                        .expect("state key contract lock poisoned")
+                        .clone(),
+                });
+            }
             EntityMsg::GetField { field } => {
                 let value = state
                     .fields
@@ -1214,44 +1269,104 @@ impl Actor for EntityActor {
                     .await?;
             }
             EntityMsg::Delete => {
-                if state.status == "Deleted" {
-                    ctx.reply(EntityResponse {
-                        success: true,
-                        state: state.clone(),
-                        error: None,
-                        custom_effects: vec![],
-                        scheduled_actions: vec![],
-                        spawn_requests: vec![],
-                        spec_governed: true,
-                    });
-                    return Ok(());
-                }
-                let deleted = EntityEvent {
-                    action: "Deleted".to_string(),
-                    from_status: state.status.clone(),
-                    to_status: "Deleted".to_string(),
-                    timestamp: sim_now(),
-                    params: serde_json::json!({}),
-                    idempotency_key: None,
-                };
+                const MAX_DELETE_RETRIES: u32 = 2;
+                let mut retries = 0_u32;
+                let table = self.table.read().expect("table lock poisoned").clone();
+                let deleted = loop {
+                    if state.status == "Deleted" {
+                        ctx.reply(EntityResponse {
+                            success: true,
+                            state: state.clone(),
+                            error: None,
+                            custom_effects: vec![],
+                            scheduled_actions: vec![],
+                            spawn_requests: vec![],
+                            spec_governed: true,
+                        });
+                        return Ok(());
+                    }
+                    if !state.can_accept_event() {
+                        ctx.reply(EntityResponse {
+                            success: false,
+                            state: state.clone(),
+                            error: Some(format!(
+                                "Event budget exhausted ({MAX_EVENTS_SINCE_SNAPSHOT} max since snapshot)"
+                            )),
+                            custom_effects: vec![],
+                            scheduled_actions: vec![],
+                            spawn_requests: vec![],
+                            spec_governed: true,
+                        });
+                        return Ok(());
+                    }
+                    let deleted = EntityEvent {
+                        action: "Deleted".to_string(),
+                        from_status: state.status.clone(),
+                        to_status: "Deleted".to_string(),
+                        timestamp: sim_now(),
+                        params: serde_json::json!({}),
+                        idempotency_key: None,
+                    };
 
-                if let (Some(store), Some(backend)) =
-                    (self.event_journal.as_ref(), self.event_backend)
-                    && let Err(e) = self
-                        .persist_event(store, backend, &self.persistence_id(), state, &deleted)
+                    let (Some(store), Some(backend)) =
+                        (self.event_journal.as_ref(), self.event_backend)
+                    else {
+                        break deleted;
+                    };
+                    let state_before_delete = state.clone();
+                    match self
+                        .persist_event(
+                            store,
+                            backend,
+                            &self.persistence_id(),
+                            &table,
+                            &state_before_delete,
+                            state,
+                            &deleted,
+                            None,
+                        )
                         .await
-                {
-                    ctx.reply(EntityResponse {
-                        success: false,
-                        state: state.clone(),
-                        error: Some(format!("persistence failed: {e}")),
-                        custom_effects: vec![],
-                        scheduled_actions: vec![],
-                        spawn_requests: vec![],
-                        spec_governed: true,
-                    });
-                    return Ok(());
-                }
+                    {
+                        Ok(_) => break deleted,
+                        Err(error)
+                            if durable_conflict_sequence(&error, state.sequence_nr).is_some()
+                                && retries < MAX_DELETE_RETRIES =>
+                        {
+                            let actual = durable_conflict_sequence(&error, state.sequence_nr)
+                                .expect("guard accepted durable conflict");
+                            let recovered = self
+                                .recover_authoritative_state(store, backend, &table)
+                                .await
+                                .map_err(|recovery_error| {
+                                    ActorError::custom(format!(
+                                        "failed to catch up {}:{} after delete concurrency loss: {recovery_error}",
+                                        self.entity_type, self.entity_id
+                                    ))
+                                })?;
+                            if recovered.sequence_nr < actual {
+                                return Err(ActorError::custom(format!(
+                                    "delete catch-up under-reached authoritative sequence for {}:{} ({} < {actual})",
+                                    self.entity_type, self.entity_id, recovered.sequence_nr
+                                )));
+                            }
+                            *state = recovered;
+                            retries += 1;
+                            continue;
+                        }
+                        Err(error) => {
+                            ctx.reply(EntityResponse {
+                                success: false,
+                                state: state.clone(),
+                                error: Some(format!("persistence failed: {error}")),
+                                custom_effects: vec![],
+                                scheduled_actions: vec![],
+                                spawn_requests: vec![],
+                                spec_governed: true,
+                            });
+                            return Ok(());
+                        }
+                    }
+                };
 
                 state.status = deleted.to_status.clone();
                 if let Some(obj) = state.fields.as_object_mut() {
@@ -1261,6 +1376,7 @@ impl Actor for EntityActor {
                     );
                 }
                 state.push_event_bounded(deleted);
+                self.record_state_key_contract(&table);
 
                 ctx.reply(EntityResponse {
                     success: true,

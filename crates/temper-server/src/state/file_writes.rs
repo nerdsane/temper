@@ -52,12 +52,13 @@ impl ServerState {
         &self,
         tenant: &temper_runtime::tenant::TenantId,
         workspace_id: &str,
+        agent_ctx: &crate::request_context::AgentContext,
     ) -> Result<(), FileStreamContentError> {
         if workspace_id.is_empty() {
             return Ok(());
         }
         match self
-            .resolve_entity_status(tenant, "Workspace", workspace_id)
+            .resolve_entity_status_in_generation(tenant, "Workspace", workspace_id, agent_ctx)
             .await
         {
             Some(status) if status != "Active" => {
@@ -155,7 +156,7 @@ impl ServerState {
         // happen if the workspace refuses the write (otherwise an orphaned blob
         // would be left behind on guard rejection).
         let file_state = self
-            .get_tenant_entity_state(tenant, "File", file_id)
+            .get_tenant_entity_state_in_generation(tenant, "File", file_id, agent_ctx)
             .await
             .map_err(|e| {
                 FileStreamContentError::State(format!(
@@ -169,7 +170,7 @@ impl ServerState {
             .get("workspace_id")
             .and_then(|value| value.as_str())
             .unwrap_or_default();
-        self.reject_write_if_workspace_not_active(tenant, workspace_id)
+        self.reject_write_if_workspace_not_active(tenant, workspace_id, agent_ctx)
             .await?;
 
         self.put_content_addressed_blob(tenant, &blob_key, body, None)
@@ -233,7 +234,7 @@ impl ServerState {
     ) -> Result<crate::entity_actor::EntityResponse, FileStreamContentError> {
         let mut entity_state = serde_json::to_value(
             &self
-                .get_tenant_entity_state(tenant, "File", file_id)
+                .get_tenant_entity_state_in_generation(tenant, "File", file_id, agent_ctx)
                 .await
                 .map_err(|e| {
                     FileStreamContentError::State(format!(

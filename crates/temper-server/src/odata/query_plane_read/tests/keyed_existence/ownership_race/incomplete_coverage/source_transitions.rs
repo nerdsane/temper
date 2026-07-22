@@ -58,7 +58,17 @@ fn expect_read(
 ) -> QueryPlaneReadResult {
     match result {
         Ok(result) => result,
-        Err(_) => panic!("{message}"),
+        Err(error) => panic!("{message}: {}", query_read_error_name(&error)),
+    }
+}
+
+fn query_read_error_name(error: &QueryPlaneReadError) -> &'static str {
+    match error {
+        QueryPlaneReadError::AuthorizationDenied(_) => "AuthorizationDenied",
+        QueryPlaneReadError::QueryTooLarge { .. } => "QueryTooLarge",
+        QueryPlaneReadError::KeyOwnershipUnstable => "KeyOwnershipUnstable",
+        QueryPlaneReadError::ProjectionUnstable => "ProjectionUnstable",
+        QueryPlaneReadError::InvalidContinuation => "InvalidContinuation",
     }
 }
 
@@ -98,6 +108,7 @@ async fn incomplete_scan_prefers_equal_sequence_journal_over_snapshot_source() {
             keys: true,
             key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
             vectors: false,
+            snapshot_source: Default::default(),
         },
     )
     .await
@@ -159,6 +170,7 @@ impl BoundaryMutationStore {
                 keys: true,
                 key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
                 vectors: false,
+                snapshot_source: Default::default(),
             },
         )
         .await?;
@@ -403,6 +415,7 @@ async fn incomplete_scan_retries_when_journal_advances_after_replay() {
             keys: true,
             key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
             vectors: false,
+            snapshot_source: Default::default(),
         },
     )
     .await

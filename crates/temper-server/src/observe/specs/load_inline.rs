@@ -234,40 +234,13 @@ pub(crate) async fn handle_load_inline(
 
     // Delegate to load-dir logic with merge=true so agent-submitted specs
     // are added to the existing tenant config instead of replacing it.
-    let cedar_policies = body.cedar_policies.clone();
     let dir_request = LoadDirRequest {
         tenant: tenant.clone(),
         specs_dir: specs_root.to_string_lossy().to_string(),
         merge: true,
+        cedar_policies: body.cedar_policies.clone(),
     };
     let result = handle_load_dir(State(state.clone()), Json(dir_request)).await;
-
-    if result.is_ok()
-        && let Some(ref cedar_text) = cedar_policies
-        && !cedar_text.trim().is_empty()
-    {
-        if let Err(e) = cedar_text.parse::<cedar_policy::PolicySet>() {
-            tracing::warn!(error = %e, "bundled Cedar policies failed to parse, skipping");
-        } else {
-            // Update the in-memory text cache.
-            if let Ok(mut policies) = state.tenant_policies.write() {
-                let entry = policies.entry(tenant.clone()).or_default();
-                *entry = merge_inline_cedar_policy_text(entry, cedar_text);
-            }
-            // Reload the per-tenant Cedar policy set.
-            let full_text = state
-                .tenant_policies
-                .read()
-                .ok()
-                .and_then(|p| p.get(&tenant).cloned())
-                .unwrap_or_default();
-            if let Err(e) = state.authz.reload_tenant_policies(&tenant, &full_text) {
-                tracing::error!(error = %e, "failed to reload policies with bundled Cedar");
-            } else {
-                tracing::info!(tenant = %tenant, "bundled Cedar policies loaded successfully");
-            }
-        }
-    }
 
     if result.is_ok() {
         let warning_context = build_adr_warning_context(&state, &body, &tenant).await;
@@ -391,7 +364,7 @@ fn resolve_inline_specs_root(
     })
 }
 
-fn merge_inline_cedar_policy_text(existing: &str, incoming: &str) -> String {
+pub(super) fn merge_inline_cedar_policy_text(existing: &str, incoming: &str) -> String {
     let mut policy_text = existing.trim_end().to_string();
     let incoming = incoming.trim();
     if incoming.is_empty() || policy_text.contains(incoming) {

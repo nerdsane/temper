@@ -88,6 +88,7 @@ fn stale_orphan_classification_cannot_delete_a_concurrent_live_claim() {
                     keys: true,
                     key_set_signature: Some(key_set_signature.to_string()),
                     vectors: false,
+                    snapshot_source: Default::default(),
                 },
             )
             .await

@@ -87,6 +87,14 @@ pub enum RegistryError {
         entity_type: String,
         source: String,
     },
+    /// A hot swap changed a declared-key contract without first activating a
+    /// store epoch for the replacement table.
+    KeyContractActivationRequired {
+        tenant: String,
+        entity_type: String,
+        current_signature: Option<String>,
+        attempted_signature: String,
+    },
 }
 
 impl std::fmt::Display for RegistryError {
@@ -108,6 +116,15 @@ impl std::fmt::Display for RegistryError {
                     "failed to parse IOA for tenant '{tenant}', entity '{entity_type}': {source}"
                 )
             }
+            Self::KeyContractActivationRequired {
+                tenant,
+                entity_type,
+                current_signature,
+                attempted_signature,
+            } => write!(
+                f,
+                "key contract activation required for tenant '{tenant}', entity '{entity_type}' before changing {current_signature:?} to '{attempted_signature}'"
+            ),
         }
     }
 }

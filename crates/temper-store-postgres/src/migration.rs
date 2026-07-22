@@ -104,6 +104,41 @@ mod tests {
     }
 
     #[test]
+    fn projection_dirty_migration_fences_pre_existing_sources_and_catalog_rows() {
+        let migration =
+            include_str!("../migrations/0014_query_projection_dirty.sql").to_ascii_lowercase();
+        for source in ["from events", "from snapshots", "from entity_catalog"] {
+            assert!(
+                migration.contains(source),
+                "projection dirty migration must seed {source}"
+            );
+        }
+        assert!(
+            migration.contains("on conflict (tenant, entity_type, entity_id) do nothing"),
+            "projection dirty migration seed must be idempotent"
+        );
+        for trigger in [
+            "events_mark_query_projection_dirty",
+            "snapshots_mark_query_projection_dirty",
+            "catalog_mark_query_projection_dirty",
+        ] {
+            assert!(
+                migration.contains(trigger),
+                "projection dirty migration must install the {trigger} mixed-version fence"
+            );
+        }
+    }
+
+    #[test]
+    fn key_contract_activation_migration_adds_monotonic_epoch_fence() {
+        let migration = include_str!("../migrations/0015_key_index_contract_activation.sql")
+            .to_ascii_lowercase();
+        assert!(migration.contains("activated_key_set text"));
+        assert!(migration.contains("activation_epoch bigint not null default 0"));
+        assert!(migration.contains("check (activation_epoch >= 0)"));
+    }
+
+    #[test]
     fn migration_sql_is_idempotent() {
         // Both schemas must use IF NOT EXISTS so repeated execution is safe.
         assert!(

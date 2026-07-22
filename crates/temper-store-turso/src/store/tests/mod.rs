@@ -1,9 +1,10 @@
 //! Integration tests for the Turso event store.
 
-use libsql::params;
+use libsql::{TransactionBehavior, params};
 use temper_runtime::persistence::{
     EntityVectorRow, EventMetadata, EventStore, IndexReconciliation, PersistenceAppend,
-    PersistenceEnvelope, PersistenceError, SnapshotSourceFence,
+    PersistenceEnvelope, PersistenceError, ProjectionSourceFence, SnapshotBackfillFence,
+    SnapshotSourceFence,
 };
 
 use super::{PublishedArtifactUpsert, QueryProjectionUpsert, TursoEventStore};
@@ -68,6 +69,7 @@ fn unchecked_batch_append(
         reconcile_keys: false,
         key_set_signature: None,
         snapshot_source: SnapshotSourceFence::Unchecked,
+        batch_idempotency: None,
     }
 }
 
@@ -420,6 +422,7 @@ async fn append_batch_zero_sequence_detects_existing_stream_by_unique_key() {
             reconcile_keys: false,
             key_set_signature: None,
             snapshot_source: SnapshotSourceFence::Unchecked,
+            batch_idempotency: None,
         }])
         .await
         .unwrap_err();
@@ -435,6 +438,81 @@ async fn append_batch_zero_sequence_detects_existing_stream_by_unique_key() {
     let events = store.read_events(persistence_id, 0).await.unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event_type, "OrderCreated");
+}
+
+#[tokio::test]
+async fn append_batch_claim_is_atomic_content_bound_and_retryable() {
+    let store = make_store("append-batch-idempotency").await;
+    let persistence_id = "tenant-a:Repository:repo-idempotent";
+    let mut append = unchecked_batch_append(
+        persistence_id,
+        0,
+        vec![test_envelope(
+            "CompositeEvent",
+            serde_json::json!({"push": 1}),
+        )],
+    );
+    append.batch_idempotency = Some(temper_runtime::persistence::PersistenceBatchIdempotency {
+        persistence_id: persistence_id.to_string(),
+        idempotency_key: "push-1".to_string(),
+        intent_hash: "intent-a".to_string(),
+    });
+
+    store
+        .append_batch(std::slice::from_ref(&append))
+        .await
+        .expect("first batch");
+    let retry = store
+        .append_batch(std::slice::from_ref(&append))
+        .await
+        .expect("stale exact retry must be a no-op");
+    assert!(retry[0].batch_already_applied);
+    assert_eq!(store.read_events(persistence_id, 0).await.unwrap().len(), 1);
+
+    append
+        .batch_idempotency
+        .as_mut()
+        .expect("claim")
+        .intent_hash = "intent-b".to_string();
+    let error = store
+        .append_batch(&[append])
+        .await
+        .expect_err("same key with different work must fail");
+    assert!(error.to_string().contains("different intent"));
+}
+
+#[tokio::test]
+async fn saving_an_unchanged_disabled_policy_durably_reenables_it() {
+    let store = make_store("policy-reenable").await;
+    let policy = "permit(principal, action, resource);";
+    assert!(
+        store
+            .save_policy("tenant-a", "generated", policy, "test")
+            .await
+            .expect("create policy")
+    );
+    assert!(
+        store
+            .toggle_policy_enabled("tenant-a", "generated", false)
+            .await
+            .expect("disable policy")
+    );
+
+    assert!(
+        store
+            .save_policy("tenant-a", "generated", policy, "test")
+            .await
+            .expect("republish identical policy")
+    );
+    let rows = store
+        .load_policies_for_tenant("tenant-a")
+        .await
+        .expect("reload policies");
+    assert_eq!(rows.len(), 1);
+    assert!(
+        rows[0].enabled,
+        "equal policy content must not suppress the durable enabled transition"
+    );
 }
 
 #[tokio::test]
@@ -988,6 +1066,7 @@ async fn checked_snapshot_save_rejects_a_changed_derivation_source() {
                 sequence_nr: 2,
                 state: b"snapshot-a".to_vec(),
             },
+            None,
         )
         .await
         .expect("current exact source may replace equal-sequence bytes");
@@ -1005,6 +1084,7 @@ async fn checked_snapshot_save_rejects_a_changed_derivation_source() {
                 sequence_nr: 2,
                 state: b"snapshot-a".to_vec(),
             },
+            None,
         )
         .await
         .unwrap_err();
@@ -1024,11 +1104,11 @@ async fn checked_snapshot_save_rejects_a_changed_derivation_source() {
 
     let absent_id = "tenant-checked-snapshot:Order:absent-source";
     store
-        .save_snapshot_if_source(absent_id, 1, b"first", &SnapshotSourceFence::Absent)
+        .save_snapshot_if_source(absent_id, 1, b"first", &SnapshotSourceFence::Absent, None)
         .await
         .expect("absent source may create the first snapshot");
     let error = store
-        .save_snapshot_if_source(absent_id, 2, b"second", &SnapshotSourceFence::Absent)
+        .save_snapshot_if_source(absent_id, 2, b"second", &SnapshotSourceFence::Absent, None)
         .await
         .unwrap_err();
     assert!(matches!(error, PersistenceError::SnapshotGenerationChanged));
@@ -1479,6 +1559,515 @@ async fn append_is_durable_before_return() {
 }
 
 #[tokio::test]
+async fn source_fenced_projection_repairs_snapshot_rewrites_and_lifecycle_races() {
+    let store = make_store("source-fenced-projection-races").await;
+    let tenant = "tenant-projection-fence";
+    let entity_type = "Doc";
+    let entity_id = "projection-race";
+    let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+    let snapshot_a = b"snapshot-a".to_vec();
+    let snapshot_b = b"snapshot-b".to_vec();
+    let fields_a = serde_json::json!({"Id": entity_id, "Status": "Live", "Version": "A"});
+    let state_a = fields_a.clone();
+    let fields_b = serde_json::json!({"Id": entity_id, "Status": "Live", "Version": "B"});
+    let state_b = fields_b.clone();
+
+    store
+        .append(
+            &persistence_id,
+            0,
+            &[test_envelope(
+                "Created",
+                serde_json::json!({"to_status": "Live"}),
+            )],
+        )
+        .await
+        .expect("seed journal generation");
+    store
+        .save_snapshot(&persistence_id, 1, &snapshot_a)
+        .await
+        .expect("seed snapshot A");
+    assert!(
+        store
+            .upsert_query_projection_with_state_if_source(
+                tenant,
+                entity_type,
+                entity_id,
+                "Live",
+                &fields_a,
+                &state_a,
+                1,
+                ProjectionSourceFence {
+                    expected_journal_sequence: 1,
+                    expected_snapshot: Some(SnapshotBackfillFence {
+                        sequence_nr: 1,
+                        state: &snapshot_a,
+                    }),
+                },
+            )
+            .await
+            .expect("project snapshot A")
+    );
+    assert!(
+        store
+            .dirty_query_projection_entity_ids(tenant, entity_type, 10)
+            .await
+            .expect("read clean marker set")
+            .is_empty()
+    );
+
+    store
+        .save_snapshot(&persistence_id, 1, &snapshot_b)
+        .await
+        .expect("replace snapshot A with B at the same HWM");
+    assert!(
+        !store
+            .upsert_query_projection_with_state_if_source(
+                tenant,
+                entity_type,
+                entity_id,
+                "Live",
+                &fields_a,
+                &state_a,
+                1,
+                ProjectionSourceFence {
+                    expected_journal_sequence: 1,
+                    expected_snapshot: Some(SnapshotBackfillFence {
+                        sequence_nr: 1,
+                        state: &snapshot_a,
+                    }),
+                },
+            )
+            .await
+            .expect("reject stale snapshot A fence")
+    );
+    assert_eq!(
+        store
+            .dirty_query_projection_entity_ids(tenant, entity_type, 10)
+            .await
+            .expect("snapshot B remains dirty"),
+        vec![entity_id.to_string()]
+    );
+    assert!(
+        store
+            .upsert_query_projection_with_state_if_source(
+                tenant,
+                entity_type,
+                entity_id,
+                "Live",
+                &fields_b,
+                &state_b,
+                1,
+                ProjectionSourceFence {
+                    expected_journal_sequence: 1,
+                    expected_snapshot: Some(SnapshotBackfillFence {
+                        sequence_nr: 1,
+                        state: &snapshot_b,
+                    }),
+                },
+            )
+            .await
+            .expect("repair projection from snapshot B")
+    );
+
+    // A delayed unfenced queue delivery can arrive after the repair. It may
+    // write its stale row, but must atomically re-mark the projection dirty so
+    // the next read source-fences B again instead of trusting A indefinitely.
+    store
+        .upsert_query_projection_with_state(
+            tenant,
+            entity_type,
+            entity_id,
+            "Live",
+            &fields_a,
+            &state_a,
+            1,
+        )
+        .await
+        .expect("deliver delayed plain projection A");
+    assert_eq!(
+        store
+            .dirty_query_projection_entity_ids(tenant, entity_type, 10)
+            .await
+            .expect("delayed delivery re-marks dirty"),
+        vec![entity_id.to_string()]
+    );
+    assert!(
+        store
+            .upsert_query_projection_with_state_if_source(
+                tenant,
+                entity_type,
+                entity_id,
+                "Live",
+                &fields_b,
+                &state_b,
+                1,
+                ProjectionSourceFence {
+                    expected_journal_sequence: 1,
+                    expected_snapshot: Some(SnapshotBackfillFence {
+                        sequence_nr: 1,
+                        state: &snapshot_b,
+                    }),
+                },
+            )
+            .await
+            .expect("repair delayed A back to B")
+    );
+    assert!(
+        !store
+            .remove_query_projection_if_exact(
+                tenant,
+                entity_type,
+                entity_id,
+                "Live",
+                &fields_a,
+                &state_a,
+                1,
+            )
+            .await
+            .expect("full-row cleanup CAS preserves B")
+    );
+    let row = store
+        .load_entity_catalog_rows(tenant, entity_type, &[entity_id.to_string()])
+        .await
+        .expect("load repaired B row")
+        .pop()
+        .expect("B row remains");
+    assert_eq!(row.fields, fields_b);
+    assert!(
+        store
+            .query_field_index(
+                tenant,
+                entity_type,
+                "field_name = ?3 AND field_value = ?4",
+                vec!["Version".to_string(), "B".to_string()],
+            )
+            .await
+            .expect("query B field index")
+            .contains(&entity_id.to_string()),
+        "a failed exact cleanup must preserve B's EAV rows"
+    );
+
+    store
+        .append(
+            &persistence_id,
+            1,
+            &[test_envelope(
+                "Delete",
+                serde_json::json!({"to_status": "Deleted"}),
+            )],
+        )
+        .await
+        .expect("advance source to Deleted");
+    assert!(
+        !store
+            .remove_query_projection_if_source(
+                tenant,
+                entity_type,
+                entity_id,
+                ProjectionSourceFence {
+                    expected_journal_sequence: 1,
+                    expected_snapshot: Some(SnapshotBackfillFence {
+                        sequence_nr: 1,
+                        state: &snapshot_b,
+                    }),
+                },
+            )
+            .await
+            .expect("reject stale live removal fence")
+    );
+    assert!(
+        store
+            .remove_query_projection_if_source(
+                tenant,
+                entity_type,
+                entity_id,
+                ProjectionSourceFence {
+                    expected_journal_sequence: 2,
+                    expected_snapshot: Some(SnapshotBackfillFence {
+                        sequence_nr: 1,
+                        state: &snapshot_b,
+                    }),
+                },
+            )
+            .await
+            .expect("remove Deleted projection")
+    );
+    assert!(
+        store
+            .load_entity_catalog_rows(tenant, entity_type, &[entity_id.to_string()])
+            .await
+            .expect("load removed catalog")
+            .is_empty()
+    );
+
+    store
+        .append(
+            &persistence_id,
+            2,
+            &[test_envelope(
+                "Restore",
+                serde_json::json!({"to_status": "Live"}),
+            )],
+        )
+        .await
+        .expect("advance source back to Live");
+    assert!(
+        store
+            .upsert_query_projection_with_state_if_source(
+                tenant,
+                entity_type,
+                entity_id,
+                "Live",
+                &fields_b,
+                &state_b,
+                3,
+                ProjectionSourceFence {
+                    expected_journal_sequence: 3,
+                    expected_snapshot: Some(SnapshotBackfillFence {
+                        sequence_nr: 1,
+                        state: &snapshot_b,
+                    }),
+                },
+            )
+            .await
+            .expect("restore Live projection")
+    );
+    assert!(
+        store
+            .dirty_query_projection_entity_ids(tenant, entity_type, 1)
+            .await
+            .expect("restored source is clean")
+            .is_empty()
+    );
+
+    // If source closing fails after a conditional upsert, exact cleanup removes
+    // the attempted row. With no concurrent source writer, cleanup itself must
+    // leave a durable marker so a later read rebuilds the missing projection.
+    assert!(
+        store
+            .remove_query_projection_if_exact(
+                tenant,
+                entity_type,
+                entity_id,
+                "Live",
+                &fields_b,
+                &state_b,
+                3,
+            )
+            .await
+            .expect("remove exact attempted projection after closing fault")
+    );
+    assert_eq!(
+        store
+            .dirty_query_projection_entity_ids(tenant, entity_type, 1)
+            .await
+            .expect("exact cleanup marks projection dirty"),
+        vec![entity_id.to_string()]
+    );
+    assert!(
+        store
+            .upsert_query_projection_with_state_if_source(
+                tenant,
+                entity_type,
+                entity_id,
+                "Live",
+                &fields_b,
+                &state_b,
+                3,
+                ProjectionSourceFence {
+                    expected_journal_sequence: 3,
+                    expected_snapshot: Some(SnapshotBackfillFence {
+                        sequence_nr: 1,
+                        state: &snapshot_b,
+                    }),
+                },
+            )
+            .await
+            .expect("repair exact-cleanup absence")
+    );
+    assert!(
+        store
+            .dirty_query_projection_entity_ids(tenant, entity_type, 1)
+            .await
+            .expect("exact-cleanup repair clears marker")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn dirty_projection_upgrade_seed_covers_sources_and_catalog_only_rows_once() {
+    let url = sqlite_test_url("projection-dirty-upgrade-seed");
+    let store = TursoEventStore::new(&url, None)
+        .await
+        .expect("create pre-upgrade store");
+    let tenant = "tenant-upgrade-seed";
+    let entity_type = "Doc";
+    let source_id = "source-backed";
+    let source_pid = format!("{tenant}:{entity_type}:{source_id}");
+    let catalog_only_id = "catalog-only";
+
+    store
+        .append(
+            &source_pid,
+            0,
+            &[test_envelope(
+                "Created",
+                serde_json::json!({"to_status": "Live"}),
+            )],
+        )
+        .await
+        .expect("seed authoritative source");
+    store
+        .upsert_query_projection(
+            tenant,
+            entity_type,
+            catalog_only_id,
+            "Live",
+            &serde_json::json!({"Id": catalog_only_id, "Status": "Live"}),
+            0,
+        )
+        .await
+        .expect("seed catalog-only compatibility row");
+
+    store
+        .connection()
+        .expect("open migration connection")
+        .execute("DROP TABLE query_projection_dirty", ())
+        .await
+        .expect("simulate database created before dirty-ledger migration");
+
+    let interrupted_connection = store.connection().expect("open interrupted migration");
+    let interrupted = interrupted_connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .expect("begin interrupted migration");
+    interrupted
+        .execute(crate::schema::CREATE_QUERY_PROJECTION_DIRTY_TABLE, ())
+        .await
+        .expect("create ledger inside interrupted migration");
+    interrupted
+        .rollback()
+        .await
+        .expect("simulate interruption before seed publication");
+
+    let upgraded = TursoEventStore::new(&url, None)
+        .await
+        .expect("run dirty-ledger upgrade");
+    assert_eq!(
+        upgraded
+            .dirty_query_projection_entity_ids(tenant, entity_type, 10)
+            .await
+            .expect("read upgrade seed"),
+        vec![catalog_only_id.to_string(), source_id.to_string()],
+        "the one-time seed must gate both missing source projections and pre-existing catalog rows"
+    );
+
+    assert!(
+        upgraded
+            .clear_query_projection_dirty_if_source(
+                tenant,
+                entity_type,
+                catalog_only_id,
+                ProjectionSourceFence {
+                    expected_journal_sequence: 0,
+                    expected_snapshot: None,
+                },
+            )
+            .await
+            .expect("acknowledge catalog-only row")
+    );
+    assert_eq!(
+        upgraded
+            .load_entity_catalog_rows(tenant, entity_type, &[catalog_only_id.to_string()])
+            .await
+            .expect("load catalog-only row after acknowledgement")
+            .len(),
+        1,
+        "upgrade repair must preserve catalog-only compatibility rows"
+    );
+
+    let reopened = TursoEventStore::new(&url, None)
+        .await
+        .expect("reopen upgraded store");
+    assert_eq!(
+        reopened
+            .dirty_query_projection_entity_ids(tenant, entity_type, 10)
+            .await
+            .expect("read ledger after ordinary reopen"),
+        vec![source_id.to_string()],
+        "an ordinary restart must not re-seed already acknowledged catalog-only rows"
+    );
+}
+
+#[tokio::test]
+async fn exact_snapshot_source_replaces_a_higher_stale_catalog_sequence() {
+    let store = make_store("snapshot-source-replaces-stale-catalog").await;
+    let tenant = "tenant-snapshot-catalog-fence";
+    let entity_type = "Doc";
+    let entity_id = "snapshot-owner";
+    let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+    let stale_fields = serde_json::json!({"Id": entity_id, "Status": "Live", "Version": "stale"});
+    let current_fields =
+        serde_json::json!({"Id": entity_id, "Status": "Live", "Version": "snapshot"});
+    let snapshot = b"authoritative-snapshot".to_vec();
+
+    store
+        .upsert_query_projection_with_state(
+            tenant,
+            entity_type,
+            entity_id,
+            "Live",
+            &stale_fields,
+            &stale_fields,
+            10,
+        )
+        .await
+        .expect("seed higher catalog-only compatibility sequence");
+    store
+        .save_snapshot(&persistence_id, 5, &snapshot)
+        .await
+        .expect("publish lower authoritative snapshot generation");
+    assert!(
+        store
+            .upsert_query_projection_with_state_if_source(
+                tenant,
+                entity_type,
+                entity_id,
+                "Live",
+                &current_fields,
+                &current_fields,
+                5,
+                ProjectionSourceFence {
+                    expected_journal_sequence: 0,
+                    expected_snapshot: Some(SnapshotBackfillFence {
+                        sequence_nr: 5,
+                        state: &snapshot,
+                    }),
+                },
+            )
+            .await
+            .expect("repair from exact snapshot source"),
+        "the exact current snapshot must outrank a higher stale catalog sequence"
+    );
+    let row = store
+        .load_entity_catalog_rows(tenant, entity_type, &[entity_id.to_string()])
+        .await
+        .expect("load repaired catalog")
+        .pop()
+        .expect("repaired catalog row");
+    assert_eq!(row.sequence_nr, 5);
+    assert_eq!(row.fields, current_fields);
+    assert!(
+        store
+            .dirty_query_projection_entity_ids(tenant, entity_type, 1)
+            .await
+            .expect("read closed dirty ledger")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn query_projection_roundtrip_updates_catalog_and_field_index() {
     let store = make_store("query-projection-roundtrip").await;
     let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
@@ -1500,6 +2089,14 @@ async fn query_projection_roundtrip_updates_catalog_and_field_index() {
         )
         .await
         .expect("upsert query projection");
+    assert!(
+        store
+            .dirty_query_projection_entity_ids(&tenant, entity_type, 1)
+            .await
+            .expect("read catalog-only dirty ledger")
+            .is_empty(),
+        "a projection with no journal or snapshot source remains a supported catalog-only row"
+    );
 
     let title_matches = store
         .query_field_index(
@@ -1522,6 +2119,14 @@ async fn query_projection_roundtrip_updates_catalog_and_field_index() {
         .remove_query_projection(&tenant, entity_type, entity_id)
         .await
         .expect("remove query projection");
+    assert!(
+        store
+            .dirty_query_projection_entity_ids(&tenant, entity_type, 1)
+            .await
+            .expect("read catalog-only dirty ledger after removal")
+            .is_empty(),
+        "removing a catalog-only row must not create an unrecoverable dirty marker"
+    );
 
     let remaining = store
         .query_field_index(

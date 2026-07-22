@@ -67,6 +67,8 @@ impl EntityActor {
         &self,
         store: &BoxedEventStore,
         backend: BackendLabel,
+        table: &TransitionTable,
+        state_before_update: &EntityState,
         state: &mut EntityState,
         update: FieldUpdatePersistence<'_>,
     ) -> Result<u64, PersistenceError> {
@@ -83,12 +85,15 @@ impl EntityActor {
             store,
             backend,
             &persistence_id,
+            table,
+            state_before_update,
             state,
             PersistencePayload {
                 event_type: FIELD_UPDATE_EVENT_TYPE,
                 payload,
                 timestamp: update.timestamp,
                 to_status: &to_status,
+                post_dispatch_effects: None,
             },
         )
         .await
@@ -104,20 +109,28 @@ impl EntityActor {
         &self,
         store: &BoxedEventStore,
         backend: BackendLabel,
+        table: &TransitionTable,
     ) -> Result<EntityState, ActorError> {
-        let table = self.table.read().expect("table lock poisoned").clone();
-        recover_entity_state_from_store(
-            &self.tenant,
-            &self.entity_type,
-            &self.entity_id,
-            &table,
-            store,
-            backend,
-            &self.initial_fields,
-            self.blob_store.as_ref(),
+        let recovered = recover_entity_state_with_source_from_store(
+            EntityRecoveryContext {
+                tenant: &self.tenant,
+                entity_type: &self.entity_type,
+                entity_id: &self.entity_id,
+                table,
+                store,
+                backend,
+                initial_fields: &self.initial_fields,
+                blob_store: self.blob_store.as_ref(),
+            },
             true,
         )
-        .await
+        .await?;
+        *self
+            .snapshot_source
+            .write()
+            .expect("snapshot source lock poisoned") = recovered.snapshot_source;
+        self.record_state_key_contract(table);
+        Ok(recovered.state)
     }
 
     pub(super) async fn handle_field_update(
@@ -137,6 +150,7 @@ impl EntityActor {
         };
         let timestamp = sim_now();
         let mut retries = 0;
+        let table = self.table.read().expect("table lock poisoned").clone();
 
         loop {
             // The append and the actor reply are separate observations. A retry
@@ -231,6 +245,8 @@ impl EntityActor {
                     .persist_field_update(
                         store,
                         backend,
+                        &table,
+                        &state_before,
                         state,
                         FieldUpdatePersistence {
                             fields: &fields,
@@ -242,9 +258,13 @@ impl EntityActor {
                     .await
                 {
                     Ok(_) => {}
-                    Err(PersistenceError::ConcurrencyViolation { actual, .. }) => {
+                    Err(error)
+                        if durable_conflict_sequence(&error, state.sequence_nr).is_some() =>
+                    {
+                        let actual = durable_conflict_sequence(&error, state.sequence_nr)
+                            .expect("guard accepted durable conflict");
                         let recovered = self
-                                    .recover_authoritative_state(store, backend)
+                                    .recover_authoritative_state(store, backend, &table)
                                     .await
                                     .map_err(|error| {
                                         ActorError::custom(format!(
@@ -313,22 +333,40 @@ impl EntityActor {
                 idempotency_key: Some(idempotency_key.clone()),
             };
             state.push_event_bounded(event);
+            self.record_state_key_contract(&table);
             let persistence_id = self.persistence_id();
-            if let Some(store) = self.event_journal.as_ref()
-                && let Err(error) = Self::maybe_save_snapshot(
+            if let Some(store) = self.event_journal.as_ref() {
+                let mut snapshot_source = self
+                    .snapshot_source
+                    .read()
+                    .expect("snapshot source lock poisoned")
+                    .clone();
+                let key_contract = crate::key_index::declared_key_write_contract(&table);
+                match Self::maybe_save_snapshot(
                     store,
                     self.snapshot_queue.as_ref(),
                     &persistence_id,
                     state,
+                    &mut snapshot_source,
+                    Some(&key_contract),
                 )
                 .await
-            {
-                tracing::warn!(
-                    entity = %state.entity_id,
-                    seq = state.sequence_nr,
-                    error = %error,
-                    "failed to persist snapshot after field update"
-                );
+                {
+                    Ok(_) => {
+                        *self
+                            .snapshot_source
+                            .write()
+                            .expect("snapshot source lock poisoned") = snapshot_source;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            entity = %state.entity_id,
+                            seq = state.sequence_nr,
+                            error = %error,
+                            "failed to persist snapshot after field update"
+                        );
+                    }
+                }
             }
             ctx.reply(EntityResponse {
                 success: true,

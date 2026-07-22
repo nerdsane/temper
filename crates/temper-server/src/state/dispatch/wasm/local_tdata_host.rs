@@ -88,6 +88,7 @@ impl LocalTDataWasmHost {
                 "POST" => crate::odata::handle_odata_post(
                     State(self.state.clone()),
                     None,
+                    None,
                     headers,
                     Path(request.path),
                     Query(request.query),

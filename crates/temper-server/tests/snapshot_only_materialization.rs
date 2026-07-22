@@ -45,8 +45,8 @@ async fn first_journal_write_materializes_snapshot_only_state_for_restart() {
         "booleans": {},
         "lists": {},
         "fields": {
-            "Id": "snapshot-only-counter",
-            "Status": "Ready"
+            "Id": "legacy-wrong-id",
+            "Status": "LegacyWrongStatus"
         },
         "events": [],
         "total_event_count": 10,
@@ -96,6 +96,14 @@ async fn first_journal_write_materializes_snapshot_only_state_for_restart() {
         "the first journal record must carry the complete snapshot-only baseline"
     );
     assert_eq!(journal[1].event_type, "Increment");
+    assert_eq!(
+        journal[0].payload["state"]["fields"]["Id"], "snapshot-only-counter",
+        "snapshot recovery must canonicalize field identity before journal materialization"
+    );
+    assert_eq!(
+        journal[0].payload["state"]["fields"]["Status"], "Ready",
+        "snapshot recovery must canonicalize field status before journal materialization"
+    );
     assert!(
         events
             .load_snapshot(persistence_id)
@@ -103,6 +111,18 @@ async fn first_journal_write_materializes_snapshot_only_state_for_restart() {
             .expect("load snapshot after materialization")
             .is_none(),
         "the fenced first journal append must atomically retire the migration snapshot"
+    );
+    events
+        .save_snapshot(persistence_id, 50, &snapshot)
+        .await
+        .expect("attempt delayed migration snapshot write");
+    assert!(
+        events
+            .load_snapshot(persistence_id)
+            .await
+            .expect("load snapshot after delayed migration writer")
+            .is_none(),
+        "a delayed ahead-of-journal writer must not recreate a retired migration snapshot"
     );
 
     let restart_system = ActorSystem::new("snapshot-only-materialization-restart");
@@ -128,4 +148,6 @@ async fn first_journal_write_materializes_snapshot_only_state_for_restart() {
         Some(&11),
         "restart must replay the first journal delta from the complete snapshot-only baseline"
     );
+    assert_eq!(recovered.state.fields["Id"], "snapshot-only-counter");
+    assert_eq!(recovered.state.fields["Status"], "Ready");
 }

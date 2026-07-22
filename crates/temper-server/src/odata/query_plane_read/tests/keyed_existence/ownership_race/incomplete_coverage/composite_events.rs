@@ -61,6 +61,7 @@ async fn composite_event_type_only_skips_the_runtime_audit_schema() {
             keys: true,
             key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
             vectors: false,
+            snapshot_source: Default::default(),
         },
     )
     .await
@@ -109,6 +110,7 @@ async fn malformed_composite_audit_record_is_not_silently_authoritative() {
             keys: true,
             key_set_signature: Some(ORDER_KEY_SET_SIGNATURE.to_string()),
             vectors: false,
+            snapshot_source: Default::default(),
         },
     )
     .await

@@ -38,7 +38,14 @@ impl crate::state::ServerState {
         let action = input.action.to_string();
         let custom_effects = input.custom_effects.to_vec();
         let entity_state = input.entity_state.clone();
-        let agent_ctx = input.agent_ctx.clone();
+        let agent_ctx = input
+            .agent_ctx
+            .fork_tenant_generation_lease(input.tenant)
+            .unwrap_or_else(|| {
+                let mut detached = input.agent_ctx.clone();
+                detached.detach_tenant_generation_lease();
+                detached
+            });
         let action_params = input.action_params.clone();
         let workflow_root_entity_type = agent_ctx
             .workflow_root_entity_type
@@ -65,6 +72,18 @@ impl crate::state::ServerState {
         tokio::spawn(
             async move {
                 // determinism-ok: async integration side-effects run outside simulation core
+                let Some(agent_ctx) = state
+                    .activate_immediate_tenant_work(&tenant, agent_ctx)
+                    .await
+                else {
+                    tracing::error!(
+                        tenant = %tenant,
+                        entity_type = %entity_type,
+                        entity_id = %entity_id,
+                        "adapter integrations could not enter a complete runtime generation"
+                    );
+                    return;
+                };
                 let req = WasmDispatchRequest {
                     tenant: &tenant,
                     entity_type: &entity_type,
@@ -88,6 +107,7 @@ impl crate::state::ServerState {
                         &entity_id,
                         &action,
                         &e,
+                        &agent_ctx,
                     );
                 }
             }
@@ -112,8 +132,12 @@ impl crate::state::ServerState {
         &self,
         req: &WasmDispatchRequest<'_>,
     ) -> Result<Option<EntityResponse>, String> {
+        let generation_agent_ctx = self
+            .dispatch_context_in_generation(req.tenant, req.agent_ctx)
+            .await
+            .map_err(|error| error.to_string())?;
         record_workflow_span_attrs(
-            req.agent_ctx,
+            &generation_agent_ctx,
             req.entity_type,
             req.entity_id,
             Some(req.action),
@@ -136,7 +160,7 @@ impl crate::state::ServerState {
                 entity_id: req.entity_id,
             },
             action: req.action,
-            agent_ctx: req.agent_ctx,
+            agent_ctx: &generation_agent_ctx,
             mode: req.mode,
         };
 

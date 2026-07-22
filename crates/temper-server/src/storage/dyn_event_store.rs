@@ -31,6 +31,13 @@ where
         Box::pin(EventStore::append_batch(self, appends))
     }
 
+    fn batch_idempotency_committed<'a>(
+        &'a self,
+        claim: &'a PersistenceBatchIdempotency,
+    ) -> EventStoreFuture<'a, Result<bool, PersistenceError>> {
+        Box::pin(EventStore::batch_idempotency_committed(self, claim))
+    }
+
     fn read_events<'a>(
         &'a self,
         persistence_id: &'a str,
@@ -242,6 +249,12 @@ where
         Box::pin(EventStore::key_index_backfilled_types(self, tenant))
     }
 
+    fn key_index_activated_contracts(
+        &self,
+    ) -> EventStoreFuture<'_, Result<Vec<(String, String)>, PersistenceError>> {
+        Box::pin(EventStore::key_index_activated_contracts(self))
+    }
+
     fn key_index_reconciliation_revision<'a>(
         &'a self,
         tenant: &'a str,
@@ -265,6 +278,35 @@ where
             tenant,
             entity_type,
             key_set,
+        ))
+    }
+
+    fn activate_key_index_contract<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        key_set: &'a str,
+        purge_existing_rows: bool,
+    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>> {
+        Box::pin(EventStore::activate_key_index_contract(
+            self,
+            tenant,
+            entity_type,
+            key_set,
+            purge_existing_rows,
+        ))
+    }
+
+    fn activate_key_index_contracts<'a>(
+        &'a self,
+        tenant: &'a str,
+        activations: &'a [temper_runtime::persistence::KeyContractActivation],
+    ) -> EventStoreFuture<'a, Result<std::collections::BTreeMap<String, u64>, PersistenceError>>
+    {
+        Box::pin(EventStore::activate_key_index_contracts(
+            self,
+            tenant,
+            activations,
         ))
     }
 
@@ -310,6 +352,24 @@ where
         ))
     }
 
+    fn save_snapshot_if_source<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        sequence_nr: u64,
+        snapshot: &'a [u8],
+        source: &'a SnapshotSourceFence,
+        key_contract: Option<&'a str>,
+    ) -> EventStoreFuture<'a, Result<(), PersistenceError>> {
+        Box::pin(EventStore::save_snapshot_if_source(
+            self,
+            persistence_id,
+            sequence_nr,
+            snapshot,
+            source,
+            key_contract,
+        ))
+    }
+
     fn load_snapshot<'a>(
         &'a self,
         persistence_id: &'a str,
@@ -345,6 +405,39 @@ where
             self,
             tenant,
             entity_type,
+        ))
+    }
+
+    fn key_reconciliation_boundary<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+    ) -> EventStoreFuture<'a, Result<Option<String>, PersistenceError>> {
+        Box::pin(EventStore::key_reconciliation_boundary(
+            self,
+            tenant,
+            entity_type,
+        ))
+    }
+
+    fn list_key_reconciliation_page<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        after_entity_id: Option<&'a str>,
+        through_entity_id: &'a str,
+        limit: usize,
+    ) -> EventStoreFuture<
+        'a,
+        Result<Vec<temper_runtime::persistence::KeyReconciliationEntity>, PersistenceError>,
+    > {
+        Box::pin(EventStore::list_key_reconciliation_page(
+            self,
+            tenant,
+            entity_type,
+            after_entity_id,
+            through_entity_id,
+            limit,
         ))
     }
 

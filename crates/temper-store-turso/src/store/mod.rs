@@ -9,7 +9,7 @@
 //! - [`constraints`]: Tenant-level cross-entity constraints
 //! - [`event_store`]: [`EventStore`] trait implementation
 
-use libsql::{Builder, Database};
+use libsql::{Builder, Database, TransactionBehavior};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use temper_runtime::persistence::{PersistenceError, storage_error};
@@ -132,6 +132,9 @@ impl TursoEventStore {
             .execute(schema::ALTER_EVENTS_ADD_SEGMENT_INDEX, ())
             .await;
         conn.execute(schema::CREATE_EVENTS_ENTITY_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_PERSISTENCE_BATCH_IDEMPOTENCY_TABLE, ())
             .await
             .map_err(storage_error)?;
         conn.execute(schema::CREATE_EVENT_SEGMENTS_TABLE, ())
@@ -381,6 +384,41 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_ENTITY_FIELD_INDEX_STATUS, ())
             .await
             .map_err(storage_error)?;
+        // Publish the ledger and its upgrade seed in one transaction. If the
+        // process stops anywhere before commit, SQLite/libSQL rolls back the
+        // table creation too, so the next startup cannot mistake an unseeded
+        // table for a completed migration.
+        let projection_dirty_tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+        let query_projection_dirty_was_missing = {
+            let mut rows = projection_dirty_tx
+                .query(
+                    "SELECT 1 FROM sqlite_schema \
+                     WHERE type = 'table' AND name = 'query_projection_dirty' \
+                     LIMIT 1",
+                    (),
+                )
+                .await
+                .map_err(storage_error)?;
+            rows.next().await.map_err(storage_error)?.is_none()
+        };
+        projection_dirty_tx
+            .execute(schema::CREATE_QUERY_PROJECTION_DIRTY_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        projection_dirty_tx
+            .execute(schema::CREATE_QUERY_PROJECTION_DIRTY_TYPE_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+        if query_projection_dirty_was_missing {
+            projection_dirty_tx
+                .execute(schema::SEED_QUERY_PROJECTION_DIRTY, ())
+                .await
+                .map_err(storage_error)?;
+        }
+        projection_dirty_tx.commit().await.map_err(storage_error)?;
 
         // Entity key index (ADR-0153) — declared composite-key -> entity_id, the
         // negative-existence access path co-committed with the journal append.
@@ -430,7 +468,7 @@ impl TursoEventStore {
 // Row / result types
 // ---------------------------------------------------------------------------
 
-pub use policy::PolicyRow;
+pub use policy::{PolicyGenerationWrite, PolicyRow};
 
 /// Durable denial-pattern row used to rebuild policy suggestions.
 #[derive(Debug, Clone, serde::Serialize)]

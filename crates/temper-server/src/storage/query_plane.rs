@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use temper_runtime::persistence::PersistenceError;
+use temper_runtime::persistence::{PersistenceError, ProjectionSourceFence};
 
 /// Backend-neutral projection row returned by [`QueryPlaneStore`].
 #[derive(Clone, Debug, PartialEq)]
@@ -82,6 +82,29 @@ pub trait QueryPlaneStore: Send + Sync {
         sequence_nr: u64,
     ) -> Result<(), PersistenceError>;
 
+    /// Upsert a projection only while the exact journal and snapshot generation
+    /// used to derive it is still current. The source comparison and mutation
+    /// must share one backend transaction. `false` means no mutation occurred.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "source-fenced projection boundary"
+    )]
+    async fn upsert_projection_if_source(
+        &self,
+        _tenant: &str,
+        _entity_type: &str,
+        _entity_id: &str,
+        _status: &str,
+        _fields: &serde_json::Value,
+        _state: &serde_json::Value,
+        _sequence_nr: u64,
+        _source: ProjectionSourceFence<'_>,
+    ) -> Result<bool, PersistenceError> {
+        Err(PersistenceError::Storage(
+            "query plane does not support source-fenced projection repair".to_string(),
+        ))
+    }
+
     async fn upsert_projections(
         &self,
         tenant: &str,
@@ -108,6 +131,55 @@ pub trait QueryPlaneStore: Send + Sync {
         entity_type: &str,
         entity_id: &str,
     ) -> Result<(), PersistenceError>;
+
+    /// Remove a projection only while the exact journal and snapshot generation
+    /// used to classify the entity as deleted is still current.
+    async fn remove_projection_if_source(
+        &self,
+        _tenant: &str,
+        _entity_type: &str,
+        _entity_id: &str,
+        _source: ProjectionSourceFence<'_>,
+    ) -> Result<bool, PersistenceError> {
+        Err(PersistenceError::Storage(
+            "query plane does not support source-fenced projection repair".to_string(),
+        ))
+    }
+
+    /// Clear a durable dirty marker only while the exact journal and snapshot
+    /// source is current, without changing a compatibility catalog row.
+    async fn clear_projection_dirty_if_source(
+        &self,
+        _tenant: &str,
+        _entity_type: &str,
+        _entity_id: &str,
+        _source: ProjectionSourceFence<'_>,
+    ) -> Result<bool, PersistenceError> {
+        Err(PersistenceError::Storage(
+            "query plane does not support source-fenced dirty acknowledgement".to_string(),
+        ))
+    }
+
+    /// Remove exactly the attempted projection row after its durable source was
+    /// observed to change. A different or newer catalog row is never removed.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "exact projection cleanup boundary"
+    )]
+    async fn remove_projection_if_exact(
+        &self,
+        _tenant: &str,
+        _entity_type: &str,
+        _entity_id: &str,
+        _status: &str,
+        _fields: &serde_json::Value,
+        _state: &serde_json::Value,
+        _sequence_nr: u64,
+    ) -> Result<bool, PersistenceError> {
+        Err(PersistenceError::Storage(
+            "query plane does not support exact projection cleanup".to_string(),
+        ))
+    }
 
     async fn query_field_index(
         &self,
@@ -178,4 +250,16 @@ pub trait QueryPlaneStore: Send + Sync {
     async fn projected_entity_counts_by_tenant(
         &self,
     ) -> Result<Option<Vec<(String, u64)>>, PersistenceError>;
+
+    /// Return at most `limit` entities whose durable source changed after their
+    /// last source-fenced projection reconciliation. `None` means the backend
+    /// does not expose durable dirty-projection tracking.
+    async fn dirty_projection_entity_ids(
+        &self,
+        _tenant: &str,
+        _entity_type: &str,
+        _limit: usize,
+    ) -> Result<Option<Vec<String>>, PersistenceError> {
+        Ok(None)
+    }
 }

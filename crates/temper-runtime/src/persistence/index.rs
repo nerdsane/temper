@@ -2,6 +2,57 @@
 
 use serde::{Deserialize, Serialize};
 
+const ACTIVATED_KEY_CONTRACT_PREFIX: &str = "@temper-key-contract-v1:";
+
+/// Attach the monotonic spec-activation epoch captured by a durable writer to
+/// its stable declared-key signature.
+pub fn encode_activated_key_contract(key_set: &str, activation_epoch: u64) -> String {
+    format!(
+        "{ACTIVATED_KEY_CONTRACT_PREFIX}{activation_epoch}:{}:{key_set}",
+        key_set.len()
+    )
+}
+
+/// Split a writer contract into its stable key-set signature and optional
+/// activation epoch. Plain legacy/backfill signatures have no epoch.
+pub fn decode_activated_key_contract(contract: &str) -> (&str, Option<u64>) {
+    let Some(encoded) = contract.strip_prefix(ACTIVATED_KEY_CONTRACT_PREFIX) else {
+        return (contract, None);
+    };
+    let Some((epoch, remainder)) = encoded.split_once(':') else {
+        return (contract, None);
+    };
+    let Some((length, key_set)) = remainder.split_once(':') else {
+        return (contract, None);
+    };
+    let Ok(epoch) = epoch.parse::<u64>() else {
+        return (contract, None);
+    };
+    let Ok(length) = length.parse::<usize>() else {
+        return (contract, None);
+    };
+    if key_set.len() != length {
+        return (contract, None);
+    }
+    (key_set, Some(epoch))
+}
+
+/// One entity type's declared-key contract in an atomic spec activation batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyContractActivation {
+    /// Entity type whose live table will receive the returned epoch.
+    pub entity_type: String,
+    /// Stable declared-key-set signature (without an activation epoch).
+    pub key_set: String,
+    /// Stable fingerprint of the full IOA source whose replay semantics derive
+    /// key-property fields. A change forces coverage invalidation even when the
+    /// declared key set itself is byte-identical.
+    pub spec_fingerprint: String,
+    /// Whether activation must atomically purge every prior ownership row for
+    /// the type (the exact empty-contract transition).
+    pub purge_existing_rows: bool,
+}
+
 /// A declared-key row to co-commit with an append (ADR-0153). The entity claims
 /// `key_hash` for `key_name`; the store writes it into `entity_key_index` in the
 /// same transaction as the journal append.
@@ -24,7 +75,7 @@ pub struct EntityKeyLookup {
 
 /// Contract and entity classification captured before a declared-key backfill
 /// replays entity state. Every repair row must validate this fence before mutation
-/// (ADR-0171).
+/// (ADR-0192).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyIndexBackfillFence<'a> {
     /// Versioned signature used to derive the attempted repair rows.
@@ -54,6 +105,42 @@ pub struct SnapshotBackfillFence<'a> {
     pub state: &'a [u8],
 }
 
+/// Exact journal and snapshot generation used to derive a query projection.
+///
+/// Projection repair must validate both components in the same storage
+/// transaction that mutates the catalog and field index. Comparing only a
+/// numeric sequence cannot distinguish a same-sequence snapshot replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectionSourceFence<'a> {
+    /// Exact journal high-water captured during state reconstruction.
+    pub expected_journal_sequence: u64,
+    /// Exact snapshot generation that participated in reconstruction. `None`
+    /// proves that no snapshot was present.
+    pub expected_snapshot: Option<SnapshotBackfillFence<'a>>,
+}
+
+/// Exact durable snapshot generation an event append was derived from.
+///
+/// `Unchecked` preserves compatibility for callers whose state does not depend on
+/// snapshots. Entity actors and atomic composite writers must instead use
+/// `Absent` or `Exact`, allowing the store to reject a same-sequence snapshot
+/// replacement before journal and derived-index rows are mutated.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SnapshotSourceFence {
+    /// The caller does not participate in snapshot-source fencing.
+    #[default]
+    Unchecked,
+    /// State reconstruction observed no durable snapshot.
+    Absent,
+    /// State reconstruction used this exact snapshot sequence and payload.
+    Exact {
+        /// Snapshot sequence captured during state reconstruction.
+        sequence_nr: u64,
+        /// Exact serialized snapshot payload captured during reconstruction.
+        state: Vec<u8>,
+    },
+}
+
 /// A derived vector-index row to co-commit with an append (ADR-0155).
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntityVectorRow {
@@ -70,12 +157,14 @@ pub struct EntityVectorRow {
 /// when true, even an empty row set means "delete every prior row for this entity."
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IndexReconciliation {
-    /// Reconcile the entity's complete declared-key ownership set (ADR-0171).
+    /// Reconcile the entity's complete declared-key ownership set (ADR-0192).
     pub keys: bool,
     /// Versioned signature of the complete declared-key contract used for this write.
     pub key_set_signature: Option<String>,
     /// Reconcile the entity's complete derived-vector row set (ADR-0155).
     pub vectors: bool,
+    /// Exact snapshot generation used to derive the event and index rows.
+    pub snapshot_source: SnapshotSourceFence,
 }
 
 /// Pack an `f32` slice to little-endian bytes for `entity_vector_index`.

@@ -1,10 +1,15 @@
 //! SQLite-compatible schema for the Turso/libSQL event store.
 
+mod event_store;
 mod query_plane;
 
 pub use crate::schema_event_history::{
     ALTER_EVENTS_ADD_SEGMENT_INDEX, CREATE_EVENT_SEGMENTS_OPEN_INDEX, CREATE_EVENT_SEGMENTS_TABLE,
     CREATE_SNAPSHOT_HISTORY_ENTITY_INDEX, CREATE_SNAPSHOT_HISTORY_TABLE,
+};
+pub use event_store::{
+    CREATE_EVENTS_ENTITY_INDEX, CREATE_EVENTS_TABLE, CREATE_PERSISTENCE_BATCH_IDEMPOTENCY_TABLE,
+    CREATE_SNAPSHOTS_TABLE,
 };
 pub use query_plane::{
     CREATE_ENTITY_CATALOG_STATUS_INDEX, CREATE_ENTITY_CATALOG_TABLE,
@@ -12,38 +17,10 @@ pub use query_plane::{
     CREATE_ENTITY_FIELD_INDEX_STATUS, CREATE_ENTITY_FIELD_INDEX_TABLE,
     CREATE_ENTITY_KEY_INDEX_ENTITY, CREATE_ENTITY_KEY_INDEX_TABLE,
     CREATE_ENTITY_VECTOR_INDEX_ENTITY, CREATE_ENTITY_VECTOR_INDEX_PARTITION,
-    CREATE_ENTITY_VECTOR_INDEX_TABLE, CREATE_VECTOR_INDEX_BACKFILL_WATERMARK,
+    CREATE_ENTITY_VECTOR_INDEX_TABLE, CREATE_QUERY_PROJECTION_DIRTY_TABLE,
+    CREATE_QUERY_PROJECTION_DIRTY_TYPE_INDEX, CREATE_VECTOR_INDEX_BACKFILL_WATERMARK,
+    SEED_QUERY_PROJECTION_DIRTY,
 };
-
-pub const CREATE_EVENTS_TABLE: &str = "\
-CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tenant TEXT NOT NULL,
-    entity_type TEXT NOT NULL,
-    entity_id TEXT NOT NULL,
-    sequence_nr INTEGER NOT NULL,
-    segment_index INTEGER NOT NULL DEFAULT 0,
-    event_type TEXT NOT NULL,
-    payload TEXT NOT NULL,
-    metadata TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(tenant, entity_type, entity_id, sequence_nr)
-);";
-
-pub const CREATE_EVENTS_ENTITY_INDEX: &str = "\
-CREATE INDEX IF NOT EXISTS idx_events_entity
-    ON events(tenant, entity_type, entity_id, sequence_nr);";
-
-pub const CREATE_SNAPSHOTS_TABLE: &str = "\
-CREATE TABLE IF NOT EXISTS snapshots (
-    tenant TEXT NOT NULL,
-    entity_type TEXT NOT NULL,
-    entity_id TEXT NOT NULL,
-    sequence_nr INTEGER NOT NULL,
-    snapshot BLOB NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY(tenant, entity_type, entity_id)
-);";
 
 pub const CREATE_SPECS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS specs (

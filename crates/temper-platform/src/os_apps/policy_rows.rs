@@ -1,58 +1,45 @@
 use super::AppBundle;
-use crate::state::PlatformState;
 
-pub(crate) fn os_app_policy_row_id(app_name: &str, relative_path: &str) -> String {
-    let source = relative_path
-        .trim_start_matches('/')
-        .strip_prefix("policies/")
-        .unwrap_or_else(|| relative_path.trim_start_matches('/'))
-        .strip_suffix(".cedar")
-        .unwrap_or(relative_path);
-    let mut slug = String::new();
-    for ch in source.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
-            slug.push(ch);
-        } else if ch == '/' || ch == '.' {
-            slug.push('-');
-        } else {
-            slug.push('_');
-        }
-    }
-    let slug = slug.trim_matches('-');
-    if slug.is_empty() {
-        format!("{app_name}-policy")
-    } else {
-        format!("{app_name}-{slug}")
-    }
+pub(super) struct OwnedPolicyEntry {
+    pub(super) policy_id: String,
+    pub(super) cedar_text: String,
+    pub(super) created_by: String,
 }
 
-pub(super) async fn persist_bundle_policy_rows(
-    state: &PlatformState,
-    tenant: &str,
-    app_name: &str,
-    bundle: &AppBundle,
-) -> Result<(), String> {
-    if bundle.cedar_policy_sources.is_empty() {
-        return Ok(());
+pub(crate) fn os_app_policy_row_id(app_name: &str, relative_path: &str) -> String {
+    fn hex_component(value: &str) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut encoded = String::with_capacity(value.len() * 2);
+        for byte in value.as_bytes() {
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+        encoded
     }
-    let Some(policy_store) = state.server.policy_store() else {
-        return Ok(());
-    };
+
+    // Hex encoding is injective and the separator is outside its alphabet, so
+    // no app owner/path pair can alias another row in the tenant-wide primary
+    // key. Slug concatenation was ambiguous across both owner and path.
+    format!(
+        "os-app-{}-{}",
+        hex_component(app_name),
+        hex_component(relative_path.trim_start_matches('/'))
+    )
+}
+
+pub(super) fn bundle_policy_entries(app_name: &str, bundle: &AppBundle) -> Vec<OwnedPolicyEntry> {
     let created_by = format!("os-app:{app_name}");
+    let mut entries = Vec::new();
     for source in &bundle.cedar_policy_sources {
         let cedar_text = source.text.trim();
         if cedar_text.is_empty() {
             continue;
         }
-        let policy_id = os_app_policy_row_id(app_name, &source.relative_path);
-        policy_store
-            .save_policy(tenant, &policy_id, cedar_text, &created_by)
-            .await
-            .map_err(|error| {
-                format!(
-                    "Failed to persist OS app Cedar policy row '{policy_id}' for '{app_name}': {error}"
-                )
-            })?;
+        entries.push(OwnedPolicyEntry {
+            policy_id: os_app_policy_row_id(app_name, &source.relative_path),
+            cedar_text: cedar_text.to_string(),
+            created_by: created_by.clone(),
+        });
     }
-    Ok(())
+    entries
 }

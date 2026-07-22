@@ -21,7 +21,9 @@ mod published_artifacts;
 mod query_projection_queue;
 pub(crate) mod rate_limit;
 mod runtime_metrics;
+pub(crate) mod source_fenced_projection;
 pub(crate) mod storage_caps;
+mod tenant_generation;
 pub mod trajectory;
 pub mod wasm_invocation_log;
 
@@ -39,9 +41,11 @@ pub use persistence::WasmModuleSource;
 pub use policy_suggestions::PolicySuggestionEngine;
 pub use published_artifacts::PublishFileArtifactRequest;
 pub(crate) use query_projection_queue::{ProjectionEnqueueOutcome, QueryProjectionWriteQueue};
+pub use tenant_generation::{SpecPublicationGuard, TenantGenerationLease};
 pub use trajectory::{TrajectoryEntry, TrajectorySource};
 pub use wasm_invocation_log::WasmInvocationEntry;
 
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -87,10 +91,27 @@ pub struct BoundActionHookContext<'a> {
     pub action: &'a str,
     pub params: &'a serde_json::Value,
     pub state_json: &'a serde_json::Value,
+    /// Stable, content-bound operation ID. Implementations must treat repeated
+    /// calls with this ID as the same operation and return the same successful
+    /// output after any partial completion.
+    pub operation_id: &'a str,
+    /// Runtime-generation token captured while the governed request still held
+    /// its tenant read lease. Publication-capable hooks must use this token for
+    /// their first writer acquisition after the lease handoff.
+    pub expected_generation: Option<u64>,
 }
 
 #[async_trait::async_trait]
 pub trait BoundActionHook: Send + Sync {
+    /// Whether this hook must run after the request releases its stable tenant
+    /// generation because the hook itself may publish a replacement generation.
+    fn requires_generation_handoff(&self, _entity_type: &str, _action: &str) -> bool {
+        false
+    }
+
+    /// Execute one content-idempotent operation. A process may repeat this call
+    /// after losing the completion acknowledgement, so external mutations and
+    /// the returned output must be stable for `ctx.operation_id`.
     async fn after_bound_action(
         &self,
         ctx: BoundActionHookContext<'_>,
@@ -404,6 +425,22 @@ pub struct ServerState {
     /// O(log n) answer once the type is fully keyed (ARN-68). Loaded lazily from the
     /// durable watermark (see [`key_index_watermarks_loaded`]).
     pub key_index_backfilled: Arc<RwLock<BTreeMap<String, String>>>,
+    /// Tenant/type contracts currently inside the fenced activate → replay →
+    /// publish → ready cutover. Actor spawn is closed until readiness commits.
+    pub(crate) activating_key_contracts: Arc<RwLock<BTreeSet<(String, String)>>>,
+    /// Per-tenant coordinators serializing durable spec publication through
+    /// registry/key-contract readiness cutover.
+    spec_publication_locks: Arc<tokio::sync::Mutex<BTreeMap<String, Arc<tokio::sync::RwLock<()>>>>>,
+    /// Monotonic version of each complete live tenant generation. A bound
+    /// action captures this while holding a read lease and validates it after
+    /// handing off to a publication writer.
+    tenant_generation_versions: Arc<RwLock<BTreeMap<String, u64>>>,
+    /// Tenants whose publication may have crossed the durable commit boundary
+    /// but has not completed its live registry/key-contract cutover.
+    spec_publication_gated_tenants: Arc<RwLock<BTreeSet<String>>>,
+    /// Exact runtime-generation intent responsible for a sticky tenant gate.
+    /// Only an identical retry may discharge an outcome-ambiguous publication.
+    spec_publication_debts: Arc<RwLock<BTreeMap<String, String>>>,
     /// Tenants whose durable watermarks have been read into `key_index_backfilled`
     /// at least once this run. Gates the one-time-per-tenant load on the read path.
     pub key_index_watermarks_loaded: Arc<RwLock<BTreeSet<String>>>,
@@ -441,7 +478,10 @@ pub struct ServerState {
     /// LRU cache of entity current state, updated on every state change broadcast.
     /// Key: "{tenant}:{entity_type}:{entity_id}", Value: (current_state, last_updated).
     /// Capped at [`state_cache_budget()`] entries; oldest entry evicted automatically.
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "claim-scoped weak locks require the ownership shape to remain explicit"
+    )]
     pub entity_state_cache:
         Arc<Mutex<lru::LruCache<String, (String, chrono::DateTime<chrono::Utc>)>>>,
     /// Configurable timeout for actor ask operations (default: 5s).
@@ -458,6 +498,12 @@ pub struct ServerState {
     pub eventual_tracker: Arc<RwLock<crate::eventual_invariants::EventualInvariantTracker>>,
     /// Idempotency cache for deduplicating agent retries.
     pub idempotency_cache: Arc<IdempotencyCache>,
+    /// Per-claim serializers for concurrent composite callbacks in this
+    /// single-process runtime. Values are weak so completed claim namespaces
+    /// are reclaimed on the next admission instead of becoming durable memory.
+    #[allow(clippy::type_complexity)]
+    pub(crate) composite_claim_locks:
+        Arc<Mutex<BTreeMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>>,
     /// Optional encrypted secrets vault for per-tenant secret management.
     /// Broadcast channel for new pending decisions (SSE subscriptions).
     pub pending_decision_tx: Arc<tokio::sync::broadcast::Sender<PendingDecision>>,
@@ -682,6 +728,11 @@ impl ServerState {
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
             entity_index_hydrated: Arc::new(RwLock::new(BTreeSet::new())),
             key_index_backfilled: Arc::new(RwLock::new(BTreeMap::new())),
+            activating_key_contracts: Arc::new(RwLock::new(BTreeSet::new())),
+            spec_publication_locks: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+            tenant_generation_versions: Arc::new(RwLock::new(BTreeMap::new())),
+            spec_publication_gated_tenants: Arc::new(RwLock::new(BTreeSet::new())),
+            spec_publication_debts: Arc::new(RwLock::new(BTreeMap::new())),
             key_index_watermarks_loaded: Arc::new(RwLock::new(BTreeSet::new())),
             event_tx: Arc::new(event_tx),
             entity_observe_tx: Arc::new(entity_observe_tx),
@@ -707,6 +758,7 @@ impl ServerState {
                 crate::eventual_invariants::EventualInvariantTracker::new(),
             )),
             idempotency_cache: Arc::new(IdempotencyCache::new()),
+            composite_claim_locks: Arc::new(Mutex::new(BTreeMap::new())),
             pending_decision_tx: Arc::new(pending_decision_tx),
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
             commons_guardrail_tenants: Arc::new(RwLock::new(BTreeSet::new())),
@@ -930,6 +982,11 @@ impl ServerState {
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
             entity_index_hydrated: Arc::new(RwLock::new(BTreeSet::new())),
             key_index_backfilled: Arc::new(RwLock::new(BTreeMap::new())),
+            activating_key_contracts: Arc::new(RwLock::new(BTreeSet::new())),
+            spec_publication_locks: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+            tenant_generation_versions: Arc::new(RwLock::new(BTreeMap::new())),
+            spec_publication_gated_tenants: Arc::new(RwLock::new(BTreeSet::new())),
+            spec_publication_debts: Arc::new(RwLock::new(BTreeMap::new())),
             key_index_watermarks_loaded: Arc::new(RwLock::new(BTreeSet::new())),
             event_tx: Arc::new(event_tx),
             entity_observe_tx: Arc::new(entity_observe_tx),
@@ -955,6 +1012,7 @@ impl ServerState {
                 crate::eventual_invariants::EventualInvariantTracker::new(),
             )),
             idempotency_cache: Arc::new(IdempotencyCache::new()),
+            composite_claim_locks: Arc::new(Mutex::new(BTreeMap::new())),
             pending_decision_tx: Arc::new(pending_decision_tx),
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
             commons_guardrail_tenants: Arc::new(RwLock::new(BTreeSet::new())),
@@ -1208,7 +1266,7 @@ impl ServerState {
 
         let entity_state = serde_json::to_value(
             &self
-                .get_tenant_entity_state(tenant, "File", file_id)
+                .get_tenant_entity_state_in_generation(tenant, "File", file_id, agent_ctx)
                 .await
                 .map_err(|e| format!("failed to load File('{file_id}') state: {e}"))?
                 .state,

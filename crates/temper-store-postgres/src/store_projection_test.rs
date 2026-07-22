@@ -3,7 +3,7 @@ use crate::migration::run_migrations;
 use sqlx::PgPool;
 use temper_runtime::persistence::{
     EntityKeyRow, EventStore, IndexReconciliation, KeyIndexBackfillFence, PersistenceAppend,
-    SnapshotBackfillFence,
+    PersistenceBatchIdempotency, SnapshotBackfillFence,
 };
 
 fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
@@ -207,6 +207,7 @@ fn entity_key_index_present_absent_and_atomic_reject() {
                     reconcile_keys: true,
                     key_set_signature: Some("v3:path".to_string()),
                     snapshot_source: Default::default(),
+                    batch_idempotency: None,
                 },
                 PersistenceAppend {
                     persistence_id: winner_pid.clone(),
@@ -216,6 +217,7 @@ fn entity_key_index_present_absent_and_atomic_reject() {
                     reconcile_keys: true,
                     key_set_signature: Some("v3:path".to_string()),
                     snapshot_source: Default::default(),
+                    batch_idempotency: None,
                 },
             ])
             .await
@@ -246,6 +248,7 @@ fn entity_key_index_present_absent_and_atomic_reject() {
                     reconcile_keys: true,
                     key_set_signature: Some("v3:path".to_string()),
                     snapshot_source: Default::default(),
+                    batch_idempotency: None,
                 },
                 PersistenceAppend {
                     persistence_id: conflict_pid.clone(),
@@ -255,6 +258,7 @@ fn entity_key_index_present_absent_and_atomic_reject() {
                     reconcile_keys: true,
                     key_set_signature: Some("v3:path".to_string()),
                     snapshot_source: Default::default(),
+                    batch_idempotency: None,
                 },
             ])
             .await;
@@ -293,6 +297,52 @@ fn entity_key_index_present_absent_and_atomic_reject() {
             "rejected batch must preserve the committed owner"
         );
 
+        // A durable batch claim is checked before stale sequence fences, and
+        // binds the idempotency key to the complete intended write.
+        let idempotent_pid = format!("{tenant}:Repository:repo-idempotent");
+        let mut idempotent_append = PersistenceAppend {
+            persistence_id: idempotent_pid.clone(),
+            expected_sequence: 0,
+            events: vec![test_envelope(
+                "CompositeEvent",
+                serde_json::json!({"push": 1}),
+            )],
+            key_rows: Vec::new(),
+            reconcile_keys: false,
+            key_set_signature: None,
+            snapshot_source: Default::default(),
+            batch_idempotency: Some(PersistenceBatchIdempotency {
+                persistence_id: idempotent_pid.clone(),
+                idempotency_key: "push-1".to_string(),
+                intent_hash: "intent-a".to_string(),
+            }),
+        };
+        store
+            .append_batch(std::slice::from_ref(&idempotent_append))
+            .await
+            .expect("first content-bound batch");
+        let retry = store
+            .append_batch(std::slice::from_ref(&idempotent_append))
+            .await
+            .expect("stale exact retry must be a no-op");
+        assert!(retry[0].batch_already_applied);
+        assert_eq!(
+            store.read_events(&idempotent_pid, 0).await.unwrap().len(),
+            1
+        );
+        idempotent_append
+            .batch_idempotency
+            .as_mut()
+            .expect("claim")
+            .intent_hash = "intent-b".to_string();
+        let mismatch = store.append_batch(&[idempotent_append]).await;
+        assert!(
+            mismatch
+                .expect_err("same key with different work must fail")
+                .to_string()
+                .contains("different intent")
+        );
+
         // Clean up this test tenant's rows.
         let _ = crate::dbm::postgres_query!("DELETE FROM entity_key_index WHERE tenant = $1")
             .bind(&tenant)
@@ -302,6 +352,12 @@ fn entity_key_index_present_absent_and_atomic_reject() {
             .bind(&tenant)
             .execute(&pool)
             .await;
+        let _ = crate::dbm::postgres_query!(
+            "DELETE FROM persistence_batch_idempotency WHERE persistence_id = $1"
+        )
+        .bind(&idempotent_pid)
+        .execute(&pool)
+        .await;
     });
 }
 
@@ -1252,6 +1308,16 @@ fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
         let mut envelope = test_envelope("Created", fields.clone());
         envelope.sequence_nr = 1;
 
+        let key_signature = "v3|session_entry[SessionId,EntryId]";
+        store
+            .mark_key_index_backfilled(&tenant, entity_type, key_signature)
+            .await
+            .expect("seed complete declared-key coverage");
+        let revision_before = store
+            .key_index_reconciliation_revision(&tenant, entity_type)
+            .await
+            .expect("read pre-create key revision");
+
         let sequence_nr = store
             .create_data_only_entity_native(
                 &tenant,
@@ -1265,6 +1331,37 @@ fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
             .unwrap();
 
         assert_eq!(sequence_nr, 1);
+        assert!(
+            !store
+                .key_index_backfilled_types(&tenant)
+                .await
+                .expect("read invalidated key coverage")
+                .iter()
+                .any(|(covered_type, _)| covered_type == entity_type),
+            "a legacy native create without exact key rows must invalidate authoritative keyed absence"
+        );
+        assert!(
+            store
+                .key_index_reconciliation_revision(&tenant, entity_type)
+                .await
+                .expect("read post-create key revision")
+                > revision_before,
+            "coverage invalidation must advance the contract revision"
+        );
+        let dirty_projection_count: i64 = crate::dbm::postgres_query_scalar!(
+            "SELECT COUNT(*)::bigint FROM query_projection_dirty \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(&tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            dirty_projection_count, 0,
+            "the atomic journal+catalog fast path must close its trigger-created repair marker"
+        );
         let event_count: i64 = crate::dbm::postgres_query_scalar!(
             "SELECT COUNT(*)::bigint FROM events \
              WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",

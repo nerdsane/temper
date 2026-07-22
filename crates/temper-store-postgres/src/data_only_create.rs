@@ -13,7 +13,9 @@ use crate::metrics::{
 };
 use crate::platform::{canonical_projection_status, json_hash, scalar_index_fields, storage_error};
 use crate::store::{
-    event_stream_lock_key, lock_event_stream, lock_key_contract, reconcile_key_contract_state,
+    KeyContractUse, clear_query_projection_dirty, event_stream_lock_key,
+    invalidate_key_coverage_for_unreconciled_append, lock_event_stream, lock_key_contract,
+    reconcile_key_contract_state,
 };
 
 const DATA_ONLY_CREATE_OPERATION: &str = "data_only_create";
@@ -167,6 +169,21 @@ impl PostgresEventStore {
         let lock_key = event_stream_lock_key(tenant, entity_type, entity_id);
         lock_event_stream(&mut tx, &lock_key).await?;
 
+        let snapshot: Option<(i64,)> = crate::dbm::postgres_query_as!(
+            "SELECT sequence_nr FROM snapshots \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+             FOR UPDATE",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+        if snapshot.is_some() {
+            return Err(PersistenceError::SnapshotGenerationChanged);
+        }
+
         if reconcile_keys {
             for key in key_rows {
                 let holder: Option<(String,)> = crate::dbm::postgres_query_as!(
@@ -191,7 +208,19 @@ impl PostgresEventStore {
             }
         }
 
-        reconcile_key_contract_state(&mut tx, tenant, entity_type, key_set_signature).await?;
+        if reconcile_keys {
+            reconcile_key_contract_state(
+                &mut tx,
+                tenant,
+                entity_type,
+                key_set_signature,
+                None,
+                KeyContractUse::LiveWrite,
+            )
+            .await?;
+        } else {
+            invalidate_key_coverage_for_unreconciled_append(&mut tx, tenant, entity_type).await?;
+        }
 
         let metadata_json = serde_json::to_value(&event.metadata)
             .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
@@ -291,6 +320,12 @@ impl PostgresEventStore {
                 .map_err(storage_error)?;
             }
         }
+
+        // The event and exact catalog/EAV projection were installed under the
+        // same stream transaction. Migration triggers conservatively mark both
+        // writes dirty for mixed-version safety; close that marker only after
+        // every projection row above is complete.
+        clear_query_projection_dirty(&mut tx, tenant, entity_type, entity_id).await?;
 
         let commit_started = Instant::now();
         tx.commit().await.map_err(|e| {

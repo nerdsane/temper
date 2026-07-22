@@ -362,6 +362,21 @@ pub const CREATE_ENTITY_FIELD_INDEX_STATUS: &str = "\
 CREATE INDEX IF NOT EXISTS idx_efi_status
     ON entity_field_index (tenant, entity_type, status);";
 
+/// Entities whose journal/snapshot source is newer than their query projection.
+pub const CREATE_QUERY_PROJECTION_DIRTY_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS query_projection_dirty (
+    tenant      TEXT        NOT NULL,
+    entity_type TEXT        NOT NULL,
+    entity_id   TEXT        NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant, entity_type, entity_id)
+);";
+
+/// Bounded dirty-projection enumeration by tenant and entity type.
+pub const CREATE_QUERY_PROJECTION_DIRTY_TYPE_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_query_projection_dirty_type
+    ON query_projection_dirty (tenant, entity_type, entity_id);";
+
 /// Feature request records generated from trajectory analysis.
 pub const CREATE_FEATURE_REQUESTS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS feature_requests (

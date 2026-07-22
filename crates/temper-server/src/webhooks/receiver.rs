@@ -38,6 +38,18 @@ pub async fn handle_webhook(
     Query(query): Query<BTreeMap<String, String>>,
 ) -> impl IntoResponse {
     let tenant = TenantId::new(&tenant_str);
+    let Some(_generation) = state.try_begin_tenant_request(&tenant).await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Tenant runtime generation is being published; retry the webhook".to_string(),
+        );
+    };
+    if state.spec_publication_gated(&tenant) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Tenant runtime generation is being published; retry the webhook".to_string(),
+        );
+    }
 
     // Look up webhook config from registry.
     let lookup = find_webhook(&state, &tenant, &webhook_path);

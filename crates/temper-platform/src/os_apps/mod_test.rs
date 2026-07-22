@@ -2,6 +2,63 @@ use super::agent_bootstrap::{
     AgentSoulRefreshDecision, bootstrapped_agent_soul_entity_id, decide_agent_soul_refresh,
 };
 use super::*;
+
+#[test]
+fn os_app_publication_intent_binds_every_persisted_provenance_field() {
+    let baseline = InstalledAppRecord {
+        tenant: "tenant-a".to_string(),
+        app_name: "project-management".to_string(),
+        source_kind: "genesis".to_string(),
+        app_ref: "temper/project-management@abc".to_string(),
+        version_hash: "abc".to_string(),
+        pinned_version_hash: "abc".to_string(),
+        current_version_hash: "abc".to_string(),
+        follow_policy: "pinned".to_string(),
+        closure_id: "closure-a".to_string(),
+        registry_url: "https://registry.example".to_string(),
+        registry_tenant: "source-a".to_string(),
+        app_version: "1.0.0".to_string(),
+        bundle_digest: "bundle".to_string(),
+        spec_digest: "spec".to_string(),
+        policy_digest: "policy".to_string(),
+        wasm_digest: "wasm".to_string(),
+        content_digest: "content".to_string(),
+        seed_digest: "seed".to_string(),
+        installed_at: None,
+        last_reconciled_at: None,
+        status: "installed".to_string(),
+    };
+    let intent = |record: &InstalledAppRecord| {
+        let mut components = Vec::new();
+        append_installed_app_record_intent(&mut components, record);
+        temper_server::ServerState::spec_publication_intent(
+            "os-app-runtime-generation",
+            components
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_slice())),
+        )
+    };
+    let baseline_intent = intent(&baseline);
+    for mutate in [
+        |record: &mut InstalledAppRecord| record.source_kind.push_str("-other"),
+        |record: &mut InstalledAppRecord| record.app_ref.push_str("-other"),
+        |record: &mut InstalledAppRecord| record.version_hash.push_str("-other"),
+        |record: &mut InstalledAppRecord| record.pinned_version_hash.push_str("-other"),
+        |record: &mut InstalledAppRecord| record.current_version_hash.push_str("-other"),
+        |record: &mut InstalledAppRecord| record.follow_policy.push_str("-other"),
+        |record: &mut InstalledAppRecord| record.closure_id.push_str("-other"),
+        |record: &mut InstalledAppRecord| record.registry_url.push_str("-other"),
+        |record: &mut InstalledAppRecord| record.registry_tenant.push_str("-other"),
+    ] {
+        let mut changed = baseline.clone();
+        mutate(&mut changed);
+        assert_ne!(
+            intent(&changed),
+            baseline_intent,
+            "persisted provenance must change the sticky publication intent"
+        );
+    }
+}
 use std::collections::HashMap;
 use std::fs;
 use std::time::Duration;
@@ -264,6 +321,40 @@ fn test_reconcile_plan_for_wasm_only_digest_skips_unrelated_phases() {
             content: false,
             seed: false,
         }
+    );
+}
+
+#[test]
+fn publishing_record_retries_every_unproved_post_commit_phase() {
+    let digest = OsAppBundleDigest {
+        app_name: "publication-retry".to_string(),
+        app_version: "1.0.0".to_string(),
+        bundle_digest: "sha256:bundle".to_string(),
+        spec_digest: "sha256:spec".to_string(),
+        policy_digest: "sha256:policy".to_string(),
+        wasm_digest: "sha256:wasm".to_string(),
+        content_digest: "sha256:content".to_string(),
+        seed_digest: "sha256:seed".to_string(),
+    };
+    let record = InstalledAppRecord {
+        tenant: "default".to_string(),
+        app_name: digest.app_name.clone(),
+        app_version: digest.app_version.clone(),
+        bundle_digest: digest.bundle_digest.clone(),
+        spec_digest: digest.spec_digest.clone(),
+        policy_digest: digest.policy_digest.clone(),
+        wasm_digest: digest.wasm_digest.clone(),
+        content_digest: digest.content_digest.clone(),
+        seed_digest: digest.seed_digest.clone(),
+        status: "publishing:{\"bundle_wasm_digest_changed\":false,\"app_recorded_at\":null}"
+            .to_string(),
+        ..InstalledAppRecord::default()
+    };
+
+    assert_eq!(
+        reconcile::plan_reconcile_from_installed_record(&record, &digest, true, true, true),
+        OsAppInstallPlan::all(),
+        "target digests in an in-progress record do not prove runtime, content, or seed completion"
     );
 }
 
@@ -534,6 +625,72 @@ async fn test_runtime_recovery_requires_active_policies_for_ready_outcome() {
             .map(String::as_str),
         Some(cached_policy_text.as_str()),
         "test setup should preserve cached policy text while active authz is empty"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
+async fn test_runtime_recovery_reconciles_a_warm_but_incomplete_publication() {
+    let db_path = format!(
+        "/tmp/temper-test-runtime-publishing-{}.db",
+        uuid::Uuid::new_v4()
+    );
+    let db_url = format!("file:{db_path}");
+    let tenant = "test-runtime-publishing";
+    let app_name = "project-management";
+
+    let turso = temper_store_turso::TursoEventStore::new(&db_url, None)
+        .await
+        .unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+    install_os_app(&state, tenant, app_name)
+        .await
+        .expect("initial install should succeed");
+
+    let ps = state
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.platform.clone())
+        .expect("platform store");
+    let mut record = ps
+        .get_installed_app(tenant, app_name)
+        .await
+        .expect("read installed metadata")
+        .expect("installed metadata");
+    record.status =
+        "publishing:{\"bundle_wasm_digest_changed\":false,\"app_recorded_at\":null}".to_string();
+    ps.record_installed_app_metadata(&record)
+        .await
+        .expect("simulate crash after runtime publication but before finalization");
+
+    assert_eq!(
+        crate::recovery::recover_installed_app_runtime_state(
+            &state,
+            ps.as_ref(),
+            tenant,
+            app_name,
+        )
+        .await,
+        crate::recovery::InstalledAppRuntimeRecoveryOutcome::NeedsReconcile,
+        "warm runtime artifacts cannot prove post-publication content and seed completion"
+    );
+
+    crate::recovery::restore_installed_apps(&state, ps.as_ref()).await;
+    let recovered = ps
+        .get_installed_app(tenant, app_name)
+        .await
+        .expect("read recovered metadata")
+        .expect("recovered metadata");
+    assert_eq!(
+        recovered.status, "installed",
+        "startup recovery must run the full idempotent reconcile and finalize metadata"
     );
 
     let _ = std::fs::remove_file(&db_path);
@@ -821,11 +978,11 @@ async fn test_reconcile_os_app_repairs_entity_set_map_from_matching_digest() {
 
     let result = reconcile_os_app(&state, tenant_name, "project-management")
         .await
-        .expect("reconcile should heal missing entity-set map without reinstalling content");
+        .expect("reconcile should heal missing entity-set map in one guarded generation");
 
     assert!(
-        matches!(result, OsAppReconcileResult::Skipped { .. }),
-        "matching digest should repair OData entity-set mappings without reinstall, got {result:?}"
+        matches!(result, OsAppReconcileResult::Installed { .. }),
+        "runtime mapping drift requires one guarded idempotent reinstall, got {result:?}"
     );
     assert_eq!(
         state
@@ -1372,7 +1529,7 @@ async fn test_install_os_app_persists_granular_policy_rows() {
         .expect("load granular policies");
     assert!(
         rows.iter().any(|row| {
-            row.policy_id == "project-management-issue"
+            row.policy_id == os_app_policy_row_id("project-management", "policies/issue.cedar")
                 && row.enabled
                 && row.cedar_text.contains("resource is Issue")
         }),
@@ -1387,6 +1544,162 @@ async fn test_install_os_app_persists_granular_policy_rows() {
             .any(|(tenant, text)| tenant == "test-policy-rows" && text.contains("Issue")),
         "legacy aggregate policy should still be persisted for compatibility"
     );
+
+    temper_server::authz::load_and_activate_tenant_policies(&state.server, "test-policy-rows")
+        .await;
+    let reloaded_rows = policy_store
+        .load_policies_for_tenant("test-policy-rows")
+        .await
+        .expect("reload granular policies after compatibility projection");
+    assert!(
+        reloaded_rows.iter().all(|row| row.policy_id != "primary"),
+        "the compatibility aggregate must not be copied back into a primary row: {reloaded_rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_subsumed_multi_owner_policy_reload_does_not_create_ownerless_primary() {
+    use temper_store_turso::TursoEventStore;
+
+    let tenant = "test-policy-owner-reload";
+    let shared = r#"permit(principal, action == Action::\"shared\", resource);"#;
+    let owner_a =
+        format!("{shared}\npermit(principal, action == Action::\"owner_a_only\", resource);");
+    let aggregate = merge_bundle_policies("", &[owner_a.clone(), shared.to_string()]);
+    assert_eq!(
+        aggregate, owner_a,
+        "the compatibility aggregate should deduplicate the subsumed owner row"
+    );
+
+    let db_path = format!(
+        "/tmp/temper-policy-owner-reload-{}.db",
+        uuid::Uuid::new_v4()
+    );
+    let db_url = format!("file:{db_path}");
+    let turso = TursoEventStore::new(&db_url, None).await.unwrap();
+    let owner_a_entries = [("owner-a", owner_a.as_str(), "os-app:owner-a")];
+    turso
+        .publish_specs(
+            tenant,
+            &[],
+            false,
+            None,
+            Some(&aggregate),
+            None,
+            &[],
+            Some("os-app:owner-a"),
+            &owner_a_entries,
+        )
+        .await
+        .expect("publish first policy owner");
+    let owner_b_entries = [("owner-b", shared, "os-app:owner-b")];
+    turso
+        .publish_specs(
+            tenant,
+            &[],
+            false,
+            None,
+            Some(&aggregate),
+            None,
+            &[],
+            Some("os-app:owner-b"),
+            &owner_b_entries,
+        )
+        .await
+        .expect("publish subsumed second policy owner");
+
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso.clone()));
+    temper_server::authz::load_and_activate_tenant_policies(&state.server, tenant).await;
+
+    turso
+        .publish_specs(
+            tenant,
+            &[],
+            false,
+            None,
+            Some(shared),
+            None,
+            &[],
+            Some("os-app:owner-a"),
+            &[],
+        )
+        .await
+        .expect("remove first policy owner's complete row set");
+    temper_server::authz::load_and_activate_tenant_policies(&state.server, tenant).await;
+
+    let rows = state
+        .server
+        .policy_store()
+        .expect("policy store")
+        .load_policies_for_tenant(tenant)
+        .await
+        .expect("reload granular policy owners");
+    assert_eq!(rows.len(), 1, "only the surviving owner row may remain");
+    assert_eq!(rows[0].policy_id, "owner-b");
+    assert_eq!(rows[0].created_by, "os-app:owner-b");
+    assert!(
+        rows.iter().all(|row| row.policy_id != "primary"),
+        "a deduplicated compatibility aggregate must never become ownerless authority: {rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_install_os_app_prefers_early_granular_rows_over_legacy_cache() {
+    use temper_store_turso::TursoEventStore;
+
+    let tenant = "test-policy-primary-migration";
+    let legacy = r#"permit(principal, action == Action::"legacy_only", resource);"#;
+    let early = r#"permit(principal, action == Action::"early_only", resource);"#;
+    let db_path = format!("/tmp/temper-policy-primary-{}.db", uuid::Uuid::new_v4());
+    let db_url = format!("file:{db_path}");
+    let turso = TursoEventStore::new(&db_url, None).await.unwrap();
+    turso
+        .upsert_tenant_policy(tenant, legacy)
+        .await
+        .expect("persist legacy aggregate");
+    turso
+        .save_policy(tenant, "early", early, "early-writer")
+        .await
+        .expect("persist early granular row");
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .authz
+        .reload_tenant_policies(tenant, legacy)
+        .expect("activate legacy policy");
+    state
+        .server
+        .tenant_policies
+        .write()
+        .unwrap()
+        .insert(tenant.to_string(), legacy.to_string());
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+
+    install_os_app(&state, tenant, "project-management")
+        .await
+        .expect("install must use the canonical granular generation");
+
+    let rows = state
+        .server
+        .policy_store()
+        .expect("policy store")
+        .load_policies_for_tenant(tenant)
+        .await
+        .expect("load migrated rows");
+    assert!(rows.iter().all(|row| row.policy_id != "primary"));
+    assert!(rows.iter().any(|row| row.policy_id == "early"));
+    let active = state
+        .server
+        .authz
+        .get_tenant_policy_text(tenant)
+        .expect("installed generation should be active");
+    assert!(!active.contains("legacy_only"));
+    assert!(active.contains("early_only"));
 }
 
 /// Proves the full install → persist → reboot → restore cycle.
@@ -1833,11 +2146,11 @@ mode = "commons"
     );
     assert_eq!(
         os_app_policy_row_id("katagami-commons", "policies/palette_system.cedar"),
-        "katagami-commons-palette_system"
+        "os-app-6b61746167616d692d636f6d6d6f6e73-706f6c69636965732f70616c657474655f73797374656d2e6365646172"
     );
     assert_eq!(
         os_app_policy_row_id("katagami-commons", "policies/commons/guardrail.cedar"),
-        "katagami-commons-commons-guardrail"
+        "os-app-6b61746167616d692d636f6d6d6f6e73-706f6c69636965732f636f6d6d6f6e732f67756172647261696c2e6365646172"
     );
     assert!(
         bundle
@@ -1847,6 +2160,15 @@ mode = "commons"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_os_app_policy_row_ids_are_disjoint_across_owner_path_boundaries() {
+    assert_ne!(
+        os_app_policy_row_id("foo", "policies/bar-baz.cedar"),
+        os_app_policy_row_id("foo-bar", "policies/baz.cedar"),
+        "distinct app owners and paths must never share a durable policy row"
+    );
 }
 
 #[test]

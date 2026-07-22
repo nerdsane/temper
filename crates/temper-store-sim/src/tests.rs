@@ -1,5 +1,7 @@
 use super::*;
-use temper_runtime::persistence::EventMetadata;
+use temper_runtime::persistence::{
+    EventMetadata, STATE_MATERIALIZATION_EVENT_TYPE, STATE_MATERIALIZATION_SCHEMA,
+};
 
 mod key_index;
 
@@ -16,6 +18,30 @@ fn test_envelope(seq: u64, event_type: &str) -> PersistenceEnvelope {
             actor_id: "test".to_string(),
         },
     }
+}
+
+fn materialization_envelope(entity_type: &str, entity_id: &str) -> PersistenceEnvelope {
+    let mut envelope = test_envelope(0, STATE_MATERIALIZATION_EVENT_TYPE);
+    envelope.payload = serde_json::json!({
+        "schema": STATE_MATERIALIZATION_SCHEMA,
+        "state": {
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "status": "Ready",
+            "item_count": 0,
+            "counters": {},
+            "booleans": {},
+            "lists": {},
+            "fields": {"Id": entity_id, "Status": "Ready"},
+            "events": [],
+            "total_event_count": 0,
+            "events_since_snapshot": 0,
+            "last_snapshot_sequence_nr": 0,
+            "sequence_nr": 0,
+            "processed_idempotency_keys": {},
+        }
+    });
+    envelope
 }
 
 #[tokio::test]
@@ -67,6 +93,8 @@ async fn append_batch_commits_multiple_journals_atomically() {
             key_rows: Vec::new(),
             reconcile_keys: false,
             key_set_signature: None,
+            snapshot_source: Default::default(),
+            batch_idempotency: None,
         },
         PersistenceAppend {
             persistence_id: "default:Order:ord-b".to_string(),
@@ -75,6 +103,8 @@ async fn append_batch_commits_multiple_journals_atomically() {
             key_rows: Vec::new(),
             reconcile_keys: false,
             key_set_signature: None,
+            snapshot_source: Default::default(),
+            batch_idempotency: None,
         },
     ];
 
@@ -86,15 +116,70 @@ async fn append_batch_commits_multiple_journals_atomically() {
             PersistenceAppendResult {
                 persistence_id: "default:Order:ord-a".to_string(),
                 sequence_nr: 1,
+                batch_already_applied: false,
             },
             PersistenceAppendResult {
                 persistence_id: "default:Order:ord-b".to_string(),
                 sequence_nr: 2,
+                batch_already_applied: false,
             },
         ]
     );
     assert_eq!(store.dump_journal("default:Order:ord-a").len(), 1);
     assert_eq!(store.dump_journal("default:Order:ord-b").len(), 2);
+}
+
+#[tokio::test]
+async fn append_batch_replays_a_content_bound_claim_without_rescanning_journals() {
+    let store = SimEventStore::no_faults(96);
+    let claim = temper_runtime::persistence::PersistenceBatchIdempotency {
+        persistence_id: "default:Repository:repo-1".to_string(),
+        idempotency_key: "push-1".to_string(),
+        intent_hash: "intent-a".to_string(),
+    };
+    let appends = vec![
+        PersistenceAppend {
+            persistence_id: "default:Repository:repo-1".to_string(),
+            expected_sequence: 0,
+            events: vec![test_envelope(0, "CompositeEvent")],
+            key_rows: Vec::new(),
+            reconcile_keys: false,
+            key_set_signature: None,
+            snapshot_source: Default::default(),
+            batch_idempotency: Some(claim.clone()),
+        },
+        PersistenceAppend {
+            persistence_id: "default:Commit:commit-1".to_string(),
+            expected_sequence: 0,
+            events: vec![test_envelope(0, "Create")],
+            key_rows: Vec::new(),
+            reconcile_keys: false,
+            key_set_signature: None,
+            snapshot_source: Default::default(),
+            batch_idempotency: None,
+        },
+    ];
+    store.append_batch(&appends).await.expect("first batch");
+
+    let retry = store
+        .append_batch(&appends)
+        .await
+        .expect("committed retry must be a no-op before stale sequence checks");
+    assert!(retry.iter().all(|result| result.batch_already_applied));
+    assert_eq!(store.dump_journal("default:Repository:repo-1").len(), 1);
+    assert_eq!(store.dump_journal("default:Commit:commit-1").len(), 1);
+
+    let mut conflicting = appends;
+    conflicting[0]
+        .batch_idempotency
+        .as_mut()
+        .expect("claim")
+        .intent_hash = "intent-b".to_string();
+    let error = store
+        .append_batch(&conflicting)
+        .await
+        .expect_err("same idempotency key with different work must fail");
+    assert!(error.to_string().contains("different intent"));
 }
 
 #[tokio::test]
@@ -118,6 +203,8 @@ async fn append_batch_conflict_leaves_all_journals_untouched() {
                 key_rows: Vec::new(),
                 reconcile_keys: false,
                 key_set_signature: None,
+                snapshot_source: Default::default(),
+                batch_idempotency: None,
             },
             PersistenceAppend {
                 persistence_id: "default:Order:ord-existing".to_string(),
@@ -126,6 +213,8 @@ async fn append_batch_conflict_leaves_all_journals_untouched() {
                 key_rows: Vec::new(),
                 reconcile_keys: false,
                 key_set_signature: None,
+                snapshot_source: Default::default(),
+                batch_idempotency: None,
             },
         ])
         .await
@@ -258,6 +347,239 @@ async fn delayed_snapshot_splits_durable_tail_and_equal_rewrite_preserves_topolo
     assert_eq!(
         store.load_snapshot(pid).await.unwrap(),
         Some((5, b"snapshot-b".to_vec()))
+    );
+}
+
+#[tokio::test]
+async fn snapshot_only_and_batch_appends_keep_journal_segments_contiguous() {
+    let store = SimEventStore::no_faults(283);
+    let snapshot_only = "default:Order:snapshot-only-first-journal";
+    let snapshot = b"snapshot-only".to_vec();
+    store
+        .save_snapshot(snapshot_only, 5, &snapshot)
+        .await
+        .unwrap();
+    assert!(
+        store.dump_segments(snapshot_only).is_empty(),
+        "a snapshot-only generation must not invent journal segments"
+    );
+    store
+        .append_with_index_rows(
+            snapshot_only,
+            0,
+            &[test_envelope(0, "FirstJournalEvent")],
+            &[],
+            &[],
+            IndexReconciliation {
+                snapshot_source: SnapshotSourceFence::Exact {
+                    sequence_nr: 5,
+                    state: snapshot,
+                },
+                ..IndexReconciliation::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.dump_segments(snapshot_only),
+        vec![SimEventSegment {
+            segment_index: 0,
+            start_sequence_nr: 1,
+            end_sequence_nr: Some(1),
+            snapshot_sequence: None,
+            event_count: 1,
+            sealed: false,
+        }]
+    );
+
+    let batched = "default:Order:batch-after-snapshot";
+    store
+        .append(batched, 0, &[test_envelope(0, "Created")])
+        .await
+        .unwrap();
+    store
+        .save_snapshot(batched, 1, b"snapshot-1")
+        .await
+        .unwrap();
+    store
+        .append_batch(&[PersistenceAppend {
+            persistence_id: batched.to_string(),
+            expected_sequence: 1,
+            events: vec![test_envelope(0, "Batched")],
+            key_rows: Vec::new(),
+            reconcile_keys: false,
+            key_set_signature: None,
+            snapshot_source: SnapshotSourceFence::Exact {
+                sequence_nr: 1,
+                state: b"snapshot-1".to_vec(),
+            },
+            batch_idempotency: None,
+        }])
+        .await
+        .unwrap();
+    assert_eq!(
+        store.dump_segments(batched),
+        vec![
+            SimEventSegment {
+                segment_index: 0,
+                start_sequence_nr: 1,
+                end_sequence_nr: Some(1),
+                snapshot_sequence: Some(1),
+                event_count: 1,
+                sealed: true,
+            },
+            SimEventSegment {
+                segment_index: 1,
+                start_sequence_nr: 2,
+                end_sequence_nr: Some(2),
+                snapshot_sequence: None,
+                event_count: 1,
+                sealed: false,
+            },
+        ]
+    );
+
+    let snapshot_ahead = "default:Order:snapshot-ahead-of-journal";
+    store
+        .append(
+            snapshot_ahead,
+            0,
+            &[test_envelope(0, "Created"), test_envelope(0, "Updated")],
+        )
+        .await
+        .unwrap();
+    let ahead_snapshot = b"snapshot-5".to_vec();
+    store
+        .save_snapshot(snapshot_ahead, 5, &ahead_snapshot)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.dump_segments(snapshot_ahead),
+        vec![SimEventSegment {
+            segment_index: 0,
+            start_sequence_nr: 1,
+            end_sequence_nr: Some(2),
+            snapshot_sequence: None,
+            event_count: 2,
+            sealed: false,
+        }],
+        "snapshot sequence 5 must not rotate topology beyond journal HWM 2"
+    );
+    store
+        .inner
+        .lock()
+        .expect("SimEventStore lock poisoned")
+        .event_segments
+        .entry(snapshot_ahead.to_string())
+        .or_default()
+        .push(SimEventSegment {
+            segment_index: 1,
+            start_sequence_nr: 6,
+            end_sequence_nr: None,
+            snapshot_sequence: None,
+            event_count: 0,
+            sealed: false,
+        });
+    store
+        .append_with_index_rows(
+            snapshot_ahead,
+            2,
+            &[test_envelope(0, "AfterMigrationSnapshot")],
+            &[],
+            &[],
+            IndexReconciliation {
+                snapshot_source: SnapshotSourceFence::Exact {
+                    sequence_nr: 5,
+                    state: ahead_snapshot,
+                },
+                ..IndexReconciliation::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.dump_segments(snapshot_ahead),
+        vec![SimEventSegment {
+            segment_index: 0,
+            start_sequence_nr: 1,
+            end_sequence_nr: Some(3),
+            snapshot_sequence: None,
+            event_count: 3,
+            sealed: false,
+        }],
+        "append must rebuild a legacy future-start segment from journal HWM 2"
+    );
+}
+
+#[tokio::test]
+async fn materialized_journal_permanently_retires_unchecked_snapshot_generation() {
+    let store = SimEventStore::no_faults(284);
+    let persistence_id = "default:Order:materialized-catch-up";
+    let migration_snapshot = b"migration-snapshot".to_vec();
+    store
+        .save_snapshot(persistence_id, 5, &migration_snapshot)
+        .await
+        .unwrap();
+    store
+        .append_with_index_rows(
+            persistence_id,
+            0,
+            &[
+                materialization_envelope("Order", "materialized-catch-up"),
+                test_envelope(0, "Changed"),
+            ],
+            &[],
+            &[],
+            IndexReconciliation {
+                snapshot_source: SnapshotSourceFence::Exact {
+                    sequence_nr: 5,
+                    state: migration_snapshot,
+                },
+                ..IndexReconciliation::default()
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .append(
+            persistence_id,
+            2,
+            &[
+                test_envelope(0, "Changed"),
+                test_envelope(0, "Changed"),
+                test_envelope(0, "Changed"),
+                test_envelope(0, "Changed"),
+            ],
+        )
+        .await
+        .unwrap();
+    let topology_before = store.dump_segments(persistence_id);
+    let history_before = store.snapshot_history_len(persistence_id);
+
+    store
+        .save_snapshot(persistence_id, 5, b"delayed-unchecked-generation")
+        .await
+        .unwrap();
+
+    assert_eq!(store.load_snapshot(persistence_id).await.unwrap(), None);
+    assert_eq!(store.snapshot_history_len(persistence_id), history_before);
+    assert_eq!(store.dump_segments(persistence_id), topology_before);
+    assert_eq!(store.dump_journal(persistence_id).len(), 6);
+
+    store
+        .save_snapshot_if_source(
+            persistence_id,
+            6,
+            b"checked-journal-snapshot",
+            &SnapshotSourceFence::Absent,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.load_snapshot(persistence_id).await.unwrap(),
+        Some((6, b"checked-journal-snapshot".to_vec())),
+        "a checked writer may establish the current journal generation's snapshot"
     );
 }
 
@@ -410,6 +732,60 @@ async fn snapshot_only_writer_invalidates_inflight_key_coverage() {
             .await
             .unwrap(),
         "an entity created after enumeration must reject stale coverage publication"
+    );
+}
+
+#[tokio::test]
+async fn failed_snapshot_write_preserves_key_contract_and_coverage() {
+    let store = SimEventStore::new(
+        45,
+        SimFaultConfig {
+            write_failure_prob: 0.0,
+            concurrency_violation_prob: 0.0,
+            read_truncation_prob: 0.0,
+            snapshot_failure_prob: 1.0,
+        },
+    );
+    let original_signature = "v4:path";
+    let original_revision = store
+        .begin_key_index_backfill("default", "Doc", original_signature)
+        .await
+        .unwrap();
+    store
+        .mark_key_index_backfilled("default", "Doc", original_signature)
+        .await
+        .unwrap();
+
+    let result = store
+        .save_snapshot_if_source(
+            "default:Doc:failed-snapshot",
+            1,
+            b"snapshot",
+            &SnapshotSourceFence::Unchecked,
+            Some("v4:slug"),
+        )
+        .await;
+
+    assert!(matches!(result, Err(PersistenceError::Storage(_))));
+    assert_eq!(
+        store
+            .key_index_reconciliation_revision("default", "Doc")
+            .await
+            .unwrap(),
+        original_revision,
+        "a failed snapshot must not advance the key-contract revision"
+    );
+    assert_eq!(
+        store.key_index_backfilled_types("default").await.unwrap(),
+        vec![("Doc".to_string(), original_signature.to_string())],
+        "a failed snapshot must not invalidate proven coverage"
+    );
+    assert_eq!(
+        store
+            .load_snapshot("default:Doc:failed-snapshot")
+            .await
+            .unwrap(),
+        None
     );
 }
 

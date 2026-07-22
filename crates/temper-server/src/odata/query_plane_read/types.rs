@@ -247,6 +247,10 @@ pub(in crate::odata) enum QueryPlaneReadError {
     /// Returning an entity or an empty set would not have a stable ownership
     /// proof, so the caller receives a retryable response instead.
     KeyOwnershipUnstable,
+    /// A durable source changed while its query projection was being repaired,
+    /// or the bounded repair budget was exhausted. Native projection reads are
+    /// unsafe until a later retry closes that source generation.
+    ProjectionUnstable,
     /// The `$skiptoken` continuation could not be decoded for this request —
     /// malformed, or its key count does not match the request's ordering.
     InvalidContinuation,
@@ -258,6 +262,7 @@ impl QueryPlaneReadError {
             Self::AuthorizationDenied(_) => {}
             Self::QueryTooLarge { telemetry, .. } => telemetry.record(span),
             Self::KeyOwnershipUnstable => {}
+            Self::ProjectionUnstable => {}
             Self::InvalidContinuation => {}
         }
     }
@@ -275,6 +280,12 @@ impl QueryPlaneReadError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "KeyOwnershipUnstable",
                 "Declared-key ownership changed while this read was materialized. Retry the request.",
+            )
+            .into_response(),
+            Self::ProjectionUnstable => odata_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ProjectionUnstable",
+                "The query projection changed while this read was materialized. Retry the request.",
             )
             .into_response(),
             Self::InvalidContinuation => odata_error(

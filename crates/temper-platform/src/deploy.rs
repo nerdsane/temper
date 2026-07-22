@@ -9,6 +9,8 @@
 //!   └─ temper.verify.{Entity} (cascade_passed, l1, l2, l3)
 //! ```
 
+mod publication;
+
 use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::trace::{Span, Status, Tracer};
@@ -82,7 +84,7 @@ impl DeployPipeline {
     /// 5. Broadcast deployment status
     ///
     /// Emits a parent `temper.deploy` span with child spans per entity.
-    pub fn verify_and_deploy(state: &PlatformState, input: &DeployInput) -> DeployResult {
+    pub async fn verify_and_deploy(state: &PlatformState, input: &DeployInput) -> DeployResult {
         let tracer = global::tracer("temper");
         let mut deploy_span = tracer
             .span_builder("temper.deploy")
@@ -293,22 +295,13 @@ impl DeployPipeline {
         if all_passed && !input.entities.is_empty() {
             match parse_csdl(&input.csdl_xml) {
                 Ok(csdl) => {
-                    // Collect IOA sources for registration
-                    let ioa_pairs: Vec<(&str, &str)> = entity_results
-                        .iter()
-                        .map(|r| (r.entity_name.as_str(), r.ioa_source.as_str()))
-                        .collect();
-
-                    // Register tenant in the live registry.
-                    let register_result = {
-                        let mut registry = state.registry.write().unwrap();
-                        registry.try_register_tenant(
-                            TenantId::new(&input.tenant_name),
-                            csdl,
-                            input.csdl_xml.clone(),
-                            &ioa_pairs,
-                        )
-                    };
+                    let register_result = publication::publish_verified_generation(
+                        state,
+                        input,
+                        &entity_results,
+                        csdl,
+                    )
+                    .await;
 
                     match register_result {
                         Ok(()) => {
@@ -508,12 +501,12 @@ kind = "internal"
         }
     }
 
-    #[test]
-    fn test_deploy_pipeline_success() {
+    #[tokio::test]
+    async fn test_deploy_pipeline_success() {
         let state = PlatformState::new(None);
         let mut rx = state.subscribe();
 
-        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
+        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input()).await;
 
         assert!(
             result.success,
@@ -532,11 +525,11 @@ kind = "internal"
         assert!(!received.is_empty(), "Should have broadcast messages");
     }
 
-    #[test]
-    fn test_deploy_pipeline_registers_tenant() {
+    #[tokio::test]
+    async fn test_deploy_pipeline_registers_tenant() {
         let state = PlatformState::new(None);
 
-        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
+        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input()).await;
 
         assert!(result.success);
 
@@ -547,8 +540,8 @@ kind = "internal"
         assert!(registry.get_table(&tenant, "Task").is_some());
     }
 
-    #[test]
-    fn test_deploy_pipeline_empty_entities() {
+    #[tokio::test]
+    async fn test_deploy_pipeline_empty_entities() {
         let state = PlatformState::new(None);
 
         let input = DeployInput {
@@ -557,18 +550,18 @@ kind = "internal"
             entities: vec![],
             wasm_modules: std::collections::BTreeMap::new(),
         };
-        let result = DeployPipeline::verify_and_deploy(&state, &input);
+        let result = DeployPipeline::verify_and_deploy(&state, &input).await;
 
         // Empty entities should succeed vacuously
         assert!(result.success);
         assert!(result.entity_results.is_empty());
     }
 
-    #[test]
-    fn test_deploy_pipeline_verification_results() {
+    #[tokio::test]
+    async fn test_deploy_pipeline_verification_results() {
         let state = PlatformState::new(None);
 
-        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
+        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input()).await;
 
         assert!(result.success);
         let entity_result = &result.entity_results[0];
@@ -577,12 +570,12 @@ kind = "internal"
         assert!(cascade.all_passed);
     }
 
-    #[test]
-    fn test_deploy_pipeline_broadcasts_verify_status() {
+    #[tokio::test]
+    async fn test_deploy_pipeline_broadcasts_verify_status() {
         let state = PlatformState::new(None);
         let mut rx = state.subscribe();
 
-        let _result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
+        let _result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input()).await;
 
         let mut verify_msgs = Vec::new();
         let mut deploy_msgs = Vec::new();
@@ -605,21 +598,21 @@ kind = "internal"
         );
     }
 
-    #[test]
-    fn test_deploy_result_summary() {
+    #[tokio::test]
+    async fn test_deploy_result_summary() {
         let state = PlatformState::new(None);
 
-        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
+        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input()).await;
 
         assert!(result.summary.contains("Successfully deployed"));
         assert!(result.summary.contains("test-tenant"));
     }
 
-    #[test]
-    fn test_deploy_pipeline_span_noop() {
+    #[tokio::test]
+    async fn test_deploy_pipeline_span_noop() {
         // Verifies that OTEL span instrumentation doesn't panic with no-op tracer.
         let state = PlatformState::new(None);
-        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input());
+        let result = DeployPipeline::verify_and_deploy(&state, &sample_deploy_input()).await;
         assert!(
             result.success,
             "Pipeline should succeed with no-op OTEL: {}",
@@ -627,8 +620,8 @@ kind = "internal"
         );
     }
 
-    #[test]
-    fn test_deploy_multiple_entities() {
+    #[tokio::test]
+    async fn test_deploy_multiple_entities() {
         let state = PlatformState::new(None);
 
         let input = DeployInput {
@@ -647,7 +640,7 @@ kind = "internal"
             wasm_modules: std::collections::BTreeMap::new(),
         };
 
-        let result = DeployPipeline::verify_and_deploy(&state, &input);
+        let result = DeployPipeline::verify_and_deploy(&state, &input).await;
 
         assert!(
             result.success,
@@ -662,8 +655,8 @@ kind = "internal"
         assert!(registry.get_table(&tenant, "Bug").is_some());
     }
 
-    #[test]
-    fn test_deploy_bad_ioa_fails() {
+    #[tokio::test]
+    async fn test_deploy_bad_ioa_fails() {
         let state = PlatformState::new(None);
 
         let input = DeployInput {
@@ -676,7 +669,7 @@ kind = "internal"
             wasm_modules: std::collections::BTreeMap::new(),
         };
 
-        let result = DeployPipeline::verify_and_deploy(&state, &input);
+        let result = DeployPipeline::verify_and_deploy(&state, &input).await;
         assert!(!result.success);
         assert!(!result.entity_results[0].verified);
     }

@@ -1,4 +1,5 @@
 //! Redis-backed implementation of the [`EventStore`] trait.
+
 //!
 //! Uses Redis primitives:
 //! - `LIST` per entity for ordered event journal entries
@@ -10,55 +11,341 @@
 //! check-and-set the sequence number, preventing lost-update races between
 //! concurrent writers on the same entity.
 
+mod atomic;
+
+#[cfg(test)]
+mod tests;
+
 use std::sync::Arc;
 
 use fred::prelude::*;
 use fred::types::scripts::Script;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use temper_runtime::persistence::STATE_MATERIALIZATION_EVENT_TYPE;
 use temper_runtime::persistence::{
-    EventStore, JournalBoundary, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
-    PersistenceError, storage_error,
+    EventStore, IndexReconciliation, JournalBoundary, PersistenceAppend, PersistenceAppendResult,
+    PersistenceBatchIdempotency, PersistenceEnvelope, PersistenceError, SnapshotSourceFence,
+    is_state_materialization_event_for, storage_error,
 };
+use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::parse_persistence_id_parts;
 
-/// Lua script for atomic append: check expected sequence, RPUSH events, SET new seq, SADD entity ref.
+/// Lua script for one atomic journal, entity-catalog, and segment append.
 ///
-/// KEYS[1] = seq_key, KEYS[2] = events_key, KEYS[3] = entities_key
-/// ARGV[1] = expected_seq (string-encoded integer)
-/// ARGV[2] = entity_ref_json (for SADD into entities set)
-/// ARGV[3..N] = serialized event JSONs
+/// KEYS: journal sequence, journal events, tenant entities, current-segment
+/// pointer, expected active segment, current snapshot, canonical segment zero,
+/// the validated materialization-generation marker, first-terminal sequence,
+/// and optional batch-idempotency claim.
+/// ARGV: expected journal sequence, entity ref, expected segment, timestamp,
+/// snapshot-fence mode, exact expected snapshot record, whether to retire the
+/// migration snapshot, first terminal sequence in this append (zero if absent),
+/// optional batch intent hash, then event records.
 ///
-/// Returns: `{1, new_seq}` on success, `{0, current_seq}` on conflict.
+/// Returns `{1, new_seq}` on success, `{0, current_seq}` on journal conflict,
+/// `{2, current_segment}` when the caller must retry its pointer capture, or
+/// `{3, current_seq}` when the exact snapshot-generation fence changed.
 const APPEND_LUA: &str = r#"
 local seq_key = KEYS[1]
 local events_key = KEYS[2]
 local entities_key = KEYS[3]
+local segment_pointer_key = KEYS[4]
+local active_segment_key = KEYS[5]
+local snapshot_key = KEYS[6]
+local canonical_segment_key = KEYS[7]
+local materialization_marker_key = KEYS[8]
+local terminal_sequence_key = KEYS[9]
+local batch_idempotency_key = KEYS[10]
 local expected = tonumber(ARGV[1])
 local entity_ref = ARGV[2]
+local expected_segment = tonumber(ARGV[3])
+local timestamp = ARGV[4]
+local snapshot_fence_mode = tonumber(ARGV[5])
+local expected_snapshot = ARGV[6]
+local retire_snapshot = tonumber(ARGV[7])
+local batch_intent_hash = ARGV[9]
+
+local function snapshots_equal(left_json, right_json)
+    if not left_json or not right_json or right_json == '' then
+        return false
+    end
+    local left = cjson.decode(left_json)
+    local right = cjson.decode(right_json)
+    return tonumber(left.sequence_nr) == tonumber(right.sequence_nr)
+        and cjson.encode(left.snapshot) == cjson.encode(right.snapshot)
+end
 
 local current = tonumber(redis.call('GET', seq_key) or '0')
+if batch_intent_hash ~= '' then
+    local committed_hash = redis.call('GET', batch_idempotency_key)
+    if committed_hash then
+        if committed_hash == batch_intent_hash then
+            return {4, current}
+        end
+        return {5, current}
+    end
+end
 if current ~= expected then
     return {0, current}
 end
 
-for i = 3, #ARGV do
+local current_snapshot = redis.call('GET', snapshot_key)
+if snapshot_fence_mode == 1 and current_snapshot then
+    return {3, current}
+end
+if snapshot_fence_mode == 2
+    and not snapshots_equal(current_snapshot, expected_snapshot) then
+    return {3, current}
+end
+
+local current_segment = tonumber(redis.call('GET', segment_pointer_key) or '0')
+if current_segment ~= expected_segment then
+    return {2, current_segment}
+end
+
+local segment
+local target_segment_key
+if current == 0 then
+    current_segment = 0
+    target_segment_key = canonical_segment_key
+    segment = {
+        segment_index = 0,
+        start_sequence_nr = 1,
+        end_sequence_nr = cjson.null,
+        snapshot_sequence = cjson.null,
+        event_count = 0,
+        sealed_at = cjson.null,
+        created_at = timestamp
+    }
+else
+    target_segment_key = active_segment_key
+    local encoded_segment = redis.call('GET', active_segment_key)
+    if encoded_segment then
+        segment = cjson.decode(encoded_segment)
+        local start_sequence = tonumber(segment.start_sequence_nr)
+        local invalid_end = segment.end_sequence_nr
+            and segment.end_sequence_nr ~= cjson.null
+            and tonumber(segment.end_sequence_nr) < start_sequence
+        if start_sequence > expected + 1 or invalid_end then
+            -- Repair legacy snapshot-ahead topology from the authoritative
+            -- journal high-water before assigning the new event.
+            current_segment = 0
+            target_segment_key = canonical_segment_key
+            segment = {
+                segment_index = 0,
+                start_sequence_nr = 1,
+                end_sequence_nr = expected,
+                snapshot_sequence = cjson.null,
+                event_count = expected,
+                sealed_at = cjson.null,
+                created_at = timestamp
+            }
+        end
+    else
+        current_segment = 0
+        target_segment_key = canonical_segment_key
+        segment = {
+            segment_index = 0,
+            start_sequence_nr = 1,
+            end_sequence_nr = expected,
+            snapshot_sequence = cjson.null,
+            event_count = expected,
+            sealed_at = cjson.null,
+            created_at = timestamp
+        }
+    end
+end
+
+for i = 10, #ARGV do
     redis.call('RPUSH', events_key, ARGV[i])
 end
 
-local new_seq = expected + (#ARGV - 2)
+local new_seq = expected + (#ARGV - 9)
+segment.end_sequence_nr = new_seq
+segment.event_count = math.max(new_seq - tonumber(segment.start_sequence_nr) + 1, 0)
+
 redis.call('SET', seq_key, tostring(new_seq))
+local appended_terminal_sequence = tonumber(ARGV[8])
+local stored_terminal_sequence = redis.call('GET', terminal_sequence_key)
+if not stored_terminal_sequence and current == 0 then
+    redis.call('SET', terminal_sequence_key, tostring(appended_terminal_sequence))
+elseif stored_terminal_sequence
+    and appended_terminal_sequence > 0
+    and tonumber(stored_terminal_sequence) == 0 then
+    redis.call('SET', terminal_sequence_key, tostring(appended_terminal_sequence))
+end
 redis.call('SADD', entities_key, entity_ref)
+if expected_segment ~= current_segment then
+    redis.call('DEL', active_segment_key)
+end
+redis.call('SET', target_segment_key, cjson.encode(segment))
+redis.call('SET', segment_pointer_key, tostring(current_segment))
+if retire_snapshot == 1 then
+    redis.call('DEL', snapshot_key)
+    redis.call('SET', materialization_marker_key, '1')
+end
+if batch_intent_hash ~= '' then
+    redis.call('SET', batch_idempotency_key, batch_intent_hash)
+end
 
 return {1, new_seq}
 "#;
 
+/// Atomically read a stream's journal and terminal metadata pair.
+const READ_BOUNDARY_LUA: &str = r#"
+local latest = redis.call('GET', KEYS[1]) or '0'
+local terminal = redis.call('GET', KEYS[2]) or ''
+return {latest, terminal}
+"#;
+
+/// Install lazily reconstructed terminal metadata only if the captured journal
+/// high-water is still current and no other migrator already installed it.
+const BACKFILL_BOUNDARY_LUA: &str = r#"
+local current = redis.call('GET', KEYS[1]) or '0'
+if current ~= ARGV[1] then
+    return 0
+end
+if redis.call('EXISTS', KEYS[2]) == 0 then
+    redis.call('SET', KEYS[2], ARGV[2])
+end
+return 1
+"#;
+
+/// Atomically retain only a monotonic current snapshot and rotate its segment.
+///
+/// KEYS: current snapshot, history row, segment pointer, active segment, next
+/// segment, journal high-water, the validated materialization marker, and the
+/// tenant entity set.
+/// ARGV: expected segment index, sequence, snapshot JSON, history JSON, timestamp,
+/// snapshot-source fence mode, exact expected source record, and entity ref.
+/// Returns `0` on older/identical no-op, `1` on an initial/newer write, `2` on
+/// equal-sequence byte replacement, or `-1` when the caller must retry with the
+/// new segment pointer. A write rotates only when a journal exists; `-2` rejects
+/// a changed exact snapshot source.
+const SAVE_SNAPSHOT_LUA: &str = r#"
+local expected_segment = tonumber(ARGV[1])
+local incoming_sequence = tonumber(ARGV[2])
+local incoming_snapshot = ARGV[3]
+local current_snapshot = redis.call('GET', KEYS[1])
+local same_sequence_rewrite = false
+local snapshot_fence_mode = tonumber(ARGV[6])
+local expected_snapshot = ARGV[7]
+
+local function snapshot_payloads_equal(left, right)
+    return cjson.encode(left.snapshot) == cjson.encode(right.snapshot)
+end
+
+local function snapshot_records_equal(left_json, right_json)
+    if not left_json or not right_json or right_json == '' then
+        return false
+    end
+    local left = cjson.decode(left_json)
+    local right = cjson.decode(right_json)
+    return tonumber(left.sequence_nr) == tonumber(right.sequence_nr)
+        and snapshot_payloads_equal(left, right)
+end
+
+if snapshot_fence_mode == 1 and current_snapshot then
+    return -2
+end
+if snapshot_fence_mode == 2
+    and not snapshot_records_equal(current_snapshot, expected_snapshot) then
+    return -2
+end
+
+local journal_sequence = tonumber(redis.call('GET', KEYS[6]) or '0')
+if snapshot_fence_mode == 0
+    and redis.call('GET', KEYS[7]) == '1' then
+    return 0
+end
+
+redis.call('SADD', KEYS[8], ARGV[8])
+
+if current_snapshot then
+    local current = cjson.decode(current_snapshot)
+    local incoming = cjson.decode(incoming_snapshot)
+    local current_sequence = tonumber(current.sequence_nr)
+    if current_sequence > incoming_sequence
+        or (current_sequence == incoming_sequence and snapshot_payloads_equal(current, incoming)) then
+        return 0
+    end
+    same_sequence_rewrite = current_sequence == incoming_sequence
+end
+
+if same_sequence_rewrite then
+    redis.call('SET', KEYS[1], incoming_snapshot)
+    redis.call('SET', KEYS[2], ARGV[4])
+    return 2
+end
+
+if journal_sequence == 0 then
+    redis.call('SET', KEYS[1], incoming_snapshot)
+    redis.call('SET', KEYS[2], ARGV[4])
+    return 1
+end
+if incoming_sequence > journal_sequence then
+    redis.call('SET', KEYS[1], incoming_snapshot)
+    redis.call('SET', KEYS[2], ARGV[4])
+    return 1
+end
+
+local current_segment = tonumber(redis.call('GET', KEYS[3]) or '0')
+if current_segment ~= expected_segment then
+    return -1
+end
+
+local timestamp = ARGV[5]
+local encoded_segment = redis.call('GET', KEYS[4])
+local segment
+if encoded_segment then
+    segment = cjson.decode(encoded_segment)
+else
+    segment = {
+        segment_index = current_segment,
+        start_sequence_nr = 1,
+        end_sequence_nr = cjson.null,
+        snapshot_sequence = cjson.null,
+        event_count = 0,
+        sealed_at = cjson.null,
+        created_at = timestamp
+    }
+end
+
+segment.end_sequence_nr = incoming_sequence
+segment.snapshot_sequence = incoming_sequence
+segment.event_count = math.max(incoming_sequence - tonumber(segment.start_sequence_nr) + 1, 0)
+segment.sealed_at = timestamp
+
+local next_segment = {
+    segment_index = current_segment + 1,
+    start_sequence_nr = incoming_sequence + 1,
+    end_sequence_nr = journal_sequence > incoming_sequence and journal_sequence or cjson.null,
+    snapshot_sequence = cjson.null,
+    event_count = math.max(journal_sequence - incoming_sequence, 0),
+    sealed_at = cjson.null,
+    created_at = timestamp
+}
+
+redis.call('SET', KEYS[1], incoming_snapshot)
+redis.call('SET', KEYS[2], ARGV[4])
+redis.call('SET', KEYS[4], cjson.encode(segment))
+redis.call('SET', KEYS[5], cjson.encode(next_segment))
+redis.call('SET', KEYS[3], tostring(current_segment + 1))
+return 1
+"#;
+
 const JOURNAL_BOUNDARY_PAGE_SIZE: usize = 1_024;
+const APPEND_POINTER_RETRY_BUDGET: usize = 8;
+const SNAPSHOT_POINTER_RETRY_BUDGET: usize = 8;
 
 /// Redis-backed event store.
 #[derive(Clone)]
 pub struct RedisEventStore {
     client: Arc<fred::clients::Client>,
     append_script: Script,
+    snapshot_script: Script,
+    read_boundary_script: Script,
+    backfill_boundary_script: Script,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -74,7 +361,8 @@ struct SnapshotHistoryRecord {
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[cfg(test)]
+#[derive(Debug, Deserialize)]
 struct SegmentRecord {
     segment_index: u64,
     start_sequence_nr: u64,
@@ -102,6 +390,9 @@ impl RedisEventStore {
         Ok(Self {
             client: Arc::new(client),
             append_script: Script::from_lua(APPEND_LUA),
+            snapshot_script: Script::from_lua(SAVE_SNAPSHOT_LUA),
+            read_boundary_script: Script::from_lua(READ_BOUNDARY_LUA),
+            backfill_boundary_script: Script::from_lua(BACKFILL_BOUNDARY_LUA),
         })
     }
 
@@ -124,9 +415,23 @@ impl RedisEventStore {
         )
     }
 
+    fn terminal_sequence_key(tenant: &str, entity_type: &str, entity_id: &str) -> String {
+        format!(
+            "{}:events_terminal:{tenant}:{entity_type}:{entity_id}",
+            crate::keys::PREFIX
+        )
+    }
+
     fn snapshot_key(tenant: &str, entity_type: &str, entity_id: &str) -> String {
         format!(
             "{}:snapshot:{tenant}:{entity_type}:{entity_id}",
+            crate::keys::PREFIX
+        )
+    }
+
+    fn materialization_marker_key(tenant: &str, entity_type: &str, entity_id: &str) -> String {
+        format!(
+            "{}:state_materialized:{tenant}:{entity_type}:{entity_id}",
             crate::keys::PREFIX
         )
     }
@@ -159,6 +464,20 @@ impl RedisEventStore {
 
     fn tenant_entities_key(tenant: &str) -> String {
         format!("{}:entities:{tenant}", crate::keys::PREFIX)
+    }
+
+    fn batch_idempotency_key(claim: Option<&PersistenceBatchIdempotency>) -> String {
+        match claim {
+            Some(claim) => format!(
+                "{}:batch_idempotency:{}:{}:{}:{}",
+                crate::keys::PREFIX,
+                claim.persistence_id.len(),
+                claim.persistence_id,
+                claim.idempotency_key.len(),
+                claim.idempotency_key
+            ),
+            None => format!("{}:batch_idempotency:none", crate::keys::PREFIX),
+        }
     }
 
     fn trajectory_key(tenant: &str) -> String {
@@ -206,106 +525,59 @@ impl RedisEventStore {
 }
 
 impl EventStore for RedisEventStore {
+    async fn batch_idempotency_committed(
+        &self,
+        claim: &PersistenceBatchIdempotency,
+    ) -> Result<bool, PersistenceError> {
+        let key = Self::batch_idempotency_key(Some(claim));
+        let committed_hash: Option<String> = self.client.get(&key).await.map_err(storage_error)?;
+        let Some(committed_hash) = committed_hash else {
+            return Ok(false);
+        };
+        if committed_hash != claim.intent_hash {
+            return Err(PersistenceError::Storage(format!(
+                "atomic batch idempotency key '{}' was reused with a different intent",
+                claim.idempotency_key
+            )));
+        }
+        Ok(true)
+    }
+
     async fn append(
         &self,
         persistence_id: &str,
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
-        let (tenant, entity_type, entity_id) =
-            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
-        let seq_key = Self::seq_key(tenant, entity_type, entity_id);
-        let events_key = Self::events_key(tenant, entity_type, entity_id);
-        let entities_key = Self::tenant_entities_key(tenant);
+        self.append_atomically(
+            persistence_id,
+            expected_sequence,
+            events,
+            &SnapshotSourceFence::Unchecked,
+            None,
+        )
+        .await
+        .map(|(sequence_nr, _)| sequence_nr)
+    }
 
-        // Pre-serialize events with provisional sequence numbers.
-        let mut args: Vec<String> = Vec::with_capacity(events.len() + 2);
-        args.push(expected_sequence.to_string());
-
-        let entity_ref = EntityRef {
-            entity_type: entity_type.to_string(),
-            entity_id: entity_id.to_string(),
-        };
-        let entity_ref_json = serde_json::to_string(&entity_ref)
-            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-        args.push(entity_ref_json);
-
-        let mut seq = expected_sequence;
-        for event in events {
-            seq += 1;
-            let mut env = event.clone();
-            env.sequence_nr = seq;
-            let encoded = serde_json::to_string(&env)
-                .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-            args.push(encoded);
-        }
-
-        let keys = vec![seq_key, events_key, entities_key];
-        let result: Vec<i64> = self
-            .append_script
-            .evalsha_with_reload(&self.client, keys, args)
-            .await
-            .map_err(storage_error)?;
-
-        match result.as_slice() {
-            [1, new_seq] => {
-                let new_seq = *new_seq as u64;
-                let current_segment_key = Self::current_segment_key(tenant, entity_type, entity_id);
-                let current_segment_raw: Option<String> = self
-                    .client
-                    .get(&current_segment_key)
-                    .await
-                    .map_err(storage_error)?;
-                let segment_index = current_segment_raw
-                    .and_then(|raw| raw.parse::<u64>().ok())
-                    .unwrap_or(0);
-                let segment_key = Self::segment_key(tenant, entity_type, entity_id, segment_index);
-                let existing: Option<String> =
-                    self.client.get(&segment_key).await.map_err(storage_error)?;
-                let mut record = existing
-                    .as_deref()
-                    .map(serde_json::from_str::<SegmentRecord>)
-                    .transpose()
-                    .map_err(|e| PersistenceError::Serialization(e.to_string()))?
-                    .unwrap_or_else(|| SegmentRecord {
-                        segment_index,
-                        start_sequence_nr: (expected_sequence + 1).max(1),
-                        end_sequence_nr: None,
-                        snapshot_sequence: None,
-                        event_count: 0,
-                        sealed_at: None,
-                        created_at: chrono::Utc::now(),
-                    });
-                record.end_sequence_nr = Some(new_seq);
-                record.event_count = new_seq.saturating_sub(record.start_sequence_nr) + 1;
-                let encoded = serde_json::to_string(&record)
-                    .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-                let _: () = self
-                    .client
-                    .set(&segment_key, encoded, None, None, false)
-                    .await
-                    .map_err(storage_error)?;
-                let _: () = self
-                    .client
-                    .set(
-                        &current_segment_key,
-                        segment_index.to_string(),
-                        None,
-                        None,
-                        false,
-                    )
-                    .await
-                    .map_err(storage_error)?;
-                Ok(new_seq)
-            }
-            [0, actual] => Err(PersistenceError::ConcurrencyViolation {
-                expected: expected_sequence,
-                actual: *actual as u64,
-            }),
-            other => Err(PersistenceError::Storage(format!(
-                "unexpected Lua script result: {other:?}"
-            ))),
-        }
+    async fn append_with_index_rows(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        _key_rows: &[temper_runtime::persistence::EntityKeyRow],
+        _vector_rows: &[temper_runtime::persistence::EntityVectorRow],
+        reconciliation: IndexReconciliation,
+    ) -> Result<u64, PersistenceError> {
+        self.append_atomically(
+            persistence_id,
+            expected_sequence,
+            events,
+            &reconciliation.snapshot_source,
+            None,
+        )
+        .await
+        .map(|(sequence_nr, _)| sequence_nr)
     }
 
     async fn append_batch(
@@ -315,16 +587,19 @@ impl EventStore for RedisEventStore {
         match appends {
             [] => Ok(Vec::new()),
             [append] => {
-                let sequence_nr = self
-                    .append(
+                let (sequence_nr, batch_already_applied) = self
+                    .append_atomically(
                         &append.persistence_id,
                         append.expected_sequence,
                         &append.events,
+                        &append.snapshot_source,
+                        append.batch_idempotency.as_ref(),
                     )
                     .await?;
                 Ok(vec![PersistenceAppendResult {
                     persistence_id: append.persistence_id.clone(),
                     sequence_nr,
+                    batch_already_applied,
                 }])
             }
             _ => Err(PersistenceError::Storage(
@@ -412,52 +687,100 @@ impl EventStore for RedisEventStore {
         let (tenant, entity_type, entity_id) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let sequence_key = Self::seq_key(tenant, entity_type, entity_id);
-        let latest_sequence = self
-            .client
-            .get::<Option<String>, _>(&sequence_key)
-            .await
-            .map_err(storage_error)?
-            .as_deref()
-            .unwrap_or("0")
-            .parse::<u64>()
-            .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
-        let mut cursor = 0_u64;
-        let mut first_terminal_sequence = None;
-        while cursor < latest_sequence && first_terminal_sequence.is_none() {
-            let remaining = latest_sequence - cursor;
-            let page_len = usize::try_from(remaining.min(JOURNAL_BOUNDARY_PAGE_SIZE as u64))
-                .expect("bounded Redis journal page length fits usize");
-            let page = self
-                .read_events_page(persistence_id, cursor, latest_sequence, page_len)
-                .await?;
-            if page.len() != page_len {
+        let terminal_sequence_key = Self::terminal_sequence_key(tenant, entity_type, entity_id);
+
+        for _attempt in 0..APPEND_POINTER_RETRY_BUDGET {
+            let encoded: Vec<String> = self
+                .read_boundary_script
+                .evalsha_with_reload(
+                    &self.client,
+                    vec![sequence_key.clone(), terminal_sequence_key.clone()],
+                    Vec::<String>::new(),
+                )
+                .await
+                .map_err(storage_error)?;
+            let [latest_raw, terminal_raw] = encoded.as_slice() else {
                 return Err(PersistenceError::Storage(format!(
-                    "Redis journal boundary expected {page_len} events after sequence {cursor}, received {}",
-                    page.len()
+                    "unexpected Redis journal boundary result: {encoded:?}"
                 )));
-            }
-            for (offset, event) in page.iter().enumerate() {
-                let expected_sequence = cursor + offset as u64 + 1;
-                if event.sequence_nr != expected_sequence {
+            };
+            let latest_sequence = latest_raw
+                .parse::<u64>()
+                .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+            if !terminal_raw.is_empty() {
+                let terminal_sequence = terminal_raw
+                    .parse::<u64>()
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+                if terminal_sequence > latest_sequence {
                     return Err(PersistenceError::Storage(format!(
-                        "Redis journal boundary expected sequence {expected_sequence}, received {}",
-                        event.sequence_nr
+                        "Redis terminal sequence {terminal_sequence} exceeds journal high-water {latest_sequence} for {persistence_id}"
                     )));
                 }
-                if event.transitions_to_deleted() {
-                    first_terminal_sequence = Some(event.sequence_nr);
-                    break;
-                }
+                return Ok(JournalBoundary {
+                    latest_sequence,
+                    first_terminal_sequence: (terminal_sequence > 0).then_some(terminal_sequence),
+                });
             }
-            cursor = page
-                .last()
-                .map(|event| event.sequence_nr)
-                .expect("validated non-empty Redis journal page");
+
+            // Compatibility migration for streams written before terminal
+            // metadata existed. Scan only the captured high-water, then install
+            // the result with a high-water CAS so every later lookup is O(1).
+            let mut cursor = 0_u64;
+            let mut first_terminal_sequence = None;
+            while cursor < latest_sequence && first_terminal_sequence.is_none() {
+                let remaining = latest_sequence - cursor;
+                let page_len = usize::try_from(remaining.min(JOURNAL_BOUNDARY_PAGE_SIZE as u64))
+                    .expect("bounded Redis journal page length fits usize");
+                let page = self
+                    .read_events_page(persistence_id, cursor, latest_sequence, page_len)
+                    .await?;
+                if page.len() != page_len {
+                    return Err(PersistenceError::Storage(format!(
+                        "Redis journal boundary expected {page_len} events after sequence {cursor}, received {}",
+                        page.len()
+                    )));
+                }
+                for (offset, event) in page.iter().enumerate() {
+                    let expected_sequence = cursor + offset as u64 + 1;
+                    if event.sequence_nr != expected_sequence {
+                        return Err(PersistenceError::Storage(format!(
+                            "Redis journal boundary expected sequence {expected_sequence}, received {}",
+                            event.sequence_nr
+                        )));
+                    }
+                    if event.transitions_to_deleted() {
+                        first_terminal_sequence = Some(event.sequence_nr);
+                        break;
+                    }
+                }
+                cursor = page
+                    .last()
+                    .map(|event| event.sequence_nr)
+                    .expect("validated non-empty Redis journal page");
+            }
+            let installed: i64 = self
+                .backfill_boundary_script
+                .evalsha_with_reload(
+                    &self.client,
+                    vec![sequence_key.clone(), terminal_sequence_key.clone()],
+                    vec![
+                        latest_sequence.to_string(),
+                        first_terminal_sequence.unwrap_or(0).to_string(),
+                    ],
+                )
+                .await
+                .map_err(storage_error)?;
+            if installed == 1 {
+                return Ok(JournalBoundary {
+                    latest_sequence,
+                    first_terminal_sequence,
+                });
+            }
         }
-        Ok(JournalBoundary {
-            latest_sequence,
-            first_terminal_sequence,
-        })
+
+        Err(PersistenceError::Storage(format!(
+            "Redis journal boundary for {persistence_id} did not stabilize after {APPEND_POINTER_RETRY_BUDGET} attempts"
+        )))
     }
 
     async fn save_snapshot(
@@ -466,103 +789,25 @@ impl EventStore for RedisEventStore {
         sequence_nr: u64,
         snapshot: &[u8],
     ) -> Result<(), PersistenceError> {
-        let (tenant, entity_type, entity_id) =
-            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
-        let key = Self::snapshot_key(tenant, entity_type, entity_id);
-        let record = SnapshotRecord {
+        self.save_snapshot_atomically(
+            persistence_id,
             sequence_nr,
-            snapshot: snapshot.to_vec(),
-        };
-        let encoded = serde_json::to_string(&record)
-            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-        let _: () = self
-            .client
-            .set(&key, encoded, None, None, false)
-            .await
-            .map_err(storage_error)?;
+            snapshot,
+            &SnapshotSourceFence::Unchecked,
+        )
+        .await
+    }
 
-        let history_key = Self::snapshot_history_key(tenant, entity_type, entity_id, sequence_nr);
-        let history = SnapshotHistoryRecord {
-            sequence_nr,
-            snapshot: snapshot.to_vec(),
-            created_at: chrono::Utc::now(),
-        };
-        let encoded_history = serde_json::to_string(&history)
-            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-        let _: () = self
-            .client
-            .set(&history_key, encoded_history, None, None, false)
+    async fn save_snapshot_if_source(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+        source: &SnapshotSourceFence,
+        _key_contract: Option<&str>,
+    ) -> Result<(), PersistenceError> {
+        self.save_snapshot_atomically(persistence_id, sequence_nr, snapshot, source)
             .await
-            .map_err(storage_error)?;
-
-        let current_segment_key = Self::current_segment_key(tenant, entity_type, entity_id);
-        let current_segment_raw: Option<String> = self
-            .client
-            .get(&current_segment_key)
-            .await
-            .map_err(storage_error)?;
-        let current_segment = current_segment_raw
-            .and_then(|raw| raw.parse::<u64>().ok())
-            .unwrap_or(0);
-        let segment_key = Self::segment_key(tenant, entity_type, entity_id, current_segment);
-        let existing: Option<String> =
-            self.client.get(&segment_key).await.map_err(storage_error)?;
-        let mut segment = existing
-            .as_deref()
-            .map(serde_json::from_str::<SegmentRecord>)
-            .transpose()
-            .map_err(|e| PersistenceError::Serialization(e.to_string()))?
-            .unwrap_or_else(|| SegmentRecord {
-                segment_index: current_segment,
-                start_sequence_nr: 1,
-                end_sequence_nr: Some(sequence_nr),
-                snapshot_sequence: Some(sequence_nr),
-                event_count: sequence_nr,
-                sealed_at: None,
-                created_at: chrono::Utc::now(),
-            });
-        segment.end_sequence_nr = Some(sequence_nr);
-        segment.snapshot_sequence = Some(sequence_nr);
-        segment.event_count = sequence_nr.saturating_sub(segment.start_sequence_nr) + 1;
-        segment.sealed_at = Some(chrono::Utc::now());
-        let encoded_segment = serde_json::to_string(&segment)
-            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-        let _: () = self
-            .client
-            .set(&segment_key, encoded_segment, None, None, false)
-            .await
-            .map_err(storage_error)?;
-
-        let next_segment = current_segment + 1;
-        let next_segment_key = Self::segment_key(tenant, entity_type, entity_id, next_segment);
-        let next = SegmentRecord {
-            segment_index: next_segment,
-            start_sequence_nr: sequence_nr + 1,
-            end_sequence_nr: None,
-            snapshot_sequence: None,
-            event_count: 0,
-            sealed_at: None,
-            created_at: chrono::Utc::now(),
-        };
-        let encoded_next = serde_json::to_string(&next)
-            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-        let _: () = self
-            .client
-            .set(&next_segment_key, encoded_next, None, None, false)
-            .await
-            .map_err(storage_error)?;
-        let _: () = self
-            .client
-            .set(
-                &current_segment_key,
-                next_segment.to_string(),
-                None,
-                None,
-                false,
-            )
-            .await
-            .map_err(storage_error)?;
-        Ok(())
     }
 
     async fn load_snapshot(
@@ -620,282 +865,5 @@ impl EventStore for RedisEventStore {
         out.sort();
         out.dedup();
         Ok(out)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use temper_runtime::persistence::EventMetadata;
-
-    fn redis_url() -> Option<String> {
-        std::env::var("REDIS_URL").ok()
-    }
-
-    fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
-        PersistenceEnvelope {
-            sequence_nr: 0,
-            event_type: event_type.to_string(),
-            payload,
-            metadata: EventMetadata {
-                event_id: uuid::Uuid::new_v4(),
-                causation_id: uuid::Uuid::new_v4(),
-                correlation_id: uuid::Uuid::new_v4(),
-                timestamp: chrono::Utc::now(),
-                actor_id: "redis-test".to_string(),
-            },
-        }
-    }
-
-    fn unique_persistence_id() -> String {
-        let id = uuid::Uuid::new_v4();
-        format!("test-{id}:Order:ord-{id}")
-    }
-
-    async fn make_store() -> Option<RedisEventStore> {
-        let url = redis_url()?;
-        Some(
-            RedisEventStore::new(&url)
-                .await
-                .expect("failed to connect to Redis"),
-        )
-    }
-
-    #[tokio::test]
-    async fn append_and_read_events_roundtrip() {
-        let Some(store) = make_store().await else {
-            eprintln!("REDIS_URL not set, skipping test");
-            return;
-        };
-        let pid = unique_persistence_id();
-
-        let new_seq = store
-            .append(
-                &pid,
-                0,
-                &[
-                    test_envelope("OrderCreated", serde_json::json!({ "id": "ord-1" })),
-                    test_envelope("OrderApproved", serde_json::json!({ "approved": true })),
-                ],
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(new_seq, 2);
-
-        // Read all events
-        let events = store.read_events(&pid, 0).await.unwrap();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].sequence_nr, 1);
-        assert_eq!(events[1].sequence_nr, 2);
-        assert_eq!(events[0].event_type, "OrderCreated");
-        assert_eq!(events[1].event_type, "OrderApproved");
-
-        // Partial read (from_sequence = 1 should skip event 1)
-        let partial = store.read_events(&pid, 1).await.unwrap();
-        assert_eq!(partial.len(), 1);
-        assert_eq!(partial[0].sequence_nr, 2);
-        assert_eq!(partial[0].event_type, "OrderApproved");
-    }
-
-    #[tokio::test]
-    async fn append_with_wrong_sequence_fails() {
-        let Some(store) = make_store().await else {
-            eprintln!("REDIS_URL not set, skipping test");
-            return;
-        };
-        let pid = unique_persistence_id();
-
-        store
-            .append(
-                &pid,
-                0,
-                &[test_envelope(
-                    "OrderCreated",
-                    serde_json::json!({ "id": "ord-1" }),
-                )],
-            )
-            .await
-            .unwrap();
-
-        let err = store
-            .append(
-                &pid,
-                0, // stale: actual is 1
-                &[test_envelope(
-                    "OrderUpdated",
-                    serde_json::json!({ "step": 2 }),
-                )],
-            )
-            .await
-            .unwrap_err();
-
-        assert!(matches!(
-            err,
-            PersistenceError::ConcurrencyViolation {
-                expected: 0,
-                actual: 1
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn snapshot_save_and_load_roundtrip() {
-        let Some(store) = make_store().await else {
-            eprintln!("REDIS_URL not set, skipping test");
-            return;
-        };
-        let pid = unique_persistence_id();
-
-        store
-            .save_snapshot(&pid, 5, b"{\"status\":\"created\"}")
-            .await
-            .unwrap();
-
-        let snapshot = store.load_snapshot(&pid).await.unwrap();
-        assert_eq!(snapshot, Some((5, b"{\"status\":\"created\"}".to_vec())));
-
-        // Overwrite
-        store
-            .save_snapshot(&pid, 8, b"{\"status\":\"shipped\"}")
-            .await
-            .unwrap();
-
-        let updated = store.load_snapshot(&pid).await.unwrap();
-        assert_eq!(updated, Some((8, b"{\"status\":\"shipped\"}".to_vec())));
-    }
-
-    #[tokio::test]
-    async fn list_entity_ids_returns_distinct_pairs() {
-        let Some(store) = make_store().await else {
-            eprintln!("REDIS_URL not set, skipping test");
-            return;
-        };
-        let unique = uuid::Uuid::new_v4();
-        let tenant_a = format!("tenant-a-{unique}");
-        let tenant_b = format!("tenant-b-{unique}");
-
-        let order_1 = format!("{tenant_a}:Order:ord-1");
-        let order_2 = format!("{tenant_a}:Order:ord-2");
-        let task_1 = format!("{tenant_a}:Task:task-1");
-        let other_tenant = format!("{tenant_b}:Order:ord-9");
-
-        store
-            .append(
-                &order_1,
-                0,
-                &[test_envelope(
-                    "OrderCreated",
-                    serde_json::json!({ "id": "ord-1" }),
-                )],
-            )
-            .await
-            .unwrap();
-        store
-            .append(
-                &order_2,
-                0,
-                &[test_envelope(
-                    "OrderCreated",
-                    serde_json::json!({ "id": "ord-2" }),
-                )],
-            )
-            .await
-            .unwrap();
-        store
-            .append(
-                &task_1,
-                0,
-                &[test_envelope(
-                    "TaskCreated",
-                    serde_json::json!({ "id": "task-1" }),
-                )],
-            )
-            .await
-            .unwrap();
-        store
-            .append(
-                &other_tenant,
-                0,
-                &[test_envelope(
-                    "OrderCreated",
-                    serde_json::json!({ "id": "ord-9" }),
-                )],
-            )
-            .await
-            .unwrap();
-
-        let mut entities = store.list_entity_ids(&tenant_a).await.unwrap();
-        entities.sort();
-
-        assert_eq!(
-            entities,
-            vec![
-                ("Order".to_string(), "ord-1".to_string()),
-                ("Order".to_string(), "ord-2".to_string()),
-                ("Task".to_string(), "task-1".to_string()),
-            ]
-        );
-
-        // Cross-tenant isolation
-        let other_entities = store.list_entity_ids(&tenant_b).await.unwrap();
-        assert_eq!(
-            other_entities,
-            vec![("Order".to_string(), "ord-9".to_string())]
-        );
-    }
-
-    #[tokio::test]
-    async fn concurrent_appends_detect_conflict() {
-        let Some(store) = make_store().await else {
-            eprintln!("REDIS_URL not set, skipping test");
-            return;
-        };
-        let pid = unique_persistence_id();
-
-        let store1 = store.clone();
-        let store2 = store.clone();
-        let pid1 = pid.clone();
-        let pid2 = pid.clone();
-
-        let handle1 = tokio::spawn(async move {
-            store1
-                .append(
-                    &pid1,
-                    0,
-                    &[test_envelope(
-                        "OrderCreated",
-                        serde_json::json!({ "writer": 1 }),
-                    )],
-                )
-                .await
-        });
-
-        let handle2 = tokio::spawn(async move {
-            store2
-                .append(
-                    &pid2,
-                    0,
-                    &[test_envelope(
-                        "OrderCreated",
-                        serde_json::json!({ "writer": 2 }),
-                    )],
-                )
-                .await
-        });
-
-        let (r1, r2) = tokio::join!(handle1, handle2);
-        let r1 = r1.unwrap();
-        let r2 = r2.unwrap();
-
-        // Exactly one should succeed, the other should get a ConcurrencyViolation.
-        let successes = [r1.is_ok(), r2.is_ok()].iter().filter(|&&ok| ok).count();
-        let conflicts = [&r1, &r2]
-            .iter()
-            .filter(|r| matches!(r, Err(PersistenceError::ConcurrencyViolation { .. })))
-            .count();
-
-        assert_eq!(successes, 1, "exactly one writer should succeed");
-        assert_eq!(conflicts, 1, "exactly one writer should see a conflict");
     }
 }

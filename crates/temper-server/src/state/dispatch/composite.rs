@@ -8,14 +8,17 @@ use temper_authz::SecurityContext;
 use temper_jit::table::{CompositeActionMetadata, TransitionTable};
 use temper_runtime::persistence::{
     COMPOSITE_EVENT_TYPE, CompositeEvent, CompositeEventSubWrite, EventMetadata, PersistenceAppend,
-    PersistenceEnvelope, PersistenceError,
+    PersistenceBatchIdempotency, PersistenceEnvelope, PersistenceError, SnapshotSourceFence,
 };
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
-use crate::entity_actor::EntityState;
 use crate::entity_actor::effects::{
     FieldSyncMode, build_eval_context_with_xref, process_action_with_xref_and_field_mode,
+};
+use crate::entity_actor::{
+    EntityRecoveryContext, EntityResponse, EntityState, recover_entity_state_from_stable_sources,
+    state_materialization_envelope,
 };
 use crate::request_context::AgentContext;
 use crate::state::account_verification::CommonsAccountVerificationError;
@@ -24,10 +27,15 @@ use crate::state::storage_caps::{CommonsStorageCapError, CommonsStorageWrite};
 use crate::storage::BackendLabel;
 
 use super::DispatchError;
+use super::effects::PostDispatchContext;
 
+mod atomic;
 mod helpers;
+mod preflight;
 mod projection;
 use helpers::*;
+
+const MAX_ACTIVE_COMPOSITE_CLAIM_LOCKS: usize = 4_096;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CompositeSubWrite {
@@ -52,6 +60,7 @@ struct PreparedCompositeSubWrite {
     uses_parent_gate: bool,
 }
 
+#[derive(Clone, Copy)]
 struct AtomicCompositeParent<'a> {
     tenant: &'a TenantId,
     entity_type: &'a str,
@@ -59,6 +68,16 @@ struct AtomicCompositeParent<'a> {
     action: &'a str,
     idempotency: &'a str,
     record_event: bool,
+    agent_ctx: &'a AgentContext,
+}
+
+struct AtomicCompositePostCommit {
+    entity_type: String,
+    entity_id: String,
+    action: String,
+    params: Value,
+    idempotency_key: String,
+    response: EntityResponse,
 }
 
 #[derive(Debug, Clone)]
@@ -71,9 +90,13 @@ struct PreflightCompositeTarget {
 struct AtomicCompositeStream {
     entity_type: String,
     entity_id: String,
+    /// Exact transition table captured before any composite recovery/evaluation.
+    table: TransitionTable,
     target_existed: bool,
     state: EntityState,
     expected_sequence: u64,
+    snapshot_source: SnapshotSourceFence,
+    materialization_baseline: Option<EntityState>,
     events: Vec<PersistenceEnvelope>,
 }
 
@@ -87,7 +110,233 @@ fn empty_params() -> Value {
     Value::Object(Default::default())
 }
 
+fn prepare_composite_intent_sub_writes(
+    parent: AtomicCompositeParent<'_>,
+    sub_writes: &[CompositeSubWrite],
+    metadata: &CompositeActionMetadata,
+) -> Vec<PreparedCompositeSubWrite> {
+    sub_writes
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(idx, sub_write)| {
+            let entity_type = sub_write.entity_type.clone();
+            let entity_id = sub_write.entity_id.clone();
+            let action = sub_write.action.clone();
+            PreparedCompositeSubWrite {
+                idx,
+                entity_type: entity_type.clone(),
+                entity_id,
+                action: action.clone(),
+                params: normalize_sub_write_params(sub_write),
+                idempotency_key: format!(
+                    "composite:{}:{}:{}:{}:{}:subwrite:{idx}",
+                    parent.tenant,
+                    parent.entity_type,
+                    parent.entity_id,
+                    parent.action,
+                    parent.idempotency
+                ),
+                preflight_target: None,
+                uses_parent_gate: composite_sub_write_uses_parent_gate(
+                    metadata,
+                    &entity_type,
+                    &action,
+                ),
+            }
+        })
+        .collect()
+}
+
+fn composite_batch_claim(
+    parent: AtomicCompositeParent<'_>,
+    prepared_sub_writes: &[PreparedCompositeSubWrite],
+) -> Result<PersistenceBatchIdempotency, DispatchError> {
+    let persistence_id = format!(
+        "{}:{}:{}",
+        parent.tenant, parent.entity_type, parent.entity_id
+    );
+    let composite_event = build_composite_event(
+        parent.tenant,
+        parent.entity_type,
+        parent.entity_id,
+        parent.action,
+        parent.idempotency,
+        prepared_sub_writes,
+    );
+    let intent_sub_writes = prepared_sub_writes
+        .iter()
+        .map(|write| {
+            (
+                write.idx,
+                write.entity_type.as_str(),
+                write.entity_id.as_str(),
+                write.action.as_str(),
+                canonical_json(&write.params),
+                write.idempotency_key.as_str(),
+                write.uses_parent_gate,
+            )
+        })
+        .collect::<Vec<_>>();
+    let intent_bytes =
+        serde_json::to_vec(&(parent.record_event, composite_event, intent_sub_writes)).map_err(
+            |error| {
+                DispatchError::Internal(format!(
+                    "failed to encode composite batch idempotency intent: {error}"
+                ))
+            },
+        )?;
+    let intent_hash = format!("{:x}", Sha256::digest(intent_bytes));
+    let repairs_incomplete_pack_payload = prepared_sub_writes.iter().any(|write| {
+        write.uses_parent_gate
+            && write.action == "Create"
+            && is_pack_object_entity(&write.entity_type)
+            && !has_complete_git_object_payload(&write.params)
+    });
+    let idempotency_key = if repairs_incomplete_pack_payload {
+        format!("{}:partial:{intent_hash}", parent.idempotency)
+    } else {
+        parent.idempotency.to_string()
+    };
+    Ok(PersistenceBatchIdempotency {
+        persistence_id,
+        idempotency_key,
+        intent_hash,
+    })
+}
+
+fn composite_claim_lock_key(claim: &PersistenceBatchIdempotency) -> String {
+    debug_assert!(!claim.persistence_id.is_empty());
+    debug_assert!(!claim.idempotency_key.is_empty());
+    format!(
+        "{}:{}{}:{}",
+        claim.persistence_id.len(),
+        claim.persistence_id,
+        claim.idempotency_key.len(),
+        claim.idempotency_key
+    )
+}
+
 impl crate::state::ServerState {
+    fn effectful_composite_reservation_persistence_id(
+        parent: AtomicCompositeParent<'_>,
+        intended: &CompositeEvent,
+    ) -> String {
+        let mut digest = Sha256::new();
+        for component in [
+            parent.entity_type,
+            parent.entity_id,
+            intended.composite_idempotency_key.as_str(),
+        ] {
+            digest.update((component.len() as u64).to_be_bytes());
+            digest.update(component.as_bytes());
+        }
+        format!("{}:_CompositeIntent:{:x}", parent.tenant, digest.finalize())
+    }
+
+    async fn effectful_composite_reservation_exists(
+        &self,
+        store: &crate::storage::BoxedEventStore,
+        parent: AtomicCompositeParent<'_>,
+        intended: &CompositeEvent,
+    ) -> Result<bool, DispatchError> {
+        let persistence_id = Self::effectful_composite_reservation_persistence_id(parent, intended);
+        let events = store
+            .read_events(&persistence_id, 0)
+            .await
+            .map_err(composite_batch_persistence_error)?;
+        let mut existing: Option<CompositeEvent> = None;
+        for event in events {
+            if event.event_type != COMPOSITE_EVENT_TYPE {
+                continue;
+            }
+            let decoded =
+                serde_json::from_value::<CompositeEvent>(event.payload).map_err(|error| {
+                    DispatchError::Internal(format!(
+                        "malformed composite reservation at sequence {}: {error}",
+                        event.sequence_nr
+                    ))
+                })?;
+            if decoded.composite_idempotency_key != intended.composite_idempotency_key {
+                continue;
+            }
+            if existing.as_ref().is_some_and(|prior| prior != &decoded) {
+                return Err(DispatchError::Internal(format!(
+                    "composite idempotency key '{}' has conflicting durable reservations",
+                    parent.idempotency
+                )));
+            }
+            existing = Some(decoded);
+        }
+        let Some(existing) = existing else {
+            return Ok(false);
+        };
+        if existing != *intended {
+            return Err(DispatchError::Internal(format!(
+                "composite idempotency key '{}' was reused with a different intent",
+                parent.idempotency
+            )));
+        }
+        Ok(true)
+    }
+
+    async fn persist_effectful_composite_reservation(
+        &self,
+        store: &crate::storage::BoxedEventStore,
+        parent: AtomicCompositeParent<'_>,
+        intended: &CompositeEvent,
+    ) -> Result<(), DispatchError> {
+        if self
+            .effectful_composite_reservation_exists(store, parent, intended)
+            .await?
+        {
+            return Ok(());
+        }
+        let persistence_id = Self::effectful_composite_reservation_persistence_id(parent, intended);
+        let boundary = store
+            .journal_boundary(&persistence_id)
+            .await
+            .map_err(composite_batch_persistence_error)?;
+        let envelope = composite_event_envelope(&persistence_id, intended)?;
+        if let Err(error) = store
+            .append(&persistence_id, boundary.latest_sequence, &[envelope])
+            .await
+            && !self
+                .effectful_composite_reservation_exists(store, parent, intended)
+                .await?
+        {
+            return Err(composite_batch_persistence_error(error));
+        }
+
+        Ok(())
+    }
+
+    async fn acquire_composite_claim_lock(
+        &self,
+        claim: &PersistenceBatchIdempotency,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, DispatchError> {
+        let key = composite_claim_lock_key(claim);
+        let serializer = {
+            let mut locks = self.composite_claim_locks.lock().map_err(|error| {
+                DispatchError::Internal(format!(
+                    "composite claim serializer lock poisoned: {error}"
+                ))
+            })?;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(&key).and_then(std::sync::Weak::upgrade) {
+                lock
+            } else {
+                if locks.len() >= MAX_ACTIVE_COMPOSITE_CLAIM_LOCKS {
+                    return Err(DispatchError::Deferred { retry_after_ms: 1 });
+                }
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                locks.insert(key, Arc::downgrade(&lock));
+                lock
+            }
+        };
+        Ok(serializer.lock_owned().await)
+    }
+
     pub(super) fn composite_metadata_for(
         &self,
         tenant: &TenantId,
@@ -138,8 +387,6 @@ impl crate::state::ServerState {
         validate_sub_writes(&metadata, &sub_writes)?;
         let parent_idempotency = composite_parent_idempotency(agent_ctx, callback_params);
 
-        let _commons_guardrail_lock = self.acquire_commons_write_guardrail_lock(tenant).await;
-
         let composite_action_context = format!("composite:{entity_type}.{action}");
         let mut composite_agent_ctx = agent_ctx.clone();
         composite_agent_ctx.security_ctx = Some(
@@ -149,6 +396,65 @@ impl crate::state::ServerState {
                 .unwrap_or_else(|| SecurityContext::from_headers(&[]))
                 .with_action_context(composite_action_context),
         );
+
+        let parent = AtomicCompositeParent {
+            tenant,
+            entity_type,
+            entity_id,
+            action,
+            idempotency: &parent_idempotency,
+            record_event: metadata.record_parent_event,
+            agent_ctx: &composite_agent_ctx,
+        };
+        let intent_prepared = prepare_composite_intent_sub_writes(parent, &sub_writes, &metadata);
+        let batch_claim = composite_batch_claim(parent, &intent_prepared)?;
+        // The durable append is still the final cross-backend authority, but the
+        // current runtime is single-process. Serialize one raw batch namespace so
+        // an identical callback cannot observe "claim absent", lose a
+        // state-dependent preflight race to its peer, and return a conflict before
+        // reaching the backend's exact-claim replay.
+        let _claim_lock = self.acquire_composite_claim_lock(&batch_claim).await?;
+        let event_journal = self.event_journal();
+        let batch_already_committed = match event_journal.as_ref() {
+            Some((store, _)) => store
+                .batch_idempotency_committed(&batch_claim)
+                .await
+                .map_err(composite_batch_persistence_error)?,
+            None => false,
+        };
+
+        let _commons_guardrail_lock = self.acquire_commons_write_guardrail_lock(tenant).await;
+        if batch_already_committed {
+            if !self
+                .apply_composite_sub_writes_atomic(parent, &intent_prepared, batch_claim, true)
+                .await?
+            {
+                return Err(DispatchError::Internal(
+                    "committed composite batch cannot be repaired without its durable event journal"
+                        .to_string(),
+                ));
+            }
+            return Ok(true);
+        }
+
+        let mut intended_reservation = build_composite_event(
+            tenant,
+            entity_type,
+            entity_id,
+            action,
+            &parent_idempotency,
+            &intent_prepared,
+        );
+        intended_reservation
+            .intent_hash
+            .clone_from(&batch_claim.intent_hash);
+        intended_reservation
+            .composite_idempotency_key
+            .clone_from(&batch_claim.idempotency_key);
+        if let Some((store, _)) = event_journal.as_ref() {
+            self.effectful_composite_reservation_exists(store, parent, &intended_reservation)
+                .await?;
+        }
 
         let prepared_sub_writes = self
             .prepare_composite_sub_writes(
@@ -165,19 +471,19 @@ impl crate::state::ServerState {
 
         if self
             .apply_composite_sub_writes_atomic(
-                AtomicCompositeParent {
-                    tenant,
-                    entity_type,
-                    entity_id,
-                    action,
-                    idempotency: &parent_idempotency,
-                    record_event: metadata.record_parent_event,
-                },
+                parent,
                 &prepared_sub_writes,
+                batch_claim.clone(),
+                false,
             )
             .await?
         {
             return Ok(true);
+        }
+
+        if let Some((store, _)) = event_journal.as_ref() {
+            self.persist_effectful_composite_reservation(store, parent, &intended_reservation)
+                .await?;
         }
 
         for prepared in prepared_sub_writes {
@@ -209,756 +515,6 @@ impl crate::state::ServerState {
         }
 
         Ok(true)
-    }
-
-    async fn apply_composite_sub_writes_atomic(
-        &self,
-        parent: AtomicCompositeParent<'_>,
-        prepared_sub_writes: &[PreparedCompositeSubWrite],
-    ) -> Result<bool, DispatchError> {
-        let tenant = parent.tenant;
-        let parent_entity_type = parent.entity_type;
-        let parent_entity_id = parent.entity_id;
-        let parent_action = parent.action;
-        let parent_idempotency = parent.idempotency;
-
-        let Some((store, backend)) = self.event_journal() else {
-            return Ok(false);
-        };
-        if prepared_sub_writes.is_empty() {
-            return Ok(true);
-        }
-
-        let field_sync_mode = self.composite_batch_field_sync_mode(tenant, backend);
-        let blob_store = self.blob_store_for_tenant(tenant).ok();
-        let mut streams: BTreeMap<String, AtomicCompositeStream> = BTreeMap::new();
-        let parent_persistence_id = format!("{tenant}:{parent_entity_type}:{parent_entity_id}");
-        let timing_enabled = prepared_sub_writes.len() >= 10;
-        let total_started_at = timing_enabled.then(std::time::Instant::now);
-        let parent_started_at = timing_enabled.then(std::time::Instant::now);
-
-        if parent.record_event
-            && !self
-                .composite_event_already_persisted(
-                    &store,
-                    &parent_persistence_id,
-                    parent_idempotency,
-                )
-                .await?
-        {
-            self.ensure_atomic_composite_stream(
-                &mut streams,
-                tenant,
-                parent_entity_type,
-                parent_entity_id,
-                None,
-                false,
-            )
-            .await?;
-            let event = build_composite_event(
-                tenant,
-                parent_entity_type,
-                parent_entity_id,
-                parent_action,
-                parent_idempotency,
-                prepared_sub_writes,
-            );
-            let stream = streams
-                .get_mut(&parent_persistence_id)
-                .expect("parent stream inserted before composite event append");
-            stream
-                .events
-                .push(composite_event_envelope(&parent_persistence_id, &event)?);
-            stream.state.sequence_nr = stream.state.sequence_nr.saturating_add(1);
-        }
-        let parent_ms = parent_started_at.map(|started| started.elapsed().as_millis() as u64);
-
-        let stage_started_at = timing_enabled.then(std::time::Instant::now);
-        for write in prepared_sub_writes {
-            let persistence_id = format!("{tenant}:{}:{}", write.entity_type, write.entity_id);
-            self.ensure_atomic_composite_stream(
-                &mut streams,
-                tenant,
-                &write.entity_type,
-                &write.entity_id,
-                write.preflight_target.as_ref(),
-                write.uses_parent_gate && write.action == "Create",
-            )
-            .await?;
-
-            let table = self.transition_table_for_dispatch(tenant, &write.entity_type)?;
-            let cross_entity_booleans =
-                if table_has_cross_entity_guards_for_action(&table, &write.action) {
-                    self.resolve_cross_entity_guards(
-                        tenant,
-                        &write.entity_type,
-                        &write.entity_id,
-                        &write.action,
-                    )
-                    .await
-                } else {
-                    BTreeMap::new()
-                };
-            let stream = streams
-                .get_mut(&persistence_id)
-                .expect("stream inserted before processing sub-write");
-
-            let incomplete_pack_object_repair =
-                is_incomplete_existing_pack_object_create(write, stream);
-
-            if should_skip_existing_pack_object_create(write, stream) {
-                continue;
-            }
-
-            if !incomplete_pack_object_repair
-                && stream
-                    .state
-                    .has_processed_idempotency_key(&write.idempotency_key)
-            {
-                continue;
-            }
-
-            validate_composite_ref_compare_and_set(
-                parent_entity_type,
-                parent_action,
-                write,
-                stream,
-            )?;
-
-            let result = process_action_with_xref_and_field_mode(
-                &mut stream.state,
-                &table,
-                &write.action,
-                &write.params,
-                &cross_entity_booleans,
-                field_sync_mode,
-            );
-            if !result.success {
-                return Err(DispatchError::Internal(result.error.unwrap_or_else(|| {
-                    format!(
-                        "composite {parent_entity_type}.{parent_action} sub-write {} failed during atomic staging",
-                        write.idx
-                    )
-                })));
-            }
-            if !result.custom_effects.is_empty()
-                || !result.scheduled_actions.is_empty()
-                || !result.spawn_requests.is_empty()
-            {
-                return Ok(false);
-            }
-            if !result.overflow_blobs.is_empty() {
-                let blob_store = blob_store.as_ref().ok_or_else(|| {
-                    DispatchError::Internal(
-                        "field-overflow blobs require a configured object blob store".to_string(),
-                    )
-                })?;
-                crate::blobs::put_overflow_blobs(blob_store, &result.overflow_blobs)
-                    .await
-                    .map_err(|e| {
-                        DispatchError::Internal(format!(
-                            "field-overflow blob persistence failed during composite batch: {e}"
-                        ))
-                    })?;
-            }
-
-            let mut event = result
-                .event
-                .expect("successful process_action returns an event");
-            event.idempotency_key = Some(write.idempotency_key.clone());
-            stream
-                .events
-                .push(composite_envelope(&persistence_id, &event)?);
-            stream.state.sequence_nr = stream.state.sequence_nr.saturating_add(1);
-            stream.state.push_event_bounded(event);
-        }
-        let stage_ms = stage_started_at.map(|started| started.elapsed().as_millis() as u64);
-
-        let mut appends = Vec::with_capacity(streams.len());
-        for (persistence_id, stream) in streams
-            .iter()
-            .filter(|(_, stream)| !stream.events.is_empty())
-        {
-            let table = self.transition_table_for_dispatch(tenant, &stream.entity_type)?;
-            let reconcile_keys = !table.keys.is_empty();
-            let key_set_signature = crate::key_index::declared_key_set_signature(&table.keys);
-            let key_rows = crate::key_index::derive_entity_key_rows(
-                &table.keys,
-                &stream.state.fields,
-                stream.state.status != "Deleted",
-            );
-            appends.push(PersistenceAppend {
-                persistence_id: persistence_id.clone(),
-                expected_sequence: stream.expected_sequence,
-                events: stream.events.clone(),
-                key_rows,
-                reconcile_keys,
-                key_set_signature: Some(key_set_signature),
-            });
-        }
-        if appends.is_empty() {
-            return Ok(true);
-        }
-
-        let append_started_at = timing_enabled.then(std::time::Instant::now);
-        store
-            .append_batch(&appends)
-            .await
-            .map_err(composite_batch_persistence_error)?;
-        let append_ms = append_started_at.map(|started| started.elapsed().as_millis() as u64);
-
-        let projection_collect_started_at = timing_enabled.then(std::time::Instant::now);
-        self.update_composite_query_projections(tenant, &streams)
-            .await?;
-        let projection_collect_ms =
-            projection_collect_started_at.map(|started| started.elapsed().as_millis() as u64);
-
-        let projection_write_started_at = timing_enabled.then(std::time::Instant::now);
-        let projection_write_ms =
-            projection_write_started_at.map(|started| started.elapsed().as_millis() as u64);
-
-        let reload_started_at = timing_enabled.then(std::time::Instant::now);
-        for stream in streams.values() {
-            if stream.events.is_empty() {
-                continue;
-            }
-            if !stream.target_existed {
-                continue;
-            }
-            self.stop_and_remove_entity(tenant, &stream.entity_type, &stream.entity_id);
-            if stream.state.status == "Deleted" {
-                continue;
-            }
-            if !self
-                .ensure_entity_loaded(tenant, &stream.entity_type, &stream.entity_id)
-                .await
-            {
-                return Err(DispatchError::Internal(format!(
-                    "composite batch committed {}:{} but failed to reload it",
-                    stream.entity_type, stream.entity_id
-                )));
-            }
-        }
-        let reload_ms = reload_started_at.map(|started| started.elapsed().as_millis() as u64);
-        if let Some(started) = total_started_at {
-            tracing::info!(
-                tenant = %tenant,
-                parent_entity_type,
-                parent_entity_id,
-                parent_action,
-                sub_writes = prepared_sub_writes.len(),
-                streams = streams.len(),
-                parent_ms = parent_ms.unwrap_or_default(),
-                stage_ms = stage_ms.unwrap_or_default(),
-                append_ms = append_ms.unwrap_or_default(),
-                projection_collect_ms = projection_collect_ms.unwrap_or_default(),
-                projection_write_ms = projection_write_ms.unwrap_or_default(),
-                reload_ms = reload_ms.unwrap_or_default(),
-                total_ms = started.elapsed().as_millis() as u64,
-                "composite atomic batch timing"
-            );
-        }
-
-        Ok(true)
-    }
-
-    async fn ensure_atomic_composite_stream(
-        &self,
-        streams: &mut BTreeMap<String, AtomicCompositeStream>,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        preflight_target: Option<&PreflightCompositeTarget>,
-        suppress_bootstrap_event: bool,
-    ) -> Result<(), DispatchError> {
-        let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
-        if streams.contains_key(&persistence_id) {
-            return Ok(());
-        }
-
-        let (target_exists, mut state) = if let Some(target) = preflight_target {
-            (target.target_existed, target.state.clone())
-        } else {
-            let table = self.transition_table_for_dispatch(tenant, entity_type)?;
-            let target_exists = self
-                .ensure_entity_loaded(tenant, entity_type, entity_id)
-                .await;
-            let state = if target_exists {
-                self.get_tenant_entity_state(tenant, entity_type, entity_id)
-                    .await
-                    .map_err(DispatchError::Internal)?
-                    .state
-            } else {
-                synthetic_initial_state(entity_type, entity_id, &table)
-            };
-            (target_exists, state)
-        };
-        let expected_sequence = state.sequence_nr;
-        let mut events = Vec::new();
-        if !suppress_bootstrap_event
-            && !target_exists
-            && expected_sequence == 0
-            && state.total_event_count == 0
-        {
-            let bootstrap = crate::entity_actor::EntityEvent {
-                action: "Created".to_string(),
-                from_status: String::new(),
-                to_status: state.status.clone(),
-                timestamp: sim_now(),
-                params: serde_json::json!({}),
-                idempotency_key: None,
-            };
-            events.push(composite_envelope(&persistence_id, &bootstrap)?);
-            state.sequence_nr = state.sequence_nr.saturating_add(1);
-            state.push_event_bounded(bootstrap);
-        }
-        streams.insert(
-            persistence_id,
-            AtomicCompositeStream {
-                entity_type: entity_type.to_string(),
-                entity_id: entity_id.to_string(),
-                target_existed: target_exists,
-                state,
-                expected_sequence,
-                events,
-            },
-        );
-        Ok(())
-    }
-
-    async fn composite_event_already_persisted(
-        &self,
-        store: &crate::storage::BoxedEventStore,
-        parent_persistence_id: &str,
-        parent_idempotency: &str,
-    ) -> Result<bool, DispatchError> {
-        let envelopes = store
-            .read_events(parent_persistence_id, 0)
-            .await
-            .map_err(|e| {
-                DispatchError::Internal(format!(
-                    "failed to read parent journal before CompositeEvent append: {e}"
-                ))
-            })?;
-        Ok(envelopes.iter().any(|env| {
-            env.event_type == COMPOSITE_EVENT_TYPE
-                && serde_json::from_value::<CompositeEvent>(env.payload.clone())
-                    .is_ok_and(|event| event.composite_idempotency_key == parent_idempotency)
-        }))
-    }
-
-    fn composite_batch_field_sync_mode(
-        &self,
-        tenant: &TenantId,
-        backend: BackendLabel,
-    ) -> FieldSyncMode {
-        match backend {
-            BackendLabel::Turso | BackendLabel::TursoRouted => FieldSyncMode::blob_refs_default(),
-            _ if self.blob_store_for_tenant(tenant).is_ok() => FieldSyncMode::blob_refs_default(),
-            _ => FieldSyncMode::InlineTruncate,
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn prepare_composite_sub_writes(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        action: &str,
-        sub_writes: &[CompositeSubWrite],
-        metadata: &CompositeActionMetadata,
-        composite_agent_ctx: &AgentContext,
-        parent_idempotency: &str,
-    ) -> Result<Vec<PreparedCompositeSubWrite>, DispatchError> {
-        let sub_security_ctx = composite_agent_ctx.security_ctx.as_ref().ok_or_else(|| {
-            DispatchError::Internal(
-                "composite sub-write authorization requires a security context".to_string(),
-            )
-        })?;
-        let mut prepared = Vec::with_capacity(sub_writes.len());
-        let mut governed_cache = BTreeMap::new();
-        let mut create_auth_defaults_cache = BTreeMap::new();
-
-        for (idx, sub_write) in sub_writes.iter().cloned().enumerate() {
-            let sub_entity_type = sub_write.entity_type.clone();
-            let sub_entity_id = sub_write.entity_id.clone();
-            let sub_action = sub_write.action.clone();
-            let sub_params = normalize_sub_write_params(sub_write);
-
-            let governed = match governed_cache.get(&sub_entity_type) {
-                Some(governed) => *governed,
-                None => {
-                    let governed = self
-                        .is_entity_type_governed(tenant, &sub_entity_type)
-                        .map_err(DispatchError::Internal)?;
-                    governed_cache.insert(sub_entity_type.clone(), governed);
-                    governed
-                }
-            };
-            if !governed {
-                return Err(DispatchError::Ungoverned(sub_entity_type));
-            }
-
-            let use_parent_gate =
-                composite_sub_write_uses_parent_gate(metadata, &sub_entity_type, &sub_action);
-            let resource_attrs = if use_parent_gate {
-                None
-            } else if sub_action == "Create" {
-                if !create_auth_defaults_cache.contains_key(&sub_entity_type) {
-                    create_auth_defaults_cache.insert(
-                        sub_entity_type.clone(),
-                        self.composite_create_auth_defaults(tenant, &sub_entity_type)?,
-                    );
-                }
-                let defaults = create_auth_defaults_cache
-                    .get(&sub_entity_type)
-                    .expect("create auth defaults inserted before use");
-                Some(composite_create_resource_attrs_from_defaults(
-                    &sub_entity_id,
-                    &sub_params,
-                    defaults,
-                ))
-            } else {
-                Some(
-                    self.composite_sub_write_auth_resource_attrs(
-                        tenant,
-                        &sub_entity_type,
-                        &sub_entity_id,
-                        &sub_action,
-                        &sub_params,
-                    )
-                    .await?,
-                )
-            };
-
-            if let Some(resource_attrs) = resource_attrs {
-                self.authorize_with_context(
-                    sub_security_ctx,
-                    &sub_action,
-                    &sub_entity_type,
-                    &resource_attrs,
-                    tenant.as_str(),
-                )
-                .map_err(|denial| {
-                    DispatchError::AuthzDenied(format!(
-                        "composite {entity_type}.{action} sub-write {idx} denied for {sub_entity_type}.{sub_action}: {denial}"
-                    ))
-                })?;
-            }
-
-            prepared.push(PreparedCompositeSubWrite {
-                idx,
-                entity_type: sub_entity_type,
-                entity_id: sub_entity_id,
-                action: sub_action,
-                params: sub_params,
-                idempotency_key: format!(
-                    "composite:{tenant}:{entity_type}:{entity_id}:{action}:{parent_idempotency}:subwrite:{idx}"
-                ),
-                preflight_target: None,
-                uses_parent_gate: use_parent_gate,
-            });
-        }
-
-        let known_absent_create_targets = self
-            .composite_known_absent_create_targets(tenant, &prepared)
-            .await?;
-
-        for write in &mut prepared {
-            let known_absent_create = known_absent_create_targets
-                .contains(&(write.entity_type.clone(), write.entity_id.clone()));
-            write.preflight_target = Some(
-                self.preflight_composite_sub_write_transition(
-                    tenant,
-                    entity_type,
-                    action,
-                    write,
-                    known_absent_create,
-                )
-                .await?,
-            );
-        }
-
-        let storage_writes = prepared
-            .iter()
-            .map(|write| CommonsStorageWrite {
-                entity_type: write.entity_type.clone(),
-                entity_id: write.entity_id.clone(),
-                action: write.action.clone(),
-                fields: write.params.clone(),
-            })
-            .collect::<Vec<_>>();
-        for write in &storage_writes {
-            self.enforce_commons_verified_owner_for_write(
-                tenant,
-                &write.entity_type,
-                &write.fields,
-            )
-            .await
-            .map_err(composite_account_verification_error)?;
-            self.enforce_commons_app_name_unique_for_write(
-                tenant,
-                &write.entity_type,
-                &write.entity_id,
-                &write.fields,
-            )
-            .await
-            .map_err(composite_app_uniqueness_error)?;
-        }
-        self.enforce_commons_storage_caps_for_writes(tenant, &storage_writes)
-            .await
-            .map_err(composite_storage_cap_error)?;
-
-        Ok(prepared)
-    }
-
-    async fn composite_known_absent_create_targets(
-        &self,
-        tenant: &TenantId,
-        prepared: &[PreparedCompositeSubWrite],
-    ) -> Result<BTreeSet<(String, String)>, DispatchError> {
-        let Some(query_plane) = self.query_plane_store() else {
-            return Ok(BTreeSet::new());
-        };
-
-        let mut by_type: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for write in prepared {
-            if write.uses_parent_gate
-                || write.action != "Create"
-                || self.entity_exists(tenant, &write.entity_type, &write.entity_id)
-            {
-                continue;
-            }
-            by_type
-                .entry(write.entity_type.clone())
-                .or_default()
-                .insert(write.entity_id.clone());
-        }
-
-        let mut absent = BTreeSet::new();
-        for (entity_type, ids) in by_type {
-            let entity_ids = ids.into_iter().collect::<Vec<_>>();
-            let Some(rows) = query_plane
-                .load_entity_catalog_rows(tenant.as_str(), &entity_type, &entity_ids)
-                .await
-                .map_err(|e| {
-                    DispatchError::Internal(format!(
-                        "query projection preflight failed for composite {entity_type} creates: {e}"
-                    ))
-                })?
-            else {
-                continue;
-            };
-
-            let present = rows
-                .into_iter()
-                .map(|row| row.entity_id)
-                .collect::<BTreeSet<_>>();
-            for entity_id in entity_ids {
-                if !present.contains(&entity_id) {
-                    absent.insert((entity_type.clone(), entity_id));
-                }
-            }
-        }
-
-        Ok(absent)
-    }
-
-    async fn preflight_composite_sub_write_transition(
-        &self,
-        tenant: &TenantId,
-        parent_entity_type: &str,
-        parent_action: &str,
-        write: &PreparedCompositeSubWrite,
-        known_absent_create: bool,
-    ) -> Result<PreflightCompositeTarget, DispatchError> {
-        let table = self.transition_table_for_dispatch(tenant, &write.entity_type)?;
-        let known_absent_create = known_absent_create
-            && write.action == "Create"
-            && !self.entity_exists(tenant, &write.entity_type, &write.entity_id);
-        let target_exists = if known_absent_create {
-            false
-        } else {
-            self.ensure_entity_loaded(tenant, &write.entity_type, &write.entity_id)
-                .await
-        };
-        let target_state = if known_absent_create {
-            synthetic_initial_state(&write.entity_type, &write.entity_id, &table)
-        } else if target_exists {
-            self.get_tenant_entity_state(tenant, &write.entity_type, &write.entity_id)
-                .await
-                .map_err(DispatchError::Internal)?
-                .state
-        } else {
-            synthetic_initial_state(&write.entity_type, &write.entity_id, &table)
-        };
-
-        let preflight_target = PreflightCompositeTarget {
-            target_existed: target_exists,
-            state: target_state.clone(),
-        };
-
-        if target_state.has_processed_idempotency_key(&write.idempotency_key) {
-            return Ok(preflight_target);
-        }
-
-        validate_composite_ref_preflight_compare_and_set(
-            parent_entity_type,
-            parent_action,
-            write,
-            &preflight_target,
-        )?;
-
-        if !target_state.can_accept_event() {
-            return Err(DispatchError::Internal(format!(
-                "composite {parent_entity_type}.{parent_action} sub-write {} would exceed the event budget for {}:{}",
-                write.idx, write.entity_type, write.entity_id
-            )));
-        }
-
-        let cross_entity_booleans =
-            if table_has_cross_entity_guards_for_action(&table, &write.action) {
-                self.resolve_cross_entity_guards(
-                    tenant,
-                    &write.entity_type,
-                    &write.entity_id,
-                    &write.action,
-                )
-                .await
-            } else {
-                BTreeMap::new()
-            };
-        let eval_ctx = build_eval_context_with_xref(&target_state, &cross_entity_booleans);
-        match table.evaluate_ctx(&target_state.status, &eval_ctx, &write.action) {
-            Some(result) if result.success => Ok(preflight_target),
-            Some(_) => Err(DispatchError::Conflict(format!(
-                "composite {parent_entity_type}.{parent_action} sub-write {} would fail: action '{}' is not valid from state '{}'",
-                write.idx, write.action, target_state.status
-            ))),
-            None => Err(DispatchError::Internal(format!(
-                "composite {parent_entity_type}.{parent_action} sub-write {} would fail: unknown action '{}'",
-                write.idx, write.action
-            ))),
-        }
-    }
-
-    async fn composite_sub_write_auth_resource_attrs(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        action: &str,
-        params: &Value,
-    ) -> Result<BTreeMap<String, Value>, DispatchError> {
-        if action == "Create" {
-            return self.composite_create_resource_attrs(tenant, entity_type, entity_id, params);
-        }
-
-        if !self
-            .ensure_entity_loaded(tenant, entity_type, entity_id)
-            .await
-        {
-            return Err(DispatchError::Internal(format!(
-                "composite sub-write target {entity_type}:{entity_id} does not exist"
-            )));
-        }
-
-        self.load_authz_resource_snapshot(tenant, entity_type, entity_id)
-            .await
-            .map(|snapshot| snapshot.resource_attrs)
-            .map_err(DispatchError::Internal)
-    }
-
-    fn composite_create_auth_defaults(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-    ) -> Result<CompositeCreateAuthDefaults, DispatchError> {
-        let table = self.transition_table_for_dispatch(tenant, entity_type)?;
-        let has_spec = self
-            .has_registered_spec(tenant, entity_type)
-            .map_err(DispatchError::Internal)?;
-        Ok(CompositeCreateAuthDefaults {
-            initial_state: table.initial_state.clone(),
-            has_spec,
-        })
-    }
-
-    fn composite_create_resource_attrs(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        params: &Value,
-    ) -> Result<BTreeMap<String, Value>, DispatchError> {
-        let table = self.transition_table_for_dispatch(tenant, entity_type)?;
-        let mut resource_attrs = BTreeMap::new();
-        resource_attrs.insert("id".to_string(), Value::String(entity_id.to_string()));
-        resource_attrs.insert(
-            "status".to_string(),
-            Value::String(table.initial_state.clone()),
-        );
-        if let Value::Object(fields) = params {
-            for (key, value) in fields {
-                resource_attrs.insert(key.clone(), value.clone());
-            }
-        }
-        let has_spec = self
-            .has_registered_spec(tenant, entity_type)
-            .map_err(DispatchError::Internal)?;
-        resource_attrs.insert("has_spec".to_string(), Value::Bool(has_spec));
-        Ok(resource_attrs)
-    }
-
-    fn transition_table_for_dispatch(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-    ) -> Result<Arc<TransitionTable>, DispatchError> {
-        if let Some(table) = self
-            .registry
-            .read()
-            .map_err(|e| DispatchError::Internal(format!("registry lock poisoned: {e}")))?
-            .get_table(tenant, entity_type)
-        {
-            return Ok(table);
-        }
-
-        self.transition_tables
-            .get(entity_type)
-            .cloned()
-            .ok_or_else(|| DispatchError::Ungoverned(entity_type.to_string()))
-    }
-
-    #[allow(dead_code)]
-    async fn ensure_composite_entry_transition_allowed(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        action: &str,
-    ) -> Result<(), DispatchError> {
-        let table = self.transition_table_for_dispatch(tenant, entity_type)?;
-        let current = self
-            .get_tenant_entity_state(tenant, entity_type, entity_id)
-            .await
-            .map_err(DispatchError::Internal)?;
-        let cross_entity_booleans = self
-            .resolve_cross_entity_guards(tenant, entity_type, entity_id, action)
-            .await;
-        let eval_ctx = build_eval_context_with_xref(&current.state, &cross_entity_booleans);
-
-        match table.evaluate_ctx(&current.state.status, &eval_ctx, action) {
-            Some(result) if result.success => Ok(()),
-            Some(_) => Err(DispatchError::Internal(format!(
-                "Composite action '{action}' not valid from state '{}'",
-                current.state.status
-            ))),
-            None => Err(DispatchError::Internal(format!(
-                "Unknown composite action: {action}"
-            ))),
-        }
     }
 }
 

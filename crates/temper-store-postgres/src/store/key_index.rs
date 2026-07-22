@@ -3,11 +3,14 @@
 use sqlx::PgPool;
 use temper_runtime::persistence::{EntityKeyRow, KeyIndexBackfillFence, PersistenceError};
 
+mod activation;
 mod coverage;
 mod query;
 
+pub(super) use activation::{activate_contract, activate_contracts};
 pub(crate) use coverage::{
-    DerivedWriteSource, invalidate_key_coverage_for_derived_write, reconcile_key_contract_state,
+    DerivedWriteSource, KeyContractUse, invalidate_key_coverage_for_derived_write,
+    invalidate_key_coverage_for_unreconciled_append, reconcile_key_contract_state,
 };
 pub(super) use query::{keyed_entity_ids, lookup};
 
@@ -113,24 +116,27 @@ pub(super) async fn backfill_entity_keys(
         return Err(PersistenceError::SnapshotGenerationChanged);
     }
 
-    // Migration-era entities can be represented only by a snapshot or catalog
-    // projection. Fence against the newest durable representation, not merely the
-    // event journal, before replacing that entity's complete ownership set.
+    // Source authority is categorical, not numeric: journal first, then snapshot,
+    // then catalog only when neither stronger source exists. A higher compatibility
+    // catalog sequence must never outrank an exact snapshot generation.
     let row: (i64, i64, bool) = crate::dbm::postgres_query_as!(
-        "SELECT GREATEST( \
-           COALESCE(( \
+        "SELECT CASE WHEN EXISTS ( \
+             SELECT 1 FROM events \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+           ) THEN COALESCE(( \
              SELECT MAX(sequence_nr) FROM events \
              WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
-           ), 0), \
-           COALESCE(( \
-             SELECT sequence_nr FROM snapshots \
+           ), 0) WHEN EXISTS ( \
+             SELECT 1 FROM snapshots \
              WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
-           ), 0), \
-           COALESCE(( \
-             SELECT sequence_nr FROM entity_catalog \
-             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
-           ), 0) \
-         ), COALESCE(( \
+           ) THEN COALESCE(( \
+               SELECT sequence_nr FROM snapshots \
+               WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+             ), 0) ELSE COALESCE(( \
+               SELECT sequence_nr FROM entity_catalog \
+               WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+             ), 0) \
+           END, COALESCE(( \
            SELECT MAX(sequence_nr) FROM events \
            WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
          ), 0), ( \
@@ -278,7 +284,15 @@ pub(super) async fn mark_backfilled(
         .await
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
     lock_key_contract(&mut tx, tenant, entity_type).await?;
-    reconcile_key_contract_state(&mut tx, tenant, entity_type, Some(key_set)).await?;
+    reconcile_key_contract_state(
+        &mut tx,
+        tenant,
+        entity_type,
+        Some(key_set),
+        None,
+        KeyContractUse::Backfill,
+    )
+    .await?;
     upsert_watermark(&mut tx, tenant, entity_type, key_set).await?;
     tx.commit()
         .await
@@ -297,6 +311,19 @@ pub(super) async fn backfilled_types(
     .fetch_all(pool)
     .await
     .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+    Ok(rows)
+}
+
+pub(super) async fn activated_contracts(
+    pool: &PgPool,
+) -> Result<Vec<(String, String)>, PersistenceError> {
+    let rows = crate::dbm::postgres_query_as!(
+        "SELECT tenant, entity_type FROM key_index_contract_state \
+         WHERE activated_key_set IS NOT NULL ORDER BY tenant, entity_type",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| PersistenceError::Storage(error.to_string()))?;
     Ok(rows)
 }
 
@@ -328,8 +355,15 @@ pub(super) async fn begin_backfill(
         .await
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
     lock_key_contract(&mut tx, tenant, entity_type).await?;
-    let revision =
-        reconcile_key_contract_state(&mut tx, tenant, entity_type, Some(key_set)).await?;
+    let revision = reconcile_key_contract_state(
+        &mut tx,
+        tenant,
+        entity_type,
+        Some(key_set),
+        None,
+        KeyContractUse::Backfill,
+    )
+    .await?;
     tx.commit()
         .await
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;

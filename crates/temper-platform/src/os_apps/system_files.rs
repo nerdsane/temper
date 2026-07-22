@@ -84,9 +84,10 @@ pub async fn bootstrap_system_files(
     tenant_id: &TenantId,
     tenant: &str,
     system_files: &[SystemFileEntry],
-) {
+    agent_ctx: &temper_server::request_context::AgentContext,
+) -> Vec<String> {
     if system_files.is_empty() {
-        return;
+        return Vec::new();
     }
 
     let has_fs = {
@@ -95,20 +96,19 @@ pub async fn bootstrap_system_files(
             && registry.get_spec(tenant_id, "Directory").is_some()
     };
     if !has_fs {
-        return;
+        return Vec::new();
     }
 
-    let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
-    if let Err(e) = super::ensure_app_docs_workspace(state, tenant_id, &agent_ctx).await {
+    if let Err(e) = super::ensure_app_docs_workspace(state, tenant_id, agent_ctx).await {
         tracing::warn!(tenant, error = %e, "Failed to ensure workspace for system file bootstrap");
-        return;
+        return Vec::new();
     }
 
     // Ensure /system/ root exists.
     if let Err(e) = ensure_directory(
         state,
         tenant_id,
-        &agent_ctx,
+        agent_ctx,
         DirectoryBootstrapTarget {
             directory_id: "os-system-root",
             name: "system",
@@ -120,11 +120,12 @@ pub async fn bootstrap_system_files(
     .await
     {
         tracing::warn!(tenant, error = %e, "Failed to create /system/ directory for system files");
-        return;
+        return Vec::new();
     }
 
     // Collect unique subdirectories from relative paths and ensure they exist.
     let mut ensured_dirs = std::collections::HashSet::new();
+    let mut bootstrapped = Vec::new();
     for entry in system_files {
         if let Some(parent) = Path::new(&entry.relative_path).parent() {
             let parent_str = parent.to_string_lossy().to_string();
@@ -135,7 +136,7 @@ pub async fn bootstrap_system_files(
                 if let Err(e) = ensure_directory(
                     state,
                     tenant_id,
-                    &agent_ctx,
+                    agent_ctx,
                     DirectoryBootstrapTarget {
                         directory_id: &dir_id,
                         name: &parent_str,
@@ -171,7 +172,7 @@ pub async fn bootstrap_system_files(
         match ensure_markdown_file(
             state,
             tenant_id,
-            &agent_ctx,
+            agent_ctx,
             MarkdownFileBootstrapTarget {
                 file_id: &file_id,
                 name: &entry.file_name,
@@ -185,6 +186,7 @@ pub async fn bootstrap_system_files(
         {
             Ok(()) => {
                 tracing::info!(tenant, path = %file_path, "Bootstrapped system file");
+                bootstrapped.push(entry.relative_path.clone());
             }
             Err(error) => {
                 tracing::warn!(
@@ -196,4 +198,5 @@ pub async fn bootstrap_system_files(
             }
         }
     }
+    bootstrapped
 }

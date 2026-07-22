@@ -1,8 +1,8 @@
-//! DST for ADR-0171 exact declared-key reconciliation under failure and retry.
+//! DST for ADR-0192 exact declared-key reconciliation under failure and retry.
 
 use temper_runtime::persistence::{
     EntityKeyRow, EventMetadata, EventStore, IndexReconciliation, KeyIndexBackfillFence,
-    PersistenceEnvelope, PersistenceError,
+    PersistenceEnvelope, PersistenceError, SnapshotBackfillFence,
 };
 use temper_runtime::scheduler::{install_deterministic_context, sim_now, sim_uuid};
 use temper_store_sim::SimEventStore;
@@ -84,6 +84,7 @@ async fn dst_orphan_to_live_repair_is_liveness_fenced() {
                     keys: true,
                     key_set_signature: Some(repair_signature.to_string()),
                     vectors: false,
+                    snapshot_source: Default::default(),
                 },
             )
             .await
@@ -145,6 +146,7 @@ async fn dst_action_named_tombstone_outranks_newer_snapshot() {
                     keys: true,
                     key_set_signature: Some(repair_signature.to_string()),
                     vectors: false,
+                    snapshot_source: Default::default(),
                 },
             )
             .await
@@ -166,6 +168,7 @@ async fn dst_action_named_tombstone_outranks_newer_snapshot() {
                     keys: false,
                     key_set_signature: Some(repair_signature.to_string()),
                     vectors: false,
+                    snapshot_source: Default::default(),
                 },
             )
             .await
@@ -198,7 +201,10 @@ async fn dst_action_named_tombstone_outranks_newer_snapshot() {
                     contract_revision: repair_revision,
                     expected_journal_sequence: 2,
                     expected_entity_live: true,
-                    expected_snapshot: None,
+                    expected_snapshot: Some(SnapshotBackfillFence {
+                        sequence_nr: 3,
+                        state: b"newer-stale-live-snapshot",
+                    }),
                 },
                 &[],
             )
@@ -224,18 +230,21 @@ async fn dst_action_named_tombstone_outranks_newer_snapshot() {
                 "default",
                 "Doc",
                 "action-named-delete",
-                3,
+                2,
                 KeyIndexBackfillFence {
                     key_set_signature: repair_signature,
                     contract_revision: repair_revision,
                     expected_journal_sequence: 2,
                     expected_entity_live: false,
-                    expected_snapshot: None,
+                    expected_snapshot: Some(SnapshotBackfillFence {
+                        sequence_nr: 3,
+                        state: b"newer-stale-live-snapshot",
+                    }),
                 },
                 &[],
             )
             .await
-            .expect("purge action-named tombstone at newest durable sequence");
+            .expect("purge action-named tombstone at the journal-owned durable sequence");
         assert_eq!(
             store
                 .lookup_by_key("default", "Doc", "path", &stale_key.key_hash)
@@ -462,6 +471,7 @@ async fn dst_old_contract_live_write_fences_new_contract_backfill() {
                     keys: true,
                     key_set_signature: Some("v3:old-contract".to_string()),
                     vectors: false,
+                    snapshot_source: Default::default(),
                 },
             )
             .await
@@ -496,6 +506,7 @@ async fn dst_old_contract_live_write_fences_new_contract_backfill() {
                     keys: true,
                     key_set_signature: Some("v3:old-contract".to_string()),
                     vectors: false,
+                    snapshot_source: Default::default(),
                 },
             )
             .await
@@ -549,6 +560,7 @@ async fn dst_cross_stream_contract_change_fences_repair_rows() {
                     keys: true,
                     key_set_signature: Some(current_contract.to_string()),
                     vectors: false,
+                    snapshot_source: Default::default(),
                 },
             )
             .await
@@ -574,6 +586,7 @@ async fn dst_cross_stream_contract_change_fences_repair_rows() {
                     keys: true,
                     key_set_signature: Some(current_contract.to_string()),
                     vectors: false,
+                    snapshot_source: Default::default(),
                 },
             )
             .await

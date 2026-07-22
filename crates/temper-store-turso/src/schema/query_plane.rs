@@ -50,6 +50,36 @@ pub const CREATE_ENTITY_FIELD_INDEX_STATUS: &str = "\
 CREATE INDEX IF NOT EXISTS idx_efi_status
     ON entity_field_index(tenant, entity_type, status);";
 
+/// Entities whose journal/snapshot source is newer than their query projection.
+pub const CREATE_QUERY_PROJECTION_DIRTY_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS query_projection_dirty (
+    tenant      TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id   TEXT NOT NULL,
+    updated_at  TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (tenant, entity_type, entity_id)
+);";
+
+/// Bounded dirty-projection enumeration by tenant and entity type.
+pub const CREATE_QUERY_PROJECTION_DIRTY_TYPE_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_query_projection_dirty_type
+    ON query_projection_dirty(tenant, entity_type, entity_id);";
+
+/// One-time upgrade seed for projections created before the dirty-source ledger.
+///
+/// The table-existence check in the migration runner ensures this executes only
+/// when the ledger is first introduced. Including the source tables covers
+/// missing catalog rows; including the catalog covers stale rows whose source
+/// has already been retired. Catalog-only compatibility rows are acknowledged
+/// and cleared by exact-source repair without being deleted.
+pub const SEED_QUERY_PROJECTION_DIRTY: &str = "\
+INSERT OR IGNORE INTO query_projection_dirty (tenant, entity_type, entity_id)
+SELECT tenant, entity_type, entity_id FROM events
+UNION
+SELECT tenant, entity_type, entity_id FROM snapshots
+UNION
+SELECT tenant, entity_type, entity_id FROM entity_catalog;";
+
 /// ADR-0153: declared composite-key index — the negative-existence access path.
 ///
 /// One row per (declared key, entity), co-committed with the journal append (unlike

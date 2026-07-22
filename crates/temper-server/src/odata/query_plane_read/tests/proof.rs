@@ -454,6 +454,7 @@ fn native_plan_pushes_file_lookup_equalities_with_status_ne_recheck() {
 
 #[tokio::test]
 async fn ordinary_null_filter_uses_lossless_candidate_scan() {
+    let _turso_test_guard = TURSO_QUERY_PROOF_LOCK.lock().await;
     let db_path =
         std::env::temp_dir().join(format!("temper-query-plane-null-proof-{}.db", sim_uuid()));
     let _ = std::fs::remove_file(&db_path);
@@ -553,6 +554,7 @@ async fn ordinary_null_filter_uses_lossless_candidate_scan() {
 
 #[tokio::test]
 async fn nullable_scalar_order_uses_read_source_full_proof() {
+    let _turso_test_guard = TURSO_QUERY_PROOF_LOCK.lock().await;
     let db_path =
         std::env::temp_dir().join(format!("temper-query-plane-null-order-{}.db", sim_uuid()));
     let _ = std::fs::remove_file(&db_path);
@@ -627,6 +629,7 @@ async fn nullable_scalar_order_uses_read_source_full_proof() {
 
 #[tokio::test]
 async fn context_prep_shaped_filter_with_huge_top_uses_bounded_native_page() {
+    let _turso_test_guard = TURSO_QUERY_PROOF_LOCK.lock().await;
     let db_path = std::env::temp_dir().join(format!(
         "temper-query-plane-session-filter-{}.db",
         sim_uuid()
@@ -640,19 +643,23 @@ async fn context_prep_shaped_filter_with_huge_top_uses_bounded_native_page() {
     state.set_storage_stack(StorageStack::from_turso(store.clone()));
     let tenant = TenantId::default();
 
-    for index in 0usize..1200 {
-        upsert_order_projection(
-            &store,
-            &tenant,
-            &format!("entry-{index:04}"),
-            serde_json::json!({
-                "SessionId": "session-hot",
-                "ParentEntryId": format!("entry-{:04}", index.saturating_sub(1)),
-            }),
-            index as u64 + 1,
-        )
-        .await;
-    }
+    upsert_order_projections(
+        &store,
+        &tenant,
+        (0usize..1200)
+            .map(|index| {
+                (
+                    format!("entry-{index:04}"),
+                    serde_json::json!({
+                        "SessionId": "session-hot",
+                        "ParentEntryId": format!("entry-{:04}", index.saturating_sub(1)),
+                    }),
+                    index as u64 + 1,
+                )
+            })
+            .collect(),
+    )
+    .await;
     upsert_order_projection(
         &store,
         &tenant,
@@ -710,6 +717,7 @@ async fn context_prep_shaped_filter_with_huge_top_uses_bounded_native_page() {
 
 #[tokio::test]
 async fn file_point_lookup_with_status_ne_uses_lossless_equality_candidates() {
+    let _turso_test_guard = TURSO_QUERY_PROOF_LOCK.lock().await;
     let db_path = std::env::temp_dir().join(format!(
         "temper-query-plane-file-status-ne-{}.db",
         sim_uuid()
@@ -854,6 +862,9 @@ async fn file_point_lookup_with_status_ne_uses_lossless_equality_candidates() {
         Err(QueryPlaneReadError::KeyOwnershipUnstable) => {
             panic!("file point lookup ownership should remain stable")
         }
+        Err(QueryPlaneReadError::ProjectionUnstable) => {
+            panic!("file point lookup projection should remain stable")
+        }
     };
 
     assert_eq!(result.entities.len(), 1);
@@ -878,6 +889,7 @@ async fn file_point_lookup_with_status_ne_uses_lossless_equality_candidates() {
 
 #[tokio::test]
 async fn session_entry_chain_parent_lookup_uses_bounded_native_page() {
+    let _turso_test_guard = TURSO_QUERY_PROOF_LOCK.lock().await;
     let db_dir = tempfile::tempdir().expect("create isolated query-plane db dir");
     let db_path = db_dir.path().join("session-parent.db");
     let db_url = format!("file:{}", db_path.display());
@@ -888,19 +900,23 @@ async fn session_entry_chain_parent_lookup_uses_bounded_native_page() {
     state.set_storage_stack(StorageStack::from_turso(store.clone()));
     let tenant = TenantId::default();
 
-    for index in 0usize..1200 {
-        upsert_order_projection(
-            &store,
-            &tenant,
-            &format!("entry-{index:04}"),
-            serde_json::json!({
-                "SessionId": "session-hot",
-                "ParentEntryId": format!("entry-{:04}", index.saturating_sub(1)),
-            }),
-            index as u64 + 1,
-        )
-        .await;
-    }
+    upsert_order_projections(
+        &store,
+        &tenant,
+        (0usize..1200)
+            .map(|index| {
+                (
+                    format!("entry-{index:04}"),
+                    serde_json::json!({
+                        "SessionId": "session-hot",
+                        "ParentEntryId": format!("entry-{:04}", index.saturating_sub(1)),
+                    }),
+                    index as u64 + 1,
+                )
+            })
+            .collect(),
+    )
+    .await;
 
     let security_ctx = SecurityContext::system();
     let query_options = QueryOptions {
@@ -955,6 +971,7 @@ async fn session_entry_chain_parent_lookup_uses_bounded_native_page() {
 
 #[tokio::test]
 async fn session_entry_leaf_id_lookup_uses_bounded_native_page() {
+    let _turso_test_guard = TURSO_QUERY_PROOF_LOCK.lock().await;
     let db_dir = tempfile::tempdir().expect("create isolated query-plane db dir");
     let db_path = db_dir.path().join("session-leaf.db");
     let db_url = format!("file:{}", db_path.display());
@@ -965,19 +982,23 @@ async fn session_entry_leaf_id_lookup_uses_bounded_native_page() {
     state.set_storage_stack(StorageStack::from_turso(store.clone()));
     let tenant = TenantId::default();
 
-    for index in 0usize..1200 {
-        upsert_order_projection(
-            &store,
-            &tenant,
-            &format!("entry-{index:04}"),
-            serde_json::json!({
-                "SessionId": "session-hot",
-                "ParentEntryId": format!("entry-{:04}", index.saturating_sub(1)),
-            }),
-            index as u64 + 1,
-        )
-        .await;
-    }
+    upsert_order_projections(
+        &store,
+        &tenant,
+        (0usize..1200)
+            .map(|index| {
+                (
+                    format!("entry-{index:04}"),
+                    serde_json::json!({
+                        "SessionId": "session-hot",
+                        "ParentEntryId": format!("entry-{:04}", index.saturating_sub(1)),
+                    }),
+                    index as u64 + 1,
+                )
+            })
+            .collect(),
+    )
+    .await;
 
     let security_ctx = SecurityContext::system();
     let query_options = QueryOptions {
@@ -1028,6 +1049,7 @@ async fn session_entry_leaf_id_lookup_uses_bounded_native_page() {
 
 #[tokio::test]
 async fn unsafe_order_uses_read_source_full_proof() {
+    let _turso_test_guard = TURSO_QUERY_PROOF_LOCK.lock().await;
     let db_path =
         std::env::temp_dir().join(format!("temper-query-plane-order-proof-{}.db", sim_uuid()));
     let _ = std::fs::remove_file(&db_path);
@@ -1111,30 +1133,26 @@ async fn build_large_projected_type(
 ) -> ServerState {
     let mut state = build_order_state(system_name);
     state.set_storage_stack(StorageStack::from_turso(store.clone()));
-    let agent_ctx = AgentContext::for_service(system_name);
     for index in 0..count {
         let entity_id = format!("entry-{index:04}");
         state
-            .dispatch_tenant_action(
+            .get_or_create_tenant_entity(
                 tenant,
                 "Order",
                 &entity_id,
-                "Create",
-                serde_json::json!({}),
-                &agent_ctx,
+                serde_json::json!({ "SessionId": "session-hot" }),
             )
             .await
             .expect("create order");
-        // Deterministic projected fields (high sequence wins over the async queue).
-        upsert_order_projection(
-            store,
-            tenant,
-            &entity_id,
-            serde_json::json!({ "SessionId": "session-hot" }),
-            1_000 + index as u64,
-        )
-        .await;
     }
+    crate::state::source_fenced_projection::repair_dirty_projections_before_read(
+        &state,
+        tenant,
+        "Order",
+        count.max(1),
+    )
+    .await
+    .expect("establish a fully repaired projected type");
     state
 }
 
@@ -1157,6 +1175,7 @@ fn session_filter_options(session: &str) -> QueryOptions {
 /// Before the fix this was an unconditional budget rejection.
 #[tokio::test]
 async fn empty_equality_list_on_large_type_is_authoritative_absent_without_scan() {
+    let _turso_test_guard = TURSO_QUERY_PROOF_LOCK.lock().await;
     let db_path = std::env::temp_dir().join(format!("temper-arn68-empty-list-{}.db", sim_uuid()));
     let _ = std::fs::remove_file(&db_path);
     let db_url = format!("file:{}", db_path.display());
@@ -1198,6 +1217,7 @@ async fn empty_equality_list_on_large_type_is_authoritative_absent_without_scan(
 /// stays a bounded empty answer. Before the fix both were budget rejections.
 #[tokio::test]
 async fn equality_list_on_large_type_repairs_unprojected_match_boundedly() {
+    let _turso_test_guard = TURSO_QUERY_PROOF_LOCK.lock().await;
     let db_path = std::env::temp_dir().join(format!("temper-arn68-gap-list-{}.db", sim_uuid()));
     let _ = std::fs::remove_file(&db_path);
     let db_url = format!("file:{}", db_path.display());
@@ -1210,8 +1230,20 @@ async fn equality_list_on_large_type_repairs_unprojected_match_boundedly() {
     // The lagging entity: journal-durable via DIRECT append — its projection was never
     // enqueued (the crash-lost shape, deterministic: no async worker to race). The
     // snapshot carries the queried SessionId for materialization.
-    use temper_runtime::persistence::{EventMetadata, EventStore as _, PersistenceEnvelope};
+    use temper_runtime::persistence::{
+        EventMetadata, EventStore as _, PersistenceEnvelope, ProjectionSourceFence,
+        SnapshotBackfillFence,
+    };
     use temper_runtime::scheduler::{sim_now, sim_uuid as runtime_sim_uuid};
+    let timestamp = sim_now();
+    let lagging_event = crate::entity_actor::EntityEvent {
+        action: "Create".to_string(),
+        from_status: "Draft".to_string(),
+        to_status: "Draft".to_string(),
+        timestamp,
+        params: serde_json::json!({ "SessionId": "session-brand-new" }),
+        idempotency_key: None,
+    };
     store
         .append(
             &format!("{tenant}:Order:entry-lagging"),
@@ -1219,15 +1251,12 @@ async fn equality_list_on_large_type_repairs_unprojected_match_boundedly() {
             &[PersistenceEnvelope {
                 sequence_nr: 1,
                 event_type: "Create".to_string(),
-                payload: serde_json::json!({
-                    "action": "Create",
-                    "params": { "SessionId": "session-brand-new" },
-                }),
+                payload: serde_json::to_value(lagging_event).expect("serialize lagging event"),
                 metadata: EventMetadata {
                     event_id: runtime_sim_uuid(),
                     causation_id: runtime_sim_uuid(),
                     correlation_id: runtime_sim_uuid(),
-                    timestamp: sim_now(),
+                    timestamp,
                     actor_id: "arn68-gap-list".to_string(),
                 },
             }],
@@ -1241,14 +1270,29 @@ async fn equality_list_on_large_type_repairs_unprojected_match_boundedly() {
         "item_count": 0,
         "fields": { "Id": "entry-lagging", "Status": "Draft", "SessionId": "session-brand-new" },
     });
+    let snapshot_bytes = serde_json::to_vec(&snapshot).expect("serialize lagging snapshot");
     store
-        .save_snapshot(
-            &format!("{tenant}:Order:entry-lagging"),
-            1,
-            &serde_json::to_vec(&snapshot).unwrap(),
-        )
+        .save_snapshot(&format!("{tenant}:Order:entry-lagging"), 1, &snapshot_bytes)
         .await
         .expect("seed snapshot");
+    assert!(
+        store
+            .clear_query_projection_dirty_if_source(
+                tenant.as_str(),
+                "Order",
+                "entry-lagging",
+                ProjectionSourceFence {
+                    expected_journal_sequence: 1,
+                    expected_snapshot: Some(SnapshotBackfillFence {
+                        sequence_nr: 1,
+                        state: &snapshot_bytes,
+                    }),
+                },
+            )
+            .await
+            .expect("clear exact lagging dirty generation"),
+        "the fixture must model a pre-ledger crash-lost projection"
+    );
 
     let security_ctx = SecurityContext::system();
     let budget = QueryPlaneReadBudget {
@@ -1304,6 +1348,7 @@ async fn equality_list_on_large_type_repairs_unprojected_match_boundedly() {
 /// `$select` must not strip the union's `entity_id` key.
 #[tokio::test]
 async fn equality_list_rescue_honors_skip_and_select() {
+    let _turso_test_guard = TURSO_QUERY_PROOF_LOCK.lock().await;
     let db_path = std::env::temp_dir().join(format!("temper-arn68-skip-list-{}.db", sim_uuid()));
     let _ = std::fs::remove_file(&db_path);
     let db_url = format!("file:{}", db_path.display());
@@ -1313,19 +1358,25 @@ async fn equality_list_rescue_honors_skip_and_select() {
     let tenant = TenantId::default();
     let state = build_large_projected_type(&store, &tenant, "arn68-skip-list", 15).await;
 
-    // Two PROJECTED matches for the queried session (visible only to the page)...
-    for (id, seq) in [("paged-c1", 5001u64), ("paged-c2", 5002)] {
-        upsert_order_projection(
-            &store,
-            &tenant,
-            id,
-            serde_json::json!({ "SessionId": "session-paged" }),
-            seq,
-        )
-        .await;
+    // Two durable matches for the queried session, then source-fenced repair
+    // establishes their catalog rows before paging.
+    for id in ["paged-c1", "paged-c2"] {
+        state
+            .get_or_create_tenant_entity(
+                &tenant,
+                "Order",
+                id,
+                serde_json::json!({ "SessionId": "session-paged" }),
+            )
+            .await
+            .expect("create paged match");
     }
-    // ...and they must also be journal-durable so enumeration sees the type as-is.
-    // (The 15 harness entities already push the type over budget.)
+    crate::state::source_fenced_projection::repair_dirty_projections_before_read(
+        &state, &tenant, "Order", 2,
+    )
+    .await
+    .expect("repair paged match projections");
+    // The 15 harness entities already push the type over budget.
 
     let security_ctx = SecurityContext::system();
     let budget = QueryPlaneReadBudget {

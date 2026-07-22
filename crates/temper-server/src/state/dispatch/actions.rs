@@ -37,6 +37,35 @@ fn background_reaction_semaphore() -> Arc<Semaphore> {
 }
 
 impl crate::state::ServerState {
+    pub(super) async fn dispatch_context_in_generation(
+        &self,
+        tenant: &TenantId,
+        agent_ctx: &AgentContext,
+    ) -> Result<AgentContext, DispatchError> {
+        if let Some(lease) = agent_ctx.tenant_generation_lease.as_ref()
+            && lease.belongs_to(tenant)
+            && lease.captured_generation() == self.tenant_generation_version(tenant)
+            && (lease.is_held_for(tenant)
+                || (lease.is_publication_owned_for(tenant) && self.spec_publication_gated(tenant)))
+        {
+            return Ok(agent_ctx.clone());
+        }
+        if self.spec_publication_gated(tenant) {
+            return Err(DispatchError::Deferred { retry_after_ms: 1 });
+        }
+        let generation = self
+            .try_begin_tenant_request(tenant)
+            .await
+            .ok_or(DispatchError::Deferred { retry_after_ms: 1 })?;
+        if self.spec_publication_gated(tenant) {
+            return Err(DispatchError::Deferred { retry_after_ms: 1 });
+        }
+        let captured_generation = self.tenant_generation_version(tenant);
+        Ok(agent_ctx.clone().with_tenant_generation_lease(
+            crate::state::TenantGenerationLease::new(tenant, generation, captured_generation),
+        ))
+    }
+
     /// Dispatch an action using the unified command object.
     ///
     /// This is the preferred entry point. The command struct makes all
@@ -162,6 +191,10 @@ impl crate::state::ServerState {
             await_integration,
             await_reactions,
         } = cmd;
+        let dispatch_agent_ctx = self
+            .dispatch_context_in_generation(tenant, agent_ctx)
+            .await?;
+        let agent_ctx = &dispatch_agent_ctx;
 
         if self
             .composite_metadata_for(tenant, entity_type, action)?
@@ -272,6 +305,13 @@ impl crate::state::ServerState {
             fields,
             agent_ctx,
         } = dispatch;
+        let agent_ctx = agent_ctx
+            .fork_tenant_generation_lease(&tenant)
+            .unwrap_or_else(|| {
+                let mut detached = agent_ctx;
+                detached.detach_tenant_generation_lease();
+                detached
+            });
         let span = tracing::info_span!(
             "reaction.dispatch.background",
             tenant = %tenant,
@@ -282,6 +322,19 @@ impl crate::state::ServerState {
 
         let reaction_task = async move {
             let _permit = permit;
+            let Some(agent_ctx) = state
+                .activate_immediate_tenant_work(&tenant, agent_ctx)
+                .await
+            else {
+                tracing::error!(
+                    tenant = %tenant,
+                    entity_type = %entity_type,
+                    entity_id = %entity_id,
+                    action_name = %action,
+                    "background reactions could not enter a complete runtime generation"
+                );
+                return;
+            };
             let results = dispatcher
                 .dispatch_reactions(
                     &state,
@@ -339,6 +392,10 @@ impl crate::state::ServerState {
         agent_ctx: &AgentContext,
         await_integration: bool,
     ) -> Result<EntityResponse, DispatchError> {
+        let generation_agent_ctx = self
+            .dispatch_context_in_generation(tenant, agent_ctx)
+            .await?;
+        let agent_ctx = &generation_agent_ctx;
         let explicit_workflow_context = agent_ctx.workflow_run_id.is_some()
             || agent_ctx.workflow_root_entity_type.is_some()
             || agent_ctx.workflow_root_entity_id.is_some();
@@ -424,7 +481,12 @@ impl crate::state::ServerState {
                 .read()
                 .map(|reg| reg.contains_key(&actor_key))
                 .unwrap_or(false);
-            let Some(ar) = self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id) else {
+            let Some(ar) = self.get_or_spawn_tenant_actor_in_generation(
+                tenant,
+                entity_type,
+                entity_id,
+                agent_ctx,
+            ) else {
                 return Err(DispatchError::Internal(format!(
                     "failed to resolve actor for governed entity type '{entity_type}'"
                 )));

@@ -28,7 +28,7 @@ mod governance_callback;
 ///
 /// Returns `Ok(())` if the hook ran successfully or the effect was
 /// unrecognized (silently ignored). Returns `Err` if the hook failed.
-pub fn dispatch_custom_effect(
+pub async fn dispatch_custom_effect(
     effect_name: &str,
     entity_type: &str,
     entity_id: &str,
@@ -36,9 +36,9 @@ pub fn dispatch_custom_effect(
     state: &PlatformState,
 ) -> Result<(), String> {
     match effect_name {
-        "DeploySpecs" => handle_deploy_specs(entity_type, entity_id, state),
+        "DeploySpecs" => handle_deploy_specs(entity_type, entity_id, state).await,
         "GenerateCedarPolicy" => {
-            handle_generate_cedar_policy(entity_type, entity_id, _params, state)
+            handle_generate_cedar_policy(entity_type, entity_id, _params, state).await
         }
         _ => {
             tracing::debug!(
@@ -56,7 +56,7 @@ pub fn dispatch_custom_effect(
 ///
 /// Reads specs from the [`SpecStore`], builds a [`DeployInput`], and runs
 /// the verify-and-deploy pipeline. On success, removes specs from the store.
-fn handle_deploy_specs(
+async fn handle_deploy_specs(
     _entity_type: &str,
     entity_id: &str,
     state: &PlatformState,
@@ -100,7 +100,7 @@ fn handle_deploy_specs(
     };
 
     // Run the verify-and-deploy pipeline.
-    let result = DeployPipeline::verify_and_deploy(state, &input);
+    let result = DeployPipeline::verify_and_deploy(state, &input).await;
 
     if result.success {
         tracing::info!(tenant = entity_id, "DeploySpecs hook: pipeline succeeded");
@@ -133,124 +133,13 @@ fn handle_deploy_specs(
 /// Reads the entity's fields from the action params, generates a Cedar
 /// permit statement based on the scope, validates the combined policy set,
 /// and reloads the authz engine.
-fn handle_generate_cedar_policy(
+async fn handle_generate_cedar_policy(
     _entity_type: &str,
     entity_id: &str,
     params: &serde_json::Value,
     state: &PlatformState,
 ) -> Result<(), String> {
-    tracing::info!(
-        entity_id = entity_id,
-        "GenerateCedarPolicy hook: generating Cedar policy from GovernanceDecision"
-    );
-
-    let agent_id = params
-        .get("agent_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let action_name = params
-        .get("action_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let resource_type = params
-        .get("resource_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let resource_id = params
-        .get("resource_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let scope = params
-        .get("scope")
-        .and_then(|v| v.as_str())
-        .unwrap_or("narrow");
-    let tenant = params.get("tenant").and_then(|v| v.as_str()).unwrap_or("");
-
-    if agent_id.is_empty() || action_name.is_empty() || resource_type.is_empty() {
-        return Err(format!(
-            "GenerateCedarPolicy: missing required fields for entity '{entity_id}'"
-        ));
-    }
-
-    // Parse scope_matrix from params, or build a default matrix based on the legacy scope string.
-    let matrix: temper_authz::PolicyScopeMatrix =
-        if let Some(matrix_val) = params.get("scope_matrix") {
-            serde_json::from_value(matrix_val.clone()).map_err(|e| {
-                format!("GenerateCedarPolicy: invalid scope_matrix for entity '{entity_id}': {e}")
-            })?
-        } else {
-            match scope {
-                "narrow" => temper_authz::PolicyScopeMatrix {
-                    principal: temper_authz::PrincipalScope::ThisAgent,
-                    action: temper_authz::ActionScope::ThisAction,
-                    resource: temper_authz::ResourceScope::ThisResource,
-                    duration: temper_authz::DurationScope::Always,
-                    agent_type_value: None,
-                    role_value: None,
-                    session_id: None,
-                },
-                "broad" => temper_authz::PolicyScopeMatrix {
-                    principal: temper_authz::PrincipalScope::ThisAgent,
-                    action: temper_authz::ActionScope::AllActionsOnType,
-                    resource: temper_authz::ResourceScope::AnyOfType,
-                    duration: temper_authz::DurationScope::Always,
-                    agent_type_value: None,
-                    role_value: None,
-                    session_id: None,
-                },
-                _ => temper_authz::PolicyScopeMatrix::default_for(None),
-            }
-        };
-    temper_authz::validate_policy_scope_matrix(&matrix).map_err(|e| {
-        format!("GenerateCedarPolicy: invalid scope_matrix for entity '{entity_id}': {e}")
-    })?;
-    let principal_kind = params
-        .get("principal_kind")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Agent");
-    let generated_policy = temper_authz::generate_cedar_from_matrix(
-        agent_id,
-        principal_kind,
-        action_name,
-        resource_type,
-        resource_id,
-        &matrix,
-    );
-
-    tracing::info!(
-        entity_id = entity_id,
-        tenant = tenant,
-        scope = scope,
-        "GenerateCedarPolicy hook: generated policy, validating and loading"
-    );
-
-    // Validate and reload the per-tenant policy set.
-    {
-        let Ok(mut policies) = state.server.tenant_policies.write() else {
-            return Err("tenant_policies lock poisoned".to_string());
-        };
-        let entry = policies.entry(tenant.to_string()).or_default();
-        if !entry.is_empty() {
-            entry.push('\n');
-        }
-        entry.push_str(&generated_policy);
-
-        let tenant_text = entry.clone();
-        if let Err(e) = state
-            .server
-            .authz
-            .reload_tenant_policies(tenant, &tenant_text)
-        {
-            tracing::error!(error = %e, "GenerateCedarPolicy: failed to reload policies");
-            return Err(format!("Failed to reload policies: {e}"));
-        }
-    }
-
-    tracing::info!(
-        entity_id = entity_id,
-        "GenerateCedarPolicy hook: policy loaded successfully"
-    );
-    Ok(())
+    generate_cedar::handle_generate_cedar_from_fields(entity_id, params, &state.server).await
 }
 
 // ---------------------------------------------------------------------------
@@ -266,8 +155,9 @@ pub struct PlatformEffectHandler {
     pub spec_store: Arc<RwLock<crate::spec_store::SpecStore>>,
 }
 
+#[async_trait::async_trait]
 impl CustomEffectHandler for PlatformEffectHandler {
-    fn handle(
+    async fn handle(
         &self,
         effect_name: &str,
         entity_type: &str,
@@ -278,6 +168,7 @@ impl CustomEffectHandler for PlatformEffectHandler {
         match effect_name {
             "GenerateCedarPolicy" => {
                 generate_cedar::handle_generate_cedar_from_fields(entity_id, entity_fields, server)
+                    .await
             }
             "DispatchCallback" => {
                 governance_callback::handle_dispatch_callback(entity_fields, server)
@@ -336,8 +227,8 @@ fn generate_cedar_permit(
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_dispatch_unknown_effect_is_ok() {
+    #[tokio::test]
+    async fn test_dispatch_unknown_effect_is_ok() {
         let state = PlatformState::new(None);
         let result = dispatch_custom_effect(
             "UnknownEffect",
@@ -345,7 +236,8 @@ mod tests {
             "t-1",
             &serde_json::json!({}),
             &state,
-        );
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -376,8 +268,8 @@ mod tests {
         assert!(!policy.contains("submitOrder"));
     }
 
-    #[test]
-    fn test_dispatch_generate_cedar_policy_missing_fields() {
+    #[tokio::test]
+    async fn test_dispatch_generate_cedar_policy_missing_fields() {
         let state = PlatformState::new(None);
         let result = dispatch_custom_effect(
             "GenerateCedarPolicy",
@@ -385,13 +277,78 @@ mod tests {
             "gd-1",
             &serde_json::json!({}),
             &state,
-        );
+        )
+        .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("missing required fields"));
     }
 
-    #[test]
-    fn test_dispatch_deploy_specs_no_store_entry() {
+    #[tokio::test]
+    async fn test_generate_cedar_policy_skips_api_owned_publication() {
+        let state = PlatformState::new(None);
+        let result = dispatch_custom_effect(
+            "GenerateCedarPolicy",
+            "GovernanceDecision",
+            "gd-api-owned",
+            &serde_json::json!({"policy_already_published": true}),
+            &state,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "API-owned policy must not be generated twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_cedar_policy_persists_one_stable_decision_entry() {
+        let mut state = PlatformState::new(None);
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "temper-generated-policy-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let store =
+            temper_store_turso::TursoEventStore::new(&format!("file:{}", path.display()), None)
+                .await
+                .expect("create durable test store");
+        state
+            .server
+            .set_storage_stack(temper_server::storage::StorageStack::from_turso(
+                store.clone(),
+            ));
+        let fields = serde_json::json!({
+            "agent_id": "agent-1",
+            "action_name": "read",
+            "resource_type": "Document",
+            "resource_id": "doc-1",
+            "scope": "narrow",
+            "tenant": "tenant-policy-test",
+            "decided_by": "reviewer-1",
+        });
+
+        for _ in 0..2 {
+            dispatch_custom_effect(
+                "GenerateCedarPolicy",
+                "GovernanceDecision",
+                "gd-stable",
+                &fields,
+                &state,
+            )
+            .await
+            .expect("publish generated policy generation");
+        }
+
+        let policies = store
+            .load_policies_for_tenant("tenant-policy-test")
+            .await
+            .expect("read durable policies");
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].policy_id, "decision:gd-stable");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_deploy_specs_no_store_entry() {
         let state = PlatformState::new(None);
         let result = dispatch_custom_effect(
             "DeploySpecs",
@@ -399,7 +356,8 @@ mod tests {
             "t-1",
             &serde_json::json!({}),
             &state,
-        );
+        )
+        .await;
         // No specs in store → error
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("no specs found"));

@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 
 use temper_runtime::persistence::{
     EntityKeyLookup, EntityKeyRow, KeyIndexBackfillFence, PersistenceEnvelope, PersistenceError,
+    decode_activated_key_contract, encode_activated_key_contract,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -11,16 +12,59 @@ use super::SimEventStoreInner;
 
 const UNKNOWN_KEY_SET_SIGNATURE: &str = "<unknown>";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum KeyContractUse {
+    LiveWrite,
+    Backfill,
+}
+
 pub(super) fn reconcile_key_contract_locked(
     inner: &mut SimEventStoreInner,
     tenant: &str,
     entity_type: &str,
     key_set_signature: Option<&str>,
+    contract_use: KeyContractUse,
 ) -> Result<u64, PersistenceError> {
     let type_key = (tenant.to_string(), entity_type.to_string());
-    let supplied = key_set_signature
-        .unwrap_or(UNKNOWN_KEY_SET_SIGNATURE)
-        .to_string();
+    let raw_contract = key_set_signature.unwrap_or(UNKNOWN_KEY_SET_SIGNATURE);
+    let (supplied, attempted_epoch) = decode_activated_key_contract(raw_contract);
+    let supplied = supplied.to_string();
+    match (
+        contract_use,
+        inner.key_index_activated_contract.get(&type_key),
+    ) {
+        (KeyContractUse::LiveWrite | KeyContractUse::Backfill, Some((active, _, _)))
+            if active != &supplied =>
+        {
+            return Err(PersistenceError::KeyContractNotActive {
+                activated_signature: active.clone(),
+                attempted_signature: supplied,
+            });
+        }
+        (KeyContractUse::LiveWrite, Some((_, activated_epoch, _)))
+            if attempted_epoch != Some(*activated_epoch) =>
+        {
+            return Err(PersistenceError::KeyContractActivationStale {
+                activated_epoch: *activated_epoch,
+                attempted_epoch,
+            });
+        }
+        (KeyContractUse::LiveWrite, Some((active, activated_epoch, _)))
+            if inner
+                .key_index_watermark
+                .get(&type_key)
+                .is_none_or(|covered| covered != active) =>
+        {
+            return Err(PersistenceError::KeyContractActivationNotReady {
+                activated_epoch: *activated_epoch,
+                activated_signature: active.clone(),
+            });
+        }
+        // Legacy tables and backfill passes do not establish an activation
+        // epoch. Epoch enforcement starts only when the runtime explicitly
+        // activates a durable spec contract.
+        _ => {}
+    }
     match inner.key_index_contract.get(&type_key).cloned() {
         Some((current, revision)) if current == supplied => Ok(revision),
         Some((_, revision)) => {
@@ -45,6 +89,79 @@ pub(super) fn reconcile_key_contract_locked(
     }
 }
 
+pub(super) fn activate_key_contract_locked(
+    inner: &mut SimEventStoreInner,
+    tenant: &str,
+    entity_type: &str,
+    key_set_signature: &str,
+    spec_fingerprint: &str,
+    purge_existing_rows: bool,
+) -> Result<u64, PersistenceError> {
+    let (key_set_signature, _) = decode_activated_key_contract(key_set_signature);
+    let type_key = (tenant.to_string(), entity_type.to_string());
+    let activation_epoch = inner
+        .key_index_activated_contract
+        .get(&type_key)
+        .map(|(_, epoch, _)| *epoch)
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| {
+            PersistenceError::Storage(format!(
+                "SimEventStore: key activation epoch overflow for {tenant}:{entity_type}"
+            ))
+        })?;
+    let prior_activation = inner.key_index_activated_contract.get(&type_key).cloned();
+    let semantic_contract_changed =
+        prior_activation
+            .as_ref()
+            .is_none_or(|(active_key_set, _, active_fingerprint)| {
+                active_key_set != key_set_signature || active_fingerprint != spec_fingerprint
+            });
+    let current_key_set = inner.key_index_contract.get(&type_key).cloned();
+    inner.key_index_activated_contract.insert(
+        type_key.clone(),
+        (
+            key_set_signature.to_string(),
+            activation_epoch,
+            spec_fingerprint.to_string(),
+        ),
+    );
+    let activated_contract = encode_activated_key_contract(key_set_signature, activation_epoch);
+    reconcile_key_contract_locked(
+        inner,
+        tenant,
+        entity_type,
+        Some(&activated_contract),
+        KeyContractUse::Backfill,
+    )?;
+    if semantic_contract_changed
+        && current_key_set
+            .as_ref()
+            .is_some_and(|(signature, _)| signature == key_set_signature)
+    {
+        let (_, revision) = inner
+            .key_index_contract
+            .get(&type_key)
+            .cloned()
+            .expect("activation reconciliation installed a contract");
+        let next = revision.checked_add(1).ok_or_else(|| {
+            PersistenceError::Storage(format!(
+                "SimEventStore: key contract revision overflow for {tenant}:{entity_type}"
+            ))
+        })?;
+        inner
+            .key_index_contract
+            .insert(type_key.clone(), (key_set_signature.to_string(), next));
+        inner.key_index_watermark.remove(&type_key);
+    }
+    if purge_existing_rows || semantic_contract_changed {
+        inner.key_index.retain(|(row_tenant, row_type, _, _), _| {
+            row_tenant != tenant || row_type != entity_type
+        });
+    }
+    Ok(activation_epoch)
+}
+
 /// Invalidate an in-flight coverage proof when a snapshot mutation changes the
 /// durable state used to derive ownership.
 ///
@@ -58,6 +175,30 @@ pub(super) fn invalidate_coverage_for_snapshot_write_locked(
 ) -> Result<(), PersistenceError> {
     let (tenant, entity_type, _) =
         parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+    let type_key = (tenant.to_string(), entity_type.to_string());
+    let Some((signature, revision)) = inner.key_index_contract.get(&type_key).cloned() else {
+        return Ok(());
+    };
+    let next = revision.checked_add(1).ok_or_else(|| {
+        PersistenceError::Storage(format!(
+            "SimEventStore: key reconciliation revision overflow for {tenant}:{entity_type}"
+        ))
+    })?;
+    inner
+        .key_index_contract
+        .insert(type_key.clone(), (signature, next));
+    inner.key_index_watermark.remove(&type_key);
+    Ok(())
+}
+
+/// Close an ownership proof before a journal append that does not carry an
+/// exact declared-key reconciliation. The revision change makes a racing
+/// repair publication lose its compare-and-set after the append commits.
+pub(super) fn invalidate_coverage_for_unreconciled_append_locked(
+    inner: &mut SimEventStoreInner,
+    tenant: &str,
+    entity_type: &str,
+) -> Result<(), PersistenceError> {
     let type_key = (tenant.to_string(), entity_type.to_string());
     let Some((signature, revision)) = inner.key_index_contract.get(&type_key).cloned() else {
         return Ok(());
@@ -128,7 +269,11 @@ pub(super) fn backfill_entity_keys(
         .get(&persistence_id)
         .map(|(sequence_nr, _)| *sequence_nr)
         .unwrap_or(0);
-    let current_sequence = journal_sequence.max(snapshot_sequence);
+    let current_sequence = if journal_sequence > 0 {
+        journal_sequence
+    } else {
+        snapshot_sequence
+    };
     if journal_sequence != contract_fence.expected_journal_sequence {
         return Err(PersistenceError::JournalBoundaryChanged {
             expected: contract_fence.expected_journal_sequence,
@@ -209,7 +354,13 @@ pub(super) fn mark_backfilled(
     entity_type: &str,
     key_set: &str,
 ) -> Result<(), PersistenceError> {
-    reconcile_key_contract_locked(inner, tenant, entity_type, Some(key_set))?;
+    reconcile_key_contract_locked(
+        inner,
+        tenant,
+        entity_type,
+        Some(key_set),
+        KeyContractUse::Backfill,
+    )?;
     inner.key_index_watermark.insert(
         (tenant.to_string(), entity_type.to_string()),
         key_set.to_string(),
@@ -224,6 +375,10 @@ pub(super) fn backfilled_types(inner: &SimEventStoreInner, tenant: &str) -> Vec<
         .filter(|((t, _), _)| t.as_str() == tenant)
         .map(|((_, entity_type), key_set)| (entity_type.clone(), key_set.clone()))
         .collect()
+}
+
+pub(super) fn activated_contracts(inner: &SimEventStoreInner) -> Vec<(String, String)> {
+    inner.key_index_activated_contract.keys().cloned().collect()
 }
 
 pub(super) fn reconciliation_revision(

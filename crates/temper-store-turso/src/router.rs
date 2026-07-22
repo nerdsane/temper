@@ -16,7 +16,8 @@ use tracing::{info, instrument, warn};
 
 use temper_runtime::persistence::{
     EventStore, IndexReconciliation, JournalBoundary, PersistenceAppend, PersistenceAppendResult,
-    PersistenceEnvelope, PersistenceError, storage_error,
+    PersistenceBatchIdempotency, PersistenceEnvelope, PersistenceError, SnapshotSourceFence,
+    storage_error,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -645,6 +646,16 @@ impl TenantStoreRouter {
 
 /// `EventStore` implementation that routes by tenant extracted from `persistence_id`.
 impl EventStore for TenantStoreRouter {
+    async fn batch_idempotency_committed(
+        &self,
+        claim: &PersistenceBatchIdempotency,
+    ) -> Result<bool, PersistenceError> {
+        let (tenant, _, _) =
+            parse_persistence_id_parts(&claim.persistence_id).map_err(PersistenceError::Storage)?;
+        let store = self.store_for_tenant(tenant).await?;
+        store.batch_idempotency_committed(claim).await
+    }
+
     #[instrument(skip_all, fields(persistence_id, otel.name = "router.append"))]
     async fn append(
         &self,
@@ -734,6 +745,23 @@ impl EventStore for TenantStoreRouter {
         let store = self.store_for_tenant(tenant).await?;
         store
             .save_snapshot(persistence_id, sequence_nr, snapshot)
+            .await
+    }
+
+    #[instrument(skip_all, fields(persistence_id, otel.name = "router.save_snapshot_if_source"))]
+    async fn save_snapshot_if_source(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+        source: &SnapshotSourceFence,
+        key_contract: Option<&str>,
+    ) -> Result<(), PersistenceError> {
+        let (tenant, _, _) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .save_snapshot_if_source(persistence_id, sequence_nr, snapshot, source, key_contract)
             .await
     }
 

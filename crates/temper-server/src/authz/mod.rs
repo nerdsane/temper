@@ -9,5 +9,7 @@ pub(crate) use helpers::{
     DenialInput, GovernedMutationAuth, observe_tenant_scope, record_authz_denial,
     require_governed_mutation_auth, require_observe_auth, security_context_from_headers,
 };
-pub use policy_persistence::{load_and_activate_tenant_policies, persist_and_activate_policy};
+pub use policy_persistence::{
+    load_and_activate_tenant_policies, persist_and_activate_policy, publish_policy_entry_generation,
+};
 pub use wasm_gate::{CedarWasmAuthzGate, PermissiveWasmAuthzGate};

@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 use temper_runtime::actor::Message;
+use temper_runtime::persistence::SnapshotSourceFence;
 
 // TigerStyle: Fixed resource budgets. No unbounded growth.
 // These are hard limits, not suggestions. Violations are assertion failures.
@@ -18,7 +19,8 @@ pub const RECENT_EVENTS_BUDGET_DEFAULT: usize = 50;
 /// Maximum items an entity can hold.
 pub const MAX_ITEMS_PER_ENTITY: usize = 1_000;
 /// Maximum durable idempotency keys retained per entity.
-pub const MAX_DURABLE_IDEMPOTENCY_KEYS_PER_ENTITY: usize = 1_000;
+pub const MAX_DURABLE_IDEMPOTENCY_KEYS_PER_ENTITY: usize =
+    temper_runtime::persistence::STATE_MATERIALIZATION_IDEMPOTENCY_KEY_BUDGET;
 
 /// Number of recent events retained in memory per entity.
 ///
@@ -51,6 +53,11 @@ pub enum EntityMsg {
     },
     /// Get the current entity state.
     GetState,
+    /// Get state plus the exact snapshot generation used to hydrate it.
+    ///
+    /// This internal response lets passivation condition its snapshot write on
+    /// the same source instead of overwriting a concurrent same-sequence rewrite.
+    GetPassivationSnapshot,
     /// Get a specific field value.
     GetField { field: String },
     /// Update entity fields (PATCH: merge, PUT: replace).
@@ -66,6 +73,14 @@ pub enum EntityMsg {
 }
 
 impl Message for EntityMsg {}
+
+/// Actor state and exact snapshot source captured in one mailbox turn.
+#[derive(Debug, Clone)]
+pub(crate) struct EntityPassivationSnapshot {
+    pub(crate) state: EntityState,
+    pub(crate) snapshot_source: SnapshotSourceFence,
+    pub(crate) key_contract: String,
+}
 
 /// The entity's runtime state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,12 +148,22 @@ impl EntityState {
         }
     }
 
+    /// Charge one durable non-domain envelope against the unsnapshotted journal budget.
+    pub(crate) fn record_internal_envelope(&mut self) {
+        self.events_since_snapshot = self.events_since_snapshot.saturating_add(1);
+    }
+
     pub fn has_processed_idempotency_key(&self, key: &str) -> bool {
         self.processed_idempotency_keys.contains_key(key)
     }
 
     fn record_processed_idempotency_key(&mut self, key: &str) {
         let sequence = self.sequence_nr.max(self.total_event_count as u64);
+        self.record_durable_idempotency_key(key, sequence);
+    }
+
+    /// Record a durable non-domain operation at its exact journal sequence.
+    pub(crate) fn record_durable_idempotency_key(&mut self, key: &str, sequence: u64) {
         self.processed_idempotency_keys
             .insert(key.to_string(), sequence);
 

@@ -1,4 +1,4 @@
--- ADR-0171 / ARN-238: fence declared-key coverage against live key-contract changes.
+-- ADR-0192 / ARN-238: fence declared-key coverage against live key-contract changes.
 --
 -- A durable write records the versioned key signature used to derive its exact rows.
 -- Changing that signature advances `revision` and invalidates the coverage watermark.

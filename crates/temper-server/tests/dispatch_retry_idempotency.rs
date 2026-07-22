@@ -57,7 +57,7 @@ fn build_state_with_sim_store(seed: u64) -> (ServerState, SimEventStore) {
     (state, sim_store)
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn retry_after_dropped_reply_replays_success_response_and_runs_effects_without_header() {
     let (_guard, _clock, _ids) = install_deterministic_context(48);
     let (state, sim_store) = build_state_with_sim_store(48);
@@ -75,19 +75,24 @@ async fn retry_after_dropped_reply_replays_success_response_and_runs_effects_wit
         .await
         .expect("entity creation succeeds");
 
-    sim_store.inject_append_delay(&persistence_id, Duration::from_millis(25));
-
-    let response = state
-        .dispatch_tenant_action(
-            &tenant,
-            "TimedTask",
-            entity_id,
-            "Start",
-            serde_json::json!({}),
-            &AgentContext::default(),
-        )
-        .await
-        .expect("dispatch should recover the timed-out first reply");
+    let pause = sim_store.inject_postcommit_append_pause(&persistence_id);
+    let agent_context = AgentContext::default();
+    let dispatch = state.dispatch_tenant_action(
+        &tenant,
+        "TimedTask",
+        entity_id,
+        "Start",
+        serde_json::json!({}),
+        &agent_context,
+    );
+    let advance_past_timeout = async {
+        pause.wait_until_reached().await;
+        tokio::time::advance(Duration::from_millis(6)).await;
+        pause.resume();
+        tokio::time::advance(Duration::from_secs(1)).await;
+    };
+    let (response, ()) = tokio::join!(dispatch, advance_past_timeout);
+    let response = response.expect("dispatch should recover the timed-out first reply");
 
     assert!(
         response.success,
@@ -103,7 +108,7 @@ async fn retry_after_dropped_reply_replays_success_response_and_runs_effects_wit
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn field_update_retry_after_post_commit_timeout_appends_once() {
     let (_guard, _clock, _ids) = install_deterministic_context(238);
     let (state, sim_store) = build_state_with_sim_store(238);
@@ -121,22 +126,26 @@ async fn field_update_retry_after_post_commit_timeout_appends_once() {
         .await
         .expect("entity creation succeeds");
 
-    // The sim store commits before consuming this one-shot delay. The first ask
+    // The sim store commits before reaching this one-shot barrier. The first ask
     // therefore times out after durability but before the actor can reply; the
     // dispatch retry must reuse one token and observe the committed update.
-    sim_store.inject_append_delay(&persistence_id, Duration::from_millis(25));
-
-    let response = state
-        .update_tenant_entity_fields(
-            &tenant,
-            "TimedTask",
-            entity_id,
-            serde_json::json!({"Title": "after"}),
-            false,
-            Some("patch-post-commit-timeout".to_string()),
-        )
-        .await
-        .expect("retry should return the committed field update");
+    let pause = sim_store.inject_postcommit_append_pause(&persistence_id);
+    let update = state.update_tenant_entity_fields(
+        &tenant,
+        "TimedTask",
+        entity_id,
+        serde_json::json!({"Title": "after"}),
+        false,
+        Some("patch-post-commit-timeout".to_string()),
+    );
+    let advance_past_timeout = async {
+        pause.wait_until_reached().await;
+        tokio::time::advance(Duration::from_millis(6)).await;
+        pause.resume();
+        tokio::time::advance(Duration::from_secs(1)).await;
+    };
+    let (response, ()) = tokio::join!(update, advance_past_timeout);
+    let response = response.expect("retry should return the committed field update");
 
     assert!(response.success);
     assert_eq!(response.state.fields["Title"], "after");

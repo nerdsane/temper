@@ -35,7 +35,14 @@ async fn append_exact_with_retry(
     signature: &str,
     faults: &mut FaultCounts,
 ) -> u64 {
-    let event = envelope(event_type);
+    let mut event = envelope(event_type);
+    if event_type == "Delete" {
+        event.payload = serde_json::json!({
+            "action": "Delete",
+            "from_status": "Ready",
+            "to_status": "Deleted",
+        });
+    }
     for _attempt in 0..128 {
         match store
             .append_with_index_rows(
@@ -48,6 +55,7 @@ async fn append_exact_with_retry(
                     keys: true,
                     key_set_signature: Some(signature.to_string()),
                     vectors: false,
+                    snapshot_source: Default::default(),
                 },
             )
             .await
@@ -99,10 +107,16 @@ async fn run_reconciliation_workload(seed: u64) -> ReconciliationTrace {
     let contract_b = "v3|8:new_path[7:NewPath]";
     let old_row = key("path", "old-path");
     let old_writer_row = key("path", "old-writer-path");
+    let final_event_type = if delete_final { "Delete" } else { "LiveWrite" };
     let final_rows = if delete_final {
         Vec::new()
     } else {
         vec![key("new_path", "new-path")]
+    };
+    let old_contract_rows = if delete_final {
+        Vec::new()
+    } else {
+        vec![old_writer_row.clone()]
     };
     let mut faults = FaultCounts::default();
 
@@ -136,7 +150,7 @@ async fn run_reconciliation_workload(seed: u64) -> ReconciliationTrace {
             .await
             .expect("begin contract-B repair before live write");
         let (live_rows, live_signature) = if old_contract_writer {
-            (std::slice::from_ref(&old_writer_row), contract_a)
+            (old_contract_rows.as_slice(), contract_a)
         } else {
             (final_rows.as_slice(), contract_b)
         };
@@ -145,7 +159,7 @@ async fn run_reconciliation_workload(seed: u64) -> ReconciliationTrace {
                 &store,
                 persistence_id,
                 1,
-                "LiveWrite",
+                final_event_type,
                 live_rows,
                 live_signature,
                 &mut faults,
@@ -205,7 +219,7 @@ async fn run_reconciliation_workload(seed: u64) -> ReconciliationTrace {
                 &store,
                 persistence_id,
                 1,
-                "LiveWrite",
+                final_event_type,
                 &final_rows,
                 contract_b,
                 &mut faults,
@@ -233,7 +247,7 @@ async fn run_reconciliation_workload(seed: u64) -> ReconciliationTrace {
                 key_set_signature: contract_b,
                 contract_revision: final_revision,
                 expected_journal_sequence: 2,
-                expected_entity_live: true,
+                expected_entity_live: !delete_final,
                 expected_snapshot: None,
             },
             &final_rows,
@@ -251,6 +265,20 @@ async fn run_reconciliation_workload(seed: u64) -> ReconciliationTrace {
     }
 
     let replayed_event_types = replay_after_restart(&store, persistence_id, 2).await;
+    assert_eq!(
+        replayed_event_types.last().map(String::as_str),
+        Some(final_event_type),
+        "the delete schedule must persist and replay a real terminal boundary"
+    );
+    assert_eq!(
+        store
+            .list_entity_ids_by_type("default", "Doc")
+            .await
+            .expect("classify final stream liveness")
+            .contains(&"dst-workload".to_string()),
+        !delete_final,
+        "terminal schedules must remain deleted after restart"
+    );
     let final_owner = store
         .lookup_by_key("default", "Doc", "new_path", "new-path")
         .await
