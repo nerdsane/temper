@@ -94,13 +94,20 @@ impl SimPlatformHarness {
     pub fn register_inline_spec(&self, tenant: &str, entity_type: &str, ioa_source: &str) {
         let automaton =
             temper_spec::automaton::parse_automaton(ioa_source).expect("inline IOA should parse");
-        let table = temper_jit::table::TransitionTable::from_automaton(&automaton);
+        let mut table = temper_jit::table::TransitionTable::from_automaton(&automaton);
         let mut registry = self.platform_state.server.registry.write().unwrap(); // ci-ok: infallible lock
         let spec = registry
             .get_spec_mut(&TenantId::new(tenant), entity_type)
             .unwrap_or_else(|| {
                 panic!("entity type '{entity_type}' not found for tenant '{tenant}'")
             });
+        let current_table = spec.table();
+        assert_eq!(
+            temper_server::key_index::declared_key_set_signature(&table.keys),
+            temper_server::key_index::declared_key_set_signature(&current_table.keys),
+            "inline spec overrides cannot change an activated declared-key contract"
+        );
+        table.key_contract_activation_epoch = current_table.key_contract_activation_epoch;
         spec.swap_controller().swap(table);
         spec.integrations = automaton.integrations;
         spec.ioa_source = ioa_source.to_string();
