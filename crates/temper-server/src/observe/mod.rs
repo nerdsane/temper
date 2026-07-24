@@ -74,6 +74,20 @@ pub struct ActionDetail {
     pub guards: Vec<String>,
     /// Effects (Debug representation).
     pub effects: Vec<String>,
+    /// Parameters this action accepts, in spec order.
+    #[serde(default)]
+    pub params: Vec<ActionParamDetail>,
+    /// Agent-facing hint from the spec (empty when the spec has none).
+    #[serde(default)]
+    pub hint: String,
+}
+
+/// A single action parameter: name plus its declared type ("string" default).
+#[derive(Serialize, Deserialize)]
+pub struct ActionParamDetail {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub param_type: String,
 }
 
 /// Detail of a single invariant.
