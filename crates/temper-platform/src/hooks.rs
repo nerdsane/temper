@@ -172,6 +172,7 @@ impl CustomEffectHandler for PlatformEffectHandler {
             }
             "DispatchCallback" => {
                 governance_callback::handle_dispatch_callback(entity_fields, server)
+                    .await
             }
             _ => {
                 tracing::debug!(

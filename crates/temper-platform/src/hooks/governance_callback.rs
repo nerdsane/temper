@@ -12,7 +12,7 @@ use temper_server::request_context::AgentContext;
 /// now triggers `DispatchCallback`, so replaying callback wiring after a
 /// decision has already been approved or denied will immediately redeliver
 /// the resolution to the waiting target entity.
-pub(super) fn handle_dispatch_callback(
+pub(super) async fn handle_dispatch_callback(
     entity_fields: &serde_json::Value,
     server: &ServerState,
 ) -> Result<(), String> {
@@ -244,6 +244,27 @@ params = ["error_message"]
         assert_eq!(
             resolve_callback_entity_type(&state.server, &tenant, "Session"),
             "Session"
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_dispatch_failure_is_returned_before_effect_acknowledgement() {
+        let state = PlatformState::new(None);
+        let result = handle_dispatch_callback(
+            &serde_json::json!({
+                "Status": "Approved",
+                "callback_tenant": "default",
+                "callback_entity_set": "MissingEntities",
+                "callback_entity_id": "missing-callback-target",
+                "callback_on_approve": "ResumeAfterApproval",
+            }),
+            &state.server,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "a failed callback must keep the durable custom-effect receipt retryable"
         );
     }
 
