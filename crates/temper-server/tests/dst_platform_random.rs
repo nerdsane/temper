@@ -169,6 +169,42 @@ async fn dst_random_workload_no_faults() {
     }
 }
 
+#[tokio::test]
+async fn rejected_first_file_version_action_does_not_publish_a_phantom_entity() {
+    let seed = 238;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let mut harness = SimPlatformHarness::no_faults(seed);
+    let tenant = "t-beta";
+    let entity_id = "rejected-file-version";
+
+    harness
+        .install_app(tenant, "temper-fs")
+        .await
+        .expect("temper-fs installs");
+    harness.restart().await;
+
+    let _rejected = harness
+        .dispatch(
+            tenant,
+            "FileVersion",
+            entity_id,
+            "SetDescription",
+            serde_json::json!({"description": "unsupported"}),
+        )
+        .await;
+
+    assert!(
+        harness
+            .sim_event_store
+            .dump_journal(&format!("{tenant}:FileVersion:{entity_id}"))
+            .is_empty(),
+        "the rejected first action must not append an entity event"
+    );
+    assert_p3_index_store_agreement(&harness)
+        .await
+        .expect("the rejected first action must not publish a phantom collection entry");
+}
+
 // =========================================================================
 // Test 2: Random workload with event-store faults
 // =========================================================================
