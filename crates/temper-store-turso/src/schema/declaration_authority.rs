@@ -23,7 +23,7 @@ INSERT INTO spec_declaration_authority
     (tenant, entity_type, revision, ioa_source, declaration_fingerprint, present)
 SELECT tenant, entity_type, MAX(version, 1), ioa_source, COALESCE(content_hash, ''), 1
 FROM specs
-WHERE true
+WHERE committed = 1
 ON CONFLICT(tenant, entity_type) DO NOTHING;";
 
 /// Bootstrap deletion tombstones for retained legacy vector state.
@@ -45,15 +45,17 @@ WHERE NOT EXISTS (
     FROM specs
     WHERE specs.tenant = known.tenant
       AND specs.entity_type = known.entity_type
+      AND specs.committed = 1
 )
 ON CONFLICT(tenant, entity_type) DO NOTHING;";
 
-/// Advance declaration authority and fence existing vector work on spec insert.
+/// Advance declaration authority and fence vector work on committed spec insert.
 const DROP_SPEC_DECLARATION_INSERT_TRIGGER: &str =
     "DROP TRIGGER IF EXISTS specs_declaration_authority_insert;";
 const CREATE_SPEC_DECLARATION_INSERT_TRIGGER: &str = "\
 CREATE TRIGGER specs_declaration_authority_insert
 AFTER INSERT ON specs
+WHEN NEW.committed = 1
 BEGIN
     INSERT INTO spec_declaration_authority
         (tenant, entity_type, revision, ioa_source, declaration_fingerprint, present)
@@ -76,14 +78,18 @@ BEGIN
     WHERE tenant = NEW.tenant AND entity_type = NEW.entity_type;
 END;";
 
-/// Advance declaration authority only when a spec's IOA source changes.
+/// Advance authority when a staged spec commits or committed content changes.
 const DROP_SPEC_DECLARATION_UPDATE_TRIGGER: &str =
     "DROP TRIGGER IF EXISTS specs_declaration_authority_update;";
 const CREATE_SPEC_DECLARATION_UPDATE_TRIGGER: &str = "\
 CREATE TRIGGER specs_declaration_authority_update
-AFTER UPDATE OF ioa_source, content_hash ON specs
-WHEN OLD.ioa_source IS NOT NEW.ioa_source
-  OR OLD.content_hash IS NOT NEW.content_hash
+AFTER UPDATE OF ioa_source, content_hash, committed ON specs
+WHEN NEW.committed = 1
+  AND (
+      OLD.committed IS NOT NEW.committed
+      OR OLD.ioa_source IS NOT NEW.ioa_source
+      OR OLD.content_hash IS NOT NEW.content_hash
+  )
 BEGIN
     INSERT INTO spec_declaration_authority
         (tenant, entity_type, revision, ioa_source, declaration_fingerprint, present)
@@ -106,12 +112,13 @@ BEGIN
     WHERE tenant = NEW.tenant AND entity_type = NEW.entity_type;
 END;";
 
-/// Persist an absence tombstone and fence existing vector work on spec delete.
+/// Tombstone only deletion of a committed spec; staged cleanup is invisible.
 const DROP_SPEC_DECLARATION_DELETE_TRIGGER: &str =
     "DROP TRIGGER IF EXISTS specs_declaration_authority_delete;";
 const CREATE_SPEC_DECLARATION_DELETE_TRIGGER: &str = "\
 CREATE TRIGGER specs_declaration_authority_delete
 AFTER DELETE ON specs
+WHEN OLD.committed = 1
 BEGIN
     INSERT INTO spec_declaration_authority
         (tenant, entity_type, revision, ioa_source, declaration_fingerprint, present)

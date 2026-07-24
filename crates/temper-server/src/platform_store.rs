@@ -130,6 +130,14 @@ pub trait PlatformStore: Send + Sync {
 
     /// Mark all uncommitted specs for a tenant as committed.
     async fn commit_specs(&self, tenant: &str) -> Result<(), String>;
+    /// Atomically persist verification and commit only the expected spec bytes.
+    async fn commit_verified_spec(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        expected_content_hash: &str,
+        update: SpecVerificationUpdate<'_>,
+    ) -> Result<(), String>;
     /// Delete all uncommitted specs across all tenants.
     async fn delete_uncommitted_specs(&self) -> Result<usize, String>;
 
@@ -274,6 +282,28 @@ impl PlatformStore for TursoEventStore {
 
     async fn commit_specs(&self, tenant: &str) -> Result<(), String> {
         self.commit_specs(tenant).await.map_err(|e| e.to_string())
+    }
+    async fn commit_verified_spec(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        expected_content_hash: &str,
+        update: SpecVerificationUpdate<'_>,
+    ) -> Result<(), String> {
+        self.commit_verified_spec(
+            tenant,
+            entity_type,
+            expected_content_hash,
+            TursoSpecVerificationUpdate {
+                status: update.status,
+                verified: update.verified,
+                levels_passed: update.levels_passed,
+                levels_total: update.levels_total,
+                verification_result_json: update.verification_result_json,
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())
     }
     async fn delete_uncommitted_specs(&self) -> Result<usize, String> {
         self.delete_uncommitted_specs()
@@ -530,6 +560,29 @@ impl PlatformStore for PostgresEventStore {
 
     async fn commit_specs(&self, tenant: &str) -> Result<(), String> {
         self.commit_specs(tenant).await.map_err(|e| e.to_string())
+    }
+
+    async fn commit_verified_spec(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        expected_content_hash: &str,
+        update: SpecVerificationUpdate<'_>,
+    ) -> Result<(), String> {
+        self.commit_verified_spec(
+            tenant,
+            entity_type,
+            expected_content_hash,
+            PostgresSpecVerificationUpdate {
+                status: update.status,
+                verified: update.verified,
+                levels_passed: update.levels_passed,
+                levels_total: update.levels_total,
+                verification_result_json: update.verification_result_json,
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())
     }
 
     async fn delete_uncommitted_specs(&self) -> Result<usize, String> {
@@ -1014,6 +1067,37 @@ mod sim_platform_store {
                     spec.committed = true;
                 }
             }
+            Ok(())
+        }
+
+        async fn commit_verified_spec(
+            &self,
+            tenant: &str,
+            entity_type: &str,
+            expected_content_hash: &str,
+            update: SpecVerificationUpdate<'_>,
+        ) -> Result<(), String> {
+            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+            let failure_probability = inner.faults.spec_write_failure_prob;
+            if inner.rng.chance(failure_probability) {
+                return Err("SimPlatformStore: injected verified spec commit failure".into());
+            }
+            let key = (tenant.to_string(), entity_type.to_string());
+            {
+                let spec = inner
+                    .specs
+                    .get_mut(&key)
+                    .ok_or_else(|| format!("missing staged spec {tenant}/{entity_type}"))?;
+                if spec.content_hash != expected_content_hash {
+                    return Err(format!(
+                        "staged spec fingerprint changed for {tenant}/{entity_type}"
+                    ));
+                }
+                spec.committed = true;
+            }
+            inner
+                .verification_cache
+                .insert(key, (expected_content_hash.to_string(), update.verified));
             Ok(())
         }
 

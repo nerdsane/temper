@@ -1,6 +1,6 @@
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::oneshot;
@@ -40,7 +40,9 @@ pub enum SystemSignal {
 pub struct ActorRef<M: Message> {
     pub(crate) sender: MailboxSender<M>,
     pub(crate) id: ActorId,
-    pub(crate) ready: Arc<AtomicBool>,
+    /// Packed supervised-incarnation state. The low bit is readiness and the
+    /// remaining bits are a monotonically increasing `pre_start` epoch.
+    pub(crate) lifecycle: Arc<AtomicU64>,
 }
 
 /// Unique identifier for an actor instance.
@@ -116,7 +118,17 @@ impl<M: Message> ActorRef<M> {
 
     /// Whether this actor incarnation completed `pre_start` and is serving messages.
     pub fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::Acquire)
+        self.ready_incarnation().is_some()
+    }
+
+    /// Return the ready supervised-incarnation epoch in one atomic observation.
+    ///
+    /// An [`ActorId`] identifies the mailbox/task. Supervision can run
+    /// `pre_start` repeatedly inside that task, so callers that must distinguish
+    /// initialized state across a restart also need this epoch.
+    pub fn ready_incarnation(&self) -> Option<u64> {
+        let lifecycle = self.lifecycle.load(Ordering::Acquire);
+        (lifecycle & 1 == 1).then_some(lifecycle >> 1)
     }
 
     /// Current in-flight mailbox depth (messages queued but not yet processed).
@@ -141,7 +153,7 @@ impl<M: Message> Clone for ActorRef<M> {
         Self {
             sender: self.sender.clone(),
             id: self.id.clone(),
-            ready: self.ready.clone(),
+            lifecycle: self.lifecycle.clone(),
         }
     }
 }

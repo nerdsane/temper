@@ -17,6 +17,7 @@ use crate::{EntityMsg, ServerState, SpecRegistry, StorageStack, build_router};
 const TENANT: &str = "arn216";
 const NOTE_V1: &str = include_str!("../../tests/fixtures/arn216/full_v1/note.ioa.toml");
 const NOTE_V2: &str = include_str!("../../tests/fixtures/arn216/full_v2/note.ioa.toml");
+const CSDL_V2: &str = include_str!("../../tests/fixtures/arn216/full_v2/model.csdl.xml");
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -251,7 +252,7 @@ async fn existing_actor_hot_swaps_in_place_and_removed_actor_stops() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn publication_snapshot_evicts_unready_and_same_key_replacements() {
+async fn publication_snapshot_evicts_unready_restarted_and_same_key_replacements() {
     let db_path = std::env::temp_dir().join(format!(
         "temper-arn216-actor-identity-{}.db",
         uuid::Uuid::new_v4()
@@ -288,13 +289,55 @@ async fn publication_snapshot_evicts_unready_and_same_key_replacements() {
         .await
         .expect("original actor must become ready");
     let original_snapshot = state.ready_actor_identities_for_types(&tenant, &note_types);
+    let original_incarnation = original
+        .ready_incarnation()
+        .expect("ready actor must expose its supervised incarnation");
     assert_eq!(
         original_snapshot.get(&format!("{TENANT}:Note:same-key")),
-        Some(&original.id().uid)
+        Some(&(original.id().uid, original_incarnation))
     );
-    state.stop_and_remove_entity(&tenant, "Note", "same-key");
+
+    original
+        .signal(temper_runtime::actor::SystemSignal::Restart)
+        .expect("request supervised restart");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if original
+                .ready_incarnation()
+                .is_some_and(|incarnation| incarnation != original_incarnation)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("actor must complete a new supervised incarnation");
+    assert_eq!(
+        original.id().uid,
+        original_snapshot[&format!("{TENANT}:Note:same-key")].0
+    );
+    state.evict_type_actors_except(&tenant, &note_types, &original_snapshot);
+    assert!(
+        original
+            .ask::<crate::EntityResponse>(EntityMsg::GetState, Duration::from_millis(100))
+            .await
+            .is_err(),
+        "a supervised restart must not inherit preservation from its prior incarnation"
+    );
+
+    let replacement_key = "same-key-replacement";
+    let original = state
+        .get_or_spawn_tenant_actor(&tenant, "Note", replacement_key)
+        .expect("spawn original actor for same-key replacement");
+    original
+        .ask::<crate::EntityResponse>(EntityMsg::GetState, Duration::from_secs(1))
+        .await
+        .expect("original replacement-test actor must become ready");
+    let original_snapshot = state.ready_actor_identities_for_types(&tenant, &note_types);
+    state.stop_and_remove_entity(&tenant, "Note", replacement_key);
     let replacement = state
-        .get_or_spawn_tenant_actor(&tenant, "Note", "same-key")
+        .get_or_spawn_tenant_actor(&tenant, "Note", replacement_key)
         .expect("spawn same-key replacement");
     assert_ne!(replacement.id().uid, original.id().uid);
     state.evict_type_actors_except(&tenant, &note_types, &original_snapshot);
@@ -304,6 +347,70 @@ async fn publication_snapshot_evicts_unready_and_same_key_replacements() {
             .await
             .is_err(),
         "a same-key actor with a different uid must not inherit preservation"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn publication_rechecks_supervised_restart_after_initial_eviction() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-arn216-post-eviction-restart-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&url, None).await.expect("open Turso");
+    let state = turso_state(&store, "arn216-post-eviction-restart");
+    load_dir(&state, "full_v1").await;
+    let tenant = TenantId::from(TENANT);
+    let note_types = vec!["Note".to_string()];
+    let original = state
+        .get_or_spawn_tenant_actor(&tenant, "Note", "restart-window")
+        .expect("spawn original actor");
+    original
+        .ask::<crate::EntityResponse>(EntityMsg::GetState, Duration::from_secs(1))
+        .await
+        .expect("original actor must become ready");
+    let preserved = state.ready_actor_identities_for_types(&tenant, &note_types);
+    let original_incarnation = original
+        .ready_incarnation()
+        .expect("original incarnation must be ready");
+
+    state.evict_type_actors_except(&tenant, &note_types, &preserved);
+    original
+        .signal(temper_runtime::actor::SystemSignal::Restart)
+        .expect("restart between initial eviction and registry swap");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if original
+                .ready_incarnation()
+                .is_some_and(|incarnation| incarnation != original_incarnation)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("restart must complete before registry publication");
+
+    state
+        .registry
+        .write()
+        .expect("registry lock")
+        .try_register_tenant(
+            TENANT,
+            temper_spec::csdl::parse_csdl(CSDL_V2).expect("parse v2 CSDL"),
+            CSDL_V2.to_string(),
+            &[("Note", NOTE_V2)],
+        )
+        .expect("publish Note v2");
+    state.revalidate_type_actors_after_publication(&tenant, &note_types, &preserved);
+
+    assert!(
+        original
+            .ask::<crate::EntityResponse>(EntityMsg::GetState, Duration::from_millis(100))
+            .await
+            .is_err(),
+        "an actor restarted after initial eviction must not survive the registry swap with its old cloned table"
     );
 }
 

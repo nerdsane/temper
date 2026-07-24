@@ -293,7 +293,6 @@ pub(crate) async fn persist_bootstrap_verification(
     verified_cache: &BTreeMap<String, (String, bool)>,
 ) {
     let hashes_to_persist = hashes_requiring_persistence(hashes, verified_cache);
-    let mut wrote_specs = false;
 
     for (entity_type, content_hash) in &hashes_to_persist {
         // Find the IOA source for this entity type.
@@ -311,13 +310,15 @@ pub(crate) async fn persist_bootstrap_verification(
             tracing::warn!("Failed to persist bootstrap spec {tenant}/{entity_type}: {e}");
             continue;
         }
-        wrote_specs = true;
 
-        // Mark as verified (bootstrap panics on failure, so all specs here passed).
+        // Atomically publish verification for exactly the bytes that passed.
+        // Another replica may stage the same tenant/type between the upsert
+        // above and this call; the expected fingerprint makes that fail closed.
         if let Err(e) = store
-            .persist_spec_verification(
+            .commit_verified_spec(
                 tenant,
                 entity_type,
+                content_hash,
                 SpecVerificationUpdate {
                     status: "completed",
                     verified: true,
@@ -328,15 +329,8 @@ pub(crate) async fn persist_bootstrap_verification(
             )
             .await
         {
-            tracing::warn!("Failed to persist verification status for {tenant}/{entity_type}: {e}");
+            tracing::warn!("Failed to commit verified bootstrap spec {tenant}/{entity_type}: {e}");
         }
-    }
-
-    // `upsert_spec` marks rows as uncommitted while content is rewritten. Once
-    // bootstrap verification succeeds, promote the tenant's spec set back to a
-    // durable committed state so restart recovery can actually see the rows.
-    if wrote_specs && let Err(e) = store.commit_specs(tenant).await {
-        tracing::warn!("Failed to commit bootstrap specs for tenant '{tenant}': {e}");
     }
 }
 

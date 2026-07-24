@@ -418,14 +418,32 @@ impl TursoEventStore {
         tenant: &str,
         entity_type: &str,
     ) -> Result<(), PersistenceError> {
-        let deleted = tx
-            .execute(
-                "DELETE FROM specs WHERE tenant = ?1 AND entity_type = ?2",
-                params![tenant, entity_type],
-            )
-            .await
-            .map_err(storage_error)?;
-        if deleted > 0 {
+        let deleted_catalog_committed = {
+            let mut rows = tx
+                .query(
+                    "SELECT committed FROM specs WHERE tenant = ?1 AND entity_type = ?2",
+                    params![tenant, entity_type],
+                )
+                .await
+                .map_err(storage_error)?;
+            rows.next()
+                .await
+                .map_err(storage_error)?
+                .map(|row| row.get::<i64>(0).map(|committed| committed != 0))
+                .transpose()
+                .map_err(storage_error)?
+                .unwrap_or(false)
+        };
+        tx.execute(
+            "DELETE FROM specs WHERE tenant = ?1 AND entity_type = ?2",
+            params![tenant, entity_type],
+        )
+        .await
+        .map_err(storage_error)?;
+        // Only committed-row deletion fires the authority trigger. A staged
+        // row can hide the live declaration stored in authority, so deleting
+        // it must still execute the explicit tombstone below.
+        if deleted_catalog_committed {
             return Ok(());
         }
 
@@ -845,6 +863,49 @@ impl TursoEventStore {
         )
         .await
         .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Atomically persist verification and commit only the expected spec bytes.
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "turso.commit_verified_spec"))]
+    pub async fn commit_verified_spec(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        expected_content_hash: &str,
+        update: TursoSpecVerificationUpdate<'_>,
+    ) -> Result<(), PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.commit_verified_spec");
+        let conn = self.configured_connection().await?;
+        let affected = conn
+            .execute(
+                "UPDATE specs SET
+                     verified = ?4,
+                     verification_status = ?5,
+                     levels_passed = ?6,
+                     levels_total = ?7,
+                     verification_result = ?8,
+                     committed = 1,
+                     updated_at = datetime('now')
+                 WHERE tenant = ?1 AND entity_type = ?2 AND content_hash = ?3",
+                params![
+                    tenant,
+                    entity_type,
+                    expected_content_hash,
+                    update.verified as i64,
+                    update.status,
+                    update.levels_passed,
+                    update.levels_total,
+                    update.verification_result_json
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+        if affected != 1 {
+            return Err(PersistenceError::Storage(format!(
+                "staged spec fingerprint changed for {tenant}/{entity_type}"
+            )));
+        }
         Ok(())
     }
 

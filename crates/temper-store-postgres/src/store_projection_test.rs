@@ -820,10 +820,12 @@ fn native_data_only_create_rejects_a_stale_fingerprint_before_any_insert() {
             .upsert_spec(&tenant, entity_type, ioa_a, csdl, &fingerprint_a)
             .await
             .unwrap();
+        store.commit_specs(&tenant).await.unwrap();
         store
             .upsert_spec(&tenant, entity_type, ioa_b, csdl, &fingerprint_b)
             .await
             .unwrap();
+        store.commit_specs(&tenant).await.unwrap();
 
         let fields = serde_json::json!({"Id": entity_id, "Content": "stale"});
         let state = serde_json::json!({

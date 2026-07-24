@@ -1114,6 +1114,39 @@ impl PostgresEventStore {
         Ok(())
     }
 
+    /// Atomically persist verification and commit only the expected spec bytes.
+    pub async fn commit_verified_spec(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        expected_content_hash: &str,
+        update: PostgresSpecVerificationUpdate<'_>,
+    ) -> Result<(), PersistenceError> {
+        let verification_result = parse_optional_json(update.verification_result_json)?;
+        let result = crate::dbm::postgres_query!(
+            "UPDATE specs SET verification_status = $4, verified = $5, levels_passed = $6, \
+             levels_total = $7, verification_result = $8, committed = true, updated_at = now() \
+             WHERE tenant = $1 AND entity_type = $2 AND content_hash = $3"
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(expected_content_hash)
+        .bind(update.status)
+        .bind(update.verified)
+        .bind(update.levels_passed)
+        .bind(update.levels_total)
+        .bind(verification_result)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
+        if result.rows_affected() != 1 {
+            return Err(PersistenceError::Storage(format!(
+                "staged spec fingerprint changed for {tenant}/{entity_type}"
+            )));
+        }
+        Ok(())
+    }
+
     pub async fn delete_uncommitted_specs(&self) -> Result<usize, PersistenceError> {
         let result = crate::dbm::postgres_query!("DELETE FROM specs WHERE committed = false")
             .execute(self.pool())
@@ -1127,7 +1160,8 @@ impl PostgresEventStore {
         tenant: &str,
     ) -> Result<BTreeMap<String, (String, bool)>, PersistenceError> {
         let rows: Vec<(String, String, bool)> = crate::dbm::postgres_query_as!(
-            "SELECT entity_type, content_hash, verified FROM specs WHERE tenant = $1",
+            "SELECT entity_type, content_hash, verified FROM specs \
+             WHERE tenant = $1 AND committed = true",
         )
         .bind(tenant)
         .fetch_all(self.pool())

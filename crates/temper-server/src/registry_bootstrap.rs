@@ -208,20 +208,24 @@ fn populate_registry<R: SpecRowLike>(
     Ok(restored_specs)
 }
 
+async fn load_postgres_spec_rows(pool: &sqlx::PgPool) -> Result<Vec<PersistedSpecRow>, String> {
+    sqlx::query_as(
+        "SELECT tenant, entity_type, ioa_source, csdl_xml, verification_status, verified, \
+                levels_passed, levels_total, verification_result, updated_at \
+         FROM specs WHERE committed = true \
+         ORDER BY tenant, entity_type",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to read specs from Postgres: {e}"))
+}
+
 /// Restore a [`SpecRegistry`] from Postgres.
 pub async fn restore_registry_from_postgres(
     registry: &mut SpecRegistry,
     pool: &sqlx::PgPool,
 ) -> Result<usize, String> {
-    let rows: Vec<PersistedSpecRow> = sqlx::query_as(
-        "SELECT tenant, entity_type, ioa_source, csdl_xml, verification_status, verified, \
-                levels_passed, levels_total, verification_result, updated_at \
-         FROM specs \
-         ORDER BY tenant, entity_type",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to read specs from Postgres: {e}"))?;
+    let rows = load_postgres_spec_rows(pool).await?;
 
     #[derive(sqlx::FromRow)]
     struct ConstraintRow {

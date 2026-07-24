@@ -295,6 +295,16 @@ pub(crate) async fn handle_load_dir(
                 )
             })?;
     }
+    // A supervised restart can begin after the first identity check and clone
+    // the old table before the registry swap. Revalidate the original snapshot
+    // after the swap, while actor creation is still excluded: any such new
+    // incarnation is evicted, and a later lookup can only hydrate from the new
+    // registry table.
+    state.revalidate_type_actors_after_publication(
+        &tenant_id,
+        &replaced_entity_types,
+        &preserved_incoming_actors,
+    );
     drop(actor_publication_guard);
     state.rebuild_reaction_dispatcher();
     drop(catalog_update_guard);

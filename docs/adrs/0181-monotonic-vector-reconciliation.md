@@ -92,11 +92,14 @@ Postgres and Turso additionally maintain
 `spec_declaration_authority (tenant, entity_type, revision, ioa_source,
 declaration_fingerprint, present)`.
 Database triggers advance this row in the same transaction as every IOA insert,
-source change, and hard deletion. The row is a tombstone when `present = false`, so
-its revision survives delete/re-add and process restart. A spec mutation also advances
-an existing reconciliation generation and withdraws its watermark immediately; stale
-work is fenced at the declaration commit point, not only after the next coordinator
-starts.
+source change, and hard deletion **only when the affected catalog row is committed**.
+PlatformStore staging deliberately writes `committed = false`; staging and discarded
+uncommitted rows neither fence the still-published declaration nor withdraw its
+watermark. The false-to-true commit transition is the publication point that advances
+authority. The row is a tombstone when `present = false`, so its revision survives
+delete/re-add and process restart. A committed spec mutation also advances an existing
+reconciliation generation and withdraws its watermark immediately; stale work is
+fenced at the declaration commit point, not only after the next coordinator starts.
 
 Persistent reconciliation uses the catalog's stored content fingerprint, falling back
 to hashing authoritative IOA bytes only for migrated rows, or uses the fixed
@@ -247,6 +250,17 @@ those with any registry-only compatibility omissions before publishing the new
 registry. Turso commits only the addressed tenant's incoming set and constraints; it
 does not use a process-wide commit of unrelated staged rows.
 
+Startup can subsequently merge built-in agent entities into an app tenant. That phase
+must publish their sources, exact fingerprints, and verification state through the
+tenant's active `PlatformStore`, including shared Postgres. A Turso-only bootstrap
+accessor would leave the in-memory built-ins advertised while replacement tombstones
+continued to fence every Postgres writer. Each verified built-in is committed by
+tenant and entity type; bootstrap must never use a tenant-wide commit that could
+promote an unrelated app declaration still undergoing verification on another
+Postgres replica. Verification status and commitment are finalized in one
+fingerprint-checked store operation, so a same-type overwrite by another replica
+fails closed instead of publishing bytes that the current bootstrap did not verify.
+
 A delete always leaves authority at `absent:v1`, even when compatibility first-writer
 bootstrap created authority without a `specs` row. The deletion trigger/transaction
 advances any existing reconciliation generation and removes its watermark. The absent
@@ -261,15 +275,17 @@ publication fails closed during hot swap and makes deletion replayable.
 
 ### Sub-Decision 7: Registry publication preserves only live actor incarnations
 
-Before durable catalog mutation, the server snapshots the actor key and incarnation
-UUID only for matching actors that completed `pre_start`. Readiness is shared with the
-`ActorRef` and owned by a drop guard in the actor run future; normal shutdown, handler
-panic, and task cancellation all clear it. After the durable commit and while holding
-the actor/spec publication write lock, the server preserves an actor only when the
-same key still maps to the same UUID and remains ready. It stops and removes actors
-created during the publication gap, same-key replacement incarnations, unready or
-dead actors, every removed type, and every legacy fallback actor on a tenant's first
-registry publication.
+Before durable catalog mutation, the server snapshots the actor key, task UUID, and
+ready supervised-incarnation epoch only for matching actors that completed
+`pre_start`. The `ActorRef` exposes readiness and a monotonically increasing
+`pre_start` epoch in one packed atomic value. A drop guard in the actor run future
+clears readiness on normal shutdown, handler panic, and task cancellation; every
+supervised restart advances the epoch even though it reuses the task UUID. After the
+durable commit and while holding the actor/spec publication write lock, the server
+preserves an actor only when the same key still maps to the same UUID and ready epoch.
+It stops and removes actors created or restarted during the publication gap, same-key
+replacement incarnations, unready or dead actors, every removed type, and every legacy
+fallback actor on a tenant's first registry publication.
 
 Preserved actors share the registry transition-table lock and hot-swap in place. An
 actor that captured the old declaration after the snapshot cannot survive publication

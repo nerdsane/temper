@@ -1,5 +1,28 @@
 use super::*;
 
+async fn item_authority(store: &TursoEventStore) -> (i64, String, i64) {
+    let conn = store.configured_connection().await.unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT revision, declaration_fingerprint, present \
+             FROM spec_declaration_authority \
+             WHERE tenant = 't' AND entity_type = 'Item'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows
+        .next()
+        .await
+        .unwrap()
+        .expect("Item declaration authority");
+    (
+        row.get::<i64>(0).unwrap(),
+        row.get::<String>(1).unwrap(),
+        row.get::<i64>(2).unwrap(),
+    )
+}
+
 #[tokio::test]
 async fn durable_spec_revision_rejects_stale_replica_and_allows_later_readd() {
     let store = make_store("vector-durable-spec-revision").await;
@@ -61,6 +84,221 @@ async fn durable_spec_revision_rejects_stale_replica_and_allows_later_readd() {
     assert!(
         readded_a > generation_b,
         "a durable A re-add is a new revision"
+    );
+}
+
+#[tokio::test]
+async fn staged_spec_does_not_advance_authority_until_commit() {
+    let store = make_store("vector-staged-declaration-authority").await;
+    let csdl = "<Schema Namespace=\"Temper.Tests\" />";
+    let ioa_a = "[automaton]\nname = \"Item\"\n# committed-a\n";
+    let ioa_b = "[automaton]\nname = \"Item\"\n# staged-b\n";
+    let fingerprint_a = crate::spec_content_hash(ioa_a);
+    let fingerprint_b = crate::spec_content_hash(ioa_b);
+
+    store
+        .upsert_spec("t", "Item", ioa_a, csdl, &fingerprint_a)
+        .await
+        .unwrap();
+    store.commit_specs("t").await.unwrap();
+    let generation_a = store
+        .begin_vector_index_reconciliation("t", "Item", "v2|a", 1, &fingerprint_a)
+        .await
+        .unwrap();
+    store
+        .mark_vector_index_backfilled("t", "Item", generation_a, "v2|a")
+        .await
+        .unwrap();
+    let authority_a = item_authority(&store).await;
+
+    store
+        .upsert_spec("t", "Item", ioa_b, csdl, &fingerprint_b)
+        .await
+        .unwrap();
+    assert_eq!(item_authority(&store).await, authority_a);
+    assert_eq!(
+        store.vector_index_backfilled_types("t").await.unwrap(),
+        vec![("Item".to_string(), "v2|a".to_string())],
+        "uncommitted staging must not withdraw the published watermark"
+    );
+
+    assert_eq!(store.delete_uncommitted_specs().await.unwrap(), 1);
+    assert_eq!(item_authority(&store).await, authority_a);
+    assert_eq!(
+        store.vector_index_backfilled_types("t").await.unwrap(),
+        vec![("Item".to_string(), "v2|a".to_string())],
+        "discarding uncommitted staging must not tombstone the live declaration"
+    );
+
+    store
+        .upsert_spec("t", "Item", ioa_b, csdl, &fingerprint_b)
+        .await
+        .unwrap();
+    store.commit_specs("t").await.unwrap();
+    let authority_b = item_authority(&store).await;
+    assert!(authority_b.0 > authority_a.0);
+    assert_eq!(authority_b.1, fingerprint_b);
+    assert_eq!(authority_b.2, 1);
+    assert!(
+        store
+            .vector_index_backfilled_types("t")
+            .await
+            .unwrap()
+            .is_empty(),
+        "the false-to-true commit transition must withdraw the old watermark"
+    );
+}
+
+#[tokio::test]
+async fn scoped_commit_does_not_promote_unrelated_staging() {
+    let store = make_store("vector-scoped-spec-commit").await;
+    let csdl = "<Schema Namespace=\"Temper.Tests\" />";
+    let item = "[automaton]\nname = \"Item\"\n";
+    let unrelated = "[automaton]\nname = \"Unrelated\"\n";
+    let item_fingerprint = crate::spec_content_hash(item);
+    let unrelated_fingerprint = crate::spec_content_hash(unrelated);
+
+    store
+        .upsert_spec("t", "Item", item, csdl, &item_fingerprint)
+        .await
+        .unwrap();
+    store
+        .upsert_spec("t", "Unrelated", unrelated, csdl, &unrelated_fingerprint)
+        .await
+        .unwrap();
+    store
+        .commit_verified_spec(
+            "t",
+            "Item",
+            &item_fingerprint,
+            crate::TursoSpecVerificationUpdate {
+                status: "completed",
+                verified: true,
+                levels_passed: None,
+                levels_total: None,
+                verification_result_json: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let committed = store.load_specs().await.unwrap();
+    assert_eq!(committed.len(), 1);
+    assert_eq!(committed[0].entity_type, "Item");
+    let conn = store.configured_connection().await.unwrap();
+    let unrelated_committed: i64 = conn
+        .query(
+            "SELECT committed FROM specs WHERE tenant = 't' AND entity_type = 'Unrelated'",
+            (),
+        )
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .expect("unrelated staged row")
+        .get(0)
+        .unwrap();
+    assert_eq!(unrelated_committed, 0);
+}
+
+#[tokio::test]
+async fn verified_commit_rejects_same_type_fingerprint_overwrite() {
+    let store = make_store("vector-same-type-verified-commit").await;
+    let csdl = "<Schema Namespace=\"Temper.Tests\" />";
+    let ioa_a = "[automaton]\nname = \"Item\"\n# verified-a\n";
+    let ioa_b = "[automaton]\nname = \"Item\"\n# staged-b\n";
+    let fingerprint_a = crate::spec_content_hash(ioa_a);
+    let fingerprint_b = crate::spec_content_hash(ioa_b);
+
+    store
+        .upsert_spec("t", "Item", ioa_a, csdl, &fingerprint_a)
+        .await
+        .unwrap();
+    store
+        .upsert_spec("t", "Item", ioa_b, csdl, &fingerprint_b)
+        .await
+        .unwrap();
+    let error = store
+        .commit_verified_spec(
+            "t",
+            "Item",
+            &fingerprint_a,
+            crate::TursoSpecVerificationUpdate {
+                status: "completed",
+                verified: true,
+                levels_passed: None,
+                levels_total: None,
+                verification_result_json: None,
+            },
+        )
+        .await
+        .expect_err("verified A must not publish staged B");
+    assert!(error.to_string().contains("fingerprint changed"));
+
+    let conn = store.configured_connection().await.unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT content_hash, verified, committed FROM specs \
+             WHERE tenant = 't' AND entity_type = 'Item'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().expect("staged B row");
+    assert_eq!(row.get::<String>(0).unwrap(), fingerprint_b);
+    assert_eq!(row.get::<i64>(1).unwrap(), 0);
+    assert_eq!(row.get::<i64>(2).unwrap(), 0);
+}
+
+#[tokio::test]
+async fn full_replacement_tombstones_authority_hidden_by_staged_catalog_row() {
+    let store = make_store("vector-staged-full-replacement-tombstone").await;
+    let csdl = "<Schema Namespace=\"Temper.Tests\" />";
+    let ioa_a = "[automaton]\nname = \"Item\"\n# committed-a\n";
+    let ioa_b = "[automaton]\nname = \"Item\"\n# staged-b\n";
+    let fingerprint_a = crate::spec_content_hash(ioa_a);
+    let fingerprint_b = crate::spec_content_hash(ioa_b);
+
+    store
+        .upsert_spec("t", "Item", ioa_a, csdl, &fingerprint_a)
+        .await
+        .unwrap();
+    store.commit_specs("t").await.unwrap();
+    let generation_a = store
+        .begin_vector_index_reconciliation("t", "Item", "v2|a", 1, &fingerprint_a)
+        .await
+        .unwrap();
+    store
+        .mark_vector_index_backfilled("t", "Item", generation_a, "v2|a")
+        .await
+        .unwrap();
+    let authority_a = item_authority(&store).await;
+
+    store
+        .upsert_spec("t", "Item", ioa_b, csdl, &fingerprint_b)
+        .await
+        .unwrap();
+    assert_eq!(item_authority(&store).await, authority_a);
+
+    assert_eq!(
+        store
+            .persist_spec_catalog_update("t", &[], csdl, &[], true, None)
+            .await
+            .unwrap(),
+        vec!["Item".to_string()]
+    );
+    let tombstone = item_authority(&store).await;
+    assert!(tombstone.0 > authority_a.0);
+    assert_eq!(tombstone.1, "absent:v1");
+    assert_eq!(tombstone.2, 0);
+    assert!(
+        store
+            .vector_index_backfilled_types("t")
+            .await
+            .unwrap()
+            .is_empty(),
+        "full replacement must withdraw the committed declaration even when its catalog row is staged"
     );
 }
 
@@ -448,16 +686,21 @@ async fn concurrent_reopen_cannot_miss_declaration_authority_updates() {
         let ioa_source = format!("[automaton]\nname = \"Item\"\n# revision {revision}\n");
         let fingerprint = crate::spec_content_hash(&ioa_source);
         let reopen = TursoEventStore::new(&url, None);
-        let update = store.upsert_spec(
-            "tenant",
-            "Item",
-            &ioa_source,
-            "<Schema Namespace=\"Temper.Tests\" />",
-            &fingerprint,
-        );
-        let (reopened, updated) = tokio::join!(reopen, update);
+        let publish = async {
+            store
+                .upsert_spec(
+                    "tenant",
+                    "Item",
+                    &ioa_source,
+                    "<Schema Namespace=\"Temper.Tests\" />",
+                    &fingerprint,
+                )
+                .await?;
+            store.commit_specs("tenant").await
+        };
+        let (reopened, published) = tokio::join!(reopen, publish);
         reopened.expect("concurrent reopen must finish");
-        updated.expect("concurrent spec update must finish");
+        published.expect("concurrent spec publication must finish");
 
         let conn = store.configured_connection().await.unwrap();
         let mut rows = conn

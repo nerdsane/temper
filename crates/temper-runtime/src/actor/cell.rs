@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracing::{error, info, warn};
 
@@ -24,21 +24,39 @@ pub struct ActorCell<A: Actor> {
 /// Normal shutdown, panic unwinding, and task cancellation all drop the run
 /// future, so a dead incarnation can never remain externally marked ready.
 struct ActorReadiness {
-    ready: Arc<AtomicBool>,
+    lifecycle: Arc<AtomicU64>,
 }
 
 impl ActorReadiness {
-    fn new(ready: Arc<AtomicBool>) -> Self {
-        ready.store(false, Ordering::Release);
-        Self { ready }
+    fn new(lifecycle: Arc<AtomicU64>) -> Self {
+        lifecycle.store(0, Ordering::Release);
+        Self { lifecycle }
+    }
+
+    fn begin_incarnation(&self) {
+        let current = self.lifecycle.load(Ordering::Acquire);
+        assert_eq!(
+            current & 1,
+            0,
+            "actor cannot begin a supervised incarnation while marked ready"
+        );
+        let next = current
+            .checked_add(2)
+            .expect("actor supervised-incarnation epoch exhausted");
+        self.lifecycle.store(next, Ordering::Release);
     }
 
     fn mark_ready(&self) {
-        self.ready.store(true, Ordering::Release);
+        let previous = self.lifecycle.fetch_or(1, Ordering::AcqRel);
+        assert_eq!(
+            previous & 1,
+            0,
+            "actor supervised incarnation was already marked ready"
+        );
     }
 
     fn mark_unready(&self) {
-        self.ready.store(false, Ordering::Release);
+        self.lifecycle.fetch_and(!1, Ordering::AcqRel);
     }
 }
 
@@ -68,15 +86,15 @@ impl<A: Actor> ActorCell<A> {
     pub fn spawn(self) -> ActorRef<A::Msg> {
         let (tx, rx) = mailbox::mailbox(self.mailbox_capacity);
         let id = self.id.clone();
-        let ready = Arc::new(AtomicBool::new(false));
+        let lifecycle = Arc::new(AtomicU64::new(0));
 
         let actor_ref = ActorRef {
             sender: tx,
             id: id.clone(),
-            ready: ready.clone(),
+            lifecycle: lifecycle.clone(),
         };
 
-        tokio::spawn(self.run(rx, ready)); // determinism-ok: production actor cell, not on simulation path
+        tokio::spawn(self.run(rx, lifecycle)); // determinism-ok: production actor cell, not on simulation path
 
         actor_ref
     }
@@ -85,8 +103,8 @@ impl<A: Actor> ActorCell<A> {
     /// 1. pre_start → initialize state
     /// 2. loop: receive message → handle
     /// 3. post_stop → cleanup
-    async fn run(self, mut rx: MailboxReceiver<A::Msg>, ready: Arc<AtomicBool>) {
-        let readiness = ActorReadiness::new(ready);
+    async fn run(self, mut rx: MailboxReceiver<A::Msg>, lifecycle: Arc<AtomicU64>) {
+        let readiness = ActorReadiness::new(lifecycle);
         let actor = self.actor;
         let id = self.id;
         let strategy = actor.supervision_strategy();
@@ -95,6 +113,7 @@ impl<A: Actor> ActorCell<A> {
 
         loop {
             readiness.mark_unready();
+            readiness.begin_incarnation();
             // Phase 1: Initialize
             let mut ctx = ActorContext::new(id.clone());
             info!(actor = %id, "actor starting");
@@ -268,6 +287,50 @@ mod tests {
         .await
         .expect("actor panic must clear readiness through the run-future drop guard");
         assert!(!actor.is_ready());
+    }
+
+    #[tokio::test]
+    async fn supervised_restart_advances_ready_incarnation_without_changing_actor_id() {
+        let started = Arc::new(Notify::new());
+        let actor = ActorCell::new(
+            PanickingActor {
+                started: started.clone(),
+            },
+            ActorId::new("restarting", "system/restarting"),
+        )
+        .spawn();
+        started.notified().await;
+        let first_incarnation = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(incarnation) = actor.ready_incarnation() {
+                    break incarnation;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actor must publish its first ready incarnation");
+        let actor_uid = actor.id().uid;
+
+        actor
+            .signal(SystemSignal::Restart)
+            .expect("enqueue supervised restart");
+        let second_incarnation = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(incarnation) = actor.ready_incarnation()
+                    && incarnation != first_incarnation
+                {
+                    break incarnation;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actor must publish its restarted incarnation");
+
+        assert_eq!(actor.id().uid, actor_uid);
+        assert!(second_incarnation > first_incarnation);
+        actor.stop().expect("stop restarted actor");
     }
 
     #[test]

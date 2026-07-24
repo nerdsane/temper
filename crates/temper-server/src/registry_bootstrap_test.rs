@@ -191,3 +191,55 @@ fn row_to_registry_status_failed() {
         other => panic!("Expected Restored, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn postgres_restore_does_not_publish_uncommitted_staging() {
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("connect Postgres");
+    temper_store_postgres::migration::run_migrations(&pool)
+        .await
+        .expect("migrate Postgres");
+    let store = temper_store_postgres::PostgresEventStore::new(pool.clone());
+    let tenant = format!("registry-staged-{}", uuid::Uuid::new_v4());
+    let ioa_a = include_str!("../../../test-fixtures/specs/order.ioa.toml");
+    let ioa_b = ioa_a.replace("#", "# staged restart\n#");
+    let csdl_xml = csdl_xml_for("Order", "Orders");
+    let fingerprint_a = temper_store_turso::spec_content_hash(ioa_a);
+    let fingerprint_b = temper_store_turso::spec_content_hash(&ioa_b);
+
+    store
+        .upsert_spec(&tenant, "Order", ioa_a, &csdl_xml, &fingerprint_a)
+        .await
+        .expect("stage declaration A");
+    store
+        .commit_specs(&tenant)
+        .await
+        .expect("commit declaration A");
+    store
+        .upsert_spec(&tenant, "Order", &ioa_b, &csdl_xml, &fingerprint_b)
+        .await
+        .expect("stage declaration B");
+
+    let authority: (String, bool) = sqlx::query_as(
+        "SELECT declaration_fingerprint, present \
+         FROM spec_declaration_authority \
+         WHERE tenant = $1 AND entity_type = 'Order'",
+    )
+    .bind(&tenant)
+    .fetch_one(&pool)
+    .await
+    .expect("read committed authority");
+    assert_eq!(authority, (fingerprint_a, true));
+
+    let restored_rows = load_postgres_spec_rows(&pool)
+        .await
+        .expect("load committed registry rows");
+    assert!(
+        restored_rows.iter().all(|row| row.tenant != tenant),
+        "startup must not publish staged B while durable authority remains A"
+    );
+}

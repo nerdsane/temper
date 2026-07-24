@@ -97,6 +97,7 @@ INSERT INTO spec_declaration_authority
     (tenant, entity_type, revision, ioa_source, declaration_fingerprint, present)
 SELECT tenant, entity_type, GREATEST(version::BIGINT, 1), ioa_source, content_hash, true
 FROM specs
+WHERE committed = true
 ON CONFLICT (tenant, entity_type) DO NOTHING;
 
 INSERT INTO spec_declaration_authority
@@ -116,6 +117,7 @@ WHERE NOT EXISTS (
     FROM specs
     WHERE specs.tenant = known.tenant
       AND specs.entity_type = known.entity_type
+      AND specs.committed = true
 )
 ON CONFLICT (tenant, entity_type) DO NOTHING;
 
@@ -130,6 +132,7 @@ WHERE authority.tenant = specs.tenant
   AND authority.entity_type = specs.entity_type
   AND authority.present
   AND authority.declaration_fingerprint = ''
+  AND specs.committed = true
   AND specs.content_hash <> '';
 
 UPDATE spec_declaration_authority
@@ -137,10 +140,10 @@ SET declaration_fingerprint = 'absent:v1'
 WHERE NOT present
   AND declaration_fingerprint = '';
 
--- Spec mutation is the declaration-order commit point. It advances the durable
--- authority tombstone/source and immediately fences an existing vector rebuild;
--- the next reconciliation claims that already-advanced generation. This closes
--- the interval between spec persistence and background-backfill startup.
+-- Committed spec mutation is the declaration-order publication point. Staged
+-- `committed = false` rows remain invisible to live writers and vector work;
+-- the false-to-true transition advances durable authority and immediately
+-- fences an existing vector rebuild before registry publication.
 CREATE OR REPLACE FUNCTION advance_spec_declaration_authority()
 RETURNS TRIGGER AS $$
 DECLARE
@@ -213,15 +216,20 @@ DROP TRIGGER IF EXISTS specs_declaration_authority_insert ON specs;
 CREATE TRIGGER specs_declaration_authority_insert
 AFTER INSERT ON specs
 FOR EACH ROW
+WHEN (NEW.committed IS TRUE)
 EXECUTE FUNCTION advance_spec_declaration_authority();
 
 DROP TRIGGER IF EXISTS specs_declaration_authority_update ON specs;
 CREATE TRIGGER specs_declaration_authority_update
-AFTER UPDATE OF ioa_source, content_hash ON specs
+AFTER UPDATE OF ioa_source, content_hash, committed ON specs
 FOR EACH ROW
 WHEN (
-    OLD.ioa_source IS DISTINCT FROM NEW.ioa_source
-    OR OLD.content_hash IS DISTINCT FROM NEW.content_hash
+    NEW.committed IS TRUE
+    AND (
+        OLD.committed IS DISTINCT FROM TRUE
+        OR OLD.ioa_source IS DISTINCT FROM NEW.ioa_source
+        OR OLD.content_hash IS DISTINCT FROM NEW.content_hash
+    )
 )
 EXECUTE FUNCTION advance_spec_declaration_authority();
 
@@ -229,6 +237,7 @@ DROP TRIGGER IF EXISTS specs_declaration_authority_delete ON specs;
 CREATE TRIGGER specs_declaration_authority_delete
 AFTER DELETE ON specs
 FOR EACH ROW
+WHEN (OLD.committed IS TRUE)
 EXECUTE FUNCTION advance_spec_declaration_authority();
 
 -- Full replacement must retain declaration absence even when compatibility
@@ -241,7 +250,7 @@ CREATE OR REPLACE FUNCTION tombstone_spec_declaration_authority(
 )
 RETURNS VOID AS $$
 DECLARE
-    deleted_catalog_rows BIGINT;
+    deleted_catalog_committed BOOLEAN;
     next_revision BIGINT;
 BEGIN
     PERFORM pg_advisory_xact_lock(
@@ -250,11 +259,14 @@ BEGIN
 
     DELETE FROM specs
     WHERE tenant = target_tenant
-      AND entity_type = target_entity_type;
-    GET DIAGNOSTICS deleted_catalog_rows = ROW_COUNT;
+      AND entity_type = target_entity_type
+    RETURNING committed INTO deleted_catalog_committed;
 
-    -- The DELETE trigger already advanced authority and fenced reconciliation.
-    IF deleted_catalog_rows > 0 THEN
+    -- Only deletion of a committed row fires the authority trigger. An
+    -- uncommitted staging row can hide the committed declaration represented
+    -- by authority, so its deletion must fall through to the explicit
+    -- tombstone below.
+    IF deleted_catalog_committed IS TRUE THEN
         RETURN;
     END IF;
 

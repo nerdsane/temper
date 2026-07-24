@@ -406,16 +406,17 @@ pub(super) async fn recover_secrets(state: &PlatformState) {
     }
 }
 
-/// Load the verification cache from Turso for a tenant (hash + verified status).
+/// Load the verification cache from the active platform store for a tenant.
 ///
-/// Routes to the per-tenant store in TenantRouted mode.
-/// Returns an empty map if no Turso store is available.
+/// Routes to a per-tenant Turso store in TenantRouted mode and to the shared
+/// tenant-scoped Postgres store otherwise. Returns an empty map when platform
+/// persistence is unavailable.
 async fn load_verified_cache(
     state: &PlatformState,
     tenant: &str,
 ) -> std::collections::BTreeMap<String, (String, bool)> {
-    if let Some(turso) = state.server.turso_store_for_tenant(tenant).await {
-        match turso.load_verification_cache(tenant).await {
+    if let Some(store) = state.server.platform_store_for_tenant(tenant).await {
+        match store.load_verification_cache(tenant).await {
             Ok(cache) => cache,
             Err(e) => {
                 eprintln!("  Warning: failed to load verification cache for {tenant}: {e}");
@@ -435,16 +436,20 @@ async fn load_verified_cache(
 pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, String)]) {
     let sys_cache = load_verified_cache(state, "temper-system").await;
     let sys_hashes = temper_platform::bootstrap_system_tenant(state, &sys_cache);
-    if let Some(turso) = state.server.turso_store_for_tenant("temper-system").await {
-        temper_platform::persist_system_verification(&turso, &sys_hashes, &sys_cache).await;
+    if let Some(store) = state
+        .server
+        .platform_store_for_tenant("temper-system")
+        .await
+    {
+        temper_platform::persist_system_verification(store.as_ref(), &sys_hashes, &sys_cache).await;
     }
 
     let default_cache = load_verified_cache(state, "default").await;
     let default_hashes =
         temper_platform::bootstrap_agent_specs(state, "default", false, &default_cache);
-    if let Some(turso) = state.server.turso_store_for_tenant("default").await {
+    if let Some(store) = state.server.platform_store_for_tenant("default").await {
         temper_platform::persist_agent_verification(
-            &turso,
+            store.as_ref(),
             "default",
             &default_hashes,
             &default_cache,
@@ -457,8 +462,9 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
         // App tenants already have user specs loaded in Phase 2; merge the
         // built-in agent OS entities so we do not replace their entity-set map.
         let hashes = temper_platform::bootstrap_agent_specs(state, tenant, true, &cache);
-        if let Some(turso) = state.server.turso_store_for_tenant(tenant).await {
-            temper_platform::persist_agent_verification(&turso, tenant, &hashes, &cache).await;
+        if let Some(store) = state.server.platform_store_for_tenant(tenant).await {
+            temper_platform::persist_agent_verification(store.as_ref(), tenant, &hashes, &cache)
+                .await;
         }
     }
     // In TenantRouted mode, bootstrap agent specs for all registered tenants.
@@ -474,8 +480,14 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
         for tenant in provider.connected_tenants().await {
             let cache = load_verified_cache(state, &tenant).await;
             let hashes = temper_platform::bootstrap_agent_specs(state, &tenant, true, &cache);
-            if let Some(turso) = state.server.turso_store_for_tenant(&tenant).await {
-                temper_platform::persist_agent_verification(&turso, &tenant, &hashes, &cache).await;
+            if let Some(store) = state.server.platform_store_for_tenant(&tenant).await {
+                temper_platform::persist_agent_verification(
+                    store.as_ref(),
+                    &tenant,
+                    &hashes,
+                    &cache,
+                )
+                .await;
             }
         }
     }
@@ -621,14 +633,145 @@ pub(super) async fn bootstrap_installed_apps(
 
 #[cfg(test)]
 mod tests {
+    use sqlx::PgPool;
     use temper_platform::os_apps::get_os_app;
     use temper_platform::state::PlatformState;
+    use temper_runtime::persistence::EventStore;
     use temper_runtime::tenant::TenantId;
     use temper_server::storage::StorageStack;
     use temper_spec::csdl::parse_csdl;
+    use temper_store_postgres::{PostgresEventStore, PostgresSpecVerificationUpdate};
     use temper_store_turso::TursoEventStore;
 
-    use super::bootstrap_installed_apps;
+    use super::{bootstrap_installed_apps, load_verified_cache};
+
+    #[tokio::test]
+    async fn postgres_agent_bootstrap_republishes_replacement_tombstone() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("connect Postgres");
+        temper_store_postgres::migration::run_migrations(&pool)
+            .await
+            .expect("migrate Postgres");
+        let store = PostgresEventStore::new(pool.clone());
+        let tenant = format!("bootstrap-agent-postgres-{}", uuid::Uuid::new_v4());
+        let legacy_fingerprint = temper_store_turso::spec_content_hash("legacy Agent declaration");
+        let unrelated_a = "[automaton]\nname = \"Unrelated\"\n# committed-a\n";
+        let unrelated_b = "[automaton]\nname = \"Unrelated\"\n# staged-b\n";
+        let unrelated_a_fingerprint = temper_store_turso::spec_content_hash(unrelated_a);
+        let unrelated_b_fingerprint = temper_store_turso::spec_content_hash(unrelated_b);
+
+        store
+            .begin_vector_index_reconciliation(
+                &tenant,
+                "Agent",
+                "v2|legacy",
+                1,
+                &legacy_fingerprint,
+            )
+            .await
+            .expect("bootstrap compatibility authority");
+        store
+            .persist_spec_catalog_update(&tenant, &[], "", &[], true, None)
+            .await
+            .expect("replacement tombstones compatibility authority");
+
+        store
+            .upsert_spec(
+                &tenant,
+                "Unrelated",
+                unrelated_a,
+                "",
+                &unrelated_a_fingerprint,
+            )
+            .await
+            .expect("stage unrelated A");
+        store
+            .commit_verified_spec(
+                &tenant,
+                "Unrelated",
+                &unrelated_a_fingerprint,
+                PostgresSpecVerificationUpdate {
+                    status: "completed",
+                    verified: true,
+                    levels_passed: None,
+                    levels_total: None,
+                    verification_result_json: None,
+                },
+            )
+            .await
+            .expect("commit unrelated A");
+        store
+            .upsert_spec(
+                &tenant,
+                "Unrelated",
+                unrelated_b,
+                "",
+                &unrelated_b_fingerprint,
+            )
+            .await
+            .expect("stage unrelated B during built-in bootstrap window");
+
+        let mut state = PlatformState::new(None);
+        state
+            .server
+            .set_storage_stack(StorageStack::from_postgres(store));
+        assert!(state.server.turso_store_for_tenant(&tenant).await.is_none());
+        let cache = load_verified_cache(&state, &tenant).await;
+        let hashes = temper_platform::bootstrap_agent_specs(&state, &tenant, true, &cache);
+        let platform_store = state
+            .server
+            .platform_store_for_tenant(&tenant)
+            .await
+            .expect("Postgres must provide tenant platform persistence");
+        temper_platform::persist_agent_verification(
+            platform_store.as_ref(),
+            &tenant,
+            &hashes,
+            &cache,
+        )
+        .await;
+
+        let expected_agent_fingerprint = hashes
+            .iter()
+            .find(|(entity_type, _)| entity_type == "Agent")
+            .map(|(_, fingerprint)| fingerprint)
+            .expect("Agent bootstrap fingerprint");
+        let authority: (String, bool) = sqlx::query_as(
+            "SELECT declaration_fingerprint, present \
+             FROM spec_declaration_authority \
+             WHERE tenant = $1 AND entity_type = 'Agent'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("re-published Agent authority");
+        assert_eq!(&authority.0, expected_agent_fingerprint);
+        assert!(authority.1);
+
+        let unrelated_catalog: (String, bool) = sqlx::query_as(
+            "SELECT content_hash, committed FROM specs \
+             WHERE tenant = $1 AND entity_type = 'Unrelated'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("read unrelated staging after built-in bootstrap");
+        assert_eq!(unrelated_catalog, (unrelated_b_fingerprint, false));
+        let unrelated_authority: (String, bool) = sqlx::query_as(
+            "SELECT declaration_fingerprint, present \
+             FROM spec_declaration_authority \
+             WHERE tenant = $1 AND entity_type = 'Unrelated'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("read unrelated authority after built-in bootstrap");
+        assert_eq!(unrelated_authority, (unrelated_a_fingerprint, true));
+    }
 
     #[tokio::test]
     async fn bootstrap_installed_apps_replays_persisted_app_when_registry_specs_are_stale() {

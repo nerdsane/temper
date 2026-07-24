@@ -827,7 +827,7 @@ impl ServerState {
         &self,
         tenant: &TenantId,
         entity_types: &[String],
-    ) -> BTreeMap<String, uuid::Uuid> {
+    ) -> BTreeMap<String, (uuid::Uuid, u64)> {
         let prefixes = entity_types
             .iter()
             .map(|entity_type| format!("{tenant}:{entity_type}:"))
@@ -836,10 +836,14 @@ impl ServerState {
             .read()
             .expect("actor registry lock poisoned during spec replacement")
             .iter()
-            .filter(|(key, actor)| {
-                actor.is_ready() && prefixes.iter().any(|prefix| key.starts_with(prefix))
+            .filter_map(|(key, actor)| {
+                if !prefixes.iter().any(|prefix| key.starts_with(prefix)) {
+                    return None;
+                }
+                actor
+                    .ready_incarnation()
+                    .map(|incarnation| (key.clone(), (actor.id().uid, incarnation)))
             })
-            .map(|(key, actor)| (key.clone(), actor.id().uid))
             .collect()
     }
 
@@ -849,7 +853,7 @@ impl ServerState {
         &self,
         tenant: &TenantId,
         entity_types: &[String],
-        preserved_actors: &BTreeMap<String, uuid::Uuid>,
+        preserved_actors: &BTreeMap<String, (uuid::Uuid, u64)>,
     ) {
         if entity_types.is_empty() {
             return;
@@ -866,9 +870,11 @@ impl ServerState {
             let keys = actors
                 .iter()
                 .filter(|(key, actor)| {
-                    let preserved = preserved_actors
-                        .get(key.as_str())
-                        .is_some_and(|uid| *uid == actor.id().uid && actor.is_ready());
+                    let preserved = preserved_actors.get(key.as_str()).is_some_and(|identity| {
+                        actor
+                            .ready_incarnation()
+                            .is_some_and(|incarnation| *identity == (actor.id().uid, incarnation))
+                    });
                     !preserved && prefixes.iter().any(|prefix| key.starts_with(prefix))
                 })
                 .map(|(key, _)| key.clone())
@@ -895,6 +901,17 @@ impl ServerState {
                 );
             }
         }
+    }
+
+    /// Revalidate preserved actor identities after registry publication.
+    #[cfg(feature = "observe")]
+    pub(crate) fn revalidate_type_actors_after_publication(
+        &self,
+        tenant: &TenantId,
+        entity_types: &[String],
+        preserved_actors: &BTreeMap<String, (uuid::Uuid, u64)>,
+    ) {
+        self.evict_type_actors_except(tenant, entity_types, preserved_actors);
     }
 
     /// Stop and evict an entity actor plus its in-memory indexes.

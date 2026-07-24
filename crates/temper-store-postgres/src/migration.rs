@@ -173,9 +173,26 @@ mod tests {
             authority_trigger.contains("authority_fingerprint := 'absent:v1'"),
             "spec deletion must leave an explicit declaration tombstone fingerprint"
         );
+        let update_trigger = migration
+            .split("create trigger specs_declaration_authority_update")
+            .nth(1)
+            .expect("migration 0013 declaration authority update trigger")
+            .split("execute function advance_spec_declaration_authority()")
+            .next()
+            .expect("migration 0013 declaration authority update predicate");
         assert!(
-            migration.contains("after update of ioa_source, content_hash on specs"),
-            "content-hash-only catalog updates must advance declaration authority"
+            update_trigger.contains("after update of ioa_source, content_hash, committed on specs"),
+            "content-hash-only catalog updates and staged commits must advance authority"
+        );
+        assert!(
+            update_trigger.contains("new.committed is true")
+                && update_trigger.contains("old.committed is distinct from true"),
+            "only committed declarations, including false-to-true publication, may advance authority"
+        );
+        assert!(
+            migration.contains("when (new.committed is true)")
+                && migration.contains("when (old.committed is true)"),
+            "staged inserts and deletes must remain invisible to declaration authority"
         );
         assert!(
             authority_trigger.contains("pg_advisory_xact_lock"),

@@ -1181,6 +1181,28 @@ impl ServerState {
         provider.store_for_tenant(tenant).await
     }
 
+    /// Return the platform persistence capability that owns one tenant's specs.
+    ///
+    /// Tenant-routed Turso uses a distinct store per tenant. Shared backends such
+    /// as Postgres expose one [`crate::platform_store::PlatformStore`] whose rows
+    /// are tenant-scoped. Bootstrap and verification code must use this helper
+    /// instead of assuming that durable platform metadata is always Turso.
+    pub async fn platform_store_for_tenant(
+        &self,
+        tenant: &str,
+    ) -> Option<Arc<dyn crate::platform_store::PlatformStore>> {
+        if let Some(turso) = self.turso_store_for_tenant(tenant).await {
+            return Some(Arc::new(turso));
+        }
+        let stack = self.storage_stack.as_ref()?;
+        if stack.backend == BackendLabel::TursoRouted
+            && !matches!(tenant, "temper-system" | "default")
+        {
+            return None;
+        }
+        stack.platform.clone()
+    }
+
     /// Return a backend-neutral metadata store for one tenant.
     ///
     /// Postgres is a shared platform store with tenant columns; Turso may be
@@ -1471,7 +1493,11 @@ impl ServerState {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_local_tdata_host;
+    use temper_runtime::ActorSystem;
+    use temper_store_turso::TenantStoreRouter;
+
+    use super::{ServerState, normalize_local_tdata_host};
+    use crate::{SpecRegistry, StorageStack};
 
     #[test]
     fn normalize_local_tdata_host_accepts_urls_domains_and_ports() {
@@ -1494,5 +1520,38 @@ mod tests {
         assert_eq!(normalize_local_tdata_host(""), None);
         assert_eq!(normalize_local_tdata_host("https:///tdata"), None);
         assert_eq!(normalize_local_tdata_host("bad host.example"), None);
+    }
+
+    #[tokio::test]
+    async fn routed_platform_store_does_not_fallback_for_unknown_tenant() {
+        let router = TenantStoreRouter::new(
+            "file:/tmp/temper-arn216-routed-platform-store.db",
+            None,
+            None,
+        )
+        .await
+        .expect("create routed Turso store");
+        let mut state =
+            ServerState::from_registry(ActorSystem::new("routed-store"), SpecRegistry::new());
+        state.set_storage_stack(StorageStack::from_tenant_router(router));
+
+        assert!(
+            state
+                .platform_store_for_tenant("unregistered-tenant")
+                .await
+                .is_none(),
+            "an unknown routed tenant must not write specs into the shared platform database"
+        );
+        assert!(
+            state
+                .platform_store_for_tenant("temper-system")
+                .await
+                .is_some(),
+            "the system tenant is explicitly owned by the platform database"
+        );
+        assert!(
+            state.platform_store_for_tenant("default").await.is_some(),
+            "the reserved default tenant remains explicitly platform-backed"
+        );
     }
 }
