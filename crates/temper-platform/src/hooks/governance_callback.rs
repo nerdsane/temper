@@ -13,9 +13,11 @@ use temper_server::request_context::AgentContext;
 /// decision has already been approved or denied will immediately redeliver
 /// the resolution to the waiting target entity.
 pub(super) async fn handle_dispatch_callback(
+    source_entity_id: &str,
     entity_fields: &serde_json::Value,
     server: &ServerState,
 ) -> Result<(), String> {
+    let _ = source_entity_id;
     let callback_tenant = entity_fields
         .get("callback_tenant")
         .and_then(|v| v.as_str())
@@ -83,47 +85,39 @@ pub(super) async fn handle_dispatch_callback(
         "DispatchCallback: dispatching callback"
     );
 
-    let server = server.clone();
-    let tenant = callback_tenant.to_string();
-    let entity_set = callback_entity_set.to_string();
-    let entity_id = callback_entity_id.to_string();
-    let action = callback_action.to_string();
-
-    tokio::spawn(async move {
-        // determinism-ok: async callback dispatch for governance decision resolution
-        let tid = TenantId::new(&tenant);
-        let entity_type = resolve_callback_entity_type(&server, &tid, &entity_set);
-        if let Err(e) = server
-            .dispatch_tenant_action(
-                &tid,
-                &entity_type,
-                &entity_id,
-                &action,
-                params,
-                &AgentContext::for_service("governance-service"),
-            )
-            .await
-        {
+    let tid = TenantId::new(callback_tenant);
+    let entity_type = resolve_callback_entity_type(server, &tid, callback_entity_set);
+    server
+        .dispatch_tenant_action(
+            &tid,
+            &entity_type,
+            callback_entity_id,
+            callback_action,
+            params,
+            &AgentContext::for_service("governance-service"),
+        )
+        .await
+        .map_err(|error| {
             tracing::error!(
-                error = %e,
-                tenant,
-                entity_set,
+                error = %error,
+                tenant = callback_tenant,
+                entity_set = callback_entity_set,
                 entity_type,
-                entity_id,
-                action,
+                entity_id = callback_entity_id,
+                action = callback_action,
                 "DispatchCallback: failed to dispatch callback action"
             );
-        } else {
-            tracing::info!(
-                tenant,
-                entity_set,
-                entity_type,
-                entity_id,
-                action,
-                "DispatchCallback: callback action dispatched successfully"
-            );
-        }
-    });
+            format!("DispatchCallback: failed to dispatch callback action: {error}")
+        })?;
+
+    tracing::info!(
+        tenant = callback_tenant,
+        entity_set = callback_entity_set,
+        entity_type,
+        entity_id = callback_entity_id,
+        action = callback_action,
+        "DispatchCallback: callback action dispatched successfully"
+    );
 
     Ok(())
 }
@@ -211,6 +205,25 @@ kind = "input"
 params = ["error_message"]
 "#;
 
+    const RETRY_CALLBACK_IOA: &str = r#"
+[automaton]
+name = "Session"
+initial = "Executing"
+states = ["Executing"]
+
+[[state]]
+name = "callback_count"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "ResumeAfterApproval"
+from = ["Executing"]
+to = "Executing"
+kind = "input"
+effect = [{ type = "increment", var = "callback_count" }]
+"#;
+
     #[test]
     fn callback_entity_set_resolution_uses_registry_mapping() {
         let state = PlatformState::new(None);
@@ -251,6 +264,7 @@ params = ["error_message"]
     async fn callback_dispatch_failure_is_returned_before_effect_acknowledgement() {
         let state = PlatformState::new(None);
         let result = handle_dispatch_callback(
+            "gd-missing-callback-test",
             &serde_json::json!({
                 "Status": "Approved",
                 "callback_tenant": "default",
@@ -265,6 +279,77 @@ params = ["error_message"]
         assert!(
             result.is_err(),
             "a failed callback must keep the durable custom-effect receipt retryable"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_callback_response_is_returned_before_effect_acknowledgement() {
+        let state = PlatformState::new(None);
+        let (csdl, xml) = session_callback_csdl();
+        state.registry.write().unwrap().register_tenant(
+            "default",
+            csdl,
+            xml,
+            &[("Session", SESSION_IOA)],
+        );
+
+        let result = handle_dispatch_callback(
+            "gd-rejected-callback-test",
+            &serde_json::json!({
+                "Status": "Approved",
+                "callback_tenant": "default",
+                "callback_entity_set": "Sessions",
+                "callback_entity_id": "rejected-callback-target",
+                "callback_on_approve": "MissingAction",
+            }),
+            &state.server,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "a rejected governed callback must keep the durable custom-effect receipt retryable"
+        );
+    }
+
+    #[tokio::test]
+    async fn retried_callback_uses_one_stable_target_idempotency_key() {
+        let state = PlatformState::new(None);
+        let (csdl, xml) = session_callback_csdl();
+        state.registry.write().unwrap().register_tenant(
+            "default",
+            csdl,
+            xml,
+            &[("Session", RETRY_CALLBACK_IOA)],
+        );
+        let fields = serde_json::json!({
+            "Status": "Approved",
+            "callback_tenant": "default",
+            "callback_entity_set": "Sessions",
+            "callback_entity_id": "retried-callback-target",
+            "callback_on_approve": "ResumeAfterApproval",
+        });
+
+        handle_dispatch_callback("gd-retried-callback-test", &fields, &state.server)
+            .await
+            .expect("first callback dispatch should succeed");
+        handle_dispatch_callback("gd-retried-callback-test", &fields, &state.server)
+            .await
+            .expect("replayed callback dispatch should be idempotent");
+
+        let entity = state
+            .server
+            .get_tenant_entity_state(
+                &TenantId::new("default"),
+                "Session",
+                "retried-callback-target",
+            )
+            .await
+            .expect("callback target should exist");
+        assert_eq!(
+            entity.state.counters.get("callback_count"),
+            Some(&1),
+            "a source-effect retry must not apply the callback twice"
         );
     }
 
@@ -327,7 +412,7 @@ params = ["error_message"]
             .await
             .expect("callback should register");
 
-        state
+        let approval = state
             .server
             .dispatch_tenant_action(
                 &system_tenant,
@@ -338,11 +423,17 @@ params = ["error_message"]
                     "decided_by": "human-reviewer",
                     "scope": "narrow",
                     "generated_policy": "",
+                    "policy_already_published": true,
                 }),
                 &AgentContext::for_service("governance-service"),
             )
             .await
             .expect("approval should succeed");
+        assert!(
+            approval.success,
+            "approval post-effects should succeed: {:?}",
+            approval.error
+        );
 
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {

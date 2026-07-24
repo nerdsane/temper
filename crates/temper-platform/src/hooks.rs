@@ -171,7 +171,7 @@ impl CustomEffectHandler for PlatformEffectHandler {
                     .await
             }
             "DispatchCallback" => {
-                governance_callback::handle_dispatch_callback(entity_fields, server)
+                governance_callback::handle_dispatch_callback(entity_id, entity_fields, server)
                     .await
             }
             _ => {
