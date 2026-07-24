@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use temper_runtime::TenantId;
 use temper_server::ServerState;
 use temper_server::request_context::AgentContext;
@@ -17,7 +18,6 @@ pub(super) async fn handle_dispatch_callback(
     entity_fields: &serde_json::Value,
     server: &ServerState,
 ) -> Result<(), String> {
-    let _ = source_entity_id;
     let callback_tenant = entity_fields
         .get("callback_tenant")
         .and_then(|v| v.as_str())
@@ -87,14 +87,23 @@ pub(super) async fn handle_dispatch_callback(
 
     let tid = TenantId::new(callback_tenant);
     let entity_type = resolve_callback_entity_type(server, &tid, callback_entity_set);
-    server
+    let mut agent_context = AgentContext::for_service("governance-service");
+    agent_context.idempotency_key = Some(callback_idempotency_key(
+        source_entity_id,
+        status,
+        callback_tenant,
+        &entity_type,
+        callback_entity_id,
+        callback_action,
+    ));
+    let response = server
         .dispatch_tenant_action(
             &tid,
             &entity_type,
             callback_entity_id,
             callback_action,
             params,
-            &AgentContext::for_service("governance-service"),
+            &agent_context,
         )
         .await
         .map_err(|error| {
@@ -109,6 +118,24 @@ pub(super) async fn handle_dispatch_callback(
             );
             format!("DispatchCallback: failed to dispatch callback action: {error}")
         })?;
+    if !response.success {
+        let error = response
+            .error
+            .as_deref()
+            .unwrap_or("callback action returned success=false without an error");
+        tracing::error!(
+            error,
+            tenant = callback_tenant,
+            entity_set = callback_entity_set,
+            entity_type,
+            entity_id = callback_entity_id,
+            action = callback_action,
+            "DispatchCallback: callback action was rejected"
+        );
+        return Err(format!(
+            "DispatchCallback: callback action was rejected: {error}"
+        ));
+    }
 
     tracing::info!(
         tenant = callback_tenant,
@@ -120,6 +147,30 @@ pub(super) async fn handle_dispatch_callback(
     );
 
     Ok(())
+}
+
+fn callback_idempotency_key(
+    source_entity_id: &str,
+    status: &str,
+    callback_tenant: &str,
+    callback_entity_type: &str,
+    callback_entity_id: &str,
+    callback_action: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    for part in [
+        "DispatchCallback",
+        source_entity_id,
+        status,
+        callback_tenant,
+        callback_entity_type,
+        callback_entity_id,
+        callback_action,
+    ] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    format!("governance-callback:{:x}", hasher.finalize())
 }
 
 /// Resolve a callback target from an OData entity-set name to a governed entity type.
