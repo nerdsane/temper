@@ -196,6 +196,108 @@ impl ServerState {
             })
     }
 
+    /// Evict a freshly spawned actor when its first dispatch failed before any
+    /// durable history was admitted.
+    ///
+    /// A failed actor initialization can stop before writing its bootstrap
+    /// event. The spawn path has already published the ID to `entity_index` at
+    /// that point, so leaving it behind would advertise a phantom entity and
+    /// violate index/store agreement. A durable read is the authority: an
+    /// ambiguous or non-empty journal is preserved for recovery.
+    pub(crate) async fn discard_uncommitted_spawn_after_dispatch_failure(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        expected_actor_id: &temper_runtime::actor::ActorId,
+    ) {
+        let Some((store, _backend)) = self.event_journal() else {
+            self.stop_and_remove_actor_incarnation(
+                tenant,
+                entity_type,
+                entity_id,
+                expected_actor_id,
+                true,
+            );
+            return;
+        };
+        let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+        match store.read_events(&persistence_id, 0).await {
+            Ok(events) if events.is_empty() => {
+                self.stop_and_remove_actor_incarnation(
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    expected_actor_id,
+                    true,
+                );
+            }
+            Ok(_) => {
+                self.stop_and_remove_actor_incarnation(
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    expected_actor_id,
+                    false,
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    tenant = %tenant,
+                    entity_type,
+                    entity_id,
+                    error = %error,
+                    "preserving entity index because failed actor durability is ambiguous"
+                );
+                self.stop_and_remove_actor_incarnation(
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    expected_actor_id,
+                    false,
+                );
+            }
+        }
+    }
+
+    fn stop_and_remove_actor_incarnation(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        expected_actor_id: &temper_runtime::actor::ActorId,
+        remove_from_index: bool,
+    ) {
+        let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
+        let Ok(mut registry) = self.actor_registry.write() else {
+            return;
+        };
+        let Some(current) = registry.get(&actor_key) else {
+            return;
+        };
+        if current.id() != expected_actor_id {
+            return;
+        }
+        let removed = registry.remove(&actor_key);
+        if let Some(actor_ref) = removed {
+            let _ = actor_ref.stop();
+        }
+        // Keep the registry write lock until the correlated maps are cleared,
+        // so a replacement incarnation cannot publish entries between removal
+        // and cleanup.
+        if let Ok(mut last_accessed) = self.last_accessed.write() {
+            last_accessed.remove(&actor_key);
+        }
+        if remove_from_index && let Ok(mut index) = self.entity_index.write() {
+            let index_key = format!("{tenant}:{entity_type}");
+            if let Some(ids) = index.get_mut(&index_key) {
+                ids.remove(entity_id);
+            }
+        }
+        drop(registry);
+        runtime_metrics::record_server_state_metrics(self);
+    }
+
     /// Remove an entity from the index and actor registry.
     #[instrument(skip_all, fields(otel.name = "entity.remove_entity", tenant = %tenant, entity_type, entity_id))]
     pub fn remove_entity(&self, tenant: &TenantId, entity_type: &str, entity_id: &str) {

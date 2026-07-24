@@ -1,6 +1,9 @@
 //! Entity lifecycle methods for ServerState (spawn, query, delete, index).
 
 mod actor_resolution;
+#[cfg(test)]
+#[path = "entity_ops/actor_resolution_test.rs"]
+mod actor_resolution_test;
 mod entity_loading;
 mod field_updates;
 mod generation_access;

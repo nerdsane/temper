@@ -668,6 +668,23 @@ impl crate::state::ServerState {
         let response = match outcome.result {
             Ok(response) => response,
             Err(e) => {
+                if !actor_existed_before
+                    && matches!(
+                        &e,
+                        temper_runtime::actor::ActorError::Stopped
+                            | temper_runtime::actor::ActorError::SendFailed
+                            | temper_runtime::actor::ActorError::InitFailed(_)
+                            | temper_runtime::actor::ActorError::MaxRestartsExceeded(_)
+                    )
+                {
+                    self.discard_uncommitted_spawn_after_dispatch_failure(
+                        tenant,
+                        entity_type,
+                        entity_id,
+                        actor_ref.id(),
+                    )
+                    .await;
+                }
                 let entry = TrajectoryEntry {
                     timestamp: sim_now().to_rfc3339(),
                     tenant: tenant.to_string(),
