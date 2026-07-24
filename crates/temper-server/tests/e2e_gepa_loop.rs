@@ -514,6 +514,46 @@ async fn e2e_gepa_evolution_run_full_lifecycle() {
     assert_eq!(entity.state.events.len(), 10);
 }
 
+#[tokio::test]
+async fn inline_spec_override_preserves_the_activated_key_contract_epoch() {
+    let (_guard, _clock, _id_gen) = install_deterministic_context(238);
+    let harness = SimPlatformHarness::no_faults(238);
+    harness
+        .install_app(TENANT, "evolution")
+        .await
+        .expect("evolution skill should install");
+
+    let tenant = temper_runtime::tenant::TenantId::new(TENANT);
+    let activated_epoch = harness
+        .platform_state
+        .server
+        .registry
+        .read()
+        .expect("registry lock")
+        .get_spec(&tenant, "EvolutionRun")
+        .expect("EvolutionRun spec")
+        .table()
+        .key_contract_activation_epoch;
+    assert!(
+        activated_epoch > 0,
+        "install must activate the key contract"
+    );
+
+    harness.register_inline_spec(TENANT, "EvolutionRun", EVOLUTION_RUN_IOA_NO_INTEGRATIONS);
+
+    let retained_epoch = harness
+        .platform_state
+        .server
+        .registry
+        .read()
+        .expect("registry lock")
+        .get_spec(&tenant, "EvolutionRun")
+        .expect("EvolutionRun spec")
+        .table()
+        .key_contract_activation_epoch;
+    assert_eq!(retained_epoch, activated_epoch);
+}
+
 // =========================================================================
 // Phase 3: Verification retry loop
 // =========================================================================
