@@ -212,6 +212,18 @@ pub(super) fn load_webhooks(apps: &[(String, String)]) -> Option<Arc<WebhookDisp
 }
 
 /// Phase 5: Hydrate entities from the event store for each tenant.
+fn registered_hydration_tenants(state: &PlatformState) -> std::collections::BTreeSet<TenantId> {
+    state
+        .server
+        .registry
+        .read()
+        .map(|registry| registry.tenant_ids().into_iter().cloned().collect())
+        .unwrap_or_else(|error| {
+            eprintln!("  Warning: registry lock poisoned during hydration: {error}");
+            std::collections::BTreeSet::new()
+        })
+}
+
 pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, String)]) {
     if state.server.storage_stack.is_none() {
         return;
@@ -225,15 +237,9 @@ pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, Str
             )
         })
         .unwrap_or(false);
-    let mut all_tenants = Vec::new();
+    let mut all_tenants = registered_hydration_tenants(state);
     for (tenant, _dir) in apps {
-        let tenant_id = TenantId::new(tenant.as_str());
-        if eager_hydrate {
-            state.server.hydrate_from_store(&tenant_id).await;
-        } else {
-            state.server.populate_index_from_store(&tenant_id).await;
-        }
-        all_tenants.push(tenant_id);
+        all_tenants.insert(TenantId::new(tenant.as_str()));
     }
     // In TenantRouted mode, also hydrate all registered tenants.
     if let Some(provider) = state
@@ -243,13 +249,14 @@ pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, Str
         .and_then(|stack| stack.turso.clone())
     {
         for tenant in provider.connected_tenants().await {
-            let tenant_id = TenantId::new(&tenant);
-            if eager_hydrate {
-                state.server.hydrate_from_store(&tenant_id).await;
-            } else {
-                state.server.populate_index_from_store(&tenant_id).await;
-            }
-            all_tenants.push(tenant_id);
+            all_tenants.insert(TenantId::new(&tenant));
+        }
+    }
+    for tenant_id in &all_tenants {
+        if eager_hydrate {
+            state.server.hydrate_from_store(tenant_id).await;
+        } else {
+            state.server.populate_index_from_store(tenant_id).await;
         }
     }
 
@@ -643,7 +650,32 @@ mod tests {
     use temper_store_postgres::{PostgresEventStore, PostgresSpecVerificationUpdate};
     use temper_store_turso::TursoEventStore;
 
-    use super::{bootstrap_installed_apps, load_verified_cache};
+    use super::{bootstrap_installed_apps, load_verified_cache, registered_hydration_tenants};
+
+    #[test]
+    fn restored_registry_tenants_are_hydrated_without_cli_apps() {
+        let tenant = "restored-postgres-tenant";
+        let bundle = get_os_app("temper-fs").expect("temper-fs bundle");
+        let csdl_xml = bundle.csdl.clone().expect("temper-fs CSDL");
+        let csdl = parse_csdl(&csdl_xml).expect("parse CSDL");
+        let refs = bundle
+            .specs
+            .iter()
+            .map(|(entity_type, source)| (entity_type.as_str(), source.as_str()))
+            .collect::<Vec<_>>();
+        let state = PlatformState::new(None);
+        state
+            .registry
+            .write()
+            .expect("registry")
+            .register_tenant(tenant, csdl, csdl_xml, &refs);
+
+        assert_eq!(
+            registered_hydration_tenants(&state),
+            [TenantId::from(tenant)].into_iter().collect(),
+            "startup must hydrate tenants restored from PostgreSQL even with no --app"
+        );
+    }
 
     #[tokio::test]
     async fn postgres_agent_bootstrap_republishes_replacement_tombstone() {

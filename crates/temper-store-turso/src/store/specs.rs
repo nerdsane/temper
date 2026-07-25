@@ -18,6 +18,134 @@ struct ExistingSpecFingerprint {
 }
 
 impl TursoEventStore {
+    /// Atomically publish an exact verified staged catalog.
+    pub async fn persist_verified_spec_catalog_update(
+        &self,
+        tenant: &str,
+        expected: &[(&str, &str, &str)],
+        additional_removed_entity_types: &[String],
+        replace: bool,
+        cross_invariants_toml: Option<&str>,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let mut expected = expected.to_vec();
+        expected.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        if expected.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(PersistenceError::Storage(format!(
+                "duplicate verified catalog entity type for tenant {tenant}"
+            )));
+        }
+        let _write_permit = self
+            .acquire_write_permit(
+                "turso.persist_verified_spec_catalog_update",
+                WritePriority::High,
+            )
+            .await?;
+        let conn = self.configured_connection().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+        let incoming = expected
+            .iter()
+            .map(|(entity_type, _, _)| *entity_type)
+            .collect::<BTreeSet<_>>();
+        let mut removed_entity_types = BTreeSet::new();
+        if replace {
+            let mut rows = tx
+                .query(
+                    "SELECT entity_type FROM specs WHERE tenant = ?1 \
+                     UNION SELECT entity_type FROM staged_specs WHERE tenant = ?1 \
+                     UNION SELECT entity_type FROM spec_declaration_authority \
+                     WHERE tenant = ?1 AND present = 1 ORDER BY entity_type",
+                    params![tenant],
+                )
+                .await
+                .map_err(storage_error)?;
+            while let Some(row) = rows.next().await.map_err(storage_error)? {
+                let entity_type = row.get::<String>(0).map_err(storage_error)?;
+                if !incoming.contains(entity_type.as_str()) {
+                    removed_entity_types.insert(entity_type);
+                }
+            }
+        }
+        removed_entity_types.extend(
+            additional_removed_entity_types
+                .iter()
+                .filter(|entity_type| !incoming.contains(entity_type.as_str()))
+                .cloned(),
+        );
+        let removed_entity_types = removed_entity_types.into_iter().collect::<Vec<_>>();
+
+        for (entity_type, content_hash, csdl_xml) in expected {
+            let promoted = tx
+                .execute(
+                    "INSERT INTO specs (
+                         tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version,
+                         verified, verification_status, updated_at
+                     )
+                     SELECT tenant, entity_type, ioa_source, csdl_xml, content_hash, 1, version,
+                            1, 'passed', datetime('now')
+                     FROM staged_specs
+                     WHERE tenant = ?1 AND entity_type = ?2 AND content_hash = ?3
+                       AND csdl_xml IS ?4
+                     ON CONFLICT (tenant, entity_type) DO UPDATE SET
+                         ioa_source = excluded.ioa_source,
+                         csdl_xml = excluded.csdl_xml,
+                         content_hash = excluded.content_hash,
+                         committed = 1,
+                         version = specs.version + 1,
+                         verified = 1,
+                         verification_status = 'passed',
+                         levels_passed = NULL,
+                         levels_total = NULL,
+                         verification_result = NULL,
+                         updated_at = datetime('now')",
+                    params![tenant, entity_type, content_hash, csdl_xml],
+                )
+                .await
+                .map_err(storage_error)?;
+            if promoted != 1 {
+                return Err(PersistenceError::Storage(format!(
+                    "staged spec fingerprint changed for {tenant}/{entity_type}"
+                )));
+            }
+            tx.execute(
+                "DELETE FROM staged_specs
+                 WHERE tenant = ?1 AND entity_type = ?2 AND content_hash = ?3
+                   AND csdl_xml IS ?4",
+                params![tenant, entity_type, content_hash, csdl_xml],
+            )
+            .await
+            .map_err(storage_error)?;
+        }
+        for entity_type in &removed_entity_types {
+            Self::tombstone_spec_in_transaction(&tx, tenant, entity_type).await?;
+        }
+        if let Some(source) = cross_invariants_toml {
+            tx.execute(
+                "INSERT INTO tenant_constraints
+                 (tenant, cross_invariants_toml, version, updated_at)
+                 VALUES (?1, ?2, 1, datetime('now'))
+                 ON CONFLICT(tenant) DO UPDATE SET
+                    cross_invariants_toml = excluded.cross_invariants_toml,
+                    version = tenant_constraints.version + 1,
+                    updated_at = datetime('now')",
+                params![tenant, source],
+            )
+            .await
+            .map_err(storage_error)?;
+        } else if replace {
+            tx.execute(
+                "DELETE FROM tenant_constraints WHERE tenant = ?1",
+                params![tenant],
+            )
+            .await
+            .map_err(storage_error)?;
+        }
+        tx.commit().await.map_err(storage_error)?;
+        Ok(removed_entity_types)
+    }
+
     /// Upsert a spec source (IOA + CSDL) for a tenant/entity_type.
     ///
     /// Uses content-hash gating: if the spec already exists with the same

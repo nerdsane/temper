@@ -1,4 +1,5 @@
 use super::*;
+use crate::PostgresSpecVerificationUpdate;
 use crate::migration::run_migrations;
 
 #[test]
@@ -32,6 +33,65 @@ fn replacement_enumeration_includes_staged_only_entity_types() {
                 .expect("enumerate replacement types"),
             vec!["StagedOnly".to_string()]
         );
+    });
+}
+
+#[test]
+fn verified_promotion_serializes_with_catalog_replacement() {
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        tracing::warn!("skipping Postgres integration test: DATABASE_URL is not set");
+        return;
+    };
+
+    sqlx::__rt::test_block_on(async {
+        let pool = sqlx::PgPool::connect(&database_url).await.expect("connect");
+        run_migrations(&pool).await.expect("migrate");
+        let store = PostgresEventStore::new(pool.clone());
+        let tenant = format!("tenant-promotion-lock-{}", uuid::Uuid::new_v4());
+        let csdl = "<Schema Namespace=\"Temper.Tests\" />";
+        store
+            .upsert_spec(
+                &tenant,
+                "Item",
+                "[automaton]\nname = \"Item\"\n",
+                csdl,
+                "fingerprint",
+            )
+            .await
+            .expect("stage Item");
+
+        let mut blocker = pool.begin().await.expect("begin blocker");
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('spec-catalog:' || $1, 0))")
+            .bind(&tenant)
+            .execute(&mut *blocker)
+            .await
+            .expect("acquire replacement lock");
+        let promotion_tenant = tenant.clone();
+        let mut promotion = sqlx::__rt::spawn(async move {
+            store
+                .commit_verified_spec(
+                    &promotion_tenant,
+                    "Item",
+                    "fingerprint",
+                    csdl,
+                    PostgresSpecVerificationUpdate {
+                        status: "passed",
+                        verified: true,
+                        levels_passed: None,
+                        levels_total: None,
+                        verification_result_json: None,
+                    },
+                )
+                .await
+        });
+        assert!(
+            sqlx::__rt::timeout(std::time::Duration::from_millis(100), &mut promotion)
+                .await
+                .is_err(),
+            "verified promotion must wait for the catalog replacement lock"
+        );
+        blocker.commit().await.expect("release replacement lock");
+        promotion.await.expect("promotion after lock release");
     });
 }
 

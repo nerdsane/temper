@@ -6,13 +6,9 @@ use super::ServerState;
 use super::TenantMetadataBackend;
 
 impl ServerState {
-    /// Atomically persist one hot-loaded catalog update before registry publication.
-    ///
-    /// SQL backends discover replacement omissions only after taking their shared
-    /// tenant-scoped write lock. The returned types are therefore the omissions
-    /// from the durable catalog version that this update actually replaced.
+    /// Atomically promote the exact verified staged catalog and its omissions.
     #[cfg(feature = "observe")]
-    pub(crate) async fn persist_spec_catalog_update(
+    pub(crate) async fn persist_verified_spec_catalog_update(
         &self,
         tenant: &str,
         ioa_sources: &BTreeMap<String, String>,
@@ -26,14 +22,14 @@ impl ServerState {
             .map(|(entity_type, source)| {
                 (
                     entity_type.as_str(),
-                    source.as_str(),
                     temper_store_turso::spec_content_hash(source),
+                    csdl_xml,
                 )
             })
             .collect::<Vec<_>>();
-        let specs = fingerprints
+        let expected = fingerprints
             .iter()
-            .map(|(entity_type, source, fingerprint)| (*entity_type, *source, fingerprint.as_str()))
+            .map(|(entity_type, fingerprint, csdl)| (*entity_type, fingerprint.as_str(), *csdl))
             .collect::<Vec<_>>();
         let incoming = ioa_sources
             .keys()
@@ -49,10 +45,9 @@ impl ServerState {
             Some(TenantMetadataBackend::Postgres(pool)) => {
                 removed_entity_types.extend(
                     temper_store_postgres::PostgresEventStore::new(pool)
-                        .persist_spec_catalog_update(
+                        .persist_verified_spec_catalog_update(
                             tenant,
-                            &specs,
-                            csdl_xml,
+                            &expected,
                             additional_removed_entity_types,
                             replace,
                             cross_invariants_toml,
@@ -64,10 +59,9 @@ impl ServerState {
             Some(TenantMetadataBackend::Turso(store)) => {
                 removed_entity_types.extend(
                     store
-                        .persist_spec_catalog_update(
+                        .persist_verified_spec_catalog_update(
                             tenant,
-                            &specs,
-                            csdl_xml,
+                            &expected,
                             additional_removed_entity_types,
                             replace,
                             cross_invariants_toml,
@@ -77,7 +71,9 @@ impl ServerState {
                 );
             }
             Some(TenantMetadataBackend::Redis) => {
-                return Err(Self::redis_ephemeral_error("Spec catalog replacement"));
+                return Err(Self::redis_ephemeral_error(
+                    "Verified spec catalog publication",
+                ));
             }
             None if replace => {
                 if let Some((store, _)) = self.event_journal() {
@@ -94,7 +90,7 @@ impl ServerState {
             None => {}
         }
 
-        for (entity_type, _, fingerprint) in &fingerprints {
+        for (entity_type, fingerprint, _) in &fingerprints {
             self.persist_event_store_spec_declaration(tenant, entity_type, fingerprint)
                 .await?;
         }

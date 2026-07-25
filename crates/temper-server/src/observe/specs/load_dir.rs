@@ -14,7 +14,16 @@ use super::super::specs_helpers::{
 };
 use super::types::LoadDirRequest;
 use super::verification_stream::build_verification_stream_response;
+use crate::registry::{EntityVerificationResult, VerificationStatus};
 use crate::state::ServerState;
+
+pub(super) struct PendingCatalogPublication {
+    csdl: temper_spec::csdl::CsdlDocument,
+    csdl_xml: String,
+    specs_dir: String,
+    merge: bool,
+    cross_invariants_toml: Option<String>,
+}
 
 /// POST /api/specs/load-dir -- hot-load specs from a directory into the running server.///
 /// Reads CSDL and IOA files from `specs_dir`, registers them under `tenant`,
@@ -185,157 +194,12 @@ pub(crate) async fn handle_load_dir(
         return build_ndjson_response(StatusCode::BAD_REQUEST, lines);
     }
 
-    // Keep this server's durable catalog mutation and registry publication in
-    // one serialized operation. SQL backends additionally take a tenant-scoped
-    // transaction lock shared by every replica and the CLI boot path.
-    let catalog_update_guard = state.spec_catalog_update_lock.lock().await;
-
-    let tenant_id = TenantId::from(body.tenant.as_str());
-    let incoming_entity_types = ioa_sources.keys().cloned().collect::<Vec<_>>();
-    let incoming = ioa_sources
-        .keys()
-        .map(String::as_str)
-        .collect::<std::collections::BTreeSet<_>>();
-    let (had_registry_config, additional_removed_entity_types) = {
-        let registry = state.registry.read().map_err(|error| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("registry lock poisoned: {error}"),
-            )
-        })?;
-        let had_registry_config = registry.get_tenant(&tenant_id).is_some();
-        let mut existing = registry
-            .entity_types(&tenant_id)
-            .into_iter()
-            .map(str::to_string)
-            .collect::<std::collections::BTreeSet<_>>();
-        if !had_registry_config {
-            existing.extend(state.transition_tables.keys().cloned());
-        }
-        let additional_removed_entity_types = if body.merge {
-            Vec::new()
-        } else {
-            existing
-                .into_iter()
-                .filter(|entity_type| !incoming.contains(entity_type.as_str()))
-                .collect()
-        };
-        (had_registry_config, additional_removed_entity_types)
-    };
-    let preserved_incoming_actors = if had_registry_config {
-        state.ready_actor_identities_for_types(&tenant_id, &incoming_entity_types)
-    } else {
-        std::collections::BTreeMap::new()
-    };
-
-    // Persist the incoming committed set, omissions, constraints, and Sim
-    // declaration authority before publishing the in-memory registry.
-    let removed_entity_types = state
-        .persist_spec_catalog_update(
-            &body.tenant,
-            &ioa_sources,
-            &csdl_xml,
-            &additional_removed_entity_types,
-            !body.merge,
-            cross_invariants_toml.as_deref(),
-        )
+    // Verification owns only staged bytes. Committed authority and the live
+    // registry remain unchanged until the entire exact catalog passes.
+    state
+        .stage_spec_catalog_update(&body.tenant, &ioa_sources, &csdl_xml)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    // Register into shared registry after persistence succeeds.
-    let ioa_pairs: Vec<(&str, &str)> = ioa_sources
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    let replaced_entity_types = removed_entity_types
-        .iter()
-        .cloned()
-        .chain(incoming_entity_types.iter().cloned())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-
-    let actor_publication_guard = state.actor_spec_publication_lock.write().map_err(|error| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("actor/spec publication lock poisoned: {error}"),
-        )
-    })?;
-    // Existing actors share the registry's table lock and hot-swap in place.
-    // Preserve those ready incarnations, but evict actors inserted after the snapshot: their
-    // pre_start captured the old declaration after durable authority advanced.
-    // A first tenant publication preserves nothing because fallback tables use
-    // different locks. Removed types are never in the preserved incoming set.
-    state.evict_type_actors_except(
-        &tenant_id,
-        &replaced_entity_types,
-        &preserved_incoming_actors,
-    );
-    {
-        let mut registry = state.registry.write().map_err(|error| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("registry lock poisoned: {error}"),
-            )
-        })?;
-        registry
-            .try_register_tenant_with_reactions_and_constraints(
-                body.tenant.as_str(),
-                csdl,
-                csdl_xml,
-                &ioa_pairs,
-                Vec::new(),
-                cross_invariants_toml.clone(),
-                body.merge,
-            )
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("Failed to register specs: {e}"),
-                )
-            })?;
-    }
-    // A supervised restart can begin after the first identity check and clone
-    // the old table before the registry swap. Revalidate the original snapshot
-    // after the swap, while actor creation is still excluded: any such new
-    // incarnation is evicted, and a later lookup can only hydrate from the new
-    // registry table.
-    state.revalidate_type_actors_after_publication(
-        &tenant_id,
-        &replaced_entity_types,
-        &preserved_incoming_actors,
-    );
-    drop(actor_publication_guard);
-    state.rebuild_reaction_dispatcher();
-    drop(catalog_update_guard);
-    state
-        .populate_vector_index_from_snapshots(&TenantId::from(body.tenant.as_str()))
-        .await;
-
-    if !state.data_dir.as_os_str().is_empty() {
-        let registry_path = state.data_dir.join("specs-registry.json");
-        let mut specs_registry = std::collections::BTreeMap::<String, String>::new();
-
-        if let Ok(content) = std::fs::read_to_string(&registry_path) {
-            // determinism-ok: HTTP handler reads specs registry
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content)
-                && let Some(obj) = value.as_object()
-            {
-                for (tenant, specs_dir) in obj {
-                    if let Some(specs_dir) = specs_dir.as_str() {
-                        specs_registry.insert(tenant.clone(), specs_dir.to_string());
-                    }
-                }
-            }
-        }
-
-        specs_registry.insert(body.tenant.clone(), body.specs_dir.clone());
-
-        if let Ok(encoded) = serde_json::to_string_pretty(&specs_registry) {
-            let _ = std::fs::create_dir_all(&state.data_dir); // determinism-ok: HTTP handler creates data dir
-            let _ = std::fs::write(registry_path, encoded); // determinism-ok: HTTP handler writes specs registry
-        }
-    }
 
     // Stream NDJSON response: verification runs inline and results are streamed per-entity.
     // Any agent calling this endpoint gets verification results without polling.
@@ -357,5 +221,140 @@ pub(crate) async fn handle_load_dir(
         ioa_sources,
         lint_warning_lines,
         cross_lint_warning_lines,
+        PendingCatalogPublication {
+            csdl,
+            csdl_xml,
+            specs_dir: body.specs_dir,
+            merge: body.merge,
+            cross_invariants_toml,
+        },
     ))
+}
+
+pub(super) async fn finalize_verified_load(
+    state: &ServerState,
+    tenant: &str,
+    ioa_sources: &std::collections::BTreeMap<String, String>,
+    verification_results: &std::collections::BTreeMap<String, EntityVerificationResult>,
+    pending: PendingCatalogPublication,
+) -> Result<(), String> {
+    let _catalog_update_guard = state.spec_catalog_update_lock.lock().await;
+    let tenant_id = TenantId::from(tenant);
+    let incoming_entity_types = ioa_sources.keys().cloned().collect::<Vec<_>>();
+    let incoming = ioa_sources
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let (had_registry_config, additional_removed_entity_types) = {
+        let registry = state
+            .registry
+            .read()
+            .map_err(|error| format!("registry lock poisoned: {error}"))?;
+        let had_registry_config = registry.get_tenant(&tenant_id).is_some();
+        let mut existing = registry
+            .entity_types(&tenant_id)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<std::collections::BTreeSet<_>>();
+        if !had_registry_config {
+            existing.extend(state.transition_tables.keys().cloned());
+        }
+        let removed = if pending.merge {
+            Vec::new()
+        } else {
+            existing
+                .into_iter()
+                .filter(|entity_type| !incoming.contains(entity_type.as_str()))
+                .collect()
+        };
+        (had_registry_config, removed)
+    };
+    let preserved_incoming_actors = if had_registry_config {
+        state.ready_actor_identities_for_types(&tenant_id, &incoming_entity_types)
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    let removed_entity_types = state
+        .persist_verified_spec_catalog_update(
+            tenant,
+            ioa_sources,
+            &pending.csdl_xml,
+            &additional_removed_entity_types,
+            !pending.merge,
+            pending.cross_invariants_toml.as_deref(),
+        )
+        .await?;
+    let replaced_entity_types = removed_entity_types
+        .iter()
+        .cloned()
+        .chain(incoming_entity_types.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let actor_publication_guard = state
+        .actor_spec_publication_lock
+        .write()
+        .map_err(|error| format!("actor/spec publication lock poisoned: {error}"))?;
+    state.evict_type_actors_except(
+        &tenant_id,
+        &replaced_entity_types,
+        &preserved_incoming_actors,
+    );
+    let ioa_pairs = ioa_sources
+        .iter()
+        .map(|(entity_type, source)| (entity_type.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    {
+        let mut registry = state
+            .registry
+            .write()
+            .map_err(|error| format!("registry lock poisoned: {error}"))?;
+        registry
+            .try_register_tenant_with_reactions_and_constraints(
+                tenant,
+                pending.csdl,
+                pending.csdl_xml,
+                &ioa_pairs,
+                Vec::new(),
+                pending.cross_invariants_toml,
+                pending.merge,
+            )
+            .map_err(|error| format!("failed to register verified specs: {error}"))?;
+        for (entity_type, result) in verification_results {
+            registry.set_verification_status(
+                &tenant_id,
+                entity_type,
+                VerificationStatus::Completed(result.clone()),
+            );
+        }
+    }
+    state.revalidate_type_actors_after_publication(
+        &tenant_id,
+        &replaced_entity_types,
+        &preserved_incoming_actors,
+    );
+    drop(actor_publication_guard);
+    state.rebuild_reaction_dispatcher();
+    state.populate_vector_index_from_snapshots(&tenant_id).await;
+
+    if !state.data_dir.as_os_str().is_empty() {
+        let registry_path = state.data_dir.join("specs-registry.json");
+        let mut specs_registry = std::collections::BTreeMap::<String, String>::new();
+        if let Ok(content) = std::fs::read_to_string(&registry_path)
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Some(obj) = value.as_object()
+        {
+            for (existing_tenant, specs_dir) in obj {
+                if let Some(specs_dir) = specs_dir.as_str() {
+                    specs_registry.insert(existing_tenant.clone(), specs_dir.to_string());
+                }
+            }
+        }
+        specs_registry.insert(tenant.to_string(), pending.specs_dir);
+        if let Ok(encoded) = serde_json::to_string_pretty(&specs_registry) {
+            let _ = std::fs::create_dir_all(&state.data_dir); // determinism-ok: HTTP handler creates data dir
+            let _ = std::fs::write(registry_path, encoded); // determinism-ok: HTTP handler writes specs registry
+        }
+    }
+    Ok(())
 }

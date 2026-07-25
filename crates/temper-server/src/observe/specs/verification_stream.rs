@@ -5,7 +5,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use temper_runtime::scheduler::sim_now;
 
-use crate::registry::VerificationStatus;
+use super::load_dir::{PendingCatalogPublication, finalize_verified_load};
 use crate::state::ServerState;
 
 pub(super) fn build_verification_stream_response(
@@ -15,6 +15,7 @@ pub(super) fn build_verification_stream_response(
     ioa_sources: BTreeMap<String, String>,
     lint_warning_lines: Vec<serde_json::Value>,
     cross_lint_warning_lines: Vec<serde_json::Value>,
+    pending_publication: PendingCatalogPublication,
 ) -> axum::response::Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, Infallible>>(100);
     let state_for_task = state.clone();
@@ -51,6 +52,7 @@ pub(super) fn build_verification_stream_response(
 
         let mut entity_results: std::collections::BTreeMap<String, bool> =
             std::collections::BTreeMap::new();
+        let mut verification_results = BTreeMap::new();
 
         for entity_name in &entity_names {
             // Emit design-time events for UI (spec_loaded + verify_started)
@@ -79,32 +81,6 @@ pub(super) fn build_verification_stream_response(
                 entity_results.insert(entity_name.clone(), false);
                 continue;
             }
-            if let Err(e) = state_for_task
-                .persist_spec_verification(&tenant, entity_name, "running", None)
-                .await
-            {
-                tracing::error!(tenant = %tenant, entity = %entity_name, error = %e, "failed to persist running verification status");
-                let _ = tx
-                    .send(Ok(serde_json::to_string(&serde_json::json!({
-                            "type": "verification_error",
-                            "entity": entity_name,
-                            "error": e,
-                        }))
-                        .unwrap() // ci-ok: infallible serialization
-                            + "\n"))
-                    .await;
-                entity_results.insert(entity_name.clone(), false);
-                continue;
-            }
-            {
-                let mut registry = state_for_task.registry.write().unwrap(); // ci-ok: infallible lock
-                registry.set_verification_status(
-                    &tenant.clone().into(),
-                    entity_name,
-                    VerificationStatus::Running,
-                );
-            }
-
             let started_event = crate::state::DesignTimeEvent {
                 kind: "verify_started".to_string(),
                 entity_type: entity_name.clone(),
@@ -320,43 +296,7 @@ pub(super) fn build_verification_stream_response(
                         .await;
 
                     entity_results.insert(entity_name.clone(), cascade_result.all_passed);
-
-                    let passed_count = entity_result.levels.iter().filter(|l| l.passed).count();
-                    let final_status = if entity_result.all_passed {
-                        "passed"
-                    } else if passed_count == 0 {
-                        "failed"
-                    } else {
-                        "partial"
-                    };
-                    if let Err(e) = state_for_task
-                        .persist_spec_verification(
-                            &tenant,
-                            entity_name,
-                            final_status,
-                            Some(&entity_result),
-                        )
-                        .await
-                    {
-                        tracing::error!(tenant = %tenant, entity = %entity_name, error = %e, "failed to persist completed verification status");
-                        let _ = tx
-                            .send(Ok(serde_json::to_string(&serde_json::json!({
-                                    "type": "verification_error",
-                                    "entity": entity_name,
-                                    "error": e,
-                                }))
-                                .unwrap() // ci-ok: infallible serialization
-                                    + "\n"))
-                            .await;
-                        continue;
-                    }
-                    if let Ok(mut reg) = state_for_task.registry.write() {
-                        reg.set_verification_status(
-                            &tenant.clone().into(),
-                            entity_name,
-                            VerificationStatus::Completed(entity_result.clone()),
-                        );
-                    }
+                    verification_results.insert(entity_name.clone(), entity_result);
                     let done_event = crate::state::DesignTimeEvent {
                         kind: "verify_done".to_string(),
                         entity_type: entity_name.clone(),
@@ -387,44 +327,6 @@ pub(super) fn build_verification_stream_response(
                 }
                 Err(e) => {
                     entity_results.insert(entity_name.clone(), false);
-                    let failure_result = crate::registry::EntityVerificationResult {
-                        all_passed: false,
-                        levels: vec![crate::registry::EntityLevelSummary {
-                            level: "VerificationTask".to_string(),
-                            passed: false,
-                            summary: format!("Verification failed for {entity_name}: {e}"),
-                            details: None,
-                        }],
-                        verified_at: sim_now().to_rfc3339(),
-                    };
-                    if let Err(persist_err) = state_for_task
-                        .persist_spec_verification(
-                            &tenant,
-                            entity_name,
-                            "failed",
-                            Some(&failure_result),
-                        )
-                        .await
-                    {
-                        tracing::error!(tenant = %tenant, entity = %entity_name, error = %persist_err, "failed to persist failed verification status");
-                        let _ = tx
-                            .send(Ok(serde_json::to_string(&serde_json::json!({
-                                    "type": "verification_error",
-                                    "entity": entity_name,
-                                    "error": persist_err,
-                                }))
-                                .unwrap() // ci-ok: infallible serialization
-                                    + "\n"))
-                            .await;
-                        continue;
-                    }
-                    if let Ok(mut reg) = state_for_task.registry.write() {
-                        reg.set_verification_status(
-                            &tenant.clone().into(),
-                            entity_name,
-                            VerificationStatus::Completed(failure_result.clone()),
-                        );
-                    }
                     let fail_event = crate::state::DesignTimeEvent {
                         kind: "verify_done".to_string(),
                         entity_type: entity_name.clone(),
@@ -455,12 +357,39 @@ pub(super) fn build_verification_stream_response(
         }
 
         // Stream final summary
-        let all_passed = entity_results.values().all(|&p| p);
+        let verification_passed = entity_results.len() == entity_names.len()
+            && entity_results.values().all(|&passed| passed);
+        let publication_result = if verification_passed {
+            finalize_verified_load(
+                &state_for_task,
+                &tenant,
+                &ioa_sources,
+                &verification_results,
+                pending_publication,
+            )
+            .await
+        } else {
+            Ok(())
+        };
+        if let Err(error) = &publication_result {
+            tracing::error!(tenant = %tenant, error = %error, "failed to publish verified catalog");
+            let _ = tx
+                .send(Ok(serde_json::to_string(&serde_json::json!({
+                        "type": "publication_error",
+                        "tenant": &tenant,
+                        "error": error,
+                    }))
+                    .unwrap() // ci-ok: infallible serialization
+                        + "\n"))
+                .await;
+        }
+        let all_passed = verification_passed && publication_result.is_ok();
         let _ = tx
             .send(Ok(serde_json::to_string(&serde_json::json!({
                     "type": "summary",
                     "tenant": &tenant,
                     "all_passed": all_passed,
+                    "published": all_passed,
                     "entities": entity_results,
                 }))
                 .unwrap() // ci-ok: infallible serialization

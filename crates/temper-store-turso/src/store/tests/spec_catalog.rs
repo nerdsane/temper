@@ -1,6 +1,45 @@
 use super::*;
 
 #[tokio::test]
+async fn late_verifier_cannot_publish_newer_staged_bytes() {
+    let url = sqlite_test_url("late-verifier-exact-catalog");
+    let store = TursoEventStore::new(&url, None).await.expect("open store");
+    let csdl = "<Schema Namespace=\"Temper.Tests\" />";
+    let source_a = "[automaton]\nname = \"Item\"\n# candidate-a\n";
+    let source_b = "[automaton]\nname = \"Item\"\n# candidate-b\n";
+    let fingerprint_a = crate::spec_content_hash(source_a);
+    let fingerprint_b = crate::spec_content_hash(source_b);
+    store
+        .upsert_spec("t", "Item", source_a, csdl, &fingerprint_a)
+        .await
+        .expect("stage candidate A");
+    store
+        .upsert_spec("t", "Item", source_b, csdl, &fingerprint_b)
+        .await
+        .expect("newer candidate B replaces staging");
+
+    let error = store
+        .persist_verified_spec_catalog_update(
+            "t",
+            &[("Item", fingerprint_a.as_str(), csdl)],
+            &[],
+            true,
+            None,
+        )
+        .await
+        .expect_err("candidate A verification must not publish candidate B");
+    assert!(error.to_string().contains("fingerprint changed"));
+    assert!(
+        store
+            .load_specs()
+            .await
+            .expect("load committed specs")
+            .is_empty(),
+        "no committed catalog may be created from mismatched staged bytes"
+    );
+}
+
+#[tokio::test]
 async fn concurrent_replica_replacements_commit_one_complete_catalog() {
     let url = sqlite_test_url("concurrent-spec-catalog-replacement");
     let store_a = TursoEventStore::new(&url, None)

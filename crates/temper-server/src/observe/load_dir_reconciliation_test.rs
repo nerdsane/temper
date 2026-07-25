@@ -37,7 +37,7 @@ fn turso_state(store: &TursoEventStore, name: &str) -> ServerState {
     state
 }
 
-async fn load_dir(state: &ServerState, fixture_name: &str) {
+async fn load_dir_lines(state: &ServerState, fixture_name: &str) -> Vec<serde_json::Value> {
     let body = serde_json::json!({
         "tenant": TENANT,
         "specs_dir": fixture(fixture_name),
@@ -53,6 +53,24 @@ async fn load_dir(state: &ServerState, fixture_name: &str) {
         .await
         .expect("call load-dir");
     assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
+        .await
+        .expect("consume load-dir verification stream");
+    std::str::from_utf8(&body)
+        .expect("load-dir stream must be UTF-8")
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str(line).expect("load-dir line must be JSON"))
+        .collect()
+}
+
+async fn load_dir(state: &ServerState, fixture_name: &str) {
+    let lines = load_dir_lines(state, fixture_name).await;
+    assert_eq!(
+        lines.last().and_then(|line| line["all_passed"].as_bool()),
+        Some(true),
+        "fixture load must verify and publish: {lines:?}"
+    );
 }
 
 fn envelope(actor_id: &str) -> PersistenceEnvelope {
@@ -205,6 +223,62 @@ async fn turso_load_dir_commits_scoped_replacement_across_restart() {
     assert_eq!(
         note.content_hash.as_deref(),
         Some(temper_store_turso::spec_content_hash(NOTE_V2).as_str())
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_verification_preserves_last_committed_catalog_and_registry() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-arn216-failed-verification-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&url, None).await.expect("open Turso");
+    let mut state = turso_state(&store, "arn216-failed-verification");
+    load_dir(&state, "full_v1").await;
+
+    state.verify_subprocess_bin = Some(std::sync::Arc::new(
+        Path::new("/definitely/missing/temper-verifier").to_path_buf(),
+    ));
+    let lines = load_dir_lines(&state, "full_v2").await;
+    assert_eq!(
+        lines.last().and_then(|line| line["all_passed"].as_bool()),
+        Some(false),
+        "failed verifier must fail the publication stream"
+    );
+
+    let committed_note = store
+        .load_specs()
+        .await
+        .expect("load committed catalog")
+        .into_iter()
+        .find(|row| row.tenant == TENANT && row.entity_type == "Note")
+        .expect("last committed Note");
+    assert_eq!(
+        committed_note.content_hash.as_deref(),
+        Some(temper_store_turso::spec_content_hash(NOTE_V1).as_str()),
+        "failed verification must preserve the last committed Note bytes"
+    );
+
+    let tenant = TenantId::from(TENANT);
+    let note = state
+        .get_or_spawn_tenant_actor(&tenant, "Note", "still-v1")
+        .expect("spawn Note after failed replacement");
+    let review = note
+        .ask::<crate::EntityResponse>(
+            EntityMsg::Action {
+                name: "Review".to_string(),
+                params: serde_json::json!({"Body": "must remain unavailable"}),
+                cross_entity_booleans: BTreeMap::new(),
+                idempotency_key: None,
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("actor response");
+    assert!(
+        !review.success,
+        "failed verification must not publish the v2-only Review action"
     );
 }
 

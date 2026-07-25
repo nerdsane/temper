@@ -1102,7 +1102,13 @@ impl PostgresEventStore {
     }
 
     pub async fn commit_specs(&self, tenant: &str) -> Result<(), PersistenceError> {
-        crate::dbm::postgres_query!(
+        let mut tx = self.pool().begin().await.map_err(storage_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('spec-catalog:' || $1, 0))")
+            .bind(tenant)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        sqlx::query(
             "WITH staged AS ( \
                  DELETE FROM staged_specs WHERE tenant = $1 RETURNING * \
              ) \
@@ -1117,9 +1123,10 @@ impl PostgresEventStore {
                  levels_passed = NULL, levels_total = NULL, verification_result = NULL, updated_at = now()"
         )
         .bind(tenant)
-        .execute(self.pool())
+        .execute(&mut *tx)
         .await
         .map_err(storage_error)?;
+        tx.commit().await.map_err(storage_error)?;
         Ok(())
     }
 
@@ -1137,6 +1144,11 @@ impl PostgresEventStore {
             )));
         }
         let mut tx = self.pool().begin().await.map_err(storage_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('spec-catalog:' || $1, 0))")
+            .bind(tenant)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
         for (entity_type, content_hash, csdl_xml) in expected {
             let result = sqlx::query(
                 "WITH staged AS ( \
@@ -1185,7 +1197,13 @@ impl PostgresEventStore {
         update: PostgresSpecVerificationUpdate<'_>,
     ) -> Result<(), PersistenceError> {
         let verification_result = parse_optional_json(update.verification_result_json)?;
-        let rows: Vec<(i64,)> = crate::dbm::postgres_query_as!(
+        let mut tx = self.pool().begin().await.map_err(storage_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('spec-catalog:' || $1, 0))")
+            .bind(tenant)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        let rows: Vec<(i64,)> = sqlx::query_as(
             "WITH staged AS ( \
                  DELETE FROM staged_specs \
                  WHERE tenant = $1 AND entity_type = $2 AND content_hash = $3 \
@@ -1217,7 +1235,7 @@ impl PostgresEventStore {
         .bind(update.levels_passed)
         .bind(update.levels_total)
         .bind(verification_result)
-        .fetch_all(self.pool())
+        .fetch_all(&mut *tx)
         .await
         .map_err(storage_error)?;
         if rows.first().map(|row| row.0) != Some(1) {
@@ -1225,6 +1243,7 @@ impl PostgresEventStore {
                 "staged spec fingerprint changed for {tenant}/{entity_type}"
             )));
         }
+        tx.commit().await.map_err(storage_error)?;
         Ok(())
     }
 

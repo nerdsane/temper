@@ -62,6 +62,46 @@ async fn delete_postgres_spec_source(
 }
 
 impl ServerState {
+    /// Stage candidate catalog bytes without changing committed authority.
+    #[cfg(feature = "observe")]
+    pub(crate) async fn stage_spec_catalog_update(
+        &self,
+        tenant: &str,
+        ioa_sources: &std::collections::BTreeMap<String, String>,
+        csdl_xml: &str,
+    ) -> Result<(), String> {
+        let Some(backend) = self.tenant_metadata_backend(tenant).await else {
+            return Ok(());
+        };
+        for (entity_type, ioa_source) in ioa_sources {
+            let content_hash = temper_store_turso::spec_content_hash(ioa_source);
+            match &backend {
+                TenantMetadataBackend::Postgres(pool) => stage_postgres_spec_source(
+                    pool,
+                    tenant,
+                    entity_type,
+                    ioa_source,
+                    csdl_xml,
+                    &content_hash,
+                )
+                .await
+                .map_err(|error| {
+                    format!("failed to stage spec {tenant}/{entity_type} in postgres: {error}")
+                })?,
+                TenantMetadataBackend::Turso(store) => store
+                    .upsert_spec(tenant, entity_type, ioa_source, csdl_xml, &content_hash)
+                    .await
+                    .map_err(|error| {
+                        format!("failed to stage spec {tenant}/{entity_type} in turso: {error}")
+                    })?,
+                TenantMetadataBackend::Redis => {
+                    return Err(Self::redis_ephemeral_error("Spec source staging"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Upsert a spec source into the persistence backend (Postgres or Turso).
     pub async fn upsert_spec_source(
         &self,

@@ -5,6 +5,149 @@ use temper_runtime::persistence::PersistenceError;
 use crate::PostgresEventStore;
 
 impl PostgresEventStore {
+    /// Atomically publish a verified staged catalog under the replacement lock.
+    ///
+    /// Every incoming row must still match the staged content hash and CSDL.
+    /// The transaction promotes all rows, applies replacement omissions and
+    /// constraints, and marks the promoted catalog verified as one operation.
+    pub async fn persist_verified_spec_catalog_update(
+        &self,
+        tenant: &str,
+        expected: &[(&str, &str, &str)],
+        additional_removed_entity_types: &[String],
+        replace: bool,
+        cross_invariants_toml: Option<&str>,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let mut expected = expected.to_vec();
+        expected.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        if expected.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(PersistenceError::Storage(format!(
+                "duplicate verified catalog entity type for tenant {tenant}"
+            )));
+        }
+
+        let mut tx = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock( \
+                 hashtextextended('spec-catalog:' || $1, 0) \
+             )",
+        )
+        .bind(tenant)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+
+        let incoming = expected
+            .iter()
+            .map(|(entity_type, _, _)| *entity_type)
+            .collect::<BTreeSet<_>>();
+        let mut removed_entity_types = if replace {
+            sqlx::query_scalar::<_, String>(
+                "SELECT entity_type FROM specs WHERE tenant = $1 \
+                 UNION \
+                 SELECT entity_type FROM staged_specs WHERE tenant = $1 \
+                 UNION \
+                 SELECT entity_type FROM spec_declaration_authority \
+                 WHERE tenant = $1 AND present = true \
+                 ORDER BY entity_type",
+            )
+            .bind(tenant)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|error| PersistenceError::Storage(error.to_string()))?
+            .into_iter()
+            .filter(|entity_type| !incoming.contains(entity_type.as_str()))
+            .collect::<BTreeSet<_>>()
+        } else {
+            BTreeSet::new()
+        };
+        removed_entity_types.extend(
+            additional_removed_entity_types
+                .iter()
+                .filter(|entity_type| !incoming.contains(entity_type.as_str()))
+                .cloned(),
+        );
+        let removed_entity_types = removed_entity_types.into_iter().collect::<Vec<_>>();
+
+        for (entity_type, content_hash, csdl_xml) in expected {
+            let result = sqlx::query(
+                "WITH staged AS ( \
+                     DELETE FROM staged_specs \
+                     WHERE tenant = $1 AND entity_type = $2 AND content_hash = $3 \
+                       AND csdl_xml IS NOT DISTINCT FROM $4 \
+                     RETURNING * \
+                 ) \
+                 INSERT INTO specs \
+                     (tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version, \
+                      verified, verification_status, updated_at) \
+                 SELECT tenant, entity_type, ioa_source, csdl_xml, content_hash, true, version, \
+                        true, 'passed', now() \
+                 FROM staged \
+                 ON CONFLICT (tenant, entity_type) DO UPDATE SET \
+                     ioa_source = EXCLUDED.ioa_source, csdl_xml = EXCLUDED.csdl_xml, \
+                     content_hash = EXCLUDED.content_hash, committed = true, \
+                     version = specs.version + 1, verified = true, \
+                     verification_status = 'passed', levels_passed = NULL, \
+                     levels_total = NULL, verification_result = NULL, updated_at = now()",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(content_hash)
+            .bind(csdl_xml)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+            if result.rows_affected() != 1 {
+                return Err(PersistenceError::Storage(format!(
+                    "staged spec fingerprint changed for {tenant}/{entity_type}"
+                )));
+            }
+        }
+        for entity_type in &removed_entity_types {
+            sqlx::query("DELETE FROM staged_specs WHERE tenant = $1 AND entity_type = $2")
+                .bind(tenant)
+                .bind(entity_type)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+            sqlx::query("SELECT tombstone_spec_declaration_authority($1, $2)")
+                .bind(tenant)
+                .bind(entity_type)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+        }
+        if let Some(source) = cross_invariants_toml {
+            sqlx::query(
+                "INSERT INTO tenant_constraints \
+                 (tenant, cross_invariants_toml, version, updated_at) \
+                 VALUES ($1, $2, 1, now()) \
+                 ON CONFLICT(tenant) DO UPDATE SET \
+                     cross_invariants_toml = EXCLUDED.cross_invariants_toml, \
+                     version = tenant_constraints.version + 1, updated_at = now()",
+            )
+            .bind(tenant)
+            .bind(source)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+        } else if replace {
+            sqlx::query("DELETE FROM tenant_constraints WHERE tenant = $1")
+                .bind(tenant)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+        Ok(removed_entity_types)
+    }
+
     /// Atomically publish a tenant catalog update under the shared replacement lock.
     ///
     /// When `replace` is true, omissions are discovered after the tenant-scoped
