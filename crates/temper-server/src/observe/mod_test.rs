@@ -909,6 +909,17 @@ async fn test_load_inline_supports_nested_paths() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
+        .await
+        .expect("consume inline verification stream");
+    let summary = std::str::from_utf8(&body)
+        .expect("inline verification stream must be UTF-8")
+        .lines()
+        .filter(|line| !line.is_empty())
+        .last()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("summary JSON"))
+        .expect("inline verification summary");
+    assert_eq!(summary["all_passed"], true);
 
     let registry = state.registry.read().unwrap();
     let tenant = TenantId::new("nested-inline");
