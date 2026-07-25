@@ -85,12 +85,27 @@ async fn update(
     fields: serde_json::Value,
     replace: bool,
 ) -> EntityResponse {
+    update_with_idempotency(
+        actor,
+        fields,
+        replace,
+        format!("test-field-update:{}", sim_uuid()),
+    )
+    .await
+}
+
+async fn update_with_idempotency(
+    actor: &temper_runtime::actor::ActorRef<EntityMsg>,
+    fields: serde_json::Value,
+    replace: bool,
+    idempotency_key: String,
+) -> EntityResponse {
     actor
         .ask(
             EntityMsg::UpdateFields {
                 fields,
                 replace,
-                idempotency_key: format!("test-field-update:{}", sim_uuid()),
+                idempotency_key,
             },
             Duration::from_secs(5),
         )

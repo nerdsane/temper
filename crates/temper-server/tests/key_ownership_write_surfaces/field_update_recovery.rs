@@ -60,6 +60,129 @@ fn event_envelope(persistence_id: &str, event: EntityEvent) -> PersistenceEnvelo
     }
 }
 
+/// A caller token identifies one exact PATCH/PUT intent. Reusing it for a
+/// different field set or replacement mode must fail closed while an exact
+/// retry remains successful.
+#[tokio::test]
+async fn field_update_idempotency_rejects_mismatched_live_intent() {
+    let (_guard, _clock, _ids) = install_deterministic_context(292);
+    let events = BoxedEventStore::new(SimEventStore::no_faults(292));
+    let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(DOC_IOA)));
+    let system = ActorSystem::new("arn238-field-update-live-intent");
+    let actor = system.spawn(
+        EntityActor::with_persistence(
+            "Doc",
+            "live-intent",
+            table,
+            serde_json::json!({}),
+            events,
+            BackendLabel::Sim,
+        )
+        .with_tenant("default"),
+        "live-intent",
+    );
+
+    let token = "field-update-intent-live".to_string();
+    let fields = serde_json::json!({"WorkspaceId": "ws", "Path": "/first"});
+    let first = update_with_idempotency(&actor, fields.clone(), false, token.clone()).await;
+    assert!(first.success, "first PATCH failed: {:?}", first.error);
+
+    let exact_retry = update_with_idempotency(&actor, fields.clone(), false, token.clone()).await;
+    assert!(
+        exact_retry.success,
+        "exact PATCH retry failed: {:?}",
+        exact_retry.error
+    );
+    assert_eq!(exact_retry.state.sequence_nr, first.state.sequence_nr);
+
+    let different_fields = update_with_idempotency(
+        &actor,
+        serde_json::json!({"WorkspaceId": "ws", "Path": "/second"}),
+        false,
+        token.clone(),
+    )
+    .await;
+    assert!(
+        !different_fields.success,
+        "a reused token must not acknowledge a different PATCH"
+    );
+    assert_eq!(different_fields.state.fields["Path"], "/first");
+    assert_eq!(different_fields.state.sequence_nr, first.state.sequence_nr);
+
+    let different_semantics = update_with_idempotency(&actor, fields, true, token).await;
+    assert!(
+        !different_semantics.success,
+        "a reused token must not acknowledge PATCH as PUT"
+    );
+    assert_eq!(different_semantics.state.fields["Path"], "/first");
+    assert_eq!(
+        different_semantics.state.sequence_nr,
+        first.state.sequence_nr
+    );
+}
+
+/// Durable replay must retain the request-intent binding across actor restart.
+#[tokio::test]
+async fn field_update_idempotency_rejects_mismatched_intent_after_restart() {
+    let (_guard, _clock, _ids) = install_deterministic_context(293);
+    let events = BoxedEventStore::new(SimEventStore::no_faults(293));
+    let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(DOC_IOA)));
+    let system = ActorSystem::new("arn238-field-update-restart-intent");
+    let actor = system.spawn(
+        EntityActor::with_persistence(
+            "Doc",
+            "restart-intent",
+            table.clone(),
+            serde_json::json!({}),
+            events.clone(),
+            BackendLabel::Sim,
+        )
+        .with_tenant("default"),
+        "restart-intent",
+    );
+    let token = "field-update-intent-restart".to_string();
+    let fields = serde_json::json!({"WorkspaceId": "ws", "Path": "/first"});
+    let first = update_with_idempotency(&actor, fields.clone(), false, token.clone()).await;
+    assert!(first.success, "first PATCH failed: {:?}", first.error);
+    drop(actor);
+    drop(system);
+
+    let restarted = ActorSystem::new("arn238-field-update-restart-intent-recovered");
+    let recovered = restarted.spawn(
+        EntityActor::with_persistence(
+            "Doc",
+            "restart-intent",
+            table,
+            serde_json::json!({}),
+            events,
+            BackendLabel::Sim,
+        )
+        .with_tenant("default"),
+        "restart-intent",
+    );
+    let exact_retry = update_with_idempotency(&recovered, fields, false, token.clone()).await;
+    assert!(
+        exact_retry.success,
+        "exact PATCH retry failed after restart: {:?}",
+        exact_retry.error
+    );
+    assert_eq!(exact_retry.state.sequence_nr, first.state.sequence_nr);
+
+    let mismatched = update_with_idempotency(
+        &recovered,
+        serde_json::json!({"WorkspaceId": "ws", "Path": "/after-restart"}),
+        false,
+        token,
+    )
+    .await;
+    assert!(
+        !mismatched.success,
+        "durable replay must reject a mismatched token reuse"
+    );
+    assert_eq!(mismatched.state.fields["Path"], "/first");
+    assert_eq!(mismatched.state.sequence_nr, first.state.sequence_nr);
+}
+
 /// A same-sequence snapshot rewrite changes the legacy field baseline without
 /// advancing the journal. The next actor write must detect that source change,
 /// recover it, and derive key ownership from the replacement fields.
