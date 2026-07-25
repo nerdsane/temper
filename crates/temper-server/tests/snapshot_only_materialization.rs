@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
-use temper_runtime::scheduler::install_deterministic_context;
+use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope};
+use temper_runtime::scheduler::{install_deterministic_context, sim_now, sim_uuid};
 use temper_server::entity_actor::{EntityActor, EntityMsg, EntityResponse};
 use temper_server::storage::{BackendLabel, BoxedEventStore};
 use temper_store_sim::SimEventStore;
@@ -29,6 +30,94 @@ from = ["Ready"]
 to = "Ready"
 effect = [{ type = "increment", var = "value" }]
 "#;
+
+#[tokio::test]
+async fn pre_fix_materialization_rebases_legacy_retry_coordinates() {
+    let (_guard, _clock, _ids) = install_deterministic_context(295);
+    let sim = SimEventStore::no_faults(295);
+    let events = BoxedEventStore::new(sim.clone());
+    let persistence_id = "default:Counter:pre-fix-materialization";
+    events
+        .append(
+            persistence_id,
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "Temper.Internal.StateMaterialization.v1".to_string(),
+                payload: serde_json::json!({
+                    "schema": "temper.state-materialization.v1",
+                    "state": {
+                        "entity_type": "Counter",
+                        "entity_id": "pre-fix-materialization",
+                        "status": "Ready",
+                        "item_count": 0,
+                        "counters": {"value": 10},
+                        "booleans": {},
+                        "lists": {},
+                        "fields": {
+                            "Id": "pre-fix-materialization",
+                            "Status": "Ready"
+                        },
+                        "events": [],
+                        "total_event_count": 10,
+                        "events_since_snapshot": 0,
+                        "last_snapshot_sequence_nr": 0,
+                        "sequence_nr": 0,
+                        "processed_idempotency_keys": {
+                            "pre-fix-legacy-increment": 5
+                        }
+                    }
+                }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: persistence_id.to_string(),
+                },
+            }],
+        )
+        .await
+        .expect("seed pre-fix materialization payload");
+
+    let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(COUNTER_IOA)));
+    let system = ActorSystem::new("pre-fix-materialization-retry");
+    let actor = system.spawn(
+        EntityActor::with_persistence(
+            "Counter",
+            "pre-fix-materialization",
+            table,
+            serde_json::json!({}),
+            events,
+            BackendLabel::Sim,
+        )
+        .with_tenant("default"),
+        "pre-fix-materialization",
+    );
+    let retry: EntityResponse = actor
+        .ask(
+            EntityMsg::Action {
+                name: "Increment".to_string(),
+                params: serde_json::json!({}),
+                cross_entity_booleans: BTreeMap::new(),
+                idempotency_key: Some("pre-fix-legacy-increment".to_string()),
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("retry legacy token from pre-fix materialization");
+    assert!(
+        retry.success,
+        "pre-fix materialized retry failed: {:?}",
+        retry.error
+    );
+    assert_eq!(retry.state.counters.get("value"), Some(&10));
+    assert_eq!(
+        sim.dump_journal(persistence_id).len(),
+        1,
+        "legacy retry must not append"
+    );
+}
 
 #[tokio::test]
 async fn first_journal_write_materializes_snapshot_only_state_for_restart() {
