@@ -46,6 +46,7 @@ use super::types::{
     MAX_ITEMS_PER_ENTITY,
 };
 
+mod field_update_idempotency;
 mod field_updates;
 mod persistence;
 mod recovery;
@@ -59,6 +60,7 @@ pub(crate) use recovery::{
     stable_entity_source_is_current,
 };
 
+use field_update_idempotency::field_update_intent_fingerprint;
 use field_updates::{
     FIELD_UPDATE_EVENT_TYPE, FIELD_UPDATE_SCHEMA, FIELDS_PATCHED_EVENT_TYPE,
     FIELDS_REPLACED_EVENT_TYPE, PersistedFieldUpdate,

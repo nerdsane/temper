@@ -144,6 +144,7 @@ pub(super) async fn apply_replayed_envelope(
         && let Ok(update) = serde_json::from_value::<PersistedFieldUpdate>(envelope.payload.clone())
         && update.schema == FIELD_UPDATE_SCHEMA
     {
+        let idempotency_key = update.idempotency_key.clone();
         let status = state.status.clone();
         EntityActor::apply_field_update(state, &update.fields, update.replace).map_err(
             |error| {
@@ -166,6 +167,9 @@ pub(super) async fn apply_replayed_envelope(
             idempotency_key: update.idempotency_key,
         });
         advance_durable_tail(state, envelope.sequence_nr);
+        if let Some(idempotency_key) = idempotency_key.as_deref() {
+            state.record_durable_idempotency_key(idempotency_key, envelope.sequence_nr);
+        }
         return Ok(());
     }
 

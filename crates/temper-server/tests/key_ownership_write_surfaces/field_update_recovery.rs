@@ -2,7 +2,8 @@
 
 use super::*;
 use temper_runtime::persistence::{
-    EntityKeyRow, EventMetadata, IndexReconciliation, PersistenceEnvelope,
+    COMPOSITE_EVENT_TYPE, CompositeEvent, EntityKeyRow, EventMetadata, IndexReconciliation,
+    PersistenceEnvelope,
 };
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_server::entity_actor::types::{EntityEvent, MAX_EVENTS_SINCE_SNAPSHOT};
@@ -83,11 +84,20 @@ async fn field_update_idempotency_rejects_mismatched_live_intent() {
     );
 
     let token = "field-update-intent-live".to_string();
-    let fields = serde_json::json!({"WorkspaceId": "ws", "Path": "/first"});
+    let fields = serde_json::json!({
+        "WorkspaceId": "ws",
+        "Path": "/first",
+        "Metadata": {"z": 1, "a": 2}
+    });
     let first = update_with_idempotency(&actor, fields.clone(), false, token.clone()).await;
     assert!(first.success, "first PATCH failed: {:?}", first.error);
 
-    let exact_retry = update_with_idempotency(&actor, fields.clone(), false, token.clone()).await;
+    let reordered_fields = serde_json::json!({
+        "Metadata": {"a": 2, "z": 1},
+        "Path": "/first",
+        "WorkspaceId": "ws"
+    });
+    let exact_retry = update_with_idempotency(&actor, reordered_fields, false, token.clone()).await;
     assert!(
         exact_retry.success,
         "exact PATCH retry failed: {:?}",
@@ -141,7 +151,11 @@ async fn field_update_idempotency_rejects_mismatched_intent_after_restart() {
         "restart-intent",
     );
     let token = "field-update-intent-restart".to_string();
-    let fields = serde_json::json!({"WorkspaceId": "ws", "Path": "/first"});
+    let fields = serde_json::json!({
+        "WorkspaceId": "ws",
+        "Path": "/first",
+        "Metadata": {"z": 1, "a": 2}
+    });
     let first = update_with_idempotency(&actor, fields.clone(), false, token.clone()).await;
     assert!(first.success, "first PATCH failed: {:?}", first.error);
     drop(actor);
@@ -160,7 +174,13 @@ async fn field_update_idempotency_rejects_mismatched_intent_after_restart() {
         .with_tenant("default"),
         "restart-intent",
     );
-    let exact_retry = update_with_idempotency(&recovered, fields, false, token.clone()).await;
+    let reordered_fields = serde_json::json!({
+        "Metadata": {"a": 2, "z": 1},
+        "Path": "/first",
+        "WorkspaceId": "ws"
+    });
+    let exact_retry =
+        update_with_idempotency(&recovered, reordered_fields, false, token.clone()).await;
     assert!(
         exact_retry.success,
         "exact PATCH retry failed after restart: {:?}",
@@ -181,6 +201,83 @@ async fn field_update_idempotency_rejects_mismatched_intent_after_restart() {
     );
     assert_eq!(mismatched.state.fields["Path"], "/first");
     assert_eq!(mismatched.state.sequence_nr, first.state.sequence_nr);
+}
+
+/// Replay must bind a field-update key to its exact envelope even when an
+/// internal audit envelope consumed the preceding journal sequence.
+#[tokio::test]
+async fn field_update_idempotency_uses_exact_sequence_after_internal_envelope() {
+    let (_guard, _clock, _ids) = install_deterministic_context(294);
+    let sim = SimEventStore::no_faults(294);
+    let events = BoxedEventStore::new(sim.clone());
+    let persistence_id = "default:Doc:internal-before-field-update";
+    let metadata = |event_id| EventMetadata {
+        event_id,
+        causation_id: sim_uuid(),
+        correlation_id: sim_uuid(),
+        timestamp: sim_now(),
+        actor_id: persistence_id.to_string(),
+    };
+    let token = "field-update-after-internal".to_string();
+    let fields = serde_json::json!({"WorkspaceId": "ws", "Path": "/first"});
+    events
+        .append(
+            persistence_id,
+            0,
+            &[
+                PersistenceEnvelope {
+                    sequence_nr: 0,
+                    event_type: COMPOSITE_EVENT_TYPE.to_string(),
+                    payload: serde_json::to_value(CompositeEvent {
+                        tenant: "default".to_string(),
+                        parent_entity_type: "Doc".to_string(),
+                        parent_entity_id: "internal-before-field-update".to_string(),
+                        parent_action: "Audit".to_string(),
+                        composite_idempotency_key: "internal-audit".to_string(),
+                        intent_hash: "audit-intent".to_string(),
+                        sub_writes: vec![],
+                    })
+                    .expect("serialize composite audit"),
+                    metadata: metadata(sim_uuid()),
+                },
+                PersistenceEnvelope {
+                    sequence_nr: 0,
+                    event_type: "Temper.Internal.FieldUpdate.v1".to_string(),
+                    payload: serde_json::json!({
+                        "schema": "temper.field-update.v1",
+                        "fields": fields.clone(),
+                        "replace": false,
+                        "idempotency_key": token.clone()
+                    }),
+                    metadata: metadata(sim_uuid()),
+                },
+            ],
+        )
+        .await
+        .expect("seed internal and field-update envelopes");
+
+    let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(DOC_IOA)));
+    let system = ActorSystem::new("arn238-field-update-exact-sequence");
+    let actor = system.spawn(
+        EntityActor::with_persistence(
+            "Doc",
+            "internal-before-field-update",
+            table,
+            serde_json::json!({}),
+            events,
+            BackendLabel::Sim,
+        )
+        .with_tenant("default"),
+        "internal-before-field-update",
+    );
+    let exact_retry = update_with_idempotency(&actor, fields, false, token).await;
+    assert!(
+        exact_retry.success,
+        "exact retry must load the field-update envelope: {:?}",
+        exact_retry.error
+    );
+    assert_eq!(exact_retry.state.sequence_nr, 2);
+    assert_eq!(sim.dump_journal(persistence_id).len(), 2);
 }
 
 /// A same-sequence snapshot rewrite changes the legacy field baseline without

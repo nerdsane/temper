@@ -20,12 +20,15 @@ pub(super) struct PersistedFieldUpdate {
     pub(super) replace: bool,
     #[serde(default)]
     pub(super) idempotency_key: Option<String>,
+    #[serde(default)]
+    pub(super) intent_fingerprint: Option<String>,
 }
 
 struct FieldUpdatePersistence<'a> {
     fields: &'a serde_json::Value,
     replace: bool,
     idempotency_key: &'a str,
+    intent_fingerprint: &'a str,
     timestamp: chrono::DateTime<chrono::Utc>,
 }
 
@@ -77,6 +80,7 @@ impl EntityActor {
             fields: update.fields.clone(),
             replace: update.replace,
             idempotency_key: Some(update.idempotency_key.to_string()),
+            intent_fingerprint: Some(update.intent_fingerprint.to_string()),
         })
         .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
         let to_status = state.status.clone();
@@ -151,6 +155,7 @@ impl EntityActor {
         let timestamp = sim_now();
         let mut retries = 0;
         let table = self.table.read().expect("table lock poisoned").clone();
+        let intent_fingerprint = field_update_intent_fingerprint(&fields, replace)?;
 
         loop {
             // The append and the actor reply are separate observations. A retry
@@ -159,6 +164,30 @@ impl EntityActor {
             // payload below, so the duplicate returns the committed state without
             // spending another event-budget slot.
             if state.has_processed_idempotency_key(&idempotency_key) {
+                if !self
+                    .processed_field_update_matches_intent(
+                        state,
+                        &fields,
+                        replace,
+                        &idempotency_key,
+                        &intent_fingerprint,
+                    )
+                    .await?
+                {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(
+                            "idempotency key was already used for a different field update intent"
+                                .to_string(),
+                        ),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
                 ctx.reply(EntityResponse {
                     success: true,
                     state: state.clone(),
@@ -252,6 +281,7 @@ impl EntityActor {
                             fields: &fields,
                             replace,
                             idempotency_key: &idempotency_key,
+                            intent_fingerprint: &intent_fingerprint,
                             timestamp,
                         },
                     )
