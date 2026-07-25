@@ -138,14 +138,24 @@ resolution to three shapes, all producing a verified `SecurityContext`:
   (issuer allowlisted per tenant, standard OIDC ID-token validation) and loads
   principal attributes from the tenant's Member entity (see 3).
 
-  Human sessions are revocable everywhere at once (decided 2026-07-14): each
-  Member carries an `auth_generation` counter, every human token embeds the
-  value current at issuance, and verification rejects tokens carrying an
-  older generation — the same liveness pattern (and the same short-TTL cache)
-  the MCP adapter already uses for agent grant checks. "Sign out everywhere"
-  bumps the counter, invalidating every outstanding token for that human on
-  every device within the cache window. Agent tokens already behave this way
-  through grant revocation.
+  Human sessions are revocable everywhere at once (decided 2026-07-14). The
+  counter lives in a kernel-owned `PrincipalGeneration` entity keyed by the
+  principal's subject — **not** on the app's `Member` entity as this RFC
+  originally proposed, because the kernel is generic and cannot read an app's
+  entities; keeping it in the kernel makes revocation a platform capability
+  any app inherits (implemented 2026-07-19). Every human token embeds the
+  value current at issuance, and verification rejects an older generation —
+  a token that omits the claim counts as generation 0, so revocation cannot
+  be skipped by an issuer that fails to stamp it. "Sign out everywhere" bumps
+  the counter, and the app additionally revokes the human's live agent grants,
+  since an agent would otherwise refresh straight back in. The signed-in
+  session cookie carries and re-checks the same counter, so the human is
+  signed out on every device rather than merely losing API tokens.
+
+  The same counter, keyed by `grant_id`, carries per-agent revocation: any
+  bump means that grant is revoked. This closes the window in which a revoked
+  agent kept working directly against OData until its token expired, because
+  only the MCP front door had been checking grant liveness.
 - **Registered service credentials** (existing ADR-0033 path): the curation
   pipeline, SSR readers, and other app services each get their own
   `AgentCredential` instead of sharing the global key.
@@ -184,37 +194,34 @@ permit(principal, action == Action::"Publish", resource is DesignLanguage)
 
 Env-var allowlists like `KATAGAMI_OWNER_SUBS` retire.
 
-### 4. Authorization declared in the spec, compiled to Cedar
+### 4. Authorization declared in the spec — deferred, not shipped
 
-Hand-written permit-all files are how Katagami ended up open by default. An
-app's behavior is declared in its IOA spec (the TOML document that defines a
-Temper app's entities, state machines, and actions), so that spec is also
-where access requirements belong:
+This RFC originally proposed declaring access requirements on the IOA action
+itself (`requires_role = ["owner","curator"]`, `requires = "creator"`) and
+compiling them to Cedar at install. That was built and then **deliberately
+backed out** (decided 2026-07-25). Three reasons, in order of weight:
 
-```toml
-[[action]]
-name = "Publish"
-requires_role = ["owner", "curator"]
+1. **The spec format is changing.** The sugar and its parser were bound to
+   TOML; the spec language is being replaced, so this work would be rewritten
+   at that migration. Hand-written `.cedar` is format-independent and survives
+   it untouched. Authorization-in-spec belongs in the *design of the new
+   language*, where it can be genuinely expressive rather than sugar.
+2. **The contract was wrong in both directions.** Compiled as `forbid … unless
+   principal.role in [...]`, it excluded every principal *without* a role —
+   including service credentials — so it could not express this RFC's own
+   `Publish` example without locking out the curation pipeline. And
+   `requires = "creator"` compared `principal.id`, which for an agent is its
+   client id rather than the human it acts for, so an agent could never act on
+   its owner's behalf.
+3. **Two homes for one rule.** With hand-written `.cedar` still in place, the
+   same restriction could be expressed twice and drift.
 
-[[action]]
-name = "Withdraw"
-requires = "creator"        # resource.creator_sub == principal.sub
-```
-
-At install time the platform compiles these into Cedar policies. This
-compiler is new work: the existing Cedar-generation machinery
-(`crates/temper-authz/src/policy_gen.rs`) builds permits from
-principal/action/resource scope matrices for the denial-remediation flow, and
-would be extended — it has no resource-attribute or set-membership
-conditions, and no spec-install wiring today. Per-policy storage already
-exists (ADR-0032), and
-resource-attribute injection already puts entity fields like `creator_sub` on
-the Cedar resource, so creator rules evaluate without new engine surface.
-Actions with no declaration get no permit — the app's posture flips from
-permit-all with forbid overlays to default-deny with generated permits. That
-flip is only trustworthy once ARN-230's permit-all fallback on failed policy
-loads is fixed (see Risks). Hand-written `.cedar` files remain supported for
-policies the sugar cannot express.
+Authorization therefore has exactly one home today: hand-written per-entity
+`.cedar` files. Contributor boundaries there are expressed as `forbid … when
+{ principal.agent_type == "contributor" }` overlays on top of each entity's
+base permit, which is sound because Cedar's forbid always overrides permit.
+The removed compiler remains in the branch history for whoever picks up
+authorization-in-spec for the new format.
 
 ### 5. Front-end auth kit
 
@@ -273,16 +280,13 @@ depends on two deploys landing simultaneously.
    spec promoted to the platform; katagami.ai server actions call with
    per-user tokens; `KATAGAMI_OWNER_SUBS` retires. Unblocks ARN-248 (personal
    spaces need the kernel to know whose space is whose).
-4. **Platform authorization server + spec-compiled policies.** The AS moves
-   into the platform and katagami.ai's retires; `requires_role` / `requires`
-   sugar ships; new apps default to generated default-deny policies;
-   Katagami's hand-written permit-all files are migrated to spec declarations
-   in the same pass (they are the proof that the sugar covers a real app);
-   ARN-163's MCP resource server points at the platform AS.
-   *Prerequisite:* ARN-230's fail-open fallback is fixed and verified first —
-   a failed or missing tenant policy load must fail closed. Shipping
-   default-deny generation on top of a permit-all fallback would silently
-   reopen every action the spec intended to deny whenever a load fails.
+4. **Platform authorization server.** The AS moves into the platform and
+   katagami.ai's retires; ARN-163's MCP resource server points at the platform
+   AS. Spec-declared authorization is *not* part of this step — see section 4;
+   it is deferred to the design of the replacement spec language.
+   *Prerequisite for any default-deny posture:* ARN-230's fail-open fallback
+   must be fixed and verified first — a failed or missing tenant policy load
+   has to fail closed, or a load failure silently reopens everything.
 
 ## Consequences
 
@@ -310,9 +314,11 @@ depends on two deploys landing simultaneously.
 - **Migration breakage.** Katagami is live; each rollout step changes a live
   credential path. Every step needs the local end-to-end run against a seeded
   server before deploy, per the standing definition of done.
-- **Spec sugar scope creep.** `requires_role` / `requires = "creator"` covers
-  the audited needs; resisting a policy-language-in-TOML is deliberate.
-  Anything more complex is a hand-written Cedar file.
+- **Authorization-in-spec, when it returns.** The removed sugar failed on
+  service principals and on agents acting for a human. Whatever replaces it in
+  the new spec language must state, up front, how it treats a principal with
+  no role and an agent acting on someone's behalf — and must not become a
+  second home for rules that already live in Cedar.
 - **Fail-open regressions.** ARN-230's finding (missing tenant policies fall
   back to permit-all) must be fixed before default-deny generation can be
   trusted; otherwise a failed policy load reopens everything.
