@@ -365,6 +365,12 @@ impl EntityActor {
             state.push_event_bounded(event);
             if self.event_journal.is_some() {
                 state.record_durable_idempotency_key(&idempotency_key, state.sequence_nr);
+            } else {
+                self.record_in_memory_field_update_intent(
+                    state,
+                    &idempotency_key,
+                    &intent_fingerprint,
+                );
             }
             self.record_state_key_contract(&table);
             let persistence_id = self.persistence_id();

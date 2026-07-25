@@ -42,8 +42,8 @@ use super::effects::{
 };
 use super::snapshot_queue::{SnapshotEnqueueOutcome, SnapshotWriteQueue};
 use super::types::{
-    EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_SINCE_SNAPSHOT,
-    MAX_ITEMS_PER_ENTITY,
+    EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_DURABLE_IDEMPOTENCY_KEYS_PER_ENTITY,
+    MAX_EVENTS_SINCE_SNAPSHOT, MAX_ITEMS_PER_ENTITY,
 };
 
 mod field_update_idempotency;
@@ -236,6 +236,11 @@ pub struct EntityActor {
     /// executing an action whose `idempotency_key` is set, so dispatch-layer
     /// retries that race past the caller's timeout cannot double-execute.
     idempotency_cache: Option<Arc<crate::idempotency::IdempotencyCache>>,
+    /// Canonical PATCH/PUT intent fingerprints retained for memory-only actors.
+    ///
+    /// Each fingerprint is bound to the retained token's sequence because token
+    /// text may be reused after eviction from the shared idempotency window.
+    in_memory_field_update_intents: Arc<RwLock<BTreeMap<String, (u64, String)>>>,
     /// Object store for field-overflow blob bytes. SQL stores only refs.
     blob_store: Option<crate::blob_store::BlobStore>,
 }
@@ -402,6 +407,7 @@ impl EntityActor {
             event_backend: None,
             trace_id: sim_uuid().to_string(),
             idempotency_cache: None,
+            in_memory_field_update_intents: Arc::new(RwLock::new(BTreeMap::new())),
             blob_store: None,
         }
     }
@@ -428,6 +434,7 @@ impl EntityActor {
             event_backend: Some(backend),
             trace_id: sim_uuid().to_string(),
             idempotency_cache: None,
+            in_memory_field_update_intents: Arc::new(RwLock::new(BTreeMap::new())),
             blob_store: None,
         }
     }

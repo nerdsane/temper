@@ -41,6 +41,41 @@ pub(super) fn field_update_intent_fingerprint(
 }
 
 impl EntityActor {
+    pub(super) fn record_in_memory_field_update_intent(
+        &self,
+        state: &EntityState,
+        idempotency_key: &str,
+        intent_fingerprint: &str,
+    ) {
+        if self.event_journal.is_some() {
+            return;
+        }
+
+        let sequence = state
+            .processed_idempotency_keys
+            .get(idempotency_key)
+            .copied()
+            .expect("field-update event must record its idempotency key");
+        let mut intents = self
+            .in_memory_field_update_intents
+            .write()
+            .expect("in-memory field-update intents lock poisoned");
+        intents.insert(
+            idempotency_key.to_string(),
+            (sequence, intent_fingerprint.to_string()),
+        );
+        while intents.len() > MAX_DURABLE_IDEMPOTENCY_KEYS_PER_ENTITY {
+            let Some(oldest_key) = intents
+                .iter()
+                .min_by_key(|(_, (sequence, _))| *sequence)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            intents.remove(&oldest_key);
+        }
+    }
+
     pub(super) async fn processed_field_update_matches_intent(
         &self,
         state: &EntityState,
@@ -61,6 +96,14 @@ impl EntityActor {
             })?;
 
         let Some(store) = self.event_journal.as_ref() else {
+            if let Some((stored_sequence, stored_fingerprint)) = self
+                .in_memory_field_update_intents
+                .read()
+                .expect("in-memory field-update intents lock poisoned")
+                .get(idempotency_key)
+            {
+                return Ok(*stored_sequence == sequence && stored_fingerprint == intent_fingerprint);
+            }
             let Some(event) = state
                 .events
                 .iter()
