@@ -42,6 +42,7 @@ mod tests {
             include_str!("../migrations/0011_key_index_watermark_key_set.sql"),
             include_str!("../migrations/0012_entity_vector_index.sql"),
             include_str!("../migrations/0013_monotonic_vector_reconciliation.sql"),
+            include_str!("../migrations/0014_versioned_spec_staging.sql"),
         ]
         .join("\n")
         .to_lowercase();
@@ -63,6 +64,7 @@ mod tests {
             "entity_vector_index_version",
             "entity_vector_reconciliation_generation",
             "spec_declaration_authority",
+            "staged_specs",
         ] {
             assert!(
                 migration.contains(&format!("create table if not exists {table}")),

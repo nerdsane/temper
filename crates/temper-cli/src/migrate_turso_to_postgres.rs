@@ -432,7 +432,10 @@ async fn migrate_specs(
             .filter(|hash| !hash.is_empty())
             .unwrap_or_else(|| spec_content_hash(&row.ioa_source));
         sqlx::query(
-            "INSERT INTO specs \
+            "WITH cleared_staging AS ( \
+                 DELETE FROM staged_specs WHERE tenant = $1 AND entity_type = $2 \
+             ) \
+             INSERT INTO specs \
              (tenant, entity_type, ioa_source, csdl_xml, version, verified, verification_status, \
               levels_passed, levels_total, verification_result, content_hash, committed, updated_at) \
              VALUES ($1, $2, $3, $4, 1, $5, $6, $7, $8, $9, $10, $11, $12) \
@@ -2077,6 +2080,23 @@ mod tests {
             .await
             .expect("put source blob");
 
+        let pool = PgPool::connect(&database_url).await.expect("target pool");
+        temper_store_postgres::migration::run_migrations(&pool)
+            .await
+            .expect("target migrations");
+        sqlx::query(
+            "INSERT INTO staged_specs \
+             (tenant, entity_type, ioa_source, csdl_xml, content_hash, version, updated_at) \
+             VALUES ($1, 'SmokeEntity', 'stale staged bytes', '<Stale />', 'stale-hash', 1, now()) \
+             ON CONFLICT (tenant, entity_type) DO UPDATE SET \
+                 ioa_source = EXCLUDED.ioa_source, csdl_xml = EXCLUDED.csdl_xml, \
+                 content_hash = EXCLUDED.content_hash, updated_at = now()",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed stale target staging");
+
         run(MigrationOptions {
             tenant: tenant.clone(),
             dry_run: false,
@@ -2090,7 +2110,15 @@ mod tests {
         .await
         .expect("run migration");
 
-        let pool = PgPool::connect(&database_url).await.expect("target pool");
+        let stale_staged_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM staged_specs \
+             WHERE tenant = $1 AND entity_type = 'SmokeEntity'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("count stale staging");
+        assert_eq!(stale_staged_count, 0);
         let event_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*)::bigint FROM events WHERE tenant = $1")
                 .bind(&tenant)

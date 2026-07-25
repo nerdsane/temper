@@ -1050,21 +1050,15 @@ impl PostgresEventStore {
         content_hash: &str,
     ) -> Result<(), PersistenceError> {
         crate::dbm::postgres_query!(
-            "INSERT INTO specs \
-             (tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version, verified, verification_status, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, false, 1, false, 'pending', now()) \
+            "INSERT INTO staged_specs \
+             (tenant, entity_type, ioa_source, csdl_xml, content_hash, version, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, 1, now()) \
              ON CONFLICT (tenant, entity_type) DO UPDATE SET \
-                 ioa_source = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN EXCLUDED.ioa_source ELSE specs.ioa_source END, \
-                 csdl_xml = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN EXCLUDED.csdl_xml ELSE specs.csdl_xml END, \
-                 content_hash = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN EXCLUDED.content_hash ELSE specs.content_hash END, \
-                 committed = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN false ELSE specs.committed END, \
-                 version = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN specs.version + 1 ELSE specs.version END, \
-                 verified = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN false ELSE specs.verified END, \
-                 verification_status = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN 'pending' ELSE specs.verification_status END, \
-                 levels_passed = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN NULL ELSE specs.levels_passed END, \
-                 levels_total = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN NULL ELSE specs.levels_total END, \
-                 verification_result = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN NULL ELSE specs.verification_result END, \
-                 updated_at = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN now() ELSE specs.updated_at END",
+                 ioa_source = EXCLUDED.ioa_source, \
+                 csdl_xml = EXCLUDED.csdl_xml, \
+                 content_hash = EXCLUDED.content_hash, \
+                 version = CASE WHEN staged_specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR staged_specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN staged_specs.version + 1 ELSE staged_specs.version END, \
+                 updated_at = CASE WHEN staged_specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR staged_specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN now() ELSE staged_specs.updated_at END",
         )
         .bind(tenant)
         .bind(entity_type)
@@ -1094,23 +1088,90 @@ impl PostgresEventStore {
         tenant: &str,
         entity_type: &str,
     ) -> Result<(), PersistenceError> {
-        crate::dbm::postgres_query!("SELECT tombstone_spec_declaration_authority($1, $2)",)
-            .bind(tenant)
-            .bind(entity_type)
-            .execute(self.pool())
-            .await
-            .map_err(storage_error)?;
+        crate::dbm::postgres_query!(
+            "WITH staged AS ( \
+                 DELETE FROM staged_specs WHERE tenant = $1 AND entity_type = $2 \
+             ) SELECT tombstone_spec_declaration_authority($1, $2)"
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
         Ok(())
     }
 
     pub async fn commit_specs(&self, tenant: &str) -> Result<(), PersistenceError> {
         crate::dbm::postgres_query!(
-            "UPDATE specs SET committed = true, updated_at = now() WHERE tenant = $1"
+            "WITH staged AS ( \
+                 DELETE FROM staged_specs WHERE tenant = $1 RETURNING * \
+             ) \
+             INSERT INTO specs \
+                 (tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version, verified, verification_status, updated_at) \
+             SELECT tenant, entity_type, ioa_source, csdl_xml, content_hash, true, version, false, 'pending', now() \
+             FROM staged \
+             ON CONFLICT (tenant, entity_type) DO UPDATE SET \
+                 ioa_source = EXCLUDED.ioa_source, csdl_xml = EXCLUDED.csdl_xml, \
+                 content_hash = EXCLUDED.content_hash, committed = true, \
+                 version = specs.version + 1, verified = false, verification_status = 'pending', \
+                 levels_passed = NULL, levels_total = NULL, verification_result = NULL, updated_at = now()"
         )
         .bind(tenant)
         .execute(self.pool())
         .await
         .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Atomically promote only staged specs matching one operation's exact bytes.
+    pub async fn commit_spec_batch(
+        &self,
+        tenant: &str,
+        expected: &[(&str, &str, &str)],
+    ) -> Result<(), PersistenceError> {
+        let mut expected = expected.to_vec();
+        expected.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        if expected.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(PersistenceError::Storage(format!(
+                "duplicate spec batch entity type for tenant {tenant}"
+            )));
+        }
+        let mut tx = self.pool().begin().await.map_err(storage_error)?;
+        for (entity_type, content_hash, csdl_xml) in expected {
+            let result = sqlx::query(
+                "WITH staged AS ( \
+                     DELETE FROM staged_specs \
+                     WHERE tenant = $1 AND entity_type = $2 AND content_hash = $3 \
+                       AND csdl_xml IS NOT DISTINCT FROM $4 \
+                     RETURNING * \
+                 ) \
+                 INSERT INTO specs \
+                     (tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version, \
+                      verified, verification_status, updated_at) \
+                 SELECT tenant, entity_type, ioa_source, csdl_xml, content_hash, true, version, \
+                        false, 'pending', now() \
+                 FROM staged \
+                 ON CONFLICT (tenant, entity_type) DO UPDATE SET \
+                     ioa_source = EXCLUDED.ioa_source, csdl_xml = EXCLUDED.csdl_xml, \
+                     content_hash = EXCLUDED.content_hash, committed = true, \
+                     version = specs.version + 1, verified = false, \
+                     verification_status = 'pending', levels_passed = NULL, \
+                     levels_total = NULL, verification_result = NULL, updated_at = now()",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(content_hash)
+            .bind(csdl_xml)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+            if result.rows_affected() != 1 {
+                return Err(PersistenceError::Storage(format!(
+                    "staged spec fingerprint changed for {tenant}/{entity_type}"
+                )));
+            }
+        }
+        tx.commit().await.map_err(storage_error)?;
         Ok(())
     }
 
@@ -1120,26 +1181,46 @@ impl PostgresEventStore {
         tenant: &str,
         entity_type: &str,
         expected_content_hash: &str,
+        expected_csdl_xml: &str,
         update: PostgresSpecVerificationUpdate<'_>,
     ) -> Result<(), PersistenceError> {
         let verification_result = parse_optional_json(update.verification_result_json)?;
-        let result = crate::dbm::postgres_query!(
-            "UPDATE specs SET verification_status = $4, verified = $5, levels_passed = $6, \
-             levels_total = $7, verification_result = $8, committed = true, updated_at = now() \
-             WHERE tenant = $1 AND entity_type = $2 AND content_hash = $3"
+        let rows: Vec<(i64,)> = crate::dbm::postgres_query_as!(
+            "WITH staged AS ( \
+                 DELETE FROM staged_specs \
+                 WHERE tenant = $1 AND entity_type = $2 AND content_hash = $3 \
+                   AND csdl_xml IS NOT DISTINCT FROM $4 \
+                 RETURNING * \
+             ), published AS ( \
+                 INSERT INTO specs \
+                     (tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version, verified, \
+                      verification_status, levels_passed, levels_total, verification_result, updated_at) \
+                 SELECT tenant, entity_type, ioa_source, csdl_xml, content_hash, true, version, $6, \
+                        $5, $7, $8, $9, now() \
+                 FROM staged \
+                 ON CONFLICT (tenant, entity_type) DO UPDATE SET \
+                     ioa_source = EXCLUDED.ioa_source, csdl_xml = EXCLUDED.csdl_xml, \
+                     content_hash = EXCLUDED.content_hash, committed = true, \
+                     version = specs.version + 1, verified = EXCLUDED.verified, \
+                     verification_status = EXCLUDED.verification_status, \
+                     levels_passed = EXCLUDED.levels_passed, levels_total = EXCLUDED.levels_total, \
+                     verification_result = EXCLUDED.verification_result, updated_at = now() \
+                 RETURNING 1 \
+             ) SELECT COUNT(*)::bigint FROM published"
         )
         .bind(tenant)
         .bind(entity_type)
         .bind(expected_content_hash)
+        .bind(expected_csdl_xml)
         .bind(update.status)
         .bind(update.verified)
         .bind(update.levels_passed)
         .bind(update.levels_total)
         .bind(verification_result)
-        .execute(self.pool())
+        .fetch_all(self.pool())
         .await
         .map_err(storage_error)?;
-        if result.rows_affected() != 1 {
+        if rows.first().map(|row| row.0) != Some(1) {
             return Err(PersistenceError::Storage(format!(
                 "staged spec fingerprint changed for {tenant}/{entity_type}"
             )));
@@ -1148,11 +1229,15 @@ impl PostgresEventStore {
     }
 
     pub async fn delete_uncommitted_specs(&self) -> Result<usize, PersistenceError> {
-        let result = crate::dbm::postgres_query!("DELETE FROM specs WHERE committed = false")
-            .execute(self.pool())
-            .await
-            .map_err(storage_error)?;
-        Ok(result.rows_affected() as usize)
+        let rows: Vec<(i64,)> = crate::dbm::postgres_query_as!(
+            "WITH staged AS (DELETE FROM staged_specs RETURNING 1), \
+                  legacy AS (DELETE FROM specs WHERE committed = false RETURNING 1) \
+             SELECT (SELECT COUNT(*) FROM staged) + (SELECT COUNT(*) FROM legacy)"
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.first().map(|row| row.0).unwrap_or_default() as usize)
     }
 
     pub async fn load_verification_cache(

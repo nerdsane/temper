@@ -5,6 +5,62 @@ use super::super::ServerState;
 use super::TenantMetadataBackend;
 use crate::registry::EntityVerificationResult;
 
+async fn stage_postgres_spec_source(
+    pool: &sqlx::PgPool,
+    tenant: &str,
+    entity_type: &str,
+    ioa_source: &str,
+    csdl_xml: &str,
+    content_hash: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO staged_specs \
+         (tenant, entity_type, ioa_source, csdl_xml, content_hash, version, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, 1, now()) \
+         ON CONFLICT (tenant, entity_type) DO UPDATE SET \
+             ioa_source = EXCLUDED.ioa_source, \
+             csdl_xml = EXCLUDED.csdl_xml, \
+             content_hash = EXCLUDED.content_hash, \
+             version = CASE \
+                 WHEN staged_specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash \
+                   OR staged_specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml \
+                 THEN staged_specs.version + 1 \
+                 ELSE staged_specs.version \
+             END, \
+             updated_at = CASE \
+                 WHEN staged_specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash \
+                   OR staged_specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml \
+                 THEN now() \
+                 ELSE staged_specs.updated_at \
+             END",
+    )
+    .bind(tenant)
+    .bind(entity_type)
+    .bind(ioa_source)
+    .bind(csdl_xml)
+    .bind(content_hash)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
+async fn delete_postgres_spec_source(
+    pool: &sqlx::PgPool,
+    tenant: &str,
+    entity_type: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "WITH staged AS ( \
+             DELETE FROM staged_specs WHERE tenant = $1 AND entity_type = $2 \
+         ) SELECT tombstone_spec_declaration_authority($1, $2)",
+    )
+    .bind(tenant)
+    .bind(entity_type)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
 impl ServerState {
     /// Upsert a spec source into the persistence backend (Postgres or Turso).
     pub async fn upsert_spec_source(
@@ -17,33 +73,18 @@ impl ServerState {
         let content_hash = temper_store_turso::spec_content_hash(ioa_source);
         if let Some(backend) = self.tenant_metadata_backend(tenant).await {
             match backend {
-                TenantMetadataBackend::Postgres(pool) => {
-                sqlx::query(
-                    "INSERT INTO specs \
-                     (tenant, entity_type, ioa_source, csdl_xml, content_hash, version, verified, verification_status, updated_at) \
-                     VALUES ($1, $2, $3, $4, $5, 1, false, 'pending', now()) \
-                     ON CONFLICT (tenant, entity_type) DO UPDATE SET \
-                         ioa_source = EXCLUDED.ioa_source, \
-                         csdl_xml = EXCLUDED.csdl_xml, \
-                         content_hash = EXCLUDED.content_hash, \
-                         version = specs.version + 1, \
-                         verified = false, \
-                         verification_status = 'pending', \
-                         levels_passed = NULL, \
-                         levels_total = NULL, \
-                         verification_result = NULL, \
-                         updated_at = now()",
+                TenantMetadataBackend::Postgres(pool) => stage_postgres_spec_source(
+                    &pool,
+                    tenant,
+                    entity_type,
+                    ioa_source,
+                    csdl_xml,
+                    &content_hash,
                 )
-                .bind(tenant)
-                .bind(entity_type)
-                .bind(ioa_source)
-                .bind(csdl_xml)
-                .bind(&content_hash)
-                .execute(&pool)
                 .await
-                .map(|_| ())
-                .map_err(|e| format!("failed to upsert spec {tenant}/{entity_type} in postgres: {e}"))
-                }
+                .map_err(|e| {
+                    format!("failed to upsert spec {tenant}/{entity_type} in postgres: {e}")
+                }),
                 TenantMetadataBackend::Turso(turso) => turso
                     .upsert_spec(tenant, entity_type, ioa_source, csdl_xml, &content_hash)
                     .await
@@ -65,12 +106,8 @@ impl ServerState {
         if let Some(backend) = self.tenant_metadata_backend(tenant).await {
             match backend {
                 TenantMetadataBackend::Postgres(pool) => {
-                    sqlx::query("SELECT tombstone_spec_declaration_authority($1, $2)")
-                        .bind(tenant)
-                        .bind(entity_type)
-                        .execute(&pool)
+                    delete_postgres_spec_source(&pool, tenant, entity_type)
                         .await
-                        .map(|_| ())
                         .map_err(|e| {
                             format!("failed to delete spec {tenant}/{entity_type} in postgres: {e}")
                         })
@@ -224,5 +261,81 @@ impl ServerState {
             }
             TenantMetadataBackend::Redis => Err(Self::redis_ephemeral_error("Spec verification persistence")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use temper_store_postgres::{
+        PostgresEventStore, PostgresSpecVerificationUpdate, migration::run_migrations,
+    };
+
+    use super::{delete_postgres_spec_source, stage_postgres_spec_source};
+
+    #[test]
+    fn postgres_hot_update_and_delete_fence_stale_verification() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        sqlx::__rt::test_block_on(async {
+            let pool = sqlx::PgPool::connect(&database_url).await.expect("connect");
+            run_migrations(&pool).await.expect("migrate");
+            let store = PostgresEventStore::new(pool.clone());
+            let tenant = format!("tenant-server-spec-race-{}", uuid::Uuid::new_v4());
+            let ioa_a = "[automaton]\nname = \"Item\"\n# a\n";
+            let ioa_b = "[automaton]\nname = \"Item\"\n# b\n";
+            let csdl = "<Schema Namespace=\"Temper.Tests\" />";
+            let hash_a = temper_store_turso::spec_content_hash(ioa_a);
+            let hash_b = temper_store_turso::spec_content_hash(ioa_b);
+            let verified = || PostgresSpecVerificationUpdate {
+                status: "completed",
+                verified: true,
+                levels_passed: None,
+                levels_total: None,
+                verification_result_json: None,
+            };
+
+            stage_postgres_spec_source(&pool, &tenant, "Item", ioa_a, csdl, &hash_a)
+                .await
+                .expect("stage A through server path");
+            store
+                .commit_verified_spec(&tenant, "Item", &hash_a, csdl, verified())
+                .await
+                .expect("commit A");
+            stage_postgres_spec_source(&pool, &tenant, "Item", ioa_b, csdl, &hash_b)
+                .await
+                .expect("stage B through server path");
+            store
+                .commit_verified_spec(&tenant, "Item", &hash_a, csdl, verified())
+                .await
+                .expect_err("stale A verification must not publish B");
+
+            let committed: (String,) = sqlx::query_as(
+                "SELECT content_hash FROM specs WHERE tenant = $1 AND entity_type = 'Item'",
+            )
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("read committed A");
+            assert_eq!(committed.0, hash_a);
+
+            delete_postgres_spec_source(&pool, &tenant, "Item")
+                .await
+                .expect("delete through server path");
+            store
+                .commit_verified_spec(&tenant, "Item", &hash_b, csdl, verified())
+                .await
+                .expect_err("stale B verification must not resurrect deletion");
+            let remaining: (i64,) = sqlx::query_as(
+                "SELECT \
+                    (SELECT COUNT(*) FROM specs WHERE tenant = $1 AND entity_type = 'Item') + \
+                    (SELECT COUNT(*) FROM staged_specs WHERE tenant = $1 AND entity_type = 'Item')",
+            )
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("count remaining catalog rows");
+            assert_eq!(remaining.0, 0);
+        });
     }
 }

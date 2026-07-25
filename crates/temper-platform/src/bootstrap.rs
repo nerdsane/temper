@@ -319,6 +319,7 @@ pub(crate) async fn persist_bootstrap_verification(
                 tenant,
                 entity_type,
                 content_hash,
+                csdl_source,
                 SpecVerificationUpdate {
                     status: "completed",
                     verified: true,

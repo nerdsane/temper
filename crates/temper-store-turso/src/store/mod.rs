@@ -152,6 +152,9 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_SPECS_TABLE, ())
             .await
             .map_err(storage_error)?;
+        conn.execute(schema::CREATE_STAGED_SPECS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
         conn.execute(schema::CREATE_TRAJECTORIES_TABLE, ())
             .await
             .map_err(storage_error)?;
@@ -287,6 +290,22 @@ impl TursoEventStore {
         // Specs table extensions — add content_hash column for verification caching.
         let _ = conn.execute(schema::ALTER_SPECS_ADD_CONTENT_HASH, ()).await;
         let _ = conn.execute(schema::ALTER_SPECS_ADD_COMMITTED, ()).await;
+        conn.execute(
+            "INSERT INTO staged_specs \
+                 (tenant, entity_type, ioa_source, csdl_xml, content_hash, version, updated_at) \
+             SELECT tenant, entity_type, ioa_source, csdl_xml, content_hash, version, updated_at \
+             FROM specs WHERE committed = 0 \
+             ON CONFLICT (tenant, entity_type) DO UPDATE SET \
+                 ioa_source = excluded.ioa_source, csdl_xml = excluded.csdl_xml, \
+                 content_hash = excluded.content_hash, version = excluded.version, \
+                 updated_at = excluded.updated_at",
+            (),
+        )
+        .await
+        .map_err(storage_error)?;
+        conn.execute("DELETE FROM specs WHERE committed = 0", ())
+            .await
+            .map_err(storage_error)?;
 
         // Trajectory table extensions — ALTER TABLE to add missing columns.
         // SQLite returns an error for duplicate columns, so we ignore failures.

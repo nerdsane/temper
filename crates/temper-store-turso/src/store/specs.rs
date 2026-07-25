@@ -37,45 +37,21 @@ impl TursoEventStore {
             .acquire_write_permit("turso.upsert_spec", WritePriority::High)
             .await?;
         let conn = self.configured_connection().await?;
-        // When content_hash matches the existing row, keep verification intact.
-        // Otherwise reset to pending so the cascade re-runs.
+        // Staging is versioned separately so an interrupted verifier cannot
+        // overwrite the last committed, restorable catalog row.
         conn.execute(
-            "INSERT INTO specs (tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version, verified, verification_status, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, 1, 0, 'pending', datetime('now'))
+            "INSERT INTO staged_specs (tenant, entity_type, ioa_source, csdl_xml, content_hash, version, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, datetime('now'))
              ON CONFLICT (tenant, entity_type) DO UPDATE SET
-                 ioa_source = CASE
-                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
-                     THEN excluded.ioa_source ELSE specs.ioa_source END,
-                 csdl_xml = CASE
-                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
-                     THEN excluded.csdl_xml ELSE specs.csdl_xml END,
-                 content_hash = CASE
-                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
-                     THEN excluded.content_hash ELSE specs.content_hash END,
-                 committed = CASE
-                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
-                     THEN 0 ELSE specs.committed END,
+                 ioa_source = excluded.ioa_source,
+                 csdl_xml = excluded.csdl_xml,
+                 content_hash = excluded.content_hash,
                  version = CASE
-                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
-                     THEN specs.version + 1 ELSE specs.version END,
-                 verified = CASE
-                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
-                     THEN 0 ELSE specs.verified END,
-                 verification_status = CASE
-                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
-                     THEN 'pending' ELSE specs.verification_status END,
-                 levels_passed = CASE
-                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
-                     THEN NULL ELSE specs.levels_passed END,
-                 levels_total = CASE
-                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
-                     THEN NULL ELSE specs.levels_total END,
-                 verification_result = CASE
-                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
-                     THEN NULL ELSE specs.verification_result END,
+                     WHEN staged_specs.content_hash IS NOT excluded.content_hash OR staged_specs.csdl_xml IS NOT excluded.csdl_xml
+                     THEN staged_specs.version + 1 ELSE staged_specs.version END,
                  updated_at = CASE
-                     WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
-                     THEN datetime('now') ELSE specs.updated_at END",
+                     WHEN staged_specs.content_hash IS NOT excluded.content_hash OR staged_specs.csdl_xml IS NOT excluded.csdl_xml
+                     THEN datetime('now') ELSE staged_specs.updated_at END",
             params![tenant, entity_type, ioa_source, csdl_xml, content_hash],
         )
         .await
@@ -117,6 +93,8 @@ impl TursoEventStore {
                 .query(
                     "SELECT entity_type FROM specs WHERE tenant = ?1 \
                      UNION \
+                     SELECT entity_type FROM staged_specs WHERE tenant = ?1 \
+                     UNION \
                      SELECT entity_type FROM spec_declaration_authority \
                      WHERE tenant = ?1 AND present = 1 \
                      ORDER BY entity_type",
@@ -144,6 +122,12 @@ impl TursoEventStore {
         let removed_entity_types = removed_entity_types.into_iter().collect::<Vec<_>>();
 
         for (entity_type, ioa_source, content_hash) in specs {
+            tx.execute(
+                "DELETE FROM staged_specs WHERE tenant = ?1 AND entity_type = ?2",
+                params![tenant, entity_type],
+            )
+            .await
+            .map_err(storage_error)?;
             tx.execute(
                 "INSERT INTO specs \
                  (tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version, verified, verification_status, updated_at) \
@@ -214,20 +198,38 @@ impl TursoEventStore {
         let policy_needs_write = Self::tenant_policy_needs_write(&conn, tenant, policy).await?;
         let app_needs_write = Self::installed_app_needs_write(&conn, tenant, app_name).await?;
 
-        if spec_indices.is_empty() && !policy_needs_write && !app_needs_write {
+        if specs.is_empty() && !policy_needs_write && !app_needs_write {
             return Ok(());
         }
 
-        let _write_permit = self
-            .acquire_write_permit("turso.upsert_specs_and_commit", WritePriority::High)
-            .await?;
+        let needs_gated_write = !spec_indices.is_empty() || policy_needs_write || app_needs_write;
+        let _write_permit = if needs_gated_write {
+            Some(
+                self.acquire_write_permit("turso.upsert_specs_and_commit", WritePriority::High)
+                    .await?,
+            )
+        } else {
+            None
+        };
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(storage_error)?;
 
-        for index in spec_indices {
-            let (entity_type, ioa_source, csdl_xml, content_hash) = specs[index];
+        // The transaction is the linearization point even when every committed
+        // input is byte-identical. A verifier may have staged conflicting bytes
+        // on another replica after the preflight reads; the authoritative app
+        // write supersedes every such candidate.
+        for (entity_type, _, _, _) in specs {
+            tx.execute(
+                "DELETE FROM staged_specs WHERE tenant = ?1 AND entity_type = ?2",
+                params![tenant, entity_type],
+            )
+            .await
+            .map_err(storage_error)?;
+        }
+
+        for (entity_type, ioa_source, csdl_xml, content_hash) in specs {
             tx.execute(
                 "INSERT INTO specs (tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version, verified, verification_status, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, 0, 'pending', datetime('now'))
@@ -434,6 +436,12 @@ impl TursoEventStore {
                 .map_err(storage_error)?
                 .unwrap_or(false)
         };
+        tx.execute(
+            "DELETE FROM staged_specs WHERE tenant = ?1 AND entity_type = ?2",
+            params![tenant, entity_type],
+        )
+        .await
+        .map_err(storage_error)?;
         tx.execute(
             "DELETE FROM specs WHERE tenant = ?1 AND entity_type = ?2",
             params![tenant, entity_type],
@@ -791,6 +799,8 @@ impl TursoEventStore {
             .query(
                 "SELECT entity_type FROM specs WHERE tenant = ?1 \
                  UNION \
+                 SELECT entity_type FROM staged_specs WHERE tenant = ?1 \
+                 UNION \
                  SELECT entity_type FROM spec_declaration_authority \
                  WHERE tenant = ?1 AND present != 0 \
                  ORDER BY entity_type",
@@ -857,12 +867,110 @@ impl TursoEventStore {
     pub async fn commit_specs(&self, tenant: &str) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.commit_specs");
         let conn = self.configured_connection().await?;
-        conn.execute(
-            "UPDATE specs SET committed = 1, updated_at = datetime('now') WHERE tenant = ?1 AND committed != 1",
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+        tx.execute(
+            "INSERT INTO specs (
+                 tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version,
+                 verified, verification_status, updated_at
+             )
+             SELECT tenant, entity_type, ioa_source, csdl_xml, content_hash, 1, version,
+                    0, 'pending', datetime('now')
+             FROM staged_specs WHERE tenant = ?1
+             ON CONFLICT (tenant, entity_type) DO UPDATE SET
+                 ioa_source = excluded.ioa_source,
+                 csdl_xml = excluded.csdl_xml,
+                 content_hash = excluded.content_hash,
+                 committed = 1,
+                 version = specs.version + 1,
+                 verified = 0,
+                 verification_status = 'pending',
+                 levels_passed = NULL,
+                 levels_total = NULL,
+                 verification_result = NULL,
+                 updated_at = datetime('now')",
             params![tenant],
         )
         .await
         .map_err(storage_error)?;
+        tx.execute(
+            "DELETE FROM staged_specs WHERE tenant = ?1",
+            params![tenant],
+        )
+        .await
+        .map_err(storage_error)?;
+        tx.commit().await.map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Atomically promote only staged specs matching one operation's exact bytes.
+    #[instrument(skip_all, fields(tenant, otel.name = "turso.commit_spec_batch"))]
+    pub async fn commit_spec_batch(
+        &self,
+        tenant: &str,
+        expected: &[(&str, &str, &str)],
+    ) -> Result<(), PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.commit_spec_batch");
+        let mut expected = expected.to_vec();
+        expected.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        if expected.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(PersistenceError::Storage(format!(
+                "duplicate spec batch entity type for tenant {tenant}"
+            )));
+        }
+        let _write_permit = self
+            .acquire_write_permit("turso.commit_spec_batch", WritePriority::High)
+            .await?;
+        let conn = self.configured_connection().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+        for (entity_type, content_hash, csdl_xml) in expected {
+            let promoted = tx
+                .execute(
+                    "INSERT INTO specs (
+                         tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version,
+                         verified, verification_status, updated_at
+                     )
+                     SELECT tenant, entity_type, ioa_source, csdl_xml, content_hash, 1, version,
+                            0, 'pending', datetime('now')
+                     FROM staged_specs
+                     WHERE tenant = ?1 AND entity_type = ?2 AND content_hash = ?3
+                       AND csdl_xml IS ?4
+                     ON CONFLICT (tenant, entity_type) DO UPDATE SET
+                         ioa_source = excluded.ioa_source,
+                         csdl_xml = excluded.csdl_xml,
+                         content_hash = excluded.content_hash,
+                         committed = 1,
+                         version = specs.version + 1,
+                         verified = 0,
+                         verification_status = 'pending',
+                         levels_passed = NULL,
+                         levels_total = NULL,
+                         verification_result = NULL,
+                         updated_at = datetime('now')",
+                    params![tenant, entity_type, content_hash, csdl_xml],
+                )
+                .await
+                .map_err(storage_error)?;
+            if promoted != 1 {
+                return Err(PersistenceError::Storage(format!(
+                    "staged spec fingerprint changed for {tenant}/{entity_type}"
+                )));
+            }
+            tx.execute(
+                "DELETE FROM staged_specs
+                 WHERE tenant = ?1 AND entity_type = ?2 AND content_hash = ?3
+                   AND csdl_xml IS ?4",
+                params![tenant, entity_type, content_hash, csdl_xml],
+            )
+            .await
+            .map_err(storage_error)?;
+        }
+        tx.commit().await.map_err(storage_error)?;
         Ok(())
     }
 
@@ -873,30 +981,93 @@ impl TursoEventStore {
         tenant: &str,
         entity_type: &str,
         expected_content_hash: &str,
+        expected_csdl_xml: &str,
         update: TursoSpecVerificationUpdate<'_>,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.commit_verified_spec");
         let conn = self.configured_connection().await?;
-        let affected = conn
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+        let staged = {
+            let mut rows = tx
+                .query(
+                    "SELECT ioa_source, csdl_xml, content_hash, version \
+                     FROM staged_specs \
+                     WHERE tenant = ?1 AND entity_type = ?2 AND content_hash = ?3 \
+                       AND csdl_xml IS ?4",
+                    params![
+                        tenant,
+                        entity_type,
+                        expected_content_hash,
+                        expected_csdl_xml
+                    ],
+                )
+                .await
+                .map_err(storage_error)?;
+            rows.next()
+                .await
+                .map_err(storage_error)?
+                .map(|row| {
+                    Ok::<_, PersistenceError>((
+                        row.get::<String>(0).map_err(storage_error)?,
+                        row.get::<Option<String>>(1).map_err(storage_error)?,
+                        row.get::<String>(2).map_err(storage_error)?,
+                        row.get::<i64>(3).map_err(storage_error)?,
+                    ))
+                })
+                .transpose()?
+        };
+        let Some((ioa_source, csdl_xml, content_hash, version)) = staged else {
+            return Err(PersistenceError::Storage(format!(
+                "staged spec fingerprint changed for {tenant}/{entity_type}"
+            )));
+        };
+        tx.execute(
+            "INSERT INTO specs (
+                 tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version,
+                 verified, verification_status, levels_passed, levels_total,
+                 verification_result, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now'))
+             ON CONFLICT (tenant, entity_type) DO UPDATE SET
+                 ioa_source = excluded.ioa_source,
+                 csdl_xml = excluded.csdl_xml,
+                 content_hash = excluded.content_hash,
+                 committed = 1,
+                 version = specs.version + 1,
+                 verified = excluded.verified,
+                 verification_status = excluded.verification_status,
+                 levels_passed = excluded.levels_passed,
+                 levels_total = excluded.levels_total,
+                 verification_result = excluded.verification_result,
+                 updated_at = datetime('now')",
+            params![
+                tenant,
+                entity_type,
+                ioa_source,
+                csdl_xml,
+                content_hash,
+                version,
+                update.verified as i64,
+                update.status,
+                update.levels_passed,
+                update.levels_total,
+                update.verification_result_json
+            ],
+        )
+        .await
+        .map_err(storage_error)?;
+        let affected = tx
             .execute(
-                "UPDATE specs SET
-                     verified = ?4,
-                     verification_status = ?5,
-                     levels_passed = ?6,
-                     levels_total = ?7,
-                     verification_result = ?8,
-                     committed = 1,
-                     updated_at = datetime('now')
-                 WHERE tenant = ?1 AND entity_type = ?2 AND content_hash = ?3",
+                "DELETE FROM staged_specs \
+                 WHERE tenant = ?1 AND entity_type = ?2 AND content_hash = ?3 \
+                   AND csdl_xml IS ?4",
                 params![
                     tenant,
                     entity_type,
                     expected_content_hash,
-                    update.verified as i64,
-                    update.status,
-                    update.levels_passed,
-                    update.levels_total,
-                    update.verification_result_json
+                    expected_csdl_xml
                 ],
             )
             .await
@@ -906,6 +1077,7 @@ impl TursoEventStore {
                 "staged spec fingerprint changed for {tenant}/{entity_type}"
             )));
         }
+        tx.commit().await.map_err(storage_error)?;
         Ok(())
     }
 
@@ -914,10 +1086,14 @@ impl TursoEventStore {
     pub async fn delete_uncommitted_specs(&self) -> Result<usize, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.delete_uncommitted_specs");
         let conn = self.configured_connection().await?;
-        let affected = conn
+        let staged = conn
+            .execute("DELETE FROM staged_specs", ())
+            .await
+            .map_err(storage_error)?;
+        let legacy = conn
             .execute("DELETE FROM specs WHERE committed = 0", ())
             .await
             .map_err(storage_error)?;
-        Ok(affected as usize)
+        Ok((staged + legacy) as usize)
     }
 }

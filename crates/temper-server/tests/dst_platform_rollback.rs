@@ -9,7 +9,7 @@ mod common;
 use common::platform_harness::SimPlatformHarness;
 use common::platform_invariants::*;
 use temper_runtime::scheduler::install_deterministic_context;
-use temper_server::platform_store::SimPlatformFaultConfig;
+use temper_server::platform_store::{PlatformStore, SimPlatformFaultConfig};
 use temper_store_sim::SimFaultConfig;
 
 const NUM_SEEDS: u64 = 50;
@@ -47,6 +47,23 @@ async fn dst_rollback_install_failure_is_atomic() {
             Err(_) => {
                 // Install failed — disable faults and verify no partial state.
                 let prev = harness.sim_platform_store.disable_faults();
+                let app_recorded = harness
+                    .sim_platform_store
+                    .is_app_installed("rollback-test", "project-management")
+                    .await
+                    .expect("read installed-app marker");
+                if !app_recorded {
+                    assert!(
+                        harness
+                            .sim_platform_store
+                            .load_specs()
+                            .await
+                            .expect("read durable specs")
+                            .iter()
+                            .all(|row| row.tenant != "rollback-test"),
+                        "seed {seed}: specs must remain unpublished when a pre-commit metadata write fails"
+                    );
+                }
                 assert_p7_cedar_persistence(&harness)
                     .await
                     .unwrap_or_else(|e| panic!("seed {seed}: P7 failed after failed install: {e}"));

@@ -13,6 +13,7 @@ use std::time::Instant;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::Serialize;
 use temper_runtime::tenant::TenantId;
+use temper_server::platform_store::SpecCommitExpectation;
 use temper_server::state::WasmModuleSource;
 use temper_spec::automaton;
 use temper_spec::csdl::{emit_csdl_xml, merge_csdl, parse_csdl};
@@ -1249,6 +1250,7 @@ pub(super) async fn install_os_app_with_plan(
         .as_ref()
         .and_then(|stack| stack.platform.clone())
     {
+        let mut expected_specs = Vec::with_capacity(bundle.specs.len());
         if plan.specs
             && let Some(ref merged) = merged_csdl
         {
@@ -1257,6 +1259,7 @@ pub(super) async fn install_os_app_with_plan(
                 ps.upsert_spec(tenant, entity_type, ioa_source, merged, &hash)
                     .await
                     .map_err(|e| format!("Failed to persist spec {entity_type}: {e}"))?;
+                expected_specs.push((entity_type.as_str(), hash));
             }
         }
         if let Some(ref policy_text) = combined_policy {
@@ -1274,11 +1277,20 @@ pub(super) async fn install_os_app_with_plan(
         ps.record_installed_app(tenant, app_name)
             .await
             .map_err(|e| format!("Failed to record os-app installation: {e}"))?;
-        if plan.specs {
-            // Commit only when this path used individual spec writes.
-            ps.commit_specs(tenant)
+        if let Some(ref merged) = merged_csdl
+            && !expected_specs.is_empty()
+        {
+            let expected = expected_specs
+                .iter()
+                .map(|(entity_type, hash)| SpecCommitExpectation {
+                    entity_type,
+                    content_hash: hash,
+                    csdl_xml: merged,
+                })
+                .collect::<Vec<_>>();
+            ps.commit_spec_batch(tenant, &expected)
                 .await
-                .map_err(|e| format!("Failed to commit specs: {e}"))?;
+                .map_err(|e| format!("Failed to commit app spec batch: {e}"))?;
         }
     }
 

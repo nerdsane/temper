@@ -2,6 +2,40 @@ use super::*;
 use crate::migration::run_migrations;
 
 #[test]
+fn replacement_enumeration_includes_staged_only_entity_types() {
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        tracing::warn!("skipping Postgres integration test: DATABASE_URL is not set");
+        return;
+    };
+
+    sqlx::__rt::test_block_on(async {
+        let pool = sqlx::PgPool::connect(&database_url).await.expect("connect");
+        run_migrations(&pool).await.expect("migrate");
+        let store = PostgresEventStore::new(pool);
+        let tenant = format!("tenant-staged-enumeration-{}", uuid::Uuid::new_v4());
+
+        store
+            .upsert_spec(
+                &tenant,
+                "StagedOnly",
+                "[automaton]\nname = \"StagedOnly\"\n",
+                "<Schema Namespace=\"Temper.Tests\" />",
+                "staged-only-fingerprint",
+            )
+            .await
+            .expect("stage catalog-only type");
+
+        assert_eq!(
+            store
+                .spec_replacement_entity_types(&tenant)
+                .await
+                .expect("enumerate replacement types"),
+            vec!["StagedOnly".to_string()]
+        );
+    });
+}
+
+#[test]
 fn concurrent_replica_replacements_commit_one_complete_catalog() {
     let Ok(database_url) = std::env::var("DATABASE_URL") else {
         tracing::warn!("skipping Postgres integration test: DATABASE_URL is not set");

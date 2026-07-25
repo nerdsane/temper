@@ -2466,21 +2466,6 @@ async fn load_verification_cache_ignores_uncommitted_specs() {
         .upsert_spec(&tenant, "Issue", ioa_source, csdl_xml, content_hash)
         .await
         .expect("upsert uncommitted spec");
-    store
-        .persist_spec_verification(
-            &tenant,
-            "Issue",
-            TursoSpecVerificationUpdate {
-                status: "passed",
-                verified: true,
-                levels_passed: Some(1),
-                levels_total: Some(1),
-                verification_result_json: Some(r#"{"all_passed":true}"#),
-            },
-        )
-        .await
-        .expect("persist verification");
-
     let cache = store
         .load_verification_cache(&tenant)
         .await
@@ -2490,7 +2475,22 @@ async fn load_verification_cache_ignores_uncommitted_specs() {
         "uncommitted specs must not be used to skip bootstrap persistence"
     );
 
-    store.commit_specs(&tenant).await.expect("commit spec");
+    store
+        .commit_verified_spec(
+            &tenant,
+            "Issue",
+            content_hash,
+            csdl_xml,
+            TursoSpecVerificationUpdate {
+                status: "passed",
+                verified: true,
+                levels_passed: Some(1),
+                levels_total: Some(1),
+                verification_result_json: Some(r#"{"all_passed":true}"#),
+            },
+        )
+        .await
+        .expect("verify and commit spec");
     let cache = store
         .load_verification_cache(&tenant)
         .await

@@ -44,6 +44,8 @@ impl PostgresEventStore {
             sqlx::query_scalar::<_, String>(
                 "SELECT entity_type FROM specs WHERE tenant = $1 \
                  UNION \
+                 SELECT entity_type FROM staged_specs WHERE tenant = $1 \
+                 UNION \
                  SELECT entity_type FROM spec_declaration_authority \
                  WHERE tenant = $1 AND present = true \
                  ORDER BY entity_type",
@@ -67,6 +69,12 @@ impl PostgresEventStore {
         let removed_entity_types = removed_entity_types.into_iter().collect::<Vec<_>>();
 
         for (entity_type, ioa_source, content_hash) in specs {
+            sqlx::query("DELETE FROM staged_specs WHERE tenant = $1 AND entity_type = $2")
+                .bind(tenant)
+                .bind(entity_type)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| PersistenceError::Storage(error.to_string()))?;
             sqlx::query(
                 "INSERT INTO specs \
                  (tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version, verified, verification_status, updated_at) \
@@ -88,6 +96,12 @@ impl PostgresEventStore {
             .map_err(|error| PersistenceError::Storage(error.to_string()))?;
         }
         for entity_type in &removed_entity_types {
+            sqlx::query("DELETE FROM staged_specs WHERE tenant = $1 AND entity_type = $2")
+                .bind(tenant)
+                .bind(entity_type)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| PersistenceError::Storage(error.to_string()))?;
             sqlx::query("SELECT tombstone_spec_declaration_authority($1, $2)")
                 .bind(tenant)
                 .bind(entity_type)

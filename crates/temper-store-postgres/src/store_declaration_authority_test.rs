@@ -16,6 +16,268 @@ fn database_url(test_name: &str) -> Option<String> {
     }
 }
 
+#[test]
+fn verified_commit_rejects_same_ioa_with_replaced_csdl() {
+    let Some(database_url) = database_url("verified_commit_rejects_same_ioa_with_replaced_csdl")
+    else {
+        return;
+    };
+    sqlx::__rt::test_block_on(async {
+        let pool = PgPool::connect(&database_url).await.expect("connect");
+        run_migrations(&pool).await.expect("migrate");
+        let store = PostgresEventStore::new(pool);
+        let tenant = format!("tenant-csdl-commit-{}", uuid::Uuid::new_v4());
+        let ioa = "[automaton]\nname = \"Item\"\n";
+        let fingerprint = spec_content_fingerprint(ioa);
+        let csdl_a = "<Schema Namespace=\"Temper.A\" />";
+        let csdl_b = "<Schema Namespace=\"Temper.B\" />";
+
+        store
+            .upsert_spec(&tenant, "Item", ioa, csdl_a, &fingerprint)
+            .await
+            .expect("stage verified pair A");
+        store
+            .commit_verified_spec(
+                &tenant,
+                "Item",
+                &fingerprint,
+                csdl_a,
+                crate::PostgresSpecVerificationUpdate {
+                    status: "completed",
+                    verified: true,
+                    levels_passed: None,
+                    levels_total: None,
+                    verification_result_json: None,
+                },
+            )
+            .await
+            .expect("commit verified pair A");
+        store
+            .upsert_spec(&tenant, "Item", ioa, csdl_b, &fingerprint)
+            .await
+            .expect("stage CSDL B");
+
+        store
+            .commit_verified_spec(
+                &tenant,
+                "Item",
+                &fingerprint,
+                csdl_a,
+                crate::PostgresSpecVerificationUpdate {
+                    status: "completed",
+                    verified: true,
+                    levels_passed: None,
+                    levels_total: None,
+                    verification_result_json: None,
+                },
+            )
+            .await
+            .expect_err("verification of CSDL A must not publish staged CSDL B");
+
+        let committed: (String, bool) = crate::dbm::postgres_query_as!(
+            "SELECT csdl_xml, verified FROM specs \
+                 WHERE tenant = $1 AND entity_type = 'Item'",
+        )
+        .bind(&tenant)
+        .fetch_one(store.pool())
+        .await
+        .expect("read committed CSDL A");
+        assert_eq!(committed, (csdl_a.to_string(), true));
+        let staged: (String,) = crate::dbm::postgres_query_as!(
+            "SELECT csdl_xml FROM staged_specs \
+                 WHERE tenant = $1 AND entity_type = 'Item'",
+        )
+        .bind(&tenant)
+        .fetch_one(store.pool())
+        .await
+        .expect("read staged CSDL B");
+        assert_eq!(staged.0, csdl_b);
+    });
+}
+
+#[test]
+fn scoped_commit_does_not_promote_unrelated_staging() {
+    let Some(database_url) = database_url("scoped_commit_does_not_promote_unrelated_staging")
+    else {
+        return;
+    };
+    sqlx::__rt::test_block_on(async {
+        let pool = PgPool::connect(&database_url).await.expect("connect");
+        run_migrations(&pool).await.expect("migrate");
+        let store = PostgresEventStore::new(pool);
+        let tenant = format!("tenant-scoped-commit-{}", uuid::Uuid::new_v4());
+        let csdl = "<Schema Namespace=\"Temper.Tests\" />";
+        let item = "[automaton]\nname = \"Item\"\n";
+        let unrelated = "[automaton]\nname = \"Unrelated\"\n";
+        let item_fingerprint = spec_content_fingerprint(item);
+        let unrelated_fingerprint = spec_content_fingerprint(unrelated);
+
+        store
+            .upsert_spec(&tenant, "Item", item, csdl, &item_fingerprint)
+            .await
+            .expect("stage owned spec");
+        store
+            .upsert_spec(
+                &tenant,
+                "Unrelated",
+                unrelated,
+                csdl,
+                &unrelated_fingerprint,
+            )
+            .await
+            .expect("stage unrelated spec");
+        store
+            .commit_verified_spec(
+                &tenant,
+                "Item",
+                &item_fingerprint,
+                csdl,
+                crate::PostgresSpecVerificationUpdate {
+                    status: "pending",
+                    verified: false,
+                    levels_passed: None,
+                    levels_total: None,
+                    verification_result_json: None,
+                },
+            )
+            .await
+            .expect("commit only owned spec");
+
+        let committed = store
+            .load_specs()
+            .await
+            .expect("load committed specs")
+            .into_iter()
+            .filter(|row| row.tenant == tenant)
+            .collect::<Vec<_>>();
+        assert_eq!(committed.len(), 1);
+        assert_eq!(committed[0].entity_type, "Item");
+        let unrelated_staged: (String,) = crate::dbm::postgres_query_as!(
+            "SELECT content_hash FROM staged_specs \
+             WHERE tenant = $1 AND entity_type = 'Unrelated'",
+        )
+        .bind(&tenant)
+        .fetch_one(store.pool())
+        .await
+        .expect("unrelated staging remains quarantined");
+        assert_eq!(unrelated_staged.0, unrelated_fingerprint);
+    });
+}
+
+#[test]
+fn spec_batch_commit_rolls_back_every_promotion_on_mismatch() {
+    let Some(database_url) =
+        database_url("spec_batch_commit_rolls_back_every_promotion_on_mismatch")
+    else {
+        return;
+    };
+    sqlx::__rt::test_block_on(async {
+        let pool = PgPool::connect(&database_url).await.expect("connect");
+        run_migrations(&pool).await.expect("migrate");
+        let store = PostgresEventStore::new(pool);
+        let tenant = format!("tenant-batch-rollback-{}", uuid::Uuid::new_v4());
+        let csdl = "<Schema Namespace=\"Temper.Tests\" />";
+        let item = "[automaton]\nname = \"Item\"\n";
+        let issue = "[automaton]\nname = \"Issue\"\n";
+        let item_hash = spec_content_fingerprint(item);
+        let issue_hash = spec_content_fingerprint(issue);
+
+        store
+            .upsert_spec(&tenant, "Item", item, csdl, &item_hash)
+            .await
+            .expect("stage Item");
+        store
+            .upsert_spec(&tenant, "Issue", issue, csdl, &issue_hash)
+            .await
+            .expect("stage Issue");
+        store
+            .commit_spec_batch(
+                &tenant,
+                &[
+                    ("Item", item_hash.as_str(), csdl),
+                    ("Issue", "wrong-hash", csdl),
+                ],
+            )
+            .await
+            .expect_err("one mismatch must roll back the whole batch");
+
+        let committed: (i64,) =
+            crate::dbm::postgres_query_as!("SELECT COUNT(*) FROM specs WHERE tenant = $1")
+                .bind(&tenant)
+                .fetch_one(store.pool())
+                .await
+                .expect("count committed rows");
+        let staged: (i64,) =
+            crate::dbm::postgres_query_as!("SELECT COUNT(*) FROM staged_specs WHERE tenant = $1")
+                .bind(&tenant)
+                .fetch_one(store.pool())
+                .await
+                .expect("count staged rows");
+        assert_eq!(committed.0, 0);
+        assert_eq!(staged.0, 2);
+    });
+}
+
+#[test]
+fn deletion_fences_a_stale_verifier_from_resurrecting_staging() {
+    let Some(database_url) =
+        database_url("deletion_fences_a_stale_verifier_from_resurrecting_staging")
+    else {
+        return;
+    };
+    sqlx::__rt::test_block_on(async {
+        let pool = PgPool::connect(&database_url).await.expect("connect");
+        run_migrations(&pool).await.expect("migrate");
+        let store = PostgresEventStore::new(pool);
+        let tenant = format!("tenant-delete-fence-{}", uuid::Uuid::new_v4());
+        let ioa = "[automaton]\nname = \"Item\"\n";
+        let csdl = "<Schema Namespace=\"Temper.Tests\" />";
+        let fingerprint = spec_content_fingerprint(ioa);
+
+        store
+            .upsert_spec(&tenant, "Item", ioa, csdl, &fingerprint)
+            .await
+            .expect("stage spec");
+        store
+            .delete_spec(&tenant, "Item")
+            .await
+            .expect("delete declaration and staging");
+        store
+            .commit_verified_spec(
+                &tenant,
+                "Item",
+                &fingerprint,
+                csdl,
+                crate::PostgresSpecVerificationUpdate {
+                    status: "completed",
+                    verified: true,
+                    levels_passed: None,
+                    levels_total: None,
+                    verification_result_json: None,
+                },
+            )
+            .await
+            .expect_err("stale verification must not resurrect a deleted spec");
+
+        let catalog_count: (i64,) = crate::dbm::postgres_query_as!(
+            "SELECT COUNT(*) FROM specs WHERE tenant = $1 AND entity_type = 'Item'",
+        )
+        .bind(&tenant)
+        .fetch_one(store.pool())
+        .await
+        .expect("count committed rows");
+        let staged_count: (i64,) = crate::dbm::postgres_query_as!(
+            "SELECT COUNT(*) FROM staged_specs WHERE tenant = $1 AND entity_type = 'Item'",
+        )
+        .bind(&tenant)
+        .fetch_one(store.pool())
+        .await
+        .expect("count staged rows");
+        assert_eq!(catalog_count.0, 0);
+        assert_eq!(staged_count.0, 0);
+    });
+}
+
 fn test_envelope(event_type: &str) -> PersistenceEnvelope {
     PersistenceEnvelope {
         sequence_nr: 0,
@@ -230,7 +492,7 @@ fn staged_spec_does_not_advance_authority_until_commit() {
         );
 
         crate::dbm::postgres_query!(
-            "DELETE FROM specs WHERE tenant = $1 AND entity_type = 'Item' AND committed = false",
+            "DELETE FROM staged_specs WHERE tenant = $1 AND entity_type = 'Item'",
         )
         .bind(&tenant)
         .execute(store.pool())
@@ -388,6 +650,7 @@ fn verified_commit_rejects_same_type_fingerprint_overwrite() {
                 &tenant,
                 "Item",
                 &fingerprint_a,
+                csdl,
                 crate::PostgresSpecVerificationUpdate {
                     status: "completed",
                     verified: true,
@@ -408,6 +671,7 @@ fn verified_commit_rejects_same_type_fingerprint_overwrite() {
                 &tenant,
                 "Item",
                 &fingerprint_a,
+                csdl,
                 crate::PostgresSpecVerificationUpdate {
                     status: "completed",
                     verified: true,
@@ -420,15 +684,24 @@ fn verified_commit_rejects_same_type_fingerprint_overwrite() {
             .expect_err("verified A must not publish staged B");
         assert!(error.to_string().contains("fingerprint changed"));
 
-        let staged_b: (String, bool, bool) = crate::dbm::postgres_query_as!(
+        let committed_a: (String, bool, bool) = crate::dbm::postgres_query_as!(
             "SELECT content_hash, verified, committed FROM specs \
              WHERE tenant = $1 AND entity_type = 'Item'",
         )
         .bind(&tenant)
         .fetch_one(store.pool())
         .await
+        .expect("read committed A");
+        assert_eq!(committed_a, (fingerprint_a.clone(), true, true));
+        let staged_b: (String,) = crate::dbm::postgres_query_as!(
+            "SELECT content_hash FROM staged_specs \
+             WHERE tenant = $1 AND entity_type = 'Item'",
+        )
+        .bind(&tenant)
+        .fetch_one(store.pool())
+        .await
         .expect("read staged B");
-        assert_eq!(staged_b, (fingerprint_b, false, false));
+        assert_eq!(staged_b.0, fingerprint_b);
         let authority: (String, bool) = crate::dbm::postgres_query_as!(
             "SELECT declaration_fingerprint, present FROM spec_declaration_authority \
              WHERE tenant = $1 AND entity_type = 'Item'",
@@ -461,21 +734,6 @@ fn verification_cache_ignores_staged_specs_until_commit() {
             .upsert_spec(&tenant, "Issue", ioa_source, csdl, &content_hash)
             .await
             .expect("stage Issue");
-        store
-            .persist_spec_verification(
-                &tenant,
-                "Issue",
-                crate::PostgresSpecVerificationUpdate {
-                    status: "passed",
-                    verified: true,
-                    levels_passed: Some(1),
-                    levels_total: Some(1),
-                    verification_result_json: Some(r#"{"all_passed":true}"#),
-                },
-            )
-            .await
-            .expect("verify staged Issue");
-
         assert!(
             !store
                 .load_verification_cache(&tenant)
@@ -485,7 +743,22 @@ fn verification_cache_ignores_staged_specs_until_commit() {
             "staged verification must not make bootstrap skip durable publication"
         );
 
-        store.commit_specs(&tenant).await.expect("commit Issue");
+        store
+            .commit_verified_spec(
+                &tenant,
+                "Issue",
+                &content_hash,
+                csdl,
+                crate::PostgresSpecVerificationUpdate {
+                    status: "passed",
+                    verified: true,
+                    levels_passed: Some(1),
+                    levels_total: Some(1),
+                    verification_result_json: Some(r#"{"all_passed":true}"#),
+                },
+            )
+            .await
+            .expect("verify and commit Issue");
         assert_eq!(
             store
                 .load_verification_cache(&tenant)

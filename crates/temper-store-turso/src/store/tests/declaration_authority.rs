@@ -171,6 +171,7 @@ async fn scoped_commit_does_not_promote_unrelated_staging() {
             "t",
             "Item",
             &item_fingerprint,
+            csdl,
             crate::TursoSpecVerificationUpdate {
                 status: "completed",
                 verified: true,
@@ -186,9 +187,9 @@ async fn scoped_commit_does_not_promote_unrelated_staging() {
     assert_eq!(committed.len(), 1);
     assert_eq!(committed[0].entity_type, "Item");
     let conn = store.configured_connection().await.unwrap();
-    let unrelated_committed: i64 = conn
+    let unrelated_staged_hash: String = conn
         .query(
-            "SELECT committed FROM specs WHERE tenant = 't' AND entity_type = 'Unrelated'",
+            "SELECT content_hash FROM staged_specs WHERE tenant = 't' AND entity_type = 'Unrelated'",
             (),
         )
         .await
@@ -199,7 +200,50 @@ async fn scoped_commit_does_not_promote_unrelated_staging() {
         .expect("unrelated staged row")
         .get(0)
         .unwrap();
-    assert_eq!(unrelated_committed, 0);
+    assert_eq!(unrelated_staged_hash, unrelated_fingerprint);
+}
+
+#[tokio::test]
+async fn spec_batch_commit_rolls_back_every_promotion_on_mismatch() {
+    let store = make_store("vector-batch-spec-rollback").await;
+    let csdl = "<Schema Namespace=\"Temper.Tests\" />";
+    let item = "[automaton]\nname = \"Item\"\n";
+    let issue = "[automaton]\nname = \"Issue\"\n";
+    let item_hash = crate::spec_content_hash(item);
+    let issue_hash = crate::spec_content_hash(issue);
+
+    store
+        .upsert_spec("t", "Item", item, csdl, &item_hash)
+        .await
+        .unwrap();
+    store
+        .upsert_spec("t", "Issue", issue, csdl, &issue_hash)
+        .await
+        .unwrap();
+    store
+        .commit_spec_batch(
+            "t",
+            &[
+                ("Item", item_hash.as_str(), csdl),
+                ("Issue", "wrong-hash", csdl),
+            ],
+        )
+        .await
+        .expect_err("one mismatch must roll back the whole batch");
+
+    assert!(store.load_specs().await.unwrap().is_empty());
+    let conn = store.configured_connection().await.unwrap();
+    let staged: i64 = conn
+        .query("SELECT COUNT(*) FROM staged_specs WHERE tenant = 't'", ())
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .expect("staged count")
+        .get(0)
+        .unwrap();
+    assert_eq!(staged, 2);
 }
 
 #[tokio::test]
@@ -216,6 +260,22 @@ async fn verified_commit_rejects_same_type_fingerprint_overwrite() {
         .await
         .unwrap();
     store
+        .commit_verified_spec(
+            "t",
+            "Item",
+            &fingerprint_a,
+            csdl,
+            crate::TursoSpecVerificationUpdate {
+                status: "completed",
+                verified: true,
+                levels_passed: None,
+                levels_total: None,
+                verification_result_json: None,
+            },
+        )
+        .await
+        .unwrap();
+    store
         .upsert_spec("t", "Item", ioa_b, csdl, &fingerprint_b)
         .await
         .unwrap();
@@ -224,6 +284,7 @@ async fn verified_commit_rejects_same_type_fingerprint_overwrite() {
             "t",
             "Item",
             &fingerprint_a,
+            csdl,
             crate::TursoSpecVerificationUpdate {
                 status: "completed",
                 verified: true,
@@ -245,10 +306,139 @@ async fn verified_commit_rejects_same_type_fingerprint_overwrite() {
         )
         .await
         .unwrap();
-    let row = rows.next().await.unwrap().expect("staged B row");
-    assert_eq!(row.get::<String>(0).unwrap(), fingerprint_b);
-    assert_eq!(row.get::<i64>(1).unwrap(), 0);
-    assert_eq!(row.get::<i64>(2).unwrap(), 0);
+    let row = rows.next().await.unwrap().expect("committed A row");
+    assert_eq!(row.get::<String>(0).unwrap(), fingerprint_a);
+    assert_eq!(row.get::<i64>(1).unwrap(), 1);
+    assert_eq!(row.get::<i64>(2).unwrap(), 1);
+    let mut staged = conn
+        .query(
+            "SELECT content_hash FROM staged_specs \
+             WHERE tenant = 't' AND entity_type = 'Item'",
+            (),
+        )
+        .await
+        .unwrap();
+    let staged_row = staged.next().await.unwrap().expect("staged B row");
+    assert_eq!(staged_row.get::<String>(0).unwrap(), fingerprint_b);
+}
+
+#[tokio::test]
+async fn verified_commit_rejects_same_ioa_with_replaced_csdl() {
+    let store = make_store("vector-same-ioa-replaced-csdl").await;
+    let ioa = "[automaton]\nname = \"Item\"\n";
+    let fingerprint = crate::spec_content_hash(ioa);
+    let csdl_a = "<Schema Namespace=\"Temper.A\" />";
+    let csdl_b = "<Schema Namespace=\"Temper.B\" />";
+
+    store
+        .upsert_spec("t", "Item", ioa, csdl_a, &fingerprint)
+        .await
+        .unwrap();
+    store
+        .commit_verified_spec(
+            "t",
+            "Item",
+            &fingerprint,
+            csdl_a,
+            crate::TursoSpecVerificationUpdate {
+                status: "completed",
+                verified: true,
+                levels_passed: None,
+                levels_total: None,
+                verification_result_json: None,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .upsert_spec("t", "Item", ioa, csdl_b, &fingerprint)
+        .await
+        .unwrap();
+
+    store
+        .commit_verified_spec(
+            "t",
+            "Item",
+            &fingerprint,
+            csdl_a,
+            crate::TursoSpecVerificationUpdate {
+                status: "completed",
+                verified: true,
+                levels_passed: None,
+                levels_total: None,
+                verification_result_json: None,
+            },
+        )
+        .await
+        .expect_err("verification of CSDL A must not publish staged CSDL B");
+
+    let conn = store.configured_connection().await.unwrap();
+    let mut committed = conn
+        .query(
+            "SELECT csdl_xml, verified FROM specs \
+             WHERE tenant = 't' AND entity_type = 'Item'",
+            (),
+        )
+        .await
+        .unwrap();
+    let committed_row = committed.next().await.unwrap().expect("committed CSDL A");
+    assert_eq!(committed_row.get::<String>(0).unwrap(), csdl_a);
+    assert_eq!(committed_row.get::<i64>(1).unwrap(), 1);
+    let mut staged = conn
+        .query(
+            "SELECT csdl_xml FROM staged_specs \
+             WHERE tenant = 't' AND entity_type = 'Item'",
+            (),
+        )
+        .await
+        .unwrap();
+    let staged_row = staged.next().await.unwrap().expect("staged CSDL B");
+    assert_eq!(staged_row.get::<String>(0).unwrap(), csdl_b);
+}
+
+#[tokio::test]
+async fn identical_atomic_app_write_discards_conflicting_staging() {
+    let store = make_store("atomic-app-write-discards-staging").await;
+    let ioa_a = "[automaton]\nname = \"Item\"\n# app-a\n";
+    let ioa_b = "[automaton]\nname = \"Item\"\n# staged-b\n";
+    let csdl = "<Schema Namespace=\"Temper.Tests\" />";
+    let fingerprint_a = crate::spec_content_hash(ioa_a);
+    let fingerprint_b = crate::spec_content_hash(ioa_b);
+    let app_specs = [("Item", ioa_a, csdl, fingerprint_a.as_str())];
+
+    store
+        .upsert_specs_and_commit("t", &app_specs, None, "test-app")
+        .await
+        .unwrap();
+    store
+        .upsert_spec("t", "Item", ioa_b, csdl, &fingerprint_b)
+        .await
+        .unwrap();
+
+    store
+        .upsert_specs_and_commit("t", &app_specs, None, "test-app")
+        .await
+        .unwrap();
+
+    let committed = store.load_specs().await.unwrap();
+    assert_eq!(committed.len(), 1);
+    assert_eq!(
+        committed[0].content_hash.as_deref(),
+        Some(fingerprint_a.as_str())
+    );
+    let conn = store.configured_connection().await.unwrap();
+    let mut staged = conn
+        .query(
+            "SELECT 1 FROM staged_specs \
+             WHERE tenant = 't' AND entity_type = 'Item'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert!(
+        staged.next().await.unwrap().is_none(),
+        "the authoritative app write must discard staged B"
+    );
 }
 
 #[tokio::test]

@@ -63,6 +63,21 @@ CREATE TABLE IF NOT EXISTS specs (
     UNIQUE(tenant, entity_type)
 );";
 
+/// Replacement spec bytes awaiting verification.
+///
+/// Keeping staging separate preserves the last committed catalog across crashes.
+pub const CREATE_STAGED_SPECS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS staged_specs (
+    tenant TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    ioa_source TEXT NOT NULL,
+    csdl_xml TEXT,
+    content_hash TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(tenant, entity_type)
+);";
+
 pub const CREATE_TRAJECTORIES_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS trajectories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

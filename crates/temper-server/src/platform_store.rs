@@ -44,6 +44,17 @@ pub struct SpecVerificationUpdate<'a> {
     pub verification_result_json: Option<&'a str>,
 }
 
+/// Exact staged spec bytes owned by one atomic catalog publication.
+#[derive(Debug, Clone, Copy)]
+pub struct SpecCommitExpectation<'a> {
+    /// Entity type whose staged bytes may be promoted.
+    pub entity_type: &'a str,
+    /// Expected IOA content hash.
+    pub content_hash: &'a str,
+    /// Expected CSDL bytes.
+    pub csdl_xml: &'a str,
+}
+
 /// WASM module row returned by [`PlatformStore`] WASM queries.
 #[derive(Debug, Clone)]
 pub struct WasmModuleRow {
@@ -130,12 +141,19 @@ pub trait PlatformStore: Send + Sync {
 
     /// Mark all uncommitted specs for a tenant as committed.
     async fn commit_specs(&self, tenant: &str) -> Result<(), String>;
+    /// Atomically promote only the exact staged specs owned by one operation.
+    async fn commit_spec_batch(
+        &self,
+        tenant: &str,
+        expected: &[SpecCommitExpectation<'_>],
+    ) -> Result<(), String>;
     /// Atomically persist verification and commit only the expected spec bytes.
     async fn commit_verified_spec(
         &self,
         tenant: &str,
         entity_type: &str,
         expected_content_hash: &str,
+        expected_csdl_xml: &str,
         update: SpecVerificationUpdate<'_>,
     ) -> Result<(), String>;
     /// Delete all uncommitted specs across all tenants.
@@ -283,17 +301,32 @@ impl PlatformStore for TursoEventStore {
     async fn commit_specs(&self, tenant: &str) -> Result<(), String> {
         self.commit_specs(tenant).await.map_err(|e| e.to_string())
     }
+    async fn commit_spec_batch(
+        &self,
+        tenant: &str,
+        expected: &[SpecCommitExpectation<'_>],
+    ) -> Result<(), String> {
+        let expected = expected
+            .iter()
+            .map(|spec| (spec.entity_type, spec.content_hash, spec.csdl_xml))
+            .collect::<Vec<_>>();
+        self.commit_spec_batch(tenant, &expected)
+            .await
+            .map_err(|e| e.to_string())
+    }
     async fn commit_verified_spec(
         &self,
         tenant: &str,
         entity_type: &str,
         expected_content_hash: &str,
+        expected_csdl_xml: &str,
         update: SpecVerificationUpdate<'_>,
     ) -> Result<(), String> {
         self.commit_verified_spec(
             tenant,
             entity_type,
             expected_content_hash,
+            expected_csdl_xml,
             TursoSpecVerificationUpdate {
                 status: update.status,
                 verified: update.verified,
@@ -561,18 +594,33 @@ impl PlatformStore for PostgresEventStore {
     async fn commit_specs(&self, tenant: &str) -> Result<(), String> {
         self.commit_specs(tenant).await.map_err(|e| e.to_string())
     }
+    async fn commit_spec_batch(
+        &self,
+        tenant: &str,
+        expected: &[SpecCommitExpectation<'_>],
+    ) -> Result<(), String> {
+        let expected = expected
+            .iter()
+            .map(|spec| (spec.entity_type, spec.content_hash, spec.csdl_xml))
+            .collect::<Vec<_>>();
+        self.commit_spec_batch(tenant, &expected)
+            .await
+            .map_err(|e| e.to_string())
+    }
 
     async fn commit_verified_spec(
         &self,
         tenant: &str,
         entity_type: &str,
         expected_content_hash: &str,
+        expected_csdl_xml: &str,
         update: SpecVerificationUpdate<'_>,
     ) -> Result<(), String> {
         self.commit_verified_spec(
             tenant,
             entity_type,
             expected_content_hash,
+            expected_csdl_xml,
             PostgresSpecVerificationUpdate {
                 status: update.status,
                 verified: update.verified,
@@ -906,6 +954,8 @@ mod sim_platform_store {
         faults: SimPlatformFaultConfig,
         /// Specs keyed by (tenant, entity_type).
         specs: BTreeMap<(String, String), SpecRow>,
+        /// Replacement bytes awaiting verification, keyed by tenant/type.
+        staged_specs: BTreeMap<(String, String), SpecRow>,
         /// Verification cache: (tenant, entity_type) -> (content_hash, verified).
         verification_cache: BTreeMap<(String, String), (String, bool)>,
         /// Cedar policies keyed by tenant.
@@ -932,6 +982,7 @@ mod sim_platform_store {
                     rng: DeterministicRng::new(seed),
                     faults,
                     specs: BTreeMap::new(),
+                    staged_specs: BTreeMap::new(),
                     verification_cache: BTreeMap::new(),
                     policies: BTreeMap::new(),
                     policy_entries: BTreeMap::new(),
@@ -1018,7 +1069,7 @@ mod sim_platform_store {
             }
 
             let key = (tenant.to_string(), entity_type.to_string());
-            inner.specs.insert(
+            inner.staged_specs.insert(
                 key,
                 SpecRow {
                     tenant: tenant.to_string(),
@@ -1057,15 +1108,74 @@ mod sim_platform_store {
             inner
                 .specs
                 .remove(&(tenant.to_string(), entity_type.to_string()));
+            inner
+                .staged_specs
+                .remove(&(tenant.to_string(), entity_type.to_string()));
             Ok(())
         }
 
         async fn commit_specs(&self, tenant: &str) -> Result<(), String> {
             let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-            for spec in inner.specs.values_mut() {
-                if spec.tenant == tenant {
-                    spec.committed = true;
+            let keys = inner
+                .staged_specs
+                .keys()
+                .filter(|(candidate_tenant, _)| candidate_tenant == tenant)
+                .cloned()
+                .collect::<Vec<_>>();
+            for key in keys {
+                let mut spec = inner
+                    .staged_specs
+                    .remove(&key)
+                    .expect("collected staged spec key must exist"); // ci-ok: same-lock key snapshot
+                spec.committed = true;
+                inner.specs.insert(key, spec);
+            }
+            Ok(())
+        }
+
+        async fn commit_spec_batch(
+            &self,
+            tenant: &str,
+            expected: &[SpecCommitExpectation<'_>],
+        ) -> Result<(), String> {
+            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+            let failure_probability = inner.faults.spec_write_failure_prob;
+            if inner.rng.chance(failure_probability) {
+                return Err("SimPlatformStore: injected spec batch commit failure".into());
+            }
+            let mut entity_types = BTreeSet::new();
+            for spec in expected {
+                if !entity_types.insert(spec.entity_type) {
+                    return Err(format!(
+                        "duplicate spec batch entity type {tenant}/{}",
+                        spec.entity_type
+                    ));
                 }
+                let key = (tenant.to_string(), spec.entity_type.to_string());
+                let staged = inner
+                    .staged_specs
+                    .get(&key)
+                    .ok_or_else(|| format!("missing staged spec {tenant}/{}", spec.entity_type))?;
+                if staged.content_hash != spec.content_hash
+                    || staged.csdl_xml.as_deref() != Some(spec.csdl_xml)
+                {
+                    return Err(format!(
+                        "staged spec fingerprint changed for {tenant}/{}",
+                        spec.entity_type
+                    ));
+                }
+            }
+            for spec in expected {
+                let key = (tenant.to_string(), spec.entity_type.to_string());
+                let mut staged = inner
+                    .staged_specs
+                    .remove(&key)
+                    .expect("validated staged spec must still exist"); // ci-ok: same-lock validation
+                staged.committed = true;
+                inner.specs.insert(key.clone(), staged);
+                inner
+                    .verification_cache
+                    .insert(key, (spec.content_hash.to_string(), false));
             }
             Ok(())
         }
@@ -1075,6 +1185,7 @@ mod sim_platform_store {
             tenant: &str,
             entity_type: &str,
             expected_content_hash: &str,
+            expected_csdl_xml: &str,
             update: SpecVerificationUpdate<'_>,
         ) -> Result<(), String> {
             let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
@@ -1085,16 +1196,23 @@ mod sim_platform_store {
             let key = (tenant.to_string(), entity_type.to_string());
             {
                 let spec = inner
-                    .specs
+                    .staged_specs
                     .get_mut(&key)
                     .ok_or_else(|| format!("missing staged spec {tenant}/{entity_type}"))?;
-                if spec.content_hash != expected_content_hash {
+                if spec.content_hash != expected_content_hash
+                    || spec.csdl_xml.as_deref() != Some(expected_csdl_xml)
+                {
                     return Err(format!(
                         "staged spec fingerprint changed for {tenant}/{entity_type}"
                     ));
                 }
                 spec.committed = true;
             }
+            let spec = inner
+                .staged_specs
+                .remove(&key)
+                .expect("verified staged spec must still exist"); // ci-ok: same-lock validation
+            inner.specs.insert(key.clone(), spec);
             inner
                 .verification_cache
                 .insert(key, (expected_content_hash.to_string(), update.verified));
@@ -1103,9 +1221,9 @@ mod sim_platform_store {
 
         async fn delete_uncommitted_specs(&self) -> Result<usize, String> {
             let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
-            let before = inner.specs.len();
-            inner.specs.retain(|_, s| s.committed);
-            Ok(before - inner.specs.len())
+            let removed = inner.staged_specs.len();
+            inner.staged_specs.clear();
+            Ok(removed)
         }
 
         async fn load_verification_cache(
@@ -1375,6 +1493,86 @@ mod sim_platform_store {
                 },
             );
             Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn spec_batch_commit_invalidates_same_ioa_verification_and_rejects_duplicates() {
+            let store = SimPlatformStore::no_faults(216);
+            let ioa = "[automaton]\nname = \"Item\"\n";
+            let hash = "same-ioa-hash";
+            let csdl_a = "<Schema Namespace=\"Temper.A\" />";
+            let csdl_b = "<Schema Namespace=\"Temper.B\" />";
+
+            store
+                .upsert_spec("t", "Item", ioa, csdl_a, hash)
+                .await
+                .unwrap();
+            store
+                .commit_verified_spec(
+                    "t",
+                    "Item",
+                    hash,
+                    csdl_a,
+                    SpecVerificationUpdate {
+                        status: "completed",
+                        verified: true,
+                        levels_passed: None,
+                        levels_total: None,
+                        verification_result_json: None,
+                    },
+                )
+                .await
+                .unwrap();
+            store
+                .upsert_spec("t", "Item", ioa, csdl_b, hash)
+                .await
+                .unwrap();
+            store
+                .commit_spec_batch(
+                    "t",
+                    &[SpecCommitExpectation {
+                        entity_type: "Item",
+                        content_hash: hash,
+                        csdl_xml: csdl_b,
+                    }],
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .load_verification_cache("t")
+                    .await
+                    .unwrap()
+                    .get("Item"),
+                Some(&(hash.to_string(), false))
+            );
+
+            store
+                .upsert_spec("t", "Issue", ioa, csdl_a, hash)
+                .await
+                .unwrap();
+            let duplicate = SpecCommitExpectation {
+                entity_type: "Issue",
+                content_hash: hash,
+                csdl_xml: csdl_a,
+            };
+            store
+                .commit_spec_batch("t", &[duplicate, duplicate])
+                .await
+                .expect_err("duplicate entity expectations must fail atomically");
+            assert!(
+                store
+                    .load_specs()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|row| row.entity_type != "Issue")
+            );
         }
     }
 }

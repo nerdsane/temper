@@ -694,6 +694,7 @@ mod tests {
                 &tenant,
                 "Unrelated",
                 &unrelated_a_fingerprint,
+                "",
                 PostgresSpecVerificationUpdate {
                     status: "completed",
                     verified: true,
@@ -759,8 +760,17 @@ mod tests {
         .bind(&tenant)
         .fetch_one(&pool)
         .await
-        .expect("read unrelated staging after built-in bootstrap");
-        assert_eq!(unrelated_catalog, (unrelated_b_fingerprint, false));
+        .expect("read committed unrelated A after built-in bootstrap");
+        assert_eq!(unrelated_catalog, (unrelated_a_fingerprint.clone(), true));
+        let unrelated_staging: (String,) = sqlx::query_as(
+            "SELECT content_hash FROM staged_specs \
+             WHERE tenant = $1 AND entity_type = 'Unrelated'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("read unrelated staging B after built-in bootstrap");
+        assert_eq!(unrelated_staging.0, unrelated_b_fingerprint);
         let unrelated_authority: (String, bool) = sqlx::query_as(
             "SELECT declaration_fingerprint, present \
              FROM spec_declaration_authority \

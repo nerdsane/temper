@@ -93,13 +93,15 @@ Postgres and Turso additionally maintain
 declaration_fingerprint, present)`.
 Database triggers advance this row in the same transaction as every IOA insert,
 source change, and hard deletion **only when the affected catalog row is committed**.
-PlatformStore staging deliberately writes `committed = false`; staging and discarded
-uncommitted rows neither fence the still-published declaration nor withdraw its
-watermark. The false-to-true commit transition is the publication point that advances
-authority. The row is a tombstone when `present = false`, so its revision survives
-delete/re-add and process restart. A committed spec mutation also advances an existing
-reconciliation generation and withdraws its watermark immediately; stale work is
-fenced at the declaration commit point, not only after the next coordinator starts.
+PlatformStore writes replacement bytes to a separate `staged_specs` row. The last
+committed `specs` row therefore remains restorable if verification or the process
+crashes. Staging and discarded rows neither fence the still-published declaration nor
+withdraw its watermark. Atomic promotion of one exact staged IOA+CSDL pair is the
+publication point that advances authority. The authority row is a tombstone when
+`present = false`, so its revision survives delete/re-add and process restart. A
+committed spec mutation also advances an existing reconciliation generation and
+withdraws its watermark immediately; stale work is fenced at the declaration commit
+point, not only after the next coordinator starts.
 
 Persistent reconciliation uses the catalog's stored content fingerprint, falling back
 to hashing authoritative IOA bytes only for migrated rows, or uses the fixed
@@ -257,9 +259,14 @@ accessor would leave the in-memory built-ins advertised while replacement tombst
 continued to fence every Postgres writer. Each verified built-in is committed by
 tenant and entity type; bootstrap must never use a tenant-wide commit that could
 promote an unrelated app declaration still undergoing verification on another
-Postgres replica. Verification status and commitment are finalized in one
-fingerprint-checked store operation, so a same-type overwrite by another replica
+Postgres replica. Verification status and commitment are finalized in one store
+operation that compares both the IOA fingerprint and the exact CSDL bytes. A same-type
+IOA overwrite or a same-IOA/different-CSDL overwrite by another replica therefore
 fails closed instead of publishing bytes that the current bootstrap did not verify.
+Multi-spec app installs promote their owned entity/hash/CSDL tuples as one atomic,
+entity-name-ordered batch after the app's policy and metadata writes. A missing or
+replaced staged row rolls back the whole batch, while unrelated crash-orphan staging
+remains quarantined.
 
 A delete always leaves authority at `absent:v1`, even when compatibility first-writer
 bootstrap created authority without a `specs` row. The deletion trigger/transaction

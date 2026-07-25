@@ -238,8 +238,9 @@ async fn postgres_restore_does_not_publish_uncommitted_staging() {
     let restored_rows = load_postgres_spec_rows(&pool)
         .await
         .expect("load committed registry rows");
-    assert!(
-        restored_rows.iter().all(|row| row.tenant != tenant),
-        "startup must not publish staged B while durable authority remains A"
-    );
+    let restored = restored_rows
+        .iter()
+        .find(|row| row.tenant == tenant && row.entity_type == "Order")
+        .expect("startup must retain committed A while B is staged");
+    assert_eq!(restored.ioa_source, ioa_a);
 }

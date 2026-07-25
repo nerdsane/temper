@@ -61,6 +61,8 @@ impl PostgresEventStore {
         crate::dbm::postgres_query_scalar!(
             "SELECT entity_type FROM specs WHERE tenant = $1 \
              UNION \
+             SELECT entity_type FROM staged_specs WHERE tenant = $1 \
+             UNION \
              SELECT entity_type FROM spec_declaration_authority \
              WHERE tenant = $1 AND present = true \
              ORDER BY entity_type",
