@@ -6,7 +6,9 @@ use temper_runtime::persistence::{
     PersistenceEnvelope,
 };
 use temper_runtime::scheduler::{sim_now, sim_uuid};
-use temper_server::entity_actor::types::{EntityEvent, MAX_EVENTS_SINCE_SNAPSHOT};
+use temper_server::entity_actor::types::{
+    EntityEvent, MAX_EVENTS_SINCE_SNAPSHOT, RECENT_EVENTS_BUDGET_DEFAULT,
+};
 
 const FIELD_UPDATE_COLLISION_IOA: &str = r#"
 [automaton]
@@ -45,6 +47,77 @@ from = ["Ready"]
 to = "Ready"
 params = ["Value"]
 "#;
+
+/// An in-memory actor retains idempotency tokens beyond its recent-event
+/// observability window. Exact PATCH retries must remain verifiable for that
+/// entire retained token window, and mismatched reuse must still fail closed.
+#[tokio::test]
+async fn in_memory_field_update_retry_survives_recent_event_eviction() {
+    let (_guard, _clock, _ids) = install_deterministic_context(296);
+    let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(
+        BUDGET_DOC_IOA,
+    )));
+    let system = ActorSystem::new("arn238-in-memory-field-update-intent");
+    let actor = system.spawn(
+        EntityActor::new("BudgetDoc", "memory-intent", table, serde_json::json!({})),
+        "memory-intent",
+    );
+
+    let token = "memory-field-update-intent".to_string();
+    let fields = serde_json::json!({"Value": "first"});
+    let first = update_with_idempotency(&actor, fields.clone(), false, token.clone()).await;
+    assert!(first.success, "first PATCH failed: {:?}", first.error);
+
+    for index in 0..=RECENT_EVENTS_BUDGET_DEFAULT {
+        let response = action(
+            &actor,
+            "Noop",
+            serde_json::json!({"Value": format!("later-{index}")}),
+        )
+        .await;
+        assert!(
+            response.success,
+            "Noop {index} failed: {:?}",
+            response.error
+        );
+    }
+    let before_retry = state(&actor).await;
+    assert!(
+        before_retry
+            .state
+            .events
+            .iter()
+            .all(|event| event.idempotency_key.as_deref() != Some(token.as_str())),
+        "the source field-update event must leave the recent-event window"
+    );
+
+    let exact_retry = update_with_idempotency(&actor, fields, false, token.clone()).await;
+    assert!(
+        exact_retry.success,
+        "exact PATCH retry failed after recent-event eviction: {:?}",
+        exact_retry.error
+    );
+    assert_eq!(
+        exact_retry.state.total_event_count, before_retry.state.total_event_count,
+        "an exact retry must not append another event"
+    );
+
+    let mismatched_retry = update_with_idempotency(
+        &actor,
+        serde_json::json!({"Value": "different"}),
+        false,
+        token,
+    )
+    .await;
+    assert!(
+        !mismatched_retry.success,
+        "the retained token must remain bound to its original PATCH intent"
+    );
+    assert_eq!(
+        mismatched_retry.state.total_event_count,
+        before_retry.state.total_event_count
+    );
+}
 
 fn event_envelope(persistence_id: &str, event: EntityEvent) -> PersistenceEnvelope {
     PersistenceEnvelope {
