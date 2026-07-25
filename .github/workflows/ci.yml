@@ -266,9 +266,12 @@ jobs:
         run: cargo test --workspace -- --skip dst_
 
       # spec_validate_endpoint declares required-features = ["observe"], so the
-      # default-features workspace run above skips it; run it here explicitly.
-      - name: cargo test observe-gated endpoint tests
-        run: cargo test -p temper-server --features observe --test spec_validate_endpoint
+      # default-features workspace run above skips it; the observe module's
+      # unit tests are also only compiled with the feature. Run both here.
+      - name: cargo test observe-gated tests
+        run: |
+          cargo test -p temper-server --features observe --test spec_validate_endpoint
+          cargo test -p temper-server --features observe --lib observe::
 
   # ─────────────────────────────────────────────────────
   # Gate 3b: DST/platform coverage (matrixed)

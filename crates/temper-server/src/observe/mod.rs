@@ -85,7 +85,12 @@ pub struct ActionDetail {
 /// A single action parameter: name plus its declared type ("string" default).
 #[derive(Serialize, Deserialize)]
 pub struct ActionParamDetail {
+    /// Parameter name exactly as declared in the spec's `params` list.
     pub name: String,
+    /// Declared parameter type, serialized under the JSON key `"type"`.
+    /// Bare-named params carry `"string"`; typed params carry the spec's
+    /// type name (e.g. `"uint64"`). This is an OPEN set — generated clients
+    /// must not assume a closed enum.
     #[serde(rename = "type")]
     pub param_type: String,
 }
