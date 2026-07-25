@@ -8,7 +8,9 @@ use crate::authz::{observe_tenant_scope, require_observe_auth};
 use crate::registry::VerificationStatus;
 use crate::state::ServerState;
 
-use super::{ActionDetail, InvariantDetail, SpecDetail, SpecSummary, StateVarDetail};
+use super::{
+    ActionDetail, ActionParamDetail, InvariantDetail, SpecDetail, SpecSummary, StateVarDetail,
+};
 
 mod load_dir;
 mod load_inline;
@@ -115,6 +117,15 @@ pub(crate) async fn handle_get_spec_detail(
                         to: a.to.clone(),
                         guards: a.guard.iter().map(|g| format!("{g:?}")).collect(),
                         effects: a.effect.iter().map(|e| format!("{e:?}")).collect(),
+                        params: a
+                            .params
+                            .iter()
+                            .map(|p| ActionParamDetail {
+                                name: p.name().to_string(),
+                                param_type: p.param_type().to_string(),
+                            })
+                            .collect(),
+                        hint: a.hint.clone().unwrap_or_default(),
                     })
                     .collect(),
                 invariants: automaton
