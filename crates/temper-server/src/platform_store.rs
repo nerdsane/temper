@@ -1511,7 +1511,7 @@ mod sim_platform_store {
             store
                 .upsert_spec("t", "Item", ioa, csdl_a, hash)
                 .await
-                .unwrap();
+                .expect("stage Item with CSDL A");
             store
                 .commit_verified_spec(
                     "t",
@@ -1527,11 +1527,11 @@ mod sim_platform_store {
                     },
                 )
                 .await
-                .unwrap();
+                .expect("commit verified Item with CSDL A");
             store
                 .upsert_spec("t", "Item", ioa, csdl_b, hash)
                 .await
-                .unwrap();
+                .expect("stage Item with CSDL B");
             store
                 .commit_spec_batch(
                     "t",
@@ -1542,12 +1542,12 @@ mod sim_platform_store {
                     }],
                 )
                 .await
-                .unwrap();
+                .expect("commit Item batch with CSDL B");
             assert_eq!(
                 store
                     .load_verification_cache("t")
                     .await
-                    .unwrap()
+                    .expect("load Item verification cache")
                     .get("Item"),
                 Some(&(hash.to_string(), false))
             );
@@ -1555,7 +1555,7 @@ mod sim_platform_store {
             store
                 .upsert_spec("t", "Issue", ioa, csdl_a, hash)
                 .await
-                .unwrap();
+                .expect("stage Issue");
             let duplicate = SpecCommitExpectation {
                 entity_type: "Issue",
                 content_hash: hash,
@@ -1569,7 +1569,7 @@ mod sim_platform_store {
                 store
                     .load_specs()
                     .await
-                    .unwrap()
+                    .expect("load committed specs")
                     .iter()
                     .all(|row| row.entity_type != "Issue")
             );
