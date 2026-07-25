@@ -53,7 +53,9 @@ async fn first_journal_write_materializes_snapshot_only_state_for_restart() {
         "events_since_snapshot": 0,
         "last_snapshot_sequence_nr": 5,
         "sequence_nr": 5,
-        "processed_idempotency_keys": {}
+        "processed_idempotency_keys": {
+            "snapshot-only-legacy-increment": 5
+        }
     }))
     .expect("serialize snapshot-only state");
     events
@@ -104,6 +106,52 @@ async fn first_journal_write_materializes_snapshot_only_state_for_restart() {
         journal[0].payload["state"]["fields"]["Status"], "Ready",
         "snapshot recovery must canonicalize field status before journal materialization"
     );
+    let retry: EntityResponse = first
+        .ask(
+            EntityMsg::Action {
+                name: "Increment".to_string(),
+                params: serde_json::json!({}),
+                cross_entity_booleans: BTreeMap::new(),
+                idempotency_key: Some("snapshot-only-increment".to_string()),
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("retry first journal action");
+    assert!(
+        retry.success,
+        "immediate exact retry failed: {:?}",
+        retry.error
+    );
+    assert_eq!(retry.state.counters.get("value"), Some(&11));
+    assert_eq!(
+        sim.dump_journal(persistence_id).len(),
+        2,
+        "immediate exact retry must not append"
+    );
+    let legacy_retry: EntityResponse = first
+        .ask(
+            EntityMsg::Action {
+                name: "Increment".to_string(),
+                params: serde_json::json!({}),
+                cross_entity_booleans: BTreeMap::new(),
+                idempotency_key: Some("snapshot-only-legacy-increment".to_string()),
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("retry materialized legacy token");
+    assert!(
+        legacy_retry.success,
+        "materialized legacy token failed: {:?}",
+        legacy_retry.error
+    );
+    assert_eq!(legacy_retry.state.counters.get("value"), Some(&11));
+    assert_eq!(
+        sim.dump_journal(persistence_id).len(),
+        2,
+        "materialized legacy token must not append"
+    );
     assert!(
         events
             .load_snapshot(persistence_id)
@@ -150,4 +198,30 @@ async fn first_journal_write_materializes_snapshot_only_state_for_restart() {
     );
     assert_eq!(recovered.state.fields["Id"], "snapshot-only-counter");
     assert_eq!(recovered.state.fields["Status"], "Ready");
+
+    for idempotency_key in ["snapshot-only-increment", "snapshot-only-legacy-increment"] {
+        let retry: EntityResponse = restarted
+            .ask(
+                EntityMsg::Action {
+                    name: "Increment".to_string(),
+                    params: serde_json::json!({}),
+                    cross_entity_booleans: BTreeMap::new(),
+                    idempotency_key: Some(idempotency_key.to_string()),
+                },
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("retry materialized token after restart");
+        assert!(
+            retry.success,
+            "post-restart retry failed for {idempotency_key}: {:?}",
+            retry.error
+        );
+        assert_eq!(retry.state.counters.get("value"), Some(&11));
+        assert_eq!(
+            sim.dump_journal(persistence_id).len(),
+            2,
+            "post-restart retry must not append for {idempotency_key}"
+        );
+    }
 }
