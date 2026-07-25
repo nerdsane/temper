@@ -7,7 +7,8 @@ use temper_runtime::persistence::{
 };
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_server::entity_actor::types::{
-    EntityEvent, MAX_EVENTS_SINCE_SNAPSHOT, RECENT_EVENTS_BUDGET_DEFAULT,
+    EntityEvent, MAX_DURABLE_IDEMPOTENCY_KEYS_PER_ENTITY, MAX_EVENTS_SINCE_SNAPSHOT,
+    RECENT_EVENTS_BUDGET_DEFAULT,
 };
 
 const FIELD_UPDATE_COLLISION_IOA: &str = r#"
@@ -115,6 +116,103 @@ async fn in_memory_field_update_retry_survives_recent_event_eviction() {
     );
     assert_eq!(
         mismatched_retry.state.total_event_count,
+        before_retry.state.total_event_count
+    );
+}
+
+/// A field-update intent proof must identify the same retained token record,
+/// not merely the same token text. Once the token is evicted and rebound to a
+/// domain action, its former PATCH intent must not be acknowledged.
+#[tokio::test]
+async fn in_memory_field_update_retry_rejects_rebound_action_token() {
+    let (_guard, _clock, _ids) = install_deterministic_context(297);
+    let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(
+        BUDGET_DOC_IOA,
+    )));
+    let system = ActorSystem::new("arn238-in-memory-field-update-rebind");
+    let actor = system.spawn(
+        EntityActor::new("BudgetDoc", "memory-rebind", table, serde_json::json!({})),
+        "memory-rebind",
+    );
+
+    let token = "rebound-field-update-token".to_string();
+    let fields = serde_json::json!({"Value": "field-update"});
+    let first = update_with_idempotency(&actor, fields.clone(), false, token.clone()).await;
+    assert!(first.success, "first PATCH failed: {:?}", first.error);
+
+    for index in 0..MAX_DURABLE_IDEMPOTENCY_KEYS_PER_ENTITY {
+        let response: temper_server::entity_actor::EntityResponse = actor
+            .ask(
+                EntityMsg::Action {
+                    name: "Noop".to_string(),
+                    params: serde_json::json!({"Value": format!("evict-{index}")}),
+                    cross_entity_booleans: BTreeMap::new(),
+                    idempotency_key: Some(format!("action-token-{index}")),
+                },
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("token-eviction action response");
+        assert!(
+            response.success,
+            "token-eviction action {index} failed: {:?}",
+            response.error
+        );
+    }
+
+    let rebound: temper_server::entity_actor::EntityResponse = actor
+        .ask(
+            EntityMsg::Action {
+                name: "Noop".to_string(),
+                params: serde_json::json!({"Value": "rebound-action"}),
+                cross_entity_booleans: BTreeMap::new(),
+                idempotency_key: Some(token.clone()),
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("rebound action response");
+    assert!(
+        rebound.success,
+        "rebound action failed: {:?}",
+        rebound.error
+    );
+    assert_eq!(rebound.state.fields["Value"], "rebound-action");
+
+    for index in 0..=RECENT_EVENTS_BUDGET_DEFAULT {
+        let response = action(
+            &actor,
+            "Noop",
+            serde_json::json!({"Value": format!("after-rebind-{index}")}),
+        )
+        .await;
+        assert!(
+            response.success,
+            "post-rebind action {index} failed: {:?}",
+            response.error
+        );
+    }
+    let before_retry = state(&actor).await;
+    assert!(
+        before_retry
+            .state
+            .events
+            .iter()
+            .all(|event| event.idempotency_key.as_deref() != Some(token.as_str())),
+        "the rebound domain event must leave the recent-event window"
+    );
+
+    let stale_retry = update_with_idempotency(&actor, fields, false, token).await;
+    assert!(
+        !stale_retry.success,
+        "an old PATCH intent must not match a token rebound to a domain action"
+    );
+    assert_eq!(
+        stale_retry.state.fields["Value"],
+        before_retry.state.fields["Value"]
+    );
+    assert_eq!(
+        stale_retry.state.total_event_count,
         before_retry.state.total_event_count
     );
 }
