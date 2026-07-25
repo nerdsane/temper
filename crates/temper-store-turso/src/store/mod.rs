@@ -32,6 +32,7 @@ mod policy;
 mod published_artifacts;
 mod query_page;
 mod secrets;
+mod spec_publication;
 mod specs;
 #[cfg(test)]
 mod tests;
