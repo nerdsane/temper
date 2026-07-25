@@ -915,8 +915,7 @@ async fn test_load_inline_supports_nested_paths() {
     let summary = std::str::from_utf8(&body)
         .expect("inline verification stream must be UTF-8")
         .lines()
-        .filter(|line| !line.is_empty())
-        .last()
+        .rfind(|line| !line.is_empty())
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("summary JSON"))
         .expect("inline verification summary");
     assert_eq!(summary["all_passed"], true);
