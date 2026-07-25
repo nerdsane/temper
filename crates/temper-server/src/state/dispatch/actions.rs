@@ -41,14 +41,14 @@ impl crate::state::ServerState {
         &self,
         tenant: &TenantId,
         agent_ctx: &AgentContext,
-    ) -> Result<AgentContext, DispatchError> {
+    ) -> Result<Box<AgentContext>, DispatchError> {
         if let Some(lease) = agent_ctx.tenant_generation_lease.as_ref()
             && lease.belongs_to(tenant)
             && lease.captured_generation() == self.tenant_generation_version(tenant)
             && (lease.is_held_for(tenant)
                 || (lease.is_publication_owned_for(tenant) && self.spec_publication_gated(tenant)))
         {
-            return Ok(agent_ctx.clone());
+            return Ok(Box::new(agent_ctx.clone()));
         }
         if self.spec_publication_gated(tenant) {
             return Err(DispatchError::Deferred { retry_after_ms: 1 });
@@ -61,9 +61,9 @@ impl crate::state::ServerState {
             return Err(DispatchError::Deferred { retry_after_ms: 1 });
         }
         let captured_generation = self.tenant_generation_version(tenant);
-        Ok(agent_ctx.clone().with_tenant_generation_lease(
+        Ok(Box::new(agent_ctx.clone().with_tenant_generation_lease(
             crate::state::TenantGenerationLease::new(tenant, generation, captured_generation),
-        ))
+        )))
     }
 
     /// Dispatch an action using the unified command object.
@@ -194,7 +194,7 @@ impl crate::state::ServerState {
         let dispatch_agent_ctx = self
             .dispatch_context_in_generation(tenant, agent_ctx)
             .await?;
-        let agent_ctx = &dispatch_agent_ctx;
+        let agent_ctx = dispatch_agent_ctx.as_ref();
 
         if self
             .composite_metadata_for(tenant, entity_type, action)?
@@ -395,7 +395,7 @@ impl crate::state::ServerState {
         let generation_agent_ctx = self
             .dispatch_context_in_generation(tenant, agent_ctx)
             .await?;
-        let agent_ctx = &generation_agent_ctx;
+        let agent_ctx = generation_agent_ctx.as_ref();
         let explicit_workflow_context = agent_ctx.workflow_run_id.is_some()
             || agent_ctx.workflow_root_entity_type.is_some()
             || agent_ctx.workflow_root_entity_id.is_some();

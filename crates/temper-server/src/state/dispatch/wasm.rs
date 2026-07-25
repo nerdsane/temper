@@ -352,7 +352,7 @@ impl crate::state::ServerState {
             .await
             .map_err(|error| error.to_string())?;
         record_workflow_span_attrs(
-            &generation_agent_ctx,
+            generation_agent_ctx.as_ref(),
             req.entity_type,
             req.entity_id,
             Some(req.action),
@@ -372,7 +372,7 @@ impl crate::state::ServerState {
                 entity_id: req.entity_id,
             },
             action: req.action,
-            agent_ctx: &generation_agent_ctx,
+            agent_ctx: generation_agent_ctx.as_ref(),
             dispatch_idempotency_key: req.dispatch_idempotency_key,
             mode: req.mode,
         };
