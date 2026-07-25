@@ -67,6 +67,7 @@ use field_updates::{
 };
 #[cfg(test)]
 pub(crate) use state_materialization::STATE_MATERIALIZATION_EVENT_TYPE;
+use state_materialization::rebase_materialized_idempotency_keys;
 pub(crate) use state_materialization::{
     PersistedStateMaterialization, STATE_MATERIALIZATION_SCHEMA, state_materialization_envelope,
 };
@@ -1096,7 +1097,13 @@ impl Actor for EntityActor {
                     wide_event::emit_span(&wide);
                     wide_event::emit_metrics(&wide);
 
+                    let committed_idempotency_key = event.idempotency_key.clone();
                     state.push_event_bounded(event);
+                    if self.event_journal.is_some()
+                        && let Some(idempotency_key) = committed_idempotency_key.as_deref()
+                    {
+                        state.record_durable_idempotency_key(idempotency_key, state.sequence_nr);
+                    }
                     self.record_state_key_contract(&table);
 
                     let persistence_id = self.persistence_id();

@@ -318,6 +318,7 @@ impl EntityActor {
                 state.sequence_nr = new_seq;
                 if materializes_snapshot {
                     state.record_internal_envelope();
+                    rebase_materialized_idempotency_keys(state);
                     *self
                         .snapshot_source
                         .write()

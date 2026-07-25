@@ -88,6 +88,7 @@ pub(super) async fn apply_replayed_envelope(
             )));
         }
         *state = materialization.state;
+        rebase_materialized_idempotency_keys(state);
         advance_durable_tail(state, envelope.sequence_nr);
         return Ok(());
     }
@@ -190,8 +191,12 @@ pub(super) async fn apply_replayed_envelope(
                 serde_json::Value::String(state.status.clone()),
             );
         }
+        let idempotency_key = tombstone.idempotency_key.clone();
         state.push_event_bounded(tombstone);
         advance_durable_tail(state, envelope.sequence_nr);
+        if let Some(idempotency_key) = idempotency_key.as_deref() {
+            state.record_durable_idempotency_key(idempotency_key, envelope.sequence_nr);
+        }
         return Ok(());
     }
 
@@ -228,7 +233,11 @@ pub(super) async fn apply_replayed_envelope(
                     state.entity_type, state.entity_id, envelope.sequence_nr
                 )));
             }
+            let idempotency_key = event.idempotency_key.clone();
             state.push_event_bounded(event);
+            if let Some(idempotency_key) = idempotency_key.as_deref() {
+                state.record_durable_idempotency_key(idempotency_key, envelope.sequence_nr);
+            }
         }
         Err(error) if strict_event_decode => {
             return Err(ActorError::custom(format!(

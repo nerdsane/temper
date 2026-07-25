@@ -9,6 +9,8 @@ pub(crate) use temper_runtime::persistence::{
     STATE_MATERIALIZATION_SCHEMA,
 };
 
+const MATERIALIZED_JOURNAL_SEQUENCE: u64 = 1;
+
 /// Complete state baseline that makes later journal deltas independently replayable.
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub(crate) struct PersistedStateMaterialization {
@@ -50,8 +52,12 @@ fn bounded_processed_idempotency_keys(state: &EntityState) -> BTreeMap<String, u
     }
     newest
         .into_iter()
-        .map(|(sequence, key)| (key, sequence))
+        .map(|(_, key)| (key, MATERIALIZED_JOURNAL_SEQUENCE))
         .collect()
+}
+
+pub(super) fn rebase_materialized_idempotency_keys(state: &mut EntityState) {
+    state.processed_idempotency_keys = bounded_processed_idempotency_keys(state);
 }
 
 /// Build the internal event that transfers a snapshot-only generation into the journal.
