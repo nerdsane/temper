@@ -306,7 +306,7 @@ async fn snapshot_ahead_of_journal_is_not_claimed_as_a_lower_applied_snapshot() 
 
 #[cfg(feature = "sim")]
 #[tokio::test]
-async fn stable_recovery_preserves_pre_coordinate_snapshot_nondeterministic_effect_values() {
+async fn stable_recovery_preserves_historical_snapshot_nondeterministic_effect_values() {
     use temper_runtime::persistence::EventStore;
     use temper_runtime::scheduler::install_deterministic_context;
     use temper_store_sim::SimEventStore;
@@ -414,6 +414,85 @@ effect = [{ type = "spawn", entity_type = "Child", entity_id_source = "{uuid}", 
             .get("last_child_id"),
         Some(&serde_json::json!("durable-child-id")),
         "replaying the snapshotted Start event must not generate a replacement child id"
+    );
+
+    let passivation_id = "passivation-snapshot";
+    let passivation_persistence_id = "default:Parent:passivation-snapshot";
+    let passivation_event = EntityEvent {
+        action: "Start".to_string(),
+        from_status: "Idle".to_string(),
+        to_status: "Active".to_string(),
+        timestamp: sim_now(),
+        params: serde_json::json!({}),
+        idempotency_key: Some("passivation-start-once".to_string()),
+    };
+    store
+        .append(
+            passivation_persistence_id,
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: passivation_event.action.clone(),
+                payload: serde_json::to_value(&passivation_event)
+                    .expect("encode passivation Start event"),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: passivation_event.timestamp,
+                    actor_id: passivation_persistence_id.to_string(),
+                },
+            }],
+        )
+        .await
+        .expect("seed passivation Start journal event");
+    let mut passivation_state = snapshot_state.clone();
+    passivation_state.entity_id = passivation_id.to_string();
+    passivation_state.fields = serde_json::json!({
+        "Id": passivation_id,
+        "Status": "Active",
+        "last_child_id": "passivation-child-id"
+    });
+    passivation_state.events_since_snapshot = 1;
+    passivation_state.last_snapshot_sequence_nr = 0;
+    passivation_state.processed_idempotency_keys =
+        BTreeMap::from([("passivation-start-once".to_string(), 1)]);
+    let mut passivation_snapshot =
+        serde_json::to_value(&passivation_state).expect("encode historical passivation snapshot");
+    passivation_snapshot
+        .as_object_mut()
+        .expect("passivation snapshot must be an object")
+        .remove("events");
+    store
+        .save_snapshot(
+            passivation_persistence_id,
+            1,
+            &serde_json::to_vec(&passivation_snapshot)
+                .expect("serialize historical passivation snapshot"),
+        )
+        .await
+        .expect("seed historical passivation snapshot");
+
+    let recovered = recover_entity_state_from_stable_sources(EntityRecoveryContext {
+        tenant: "default",
+        entity_type: "Parent",
+        entity_id: passivation_id,
+        table: &table,
+        store: &boxed_store,
+        backend: BackendLabel::Sim,
+        initial_fields: &serde_json::json!({}),
+        blob_store: None,
+    })
+    .await
+    .expect("stable recovery should use the historical passivation boundary");
+    assert_eq!(
+        recovered
+            .state
+            .expect("passivation journal-backed state")
+            .fields
+            .get("last_child_id"),
+        Some(&serde_json::json!("passivation-child-id")),
+        "historical passivation recovery must not generate a replacement child id"
     );
 }
 
