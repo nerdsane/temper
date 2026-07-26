@@ -7,9 +7,13 @@ use temper_runtime::tenant::TenantId;
 
 fn registered_activation_tenants(
     all_tenants: &[TenantId],
-    _registered_tenants: &BTreeSet<TenantId>,
+    registered_tenants: &BTreeSet<TenantId>,
 ) -> Vec<TenantId> {
-    all_tenants.to_vec()
+    all_tenants
+        .iter()
+        .filter(|tenant| registered_tenants.contains(*tenant))
+        .cloned()
+        .collect()
 }
 
 pub(in crate::serve) async fn hydrate_entities(
@@ -71,8 +75,10 @@ pub(in crate::serve) async fn hydrate_entities(
 
     all_tenants.sort();
     all_tenants.dedup();
-    // Establish each durable table's activation epoch before hydration can
-    // dispatch actors or any network listener can serve writes.
+    // Establish each loaded spec table's activation epoch before hydration can
+    // dispatch actors or any network listener can serve writes. A tenant found
+    // only through durable contract state has no live spec authority yet, so
+    // activating an empty registry would incorrectly retire its contracts.
     for tenant_id in registered_activation_tenants(&all_tenants, &registered_tenants) {
         state
             .server
