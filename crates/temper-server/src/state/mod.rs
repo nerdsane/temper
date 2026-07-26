@@ -427,6 +427,10 @@ pub struct ServerState {
     pub reaction_dispatcher: Arc<RwLock<Option<Arc<ReactionDispatcher>>>>,
     /// Optional webhook dispatcher for external system notifications.
     pub webhook_dispatcher: Option<Arc<WebhookDispatcher>>,
+    /// Shared HTTP client for spec-declared webhook integrations (ARN-227).
+    /// Always present — spec integrations fire regardless of whether a
+    /// `webhooks.toml` dispatcher is configured.
+    pub(crate) spec_webhook_client: reqwest::Client,
     /// Native adapter integration registry (`type = "adapter"` dispatch path).
     pub adapter_registry: Arc<AdapterRegistry>,
     /// WASM module registry: maps (tenant, module_name) → sha256_hash.
@@ -692,6 +696,7 @@ impl ServerState {
             pg_record_store: None,
             reaction_dispatcher: Arc::new(RwLock::new(None)),
             webhook_dispatcher: None,
+            spec_webhook_client: reqwest::Client::new(),
             adapter_registry: Arc::new(AdapterRegistry::with_builtins()),
             wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
             wasm_engine: Arc::new(WasmEngine::default()),
@@ -940,6 +945,7 @@ impl ServerState {
             pg_record_store: None,
             reaction_dispatcher: Arc::new(RwLock::new(None)),
             webhook_dispatcher: None,
+            spec_webhook_client: reqwest::Client::new(),
             adapter_registry: Arc::new(AdapterRegistry::with_builtins()),
             wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
             wasm_engine: Arc::new(WasmEngine::default()),
