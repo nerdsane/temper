@@ -153,6 +153,20 @@ pub(crate) fn generate_unmet_intents(
 
 const FEATURE_REQUEST_THRESHOLD: u64 = 3;
 
+/// Stable, content-derived feature-request id: the same platform gap always
+/// maps to the same record (ARN-240). 12 hex chars of SHA-256 over the gap
+/// group key, NUL-separated to prevent field-boundary ambiguity.
+fn deterministic_feature_request_id(action: &str, error_pattern: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(action.as_bytes());
+    hasher.update([0]);
+    hasher.update(error_pattern.as_bytes());
+    let digest = hasher.finalize();
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    format!("FR-{}", &hex[..12])
+}
+
 pub(crate) fn generate_feature_requests(
     entries: &[crate::state::TrajectoryEntry],
 ) -> Vec<FeatureRequestRecord> {
@@ -196,8 +210,14 @@ pub(crate) fn generate_feature_requests(
             _ => PlatformGapCategory::MissingCapability,
         };
 
+        let mut header = RecordHeader::new(RecordType::FeatureRequest, "insight-generator");
+        // ARN-240: identity derives from the gap group, not a minted UUID —
+        // the same (action, error pattern) always maps to the same record, so
+        // regeneration on every listing is idempotent by construction.
+        header.id = deterministic_feature_request_id(&accum.action, &accum.error_pattern);
+
         feature_requests.push(FeatureRequestRecord {
-            header: RecordHeader::new(RecordType::FeatureRequest, "insight-generator"),
+            header,
             category,
             description: format!(
                 "Agents tried '{}' {} times — {}",
