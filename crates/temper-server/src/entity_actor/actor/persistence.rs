@@ -55,8 +55,8 @@ impl EntityActor {
         // Before the explicit provenance field existed, actor-written snapshots
         // omitted the bounded in-memory `events` tail and retained the exact
         // aggregate sequence. Writers after segmented replay accounting was
-        // introduced also stored the matching boundary and a zero tail; older
-        // writers omitted both of those later fields. Generic migration
+        // introduced also stored an internally consistent boundary and tail;
+        // older writers omitted both of those later fields. Generic migration
         // snapshots with an `events` field remain provenance-free.
         let segmented_coordinates = match (
             obj.get("last_snapshot_sequence_nr")
@@ -64,7 +64,10 @@ impl EntityActor {
             obj.get("events_since_snapshot")
                 .and_then(serde_json::Value::as_u64),
         ) {
-            (Some(last_snapshot_sequence), Some(0)) => last_snapshot_sequence == sequence_nr,
+            (Some(last_snapshot_sequence), Some(events_since_snapshot)) => {
+                last_snapshot_sequence <= sequence_nr
+                    && events_since_snapshot == sequence_nr - last_snapshot_sequence
+            }
             (None, None) => true,
             _ => false,
         };

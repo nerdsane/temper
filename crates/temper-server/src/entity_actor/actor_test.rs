@@ -524,6 +524,26 @@ fn legacy_snapshot_provenance_requires_an_actor_writer_shape() {
         })
     );
 
+    let mut passivation =
+        serde_json::to_value(&snapshot_state).expect("encode historical passivation snapshot");
+    let passivation = passivation
+        .as_object_mut()
+        .expect("passivation snapshot must be an object");
+    passivation.remove("events");
+    passivation.insert("events_since_snapshot".to_string(), serde_json::json!(1));
+    passivation.insert(
+        "last_snapshot_sequence_nr".to_string(),
+        serde_json::json!(0),
+    );
+    let passivation =
+        serde_json::to_vec(&passivation).expect("serialize historical passivation snapshot");
+    assert_eq!(
+        EntityActor::apply_snapshot_bytes(&mut restored, 1, &passivation),
+        Some(SnapshotProvenance::LegacyJournal {
+            through_sequence: 1
+        })
+    );
+
     let mut pre_coordinate =
         serde_json::to_value(&snapshot_state).expect("encode pre-coordinate actor snapshot");
     let pre_coordinate = pre_coordinate
