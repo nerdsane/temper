@@ -306,7 +306,7 @@ async fn snapshot_ahead_of_journal_is_not_claimed_as_a_lower_applied_snapshot() 
 
 #[cfg(feature = "sim")]
 #[tokio::test]
-async fn stable_recovery_preserves_legacy_journal_snapshot_nondeterministic_effect_values() {
+async fn stable_recovery_preserves_pre_coordinate_snapshot_nondeterministic_effect_values() {
     use temper_runtime::persistence::EventStore;
     use temper_runtime::scheduler::install_deterministic_context;
     use temper_store_sim::SimEventStore;
@@ -378,8 +378,16 @@ effect = [{ type = "spawn", entity_type = "Child", entity_id_source = "{uuid}", 
         sequence_nr: 1,
         processed_idempotency_keys: BTreeMap::from([("start-once".to_string(), 1)]),
     };
-    let snapshot = EntityActor::serialize_snapshot_state(&snapshot_state, None)
-        .expect("encode pre-provenance journal-aligned snapshot");
+    let mut legacy_snapshot =
+        serde_json::to_value(&snapshot_state).expect("encode pre-coordinate actor snapshot");
+    let legacy_snapshot = legacy_snapshot
+        .as_object_mut()
+        .expect("actor snapshot must be an object");
+    legacy_snapshot.remove("events");
+    legacy_snapshot.remove("events_since_snapshot");
+    legacy_snapshot.remove("last_snapshot_sequence_nr");
+    let snapshot =
+        serde_json::to_vec(&legacy_snapshot).expect("serialize pre-coordinate actor snapshot");
     store
         .save_snapshot(persistence_id, 1, &snapshot)
         .await
