@@ -117,6 +117,7 @@ impl PersistedPostDispatchEffects {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SnapshotProvenance {
     Legacy,
+    LegacyJournal { through_sequence: u64 },
     Journal { through_sequence: u64 },
 }
 

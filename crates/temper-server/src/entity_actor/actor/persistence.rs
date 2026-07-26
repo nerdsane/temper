@@ -52,8 +52,27 @@ impl EntityActor {
             Err(_) => return None,
         };
         let obj = value.as_object_mut()?;
+        // Before the explicit provenance field existed, actor-written snapshots
+        // still carried an exact journal boundary in both sequence coordinates
+        // and omitted the bounded in-memory `events` tail. Generic migration
+        // snapshots did not have to use that writer shape, so keep treating
+        // coordinate-bearing payloads with `events` as provenance-free.
+        let legacy_journal_sequence = (!obj.contains_key("events")
+            && obj.get("sequence_nr").and_then(serde_json::Value::as_u64) == Some(sequence_nr)
+            && obj
+                .get("last_snapshot_sequence_nr")
+                .and_then(serde_json::Value::as_u64)
+                == Some(sequence_nr)
+            && obj
+                .get("events_since_snapshot")
+                .and_then(serde_json::Value::as_u64)
+                == Some(0))
+        .then_some(sequence_nr);
         let provenance = match obj.remove(SNAPSHOT_JOURNAL_SEQUENCE_FIELD) {
-            None => SnapshotProvenance::Legacy,
+            None => match legacy_journal_sequence {
+                Some(through_sequence) => SnapshotProvenance::LegacyJournal { through_sequence },
+                None => SnapshotProvenance::Legacy,
+            },
             Some(value) if value.as_u64() == Some(sequence_nr) => SnapshotProvenance::Journal {
                 through_sequence: sequence_nr,
             },

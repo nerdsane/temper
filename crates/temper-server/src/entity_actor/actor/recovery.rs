@@ -186,7 +186,10 @@ async fn replay_events(
         && journal_boundary.latest_sequence > 0
         && !matches!(
             snapshot_provenance,
-            Some(SnapshotProvenance::Journal { through_sequence })
+            Some(
+                SnapshotProvenance::Journal { through_sequence }
+                    | SnapshotProvenance::LegacyJournal { through_sequence }
+            )
                 if through_sequence == from_sequence
                     && through_sequence <= journal_boundary.latest_sequence
         );
