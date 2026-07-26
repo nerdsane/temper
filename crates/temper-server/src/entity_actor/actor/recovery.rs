@@ -10,6 +10,7 @@ pub(crate) use stable_source::{
     CapturedEntitySnapshot, StableEntitySource, recover_entity_state_from_stable_sources,
     stable_entity_source_is_current,
 };
+use stable_source::{CapturedReplaySource, ReplaySummary};
 
 const JOURNAL_REPLAY_PAGE_SIZE: usize = 1_024;
 const MAX_STABLE_RECOVERY_ATTEMPTS: usize = 3;
@@ -41,17 +42,6 @@ struct ReplayPolicy {
     load_snapshot: bool,
     strict_event_decode: bool,
     replay_full_journal: bool,
-}
-
-#[derive(Default)]
-struct ReplaySummary {
-    replayed_state_materialization: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct CapturedReplaySource {
-    journal_boundary: JournalBoundary,
-    snapshot: Option<CapturedEntitySnapshot>,
 }
 
 /// Actor state and the exact snapshot generation that participated in recovery.

@@ -13,6 +13,17 @@ pub(crate) struct CapturedEntitySnapshot {
     pub(crate) state: Vec<u8>,
 }
 
+#[derive(Default)]
+pub(super) struct ReplaySummary {
+    pub(super) replayed_state_materialization: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct CapturedReplaySource {
+    pub(super) journal_boundary: JournalBoundary,
+    pub(super) snapshot: Option<CapturedEntitySnapshot>,
+}
+
 /// Entity state reconstructed from one stable durable source generation.
 pub(crate) struct StableEntitySource {
     /// `None` proves that neither a journal nor a snapshot exists.
