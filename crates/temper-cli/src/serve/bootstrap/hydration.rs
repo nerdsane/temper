@@ -1,8 +1,16 @@
 //! Startup entity hydration and durable key-contract activation.
 
 use anyhow::{Context, Result};
+use std::collections::BTreeSet;
 use temper_platform::state::PlatformState;
 use temper_runtime::tenant::TenantId;
+
+fn registered_activation_tenants(
+    all_tenants: &[TenantId],
+    _registered_tenants: &BTreeSet<TenantId>,
+) -> Vec<TenantId> {
+    all_tenants.to_vec()
+}
 
 pub(in crate::serve) async fn hydrate_entities(
     state: &PlatformState,
@@ -37,16 +45,16 @@ pub(in crate::serve) async fn hydrate_entities(
     }
     // Postgres-restored tenants may have no CLI app directory and no Turso
     // router entry. The durable registry is the complete startup authority.
-    all_tenants.extend(
-        state
-            .server
-            .registry
-            .read()
-            .expect("spec registry lock poisoned")
-            .tenant_ids()
-            .into_iter()
-            .cloned(),
-    );
+    let registered_tenants = state
+        .server
+        .registry
+        .read()
+        .expect("spec registry lock poisoned")
+        .tenant_ids()
+        .into_iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    all_tenants.extend(registered_tenants.iter().cloned());
     if let Some(storage) = state.server.storage_stack.as_ref() {
         let activated_contracts = storage
             .events
@@ -65,10 +73,10 @@ pub(in crate::serve) async fn hydrate_entities(
     all_tenants.dedup();
     // Establish each durable table's activation epoch before hydration can
     // dispatch actors or any network listener can serve writes.
-    for tenant_id in &all_tenants {
+    for tenant_id in registered_activation_tenants(&all_tenants, &registered_tenants) {
         state
             .server
-            .activate_registered_key_contracts(tenant_id)
+            .activate_registered_key_contracts(&tenant_id)
             .await
             .map_err(anyhow::Error::msg)
             .with_context(|| {
@@ -111,4 +119,25 @@ pub(in crate::serve) async fn hydrate_entities(
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use temper_runtime::tenant::TenantId;
+
+    use super::registered_activation_tenants;
+
+    #[test]
+    fn durable_contract_only_tenant_is_not_activated_without_registered_specs() {
+        let registered = TenantId::new("registered");
+        let durable_only = TenantId::new("durable-only");
+        let all_tenants = vec![durable_only, registered.clone()];
+        let registered_tenants = BTreeSet::from([registered.clone()]);
+
+        assert_eq!(
+            registered_activation_tenants(&all_tenants, &registered_tenants),
+            vec![registered]
+        );
+    }
 }
