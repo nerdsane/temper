@@ -99,3 +99,166 @@ pub(super) async fn load_entity_current_fields(
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, VecDeque};
+
+    use temper_jit::TransitionTable;
+    use temper_runtime::persistence::{
+        COMPOSITE_EVENT_TYPE, CompositeEvent, EventMetadata, EventStore, PersistenceEnvelope,
+    };
+    use temper_runtime::scheduler::{install_deterministic_context, sim_now, sim_uuid};
+    use temper_store_sim::SimEventStore;
+
+    use super::*;
+    use crate::entity_actor::{EntityState, state_materialization_envelope};
+    use crate::storage::{BackendLabel, BoxedEventStore};
+
+    const KEYED_RECORD_IOA: &str = r#"
+[automaton]
+name = "KeyedRecord"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "ExternalId"
+type = "string"
+initial = ""
+
+[[key]]
+name = "external_id"
+properties = ["ExternalId"]
+"#;
+
+    fn composite_audit_envelope(persistence_id: &str, entity_id: &str) -> PersistenceEnvelope {
+        PersistenceEnvelope {
+            sequence_nr: 0,
+            event_type: COMPOSITE_EVENT_TYPE.to_string(),
+            payload: serde_json::to_value(CompositeEvent {
+                tenant: "default".to_string(),
+                parent_entity_type: "KeyedRecord".to_string(),
+                parent_entity_id: entity_id.to_string(),
+                parent_action: "Audit".to_string(),
+                composite_idempotency_key: format!("audit-{entity_id}"),
+                intent_hash: String::new(),
+                sub_writes: Vec::new(),
+            })
+            .expect("serialize composite audit"),
+            metadata: EventMetadata {
+                event_id: sim_uuid(),
+                causation_id: sim_uuid(),
+                correlation_id: sim_uuid(),
+                timestamp: sim_now(),
+                actor_id: persistence_id.to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn materialized_zero_domain_event_journal_remains_indexable() {
+        let (_guard, _clock, _ids) = install_deterministic_context(238);
+        let store = SimEventStore::no_faults(238);
+        let boxed = BoxedEventStore::new(store.clone());
+        let table = TransitionTable::from_ioa_source(KEYED_RECORD_IOA);
+        let entity_id = "materialized-key-owner";
+        let persistence_id = format!("default:KeyedRecord:{entity_id}");
+        let baseline = EntityState {
+            entity_type: "KeyedRecord".to_string(),
+            entity_id: entity_id.to_string(),
+            status: "Active".to_string(),
+            item_count: 0,
+            counters: BTreeMap::new(),
+            booleans: BTreeMap::new(),
+            lists: BTreeMap::new(),
+            fields: serde_json::json!({
+                "Id": entity_id,
+                "Status": "Active",
+                "ExternalId": "durable-owner",
+            }),
+            events: VecDeque::new(),
+            total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
+            sequence_nr: 0,
+            processed_idempotency_keys: BTreeMap::new(),
+        };
+        let materialization = state_materialization_envelope(&persistence_id, &baseline, sim_now())
+            .expect("serialize state materialization");
+        store
+            .append(
+                &persistence_id,
+                0,
+                &[
+                    materialization,
+                    composite_audit_envelope(&persistence_id, entity_id),
+                ],
+            )
+            .await
+            .expect("persist materialization and audit");
+
+        let loaded = load_entity_current_fields(
+            &TenantId::default(),
+            "KeyedRecord",
+            entity_id,
+            Some(&table),
+            &boxed,
+            BackendLabel::Sim,
+            None,
+        )
+        .await;
+
+        match loaded {
+            EntityLoadOutcome::Fields {
+                fields,
+                sequence_nr,
+                journal_sequence,
+                snapshot,
+            } => {
+                assert_eq!(fields["ExternalId"], "durable-owner");
+                assert_eq!(sequence_nr, 2);
+                assert_eq!(journal_sequence, 2);
+                assert!(snapshot.is_none());
+            }
+            _ => panic!(
+                "a valid state materialization must distinguish an entity from an audit-only phantom"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_only_zero_domain_event_journal_remains_missing() {
+        let (_guard, _clock, _ids) = install_deterministic_context(239);
+        let store = SimEventStore::no_faults(239);
+        let boxed = BoxedEventStore::new(store.clone());
+        let table = TransitionTable::from_ioa_source(KEYED_RECORD_IOA);
+        let entity_id = "audit-only-phantom";
+        let persistence_id = format!("default:KeyedRecord:{entity_id}");
+        store
+            .append(
+                &persistence_id,
+                0,
+                &[composite_audit_envelope(&persistence_id, entity_id)],
+            )
+            .await
+            .expect("persist audit-only journal");
+
+        assert!(matches!(
+            load_entity_current_fields(
+                &TenantId::default(),
+                "KeyedRecord",
+                entity_id,
+                Some(&table),
+                &boxed,
+                BackendLabel::Sim,
+                None,
+            )
+            .await,
+            EntityLoadOutcome::Missing {
+                journal_sequence: 1,
+                ..
+            }
+        ));
+    }
+}
