@@ -22,6 +22,9 @@ pub(crate) struct StableEntitySource {
     /// Snapshot generation used either as the complete snapshot-only state or as
     /// the legacy field baseline for a journal-backed state.
     pub(crate) snapshot: Option<CapturedEntitySnapshot>,
+    /// Whether strict replay applied the internal baseline that materializes a
+    /// snapshot-only entity into the journal before non-domain audit records.
+    pub(crate) replayed_state_materialization: bool,
 }
 
 impl StableEntitySource {
@@ -157,6 +160,7 @@ pub(crate) async fn recover_entity_state_from_stable_sources(
                 state: snapshot_state,
                 journal_sequence: 0,
                 snapshot,
+                replayed_state_materialization: false,
             }
         } else {
             let captured_source = CapturedReplaySource {
@@ -169,7 +173,7 @@ pub(crate) async fn recover_entity_state_from_stable_sources(
                 context.table,
                 context.initial_fields,
             );
-            replay_events(
+            let replay = replay_events(
                 context,
                 &mut state,
                 ReplayPolicy {
@@ -185,6 +189,7 @@ pub(crate) async fn recover_entity_state_from_stable_sources(
                 journal_sequence: state.sequence_nr,
                 state: Some(state),
                 snapshot,
+                replayed_state_materialization: replay.replayed_state_materialization,
             }
         };
         if stable_entity_source_is_current(context.store, &persistence_id, &source).await? {

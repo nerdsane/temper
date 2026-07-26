@@ -43,6 +43,11 @@ struct ReplayPolicy {
     replay_full_journal: bool,
 }
 
+#[derive(Default)]
+struct ReplaySummary {
+    replayed_state_materialization: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CapturedReplaySource {
     journal_boundary: JournalBoundary,
@@ -100,7 +105,7 @@ async fn replay_events(
     state: &mut EntityState,
     policy: ReplayPolicy,
     captured_source: Option<&CapturedReplaySource>,
-) -> Result<(), ActorError> {
+) -> Result<ReplaySummary, ActorError> {
     let replay_start = Instant::now(); // determinism-ok: production replay metric only
     let persistence_id = format!(
         "{}:{}:{}",
@@ -260,6 +265,7 @@ async fn replay_events(
 
     let mut cursor = from_sequence;
     let mut replayed_count = 0_u64;
+    let mut summary = ReplaySummary::default();
     while cursor < journal_boundary.latest_sequence {
         let remaining = journal_boundary.latest_sequence - cursor;
         let page_len = usize::try_from(remaining.min(JOURNAL_REPLAY_PAGE_SIZE as u64))
@@ -311,6 +317,8 @@ async fn replay_events(
                     state.entity_type, state.entity_id, expected_sequence, envelope.sequence_nr
                 )));
             }
+            let is_state_materialization =
+                is_state_materialization_event_for(envelope, &state.entity_type, &state.entity_id);
             apply_replayed_envelope(
                 context.table,
                 context.backend,
@@ -321,6 +329,7 @@ async fn replay_events(
                 effective_policy.strict_event_decode,
             )
             .await?;
+            summary.replayed_state_materialization |= is_state_materialization;
         }
         cursor = page
             .last()
@@ -379,7 +388,7 @@ async fn replay_events(
         state.last_snapshot_sequence_nr = 0;
         state.events_since_snapshot = usize::try_from(state.sequence_nr).unwrap_or(usize::MAX);
     }
-    Ok(())
+    Ok(summary)
 }
 
 async fn capture_replay_source(

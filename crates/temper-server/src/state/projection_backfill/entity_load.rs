@@ -72,6 +72,7 @@ pub(super) async fn load_entity_current_fields(
         };
     let sequence_nr = source.durable_sequence();
     let journal_sequence = source.journal_sequence;
+    let replayed_state_materialization = source.replayed_state_materialization;
     let snapshot = source.snapshot;
     match source.state {
         None => EntityLoadOutcome::Missing {
@@ -84,7 +85,11 @@ pub(super) async fn load_entity_current_fields(
             journal_sequence,
             snapshot,
         },
-        Some(state) if state.total_event_count == 0 && snapshot.is_none() => {
+        Some(state)
+            if state.total_event_count == 0
+                && snapshot.is_none()
+                && !replayed_state_materialization =>
+        {
             EntityLoadOutcome::Missing {
                 sequence_nr,
                 journal_sequence,
