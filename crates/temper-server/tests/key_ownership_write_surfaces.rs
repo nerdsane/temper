@@ -21,6 +21,8 @@ use temper_server::{EntityActor, EntityMsg, EntityResponse, ServerState};
 use temper_spec::csdl::parse_csdl;
 use temper_store_sim::SimEventStore;
 
+#[path = "key_ownership_write_surfaces/audit_only_repair.rs"]
+mod audit_only_repair;
 #[path = "key_ownership_write_surfaces/field_update_recovery.rs"]
 mod field_update_recovery;
 #[path = "key_ownership_write_surfaces/key_contract_aba.rs"]
