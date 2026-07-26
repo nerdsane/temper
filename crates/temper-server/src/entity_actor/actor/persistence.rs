@@ -53,21 +53,25 @@ impl EntityActor {
         };
         let obj = value.as_object_mut()?;
         // Before the explicit provenance field existed, actor-written snapshots
-        // still carried an exact journal boundary in both sequence coordinates
-        // and omitted the bounded in-memory `events` tail. Generic migration
-        // snapshots did not have to use that writer shape, so keep treating
-        // coordinate-bearing payloads with `events` as provenance-free.
+        // omitted the bounded in-memory `events` tail and retained the exact
+        // aggregate sequence. Writers after segmented replay accounting was
+        // introduced also stored the matching boundary and a zero tail; older
+        // writers omitted both of those later fields. Generic migration
+        // snapshots with an `events` field remain provenance-free.
+        let segmented_coordinates = match (
+            obj.get("last_snapshot_sequence_nr")
+                .and_then(serde_json::Value::as_u64),
+            obj.get("events_since_snapshot")
+                .and_then(serde_json::Value::as_u64),
+        ) {
+            (Some(last_snapshot_sequence), Some(0)) => last_snapshot_sequence == sequence_nr,
+            (None, None) => true,
+            _ => false,
+        };
         let legacy_journal_sequence = (!obj.contains_key("events")
             && obj.get("sequence_nr").and_then(serde_json::Value::as_u64) == Some(sequence_nr)
-            && obj
-                .get("last_snapshot_sequence_nr")
-                .and_then(serde_json::Value::as_u64)
-                == Some(sequence_nr)
-            && obj
-                .get("events_since_snapshot")
-                .and_then(serde_json::Value::as_u64)
-                == Some(0))
-        .then_some(sequence_nr);
+            && segmented_coordinates)
+            .then_some(sequence_nr);
         let provenance = match obj.remove(SNAPSHOT_JOURNAL_SEQUENCE_FIELD) {
             None => match legacy_journal_sequence {
                 Some(through_sequence) => SnapshotProvenance::LegacyJournal { through_sequence },

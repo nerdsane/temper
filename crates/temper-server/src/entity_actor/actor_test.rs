@@ -417,6 +417,59 @@ effect = [{ type = "spawn", entity_type = "Child", entity_id_source = "{uuid}", 
     );
 }
 
+#[test]
+fn legacy_snapshot_provenance_requires_an_actor_writer_shape() {
+    let snapshot_state = EntityState {
+        entity_type: "Parent".to_string(),
+        entity_id: "legacy-shape".to_string(),
+        status: "Active".to_string(),
+        item_count: 0,
+        counters: BTreeMap::new(),
+        booleans: BTreeMap::new(),
+        lists: BTreeMap::new(),
+        fields: serde_json::json!({"Id": "legacy-shape", "Status": "Active"}),
+        events: std::collections::VecDeque::new(),
+        total_event_count: 1,
+        events_since_snapshot: 0,
+        last_snapshot_sequence_nr: 1,
+        sequence_nr: 1,
+        processed_idempotency_keys: BTreeMap::new(),
+    };
+    let segmented = EntityActor::serialize_snapshot_state(&snapshot_state, None)
+        .expect("encode segmented pre-provenance snapshot");
+    let mut restored = snapshot_state.clone();
+    assert_eq!(
+        EntityActor::apply_snapshot_bytes(&mut restored, 1, &segmented),
+        Some(SnapshotProvenance::LegacyJournal {
+            through_sequence: 1
+        })
+    );
+
+    let mut pre_coordinate =
+        serde_json::to_value(&snapshot_state).expect("encode pre-coordinate actor snapshot");
+    let pre_coordinate = pre_coordinate
+        .as_object_mut()
+        .expect("actor snapshot must be an object");
+    pre_coordinate.remove("events");
+    pre_coordinate.remove("events_since_snapshot");
+    pre_coordinate.remove("last_snapshot_sequence_nr");
+    let pre_coordinate =
+        serde_json::to_vec(&pre_coordinate).expect("serialize pre-coordinate actor snapshot");
+    assert_eq!(
+        EntityActor::apply_snapshot_bytes(&mut restored, 1, &pre_coordinate),
+        Some(SnapshotProvenance::LegacyJournal {
+            through_sequence: 1
+        })
+    );
+
+    let generic_migration =
+        serde_json::to_vec(&snapshot_state).expect("encode coordinate-bearing migration");
+    assert_eq!(
+        EntityActor::apply_snapshot_bytes(&mut restored, 1, &generic_migration),
+        Some(SnapshotProvenance::Legacy)
+    );
+}
+
 #[cfg(feature = "sim")]
 #[tokio::test]
 async fn actor_recovery_rejects_snapshot_identity_mismatch() {
