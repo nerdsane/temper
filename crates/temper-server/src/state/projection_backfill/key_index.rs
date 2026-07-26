@@ -238,8 +238,15 @@ async fn prepare_key_index_type(
                 },
                 EntityLoadOutcome::LoadFailed => KeyRepairDisposition::Unresolved,
                 EntityLoadOutcome::Missing {
-                    journal_sequence, ..
-                } if journal_sequence > 0 => KeyRepairDisposition::Unresolved,
+                    sequence_nr,
+                    journal_sequence,
+                    snapshot,
+                } if journal_sequence > 0 => KeyRepairDisposition::Reconcile {
+                    fields: None,
+                    sequence_nr,
+                    journal_sequence,
+                    snapshot,
+                },
                 outcome => match loaded_journal_sequence(&outcome) {
                     None => KeyRepairDisposition::Unresolved,
                     Some(observed_journal_sequence) => {
