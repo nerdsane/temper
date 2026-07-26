@@ -306,10 +306,12 @@ async fn snapshot_ahead_of_journal_is_not_claimed_as_a_lower_applied_snapshot() 
 
 #[cfg(feature = "sim")]
 #[tokio::test]
-async fn stable_recovery_preserves_journal_snapshot_nondeterministic_effect_values() {
+async fn stable_recovery_preserves_legacy_journal_snapshot_nondeterministic_effect_values() {
     use temper_runtime::persistence::EventStore;
+    use temper_runtime::scheduler::install_deterministic_context;
     use temper_store_sim::SimEventStore;
 
+    let (_guard, _clock, _ids) = install_deterministic_context(405);
     let table = TransitionTable::from_ioa_source(
         r#"
 [automaton]
@@ -376,8 +378,8 @@ effect = [{ type = "spawn", entity_type = "Child", entity_id_source = "{uuid}", 
         sequence_nr: 1,
         processed_idempotency_keys: BTreeMap::from([("start-once".to_string(), 1)]),
     };
-    let snapshot = EntityActor::serialize_snapshot_state(&snapshot_state, Some(1))
-        .expect("encode journal-aligned snapshot");
+    let snapshot = EntityActor::serialize_snapshot_state(&snapshot_state, None)
+        .expect("encode pre-provenance journal-aligned snapshot");
     store
         .save_snapshot(persistence_id, 1, &snapshot)
         .await
