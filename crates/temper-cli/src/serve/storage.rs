@@ -1,13 +1,37 @@
 //! Storage backend connection and persistence functions (Postgres, Turso).
 
 use anyhow::{Context, Result};
+use std::collections::BTreeMap;
 
 use temper_evolution::PostgresRecordStore;
+use temper_platform::state::PlatformState;
 use temper_server::storage::StorageStack;
 use temper_store_postgres::PostgresEventStore;
 use temper_store_turso::TursoEventStore;
 
 use super::LoadedTenantSpecs;
+
+pub(super) async fn seed_cedar_policies(
+    state: &PlatformState,
+    tenant_policy_seed: BTreeMap<String, String>,
+) -> Result<()> {
+    for (tenant, policy_text) in tenant_policy_seed {
+        temper_server::authz::upsert_policy_entries(
+            &state.server,
+            &tenant,
+            &[temper_server::authz::PolicyEntryUpsert {
+                policy_id: "primary",
+                cedar_text: &policy_text,
+                created_by: "startup",
+            }],
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("failed to publish Cedar policies for tenant '{tenant}': {error}")
+        })?;
+    }
+    Ok(())
+}
 
 pub(super) async fn connect_postgres_store(
     database_url: &str,
@@ -129,12 +153,6 @@ pub(super) async fn upsert_loaded_specs_to_turso(
             .delete_tenant_constraints(tenant)
             .await
             .with_context(|| format!("Failed to clear tenant constraints for {tenant} in Turso"))?;
-    }
-    if let Some(policy_text) = loaded.cedar_policy_text.as_deref() {
-        turso
-            .save_policy(tenant, "primary", policy_text, "system")
-            .await
-            .with_context(|| format!("Failed to persist Cedar policy for {tenant} in Turso"))?;
     }
     Ok(())
 }

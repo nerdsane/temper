@@ -51,7 +51,7 @@ pub struct InstalledAppsRuntimeRecoverySummary {
 /// and during DST restart simulation.
 pub async fn recover_cedar_policies(state: &PlatformState, ps: &dyn PlatformStore) {
     let mut legacy_entries: BTreeMap<String, String> = BTreeMap::new();
-    let mut granular_entries: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    let mut tenants = BTreeSet::new();
 
     match ps.load_tenant_policies().await {
         Ok(rows) => {
@@ -59,6 +59,7 @@ pub async fn recover_cedar_policies(state: &PlatformState, ps: &dyn PlatformStor
                 if policy_text.trim().is_empty() {
                     continue;
                 }
+                tenants.insert(tenant.clone());
                 legacy_entries.insert(tenant, policy_text);
             }
         }
@@ -70,13 +71,7 @@ pub async fn recover_cedar_policies(state: &PlatformState, ps: &dyn PlatformStor
     match ps.load_policy_entries().await {
         Ok(rows) => {
             for row in rows {
-                if !row.enabled || row.cedar_text.trim().is_empty() {
-                    continue;
-                }
-                granular_entries
-                    .entry(row.tenant)
-                    .or_default()
-                    .push((row.policy_id, row.cedar_text));
+                tenants.insert(row.tenant);
             }
         }
         Err(e) => {
@@ -84,83 +79,36 @@ pub async fn recover_cedar_policies(state: &PlatformState, ps: &dyn PlatformStor
         }
     }
 
-    if legacy_entries.is_empty() && granular_entries.is_empty() {
+    if tenants.is_empty() {
         return;
     }
-
-    let tenants: BTreeSet<String> = legacy_entries
-        .keys()
-        .chain(granular_entries.keys())
-        .cloned()
-        .collect();
     let mut loaded_count = 0usize;
-    let mut loaded_policy_count = 0usize;
-    let mut skipped_legacy_count = 0usize;
     for tenant in tenants {
-        let entries = granular_entries.remove(&tenant).unwrap_or_default();
-        let has_primary_granular = entries.iter().any(|(policy_id, _)| policy_id == "primary");
-        let mut policy_text = String::new();
-        let mut entry_count = 0usize;
-
-        // `primary` is the durable aggregate policy row for newer installs. If
-        // it exists, prefer it over the legacy blob to avoid loading the same
-        // multi-megabyte generated policy twice.
-        if !has_primary_granular {
-            if let Some(legacy_text) = legacy_entries.get(&tenant) {
-                append_cedar_policy_text(&mut policy_text, legacy_text);
-                entry_count += 1;
+        match temper_server::authz::recover_policy_snapshot(
+            &state.server,
+            &tenant,
+            legacy_entries.get(&tenant).map(String::as_str),
+        )
+        .await
+        {
+            Ok(_) => loaded_count += 1,
+            Err(error) => {
+                tracing::error!(tenant, %error, "Failed to recover Cedar policy snapshot");
+                if let Err(fail_closed_error) =
+                    temper_server::authz::fail_closed_tenant_policies(&state.server, &tenant)
+                {
+                    tracing::error!(tenant, %fail_closed_error, "Failed to default-deny tenant after policy recovery fault");
+                }
             }
-        } else if legacy_entries.contains_key(&tenant) {
-            skipped_legacy_count += 1;
         }
-
-        for (_, cedar_text) in entries {
-            append_cedar_policy_text(&mut policy_text, &cedar_text);
-            entry_count += 1;
-        }
-
-        if policy_text.trim().is_empty() {
-            continue;
-        }
-
-        // Use the raw policy reload path here instead of per-row PolicyId
-        // rewriting. Production primary policies can contain tens of thousands
-        // of generated statements; raw reload matches the pre-existing startup
-        // path and avoids deep Cedar policy cloning during restart recovery.
-        if let Err(e) = state
-            .server
-            .authz
-            .reload_tenant_policies(&tenant, &policy_text)
-        {
-            tracing::warn!(tenant, error = %e, "Skipping invalid Cedar policies for tenant");
-            continue;
-        }
-
-        if let Some(policy_text) = state.server.authz.get_tenant_policy_text(&tenant)
-            && let Ok(mut policies) = state.server.tenant_policies.write()
-        {
-            policies.insert(tenant.clone(), policy_text);
-        }
-
-        loaded_count += 1;
-        loaded_policy_count += entry_count;
     }
 
     if loaded_count > 0 {
         tracing::info!(
             tenants = loaded_count,
-            policies = loaded_policy_count,
-            skipped_legacy = skipped_legacy_count,
-            "Restored Cedar policies from durable storage."
+            "Restored versioned Cedar policy snapshots from durable storage."
         );
     }
-}
-
-fn append_cedar_policy_text(target: &mut String, cedar_text: &str) {
-    if !target.is_empty() {
-        target.push('\n');
-    }
-    target.push_str(cedar_text);
 }
 
 /// Restore previously installed OS apps from the platform store.
@@ -342,6 +290,7 @@ mod tests {
     use std::collections::HashMap;
 
     use temper_authz::SecurityContext;
+    use temper_server::StorageStack;
     use temper_store_turso::TursoEventStore;
 
     use super::*;
@@ -374,7 +323,10 @@ permit(
             .await
             .expect("save granular policy");
 
-        let state = PlatformState::new(None);
+        let mut state = PlatformState::new(None);
+        state
+            .server
+            .set_storage_stack(StorageStack::from_turso(store.clone()));
         recover_cedar_policies(&state, &store).await;
 
         let mut resource_attrs = HashMap::new();
@@ -448,7 +400,10 @@ permit(
             .await
             .expect("save granular policy");
 
-        let state = PlatformState::new(None);
+        let mut state = PlatformState::new(None);
+        state
+            .server
+            .set_storage_stack(StorageStack::from_turso(store.clone()));
         recover_cedar_policies(&state, &store).await;
 
         let tenant_text = state

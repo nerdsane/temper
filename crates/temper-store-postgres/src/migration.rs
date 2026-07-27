@@ -37,6 +37,7 @@ mod tests {
             include_str!("../migrations/0006_segmented_event_history.sql"),
             include_str!("../migrations/0007_installed_app_follow_policy.sql"),
             include_str!("../migrations/0008_ots_trajectory_outbox_status.sql"),
+            include_str!("../migrations/0014_policy_publications.sql"),
         ]
         .join("\n")
         .to_lowercase();
@@ -53,6 +54,7 @@ mod tests {
             "event_segments",
             "snapshot_history",
             "ots_trajectories",
+            "policy_publications",
         ] {
             assert!(
                 migration.contains(&format!("create table if not exists {table}")),

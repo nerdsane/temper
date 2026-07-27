@@ -95,6 +95,16 @@ impl ServerState {
             to_status: state.status.clone(),
             timestamp: sim_now(),
             params: serde_json::json!({}),
+            custom_effects: vec![],
+            effect_receipt_version: Some(crate::entity_actor::effects::effect_receipt_version(
+                "File",
+                "",
+                "Created",
+                &state.status,
+                &[],
+            )),
+            scheduled_actions: vec![],
+            spawn_requests: vec![],
             idempotency_key: None,
         };
         push_synthetic_event(&mut state, &mut events, created);

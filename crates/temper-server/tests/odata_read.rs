@@ -14,6 +14,7 @@ use temper_server::build_router;
 use temper_server::registry::{
     EntityLevelSummary, EntityVerificationResult, SpecRegistry, VerificationStatus,
 };
+use temper_server::storage::PolicyStoreRow;
 use temper_server::{ServerState, StorageStack};
 use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoEventStore;
@@ -55,6 +56,33 @@ async fn post_json(
         .unwrap();
     let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, body)
+}
+
+async fn install_durable_policy(state: &ServerState, policy_id: &str, cedar_text: &str) {
+    let policy_store = state.policy_store().expect("policy store configured");
+    let snapshot = policy_store
+        .load_policy_snapshot(TenantId::default().as_str())
+        .await
+        .expect("load policy snapshot");
+    policy_store
+        .replace_policy_snapshot(
+            TenantId::default().as_str(),
+            snapshot.version,
+            vec![PolicyStoreRow {
+                tenant: TenantId::default().as_str().to_string(),
+                policy_id: policy_id.to_string(),
+                cedar_text: cedar_text.to_string(),
+                policy_hash: "test".to_string(),
+                created_at: "1970-01-01T00:00:00Z".to_string(),
+                created_by: "test".to_string(),
+                enabled: true,
+            }],
+        )
+        .await
+        .expect("replace policy snapshot");
+    temper_server::authz::load_and_activate_tenant_policies(state, TenantId::default().as_str())
+        .await
+        .expect("activate durable policy");
 }
 
 async fn upsert_projected_order(
@@ -236,6 +264,12 @@ async fn composite_entity_key_resolves_through_query_plane_index() {
         .await
         .expect("create local turso db");
     let state = build_turso_state("odata-read-composite-key", store.clone());
+    install_durable_policy(
+        &state,
+        "test-permit-all",
+        "permit(principal, action, resource);",
+    )
+    .await;
     let tenant = TenantId::default();
 
     for index in 0usize..1200 {
@@ -411,6 +445,12 @@ async fn filtered_entity_set_returns_entities_created_via_odata_post() {
         .await
         .expect("create local turso db");
     let state = build_turso_state("odata-read-create-filter", store);
+    install_durable_policy(
+        &state,
+        "test-permit-all",
+        "permit(principal, action, resource);",
+    )
+    .await;
 
     let (status, body) = post_json(
         &state,
@@ -448,6 +488,12 @@ async fn entity_set_authorizes_against_fields_omitted_by_select() {
         .await
         .expect("create local turso db");
     let state = build_turso_state("odata-read-cedar-select", store);
+    install_durable_policy(
+        &state,
+        "test-permit-all",
+        "permit(principal, action, resource);",
+    )
+    .await;
 
     let (status, body) = post_json(
         &state,
@@ -461,17 +507,16 @@ async fn entity_set_authorizes_against_fields_omitted_by_select() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "seed create failed: {body:?}");
 
-    state
-        .authz
-        .reload_tenant_policies(
-            TenantId::default().as_str(),
-            r#"
+    install_durable_policy(
+        &state,
+        "test-read-usd",
+        r#"
                 permit(principal, action == Action::"list", resource is Order);
                 permit(principal, action == Action::"read", resource is Order)
                 when { resource.Currency == "USD" };
             "#,
-        )
-        .expect("install Cedar policy");
+    )
+    .await;
 
     let (status, body) =
         customer_json(&state, Method::GET, "/tdata/Orders?$select=Notes", None).await;
@@ -502,6 +547,12 @@ async fn filtered_entity_set_repairs_missing_catalog_rows_before_trusting_pushdo
         .await
         .expect("create local turso db");
     let state = build_turso_state("odata-read-missing-catalog-filter", store.clone());
+    install_durable_policy(
+        &state,
+        "test-permit-all",
+        "permit(principal, action, resource);",
+    )
+    .await;
 
     let entity_id = "ord-missing-catalog-filter";
     let (status, body) = post_json(
@@ -559,6 +610,12 @@ async fn filtered_entity_set_reflects_odata_patch_updates() {
         .await
         .expect("create local turso db");
     let state = build_turso_state("odata-read-patch-filter", store);
+    install_durable_policy(
+        &state,
+        "test-permit-all",
+        "permit(principal, action, resource);",
+    )
+    .await;
 
     let (status, body) = post_json(
         &state,
@@ -606,6 +663,12 @@ async fn crud_routes_apply_cedar_mutation_policies() {
         .await
         .expect("create local turso db");
     let state = build_turso_state("odata-read-cedar-crud", store);
+    install_durable_policy(
+        &state,
+        "test-permit-all",
+        "permit(principal, action, resource);",
+    )
+    .await;
 
     let (status, body) = post_json(
         &state,
@@ -615,13 +678,12 @@ async fn crud_routes_apply_cedar_mutation_policies() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "seed create failed: {body:?}");
 
-    state
-        .authz
-        .reload_tenant_policies(
-            TenantId::default().as_str(),
-            r#"permit(principal, action in [Action::"list", Action::"read"], resource is Order);"#,
-        )
-        .expect("install Cedar policy");
+    install_durable_policy(
+        &state,
+        "test-list-read-only",
+        r#"permit(principal, action in [Action::"list", Action::"read"], resource is Order);"#,
+    )
+    .await;
 
     for (method, path, request_body) in [
         (

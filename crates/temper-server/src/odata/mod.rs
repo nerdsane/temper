@@ -19,7 +19,6 @@ mod stream_fast_path;
 mod stream_put;
 mod write;
 
-#[cfg(feature = "observe")]
 pub(crate) use common::extract_tenant;
 pub use content_addressed::handle_blob_ingest_raw;
 pub use read::handle_hints;

@@ -32,8 +32,8 @@ pub use file_reads::{IndexedFileStreamRead, TextFileReadResult, TextFileVersionR
 pub(crate) use file_writes::FileStreamContentError;
 pub use metrics::MetricsCollector;
 pub use pending_decisions::{
-    ActionScope, DecisionStatus, DurationScope, PendingDecision, PolicyScopeMatrix, PrincipalScope,
-    ResourceScope,
+    ActionScope, DecisionResolutionKind, DecisionResolutionPhase, DecisionStatus, DurationScope,
+    PendingDecision, PolicyScopeMatrix, PrincipalScope, ResourceScope,
 };
 pub use persistence::WasmModuleSource;
 pub use policy_suggestions::PolicySuggestionEngine;
@@ -71,6 +71,7 @@ use crate::storage::{
     BackendLabel, BoxedEventStore, DataOnlyCreateStore, MetadataStore, PolicyStore,
     QueryPlaneStore, StorageStack, TrajectorySink,
 };
+
 use crate::trigger::ReactionDispatcher;
 use crate::wasm_registry::WasmModuleRegistry;
 use crate::webhooks::WebhookDispatcher;
@@ -464,6 +465,12 @@ pub struct ServerState {
     pub pending_decision_tx: Arc<tokio::sync::broadcast::Sender<PendingDecision>>,
     /// Per-tenant Cedar policy text (tenant -> policy text).
     pub tenant_policies: Arc<RwLock<BTreeMap<String, String>>>,
+    /// Durable publication version currently installed in each tenant engine.
+    pub tenant_policy_versions: Arc<RwLock<BTreeMap<String, u64>>>,
+    /// Immutable configured policy text composed with every durable snapshot.
+    /// Platform bootstrap uses this for authority that cannot be deleted by
+    /// mutable policy CRUD (for example, the system-tenant control plane).
+    pub tenant_policy_baselines: Arc<RwLock<BTreeMap<String, String>>>,
     /// Tenants installed in commons mode. Collection creates for these tenants
     /// must pass Cedar so commons guardrail forbids apply to direct OData
     /// writes as well as bound actions and composite sub-writes.
@@ -559,6 +566,50 @@ impl ServerState {
         if let Ok(mut tenants) = self.commons_guardrail_tenants.write() {
             tenants.insert(tenant.to_string());
         }
+    }
+
+    /// Install immutable configured authority composed with durable policies.
+    ///
+    /// The baseline is not part of mutable policy CRUD or snapshot versions;
+    /// loading an authoritative empty durable snapshot therefore revokes every
+    /// mutable grant while retaining this explicitly configured control plane.
+    pub fn set_tenant_policy_baseline(&self, tenant: &str, cedar_text: &str) -> Result<(), String> {
+        if cedar_text.trim().is_empty() {
+            return Err("tenant policy baseline cannot be empty".to_string());
+        }
+        if self
+            .tenant_policy_versions
+            .read()
+            .map_err(|_| "tenant policy version cache lock poisoned".to_string())?
+            .contains_key(tenant)
+        {
+            return Err(
+                "tenant policy baseline must be configured before durable policy activation"
+                    .to_string(),
+            );
+        }
+        self.authz
+            .reload_tenant_policies_named(
+                tenant,
+                &[(
+                    crate::authz::policy_persistence::POLICY_BASELINE_ID.to_string(),
+                    cedar_text.to_string(),
+                )],
+            )
+            .map_err(|error| format!("invalid tenant policy baseline: {error}"))?;
+        self.tenant_policy_baselines
+            .write()
+            .map_err(|_| "tenant policy baseline lock poisoned".to_string())?
+            .insert(tenant.to_string(), cedar_text.to_string());
+        let active_text = self
+            .authz
+            .get_tenant_policy_text(tenant)
+            .ok_or_else(|| "tenant policy baseline could not be read back".to_string())?;
+        self.tenant_policies
+            .write()
+            .map_err(|_| "tenant policy cache lock poisoned".to_string())?
+            .insert(tenant.to_string(), active_text);
+        Ok(())
     }
 
     /// Whether commons-mode write guardrails are active for a tenant.
@@ -710,6 +761,8 @@ impl ServerState {
             idempotency_cache: Arc::new(IdempotencyCache::new()),
             pending_decision_tx: Arc::new(pending_decision_tx),
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
+            tenant_policy_versions: Arc::new(RwLock::new(BTreeMap::new())),
+            tenant_policy_baselines: Arc::new(RwLock::new(BTreeMap::new())),
             commons_guardrail_tenants: Arc::new(RwLock::new(BTreeSet::new())),
             commons_rate_limit_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             commons_storage_projection_cache: Arc::new(Mutex::new(BTreeMap::new())),
@@ -958,6 +1011,8 @@ impl ServerState {
             idempotency_cache: Arc::new(IdempotencyCache::new()),
             pending_decision_tx: Arc::new(pending_decision_tx),
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
+            tenant_policy_versions: Arc::new(RwLock::new(BTreeMap::new())),
+            tenant_policy_baselines: Arc::new(RwLock::new(BTreeMap::new())),
             commons_guardrail_tenants: Arc::new(RwLock::new(BTreeSet::new())),
             commons_rate_limit_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             commons_storage_projection_cache: Arc::new(Mutex::new(BTreeMap::new())),

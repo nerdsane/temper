@@ -75,10 +75,7 @@ impl PlatformState {
         }));
         // Load baseline Cedar policies for the temper-system tenant so that
         // WASM modules can manage GovernanceDecision entities via HTTP.
-        if let Err(e) = server
-            .authz
-            .reload_tenant_policies("temper-system", SYSTEM_TENANT_POLICY)
-        {
+        if let Err(e) = server.set_tenant_policy_baseline("temper-system", SYSTEM_TENANT_POLICY) {
             tracing::warn!(error = %e, "failed to load temper-system Cedar policies");
         }
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
@@ -111,10 +108,7 @@ impl PlatformState {
         }));
         // Load baseline Cedar policies for the temper-system tenant so that
         // WASM modules can manage GovernanceDecision entities via HTTP.
-        if let Err(e) = server
-            .authz
-            .reload_tenant_policies("temper-system", SYSTEM_TENANT_POLICY)
-        {
+        if let Err(e) = server.set_tenant_policy_baseline("temper-system", SYSTEM_TENANT_POLICY) {
             tracing::warn!(error = %e, "failed to load temper-system Cedar policies");
         }
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);

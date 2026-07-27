@@ -326,6 +326,8 @@ pub(super) fn build_tenant_cedar_policy<'a>(
         if covered_entities.contains(&entity) {
             continue;
         }
+        let entity = temper_authz::render_cedar_entity_type(&entity)
+            .map_err(|error| anyhow::anyhow!("Invalid Cedar entity type: {error}"))?;
         policy_chunks.push(format!(
             "permit(\n    principal,\n    action,\n    resource is {entity}\n);"
         ));
@@ -468,5 +470,14 @@ effect = "set phantom true"
             ungoverned,
             temper_authz::AuthzDecision::Deny(temper_authz::AuthzDenial::NoMatchingPermit)
         ));
+    }
+
+    #[test]
+    fn build_tenant_cedar_policy_rejects_injected_entity_type() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let entities = ["Issue); permit(principal, action, resource); //".to_string()];
+
+        let error = build_tenant_cedar_policy(tmp.path(), entities.iter()).unwrap_err();
+        assert!(error.to_string().contains("Invalid Cedar entity type"));
     }
 }

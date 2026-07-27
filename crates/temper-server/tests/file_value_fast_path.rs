@@ -236,6 +236,36 @@ fn mark_file_verified(state: &ServerState) {
     );
 }
 
+async fn install_file_policy(state: &ServerState, tenant: &TenantId, cedar_text: &str) {
+    if state.policy_store().is_some() {
+        temper_server::authz::upsert_policy_entries(
+            state,
+            tenant.as_str(),
+            &[temper_server::authz::PolicyEntryUpsert {
+                policy_id: "file-value-fast-path-test",
+                cedar_text,
+                created_by: "file-value-fast-path-test",
+            }],
+        )
+        .await
+        .expect("install durable File test policy");
+    } else {
+        state
+            .authz
+            .reload_tenant_policies(tenant.as_str(), cedar_text)
+            .expect("install in-memory File test policy");
+    }
+}
+
+async fn install_file_value_allow_policy(state: &ServerState, tenant: &TenantId) {
+    install_file_policy(
+        state,
+        tenant,
+        r#"permit(principal, action in [Action::"create", Action::"update", Action::"read"], resource is File);"#,
+    )
+    .await;
+}
+
 async fn assert_local_blob(data_dir: &std::path::Path, content_hash: &str, expected: &[u8]) {
     let blob_path = data_dir.join("blobs").join("temper-fs").join(content_hash);
     let stored = tokio::fs::read(&blob_path)
@@ -343,6 +373,7 @@ async fn odata_file_value_put_uses_native_path_without_blob_adapter() {
     let data_dir = tempfile::tempdir().expect("temp data dir");
     state.data_dir = data_dir.path().to_path_buf();
     mark_file_verified(&state);
+    install_file_value_allow_policy(&state, &tenant).await;
 
     state
         .get_or_create_tenant_entity(&tenant, "File", "fl-odata-native", serde_json::json!({}))
@@ -393,11 +424,14 @@ async fn odata_file_value_put_applies_cedar_update_policy() {
         .expect("create File state");
     state
         .authz
-        .reload_tenant_policies(
-            tenant.as_str(),
-            r#"permit(principal, action == Action::"read", resource is File);"#,
-        )
-        .expect("install Cedar policy");
+        .reload_tenant_policies(tenant.as_str(), "")
+        .expect("clear active policy before durable test install");
+    install_file_policy(
+        &state,
+        &tenant,
+        r#"permit(principal, action == Action::"read", resource is File);"#,
+    )
+    .await;
 
     let response = build_router(state.clone())
         .oneshot(
@@ -442,11 +476,14 @@ async fn odata_file_value_get_applies_cedar_read_policy() {
         .expect("seed stream content");
     state
         .authz
-        .reload_tenant_policies(
-            tenant.as_str(),
-            r#"permit(principal, action == Action::"update", resource is File);"#,
-        )
-        .expect("install Cedar policy");
+        .reload_tenant_policies(tenant.as_str(), "")
+        .expect("clear active policy before durable test install");
+    install_file_policy(
+        &state,
+        &tenant,
+        r#"permit(principal, action == Action::"update", resource is File);"#,
+    )
+    .await;
 
     let response = build_router(state)
         .oneshot(
@@ -647,9 +684,11 @@ async fn put_value_on_new_file_is_one_atomic_append() {
     // and the highest-sequence event carries content (StreamUpdated), never a
     // lone empty `Created`.
     let (mut state, store) = build_turso_file_state("new-file-atomic-append").await;
+    let tenant = TenantId::default();
     let data_dir = tempfile::tempdir().expect("temp data dir");
     state.data_dir = data_dir.path().to_path_buf();
     mark_file_verified(&state);
+    install_file_value_allow_policy(&state, &tenant).await;
 
     let body = b"brand new file value, one append";
 
@@ -714,6 +753,7 @@ async fn new_file_value_put_is_read_after_write_consistent() {
     let data_dir = tempfile::tempdir().expect("temp data dir");
     state.data_dir = data_dir.path().to_path_buf();
     mark_file_verified(&state);
+    install_file_value_allow_policy(&state, &tenant).await;
 
     let body = b"read after write consistency";
     let expected_hash = format!("sha256:{:x}", Sha256::digest(body));
@@ -764,6 +804,7 @@ async fn concurrent_new_file_value_puts_yield_one_204_one_409() {
     let data_dir = tempfile::tempdir().expect("temp data dir");
     state.data_dir = data_dir.path().to_path_buf();
     mark_file_verified(&state);
+    install_file_value_allow_policy(&state, &TenantId::default()).await;
 
     let body_a = b"writer A bytes";
     let body_b = b"writer B different bytes";
@@ -820,6 +861,7 @@ async fn existing_file_value_put_routes_through_update_unchanged() {
     let data_dir = tempfile::tempdir().expect("temp data dir");
     state.data_dir = data_dir.path().to_path_buf();
     mark_file_verified(&state);
+    install_file_value_allow_policy(&state, &tenant).await;
 
     // First write: brand-new File via the atomic create-with-content path.
     let first = b"version one bytes";

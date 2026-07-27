@@ -2,12 +2,8 @@ use super::super::*;
 #[allow(unused_imports)]
 use super::ORDER_IOA;
 
-// ADR-0046: `[[agent_trigger]]` retired along with the AgentTrigger struct.
-// The equivalent behavior is now an `[[action.triggers]]` block with
-// kind="entity" targeting the Agent entity. Auto-start-on-Assign lives
-// as a self-trigger on the target agent entity's own spec (Sub-Decision 7).
-
-// ─── ADR-0046: [[action.triggers]] parser tests ───────────────────────────
+// ADR-0046 retired `[[agent_trigger]]`; equivalent behavior now lives in
+// `[[action.triggers]]` blocks plus self-triggers on target agent specs.
 
 #[test]
 fn test_action_triggers_entity_kind_parses() {
@@ -998,8 +994,3 @@ type = "same_id"
     });
     assert!(!has_synthesized_effect);
 }
-
-// test_agent_trigger_section_does_not_overwrite_previous_action removed —
-// ADR-0046 deleted the [[agent_trigger]] section. The equivalent
-// invariant ([[action.triggers]] body doesn't leak into action fields) is
-// covered by the action-triggers parser tests above.

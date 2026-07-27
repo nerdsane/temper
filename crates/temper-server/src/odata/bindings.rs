@@ -21,10 +21,6 @@ use crate::request_context::AgentContext;
 use crate::response::{ODataResponse, odata_error};
 use crate::state::{BoundActionHookContext, DispatchError, DispatchExtOptions, ServerState};
 
-fn idempotency_actor_key(tenant: &TenantId, entity_type: &str, entity_id: &str) -> String {
-    format!("{tenant}:{entity_type}:{entity_id}")
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn dispatch_bound_action(
     state: &ServerState,
@@ -33,11 +29,10 @@ pub(super) async fn dispatch_bound_action(
     entity_type: &str,
     key_str: &str,
     action: &str,
-    body_json: serde_json::Value,
+    mut body_json: serde_json::Value,
     agent_ctx: &AgentContext,
     headers: &HeaderMap,
     await_integration: bool,
-    idempotency_key: Option<String>,
     resolved_identity: Option<&ResolvedIdentity>,
 ) -> axum::response::Response {
     let http_start = sim_now();
@@ -223,6 +218,51 @@ pub(super) async fn dispatch_bound_action(
         .into_response();
     }
 
+    if entity_type == "GovernanceDecision" && action.rsplit('.').next() == Some("RegisterCallback")
+    {
+        if tenant.as_str() != "temper-system" {
+            return odata_error(
+                StatusCode::FORBIDDEN,
+                "InvalidCallbackCapability",
+                "GovernanceDecision callbacks may only be registered in temper-system",
+            )
+            .into_response();
+        }
+        let encoded = match headers
+            .get("x-temper-callback-capability")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+        {
+            Some(encoded) => encoded.to_string(),
+            None => {
+                return odata_error(
+                    StatusCode::FORBIDDEN,
+                    "InvalidCallbackCapability",
+                    "RegisterCallback requires a target-minted capability",
+                )
+                .into_response();
+            }
+        };
+        if let Err(error) =
+            state.validate_governance_callback_binding(key_str, &body_json, &encoded)
+        {
+            return odata_error(StatusCode::FORBIDDEN, "InvalidCallbackCapability", &error)
+                .into_response();
+        }
+        let Some(params) = body_json.as_object_mut() else {
+            return odata_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidActionParameters",
+                "RegisterCallback parameters must be a JSON object",
+            )
+            .into_response();
+        };
+        params.insert(
+            "callback_capability".to_string(),
+            serde_json::Value::String(encoded),
+        );
+    }
+
     let current_fields = current_state.state.fields.clone();
     if let Err(resp) = run_write_prechecks(
         state,
@@ -240,30 +280,6 @@ pub(super) async fn dispatch_bound_action(
         let end_time: std::time::SystemTime = sim_now().into();
         http_span.end_with_timestamp(end_time);
         return resp;
-    }
-
-    // Idempotency cache check
-    let actor_key = idempotency_actor_key(tenant, entity_type, key_str);
-    if let Some(ref idem_key) = idempotency_key
-        && let Some(cached) = state
-            .idempotency_cache
-            .get_after_effects_applied(&actor_key, idem_key)
-    {
-        let body = annotate_entity(
-            serde_json::to_value(&cached.state).unwrap_or_default(),
-            format!("$metadata#{set_name}/$entity"),
-            None,
-        );
-        http_span.set_attribute(OtelKeyValue::new("idempotency.hit", true));
-        http_span.set_status(Status::Ok);
-        http_span.set_attribute(OtelKeyValue::new("http.status_code", 200i64));
-        let end_time: std::time::SystemTime = sim_now().into();
-        http_span.end_with_timestamp(end_time);
-        return ODataResponse {
-            status: StatusCode::OK,
-            body,
-        }
-        .into_response();
     }
 
     let result = state
@@ -285,15 +301,6 @@ pub(super) async fn dispatch_bound_action(
     let response = match result {
         Ok(response) => {
             if response.success {
-                // Cache for idempotency
-                if let Some(ref idem_key) = idempotency_key {
-                    state.idempotency_cache.put_effects_applied(
-                        &actor_key,
-                        idem_key,
-                        response.clone(),
-                    );
-                }
-
                 http_span.set_status(Status::Ok);
                 http_span.set_attribute(OtelKeyValue::new("http.status_code", 200i64));
 
@@ -422,19 +429,4 @@ pub(super) async fn dispatch_bound_action(
 
     http_span.end_with_timestamp(http_end);
     response
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn idempotency_actor_key_matches_actor_persistence_id_shape() {
-        let tenant = TenantId::new("acme");
-
-        assert_eq!(
-            idempotency_actor_key(&tenant, "WorkCycle", "wc-1"),
-            "acme:WorkCycle:wc-1"
-        );
-    }
 }

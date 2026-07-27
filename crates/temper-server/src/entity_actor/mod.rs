@@ -6,9 +6,14 @@
 
 mod actor;
 pub mod effects;
+mod idempotency;
 pub mod sim_handler;
 mod snapshot_queue;
 pub mod types;
+
+#[cfg(test)]
+#[path = "effect_receipt_test.rs"]
+mod effect_receipt_test;
 
 pub use actor::EntityActor;
 pub(crate) use actor::recover_entity_state_from_store;
@@ -16,6 +21,7 @@ pub use effects::{
     ProcessResult, ScheduledAction, apply_effects, apply_new_state_fallback, build_eval_context,
     process_action, process_action_with_xref, sync_fields,
 };
+pub use idempotency::DurableIdempotencyOutcome;
 pub use sim_handler::EntityActorHandler;
 pub(crate) use snapshot_queue::SnapshotWriteQueue;
 pub use types::{EntityEvent, EntityMsg, EntityResponse, EntityState};

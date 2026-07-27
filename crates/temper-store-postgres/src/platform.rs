@@ -14,7 +14,10 @@ use crate::metrics::{
     record_postgres_transaction_begin_duration, record_postgres_transaction_commit_duration,
 };
 
+mod decision_resolution;
+mod policy_snapshot;
 mod rows;
+pub use policy_snapshot::{PostgresPolicySnapshot, PostgresPolicySnapshotEntry};
 use rows::*;
 
 const DISTINCT_RESOURCE_IDS_BUDGET: usize = 100;
@@ -1231,6 +1234,32 @@ impl PostgresEventStore {
         .map_err(storage_error)?;
 
         Ok(true)
+    }
+
+    /// Atomically create an immutable policy row without replacing an existing one.
+    pub async fn create_policy_if_absent(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, PersistenceError> {
+        let policy_hash = compute_policy_hash(cedar_text);
+        let result = crate::dbm::postgres_query!(
+            "INSERT INTO policies \
+             (tenant, policy_id, cedar_text, policy_hash, created_at, created_by, enabled) \
+             VALUES ($1, $2, $3, $4, now(), $5, true) \
+             ON CONFLICT (tenant, policy_id) DO NOTHING",
+        )
+        .bind(tenant)
+        .bind(policy_id)
+        .bind(cedar_text)
+        .bind(&policy_hash)
+        .bind(created_by)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected() == 1)
     }
 
     pub async fn load_policies_for_tenant(
@@ -2606,3 +2635,7 @@ pub(crate) fn postgres_placeholders(sql: &str, max_index: usize) -> String {
     }
     out
 }
+
+#[cfg(test)]
+#[path = "platform/concurrency_test.rs"]
+mod concurrency_test;

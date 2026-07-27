@@ -9,6 +9,10 @@ use std::sync::{Arc, RwLock};
 
 use aes_gcm::aead::{Aead, OsRng}; // determinism-ok: cryptographic nonce generation, not simulation-visible
 use aes_gcm::{AeadCore, Aes256Gcm, Key, KeyInit, Nonce};
+use hmac::{Hmac, Mac};
+use sha2::{Digest, Sha256};
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Maximum number of secrets per tenant (TigerStyle budget).
 pub const MAX_SECRETS_PER_TENANT: usize = 100;
@@ -24,6 +28,8 @@ pub const MAX_SECRET_VALUE_BYTES: usize = 8192;
 pub struct SecretsVault {
     /// AES-256-GCM cipher instance.
     cipher: Arc<Aes256Gcm>,
+    /// Domain-separated key for server-minted governance callback capabilities.
+    callback_capability_key: Option<[u8; 32]>,
     /// Shared platform secrets available to every tenant.
     platform: Arc<RwLock<BTreeMap<String, String>>>,
     /// In-memory cache: tenant → (key_name → plaintext_value).
@@ -33,14 +39,47 @@ pub struct SecretsVault {
 impl SecretsVault {
     /// Create a new vault from a 32-byte master key.
     pub fn new(master_key: &[u8; 32]) -> Self {
+        Self::from_key(master_key, true)
+    }
+
+    /// Create a vault whose ephemeral key must not mint cross-replica capabilities.
+    pub fn new_ephemeral(master_key: &[u8; 32]) -> Self {
+        Self::from_key(master_key, false)
+    }
+
+    fn from_key(master_key: &[u8; 32], callback_signing_enabled: bool) -> Self {
         // determinism-ok: cryptographic operations are CPU-bound
         let key = Key::<Aes256Gcm>::from_slice(master_key);
         let cipher = Aes256Gcm::new(key);
+        let mut key_hasher = Sha256::new();
+        key_hasher.update(b"temper/governance-callback-capability/v1\0");
+        key_hasher.update(master_key);
+        let callback_capability_key =
+            callback_signing_enabled.then(|| key_hasher.finalize().into());
         Self {
             cipher: Arc::new(cipher),
+            callback_capability_key,
             platform: Arc::new(RwLock::new(BTreeMap::new())),
             cache: Arc::new(RwLock::new(BTreeMap::new())),
         }
+    }
+
+    /// Sign an opaque governance callback capability payload.
+    pub(crate) fn sign_callback_capability(&self, payload: &[u8]) -> Option<[u8; 32]> {
+        let key = self.callback_capability_key.as_ref()?;
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts a 32-byte key");
+        mac.update(payload);
+        Some(mac.finalize().into_bytes().into())
+    }
+
+    /// Verify an opaque governance callback capability payload signature.
+    pub(crate) fn verify_callback_capability(&self, payload: &[u8], signature: &[u8]) -> bool {
+        let Some(key) = self.callback_capability_key.as_ref() else {
+            return false;
+        };
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts a 32-byte key");
+        mac.update(payload);
+        mac.verify_slice(signature).is_ok()
     }
 
     /// Encrypt a plaintext value, returning `(ciphertext, nonce)`.
@@ -79,7 +118,7 @@ impl SecretsVault {
     /// tenant already has the maximum number of secrets and this is a
     /// new key (not an update).
     pub fn cache_secret(&self, tenant: &str, key: &str, value: String) -> Result<(), String> {
-        let mut cache = self.cache.write().unwrap(); // ci-ok: infallible lock
+        let mut cache = self.cache.write().expect("secret cache lock poisoned");
         let tenant_secrets = cache.entry(tenant.to_string()).or_default();
         Self::insert_secret_with_budget(tenant_secrets, key, value, tenant)
     }
@@ -136,7 +175,7 @@ impl SecretsVault {
     /// Falls back to the platform secrets layer so shared infrastructure
     /// configuration remains available until a tenant overrides it.
     pub fn get_secret(&self, tenant: &str, key: &str) -> Option<String> {
-        let cache = self.cache.read().unwrap(); // ci-ok: infallible lock
+        let cache = self.cache.read().expect("secret cache lock poisoned");
         cache
             .get(tenant)
             .and_then(|secrets| secrets.get(key).cloned())
@@ -145,7 +184,7 @@ impl SecretsVault {
 
     /// Remove a secret from the in-memory cache.
     pub fn remove_secret(&self, tenant: &str, key: &str) -> bool {
-        let mut cache = self.cache.write().unwrap(); // ci-ok: infallible lock
+        let mut cache = self.cache.write().expect("secret cache lock poisoned");
         cache
             .get_mut(tenant)
             .map(|secrets| secrets.remove(key).is_some())
@@ -157,7 +196,7 @@ impl SecretsVault {
     /// Platform secrets are included because they are visible through the
     /// same fallback path as tenant secrets.
     pub fn list_keys(&self, tenant: &str) -> Vec<String> {
-        let cache = self.cache.read().unwrap(); // ci-ok: infallible lock
+        let cache = self.cache.read().expect("secret cache lock poisoned");
         let platform = self
             .platform
             .read()
@@ -176,7 +215,7 @@ impl SecretsVault {
     /// them when present.
     pub fn get_tenant_secrets(&self, tenant: &str) -> BTreeMap<String, String> {
         let mut merged = self.get_platform_secrets();
-        let cache = self.cache.read().unwrap(); // ci-ok: infallible lock
+        let cache = self.cache.read().expect("secret cache lock poisoned");
         if let Some(tenant_secrets) = cache.get(tenant) {
             merged.extend(tenant_secrets.clone());
         }

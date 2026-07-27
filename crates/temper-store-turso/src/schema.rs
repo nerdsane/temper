@@ -196,6 +196,15 @@ CREATE TABLE IF NOT EXISTS policies (
     PRIMARY KEY(tenant, policy_id)
 );";
 
+/// Version head for one atomically published tenant policy snapshot.
+pub const CREATE_POLICY_PUBLICATIONS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS policy_publications (
+    tenant TEXT PRIMARY KEY,
+    version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+    snapshot_hash TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);";
+
 /// Migration: add `enabled` column to existing `policies` tables.
 /// SQLite returns an error if the column already exists — callers should ignore failures.
 pub const ALTER_POLICIES_ADD_ENABLED: &str =

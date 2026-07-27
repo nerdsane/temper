@@ -600,7 +600,14 @@ mod tests {
     fn test_governance_decision_initial_state() {
         let automaton = automaton::parse_automaton(GOVERNANCE_DECISION_IOA).unwrap();
         assert_eq!(automaton.automaton.initial, "Pending");
-        assert_eq!(automaton.automaton.states.len(), 4);
+        assert_eq!(automaton.automaton.states.len(), 6);
+        assert!(
+            automaton
+                .automaton
+                .states
+                .contains(&"Approving".to_string())
+        );
+        assert!(automaton.automaton.states.contains(&"Denying".to_string()));
     }
 
     #[test]

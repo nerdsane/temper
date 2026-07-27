@@ -43,10 +43,21 @@ pub struct DispatchContext<'a> {
 impl<'a> DispatchContext<'a> {
     /// Build the agent identity triple for HTTP requests.
     fn identity(&self) -> AgentIdentity<'a> {
+        let local_unverified_agent = self.api_key.is_none()
+            && is_loopback_base_url(self.base_url)
+            && self.agent_id.is_some();
         AgentIdentity {
             session_id: self.session_id,
-            principal_id: self.principal_id,
-            principal_kind: self.principal_kind,
+            principal_id: self.principal_id.or(if local_unverified_agent {
+                self.agent_id
+            } else {
+                None
+            }),
+            principal_kind: self.principal_kind.or(if local_unverified_agent {
+                Some("agent")
+            } else {
+                None
+            }),
             agent_role: self.agent_role,
             agent_type: self.agent_type,
         }
@@ -60,6 +71,16 @@ impl<'a> DispatchContext<'a> {
             entity_or_set.to_string()
         }
     }
+}
+
+fn is_loopback_base_url(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return false;
+    };
+    matches!(
+        url.host_str(),
+        Some("localhost") | Some("127.0.0.1") | Some("::1")
+    )
 }
 
 /// Dispatch a `temper.<method>()` call via HTTP to the Temper server.
@@ -735,4 +756,63 @@ fn resolve_sdk_path(binary_path: Option<&std::path::Path>) -> Result<String, Str
         "cannot find temper-wasm-sdk crate. Ensure you are running from the temper workspace."
             .to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_context<'a>(
+        http: &'a reqwest::Client,
+        base_url: &'a str,
+        api_key: Option<&'a str>,
+    ) -> DispatchContext<'a> {
+        DispatchContext {
+            http,
+            base_url,
+            tenant: "demo",
+            agent_id: Some("agent-1"),
+            agent_type: Some("claude-code"),
+            session_id: Some("session-1"),
+            principal_id: None,
+            principal_kind: None,
+            agent_role: None,
+            entity_set_resolver: None,
+            binary_path: None,
+            api_key,
+        }
+    }
+
+    #[test]
+    fn local_credentialless_agent_identity_is_unverified_principal() {
+        let http = reqwest::Client::new();
+        let ctx = test_context(&http, "http://127.0.0.1:3000", None);
+        let identity = ctx.identity();
+
+        assert_eq!(identity.principal_id, Some("agent-1"));
+        assert_eq!(identity.principal_kind, Some("agent"));
+        assert_eq!(identity.agent_type, Some("claude-code"));
+    }
+
+    #[test]
+    fn remote_credentialless_agent_identity_does_not_self_declare_principal() {
+        let http = reqwest::Client::new();
+        let ctx = test_context(&http, "https://temper.example.test", None);
+        let identity = ctx.identity();
+
+        assert_eq!(identity.principal_id, None);
+        assert_eq!(identity.principal_kind, None);
+        assert_eq!(identity.agent_type, Some("claude-code"));
+    }
+
+    #[test]
+    fn api_key_agent_identity_does_not_self_declare_principal() {
+        let http = reqwest::Client::new();
+        let ctx = test_context(&http, "http://localhost:3000", Some("secret"));
+        let identity = ctx.identity();
+
+        assert_eq!(identity.principal_id, None);
+        assert_eq!(identity.principal_kind, None);
+        assert_eq!(identity.agent_type, Some("claude-code"));
+    }
 }

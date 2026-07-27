@@ -1,8 +1,8 @@
 //! Axum router construction for the Temper Data API.
 
 use axum::Router;
-use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderName};
-use axum::http::{Method, StatusCode};
+use axum::http::Method;
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName};
 use axum::routing::{get, put};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
@@ -21,23 +21,10 @@ use axum::http::Uri;
 use axum::response::Response;
 use temper_runtime::tenant::TenantId;
 
-const TEMPER_CLIENT_JS: &str = include_str!("../static/temper-client.js");
-const INTERNAL_BLOB_BODY_LIMIT_BYTES: usize = 128 * 1024 * 1024;
+mod policy_refresh;
+mod static_client;
 
-async fn serve_temper_client() -> (
-    StatusCode,
-    [(axum::http::header::HeaderName, &'static str); 2],
-    &'static str,
-) {
-    (
-        StatusCode::OK,
-        [
-            (CONTENT_TYPE, "application/javascript"),
-            (CACHE_CONTROL, "public, max-age=3600"),
-        ],
-        TEMPER_CLIENT_JS,
-    )
-}
+const INTERNAL_BLOB_BODY_LIMIT_BYTES: usize = 128 * 1024 * 1024;
 
 /// Build the axum router with all Temper Data API routes.
 ///
@@ -78,8 +65,11 @@ pub fn build_router(state: ServerState) -> Router {
     let router = Router::new()
         .nest("/tdata", tdata)
         .nest("/_admin", crate::admin::build_admin_router())
-        .route("/temper-client.js", get(serve_temper_client))
-        .route("/static/temper-client.js", get(serve_temper_client))
+        .route("/temper-client.js", get(static_client::serve_temper_client))
+        .route(
+            "/static/temper-client.js",
+            get(static_client::serve_temper_client),
+        )
         .route("/genesis", get(crate::static_web::serve_genesis_web))
         .route("/genesis/", get(crate::static_web::serve_genesis_web))
         .route(
@@ -130,6 +120,7 @@ pub fn build_router(state: ServerState) -> Router {
             HeaderName::from_static("x-temper-agent-type"),
         ]);
 
+    let policy_refresh_state = state.clone();
     router
         .layer(
             TraceLayer::new_for_http()
@@ -157,6 +148,10 @@ pub fn build_router(state: ServerState) -> Router {
                 ),
         )
         .layer(cors)
+        .layer(axum::middleware::from_fn_with_state(
+            policy_refresh_state,
+            policy_refresh::refresh_durable_tenant_policy,
+        ))
         .with_state(state)
 }
 
@@ -203,6 +198,10 @@ async fn http_endpoint_fallback(
             }
         }
     };
+
+    if let Some(response) = policy_refresh::refresh_fallback_policy(&state, &tenant_id).await {
+        return response;
+    }
 
     let table = state.http_endpoint_tables.table_for(&tenant_id).await;
     let matched = table.match_request(method.as_str(), uri.path()).await;

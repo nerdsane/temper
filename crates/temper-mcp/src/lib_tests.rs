@@ -96,6 +96,15 @@ async fn start_test_temper_server() -> (u16, oneshot::Sender<()>) {
     )
     .unwrap();
     state.set_storage_stack(StorageStack::from_turso(turso));
+    // This fixture intentionally exercises MCP without a credential. Durable
+    // empty policy snapshots are authoritative default-deny, so demo access
+    // must be explicit rather than relying on the removed permissive fallback.
+    state
+        .set_tenant_policy_baseline(
+            "demo",
+            r#"permit(principal == Customer::"anonymous", action, resource);"#,
+        )
+        .expect("install explicit anonymous demo policy");
 
     let router: Router = temper_server::build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -501,10 +510,11 @@ async fn e2e_agent_denial_human_approve_retry() {
         .send()
         .await
         .expect("approve request");
+    let approve_status = approve_resp.status();
+    let approve_body = approve_resp.text().await.expect("approval response body");
     assert!(
-        approve_resp.status().is_success(),
-        "human approval should succeed: {:?}",
-        approve_resp.status()
+        approve_status.is_success(),
+        "human approval should succeed: {approve_status}; body: {approve_body}"
     );
 
     // Step 4: Retry the action — should now succeed (Cedar policy was hot-loaded).

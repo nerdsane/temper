@@ -30,6 +30,28 @@ pub enum DecisionStatus {
     Expired,
 }
 
+/// Durable resolution lane claimed for a pending decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DecisionResolutionKind {
+    /// Install an approved policy and deliver approval effects.
+    Approve,
+    /// Deliver denial effects without installing a policy.
+    Deny,
+}
+
+/// Restart-resumable progress of the winning resolution owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionResolutionPhase {
+    /// This owner won the durable pending-to-resolving transition.
+    Claimed,
+    /// The exact approved policy snapshot is durable and active.
+    PolicyPublished,
+    /// The linked GovernanceDecision dispatch completed idempotently.
+    GovernanceDispatched,
+}
+
 pub use temper_authz::{
     ActionScope, DurationScope, PolicyScopeMatrix, PrincipalScope, ResourceScope,
 };
@@ -88,6 +110,18 @@ pub struct PendingDecision {
     /// Linked GovernanceDecision entity ID (e.g. "GD-{uuid}") in temper-system tenant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub governance_decision_id: Option<String>,
+    /// Stable token of the one durable resolution owner, while resolving.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_owner: Option<String>,
+    /// Approve or deny lane owned by `resolution_owner`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_kind: Option<DecisionResolutionKind>,
+    /// Last durably completed resolution step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_phase: Option<DecisionResolutionPhase>,
+    /// Exact policy publication owned by an approval resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_policy_version: Option<u64>,
 }
 
 impl PendingDecision {
@@ -124,6 +158,10 @@ impl PendingDecision {
             principal_kind: None,
             session_id: None,
             governance_decision_id: None,
+            resolution_owner: None,
+            resolution_kind: None,
+            resolution_phase: None,
+            resolution_policy_version: None,
         }
     }
 
@@ -136,8 +174,22 @@ impl PendingDecision {
     }
 
     /// Generate Cedar policy text from a scope matrix.
-    pub fn generate_policy_from_matrix(&self, matrix: &PolicyScopeMatrix) -> String {
-        let kind = self.principal_kind.as_deref().unwrap_or("Agent");
+    ///
+    /// Fails closed (`Err`) when the authenticated principal kind was not
+    /// captured, or when a type-name position (`principal_kind`,
+    /// `resource_type`) is not a valid Cedar identifier, rather than emitting a
+    /// broken or wider-than-approved policy (ARN-172).
+    pub fn generate_policy_from_matrix(
+        &self,
+        matrix: &PolicyScopeMatrix,
+    ) -> Result<String, String> {
+        let kind = self
+            .principal_kind
+            .as_deref()
+            .filter(|kind| !kind.trim().is_empty())
+            .ok_or_else(|| {
+                "pending decision is missing its authenticated principal kind".to_string()
+            })?;
         temper_authz::generate_cedar_from_matrix(
             &self.agent_id,
             kind,

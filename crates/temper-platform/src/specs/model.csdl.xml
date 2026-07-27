@@ -252,13 +252,8 @@
         <Property Name="CallbackEntityId" Type="Edm.String" Nullable="true"/>
         <Property Name="CallbackOnApprove" Type="Edm.String" Nullable="true"/>
         <Property Name="CallbackOnDeny" Type="Edm.String" Nullable="true"/>
+        <Property Name="CallbackCapability" Type="Edm.String" Nullable="true"/>
       </EntityType>
-      <Action Name="ApproveGovernanceDecision" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision" />
-      </Action>
-      <Action Name="DenyGovernanceDecision" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision" />
-      </Action>
       <Action Name="ExpireGovernanceDecision" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision" />
       </Action>
@@ -269,6 +264,7 @@
         <Parameter Name="CallbackEntityId" Type="Edm.String" Nullable="true"/>
         <Parameter Name="CallbackOnApprove" Type="Edm.String" Nullable="true"/>
         <Parameter Name="CallbackOnDeny" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="CallbackCapability" Type="Edm.String" Nullable="false"/>
       </Action>
 
       <EntityType Name="HttpEndpoint">

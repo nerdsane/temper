@@ -979,6 +979,63 @@ async fn test_load_inline_supports_nested_paths() {
 }
 
 #[tokio::test]
+async fn test_load_inline_publishes_bundled_cedar_durably() {
+    let state = test_state_with_turso().await;
+    install_admin_submit_specs_policy(&state);
+    let app = build_app_with_state(state.clone());
+    let tenant = "inline-durable";
+    let bundled_policy = r#"permit(principal, action, resource);"#;
+
+    let response = app
+        .oneshot(system_post(
+            "/api/specs/load-inline",
+            &serde_json::json!({
+                "tenant": tenant,
+                "app_name": "inline-app",
+                "specs": {
+                    "InlineProbe/model.csdl.xml": CSDL_XML,
+                    "InlineProbe/order.ioa.toml": ORDER_IOA
+                },
+                "cedar_policies": bundled_policy
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let snapshot = state
+        .policy_store()
+        .expect("durable policy store")
+        .load_policy_snapshot(tenant)
+        .await
+        .expect("load durable inline policy snapshot");
+    assert_eq!(snapshot.rows.len(), 1);
+    assert_eq!(snapshot.rows[0].policy_id, "inline:inline-app");
+    assert_eq!(snapshot.rows[0].cedar_text, bundled_policy);
+
+    state
+        .authz
+        .reload_tenant_policies(tenant, "")
+        .expect("clear active policy to simulate drift");
+    state
+        .tenant_policies
+        .write()
+        .expect("tenant policy cache lock")
+        .insert(tenant.to_string(), String::new());
+
+    crate::authz::refresh_policy_snapshot_if_stale(&state, tenant)
+        .await
+        .expect("durable refresh should restore bundled inline policy");
+    let active_text = state
+        .authz
+        .get_tenant_policy_text(tenant)
+        .expect("inline policy should be active after durable refresh");
+    assert!(active_text.contains(bundled_policy));
+}
+
+#[tokio::test]
 async fn test_tenant_decisions_accessible_without_auth() {
     let state = test_state_with_registry();
     let app = build_app_with_state(state);
@@ -1061,7 +1118,7 @@ async fn test_approve_decision_reload_failure_keeps_pending_and_policies_unchang
     let state = test_state_with_turso().await;
     install_admin_policy(&state);
 
-    let pending = crate::state::PendingDecision::from_denial(
+    let mut pending = crate::state::PendingDecision::from_denial(
         "default",
         "agent-1",
         "submitOrder",
@@ -1071,6 +1128,7 @@ async fn test_approve_decision_reload_failure_keeps_pending_and_policies_unchang
         "test denial",
         None,
     );
+    pending.principal_kind = Some("Agent".to_string());
     let decision_id = pending.id.clone();
     // Persist decision to Turso (single source of truth).
     state
@@ -1111,8 +1169,18 @@ async fn test_approve_decision_reload_failure_keeps_pending_and_policies_unchang
     assert_eq!(decision.status, crate::state::DecisionStatus::Pending);
     assert!(decision.generated_policy.is_none());
 
-    let after_policies = state.tenant_policies.read().unwrap(); // ci-ok: infallible lock
-    assert_eq!(*after_policies, before_policies);
+    let mut after_policies = state
+        .tenant_policies
+        .read()
+        .unwrap() // ci-ok: infallible lock
+        .clone();
+    if after_policies
+        .get("default")
+        .is_some_and(|policy| policy.is_empty())
+    {
+        after_policies.remove("default");
+    }
+    assert_eq!(after_policies, before_policies);
 }
 
 #[tokio::test]

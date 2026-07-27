@@ -18,6 +18,7 @@ pub mod entity_actor;
 pub mod event_budget_metrics;
 pub mod events;
 pub mod eventual_invariants;
+pub mod governance_callback_capability;
 pub mod http_endpoint;
 pub mod idempotency;
 pub mod identity;

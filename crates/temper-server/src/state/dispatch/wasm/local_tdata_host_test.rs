@@ -244,6 +244,42 @@ fn local_tdata_headers_inherit_invoking_security_context() {
     );
 }
 
+#[test]
+fn local_tdata_system_inheritance_is_host_derived_and_attenuated() {
+    let inherited_headers = security_context_headers(&SecurityContext::system());
+    let map = header_map(
+        &[
+            (
+                "x-temper-principal-id".to_string(),
+                "guest-forgery".to_string(),
+            ),
+            ("x-temper-principal-kind".to_string(), "admin".to_string()),
+            (
+                "x-temper-agent-type".to_string(),
+                "guest-forgery".to_string(),
+            ),
+        ],
+        &temper_runtime::tenant::TenantId::default(),
+        &inherited_headers,
+    );
+
+    assert_eq!(
+        map.get("x-temper-principal-id")
+            .and_then(|value| value.to_str().ok()),
+        Some("system")
+    );
+    assert_eq!(
+        map.get("x-temper-principal-kind")
+            .and_then(|value| value.to_str().ok()),
+        Some("agent")
+    );
+    assert_eq!(
+        map.get("x-temper-agent-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("system")
+    );
+}
+
 #[tokio::test]
 async fn local_tdata_calls_use_odata_handlers() {
     let host = LocalTDataWasmHost::new(

@@ -92,7 +92,6 @@ pub async fn run(
     let data_dir = Path::new(&home).join(".local/share/temper");
     state.server.data_dir = data_dir.clone();
 
-    seed_cedar_policies(&state, tenant_policy_seed);
     state.server.rebuild_reaction_dispatcher();
 
     // Configure subprocess verification if requested.
@@ -113,26 +112,32 @@ pub async fn run(
         }
         state.server.set_storage_stack(stack);
     }
+    storage::seed_cedar_policies(&state, tenant_policy_seed).await?;
 
     // Phase 5b: Secrets vault
     {
         use base64::Engine as _;
-        let key_bytes: [u8; 32] = if let Ok(key_b64) = std::env::var("TEMPER_VAULT_KEY") {
-            // determinism-ok: read once at startup
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(&key_b64)
-                .expect("TEMPER_VAULT_KEY must be valid base64");
-            assert_eq!(decoded.len(), 32, "TEMPER_VAULT_KEY must be 32 bytes");
-            decoded.try_into().unwrap() // ci-ok: length asserted == 32 above
+        let (key_bytes, stable_key): ([u8; 32], bool) =
+            if let Ok(key_b64) = std::env::var("TEMPER_VAULT_KEY") {
+                // determinism-ok: read once at startup
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(&key_b64)
+                    .expect("TEMPER_VAULT_KEY must be valid base64");
+                assert_eq!(decoded.len(), 32, "TEMPER_VAULT_KEY must be 32 bytes");
+                (decoded.try_into().unwrap(), true) // ci-ok: length asserted == 32 above
+            } else {
+                // No explicit key — generate an ephemeral one for in-memory secret caching.
+                // determinism-ok: OsRng used once at startup for vault key generation
+                use rand::RngCore as _;
+                let mut key = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut key);
+                (key, false)
+            };
+        let vault = if stable_key {
+            temper_server::secrets::vault::SecretsVault::new(&key_bytes)
         } else {
-            // No explicit key — generate an ephemeral one for in-memory secret caching.
-            // determinism-ok: OsRng used once at startup for vault key generation
-            use rand::RngCore as _;
-            let mut key = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut key);
-            key
+            temper_server::secrets::vault::SecretsVault::new_ephemeral(&key_bytes)
         };
-        let vault = temper_server::secrets::vault::SecretsVault::new(&key_bytes);
         state.server.secrets_vault = Some(std::sync::Arc::new(vault));
         println!("  Secrets vault: configured");
     }
@@ -329,24 +334,6 @@ pub async fn run(
         .context("Server error")?;
 
     Ok(())
-}
-
-fn seed_cedar_policies(state: &PlatformState, tenant_policy_seed: BTreeMap<String, String>) {
-    for (tenant, policy_text) in &tenant_policy_seed {
-        if let Err(e) = state
-            .server
-            .authz
-            .reload_tenant_policies(tenant, policy_text)
-        {
-            eprintln!("  Warning: failed to load Cedar policies for tenant '{tenant}': {e}");
-            continue;
-        }
-    }
-    // Update in-memory text cache.
-    let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-    for (tenant, policy_text) in tenant_policy_seed {
-        policies.insert(tenant, policy_text);
-    }
 }
 
 fn cache_platform_secret_if_present(
