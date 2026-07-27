@@ -37,6 +37,12 @@ mod tests {
             include_str!("../migrations/0006_segmented_event_history.sql"),
             include_str!("../migrations/0007_installed_app_follow_policy.sql"),
             include_str!("../migrations/0008_ots_trajectory_outbox_status.sql"),
+            include_str!("../migrations/0009_entity_key_index.sql"),
+            include_str!("../migrations/0010_key_index_backfill_watermark.sql"),
+            include_str!("../migrations/0011_key_index_watermark_key_set.sql"),
+            include_str!("../migrations/0012_entity_vector_index.sql"),
+            include_str!("../migrations/0013_registry_restore_quarantine.sql"),
+            include_str!("../migrations/0014_spec_source_generations.sql"),
         ]
         .join("\n")
         .to_lowercase();
@@ -53,6 +59,10 @@ mod tests {
             "event_segments",
             "snapshot_history",
             "ots_trajectories",
+            "registry_restore_quarantines",
+            "spec_source_generations",
+            "spec_staging",
+            "tenant_constraint_generations",
         ] {
             assert!(
                 migration.contains(&format!("create table if not exists {table}")),
@@ -101,6 +111,15 @@ mod tests {
             !migration_six.contains("entity_catalog"),
             "entity_catalog state must not reuse migration version 0006"
         );
+    }
+
+    #[test]
+    fn registry_quarantine_migration_allows_only_one_active_version() {
+        let migration =
+            include_str!("../migrations/0013_registry_restore_quarantine.sql").to_lowercase();
+        assert!(migration.contains("create unique index if not exists"));
+        assert!(migration.contains("on registry_restore_quarantines (tenant, entity_type)"));
+        assert!(migration.contains("where resolved_at is null"));
     }
 
     #[test]

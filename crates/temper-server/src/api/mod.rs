@@ -10,6 +10,7 @@ mod decisions_access;
 mod decisions_get;
 mod files;
 mod policies;
+mod registry_quarantine;
 mod repl;
 mod secrets;
 
@@ -104,6 +105,18 @@ pub fn build_api_router() -> Router<ServerState> {
         .route(
             "/tenants/{tenant}/secrets",
             get(secrets::handle_list_secrets),
+        )
+        .route(
+            "/tenants/{tenant}/registry-quarantines",
+            get(registry_quarantine::handle_list_registry_quarantines),
+        )
+        .route(
+            "/tenants/{tenant}/registry-quarantines/{entity_type}/acknowledge",
+            post(registry_quarantine::handle_acknowledge_registry_quarantine),
+        )
+        .route(
+            "/tenants/{tenant}/registry-quarantines/{entity_type}/retry",
+            post(registry_quarantine::handle_retry_registry_quarantine),
         )
         // Policy CRUD
         .route(
@@ -255,6 +268,40 @@ impl FromRequestParts<ServerState> for PolicyAuthed {
         match require_policy_auth(state, &parts.headers, tenant).await {
             Some(resp) => Err(resp),
             None => Ok(Self),
+        }
+    }
+}
+
+/// Strict administrator gate for registry recovery operations.
+///
+/// Quarantine acknowledgment and retry can activate persisted executable specs,
+/// so they must not inherit a permissive/default tenant policy. The authenticated
+/// ingress edge is responsible for establishing the administrator principal.
+pub(crate) struct RegistryOperatorAuthed;
+
+impl FromRequestParts<ServerState> for RegistryOperatorAuthed {
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &ServerState,
+    ) -> Result<Self, Self::Rejection> {
+        let security_ctx = security_context_from_headers(&parts.headers, None, None, None);
+        let trusted = parts
+            .extensions
+            .get::<crate::authz::TrustedIngressPrincipal>()
+            .is_some();
+        // A resolved agent credential is authoritative and must never be able
+        // to upgrade itself by also supplying admin-shaped principal headers.
+        let resolved_agent = parts
+            .extensions
+            .get::<crate::identity::ResolvedIdentity>()
+            .is_some();
+        if trusted && !resolved_agent && matches!(security_ctx.principal.kind, PrincipalKind::Admin)
+        {
+            Ok(Self)
+        } else {
+            Err(StatusCode::FORBIDDEN.into_response())
         }
     }
 }

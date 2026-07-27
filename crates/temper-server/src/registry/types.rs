@@ -11,6 +11,153 @@ use temper_spec::csdl::CsdlDocument;
 
 use crate::trigger::types::ReactionRule;
 
+/// Structured health recorded while rebuilding the registry from durable specs.
+///
+/// Persisted rows are retained when they cannot be loaded. Each retained row
+/// must therefore either have a live registry entry or appear in
+/// [`quarantined_tenants`](Self::quarantined_tenants).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegistryRestoreHealth {
+    /// Number of specs restored successfully during this boot.
+    pub restored_specs: usize,
+    /// Persisted entity types deliberately withheld from activation, keyed by tenant.
+    pub quarantined_tenants: BTreeMap<String, RegistryTenantQuarantine>,
+}
+
+impl RegistryRestoreHealth {
+    /// Whether every persisted tenant restored successfully.
+    pub fn is_healthy(&self) -> bool {
+        self.quarantined_tenants.is_empty()
+    }
+
+    /// Whether a retained spec is accounted for by an explicit quarantine.
+    pub fn is_quarantined(&self, tenant: &str, entity_type: &str) -> bool {
+        self.quarantined_tenants
+            .get(tenant)
+            .is_some_and(|entry| entry.entity_failures.contains_key(entity_type))
+    }
+
+    /// Number of committed specs currently withheld from activation.
+    pub fn quarantined_spec_count(&self) -> usize {
+        self.quarantined_tenants
+            .values()
+            .map(|tenant| tenant.entity_failures.len())
+            .sum()
+    }
+}
+
+/// Persisted entity types withheld for one tenant during durable restore.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegistryTenantQuarantine {
+    /// Retained entity types and their versioned failure diagnostics.
+    pub entity_failures: BTreeMap<String, RegistryQuarantineFailure>,
+}
+
+/// Bounded diagnostic for one committed spec withheld from activation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryQuarantineFailure {
+    /// Persisted spec version that failed activation.
+    pub spec_version: i64,
+    /// Constraint source version compiled with the spec, or `None` if absent.
+    pub constraint_version: Option<i64>,
+    /// Stable failure category.
+    pub reason: RegistryQuarantineReason,
+    /// Source document whose parsing or registration failed.
+    pub source_kind: RegistryQuarantineSource,
+    /// One-based source line when the parser exposed it.
+    pub source_line: Option<i64>,
+    /// One-based source column when the parser exposed it.
+    pub source_column: Option<i64>,
+    /// Whether an operator acknowledged this exact active failure version.
+    pub acknowledged: bool,
+    /// Bounded diagnostic text retained only in the authenticated repair API.
+    pub detail: String,
+}
+
+/// Stable category for a tenant registry-restore failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistryQuarantineReason {
+    /// No non-empty CSDL document was persisted for the tenant.
+    MissingCsdl,
+    /// At least one persisted CSDL document could not be parsed or merged.
+    InvalidCsdl,
+    /// CSDL parsed, but an IOA or cross-tenant constraint failed to register.
+    RegistrationFailed,
+}
+
+impl RegistryQuarantineReason {
+    /// Stable storage/API representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingCsdl => "missing_csdl",
+            Self::InvalidCsdl => "invalid_csdl",
+            Self::RegistrationFailed => "registration_failed",
+        }
+    }
+
+    /// Parse the validated durable representation.
+    #[cfg_attr(
+        not(feature = "observe"),
+        allow(
+            dead_code,
+            reason = "registry quarantine HTTP API is compiled only with observe"
+        )
+    )]
+    pub(crate) fn from_storage(value: &str) -> Option<Self> {
+        match value {
+            "missing_csdl" => Some(Self::MissingCsdl),
+            "invalid_csdl" => Some(Self::InvalidCsdl),
+            "registration_failed" => Some(Self::RegistrationFailed),
+            _ => None,
+        }
+    }
+}
+
+/// Source document associated with a restore failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistryQuarantineSource {
+    /// Persisted CSDL XML.
+    Csdl,
+    /// Persisted IOA TOML.
+    Ioa,
+    /// Persisted cross-entity invariant TOML.
+    CrossInvariants,
+    /// Failure could not be attributed more narrowly.
+    Registration,
+}
+
+impl RegistryQuarantineSource {
+    /// Stable storage/API representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Csdl => "csdl",
+            Self::Ioa => "ioa",
+            Self::CrossInvariants => "cross_invariants",
+            Self::Registration => "registration",
+        }
+    }
+
+    /// Parse the validated durable representation.
+    #[cfg_attr(
+        not(feature = "observe"),
+        allow(
+            dead_code,
+            reason = "registry quarantine HTTP API is compiled only with observe"
+        )
+    )]
+    pub(crate) fn from_storage(value: &str) -> Option<Self> {
+        match value {
+            "csdl" => Some(Self::Csdl),
+            "ioa" => Some(Self::Ioa),
+            "cross_invariants" => Some(Self::CrossInvariants),
+            "registration" => Some(Self::Registration),
+            _ => None,
+        }
+    }
+}
+
 /// Verification status for a single entity type.
 #[derive(Debug, Clone, serde::Serialize)]
 pub enum VerificationStatus {
@@ -165,6 +312,18 @@ pub struct TenantConfig {
     pub webhook_routes: BTreeMap<String, (String, Webhook)>,
     /// Per-entity verification status (design-time observation).
     pub verification: BTreeMap<String, VerificationStatus>,
+}
+
+/// Process-local source identity used to prevent repair from overwriting a
+/// tenant registry that advanced while durable validation was in flight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RegistryTenantSourceSnapshot {
+    /// Canonical CSDL currently active in this process.
+    pub csdl_xml: String,
+    /// Exact IOA source by entity type.
+    pub ioa_sources: BTreeMap<String, String>,
+    /// Exact active cross-invariant source, including absence.
+    pub cross_invariants_source: Option<String>,
 }
 
 /// A registered entity type's spec and transition table.

@@ -31,7 +31,9 @@ pub mod ots;
 mod policy;
 mod published_artifacts;
 mod query_page;
+mod registry_quarantine;
 mod secrets;
+mod spec_promotion;
 mod specs;
 #[cfg(test)]
 mod tests;
@@ -42,6 +44,10 @@ mod write_gate;
 pub use field_index::QueryProjectionUpsert;
 use instrumentation::InstrumentedConnection;
 pub use published_artifacts::{PublishedArtifactRow, PublishedArtifactUpsert};
+pub use registry_quarantine::{
+    TursoRegistryQuarantineResolution, TursoRegistryQuarantineRow, TursoRegistryQuarantineUpsert,
+    TursoRegistrySourceSnapshot,
+};
 
 #[derive(Clone, Debug)]
 pub struct TursoEventStore {
@@ -150,6 +156,12 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
         conn.execute(schema::CREATE_SPECS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_REGISTRY_RESTORE_QUARANTINES_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_REGISTRY_RESTORE_QUARANTINES_ACTIVE_INDEX, ())
             .await
             .map_err(storage_error)?;
         conn.execute(schema::CREATE_TRAJECTORIES_TABLE, ())
@@ -287,6 +299,17 @@ impl TursoEventStore {
         // Specs table extensions — add content_hash column for verification caching.
         let _ = conn.execute(schema::ALTER_SPECS_ADD_CONTENT_HASH, ()).await;
         let _ = conn.execute(schema::ALTER_SPECS_ADD_COMMITTED, ()).await;
+        for statement in [
+            schema::CREATE_SPEC_SOURCE_GENERATIONS_TABLE,
+            schema::CREATE_SPEC_STAGING_TABLE,
+            schema::BACKFILL_SPEC_SOURCE_GENERATIONS,
+            schema::MIGRATE_LEGACY_UNCOMMITTED_SPECS,
+            schema::DELETE_LEGACY_UNCOMMITTED_SPECS,
+            schema::CREATE_TENANT_CONSTRAINT_GENERATIONS_TABLE,
+            schema::BACKFILL_TENANT_CONSTRAINT_GENERATIONS,
+        ] {
+            conn.execute(statement, ()).await.map_err(storage_error)?;
+        }
 
         // Trajectory table extensions — ALTER TABLE to add missing columns.
         // SQLite returns an error for duplicate columns, so we ignore failures.
@@ -508,6 +531,8 @@ pub struct TursoSpecRow {
     pub verification_result: Option<String>,
     /// SHA-256 hex digest of the IOA source content.
     pub content_hash: Option<String>,
+    /// Monotonic persisted source version.
+    pub version: i64,
     /// ISO-8601 updated_at timestamp.
     pub updated_at: String,
     /// Whether this spec has been committed (WAL-style commit flag).

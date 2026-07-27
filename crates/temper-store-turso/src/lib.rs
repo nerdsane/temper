@@ -75,7 +75,9 @@ pub use store::{
     ActionStats, AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow,
     PolicyDenialPatternRow, PolicyRow, PublishedArtifactRow, PublishedArtifactUpsert,
     QueryProjectionUpsert, TursoBlobRow, TursoEventStore, TursoInstalledAppRow,
-    TursoQueryProjectionRow, TursoSpecRow, TursoTenantConstraintRow, TursoTrajectoryRow,
-    TursoWasmInvocationRow, TursoWasmModuleMetadataRow, TursoWasmModuleRow, UnmetIntentAggRow,
+    TursoQueryProjectionRow, TursoRegistryQuarantineResolution, TursoRegistryQuarantineRow,
+    TursoRegistryQuarantineUpsert, TursoRegistrySourceSnapshot, TursoSpecRow,
+    TursoTenantConstraintRow, TursoTrajectoryRow, TursoWasmInvocationRow,
+    TursoWasmModuleMetadataRow, TursoWasmModuleRow, UnmetIntentAggRow,
     ots::{OtsQueuedTrajectoryRow, OtsTrajectoryParams, OtsTrajectoryRow},
 };

@@ -10,6 +10,8 @@ fn schemas_are_idempotent() {
     assert!(CREATE_SNAPSHOT_HISTORY_TABLE.contains("IF NOT EXISTS"));
     assert!(CREATE_SNAPSHOT_HISTORY_ENTITY_INDEX.contains("IF NOT EXISTS"));
     assert!(CREATE_SPECS_TABLE.contains("IF NOT EXISTS"));
+    assert!(CREATE_REGISTRY_RESTORE_QUARANTINES_TABLE.contains("IF NOT EXISTS"));
+    assert!(CREATE_REGISTRY_RESTORE_QUARANTINES_ACTIVE_INDEX.contains("IF NOT EXISTS"));
     assert!(CREATE_TRAJECTORIES_TABLE.contains("IF NOT EXISTS"));
     assert!(CREATE_TRAJECTORIES_SUCCESS_INDEX.contains("IF NOT EXISTS"));
     assert!(CREATE_TRAJECTORIES_ENTITY_ACTION_INDEX.contains("IF NOT EXISTS"));
@@ -40,6 +42,14 @@ fn schemas_are_idempotent() {
     assert!(CREATE_ENTITY_FIELD_INDEX_TABLE.contains("IF NOT EXISTS"));
     assert!(CREATE_ENTITY_FIELD_INDEX_LOOKUP.contains("IF NOT EXISTS"));
     assert!(CREATE_ENTITY_FIELD_INDEX_STATUS.contains("IF NOT EXISTS"));
+}
+
+#[test]
+fn registry_quarantine_schema_allows_only_one_active_version() {
+    let sql = CREATE_REGISTRY_RESTORE_QUARANTINES_ACTIVE_INDEX.to_uppercase();
+    assert!(sql.contains("CREATE UNIQUE INDEX"));
+    assert!(sql.contains("(TENANT, ENTITY_TYPE)"));
+    assert!(sql.contains("WHERE RESOLVED_AT IS NULL"));
 }
 
 #[test]

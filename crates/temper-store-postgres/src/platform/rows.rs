@@ -14,6 +14,7 @@ pub(super) fn row_to_spec(row: sqlx::postgres::PgRow) -> PostgresSpecRow {
         levels_total: row.get("levels_total"),
         verification_result: verification_result.map(|v| v.to_string()),
         content_hash: Some(row.get("content_hash")),
+        version: i64::from(row.get::<i32, _>("version")),
         updated_at: updated_at.to_rfc3339(),
         committed: row.get("committed"),
     }
