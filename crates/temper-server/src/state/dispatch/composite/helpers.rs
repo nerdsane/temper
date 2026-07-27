@@ -5,6 +5,12 @@ pub(super) fn synthetic_initial_state(
     entity_id: &str,
     table: &TransitionTable,
 ) -> EntityState {
+    let mut fields = serde_json::json!({});
+    crate::entity_actor::effects::canonicalize_entity_fields(
+        &mut fields,
+        entity_id,
+        &table.initial_state,
+    );
     EntityState {
         entity_type: entity_type.to_string(),
         entity_id: entity_id.to_string(),
@@ -13,7 +19,7 @@ pub(super) fn synthetic_initial_state(
         counters: BTreeMap::new(),
         booleans: BTreeMap::new(),
         lists: BTreeMap::new(),
-        fields: serde_json::json!({ "Id": entity_id }),
+        fields,
         events: Default::default(),
         total_event_count: 0,
         events_since_snapshot: 0,
@@ -242,37 +248,13 @@ pub(super) fn non_empty_json_value(value: &Value) -> bool {
     }
 }
 
-pub(super) fn composite_create_resource_attrs_from_defaults(
-    entity_id: &str,
-    params: &Value,
-    defaults: &CompositeCreateAuthDefaults,
-) -> BTreeMap<String, Value> {
-    let mut resource_attrs = BTreeMap::new();
-    resource_attrs.insert("id".to_string(), Value::String(entity_id.to_string()));
-    resource_attrs.insert(
-        "status".to_string(),
-        Value::String(defaults.initial_state.clone()),
-    );
-    if let Value::Object(fields) = params {
-        for (key, value) in fields {
-            resource_attrs.insert(key.clone(), value.clone());
-        }
-    }
-    resource_attrs.insert("has_spec".to_string(), Value::Bool(defaults.has_spec));
-    resource_attrs
-}
-
 pub(super) fn normalize_sub_write_params(sub_write: CompositeSubWrite) -> Value {
-    let mut params = if sub_write.params.is_null() {
+    let params = if sub_write.params.is_null() {
         Value::Object(Default::default())
     } else {
         sub_write.params
     };
-    if let Some(obj) = params.as_object_mut() {
-        obj.entry("Id".to_string())
-            .or_insert(Value::String(sub_write.entity_id));
-    }
-    params
+    crate::entity_actor::effects::sanitize_action_params(&params).into_owned()
 }
 
 pub(super) fn composite_parent_idempotency(
@@ -287,6 +269,50 @@ pub(super) fn composite_parent_idempotency(
     hasher.update(b"composite-integration-result:");
     hasher.update(callback_params.to_string().as_bytes());
     format!("implicit:{:x}", hasher.finalize())
+}
+
+pub(super) fn validate_composite_idempotency_window(
+    persistence_id: &str,
+    from_sequence: u64,
+    latest_sequence: u64,
+    budget: usize,
+    events: &[PersistenceEnvelope],
+) -> Result<(), DispatchError> {
+    let expected_count = latest_sequence
+        .checked_sub(from_sequence)
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or_else(|| {
+            DispatchError::Internal(format!(
+                "invalid CompositeEvent idempotency window for {persistence_id}"
+            ))
+        })?;
+    if expected_count > budget || events.len() != expected_count {
+        return Err(DispatchError::Internal(format!(
+            "bounded parent journal read was incomplete while checking CompositeEvent idempotency for {persistence_id}"
+        )));
+    }
+    for (offset, event) in events.iter().enumerate() {
+        let offset = u64::try_from(offset).map_err(|_| {
+            DispatchError::Internal(format!(
+                "CompositeEvent idempotency offset overflow for {persistence_id}"
+            ))
+        })?;
+        let expected_sequence = from_sequence
+            .checked_add(offset)
+            .and_then(|sequence| sequence.checked_add(1))
+            .ok_or_else(|| {
+                DispatchError::Internal(format!(
+                    "CompositeEvent idempotency sequence overflow for {persistence_id}"
+                ))
+            })?;
+        if event.sequence_nr != expected_sequence {
+            return Err(DispatchError::Internal(format!(
+                "non-contiguous CompositeEvent idempotency window for {persistence_id}: expected sequence {expected_sequence}, found {}",
+                event.sequence_nr
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn build_composite_event(
@@ -359,7 +385,8 @@ pub(super) fn composite_envelope(
 
 pub(super) fn composite_batch_persistence_error(error: PersistenceError) -> DispatchError {
     match error {
-        PersistenceError::ConcurrencyViolation { .. } => {
+        PersistenceError::ConcurrencyViolation { .. }
+        | PersistenceError::PreconditionFailed { .. } => {
             DispatchError::Conflict(format!("composite batch persistence conflict: {error}"))
         }
         PersistenceError::Serialization(_) | PersistenceError::Storage(_) => {

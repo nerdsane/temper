@@ -1,7 +1,9 @@
+use std::time::Duration;
 use temper_runtime::ActorSystem;
 use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
+use temper_store_sim::SimEventStore;
 use temper_store_turso::TursoEventStore;
 
 use temper_server::registry::SpecRegistry;
@@ -25,6 +27,108 @@ fn build_state_with_turso(system_name: &str, store: TursoEventStore) -> ServerSt
     let mut state = ServerState::from_registry(ActorSystem::new(system_name), registry);
     state.set_storage_stack(StorageStack::from_turso(store));
     state
+}
+
+fn build_state_with_sim(system_name: &str, store: SimEventStore) -> ServerState {
+    let mut registry = SpecRegistry::new();
+    registry.register_tenant(
+        "tenant-a",
+        parse_csdl(CSDL_XML).expect("CSDL should parse"),
+        CSDL_XML.to_string(),
+        &[("Order", ORDER_IOA)],
+    );
+    let mut state = ServerState::from_registry(ActorSystem::new(system_name), registry);
+    state.set_storage_stack(StorageStack::from_sim(store, None));
+    state
+}
+
+#[tokio::test]
+async fn hydrated_index_reconciles_remote_create_and_delete() {
+    let store = SimEventStore::no_faults(192_700);
+    let writer = build_state_with_sim("remote-index-writer", store.clone());
+    let reader = build_state_with_sim("remote-index-reader", store);
+    let tenant = TenantId::new("tenant-a");
+    let entity_id = "ord-remote-index";
+
+    assert!(
+        reader
+            .list_entity_ids_lazy(&tenant, "Order")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    writer
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            entity_id,
+            serde_json::json!({"Title": "remote"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reader.list_entity_ids_lazy(&tenant, "Order").await.unwrap(),
+        vec![entity_id.to_string()]
+    );
+
+    writer
+        .delete_tenant_entity(&tenant, "Order", entity_id)
+        .await
+        .unwrap();
+    assert!(
+        reader
+            .list_entity_ids_lazy(&tenant, "Order")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn durable_create_republishes_index_after_precommit_scan_race() {
+    let store = SimEventStore::no_faults(192_701);
+    let state = build_state_with_sim("precommit-index-race", store.clone());
+    let tenant = TenantId::new("tenant-a");
+    let entity_id = "ord-precommit-race";
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    store.inject_append_delay(&persistence_id, Duration::from_millis(250));
+
+    let create_state = state.clone();
+    let create_tenant = tenant.clone();
+    let create = tokio::spawn(async move {
+        create_state
+            .get_or_create_tenant_entity(
+                &create_tenant,
+                "Order",
+                entity_id,
+                serde_json::json!({"Title": "raced"}),
+            )
+            .await
+    });
+    for _ in 0..1_000 {
+        if state.entity_exists(&tenant, "Order", entity_id) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        state.entity_exists(&tenant, "Order", entity_id),
+        "actor spawn must publish the provisional index entry"
+    );
+    assert!(
+        state
+            .list_entity_ids_lazy(&tenant, "Order")
+            .await
+            .unwrap()
+            .is_empty(),
+        "the durable scan should not publish a stream before its append commits"
+    );
+
+    create.await.unwrap().unwrap();
+    assert!(
+        state.entity_exists(&tenant, "Order", entity_id),
+        "post-commit publication must restore an entry removed by the precommit scan"
+    );
 }
 
 #[tokio::test]
@@ -105,6 +209,78 @@ async fn ensure_entity_loaded_returns_true_for_indexed_entity_without_persistenc
 }
 
 #[tokio::test]
+async fn indexed_entity_without_journal_tail_fails_closed() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-ensure-loaded-missing-tail-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let state = build_state_with_turso("test-ensure-loaded-missing-tail", store);
+    let tenant = TenantId::new("tenant-a");
+    state
+        .entity_index
+        .write()
+        .unwrap()
+        .entry("tenant-a:Order".to_string())
+        .or_default()
+        .insert("ord-missing-tail".to_string());
+
+    assert!(
+        !state
+            .ensure_entity_loaded(&tenant, "Order", "ord-missing-tail")
+            .await,
+        "an indexed entity without a journal must not be treated as live"
+    );
+    assert!(
+        !state.entity_exists(&tenant, "Order", "ord-missing-tail"),
+        "the inconsistent index entry should be quarantined from future reads"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn lazy_list_replaces_stale_index_entries_absent_from_the_journal() {
+    let db_path = std::env::temp_dir().join(format!(
+        "temper-lazy-list-stale-index-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let store = TursoEventStore::new(&format!("file:{}", db_path.display()), None)
+        .await
+        .expect("create local turso db");
+    let state = build_state_with_turso("test-lazy-list-stale-index", store.clone());
+    let tenant = TenantId::new("tenant-a");
+    state
+        .entity_index
+        .write()
+        .unwrap()
+        .entry("tenant-a:Order".to_string())
+        .or_default()
+        .insert("ord-stale".to_string());
+
+    assert!(
+        state
+            .list_entity_ids_lazy(&tenant, "Order")
+            .await
+            .unwrap()
+            .is_empty(),
+        "a successful durable scan must replace, not merge with, stale index state"
+    );
+    assert!(
+        store
+            .read_events("tenant-a:Order:ord-stale", 0)
+            .await
+            .unwrap()
+            .is_empty(),
+        "enumeration must not bootstrap a missing entity journal"
+    );
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn list_entity_ids_lazy_populates_only_requested_type() {
     let db_path = std::env::temp_dir().join(format!(
         "temper-lazy-list-scoped-{}.db",
@@ -157,7 +333,7 @@ async fn list_entity_ids_lazy_populates_only_requested_type() {
     let state = build_state_with_turso("test-lazy-list-scoped", store);
     let tenant = TenantId::new("tenant-a");
 
-    let order_ids = state.list_entity_ids_lazy(&tenant, "Order").await;
+    let order_ids = state.list_entity_ids_lazy(&tenant, "Order").await.unwrap();
 
     assert_eq!(order_ids, vec!["ord-1".to_string()]);
     assert!(
@@ -219,10 +395,14 @@ async fn delete_writes_tombstone_and_deleted_entity_stays_out_of_list_after_rest
     );
 
     let state_after_restart = build_state_with_turso("test-delete-tombstone-list-2", store);
-    state_after_restart.populate_index_from_store(&tenant).await;
+    state_after_restart
+        .populate_index_from_store(&tenant)
+        .await
+        .unwrap();
     let ids = state_after_restart
         .list_entity_ids_lazy(&tenant, entity_type)
-        .await;
+        .await
+        .unwrap();
     assert!(
         !ids.iter().any(|id| id == entity_id),
         "deleted entity should not be listed after restart/index rebuild"
@@ -405,7 +585,7 @@ async fn list_entity_ids_lazy_surfaces_durable_entities_missing_from_partial_ind
     );
 
     // Lazy listing must reconcile against the store and return BOTH entities.
-    let mut ids = state.list_entity_ids_lazy(&tenant, "Order").await;
+    let mut ids = state.list_entity_ids_lazy(&tenant, "Order").await.unwrap();
     ids.sort();
     assert_eq!(
         ids,

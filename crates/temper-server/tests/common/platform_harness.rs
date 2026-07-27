@@ -186,7 +186,11 @@ impl SimPlatformHarness {
             registry.tenant_ids().into_iter().cloned().collect()
         };
         for tenant_id in &tenant_ids {
-            new_state.server.populate_index_from_store(tenant_id).await;
+            new_state
+                .server
+                .populate_index_from_store(tenant_id)
+                .await
+                .expect("populate entity index after restart");
         }
 
         self.platform_state = new_state;

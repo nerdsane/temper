@@ -9,6 +9,8 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use common::{build_default_state, dispatch};
 use temper_runtime::ActorSystem;
+use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
+use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 use temper_server::build_router;
 use temper_server::registry::{
@@ -16,6 +18,7 @@ use temper_server::registry::{
 };
 use temper_server::{ServerState, StorageStack};
 use temper_spec::csdl::parse_csdl;
+use temper_store_sim::SimEventStore;
 use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
@@ -36,6 +39,267 @@ async fn get_json(
         .unwrap();
     let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, body)
+}
+
+#[tokio::test]
+async fn direct_get_rejects_stale_index_without_creating_a_journal() {
+    let (mut state, _old_store) = build_default_state(192_001, "odata-direct-stale-index");
+    let tenant = TenantId::default();
+    let entity_id = "ord-stale-index";
+
+    // Create only in memory first, then attach an empty durable journal. This
+    // models a stale index/actor left behind after external journal loss.
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            entity_id,
+            serde_json::json!({"Title": "must not resurrect"}),
+        )
+        .await
+        .expect("seed in-memory stale entity");
+    let store = SimEventStore::no_faults(192_002);
+    state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
+
+    let (status, body) = get_json(&state, "/tdata/Orders('ord-stale-index')").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "unexpected body: {body:?}");
+    assert_eq!(body["error"]["code"], "ResourceNotFound");
+    assert!(
+        store
+            .read_events("default:Order:ord-stale-index", 0)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a read must never bootstrap a Created event for a stale index entry"
+    );
+}
+
+#[tokio::test]
+async fn direct_get_without_query_plane_authorizes_strict_latest_journal_state() {
+    let (state, store) = build_default_state(192_005, "odata-direct-journal-sequence");
+    let tenant = TenantId::default();
+    let entity_id = "ord-remote-auth-change";
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            entity_id,
+            serde_json::json!({"Currency": "USD"}),
+        )
+        .await
+        .expect("create running actor");
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            r#"permit(principal, action == Action::"read", resource is Order)
+                when { resource.Currency == "USD" };"#,
+        )
+        .expect("install field-sensitive read policy");
+
+    store
+        .append(
+            &persistence_id,
+            1,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "AddItem".to_string(),
+                payload: serde_json::json!({
+                    "action": "AddItem",
+                    "from_status": "Draft",
+                    "to_status": "Draft",
+                    "timestamp": sim_now(),
+                    "params": {
+                        "ProductId": "remote",
+                        "Quantity": 1,
+                        "Currency": "EUR"
+                    },
+                    "idempotency_key": null
+                }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: persistence_id.clone(),
+                },
+            }],
+        )
+        .await
+        .expect("append remote auth-relevant update");
+
+    let (status, body) = customer_json(
+        &state,
+        Method::GET,
+        "/tdata/Orders('ord-remote-auth-change')",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "unexpected body: {body:?}");
+    assert_eq!(body["error"]["code"], "AuthorizationDenied");
+}
+
+#[tokio::test]
+async fn mutation_authorization_uses_remote_latest_journal_state() {
+    let (state, store) = build_default_state(192_007, "odata-mutation-journal-sequence");
+    let tenant = TenantId::default();
+    state.registry.write().unwrap().set_verification_status(
+        &tenant,
+        "Order",
+        VerificationStatus::Completed(EntityVerificationResult {
+            all_passed: true,
+            levels: vec![EntityLevelSummary {
+                level: "L0 SMT".to_string(),
+                passed: true,
+                summary: "OK".to_string(),
+                details: None,
+            }],
+            verified_at: "2026-07-10T00:00:00Z".to_string(),
+        }),
+    );
+    let entity_id = "ord-remote-mutation-auth";
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            entity_id,
+            serde_json::json!({"Currency": "USD"}),
+        )
+        .await
+        .expect("create running actor");
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            r#"permit(principal, action == Action::"update", resource is Order)
+                when { resource.Currency == "USD" };"#,
+        )
+        .expect("install field-sensitive update policy");
+    store
+        .append(
+            &persistence_id,
+            1,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "AddItem".to_string(),
+                payload: serde_json::json!({
+                    "action": "AddItem",
+                    "from_status": "Draft",
+                    "to_status": "Draft",
+                    "timestamp": sim_now(),
+                    "params": {
+                        "ProductId": "remote",
+                        "Quantity": 1,
+                        "Currency": "EUR"
+                    },
+                    "idempotency_key": null
+                }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: persistence_id.clone(),
+                },
+            }],
+        )
+        .await
+        .expect("append remote auth-relevant update");
+
+    let (status, body) = customer_json(
+        &state,
+        Method::PATCH,
+        "/tdata/Orders('ord-remote-mutation-auth')",
+        Some(serde_json::json!({"Notes": "must not commit"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "unexpected body: {body:?}");
+    assert_eq!(body["error"]["code"], "AuthorizationDenied");
+    assert_eq!(
+        store.read_events(&persistence_id, 0).await.unwrap().len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn direct_get_quarantines_incompatible_latest_event_without_leaking_details() {
+    let (state, store) = build_default_state(192_006, "odata-direct-corrupt-journal");
+    let tenant = TenantId::default();
+    let entity_id = "ord-corrupt-latest";
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            entity_id,
+            serde_json::json!({"Currency": "USD"}),
+        )
+        .await
+        .expect("create running actor");
+    store
+        .append(
+            &persistence_id,
+            1,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "RemoteSchemaV2".to_string(),
+                payload: serde_json::json!({"new_schema": "driver-secret-detail"}),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: persistence_id.clone(),
+                },
+            }],
+        )
+        .await
+        .expect("append incompatible remote event");
+
+    let (status, body) = customer_json(
+        &state,
+        Method::GET,
+        "/tdata/Orders('ord-corrupt-latest')",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "StorageUnavailable");
+    assert!(!body.to_string().contains("driver-secret-detail"));
+}
+
+#[tokio::test]
+async fn collection_read_returns_sanitized_503_when_tail_validation_fails() {
+    let (state, store) = build_default_state(192_003, "odata-collection-tail-failure");
+    let tenant = TenantId::default();
+    let entity_id = "ord-tail-failure";
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            entity_id,
+            serde_json::json!({"Title": "durable"}),
+        )
+        .await
+        .expect("seed durable entity");
+    store.fail_next_reads(&persistence_id, 1);
+
+    let (status, body) = get_json(&state, "/tdata/Orders").await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "unexpected body: {body:?}"
+    );
+    assert_eq!(body["error"]["code"], "StorageUnavailable");
+    assert!(
+        !body
+            .to_string()
+            .contains("injected latest-event read failure"),
+        "backend diagnostics must not be exposed to OData clients"
+    );
 }
 
 async fn post_json(
@@ -247,10 +511,39 @@ async fn composite_entity_key_resolves_through_query_plane_index() {
                 "SessionId": "session-hot",
                 "EntryId": format!("entry-{index:04}"),
             }),
-            index as u64 + 1,
+            1,
         )
         .await;
     }
+    store
+        .append(
+            "default:Order:entry-1199",
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "Created".to_string(),
+                payload: serde_json::json!({
+                    "action": "Created",
+                    "from_status": "",
+                    "to_status": "Draft",
+                    "timestamp": sim_now(),
+                    "params": {
+                        "SessionId": "session-hot",
+                        "EntryId": "entry-1199"
+                    },
+                    "idempotency_key": null
+                }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: "odata-composite-key-test".to_string(),
+                },
+            }],
+        )
+        .await
+        .unwrap();
     upsert_projected_order(
         &store,
         &tenant,

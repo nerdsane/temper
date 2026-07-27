@@ -76,6 +76,43 @@ fn extract_vectors_empty_when_no_vector_blocks() {
 }
 
 #[test]
+fn production_parser_preserves_context_entities() {
+    let src = r#"
+[automaton]
+name = "Child"
+states = ["Draft"]
+initial = "Draft"
+
+[[context_entity]]
+name = "owner"
+entity_type = "Owner"
+id_field = "OwnerId"
+"#;
+    let automaton = parse_toml_to_automaton(src).expect("context entity should parse");
+    assert_eq!(automaton.context_entities.len(), 1);
+    assert_eq!(automaton.context_entities[0].name, "owner");
+    assert_eq!(automaton.context_entities[0].entity_type, "Owner");
+    assert_eq!(automaton.context_entities[0].id_field, "OwnerId");
+}
+
+#[test]
+fn malformed_context_entity_is_not_silently_dropped() {
+    let src = r#"
+[automaton]
+name = "Child"
+states = ["Draft"]
+initial = "Draft"
+
+[[context_entity]]
+name = "owner"
+entity_type = "Owner"
+"#;
+    let error = parse_toml_to_automaton(src)
+        .expect_err("missing context id_field must fail instead of weakening authorization");
+    assert!(error.to_string().contains("context_entity"));
+}
+
+#[test]
 fn parse_kv_trims_whitespace() {
     let (key, value) = parse_kv("  key  =  \"value\"  ").unwrap();
     assert_eq!(key, "key");

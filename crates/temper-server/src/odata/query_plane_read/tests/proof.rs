@@ -1,5 +1,37 @@
 use super::*;
 
+async fn append_discovery_event(store: &TursoEventStore, tenant: &TenantId, entity_id: &str) {
+    use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
+    use temper_runtime::scheduler::sim_now;
+
+    store
+        .append(
+            &format!("{tenant}:Order:{entity_id}"),
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "Created".to_string(),
+                payload: serde_json::json!({
+                    "action": "Created",
+                    "from_status": "",
+                    "to_status": "Draft",
+                    "timestamp": sim_now(),
+                    "params": {},
+                    "idempotency_key": null
+                }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: "query-plane-proof".to_string(),
+                },
+            }],
+        )
+        .await
+        .expect("append authoritative discovery event");
+}
+
 /// ADR-0153 read-plane proof on real Postgres (the prod engine): a `$filter` that
 /// is exactly the declared `[[key]]` resolves to the single matching entity via
 /// `entity_key_index` — a bounded candidate (no full-type scan → the budget that
@@ -146,8 +178,12 @@ fn keyed_filter_resolves_to_bounded_candidate_on_postgres() {
                 max_entities: 10,
             },
         };
+        let keyed_result = match keyed_candidate_ids(&request).await {
+            Ok(result) => result,
+            Err(_) => panic!("keyed lookup should succeed"),
+        };
         assert_eq!(
-            keyed_candidate_ids(&request).await,
+            keyed_result,
             Some(vec![target_id.to_string()]),
             "a $filter matching the declared key must resolve to the bounded single id via entity_key_index"
         );
@@ -167,9 +203,12 @@ fn keyed_filter_resolves_to_bounded_candidate_on_postgres() {
             query_options: &non_key,
             ..request
         };
+        let control_result = match keyed_candidate_ids(&control).await {
+            Ok(result) => result,
+            Err(_) => panic!("non-key shape classification should succeed"),
+        };
         assert_eq!(
-            keyed_candidate_ids(&control).await,
-            None,
+            control_result, None,
             "a non-key filter must decline the keyed fast path"
         );
 
@@ -198,9 +237,12 @@ fn keyed_filter_resolves_to_bounded_candidate_on_postgres() {
             query_options: &absent,
             ..request
         };
+        let absent_result = match keyed_candidate_ids(&absent_req).await {
+            Ok(result) => result,
+            Err(_) => panic!("absent keyed lookup should succeed"),
+        };
         assert_eq!(
-            keyed_candidate_ids(&absent_req).await,
-            None,
+            absent_result, None,
             "a keyed miss must decline to scan fallback pre-backfill (not authoritative-empty)"
         );
 
@@ -323,9 +365,12 @@ async fn keyed_fast_path_declines_non_key_shapes() {
             query_options,
             budget,
         };
+        let result = match keyed_candidate_ids(&request).await {
+            Ok(result) => result,
+            Err(_) => panic!("keyed shape classification should succeed"),
+        };
         assert_eq!(
-            keyed_candidate_ids(&request).await,
-            None,
+            result, None,
             "keyed fast path must decline shape '{name}' (falls back to scan/pushdown)"
         );
     }
@@ -337,9 +382,41 @@ async fn upsert_order_projection_with_status(
     entity_id: &str,
     status: &str,
     mut fields: serde_json::Value,
-    sequence_nr: u64,
+    _sequence_nr: u64,
 ) {
     fields["Id"] = serde_json::json!(entity_id);
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    let mut events = store.read_events(&persistence_id, 0).await.unwrap();
+    if events.is_empty() {
+        store
+            .append(
+                &persistence_id,
+                0,
+                &[temper_runtime::persistence::PersistenceEnvelope {
+                    sequence_nr: 0,
+                    event_type: "Created".to_string(),
+                    payload: serde_json::json!({
+                        "action": "Created",
+                        "from_status": "",
+                        "to_status": status,
+                        "timestamp": sim_now(),
+                        "params": fields.clone(),
+                        "idempotency_key": null
+                    }),
+                    metadata: temper_runtime::persistence::EventMetadata {
+                        event_id: sim_uuid(),
+                        causation_id: sim_uuid(),
+                        correlation_id: sim_uuid(),
+                        timestamp: sim_now(),
+                        actor_id: "query-plane-proof".to_string(),
+                    },
+                }],
+            )
+            .await
+            .unwrap();
+        events = store.read_events(&persistence_id, 0).await.unwrap();
+    }
+    let sequence_nr = events.last().unwrap().sequence_nr;
     let state_json = serde_json::json!({
         "entity_type": "Order",
         "entity_id": entity_id,
@@ -533,6 +610,9 @@ async fn nullable_scalar_order_uses_read_source_full_proof() {
     state.set_storage_stack(StorageStack::from_turso(store.clone()));
     let tenant = TenantId::default();
 
+    append_discovery_event(&store, &tenant, "ord-text-notes").await;
+    append_discovery_event(&store, &tenant, "ord-null-notes").await;
+
     upsert_order_projection(
         &store,
         &tenant,
@@ -609,27 +689,22 @@ async fn context_prep_shaped_filter_with_huge_top_uses_bounded_native_page() {
     state.set_storage_stack(StorageStack::from_turso(store.clone()));
     let tenant = TenantId::default();
 
-    for index in 0usize..1200 {
-        upsert_order_projection(
-            &store,
-            &tenant,
-            &format!("entry-{index:04}"),
-            serde_json::json!({
+    let mut rows = (0usize..1200)
+        .map(|index| {
+            (
+                format!("entry-{index:04}"),
+                serde_json::json!({
                 "SessionId": "session-hot",
                 "ParentEntryId": format!("entry-{:04}", index.saturating_sub(1)),
-            }),
-            index as u64 + 1,
-        )
-        .await;
-    }
-    upsert_order_projection(
-        &store,
-        &tenant,
-        "entry-other",
+                }),
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.push((
+        "entry-other".to_string(),
         serde_json::json!({ "SessionId": "session-cold" }),
-        2000,
-    )
-    .await;
+    ));
+    insert_order_projections(&store, &tenant, rows).await;
 
     let security_ctx = SecurityContext::system();
     let query_options = QueryOptions {
@@ -820,6 +895,9 @@ async fn file_point_lookup_with_status_ne_uses_lossless_equality_candidates() {
         Err(QueryPlaneReadError::InvalidContinuation) => {
             panic!("no $skiptoken was supplied")
         }
+        Err(QueryPlaneReadError::StorageUnavailable) => {
+            panic!("file point lookup storage should be available")
+        }
     };
 
     assert_eq!(result.entities.len(), 1);
@@ -1005,6 +1083,9 @@ async fn unsafe_order_uses_read_source_full_proof() {
     state.set_storage_stack(StorageStack::from_turso(store.clone()));
     let tenant = TenantId::default();
 
+    append_discovery_event(&store, &tenant, "ord-with-score").await;
+    append_discovery_event(&store, &tenant, "ord-missing-score").await;
+
     upsert_order_projection(
         &store,
         &tenant,
@@ -1080,7 +1161,7 @@ async fn build_large_projected_type(
     let agent_ctx = AgentContext::for_service(system_name);
     for index in 0..count {
         let entity_id = format!("entry-{index:04}");
-        state
+        let created = state
             .dispatch_tenant_action(
                 tenant,
                 "Order",
@@ -1091,13 +1172,15 @@ async fn build_large_projected_type(
             )
             .await
             .expect("create order");
-        // Deterministic projected fields (high sequence wins over the async queue).
-        upsert_order_projection(
+        write_order_projection(
             store,
             tenant,
             &entity_id,
-            serde_json::json!({ "SessionId": "session-hot" }),
-            1_000 + index as u64,
+            serde_json::json!({
+                "Id": entity_id,
+                "SessionId": "session-hot"
+            }),
+            created.state.sequence_nr,
         )
         .await;
     }

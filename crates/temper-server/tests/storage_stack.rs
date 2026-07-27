@@ -10,12 +10,115 @@ use temper_server::storage::{
     BackendLabel, BoxedEventStore, QueryPlaneStore, QueryProjectionFieldsRow, StorageStack,
     TrajectorySink,
 };
+use temper_store_sim::{SimEventStore, SimFaultConfig};
 use temper_store_turso::TursoEventStore;
 
 #[derive(Clone)]
 struct RecordingEventStore;
 
 struct RecordingQueryPlane;
+
+#[derive(Clone)]
+struct CommitThenLoseAckStore {
+    inner: SimEventStore,
+    append_trailing_event: bool,
+}
+
+impl EventStore for CommitThenLoseAckStore {
+    async fn append(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+    ) -> Result<u64, PersistenceError> {
+        let sequence_nr = self
+            .inner
+            .append(persistence_id, expected_sequence, events)
+            .await?;
+        if self.append_trailing_event {
+            let mut trailing = test_envelope(0);
+            trailing.event_type = "Ticket.AdvancedAfterCommit".to_string();
+            trailing.metadata.event_id = uuid::Uuid::from_u128(2);
+            self.inner
+                .append(persistence_id, sequence_nr, &[trailing])
+                .await?;
+        }
+        Err(PersistenceError::Storage(
+            "injected response loss after commit".to_string(),
+        ))
+    }
+
+    async fn append_batch(
+        &self,
+        appends: &[PersistenceAppend],
+    ) -> Result<Vec<PersistenceAppendResult>, PersistenceError> {
+        self.inner.append_batch(appends).await?;
+        Err(PersistenceError::Storage(
+            "injected batch response loss after commit".to_string(),
+        ))
+    }
+
+    async fn read_events(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        self.inner.read_events(persistence_id, from_sequence).await
+    }
+
+    async fn read_events_bounded(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        self.inner
+            .read_events_bounded(persistence_id, from_sequence, limit)
+            .await
+    }
+
+    async fn read_latest_events(
+        &self,
+        persistence_ids: &[String],
+    ) -> Result<Vec<Option<PersistenceEnvelope>>, PersistenceError> {
+        self.inner.read_latest_events(persistence_ids).await
+    }
+
+    async fn save_snapshot(
+        &self,
+        persistence_id: &str,
+        sequence_nr: u64,
+        snapshot: &[u8],
+    ) -> Result<(), PersistenceError> {
+        self.inner
+            .save_snapshot(persistence_id, sequence_nr, snapshot)
+            .await
+    }
+
+    async fn load_snapshot(
+        &self,
+        persistence_id: &str,
+    ) -> Result<Option<(u64, Vec<u8>)>, PersistenceError> {
+        self.inner.load_snapshot(persistence_id).await
+    }
+
+    async fn list_entity_ids(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        self.inner.list_entity_ids(tenant).await
+    }
+
+    async fn list_entity_ids_by_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        self.inner
+            .list_entity_ids_by_type(tenant, entity_type)
+            .await
+    }
+}
 
 #[async_trait::async_trait]
 impl QueryPlaneStore for RecordingQueryPlane {
@@ -50,6 +153,17 @@ impl QueryPlaneStore for RecordingQueryPlane {
             ("default", "Ticket", "t-1")
         );
         Ok(())
+    }
+
+    async fn remove_projection_through_sequence(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
+        assert_eq!(sequence_nr, 7);
+        self.remove_projection(tenant, entity_type, entity_id).await
     }
 
     async fn query_field_index(
@@ -139,6 +253,25 @@ impl EventStore for RecordingEventStore {
         Ok(vec![test_envelope(1)])
     }
 
+    async fn read_events_bounded(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        let mut events = self.read_events(persistence_id, from_sequence).await?;
+        events.truncate(limit);
+        Ok(events)
+    }
+
+    async fn read_latest_events(
+        &self,
+        persistence_ids: &[String],
+    ) -> Result<Vec<Option<PersistenceEnvelope>>, PersistenceError> {
+        assert_eq!(persistence_ids, &["default:Ticket:t-1".to_string()]);
+        Ok(vec![Some(test_envelope(1))])
+    }
+
     async fn save_snapshot(
         &self,
         persistence_id: &str,
@@ -196,6 +329,9 @@ async fn boxed_event_store_delegates_through_object_safe_adapter() {
                 persistence_id: "default:Ticket:t-1".to_string(),
                 expected_sequence: 0,
                 events: events.clone(),
+                key_rows: None,
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             }])
             .await
             .expect("append batch through dyn adapter"),
@@ -246,6 +382,178 @@ async fn boxed_event_store_delegates_through_object_safe_adapter() {
             .expect("bounded list through dyn adapter"),
         vec![("Ticket".to_string(), "t-1".to_string())]
     );
+}
+
+#[tokio::test]
+async fn boxed_event_store_reconciles_lost_commit_ack_for_single_and_batch_appends() {
+    let single_inner = SimEventStore::no_faults(192_900);
+    let single = BoxedEventStore::new(CommitThenLoseAckStore {
+        inner: single_inner.clone(),
+        append_trailing_event: false,
+    });
+    let single_event = test_envelope(0);
+    assert_eq!(
+        single
+            .append(
+                "default:Ticket:lost-single",
+                0,
+                std::slice::from_ref(&single_event),
+            )
+            .await
+            .expect("durable event id reconciles lost acknowledgement"),
+        1
+    );
+    assert_eq!(
+        single
+            .append(
+                "default:Ticket:lost-single",
+                0,
+                std::slice::from_ref(&single_event),
+            )
+            .await
+            .expect("retry conflict reconciles the already-committed event"),
+        1
+    );
+    assert_eq!(
+        single_inner
+            .read_events("default:Ticket:lost-single", 0)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let batch_inner = SimEventStore::no_faults(192_901);
+    let batch = BoxedEventStore::new(CommitThenLoseAckStore {
+        inner: batch_inner.clone(),
+        append_trailing_event: false,
+    });
+    let appends = [PersistenceAppend {
+        persistence_id: "default:Ticket:lost-batch".to_string(),
+        expected_sequence: 0,
+        events: vec![test_envelope(0), test_envelope(0)],
+        key_rows: None,
+        vector_rows: Vec::new(),
+        reconcile_vectors: false,
+    }];
+    assert_eq!(
+        batch
+            .append_batch(&appends)
+            .await
+            .expect("every stream event id reconciles lost batch acknowledgement")[0]
+            .sequence_nr,
+        2
+    );
+    assert_eq!(
+        batch_inner
+            .read_events("default:Ticket:lost-batch", 0)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn boxed_event_store_reconciliation_rejects_a_matching_prefix_below_durable_tail() {
+    let inner = SimEventStore::no_faults(192_902);
+    let store = BoxedEventStore::new(CommitThenLoseAckStore {
+        inner: inner.clone(),
+        append_trailing_event: true,
+    });
+
+    let error = store
+        .append(
+            "default:Ticket:advanced-after-commit",
+            0,
+            &[test_envelope(0)],
+        )
+        .await
+        .expect_err("a matching prefix must not reconcile below the durable tail");
+    assert!(matches!(error, PersistenceError::Storage(_)));
+    assert_eq!(
+        inner
+            .read_events("default:Ticket:advanced-after-commit", 0)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn boxed_event_store_reconciliation_proves_tail_after_a_truncated_range_read() {
+    let mut faults = SimFaultConfig::none();
+    faults.read_truncation_prob = 1.0;
+    let inner = SimEventStore::new(192_904, faults);
+    let store = BoxedEventStore::new(CommitThenLoseAckStore {
+        inner: inner.clone(),
+        append_trailing_event: true,
+    });
+
+    let error = store
+        .append(
+            "default:Ticket:truncated-reconciliation-read",
+            0,
+            &[test_envelope(0)],
+        )
+        .await
+        .expect_err("a truncated matching prefix must not hide a later durable event");
+    assert!(matches!(error, PersistenceError::Storage(_)));
+    assert_eq!(
+        inner
+            .read_latest_events(&["default:Ticket:truncated-reconciliation-read".to_string()])
+            .await
+            .unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .sequence_nr,
+        2
+    );
+}
+
+#[tokio::test]
+async fn boxed_event_store_rejects_duplicate_batches_before_reconciliation() {
+    let inner = SimEventStore::no_faults(192_903);
+    let store = BoxedEventStore::new(CommitThenLoseAckStore {
+        inner: inner.clone(),
+        append_trailing_event: false,
+    });
+
+    let duplicate_empty = PersistenceAppend {
+        persistence_id: "default:Ticket:duplicate-empty".to_string(),
+        expected_sequence: 0,
+        events: Vec::new(),
+        key_rows: None,
+        vector_rows: Vec::new(),
+        reconcile_vectors: false,
+    };
+    let error = store
+        .append_batch(&[duplicate_empty.clone(), duplicate_empty])
+        .await
+        .expect_err("duplicate empty streams are structurally invalid");
+    assert!(error.to_string().contains("duplicate persistence_id"));
+
+    let persistence_id = "default:Ticket:duplicate-durable";
+    let durable_event = test_envelope(0);
+    inner
+        .append(persistence_id, 0, std::slice::from_ref(&durable_event))
+        .await
+        .unwrap();
+    let duplicate_durable = PersistenceAppend {
+        persistence_id: persistence_id.to_string(),
+        expected_sequence: 0,
+        events: vec![durable_event],
+        key_rows: None,
+        vector_rows: Vec::new(),
+        reconcile_vectors: false,
+    };
+    let error = store
+        .append_batch(&[duplicate_durable.clone(), duplicate_durable])
+        .await
+        .expect_err("matching durable events cannot override duplicate-stream validation");
+    assert!(error.to_string().contains("duplicate persistence_id"));
+    assert_eq!(inner.read_events(persistence_id, 0).await.unwrap().len(), 1);
 }
 
 #[test]

@@ -316,10 +316,11 @@ impl QueryProjectionWriteQueue {
                     }
                     ProjectionOperation::Remove => {
                         self.store
-                            .remove_projection(
+                            .remove_projection_through_sequence(
                                 &update.key.tenant,
                                 &update.key.entity_type,
                                 &update.key.entity_id,
+                                update.sequence_nr,
                             )
                             .await
                     }

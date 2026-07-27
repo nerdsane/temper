@@ -165,6 +165,41 @@ async fn dst_backfill_makes_pre_existing_entity_keyed_findable() {
     }
 }
 
+#[tokio::test]
+async fn backfill_rejects_ambiguous_historical_key_instead_of_blessing_it() {
+    let store = SimEventStore::no_faults(192_800);
+    let key = EntityKeyRow {
+        key_name: "path".to_string(),
+        key_hash: doc_key_hash("ws1", "/duplicate.md"),
+    };
+    store
+        .backfill_entity_keys("default", "Doc", "doc-a", std::slice::from_ref(&key))
+        .await
+        .unwrap();
+    let conflict = store
+        .backfill_entity_keys("default", "Doc", "doc-b", std::slice::from_ref(&key))
+        .await;
+    assert!(
+        conflict.is_err(),
+        "a historical duplicate must fail the entity so the type is not watermarked"
+    );
+    assert_eq!(
+        store
+            .lookup_by_key("default", "Doc", "path", &key.key_hash)
+            .await
+            .unwrap(),
+        Some("doc-a".to_string())
+    );
+    assert!(
+        store
+            .key_index_backfilled_types("default")
+            .await
+            .unwrap()
+            .is_empty(),
+        "a conflict path must not create an authoritative watermark"
+    );
+}
+
 fn test_envelope() -> PersistenceEnvelope {
     PersistenceEnvelope {
         sequence_nr: 1,

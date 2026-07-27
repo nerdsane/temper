@@ -148,7 +148,11 @@ impl ServerState {
             .map(|(idx, event)| synthetic_envelope(&persistence_id, (idx + 1) as u64, event))
             .collect::<Result<Vec<_>, _>>()?;
 
-        match store.append(&persistence_id, 0, &envelopes).await {
+        let key_rows = crate::key_index::entity_key_rows(&table.keys, &state.fields);
+        match store
+            .append_with_keys(&persistence_id, 0, &envelopes, &key_rows)
+            .await
+        {
             Ok(sequence_nr) => state.sequence_nr = sequence_nr,
             Err(PersistenceError::ConcurrencyViolation { .. }) => {
                 return Err(FileStreamContentError::ActionRejected(format!(
@@ -184,14 +188,14 @@ impl ServerState {
         }
 
         self.stop_and_remove_entity(tenant, "File", file_id);
-        {
-            let index_key = format!("{tenant}:File");
-            let mut index = self.entity_index.write().unwrap();
+        let index_key = format!("{tenant}:File");
+        self.mutate_entity_index(tenant, "File", |index| {
             index
                 .entry(index_key)
                 .or_default()
                 .insert(file_id.to_string());
-        }
+        })
+        .map_err(FileStreamContentError::State)?;
         crate::runtime_metrics::record_server_state_metrics(self);
 
         let response = EntityResponse {
@@ -230,46 +234,6 @@ impl ServerState {
             .read()
             .expect("File transition table lock poisoned")
             .clone())
-    }
-
-    /// Build the Cedar resource attributes for a not-yet-existing `File`
-    /// WITHOUT spawning its actor.
-    ///
-    /// Produces exactly what `load_authz_resource_snapshot` would for a
-    /// freshly-spawned File so Cedar cannot allow/deny differently between a
-    /// create-via-`$value` and an update on a fresh File:
-    /// - `id` / `status` (lowercase) — the explicit inserts
-    ///   `load_authz_resource_snapshot` adds from the entity id and the File
-    ///   spec's initial state;
-    /// - `Id` / `Status` (capitalized) — the fields `build_initial_state`
-    ///   seeds (actor.rs) and that the snapshot then copies out of
-    ///   `state.fields`;
-    /// - `has_spec=true`.
-    ///
-    /// A freshly-spawned File has no other persisted fields, so the maps match.
-    /// Avoiding the spawn is the point: it skips persisting the empty bootstrap
-    /// `Created` event the spawn path (actor `pre_start`) would write — the
-    /// ARN-87 write-side empty-`$value` window this closes.
-    pub(crate) fn synthesize_new_file_resource_attrs(
-        &self,
-        tenant: &temper_runtime::tenant::TenantId,
-        file_id: &str,
-    ) -> Result<std::collections::BTreeMap<String, serde_json::Value>, String> {
-        let table = self
-            .file_transition_table(tenant)
-            .map_err(|error| error.to_string())?;
-        let initial_state = serde_json::Value::String(table.initial_state.clone());
-        let file_id_value = serde_json::Value::String(file_id.to_string());
-        let mut attrs = std::collections::BTreeMap::new();
-        attrs.insert("id".to_string(), file_id_value.clone());
-        attrs.insert("status".to_string(), initial_state.clone());
-        attrs.insert("Id".to_string(), file_id_value);
-        attrs.insert("Status".to_string(), initial_state);
-        let has_spec = self
-            .has_registered_spec(tenant, "File")
-            .map_err(|error| error.to_string())?;
-        attrs.insert("has_spec".to_string(), serde_json::Value::Bool(has_spec));
-        Ok(attrs)
     }
 
     fn broadcast_synthetic_file_stream_update(
@@ -344,13 +308,13 @@ fn initial_file_state(
     table: &temper_jit::table::TransitionTable,
     initial_fields: serde_json::Value,
 ) -> EntityState {
-    let mut fields = initial_fields;
-    if let Some(obj) = fields.as_object_mut() {
-        obj.entry("Id".to_string())
-            .or_insert(serde_json::Value::String(file_id.to_string()));
-        obj.entry("Status".to_string())
-            .or_insert(serde_json::Value::String(table.initial_state.clone()));
-    }
+    let mut fields =
+        crate::entity_actor::effects::sanitize_action_params(&initial_fields).into_owned();
+    crate::entity_actor::effects::canonicalize_entity_fields(
+        &mut fields,
+        file_id,
+        &table.initial_state,
+    );
 
     EntityState {
         entity_type: "File".to_string(),

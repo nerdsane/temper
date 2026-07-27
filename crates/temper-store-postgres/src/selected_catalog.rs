@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use temper_runtime::persistence::PersistenceError;
 
 use crate::PostgresEventStore;
-use crate::platform::{PostgresEntityCatalogRow, storage_error};
+use crate::platform::{PostgresEntityCatalogRow, decoded_projection_sequence, storage_error};
 
 impl PostgresEventStore {
     /// Batch-load catalog rows while projecting only the requested JSON fields.
@@ -62,17 +62,16 @@ impl PostgresEventStore {
         .await
         .map_err(storage_error)?;
 
-        Ok(rows
-            .into_iter()
-            .map(
-                |(entity_id, status, fields, seq)| PostgresEntityCatalogRow {
+        rows.into_iter()
+            .map(|(entity_id, status, fields, sequence_nr)| {
+                Ok(PostgresEntityCatalogRow {
+                    sequence_nr: decoded_projection_sequence(sequence_nr, &entity_id)?,
                     entity_id,
                     status,
                     fields,
                     state: None,
-                    sequence_nr: seq.max(0) as u64,
-                },
-            )
-            .collect())
+                })
+            })
+            .collect()
     }
 }

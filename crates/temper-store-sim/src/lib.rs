@@ -14,9 +14,18 @@ use std::time::Duration;
 
 use temper_runtime::persistence::{
     EntityVectorCandidate, EntityVectorRow, EventStore, PersistenceAppend, PersistenceAppendResult,
-    PersistenceEnvelope, PersistenceError,
+    PersistenceEnvelope, PersistenceError, PersistenceSequenceGuard, contains_deletion_tombstone,
+    ends_in_deletion_tombstone, validate_guarded_persistence_append_batch,
+    validate_latest_event_batch,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
+
+mod fault_control;
+mod identity;
+mod segments;
+use identity::{canonical_persistence_id, canonical_test_persistence_id};
+pub use segments::SimEventSegment;
+use segments::{record_segment_append, rotate_for_snapshot};
 
 /// Fault injection configuration for simulation.
 ///
@@ -171,16 +180,6 @@ struct SimEventStoreInner {
     vector_index_watermark: BTreeMap<(String, String), String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SimEventSegment {
-    pub segment_index: u64,
-    pub start_sequence_nr: u64,
-    pub end_sequence_nr: Option<u64>,
-    pub snapshot_sequence: Option<u64>,
-    pub event_count: u64,
-    pub sealed: bool,
-}
-
 impl SimEventStore {
     /// Create a new SimEventStore with the given seed and fault config.
     pub fn new(seed: u64, faults: SimFaultConfig) -> Self {
@@ -201,69 +200,6 @@ impl SimEventStore {
                 vector_index_watermark: BTreeMap::new(),
             })),
         }
-    }
-
-    /// Inject exactly `count` deterministic `ConcurrencyViolation` errors on
-    /// the next `count` `append` calls for `persistence_id`, then behave
-    /// normally.
-    ///
-    /// Use this for retry-path tests where the probabilistic fault injection
-    /// in `SimFaultConfig` would be flaky. Each injected violation reports
-    /// `actual = expected_sequence` (the journal has not actually moved), so
-    /// any callers with post-replay sequence assertions still hold after the
-    /// retry replays back to the same spot.
-    pub fn inject_concurrency_violations(&self, persistence_id: &str, count: u64) {
-        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
-        if count == 0 {
-            inner.pending_concurrency_violations.remove(persistence_id);
-        } else {
-            inner
-                .pending_concurrency_violations
-                .insert(persistence_id.to_string(), count);
-        }
-    }
-
-    /// Make the next `count` `read_events` calls for `persistence_id` fail with a
-    /// storage error, then behave normally. Deterministic (unlike
-    /// `read_truncation_prob`) so tests can prove read-failure handling — e.g. that
-    /// the key-index backfill classifies an unreadable entity as `LoadFailed` and
-    /// therefore does not watermark its type. `count == 0` clears the injection.
-    pub fn fail_next_reads(&self, persistence_id: &str, count: usize) {
-        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
-        if count == 0 {
-            inner.pending_read_failures.remove(persistence_id);
-        } else {
-            inner
-                .pending_read_failures
-                .insert(persistence_id.to_string(), count);
-        }
-    }
-
-    /// Return the current count of pending injected concurrency violations for
-    /// `persistence_id`. Zero if none are queued.
-    pub fn pending_concurrency_violations(&self, persistence_id: &str) -> u64 {
-        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
-        inner
-            .pending_concurrency_violations
-            .get(persistence_id)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    /// Delay the next append for `persistence_id` by `delay`.
-    ///
-    /// The delay is consumed once. Multiple calls queue multiple delays in
-    /// FIFO order.
-    pub fn inject_append_delay(&self, persistence_id: &str, delay: Duration) {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        inner
-            .pending_append_delays
-            .entry(persistence_id.to_string())
-            .or_default()
-            .push_back(delay);
     }
 
     /// Create a SimEventStore with no fault injection.
@@ -310,30 +246,73 @@ impl SimEventStore {
 
     /// Dump all events for a persistence_id (for test assertions).
     pub fn dump_journal(&self, persistence_id: &str) -> Vec<PersistenceEnvelope> {
+        let persistence_id = canonical_test_persistence_id(persistence_id);
         let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
         inner
             .journals
-            .get(persistence_id)
+            .get(&persistence_id)
             .cloned()
             .unwrap_or_default()
     }
 
     pub fn snapshot_history_len(&self, persistence_id: &str) -> usize {
+        let persistence_id = canonical_test_persistence_id(persistence_id);
         let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
         inner
             .snapshot_history
-            .get(persistence_id)
+            .get(&persistence_id)
             .map(BTreeMap::len)
             .unwrap_or(0)
     }
 
     pub fn dump_segments(&self, persistence_id: &str) -> Vec<SimEventSegment> {
+        let persistence_id = canonical_test_persistence_id(persistence_id);
         let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
         inner
             .event_segments
-            .get(persistence_id)
+            .get(&persistence_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    fn read_events_with_limit(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        let persistence_id = canonical_persistence_id(persistence_id)?;
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+
+        if let Some(remaining) = inner.pending_read_failures.get_mut(&persistence_id) {
+            *remaining -= 1;
+            let cleared = *remaining == 0;
+            if cleared {
+                inner.pending_read_failures.remove(&persistence_id);
+            }
+            return Err(PersistenceError::Storage(format!(
+                "injected read failure for {persistence_id}"
+            )));
+        }
+
+        let journal = match inner.journals.get(&persistence_id) {
+            Some(journal) => journal,
+            None => return Ok(Vec::new()),
+        };
+        let mut events = journal
+            .iter()
+            .filter(|event| event.sequence_nr > from_sequence)
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let read_truncation_probability = inner.faults.read_truncation_prob;
+        if !events.is_empty() && inner.rng.chance(read_truncation_probability) {
+            let truncate_at = (inner.rng.next_u64() as usize) % events.len();
+            events.truncate(truncate_at.max(1));
+        }
+
+        Ok(events)
     }
 }
 
@@ -347,26 +326,28 @@ impl std::fmt::Debug for SimEventStore {
     }
 }
 
-impl EventStore for SimEventStore {
-    async fn append(
+impl SimEventStore {
+    async fn append_with_indexes(
         &self,
         persistence_id: &str,
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
-    ) -> Result<u64, PersistenceError> {
-        self.append_with_index_rows(persistence_id, expected_sequence, events, &[], &[], false)
-            .await
-    }
-
-    async fn append_with_index_rows(
-        &self,
-        persistence_id: &str,
-        expected_sequence: u64,
-        events: &[PersistenceEnvelope],
-        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+        key_rows: Option<&[temper_runtime::persistence::EntityKeyRow]>,
         vector_rows: &[EntityVectorRow],
         reconcile_vectors: bool,
     ) -> Result<u64, PersistenceError> {
+        if events.is_empty() {
+            return Ok(expected_sequence);
+        }
+
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let canonical_id = format!("{tenant}:{entity_type}:{entity_id}");
+        let contains_deletion = contains_deletion_tombstone(events);
+        let ends_in_deletion = ends_in_deletion_tombstone(events);
+        let replaces_keys = key_rows.is_some();
+        let key_rows = key_rows.unwrap_or_default();
+
         let append_delay = {
             let mut inner = self
                 .inner
@@ -374,14 +355,14 @@ impl EventStore for SimEventStore {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let delay = inner
                 .pending_append_delays
-                .get_mut(persistence_id)
+                .get_mut(&canonical_id)
                 .and_then(VecDeque::pop_front);
             if inner
                 .pending_append_delays
-                .get(persistence_id)
+                .get(&canonical_id)
                 .is_some_and(VecDeque::is_empty)
             {
-                inner.pending_append_delays.remove(persistence_id);
+                inner.pending_append_delays.remove(&canonical_id);
             }
             delay
         };
@@ -403,16 +384,16 @@ impl EventStore for SimEventStore {
         // lying about journal state.
         let pending_cv = inner
             .pending_concurrency_violations
-            .get(persistence_id)
+            .get(&canonical_id)
             .copied()
             .unwrap_or(0);
         if pending_cv > 0 {
             if pending_cv == 1 {
-                inner.pending_concurrency_violations.remove(persistence_id);
+                inner.pending_concurrency_violations.remove(&canonical_id);
             } else {
                 inner
                     .pending_concurrency_violations
-                    .insert(persistence_id.to_string(), pending_cv - 1);
+                    .insert(canonical_id.clone(), pending_cv - 1);
             }
             return Err(PersistenceError::ConcurrencyViolation {
                 expected: expected_sequence,
@@ -440,7 +421,7 @@ impl EventStore for SimEventStore {
         // Check optimistic concurrency.
         let current_seq = inner
             .journals
-            .get(persistence_id)
+            .get(&canonical_id)
             .and_then(|journal| journal.last().map(|e| e.sequence_nr))
             .unwrap_or(0);
         if current_seq != expected_sequence {
@@ -453,11 +434,7 @@ impl EventStore for SimEventStore {
         // ADR-0153: validate declared-key uniqueness BEFORE writing the journal, so
         // a reject is atomic — the journal must not advance on a rejected co-commit.
         // A *different* entity already holding the key is the violation.
-        if !key_rows.is_empty() {
-            let mut parts = persistence_id.splitn(3, ':');
-            let tenant = parts.next().unwrap_or("");
-            let entity_type = parts.next().unwrap_or("");
-            let entity_id = parts.next().unwrap_or("");
+        if !ends_in_deletion && !key_rows.is_empty() {
             for row in key_rows {
                 if let Some(existing) = inner.key_index.get(&(
                     tenant.to_string(),
@@ -477,80 +454,47 @@ impl EventStore for SimEventStore {
         let mut new_seq = expected_sequence;
         let mut stored_events = Vec::with_capacity(events.len());
         for event in events {
-            new_seq += 1;
+            new_seq = new_seq.checked_add(1).ok_or_else(|| {
+                PersistenceError::Storage(format!(
+                    "event sequence exhausted while appending {persistence_id}"
+                ))
+            })?;
             // Store with correct sequence number (ignore the one in the envelope,
             // use monotonic counter like the real stores do).
             let mut stored = event.clone();
             stored.sequence_nr = new_seq;
             stored_events.push(stored);
         }
+        record_segment_append(
+            &mut inner.event_segments,
+            &canonical_id,
+            expected_sequence,
+            new_seq,
+        )?;
         inner
             .journals
-            .entry(persistence_id.to_string())
+            .entry(canonical_id)
             .or_default()
             .extend(stored_events);
 
-        let segments = inner
-            .event_segments
-            .entry(persistence_id.to_string())
-            .or_insert_with(|| {
-                vec![SimEventSegment {
-                    segment_index: 0,
-                    start_sequence_nr: (expected_sequence + 1).max(1),
-                    end_sequence_nr: None,
-                    snapshot_sequence: None,
-                    event_count: 0,
-                    sealed: false,
-                }]
+        if contains_deletion || replaces_keys {
+            // Raw appends preserve existing claims; only an explicit complete
+            // replacement or a tombstone may retire them.
+            inner.key_index.retain(|(t, et, _, _), eid| {
+                !(t.as_str() == tenant && et.as_str() == entity_type && eid.as_str() == entity_id)
             });
-        if segments.last().map(|s| s.sealed).unwrap_or(true) {
-            let next_index = segments.last().map(|s| s.segment_index + 1).unwrap_or(0);
-            segments.push(SimEventSegment {
-                segment_index: next_index,
-                start_sequence_nr: (expected_sequence + 1).max(1),
-                end_sequence_nr: None,
-                snapshot_sequence: None,
-                event_count: 0,
-                sealed: false,
-            });
-        }
-        if new_seq > expected_sequence {
-            let active_segment = segments
-                .last_mut()
-                .expect("segments must contain an active segment");
-            active_segment.end_sequence_nr = Some(new_seq);
-            active_segment.event_count = new_seq
-                .saturating_sub(active_segment.start_sequence_nr)
-                .saturating_add(1);
-        }
-
-        // ADR-0153: co-commit the declared key-index rows under the SAME lock as
-        // the journal write above (uniqueness was validated before the journal, so
-        // this only mutates — never fails). A keyed read is therefore consistent
-        // with the journal: the negative-existence access path.
-        if !key_rows.is_empty() {
-            let mut parts = persistence_id.splitn(3, ':');
-            let tenant = parts.next().unwrap_or("");
-            let entity_type = parts.next().unwrap_or("");
-            let entity_id = parts.next().unwrap_or("");
-            for row in key_rows {
-                // Drop the entity's prior row for this key_name (the value may have
-                // changed), then claim the new (key_name, key_hash) -> entity_id.
-                inner.key_index.retain(|(t, et, kn, _), eid| {
-                    !(t.as_str() == tenant
-                        && et.as_str() == entity_type
-                        && kn.as_str() == row.key_name.as_str()
-                        && eid.as_str() == entity_id)
-                });
-                inner.key_index.insert(
-                    (
-                        tenant.to_string(),
-                        entity_type.to_string(),
-                        row.key_name.clone(),
-                        row.key_hash.clone(),
-                    ),
-                    entity_id.to_string(),
-                );
+            if !ends_in_deletion {
+                for row in key_rows {
+                    inner.key_index.insert(
+                        (
+                            tenant.to_string(),
+                            entity_type.to_string(),
+                            row.key_name.clone(),
+                            row.key_hash.clone(),
+                        ),
+                        entity_id.to_string(),
+                    );
+                }
             }
         }
 
@@ -584,6 +528,56 @@ impl EventStore for SimEventStore {
 
         Ok(new_seq)
     }
+}
+
+impl EventStore for SimEventStore {
+    async fn append(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+    ) -> Result<u64, PersistenceError> {
+        self.append_with_optional_keys(persistence_id, expected_sequence, events, None)
+            .await
+    }
+
+    async fn append_with_index_rows(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+        vector_rows: &[EntityVectorRow],
+        reconcile_vectors: bool,
+    ) -> Result<u64, PersistenceError> {
+        self.append_with_indexes(
+            persistence_id,
+            expected_sequence,
+            events,
+            Some(key_rows),
+            vector_rows,
+            reconcile_vectors,
+        )
+        .await
+    }
+
+    async fn append_with_optional_keys(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: Option<&[temper_runtime::persistence::EntityKeyRow]>,
+    ) -> Result<u64, PersistenceError> {
+        self.append_with_indexes(
+            persistence_id,
+            expected_sequence,
+            events,
+            key_rows,
+            &[],
+            false,
+        )
+        .await
+    }
 
     async fn backfill_entity_keys(
         &self,
@@ -600,20 +594,30 @@ impl EventStore for SimEventStore {
                 row.key_name.clone(),
                 row.key_hash.clone(),
             );
-            match inner.key_index.get(&slot) {
-                // A different entity holds it — pre-existing conflict; skip (don't
-                // clobber, don't fail the backfill).
-                Some(existing) if existing.as_str() != entity_id => continue,
-                _ => {
-                    inner.key_index.retain(|(t, et, kn, _), eid| {
-                        !(t.as_str() == tenant
-                            && et.as_str() == entity_type
-                            && kn.as_str() == row.key_name.as_str()
-                            && eid.as_str() == entity_id)
-                    });
-                    inner.key_index.insert(slot, entity_id.to_string());
-                }
+            if let Some(existing) = inner.key_index.get(&slot)
+                && existing.as_str() != entity_id
+            {
+                return Err(PersistenceError::Storage(format!(
+                    "declared-key conflict for '{}': {entity_type}('{entity_id}') conflicts with '{existing}'",
+                    row.key_name
+                )));
             }
+        }
+        inner.key_index.retain(|(t, et, _, _), existing_id| {
+            !(t.as_str() == tenant
+                && et.as_str() == entity_type
+                && existing_id.as_str() == entity_id)
+        });
+        for row in key_rows {
+            inner.key_index.insert(
+                (
+                    tenant.to_string(),
+                    entity_type.to_string(),
+                    row.key_name.clone(),
+                    row.key_hash.clone(),
+                ),
+                entity_id.to_string(),
+            );
         }
         Ok(())
     }
@@ -784,37 +788,71 @@ impl EventStore for SimEventStore {
         &self,
         appends: &[PersistenceAppend],
     ) -> Result<Vec<PersistenceAppendResult>, PersistenceError> {
+        EventStore::append_batch_guarded(self, appends, &[]).await
+    }
+
+    async fn append_batch_guarded(
+        &self,
+        appends: &[PersistenceAppend],
+        guards: &[PersistenceSequenceGuard],
+    ) -> Result<Vec<PersistenceAppendResult>, PersistenceError> {
+        validate_guarded_persistence_append_batch(appends, guards)?;
         if appends.is_empty() {
             return Ok(Vec::new());
         }
 
+        let canonical_ids = appends
+            .iter()
+            .map(|append| canonical_persistence_id(&append.persistence_id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let canonical_guards = guards
+            .iter()
+            .map(|guard| canonical_persistence_id(&guard.persistence_id))
+            .collect::<Result<Vec<_>, _>>()?;
+        if appends.iter().all(|append| append.events.is_empty()) {
+            return Ok(appends
+                .iter()
+                .map(|append| PersistenceAppendResult {
+                    persistence_id: append.persistence_id.clone(),
+                    sequence_nr: append.expected_sequence,
+                })
+                .collect());
+        }
+
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
 
-        let mut seen = std::collections::BTreeSet::new();
-        for append in appends {
-            if !seen.insert(append.persistence_id.as_str()) {
-                return Err(PersistenceError::Storage(format!(
-                    "SimEventStore: duplicate persistence_id '{}' in append_batch",
-                    append.persistence_id
-                )));
+        for (guard, canonical_id) in guards.iter().zip(&canonical_guards) {
+            let actual = inner
+                .journals
+                .get(canonical_id)
+                .and_then(|journal| journal.last())
+                .map(|event| event.sequence_nr)
+                .unwrap_or(0);
+            if actual != guard.expected_sequence {
+                return Err(PersistenceError::PreconditionFailed {
+                    persistence_id: guard.persistence_id.clone(),
+                    expected: guard.expected_sequence,
+                    actual,
+                });
             }
         }
 
-        for append in appends {
+        for (append, canonical_id) in appends.iter().zip(&canonical_ids) {
+            if append.events.is_empty() {
+                continue;
+            }
             let pending_cv = inner
                 .pending_concurrency_violations
-                .get(&append.persistence_id)
+                .get(canonical_id)
                 .copied()
                 .unwrap_or(0);
             if pending_cv > 0 {
                 if pending_cv == 1 {
-                    inner
-                        .pending_concurrency_violations
-                        .remove(&append.persistence_id);
+                    inner.pending_concurrency_violations.remove(canonical_id);
                 } else {
                     inner
                         .pending_concurrency_violations
-                        .insert(append.persistence_id.clone(), pending_cv - 1);
+                        .insert(canonical_id.clone(), pending_cv - 1);
                 }
                 return Err(PersistenceError::ConcurrencyViolation {
                     expected: append.expected_sequence,
@@ -840,10 +878,13 @@ impl EventStore for SimEventStore {
             ));
         }
 
-        for append in appends {
+        for (append, canonical_id) in appends.iter().zip(&canonical_ids) {
+            if append.events.is_empty() {
+                continue;
+            }
             let current_seq = inner
                 .journals
-                .get(&append.persistence_id)
+                .get(canonical_id)
                 .and_then(|journal| journal.last())
                 .map(|event| event.sequence_nr)
                 .unwrap_or(0);
@@ -855,26 +896,130 @@ impl EventStore for SimEventStore {
             }
         }
 
-        let mut results = Vec::with_capacity(appends.len());
-        for append in appends {
-            let journal = inner
-                .journals
-                .entry(append.persistence_id.clone())
-                .or_default();
-            let mut new_seq = append.expected_sequence;
-            for event in &append.events {
-                new_seq += 1;
-                let mut stored = event.clone();
-                stored.sequence_nr = new_seq;
-                journal.push(stored);
-            }
-            results.push(PersistenceAppendResult {
-                persistence_id: append.persistence_id.clone(),
-                sequence_nr: new_seq,
+        // Build the complete post-batch key map before mutating journals. This
+        // validates uniqueness across both existing holders and other streams
+        // in the same atomic batch. A raw append (`key_rows == None`) preserves
+        // claims it cannot recompute; an explicit replacement or tombstone
+        // retires the prior set.
+        let mut next_key_index = inner.key_index.clone();
+        for append in appends.iter().filter(|append| {
+            !append.events.is_empty()
+                && (append.key_rows.is_some() || contains_deletion_tombstone(&append.events))
+        }) {
+            let (tenant, entity_type, entity_id) =
+                parse_persistence_id_parts(&append.persistence_id)
+                    .map_err(PersistenceError::Storage)?;
+            next_key_index.retain(|(t, et, _, _), existing_id| {
+                !(t.as_str() == tenant
+                    && et.as_str() == entity_type
+                    && existing_id.as_str() == entity_id)
             });
         }
+        for append in appends.iter().filter(|append| {
+            !append.events.is_empty() && !ends_in_deletion_tombstone(&append.events)
+        }) {
+            let (tenant, entity_type, entity_id) =
+                parse_persistence_id_parts(&append.persistence_id)
+                    .map_err(PersistenceError::Storage)?;
+            for row in append.key_rows.as_deref().unwrap_or_default() {
+                let key = (
+                    tenant.to_string(),
+                    entity_type.to_string(),
+                    row.key_name.clone(),
+                    row.key_hash.clone(),
+                );
+                if let Some(existing) = next_key_index.get(&key)
+                    && existing.as_str() != entity_id
+                {
+                    return Err(PersistenceError::Storage(format!(
+                        "duplicate declared key '{}' for {entity_type}: held by {existing}",
+                        row.key_name
+                    )));
+                }
+                next_key_index.insert(key, entity_id.to_string());
+            }
+        }
 
-        Ok(results)
+        // Build the complete post-batch vector map before mutating journals.
+        // Normal appends co-commit vector rows under the same store lock; the
+        // guarded/batch path must do the same so storage backends do not
+        // diverge when a commit-time lifecycle guard is present.
+        let mut next_vector_index = inner.vector_index.clone();
+        for append in appends
+            .iter()
+            .filter(|append| !append.events.is_empty() && append.reconcile_vectors)
+        {
+            let (tenant, entity_type, entity_id) =
+                parse_persistence_id_parts(&append.persistence_id)
+                    .map_err(PersistenceError::Storage)?;
+            next_vector_index.retain(|(t, et, _, _, eid), _| {
+                !(t.as_str() == tenant && et.as_str() == entity_type && eid.as_str() == entity_id)
+            });
+            for row in &append.vector_rows {
+                next_vector_index.insert(
+                    (
+                        tenant.to_string(),
+                        entity_type.to_string(),
+                        row.decl_name.clone(),
+                        row.model_tag.clone(),
+                        entity_id.to_string(),
+                    ),
+                    row.vector.clone(),
+                );
+            }
+        }
+
+        let mut next_segments = inner.event_segments.clone();
+        let mut prepared_events = BTreeMap::new();
+        let mut planned_sequences = BTreeMap::new();
+        for (append, canonical_id) in appends.iter().zip(&canonical_ids) {
+            if append.events.is_empty() {
+                planned_sequences.insert(canonical_id.clone(), append.expected_sequence);
+                continue;
+            }
+            let mut new_seq = append.expected_sequence;
+            let mut stored_events = Vec::with_capacity(append.events.len());
+            for event in &append.events {
+                new_seq = new_seq.checked_add(1).ok_or_else(|| {
+                    PersistenceError::Storage(format!(
+                        "event sequence exhausted while appending {}",
+                        append.persistence_id
+                    ))
+                })?;
+                let mut stored = event.clone();
+                stored.sequence_nr = new_seq;
+                stored_events.push(stored);
+            }
+            record_segment_append(
+                &mut next_segments,
+                canonical_id,
+                append.expected_sequence,
+                new_seq,
+            )?;
+            prepared_events.insert(canonical_id.clone(), stored_events);
+            planned_sequences.insert(canonical_id.clone(), new_seq);
+        }
+
+        for (persistence_id, events) in prepared_events {
+            inner
+                .journals
+                .entry(persistence_id)
+                .or_default()
+                .extend(events);
+        }
+
+        inner.event_segments = next_segments;
+        inner.key_index = next_key_index;
+        inner.vector_index = next_vector_index;
+
+        Ok(appends
+            .iter()
+            .zip(canonical_ids)
+            .map(|(append, canonical_id)| PersistenceAppendResult {
+                persistence_id: append.persistence_id.clone(),
+                sequence_nr: planned_sequences[&canonical_id],
+            })
+            .collect())
     }
 
     async fn read_events(
@@ -882,39 +1027,52 @@ impl EventStore for SimEventStore {
         persistence_id: &str,
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        self.read_events_with_limit(persistence_id, from_sequence, usize::MAX)
+    }
+
+    async fn read_events_bounded(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        self.read_events_with_limit(persistence_id, from_sequence, limit)
+    }
+
+    async fn read_latest_events(
+        &self,
+        persistence_ids: &[String],
+    ) -> Result<Vec<Option<PersistenceEnvelope>>, PersistenceError> {
+        validate_latest_event_batch(persistence_ids)?;
+        let canonical_ids = persistence_ids
+            .iter()
+            .map(|persistence_id| canonical_persistence_id(persistence_id))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
 
-        // Deterministic injected read failure (see `fail_next_reads`).
-        if let Some(remaining) = inner.pending_read_failures.get_mut(persistence_id) {
-            *remaining -= 1;
-            let cleared = *remaining == 0;
-            if cleared {
-                inner.pending_read_failures.remove(persistence_id);
+        for (persistence_id, canonical_id) in persistence_ids.iter().zip(&canonical_ids) {
+            if let Some(remaining) = inner.pending_read_failures.get_mut(canonical_id) {
+                *remaining -= 1;
+                let cleared = *remaining == 0;
+                if cleared {
+                    inner.pending_read_failures.remove(canonical_id);
+                }
+                return Err(PersistenceError::Storage(format!(
+                    "injected latest-event read failure for {persistence_id}"
+                )));
             }
-            return Err(PersistenceError::Storage(format!(
-                "injected read failure for {persistence_id}"
-            )));
         }
 
-        let journal = match inner.journals.get(persistence_id) {
-            Some(j) => j,
-            None => return Ok(Vec::new()),
-        };
-
-        let mut events: Vec<PersistenceEnvelope> = journal
+        Ok(canonical_ids
             .iter()
-            .filter(|e| e.sequence_nr > from_sequence)
-            .cloned()
-            .collect();
-
-        // Fault injection: truncate the returned events.
-        let rt_prob = inner.faults.read_truncation_prob;
-        if !events.is_empty() && inner.rng.chance(rt_prob) {
-            let truncate_at = (inner.rng.next_u64() as usize) % events.len();
-            events.truncate(truncate_at.max(1));
-        }
-
-        Ok(events)
+            .map(|canonical_id| {
+                inner
+                    .journals
+                    .get(canonical_id)
+                    .and_then(|journal| journal.last())
+                    .cloned()
+            })
+            .collect())
     }
 
     async fn save_snapshot(
@@ -923,6 +1081,7 @@ impl EventStore for SimEventStore {
         sequence_nr: u64,
         snapshot: &[u8],
     ) -> Result<(), PersistenceError> {
+        let persistence_id = canonical_persistence_id(persistence_id)?;
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
 
         // Fault injection: snapshot save failure.
@@ -933,56 +1092,35 @@ impl EventStore for SimEventStore {
             ));
         }
 
-        inner
+        let journal_tail = inner
+            .journals
+            .get(&persistence_id)
+            .and_then(|journal| journal.last())
+            .map_or(0, |event| event.sequence_nr);
+        let next_segments = rotate_for_snapshot(
+            &inner.event_segments,
+            &persistence_id,
+            journal_tail,
+            sequence_nr,
+        )?;
+
+        if inner
             .snapshots
-            .insert(persistence_id.to_string(), (sequence_nr, snapshot.to_vec()));
+            .get(&persistence_id)
+            .is_none_or(|(current_sequence, _)| sequence_nr >= *current_sequence)
+        {
+            inner
+                .snapshots
+                .insert(persistence_id.clone(), (sequence_nr, snapshot.to_vec()));
+        }
         inner
             .snapshot_history
-            .entry(persistence_id.to_string())
+            .entry(persistence_id.clone())
             .or_default()
             .insert(sequence_nr, snapshot.to_vec());
-        let segments = inner
-            .event_segments
-            .entry(persistence_id.to_string())
-            .or_insert_with(|| {
-                vec![SimEventSegment {
-                    segment_index: 0,
-                    start_sequence_nr: 1,
-                    end_sequence_nr: Some(sequence_nr),
-                    snapshot_sequence: None,
-                    event_count: sequence_nr,
-                    sealed: false,
-                }]
-            });
-        if segments.last().map(|s| s.sealed).unwrap_or(true) {
-            let idx = segments.last().map(|s| s.segment_index + 1).unwrap_or(0);
-            segments.push(SimEventSegment {
-                segment_index: idx,
-                start_sequence_nr: 1,
-                end_sequence_nr: Some(sequence_nr),
-                snapshot_sequence: None,
-                event_count: sequence_nr,
-                sealed: false,
-            });
+        if let Some(segments) = next_segments {
+            inner.event_segments.insert(persistence_id, segments);
         }
-        let active = segments
-            .last_mut()
-            .expect("segments must contain an active segment");
-        active.end_sequence_nr = Some(sequence_nr);
-        active.snapshot_sequence = Some(sequence_nr);
-        active.event_count = sequence_nr
-            .saturating_sub(active.start_sequence_nr)
-            .saturating_add(1);
-        active.sealed = true;
-        let next_index = active.segment_index + 1;
-        segments.push(SimEventSegment {
-            segment_index: next_index,
-            start_sequence_nr: sequence_nr + 1,
-            end_sequence_nr: None,
-            snapshot_sequence: None,
-            event_count: 0,
-            sealed: false,
-        });
         Ok(())
     }
 
@@ -990,8 +1128,9 @@ impl EventStore for SimEventStore {
         &self,
         persistence_id: &str,
     ) -> Result<Option<(u64, Vec<u8>)>, PersistenceError> {
+        let persistence_id = canonical_persistence_id(persistence_id)?;
         let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
-        Ok(inner.snapshots.get(persistence_id).cloned())
+        Ok(inner.snapshots.get(&persistence_id).cloned())
     }
 
     async fn list_entity_ids(
@@ -1039,5 +1178,9 @@ impl EventStore for SimEventStore {
     }
 }
 
+#[cfg(test)]
+mod key_test;
+#[cfg(test)]
+mod snapshot_test;
 #[cfg(test)]
 mod tests;

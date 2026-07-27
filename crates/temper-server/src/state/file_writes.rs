@@ -44,10 +44,9 @@ impl ServerState {
     /// byte write so a non-`Active` workspace is refused atomically, with no
     /// side effects.
     ///
-    /// Vacuous when there is no `workspace_id` or the referenced Workspace
-    /// cannot be resolved (e.g. standalone-File deployments / tests with no
-    /// Workspace entity): there is no container whose freeze we can honour, so
-    /// the write proceeds — matching the spec guard's empty-id semantics.
+    /// Vacuous when there is no `workspace_id` or no Workspace stream exists
+    /// (e.g. standalone-File deployments). Storage uncertainty fails closed;
+    /// it is not equivalent to an absent optional container.
     pub(crate) async fn reject_write_if_workspace_not_active(
         &self,
         tenant: &temper_runtime::tenant::TenantId,
@@ -60,14 +59,16 @@ impl ServerState {
             .resolve_entity_status(tenant, "Workspace", workspace_id)
             .await
         {
-            Some(status) if status != "Active" => {
+            Ok(Some(status)) if status != "Active" => {
                 Err(FileStreamContentError::ActionRejected(format!(
                     "workspace '{workspace_id}' is '{status}', not 'Active'; \
                      it does not accept new file content"
                 )))
             }
-            // Active, or unresolvable (no Workspace entity) → allow.
-            _ => Ok(()),
+            Ok(Some(_)) | Ok(None) => Ok(()),
+            Err(error) => Err(FileStreamContentError::State(format!(
+                "failed to verify workspace '{workspace_id}' before file write: {error}"
+            ))),
         }
     }
 

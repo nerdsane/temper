@@ -308,6 +308,22 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn read_events_bounded(
+            &self,
+            _persistence_id: &str,
+            _from_sequence: u64,
+            _limit: usize,
+        ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+            Ok(Vec::new())
+        }
+
+        async fn read_latest_events(
+            &self,
+            persistence_ids: &[String],
+        ) -> Result<Vec<Option<PersistenceEnvelope>>, PersistenceError> {
+            Ok(vec![None; persistence_ids.len()])
+        }
+
         async fn save_snapshot(
             &self,
             _persistence_id: &str,

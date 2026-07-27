@@ -187,7 +187,12 @@ impl crate::state::ServerState {
                 );
                 let result = if status == "Deleted" {
                     query_plane
-                        .remove_projection(&tenant, &entity_type, &entity_id)
+                        .remove_projection_through_sequence(
+                            &tenant,
+                            &entity_type,
+                            &entity_id,
+                            sequence_nr,
+                        )
                         .await
                 } else {
                     query_plane

@@ -27,4 +27,4 @@ pub use scheduler::{Scheduler, SchedulerConfig};
 pub use spec_actor::{
     SpecActorState, SpecDrivenActor, SpecMessage, build_actor_routing, build_routing_maps,
 };
-pub use system::ActorSystem;
+pub use system::{ActorSpawnOutcome, ActorSystem};

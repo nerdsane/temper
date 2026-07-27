@@ -18,7 +18,7 @@ use crate::authz::{DenialInput, record_authz_denial, security_context_from_heade
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::identity::ResolvedIdentity;
 use crate::request_context::AgentContext;
-use crate::response::{ODataResponse, odata_error};
+use crate::response::{ODataResponse, odata_error, service_unavailable_response};
 use crate::state::{BoundActionHookContext, DispatchError, DispatchExtOptions, ServerState};
 
 fn idempotency_actor_key(tenant: &TenantId, entity_type: &str, entity_id: &str) -> String {
@@ -136,16 +136,16 @@ pub(super) async fn dispatch_bound_action(
     {
         Ok(v) => v,
         Err(e) => {
-            http_span.set_status(Status::error(e.clone()));
-            http_span.set_attribute(OtelKeyValue::new("http.status_code", 500i64));
+            http_span.set_status(Status::error("ResourceStateUnavailable"));
+            http_span.set_attribute(OtelKeyValue::new("http.status_code", 503i64));
             let end_time: std::time::SystemTime = sim_now().into();
             http_span.end_with_timestamp(end_time);
-            let code = if e.contains("registry lock poisoned") {
-                "RegistryError"
-            } else {
-                "ReadError"
-            };
-            return odata_error(StatusCode::INTERNAL_SERVER_ERROR, code, &e).into_response();
+            return service_unavailable_response(
+                "ResourceStateUnavailable",
+                "Entity state is temporarily unavailable",
+                "bound_action_authorization_snapshot",
+                e,
+            );
         }
     };
     let current_state = authz_snapshot.current_state;
@@ -415,8 +415,13 @@ pub(super) async fn dispatch_bound_action(
         Err(e) => {
             let reason = e.to_string();
             http_span.set_status(Status::error(reason.clone()));
-            http_span.set_attribute(OtelKeyValue::new("http.status_code", 500i64));
-            odata_error(StatusCode::INTERNAL_SERVER_ERROR, "DispatchError", &reason).into_response()
+            http_span.set_attribute(OtelKeyValue::new("http.status_code", 503i64));
+            service_unavailable_response(
+                "DispatchUnavailable",
+                "Action processing is temporarily unavailable",
+                "bound_action_dispatch",
+                reason,
+            )
         }
     };
 

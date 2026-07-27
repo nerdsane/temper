@@ -36,10 +36,8 @@ impl TursoEventStore {
     /// an immediate transaction concurrently turns ordinary write pressure into
     /// a lock/timeout storm. This gate makes the queue explicit in-process, so
     /// timeout budgets apply to the actual database operation instead of many
-    /// requests racing for the same remote writer. Atomic foreground writes can
-    /// deliberately bypass this lane; they still mark themselves as high
-    /// priority so new low-priority writes yield while the foreground write is
-    /// in flight.
+    /// requests racing for the same remote writer. High-priority foreground
+    /// writes enter the same bounded lane ahead of low-priority maintenance.
     pub(super) async fn acquire_write_permit(
         &self,
         operation: &'static str,
@@ -89,18 +87,6 @@ impl TursoEventStore {
         }
 
         Ok(permit)
-    }
-
-    pub(super) fn mark_high_priority_write(
-        &self,
-        operation: &'static str,
-    ) -> HighPriorityWriteMarker<'_> {
-        tracing::debug!(
-            operation,
-            priority = WritePriority::High.as_str(),
-            "turso.write_gate bypassed for atomic high-priority write"
-        );
-        HighPriorityWriteMarker::new(self)
     }
 
     async fn wait_for_high_priority_writers(

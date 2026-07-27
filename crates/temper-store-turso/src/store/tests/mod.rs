@@ -1,9 +1,11 @@
 //! Integration tests for the Turso event store.
 
+mod latest_events;
+
 use libsql::params;
 use temper_runtime::persistence::{
     EntityVectorRow, EventMetadata, EventStore, PersistenceAppend, PersistenceEnvelope,
-    PersistenceError,
+    PersistenceError, PersistenceSequenceGuard,
 };
 
 use super::{PublishedArtifactUpsert, QueryProjectionUpsert, TursoEventStore};
@@ -64,6 +66,138 @@ async fn append_and_read_events_roundtrip() {
     assert_eq!(events[1].sequence_nr, 2);
     assert_eq!(events[0].event_type, "OrderCreated");
     assert_eq!(events[1].event_type, "OrderApproved");
+
+    let bounded = store
+        .read_events_bounded(persistence_id, 0, 1)
+        .await
+        .unwrap();
+    assert_eq!(bounded.len(), 1);
+    assert_eq!(bounded[0].sequence_nr, 1);
+    assert!(
+        store
+            .read_events_bounded(persistence_id, 0, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn segment_update_failure_rolls_back_single_event_append() {
+    let store = make_store("append-segment-atomic").await;
+    let persistence_id = "tenant-a:Order:ord-segment-atomic";
+    store
+        .append(
+            persistence_id,
+            0,
+            &[test_envelope("Created", serde_json::json!({}))],
+        )
+        .await
+        .unwrap();
+    let conn = store.configured_connection().await.unwrap();
+    conn.execute(
+        "CREATE TRIGGER fail_segment_update
+         BEFORE UPDATE ON event_segments
+         BEGIN
+           SELECT RAISE(ABORT, 'injected segment update failure');
+         END",
+        (),
+    )
+    .await
+    .unwrap();
+
+    let error = store
+        .append(
+            persistence_id,
+            1,
+            &[test_envelope("Updated", serde_json::json!({}))],
+        )
+        .await
+        .expect_err("segment failure must fail the complete transaction");
+    assert!(
+        error
+            .to_string()
+            .contains("injected segment update failure")
+    );
+    assert_eq!(
+        store.read_events(persistence_id, 0).await.unwrap().len(),
+        1,
+        "journal row must roll back with its segment metadata"
+    );
+
+    conn.execute("DROP TRIGGER fail_segment_update", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .append(
+                persistence_id,
+                1,
+                &[test_envelope("Updated", serde_json::json!({}))],
+            )
+            .await
+            .unwrap(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn segment_update_failure_rolls_back_every_batch_stream() {
+    let store = make_store("append-batch-segment-atomic").await;
+    let first = "tenant-a:Order:ord-batch-segment-a";
+    let second = "tenant-a:Order:ord-batch-segment-b";
+    for persistence_id in [first, second] {
+        store
+            .append(
+                persistence_id,
+                0,
+                &[test_envelope("Created", serde_json::json!({}))],
+            )
+            .await
+            .unwrap();
+    }
+    let conn = store.configured_connection().await.unwrap();
+    conn.execute(
+        "CREATE TRIGGER fail_batch_segment_update
+         BEFORE UPDATE ON event_segments
+         BEGIN
+           SELECT RAISE(ABORT, 'injected batch segment update failure');
+         END",
+        (),
+    )
+    .await
+    .unwrap();
+    let appends = [first, second].map(|persistence_id| PersistenceAppend {
+        persistence_id: persistence_id.to_string(),
+        expected_sequence: 1,
+        events: vec![test_envelope("Updated", serde_json::json!({}))],
+        key_rows: None,
+        vector_rows: Vec::new(),
+        reconcile_vectors: false,
+    });
+
+    let error = store
+        .append_batch(&appends)
+        .await
+        .expect_err("segment failure must roll back the complete batch");
+    assert!(
+        error
+            .to_string()
+            .contains("injected batch segment update failure")
+    );
+    for persistence_id in [first, second] {
+        assert_eq!(
+            store.read_events(persistence_id, 0).await.unwrap().len(),
+            1,
+            "no batch journal may advance when segment metadata fails"
+        );
+    }
+
+    conn.execute("DROP TRIGGER fail_batch_segment_update", ())
+        .await
+        .unwrap();
+    let results = store.append_batch(&appends).await.unwrap();
+    assert!(results.iter().all(|result| result.sequence_nr == 2));
 }
 
 #[tokio::test]
@@ -282,6 +416,9 @@ async fn append_batch_zero_sequence_detects_existing_stream_by_unique_key() {
                 "OrderUpdated",
                 serde_json::json!({ "step": 2 }),
             )],
+            key_rows: None,
+            vector_rows: Vec::new(),
+            reconcile_vectors: false,
         }])
         .await
         .unwrap_err();
@@ -300,8 +437,118 @@ async fn append_batch_zero_sequence_detects_existing_stream_by_unique_key() {
 }
 
 #[tokio::test]
-async fn single_event_append_bypasses_process_write_gate() {
-    let mut store = make_store("single-append-bypasses-gate").await;
+async fn guarded_append_rejects_stale_context_without_writing_target() {
+    let store = make_store("guarded-append-context").await;
+    let context_id = "tenant-a:Owner:owner-guard";
+    let target_id = "tenant-a:Document:document-guard";
+    store
+        .append(
+            context_id,
+            0,
+            &[test_envelope("Created", serde_json::json!({}))],
+        )
+        .await
+        .unwrap();
+    let error = store
+        .append_batch_guarded(
+            &[PersistenceAppend {
+                persistence_id: target_id.to_string(),
+                expected_sequence: 0,
+                events: vec![test_envelope("FieldsPatched", serde_json::json!({}))],
+                key_rows: None,
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
+            }],
+            &[PersistenceSequenceGuard {
+                persistence_id: context_id.to_string(),
+                expected_sequence: 0,
+            }],
+        )
+        .await
+        .expect_err("stale guard must abort target append");
+    assert!(matches!(error, PersistenceError::PreconditionFailed { .. }));
+    assert!(store.read_events(target_id, 0).await.unwrap().is_empty());
+    let result = store
+        .append_batch_guarded(
+            &[PersistenceAppend {
+                persistence_id: target_id.to_string(),
+                expected_sequence: 0,
+                events: vec![test_envelope("FieldsPatched", serde_json::json!({}))],
+                key_rows: None,
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
+            }],
+            &[PersistenceSequenceGuard {
+                persistence_id: context_id.to_string(),
+                expected_sequence: 1,
+            }],
+        )
+        .await
+        .expect("current guard should commit target atomically");
+    assert_eq!(result[0].sequence_nr, 1);
+    assert_eq!(store.read_events(target_id, 0).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn append_batch_empty_member_is_not_discoverable() {
+    let store = make_store("append-batch-empty-member").await;
+    let persistence_id = "tenant-a:Order:ord-empty-batch";
+    let result = store
+        .append_batch(&[PersistenceAppend {
+            persistence_id: persistence_id.to_string(),
+            expected_sequence: 7,
+            events: vec![],
+            key_rows: None,
+            vector_rows: Vec::new(),
+            reconcile_vectors: false,
+        }])
+        .await
+        .unwrap();
+
+    assert_eq!(result[0].sequence_nr, 7);
+    assert!(
+        store
+            .read_events(persistence_id, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(store.list_entity_ids("tenant-a").await.unwrap().is_empty());
+
+    let all_empty = store
+        .append_batch(&[
+            PersistenceAppend {
+                persistence_id: "tenant-a:Order:empty-a".to_string(),
+                expected_sequence: 3,
+                events: vec![],
+                key_rows: None,
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
+            },
+            PersistenceAppend {
+                persistence_id: "tenant-a:Order:empty-b".to_string(),
+                expected_sequence: 9,
+                events: vec![],
+                key_rows: None,
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
+            },
+        ])
+        .await
+        .unwrap();
+    assert_eq!(
+        all_empty
+            .into_iter()
+            .map(|result| result.sequence_nr)
+            .collect::<Vec<_>>(),
+        vec![3, 9]
+    );
+    assert!(store.list_entity_ids("tenant-a").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn single_event_append_is_serialized_by_process_write_gate() {
+    let mut store = make_store("single-append-uses-gate").await;
     store.write_gate = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
     let held_gate = store
         .write_gate
@@ -310,22 +557,30 @@ async fn single_event_append_bypasses_process_write_gate() {
         .await
         .expect("hold gate");
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        store.append(
-            "tenant-a:Order:ord-bypass",
-            0,
-            &[test_envelope(
-                "OrderCreated",
-                serde_json::json!({ "id": "ord-bypass" }),
-            )],
-        ),
-    )
-    .await;
+    let mut append = tokio::spawn(async move {
+        store
+            .append(
+                "tenant-a:Order:ord-serialized",
+                0,
+                &[test_envelope(
+                    "OrderCreated",
+                    serde_json::json!({ "id": "ord-serialized" }),
+                )],
+            )
+            .await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut append)
+            .await
+            .is_err(),
+        "single-event append must wait behind the shared transactional write gate"
+    );
     drop(held_gate);
 
-    let new_seq = result
-        .expect("single-event append should not wait for the process write gate")
+    let new_seq = tokio::time::timeout(std::time::Duration::from_secs(2), append)
+        .await
+        .expect("append should resume after the gate is released")
+        .expect("append task should not panic")
         .expect("append should succeed");
     assert_eq!(new_seq, 1);
 }
@@ -350,6 +605,122 @@ async fn snapshot_save_and_load_roundtrip() {
 
     let updated = store.load_snapshot(persistence_id).await.unwrap();
     assert_eq!(updated, Some((8, b"{\"status\":\"shipped\"}".to_vec())));
+
+    let conn = store.configured_connection().await.unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM event_segments
+             WHERE tenant = 'tenant-a' AND entity_type = 'Order' AND entity_id = 'ord-3'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        0,
+        "snapshot-only streams must not invent event-segment history"
+    );
+}
+
+#[tokio::test]
+async fn delayed_snapshot_does_not_regress_snapshot_or_segment_metadata() {
+    let store = make_store("snapshot-segment-order").await;
+    let persistence_id = "tenant-a:Order:ord-snapshot-order";
+    store
+        .append(
+            persistence_id,
+            0,
+            &[
+                test_envelope("Created", serde_json::json!({})),
+                test_envelope("Updated", serde_json::json!({})),
+            ],
+        )
+        .await
+        .unwrap();
+    store
+        .save_snapshot(persistence_id, 2, b"snapshot-2")
+        .await
+        .unwrap();
+    store
+        .append(
+            persistence_id,
+            2,
+            &[test_envelope("UpdatedAgain", serde_json::json!({}))],
+        )
+        .await
+        .unwrap();
+
+    // This delayed save is behind the journal tail. It may refresh snapshot
+    // bytes for sequence 2, but it must not seal the segment containing event 3.
+    store
+        .save_snapshot(persistence_id, 2, b"snapshot-2-delayed")
+        .await
+        .unwrap();
+    let conn = store.configured_connection().await.unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT end_sequence_nr, snapshot_sequence, event_count, sealed_at
+             FROM event_segments
+             WHERE tenant = 'tenant-a' AND entity_type = 'Order'
+               AND entity_id = 'ord-snapshot-order' AND segment_index = 1",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<Option<i64>>(0).unwrap(), Some(3));
+    assert_eq!(row.get::<Option<i64>>(1).unwrap(), None);
+    assert_eq!(row.get::<i64>(2).unwrap(), 1);
+    assert_eq!(row.get::<Option<String>>(3).unwrap(), None);
+    drop(rows);
+    drop(conn);
+
+    store
+        .save_snapshot(persistence_id, 3, b"snapshot-3")
+        .await
+        .unwrap();
+    store
+        .save_snapshot(persistence_id, 1, b"stale-snapshot-1")
+        .await
+        .unwrap();
+    assert_eq!(
+        store.load_snapshot(persistence_id).await.unwrap(),
+        Some((3, b"snapshot-3".to_vec())),
+        "an out-of-order snapshot writer must not regress the recovery boundary"
+    );
+
+    let conn = store.configured_connection().await.unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT segment_index, start_sequence_nr, end_sequence_nr,
+                    snapshot_sequence, event_count, sealed_at
+             FROM event_segments
+             WHERE tenant = 'tenant-a' AND entity_type = 'Order'
+               AND entity_id = 'ord-snapshot-order'
+             ORDER BY segment_index",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut segments = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        segments.push((
+            row.get::<i64>(0).unwrap(),
+            row.get::<i64>(1).unwrap(),
+            row.get::<Option<i64>>(2).unwrap(),
+            row.get::<Option<i64>>(3).unwrap(),
+            row.get::<i64>(4).unwrap(),
+            row.get::<Option<String>>(5).unwrap().is_some(),
+        ));
+    }
+    assert_eq!(
+        segments,
+        vec![
+            (0, 1, Some(2), Some(2), 2, true),
+            (1, 3, Some(3), Some(3), 1, true),
+            (2, 4, None, None, 0, false),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -434,7 +805,7 @@ async fn list_entity_ids_returns_distinct_pairs() {
 }
 
 #[tokio::test]
-async fn list_entity_ids_by_type_uses_entity_catalog() {
+async fn list_entity_ids_by_type_ignores_projection_without_journal() {
     let store = make_store("entity-list-by-type-catalog").await;
     let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
 
@@ -466,11 +837,11 @@ async fn list_entity_ids_by_type_uses_entity_catalog() {
         .await
         .expect("list AgentRoute IDs by type");
 
-    assert_eq!(ids, vec!["route-main".to_string()]);
+    assert!(ids.is_empty());
 }
 
 #[tokio::test]
-async fn list_entity_ids_by_type_unions_catalog_field_index_and_events() {
+async fn list_entity_ids_by_type_uses_only_authoritative_event_streams() {
     let store = make_store("entity-list-by-type-union").await;
     let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
 
@@ -538,16 +909,12 @@ async fn list_entity_ids_by_type_unions_catalog_field_index_and_events() {
 
     assert_eq!(
         ids,
-        vec![
-            "route-catalog".to_string(),
-            "route-event".to_string(),
-            "route-index".to_string(),
-        ]
+        vec!["route-deleted".to_string(), "route-event".to_string(),]
     );
 }
 
 #[tokio::test]
-async fn list_entity_ids_by_type_includes_events_and_excludes_deleted() {
+async fn list_entity_ids_by_type_returns_raw_streams_including_deleted() {
     let store = make_store("entity-list-by-type-events").await;
     let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
 
@@ -589,11 +956,21 @@ async fn list_entity_ids_by_type_includes_events_and_excludes_deleted() {
         .await
         .expect("list Order IDs by type from events");
 
-    assert_eq!(ids, vec!["ord-active".to_string()]);
+    assert_eq!(
+        ids,
+        vec!["ord-active".to_string(), "ord-deleted".to_string()]
+    );
 }
 
+/// ARN-192: whole-tenant `list_entity_ids` returns raw distinct pairs, including
+/// tombstoned entities. Deletion filtering moved out of this backend's SQL and into
+/// the server-layer cold path (`populate_index_from_store`), which applies the
+/// canonical `is_deletion_tombstone` predicate uniformly across every backend. This
+/// test documents the store contract; the deleted-absent-after-restart guarantee is
+/// covered end-to-end in `temper-server` (`deleted_entity_index_parity`,
+/// `ensure_entity_loaded`).
 #[tokio::test]
-async fn list_entity_ids_excludes_entities_with_deleted_tombstones() {
+async fn list_entity_ids_returns_raw_pairs_including_tombstones() {
     let store = make_store("entity-list-deleted").await;
     let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
 
@@ -643,7 +1020,10 @@ async fn list_entity_ids_excludes_entities_with_deleted_tombstones() {
 
     assert_eq!(
         entities,
-        vec![("Order".to_string(), "ord-active".to_string())]
+        vec![
+            ("Order".to_string(), "ord-active".to_string()),
+            ("Order".to_string(), "ord-deleted".to_string()),
+        ]
     );
 }
 
@@ -809,6 +1189,109 @@ async fn query_projection_roundtrip_updates_catalog_and_field_index() {
     assert!(
         counts.is_empty(),
         "entity catalog should be empty after removing the projection"
+    );
+}
+
+#[tokio::test]
+async fn unconditional_projection_removal_clears_orphan_field_rows() {
+    let store = make_store("query-projection-orphan-remove").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+    let entity_type = "Order";
+    let entity_id = "ord-orphan";
+    let connection = store.configured_connection().await.unwrap();
+    connection
+        .execute(
+            "INSERT INTO entity_field_index \
+             (tenant, entity_type, entity_id, field_name, field_value, status) \
+             VALUES (?1, ?2, ?3, 'Title', 'orphan', 'Draft')",
+            params![tenant.clone(), entity_type, entity_id],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .query_field_index(
+                &tenant,
+                entity_type,
+                "field_name = ?3 AND field_value = ?4",
+                vec!["Title".to_string(), "orphan".to_string()],
+            )
+            .await
+            .unwrap(),
+        vec![entity_id.to_string()]
+    );
+
+    store
+        .remove_query_projection(&tenant, entity_type, entity_id)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .query_field_index(
+                &tenant,
+                entity_type,
+                "field_name = ?3 AND field_value = ?4",
+                vec!["Title".to_string(), "orphan".to_string()],
+            )
+            .await
+            .unwrap()
+            .is_empty(),
+        "unconditional quarantine must remove a field row even when its catalog row is missing"
+    );
+}
+
+#[tokio::test]
+async fn delayed_projection_removal_preserves_newer_recreated_generation() {
+    let store = make_store("sequence-guarded-projection-remove").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+    let entity_type = "Order";
+    let entity_id = "ord-recreated";
+    store
+        .upsert_query_projection(
+            &tenant,
+            entity_type,
+            entity_id,
+            "Draft",
+            &serde_json::json!({"Title": "new generation"}),
+            3,
+        )
+        .await
+        .unwrap();
+
+    store
+        .remove_query_projection_through_sequence(&tenant, entity_type, entity_id, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .query_field_index(
+                &tenant,
+                entity_type,
+                "field_name = ?3 AND field_value = ?4",
+                vec!["Title".to_string(), "new generation".to_string()],
+            )
+            .await
+            .unwrap(),
+        vec![entity_id.to_string()],
+        "older delete cleanup must not erase a recreated projection"
+    );
+
+    store
+        .remove_query_projection_through_sequence(&tenant, entity_type, entity_id, 3)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .query_field_index(
+                &tenant,
+                entity_type,
+                "field_name = ?3 AND field_value = ?4",
+                vec!["Title".to_string(), "new generation".to_string()],
+            )
+            .await
+            .unwrap()
+            .is_empty()
     );
 }
 

@@ -633,7 +633,10 @@ fn field_index_backfill_bounds_non_keyed_path_lookup_on_postgres() {
         // The enumeration has NO declared-key branch (unlike the key-index backfill), so
         // it covers every registered type identically — keyed or not; this case exercises
         // a non-key FIELD (`Path`) on a keyed type, which is the field index's job.
-        state.populate_field_index_from_snapshots(&tenant).await;
+        state
+            .populate_field_index_from_snapshots(&tenant)
+            .await
+            .expect("backfill query projections");
 
         // (3) The same Path lookup now binds via the native page and finds /souls — proof
         // the backfill populated the field index for entities absent from the lazy index.

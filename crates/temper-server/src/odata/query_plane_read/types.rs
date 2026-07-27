@@ -226,6 +226,8 @@ pub(in crate::odata) enum QueryPlaneReadError {
     /// The `$skiptoken` continuation could not be decoded for this request —
     /// malformed, or its key count does not match the request's ordering.
     InvalidContinuation,
+    /// Durable candidate classification failed, so an empty result would be a lie.
+    StorageUnavailable,
 }
 
 impl QueryPlaneReadError {
@@ -234,6 +236,7 @@ impl QueryPlaneReadError {
             Self::AuthorizationDenied(_) => {}
             Self::QueryTooLarge { telemetry, .. } => telemetry.record(span),
             Self::InvalidContinuation => {}
+            Self::StorageUnavailable => {}
         }
     }
 
@@ -250,6 +253,12 @@ impl QueryPlaneReadError {
                 StatusCode::BAD_REQUEST,
                 "InvalidSkipToken",
                 "The $skiptoken continuation is malformed. Follow the @odata.nextLink verbatim; do not construct or edit a skiptoken.",
+            )
+            .into_response(),
+            Self::StorageUnavailable => odata_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "StorageUnavailable",
+                "Durable entity state is temporarily unavailable. Retry the request.",
             )
             .into_response(),
         }

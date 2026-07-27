@@ -7,8 +7,8 @@ use sha2::{Digest, Sha256};
 use temper_authz::SecurityContext;
 use temper_jit::table::{CompositeActionMetadata, TransitionTable};
 use temper_runtime::persistence::{
-    COMPOSITE_EVENT_TYPE, CompositeEvent, CompositeEventSubWrite, EventMetadata, PersistenceAppend,
-    PersistenceEnvelope, PersistenceError,
+    COMPOSITE_EVENT_TYPE, CompositeEvent, CompositeEventSubWrite, EntityKeyRow, EntityVectorRow,
+    EventMetadata, PersistenceAppend, PersistenceEnvelope, PersistenceError,
 };
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
@@ -77,14 +77,57 @@ struct AtomicCompositeStream {
     events: Vec<PersistenceEnvelope>,
 }
 
-#[derive(Debug, Clone)]
-struct CompositeCreateAuthDefaults {
-    initial_state: String,
-    has_spec: bool,
-}
-
 fn empty_params() -> Value {
     Value::Object(Default::default())
+}
+
+fn index_rows_for_table(
+    table: &TransitionTable,
+    state: &EntityState,
+) -> (Vec<EntityKeyRow>, Vec<EntityVectorRow>, bool) {
+    let reconcile_vectors = !table.vectors.is_empty();
+    let mut key_rows = Vec::new();
+    let mut vector_rows = Vec::new();
+    let Some(field_map) = state.fields.as_object() else {
+        return (key_rows, vector_rows, reconcile_vectors);
+    };
+
+    for key in &table.keys {
+        if let Some(hash) =
+            crate::key_index::canonical_key_hash(&key.name, &key.properties, field_map)
+        {
+            key_rows.push(EntityKeyRow {
+                key_name: key.name.clone(),
+                key_hash: hash,
+            });
+        }
+    }
+
+    if state.status == "Deleted" {
+        return (key_rows, vector_rows, reconcile_vectors);
+    }
+    for decl in &table.vectors {
+        let Some(vector) = field_map
+            .get(&decl.property)
+            .and_then(|v| crate::vector_index::parse_vector_property(v, decl.dims))
+        else {
+            continue;
+        };
+        let Some(model_tag) = field_map
+            .get(&decl.model_property)
+            .and_then(|v| v.as_str())
+            .filter(|tag| !tag.is_empty())
+        else {
+            continue;
+        };
+        vector_rows.push(EntityVectorRow {
+            decl_name: decl.name.clone(),
+            model_tag: model_tag.to_string(),
+            vector,
+        });
+    }
+
+    (key_rows, vector_rows, reconcile_vectors)
 }
 
 impl crate::state::ServerState {
@@ -374,15 +417,23 @@ impl crate::state::ServerState {
         }
         let stage_ms = stage_started_at.map(|started| started.elapsed().as_millis() as u64);
 
-        let appends = streams
+        let mut appends = Vec::new();
+        for (persistence_id, stream) in streams
             .iter()
             .filter(|(_, stream)| !stream.events.is_empty())
-            .map(|(persistence_id, stream)| PersistenceAppend {
+        {
+            let table = self.transition_table_for_dispatch(tenant, &stream.entity_type)?;
+            let (key_rows, vector_rows, reconcile_vectors) =
+                index_rows_for_table(&table, &stream.state);
+            appends.push(PersistenceAppend {
                 persistence_id: persistence_id.clone(),
                 expected_sequence: stream.expected_sequence,
                 events: stream.events.clone(),
-            })
-            .collect::<Vec<_>>();
+                key_rows: Some(key_rows),
+                vector_rows,
+                reconcile_vectors,
+            });
+        }
         if appends.is_empty() {
             return Ok(true);
         }
@@ -416,10 +467,15 @@ impl crate::state::ServerState {
             if stream.state.status == "Deleted" {
                 continue;
             }
-            if !self
-                .ensure_entity_loaded(tenant, &stream.entity_type, &stream.entity_id)
+            let reloaded = self
+                .get_tenant_entity_state_authoritative(
+                    tenant,
+                    &stream.entity_type,
+                    &stream.entity_id,
+                )
                 .await
-            {
+                .map_err(|error| DispatchError::Internal(error.to_string()))?;
+            if reloaded.is_none() {
                 return Err(DispatchError::Internal(format!(
                     "composite batch committed {}:{} but failed to reload it",
                     stream.entity_type, stream.entity_id
@@ -467,16 +523,16 @@ impl crate::state::ServerState {
             (target.target_existed, target.state.clone())
         } else {
             let table = self.transition_table_for_dispatch(tenant, entity_type)?;
-            let target_exists = self
-                .ensure_entity_loaded(tenant, entity_type, entity_id)
-                .await;
-            let state = if target_exists {
-                self.get_tenant_entity_state(tenant, entity_type, entity_id)
-                    .await
-                    .map_err(DispatchError::Internal)?
-                    .state
-            } else {
-                synthetic_initial_state(entity_type, entity_id, &table)
+            let target = self
+                .get_tenant_entity_state_authoritative(tenant, entity_type, entity_id)
+                .await
+                .map_err(|error| DispatchError::Internal(error.to_string()))?;
+            let (target_exists, state) = match target {
+                Some(target) => (true, target.state),
+                None => (
+                    false,
+                    synthetic_initial_state(entity_type, entity_id, &table),
+                ),
             };
             (target_exists, state)
         };
@@ -519,14 +575,43 @@ impl crate::state::ServerState {
         parent_persistence_id: &str,
         parent_idempotency: &str,
     ) -> Result<bool, DispatchError> {
+        let mut latest = store
+            .read_latest_events(&[parent_persistence_id.to_string()])
+            .await
+            .map_err(|e| {
+                DispatchError::Internal(format!(
+                    "failed to read parent journal tail before CompositeEvent append: {e}"
+                ))
+            })?;
+        if latest.len() != 1 {
+            return Err(DispatchError::Internal(format!(
+                "parent journal tail read returned {} rows, expected one",
+                latest.len()
+            )));
+        }
+        let Some(latest) = latest.pop().flatten() else {
+            return Ok(false);
+        };
+        let budget = crate::entity_actor::types::MAX_DURABLE_IDEMPOTENCY_KEYS_PER_ENTITY;
+        let from_sequence = latest.sequence_nr.saturating_sub(budget as u64);
+        let read_limit = budget.checked_add(1).ok_or_else(|| {
+            DispatchError::Internal("composite idempotency read budget overflowed".to_string())
+        })?;
         let envelopes = store
-            .read_events(parent_persistence_id, 0)
+            .read_events_bounded(parent_persistence_id, from_sequence, read_limit)
             .await
             .map_err(|e| {
                 DispatchError::Internal(format!(
                     "failed to read parent journal before CompositeEvent append: {e}"
                 ))
             })?;
+        validate_composite_idempotency_window(
+            parent_persistence_id,
+            from_sequence,
+            latest.sequence_nr,
+            budget,
+            &envelopes,
+        )?;
         Ok(envelopes.iter().any(|env| {
             env.event_type == COMPOSITE_EVENT_TYPE
                 && serde_json::from_value::<CompositeEvent>(env.payload.clone())
@@ -565,7 +650,6 @@ impl crate::state::ServerState {
         })?;
         let mut prepared = Vec::with_capacity(sub_writes.len());
         let mut governed_cache = BTreeMap::new();
-        let mut create_auth_defaults_cache = BTreeMap::new();
 
         for (idx, sub_write) in sub_writes.iter().cloned().enumerate() {
             let sub_entity_type = sub_write.entity_type.clone();
@@ -589,50 +673,6 @@ impl crate::state::ServerState {
 
             let use_parent_gate =
                 composite_sub_write_uses_parent_gate(metadata, &sub_entity_type, &sub_action);
-            let resource_attrs = if use_parent_gate {
-                None
-            } else if sub_action == "Create" {
-                if !create_auth_defaults_cache.contains_key(&sub_entity_type) {
-                    create_auth_defaults_cache.insert(
-                        sub_entity_type.clone(),
-                        self.composite_create_auth_defaults(tenant, &sub_entity_type)?,
-                    );
-                }
-                let defaults = create_auth_defaults_cache
-                    .get(&sub_entity_type)
-                    .expect("create auth defaults inserted before use");
-                Some(composite_create_resource_attrs_from_defaults(
-                    &sub_entity_id,
-                    &sub_params,
-                    defaults,
-                ))
-            } else {
-                Some(
-                    self.composite_sub_write_auth_resource_attrs(
-                        tenant,
-                        &sub_entity_type,
-                        &sub_entity_id,
-                        &sub_action,
-                        &sub_params,
-                    )
-                    .await?,
-                )
-            };
-
-            if let Some(resource_attrs) = resource_attrs {
-                self.authorize_with_context(
-                    sub_security_ctx,
-                    &sub_action,
-                    &sub_entity_type,
-                    &resource_attrs,
-                    tenant.as_str(),
-                )
-                .map_err(|denial| {
-                    DispatchError::AuthzDenied(format!(
-                        "composite {entity_type}.{action} sub-write {idx} denied for {sub_entity_type}.{sub_action}: {denial}"
-                    ))
-                })?;
-            }
 
             prepared.push(PreparedCompositeSubWrite {
                 idx,
@@ -656,15 +696,40 @@ impl crate::state::ServerState {
             let known_absent_create = known_absent_create_targets
                 .contains(&(write.entity_type.clone(), write.entity_id.clone()));
             write.preflight_target = Some(
-                self.preflight_composite_sub_write_transition(
-                    tenant,
-                    entity_type,
-                    action,
-                    write,
-                    known_absent_create,
-                )
-                .await?,
+                self.load_composite_preflight_target(tenant, write, known_absent_create)
+                    .await?,
             );
+        }
+
+        // Authorize against the exact state that transition preflight and the
+        // later compare-and-set will use. In particular, a `Create` colliding
+        // with a live target must see live Cedar attributes; only durable
+        // absence is represented by synthetic initial attributes.
+        for write in &prepared {
+            if write.uses_parent_gate {
+                continue;
+            }
+            let resource_attrs = self
+                .composite_sub_write_auth_resource_attrs(tenant, write)
+                .await?;
+            self.authorize_with_context(
+                sub_security_ctx,
+                &write.action,
+                &write.entity_type,
+                &resource_attrs,
+                tenant.as_str(),
+            )
+            .map_err(|denial| {
+                DispatchError::AuthzDenied(format!(
+                    "composite {entity_type}.{action} sub-write {} denied for {}.{}: {denial}",
+                    write.idx, write.entity_type, write.action
+                ))
+            })?;
+        }
+
+        for write in &prepared {
+            self.preflight_composite_sub_write_transition(tenant, entity_type, action, write)
+                .await?;
         }
 
         let storage_writes = prepared
@@ -752,49 +817,63 @@ impl crate::state::ServerState {
         Ok(absent)
     }
 
-    async fn preflight_composite_sub_write_transition(
+    async fn load_composite_preflight_target(
         &self,
         tenant: &TenantId,
-        parent_entity_type: &str,
-        parent_action: &str,
         write: &PreparedCompositeSubWrite,
         known_absent_create: bool,
     ) -> Result<PreflightCompositeTarget, DispatchError> {
         let table = self.transition_table_for_dispatch(tenant, &write.entity_type)?;
         let known_absent_create = known_absent_create
             && write.action == "Create"
+            && self.event_journal().is_none()
             && !self.entity_exists(tenant, &write.entity_type, &write.entity_id);
-        let target_exists = if known_absent_create {
-            false
+        let target = if known_absent_create {
+            None
         } else {
-            self.ensure_entity_loaded(tenant, &write.entity_type, &write.entity_id)
+            self.get_tenant_entity_state_authoritative(tenant, &write.entity_type, &write.entity_id)
                 .await
+                .map_err(|error| DispatchError::Internal(error.to_string()))?
         };
-        let target_state = if known_absent_create {
-            synthetic_initial_state(&write.entity_type, &write.entity_id, &table)
-        } else if target_exists {
-            self.get_tenant_entity_state(tenant, &write.entity_type, &write.entity_id)
-                .await
-                .map_err(DispatchError::Internal)?
-                .state
-        } else {
-            synthetic_initial_state(&write.entity_type, &write.entity_id, &table)
+        let (target_exists, target_state) = match target {
+            Some(target) => (true, target.state),
+            None => (
+                false,
+                synthetic_initial_state(&write.entity_type, &write.entity_id, &table),
+            ),
         };
 
-        let preflight_target = PreflightCompositeTarget {
+        Ok(PreflightCompositeTarget {
             target_existed: target_exists,
-            state: target_state.clone(),
-        };
+            state: target_state,
+        })
+    }
+
+    async fn preflight_composite_sub_write_transition(
+        &self,
+        tenant: &TenantId,
+        parent_entity_type: &str,
+        parent_action: &str,
+        write: &PreparedCompositeSubWrite,
+    ) -> Result<(), DispatchError> {
+        let table = self.transition_table_for_dispatch(tenant, &write.entity_type)?;
+        let preflight_target = write.preflight_target.as_ref().ok_or_else(|| {
+            DispatchError::Internal(format!(
+                "composite {parent_entity_type}.{parent_action} sub-write {} has no preflight target",
+                write.idx
+            ))
+        })?;
+        let target_state = &preflight_target.state;
 
         if target_state.has_processed_idempotency_key(&write.idempotency_key) {
-            return Ok(preflight_target);
+            return Ok(());
         }
 
         validate_composite_ref_preflight_compare_and_set(
             parent_entity_type,
             parent_action,
             write,
-            &preflight_target,
+            preflight_target,
         )?;
 
         if !target_state.can_accept_event() {
@@ -816,9 +895,9 @@ impl crate::state::ServerState {
             } else {
                 BTreeMap::new()
             };
-        let eval_ctx = build_eval_context_with_xref(&target_state, &cross_entity_booleans);
+        let eval_ctx = build_eval_context_with_xref(target_state, &cross_entity_booleans);
         match table.evaluate_ctx(&target_state.status, &eval_ctx, &write.action) {
-            Some(result) if result.success => Ok(preflight_target),
+            Some(result) if result.success => Ok(()),
             Some(_) => Err(DispatchError::Conflict(format!(
                 "composite {parent_entity_type}.{parent_action} sub-write {} would fail: action '{}' is not valid from state '{}'",
                 write.idx, write.action, target_state.status
@@ -833,69 +912,39 @@ impl crate::state::ServerState {
     async fn composite_sub_write_auth_resource_attrs(
         &self,
         tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        action: &str,
-        params: &Value,
+        write: &PreparedCompositeSubWrite,
     ) -> Result<BTreeMap<String, Value>, DispatchError> {
-        if action == "Create" {
-            return self.composite_create_resource_attrs(tenant, entity_type, entity_id, params);
+        let target = write.preflight_target.as_ref().ok_or_else(|| {
+            DispatchError::Internal(format!(
+                "composite sub-write {} has no authorization target",
+                write.idx
+            ))
+        })?;
+        if target.target_existed {
+            return self
+                .authz_resource_attrs_from_state(
+                    tenant,
+                    &write.entity_type,
+                    &write.entity_id,
+                    &target.state,
+                )
+                .await
+                .map_err(DispatchError::Internal);
         }
-
-        if !self
-            .ensure_entity_loaded(tenant, entity_type, entity_id)
-            .await
-        {
+        if write.action != "Create" {
             return Err(DispatchError::Internal(format!(
-                "composite sub-write target {entity_type}:{entity_id} does not exist"
+                "composite sub-write target {}:{} is not live for action '{}'",
+                write.entity_type, write.entity_id, write.action
             )));
         }
-
-        self.load_authz_resource_snapshot(tenant, entity_type, entity_id)
-            .await
-            .map(|snapshot| snapshot.resource_attrs)
-            .map_err(DispatchError::Internal)
-    }
-
-    fn composite_create_auth_defaults(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-    ) -> Result<CompositeCreateAuthDefaults, DispatchError> {
-        let table = self.transition_table_for_dispatch(tenant, entity_type)?;
-        let has_spec = self
-            .has_registered_spec(tenant, entity_type)
-            .map_err(DispatchError::Internal)?;
-        Ok(CompositeCreateAuthDefaults {
-            initial_state: table.initial_state.clone(),
-            has_spec,
-        })
-    }
-
-    fn composite_create_resource_attrs(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        params: &Value,
-    ) -> Result<BTreeMap<String, Value>, DispatchError> {
-        let table = self.transition_table_for_dispatch(tenant, entity_type)?;
-        let mut resource_attrs = BTreeMap::new();
-        resource_attrs.insert("id".to_string(), Value::String(entity_id.to_string()));
-        resource_attrs.insert(
-            "status".to_string(),
-            Value::String(table.initial_state.clone()),
-        );
-        if let Value::Object(fields) = params {
-            for (key, value) in fields {
-                resource_attrs.insert(key.clone(), value.clone());
-            }
-        }
-        let has_spec = self
-            .has_registered_spec(tenant, entity_type)
-            .map_err(DispatchError::Internal)?;
-        resource_attrs.insert("has_spec".to_string(), Value::Bool(has_spec));
-        Ok(resource_attrs)
+        self.build_create_authz_resource_attrs(
+            tenant,
+            &write.entity_type,
+            &write.entity_id,
+            &write.params,
+        )
+        .await
+        .map_err(DispatchError::Internal)
     }
 
     fn transition_table_for_dispatch(
@@ -916,36 +965,6 @@ impl crate::state::ServerState {
             .get(entity_type)
             .cloned()
             .ok_or_else(|| DispatchError::Ungoverned(entity_type.to_string()))
-    }
-
-    #[allow(dead_code)]
-    async fn ensure_composite_entry_transition_allowed(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        action: &str,
-    ) -> Result<(), DispatchError> {
-        let table = self.transition_table_for_dispatch(tenant, entity_type)?;
-        let current = self
-            .get_tenant_entity_state(tenant, entity_type, entity_id)
-            .await
-            .map_err(DispatchError::Internal)?;
-        let cross_entity_booleans = self
-            .resolve_cross_entity_guards(tenant, entity_type, entity_id, action)
-            .await;
-        let eval_ctx = build_eval_context_with_xref(&current.state, &cross_entity_booleans);
-
-        match table.evaluate_ctx(&current.state.status, &eval_ctx, action) {
-            Some(result) if result.success => Ok(()),
-            Some(_) => Err(DispatchError::Internal(format!(
-                "Composite action '{action}' not valid from state '{}'",
-                current.state.status
-            ))),
-            None => Err(DispatchError::Internal(format!(
-                "Unknown composite action: {action}"
-            ))),
-        }
     }
 }
 

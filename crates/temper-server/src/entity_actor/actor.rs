@@ -29,21 +29,26 @@ use temper_jit::table::{Effect, TransitionTable};
 use temper_observe::wide_event;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
 use temper_runtime::persistence::{
-    COMPOSITE_EVENT_TYPE, EventMetadata, PersistenceEnvelope, PersistenceError,
+    COMPOSITE_EVENT_TYPE, CompositeEvent, EventMetadata, PersistenceAppend, PersistenceEnvelope,
+    PersistenceError, PersistenceSequenceGuard, is_deletion_tombstone,
 };
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 use crate::storage::{BackendLabel, BoxedEventStore};
 
 use super::effects::{
-    FieldSyncMode, build_eval_context_with_xref, process_action_with_xref_and_field_mode,
-    prune_transient_action_fields_from_state,
+    FieldSyncMode, apply_field_update, build_eval_context_with_xref,
+    process_action_with_xref_and_field_mode, prune_transient_action_fields_from_state,
+    sanitize_action_params,
 };
 use super::snapshot_queue::{SnapshotEnqueueOutcome, SnapshotWriteQueue};
 use super::types::{
     EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_SINCE_SNAPSHOT,
     MAX_ITEMS_PER_ENTITY,
 };
+
+const FIELDS_PATCHED_EVENT_TYPE: &str = "FieldsPatched";
+const FIELDS_REPLACED_EVENT_TYPE: &str = "FieldsReplaced";
 
 fn event_budget_workspace_id(state: &EntityState) -> String {
     if state.entity_type == "Workspace" {
@@ -127,12 +132,7 @@ impl EntityActor {
         initial_fields: &serde_json::Value,
     ) -> EntityState {
         let mut fields = initial_fields.clone();
-        if let Some(obj) = fields.as_object_mut() {
-            obj.entry("Id".to_string())
-                .or_insert(serde_json::Value::String(entity_id.to_string()));
-            obj.entry("Status".to_string())
-                .or_insert(serde_json::Value::String(table.initial_state.clone()));
-        }
+        super::effects::canonicalize_entity_fields(&mut fields, entity_id, &table.initial_state);
 
         EntityState {
             entity_type: entity_type.to_string(),
@@ -210,6 +210,16 @@ impl EntityActor {
 
         match serde_json::from_value::<EntityState>(value) {
             Ok(mut restored) => {
+                if restored.entity_type != state.entity_type
+                    || restored.entity_id != state.entity_id
+                {
+                    return false;
+                }
+                super::effects::canonicalize_entity_fields(
+                    &mut restored.fields,
+                    &state.entity_id,
+                    &restored.status,
+                );
                 restored.sequence_nr = sequence_nr;
                 restored.events_since_snapshot = 0;
                 restored.last_snapshot_sequence_nr = sequence_nr;
@@ -334,6 +344,19 @@ impl EntityActor {
         state: &mut EntityState,
         event: &EntityEvent,
     ) -> Result<u64, PersistenceError> {
+        self.persist_event_guarded(store, backend, persistence_id, state, event, &[])
+            .await
+    }
+
+    async fn persist_event_guarded(
+        &self,
+        store: &BoxedEventStore,
+        backend: BackendLabel,
+        persistence_id: &str,
+        state: &mut EntityState,
+        event: &EntityEvent,
+        guards: &[PersistenceSequenceGuard],
+    ) -> Result<u64, PersistenceError> {
         let payload = serde_json::to_value(event)
             .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
         let envelope = PersistenceEnvelope {
@@ -406,16 +429,41 @@ impl EntityActor {
             (key_rows, vector_rows, reconcile_vectors)
         };
         let append_start = Instant::now();
-        let result = store
-            .append_with_index_rows(
-                persistence_id,
-                state.sequence_nr,
-                &[envelope],
-                &key_rows,
-                &vector_rows,
+        let result = if guards.is_empty() {
+            store
+                .append_with_index_rows(
+                    persistence_id,
+                    state.sequence_nr,
+                    &[envelope],
+                    &key_rows,
+                    &vector_rows,
+                    reconcile_vectors,
+                )
+                .await
+        } else {
+            let append = PersistenceAppend {
+                persistence_id: persistence_id.to_string(),
+                expected_sequence: state.sequence_nr,
+                events: vec![envelope],
+                key_rows: Some(key_rows),
+                vector_rows,
                 reconcile_vectors,
-            )
-            .await;
+            };
+            store
+                .append_batch_guarded(std::slice::from_ref(&append), guards)
+                .await
+                .and_then(|results| {
+                    results
+                        .into_iter()
+                        .next()
+                        .map(|result| result.sequence_nr)
+                        .ok_or_else(|| {
+                            PersistenceError::Storage(
+                                "guarded append returned no target result".to_string(),
+                            )
+                        })
+                })
+        };
         crate::runtime_metrics::record_event_store_append_wait(
             backend.as_str(),
             "append",
@@ -537,6 +585,12 @@ impl EntityActor {
             }
             Ok(None) => {}
             Err(e) => {
+                if strict_journal_read {
+                    return Err(ActorError::custom(format!(
+                        "failed to load snapshot for strict replay of {}:{}: {e}",
+                        state.entity_type, state.entity_id
+                    )));
+                }
                 tracing::warn!(
                     entity = %state.entity_id,
                     error = %e,
@@ -556,39 +610,180 @@ impl EntityActor {
                         MAX_EVENTS_SINCE_SNAPSHOT
                     )));
                 }
+                if strict_journal_read {
+                    super::replay::validate_strict_replay(
+                        store,
+                        persistence_id,
+                        from_sequence,
+                        &envelopes,
+                    )
+                    .await?;
+                }
                 for env in &envelopes {
                     if env.event_type == COMPOSITE_EVENT_TYPE {
+                        if strict_journal_read
+                            && let Err(error) =
+                                serde_json::from_value::<CompositeEvent>(env.payload.clone())
+                        {
+                            return Err(ActorError::custom(format!(
+                                "incompatible composite audit event for {}:{} at sequence {}: {error}",
+                                state.entity_type, state.entity_id, env.sequence_nr
+                            )));
+                        }
                         state.sequence_nr = env.sequence_nr;
                         continue;
                     }
 
                     let parsed_event = serde_json::from_value::<EntityEvent>(env.payload.clone());
 
-                    // Tombstone is terminal: once deleted, entity must not replay
-                    // into a live state. Stop at the first Deleted event.
-                    if env.event_type == "Deleted" {
-                        let tombstone = parsed_event.unwrap_or_else(|_| EntityEvent {
-                            action: "Deleted".to_string(),
-                            from_status: state.status.clone(),
-                            to_status: "Deleted".to_string(),
-                            timestamp: env.metadata.timestamp,
-                            params: serde_json::json!({}),
-                            idempotency_key: None,
-                        });
+                    // A tombstone ends one entity generation, but a later durable
+                    // Created event may begin a new generation with the same id.
+                    // Continue replay so tail classification and recovered state
+                    // agree on delete-then-recreate streams.
+                    if is_deletion_tombstone(env) {
+                        let tombstone = match parsed_event {
+                            Ok(mut event) => {
+                                let envelope_matches_action = env.event_type == event.action
+                                    || env.event_type == "Deleted"
+                                    || event.action == "Deleted";
+                                if event.to_status != "Deleted" || !envelope_matches_action {
+                                    if strict_journal_read {
+                                        return Err(ActorError::custom(format!(
+                                            "contradictory deletion event for {}:{} at sequence {}: event_type='{}', action='{}', to_status='{}'",
+                                            state.entity_type,
+                                            state.entity_id,
+                                            env.sequence_nr,
+                                            env.event_type,
+                                            event.action,
+                                            event.to_status
+                                        )));
+                                    }
+                                    // Liveness classification already treats
+                                    // this envelope as a tombstone. Lenient
+                                    // actor hydration must not resurrect it by
+                                    // trusting contradictory payload fields.
+                                    event.action = "Deleted".to_string();
+                                    event.to_status = "Deleted".to_string();
+                                }
+                                event
+                            }
+                            // Event-type-only tombstones predate the complete
+                            // EntityEvent payload. Preserve that canonical
+                            // legacy encoding, but do not let a generic event
+                            // with a malformed payload impersonate a valid
+                            // payload-action tombstone during strict recovery.
+                            Err(_) if env.event_type == "Deleted" => EntityEvent {
+                                action: "Deleted".to_string(),
+                                from_status: state.status.clone(),
+                                to_status: "Deleted".to_string(),
+                                timestamp: env.metadata.timestamp,
+                                params: serde_json::json!({}),
+                                idempotency_key: None,
+                            },
+                            Err(error) if strict_journal_read => {
+                                return Err(ActorError::custom(format!(
+                                    "incompatible deletion event payload for {}:{} at sequence {}: {error}",
+                                    state.entity_type, state.entity_id, env.sequence_nr
+                                )));
+                            }
+                            Err(_) => EntityEvent {
+                                action: "Deleted".to_string(),
+                                from_status: state.status.clone(),
+                                to_status: "Deleted".to_string(),
+                                timestamp: env.metadata.timestamp,
+                                params: serde_json::json!({}),
+                                idempotency_key: None,
+                            },
+                        };
                         state.status = tombstone.to_status.clone();
-                        if let Some(obj) = state.fields.as_object_mut() {
-                            obj.insert(
-                                "Status".to_string(),
-                                serde_json::Value::String(state.status.clone()),
-                            );
-                        }
+                        super::effects::canonicalize_entity_fields(
+                            &mut state.fields,
+                            &state.entity_id,
+                            &state.status,
+                        );
                         state.push_event_bounded(tombstone);
                         state.sequence_nr = env.sequence_nr;
-                        break;
+                        continue;
                     }
 
                     match parsed_event {
-                        Ok(event) => {
+                        Ok(mut event) => {
+                            if state.status == "Deleted" && event.action != "Created" {
+                                return Err(ActorError::custom(format!(
+                                    "invalid entity generation for {}:{}: action '{}' follows deletion at sequence {} (expected Created)",
+                                    state.entity_type,
+                                    state.entity_id,
+                                    event.action,
+                                    env.sequence_nr
+                                )));
+                            }
+                            if state.status == "Deleted" {
+                                super::replay::validate_recreation_event(
+                                    table,
+                                    env,
+                                    &event,
+                                    &state.entity_type,
+                                    &state.entity_id,
+                                )?;
+                                let sequence_nr = state.sequence_nr;
+                                let total_event_count = state.total_event_count;
+                                let events_since_snapshot = state.events_since_snapshot;
+                                let last_snapshot_sequence_nr = state.last_snapshot_sequence_nr;
+                                let recent_events = std::mem::take(&mut state.events);
+                                let mut recreated = Self::build_initial_state(
+                                    &state.entity_type,
+                                    &state.entity_id,
+                                    table,
+                                    &event.params,
+                                );
+                                recreated.sequence_nr = sequence_nr;
+                                recreated.total_event_count = total_event_count;
+                                recreated.events_since_snapshot = events_since_snapshot;
+                                recreated.last_snapshot_sequence_nr = last_snapshot_sequence_nr;
+                                recreated.events = recent_events;
+                                *state = recreated;
+                            }
+
+                            let field_update_replace = match event.action.as_str() {
+                                FIELDS_PATCHED_EVENT_TYPE => Some(false),
+                                FIELDS_REPLACED_EVENT_TYPE => Some(true),
+                                _ => None,
+                            };
+                            if let Some(replace) = field_update_replace {
+                                if event.from_status != state.status
+                                    || event.to_status != state.status
+                                {
+                                    return Err(ActorError::custom(format!(
+                                        "invalid durable field update for {}:{} at sequence {}: status '{} -> {}' does not match current '{}'",
+                                        state.entity_type,
+                                        state.entity_id,
+                                        env.sequence_nr,
+                                        event.from_status,
+                                        event.to_status,
+                                        state.status
+                                    )));
+                                }
+                                event.params = sanitize_action_params(&event.params).into_owned();
+                                let field_sync_mode =
+                                    Self::field_sync_mode_for_backend(Some(backend), blob_store);
+                                let overflow_blobs = apply_field_update(
+                                    state,
+                                    &event.params,
+                                    replace,
+                                    field_sync_mode,
+                                    Some(&table.state_var_metadata),
+                                )
+                                .map_err(ActorError::custom)?;
+                                if !overflow_blobs.is_empty() {
+                                    Self::persist_overflow_blobs(blob_store, &overflow_blobs)
+                                        .await
+                                        .map_err(ActorError::custom)?;
+                                }
+                                state.push_event_bounded(event);
+                                state.sequence_nr = env.sequence_nr;
+                                continue;
+                            }
+
                             // A persisted event is a historical fact: its guard
                             // already passed at commit time and its `to_status`
                             // is authoritative. Replay therefore re-derives the
@@ -657,6 +852,12 @@ impl EntityActor {
                             state.push_event_bounded(event);
                         }
                         Err(e) => {
+                            if strict_journal_read {
+                                return Err(ActorError::custom(format!(
+                                    "incompatible event payload for {}:{} at sequence {}: {e}",
+                                    state.entity_type, state.entity_id, env.sequence_nr
+                                )));
+                            }
                             // Schema-mismatched event: log and skip rather than panic.
                             // This preserves entity hydration across spec evolution —
                             // the last valid state is used and replay continues.
@@ -801,12 +1002,14 @@ impl Actor for EntityActor {
         // Persist a bootstrap Created event for first-time entities so initial
         // fields are durable and replayable.
         if self.event_journal.is_some() && state.total_event_count == 0 {
+            let initial_params =
+                super::effects::sanitize_action_params(&self.initial_fields).into_owned();
             let created = EntityEvent {
                 action: "Created".to_string(),
                 from_status: String::new(),
                 to_status: state.status.clone(),
                 timestamp: sim_now(),
-                params: self.initial_fields.clone(),
+                params: initial_params,
                 idempotency_key: None,
             };
 
@@ -1411,6 +1614,45 @@ impl Actor for EntityActor {
                     spec_governed: true,
                 });
             }
+            EntityMsg::GetStateAtLeastStrict { minimum_sequence } => {
+                let (Some(store), Some(backend)) =
+                    (self.event_journal.as_ref(), self.event_backend)
+                else {
+                    return Err(ActorError::custom(format!(
+                        "strict refresh requested without a journal for {}:{}",
+                        self.entity_type, self.entity_id
+                    )));
+                };
+                let table = self.table.read().expect("table lock poisoned").clone();
+                let recovered = recover_entity_state_from_store(
+                    &self.tenant,
+                    &self.entity_type,
+                    &self.entity_id,
+                    &table,
+                    store,
+                    backend,
+                    &self.initial_fields,
+                    self.blob_store.as_ref(),
+                    true,
+                )
+                .await?;
+                if recovered.sequence_nr < minimum_sequence {
+                    return Err(ActorError::custom(format!(
+                        "strict refresh for {}:{} reached sequence {}, expected at least {minimum_sequence}",
+                        self.entity_type, self.entity_id, recovered.sequence_nr
+                    )));
+                }
+                *state = recovered;
+                ctx.reply(EntityResponse {
+                    success: true,
+                    state: state.clone(),
+                    error: None,
+                    custom_effects: vec![],
+                    scheduled_actions: vec![],
+                    spawn_requests: vec![],
+                    spec_governed: true,
+                });
+            }
             EntityMsg::GetField { field } => {
                 let value = state
                     .fields
@@ -1419,25 +1661,177 @@ impl Actor for EntityActor {
                     .unwrap_or(serde_json::Value::Null);
                 ctx.reply(value);
             }
-            EntityMsg::UpdateFields { fields, replace } => {
-                if replace {
-                    // PUT: replace all fields (preserve Id and Status)
-                    let id = state.entity_id.clone();
-                    let status = state.status.clone();
-                    state.fields = fields;
-                    if let Some(obj) = state.fields.as_object_mut() {
-                        obj.insert("Id".to_string(), serde_json::Value::String(id));
-                        obj.insert("Status".to_string(), serde_json::Value::String(status));
+            EntityMsg::UpdateFields {
+                fields,
+                replace,
+                idempotency_key,
+                expected_precondition,
+                context_guards,
+            } => {
+                if state.has_processed_idempotency_key(&idempotency_key) {
+                    ctx.reply(EntityResponse {
+                        success: true,
+                        state: state.clone(),
+                        error: None,
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+                if let Some(expected_precondition) = expected_precondition
+                    && super::effects::field_update_precondition(state) != expected_precondition
+                {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(
+                            "field update authorization became stale; retry against current state"
+                                .to_string(),
+                        ),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+                if state.status == "Deleted" {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some("cannot update fields after entity deletion".to_string()),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+                if state.events_since_snapshot >= MAX_EVENTS_SINCE_SNAPSHOT {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(format!(
+                            "Event budget exhausted ({MAX_EVENTS_SINCE_SNAPSHOT} max since snapshot)"
+                        )),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+
+                let params = sanitize_action_params(&fields).into_owned();
+                let state_before = state.clone();
+                let table = self.table.read().expect("table lock poisoned").clone();
+                let field_sync_mode =
+                    Self::field_sync_mode_for_backend(self.event_backend, self.blob_store.as_ref());
+                let overflow_blobs = match apply_field_update(
+                    state,
+                    &params,
+                    replace,
+                    field_sync_mode,
+                    Some(&table.state_var_metadata),
+                ) {
+                    Ok(blobs) => blobs,
+                    Err(error) => {
+                        *state = state_before;
+                        ctx.reply(EntityResponse {
+                            success: false,
+                            state: state.clone(),
+                            error: Some(error),
+                            custom_effects: vec![],
+                            scheduled_actions: vec![],
+                            spawn_requests: vec![],
+                            spec_governed: true,
+                        });
+                        return Ok(());
                     }
-                } else {
-                    // PATCH: merge fields into existing
-                    if let (Some(existing), Some(updates)) =
-                        (state.fields.as_object_mut(), fields.as_object())
-                    {
-                        for (k, v) in updates {
-                            existing.insert(k.clone(), v.clone());
-                        }
-                    }
+                };
+                if !overflow_blobs.is_empty()
+                    && let Err(error) =
+                        Self::persist_overflow_blobs(self.blob_store.as_ref(), &overflow_blobs)
+                            .await
+                {
+                    *state = state_before;
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(format!("field-overflow blob persistence failed: {error}")),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+                let event = EntityEvent {
+                    action: if replace {
+                        FIELDS_REPLACED_EVENT_TYPE.to_string()
+                    } else {
+                        FIELDS_PATCHED_EVENT_TYPE.to_string()
+                    },
+                    from_status: state.status.clone(),
+                    to_status: state.status.clone(),
+                    timestamp: sim_now(),
+                    params,
+                    idempotency_key: Some(idempotency_key),
+                };
+                if let (Some(store), Some(backend)) =
+                    (self.event_journal.as_ref(), self.event_backend)
+                    && let Err(error) = self
+                        .persist_event_guarded(
+                            store,
+                            backend,
+                            &self.persistence_id(),
+                            state,
+                            &event,
+                            &context_guards,
+                        )
+                        .await
+                {
+                    *state = state_before;
+                    let stale_authorization = matches!(
+                        &error,
+                        PersistenceError::ConcurrencyViolation { .. }
+                            | PersistenceError::PreconditionFailed { .. }
+                    );
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(if stale_authorization {
+                            "field update authorization became stale; retry against current state"
+                                .to_string()
+                        } else {
+                            format!("persistence failed: {error}")
+                        }),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+                state.push_event_bounded(event);
+
+                let persistence_id = self.persistence_id();
+                if let Some(store) = self.event_journal.as_ref()
+                    && let Err(error) = Self::maybe_save_snapshot(
+                        store,
+                        self.snapshot_queue.as_ref(),
+                        &persistence_id,
+                        state,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        entity = %state.entity_id,
+                        error = %error,
+                        "failed to save snapshot after durable field update"
+                    );
                 }
                 ctx.reply(EntityResponse {
                     success: true,
@@ -1478,12 +1872,11 @@ impl Actor for EntityActor {
                 }
 
                 state.status = deleted.to_status.clone();
-                if let Some(obj) = state.fields.as_object_mut() {
-                    obj.insert(
-                        "Status".to_string(),
-                        serde_json::Value::String(state.status.clone()),
-                    );
-                }
+                super::effects::canonicalize_entity_fields(
+                    &mut state.fields,
+                    &state.entity_id,
+                    &state.status,
+                );
                 state.push_event_bounded(deleted);
 
                 ctx.reply(EntityResponse {

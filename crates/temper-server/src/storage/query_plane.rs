@@ -109,6 +109,17 @@ pub trait QueryPlaneStore: Send + Sync {
         entity_id: &str,
     ) -> Result<(), PersistenceError>;
 
+    /// Remove a projection only when it is not newer than the deletion event.
+    /// A delayed cleanup from an older generation must never erase a recreated
+    /// entity's projection.
+    async fn remove_projection_through_sequence(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError>;
+
     async fn query_field_index(
         &self,
         tenant: &str,

@@ -148,19 +148,28 @@ pub(super) fn budget_rejection(
     }
 }
 
-fn is_authorized_entity(request: &QueryPlaneReadRequest<'_>, entity: &serde_json::Value) -> bool {
-    entity_id_from_body(entity).is_some_and(|entity_id| {
-        authorize_read(
-            request.state,
-            request.tenant,
-            request.security_ctx,
-            READ_ACTION,
-            request.entity_type,
-            entity_id,
-            entity,
-        )
-        .is_ok()
-    })
+async fn is_authorized_entity(
+    request: &QueryPlaneReadRequest<'_>,
+    entity: &serde_json::Value,
+) -> Result<bool, QueryPlaneReadError> {
+    let Some(entity_id) = entity_id_from_body(entity) else {
+        return Ok(false);
+    };
+    match authorize_read(
+        request.state,
+        request.tenant,
+        request.security_ctx,
+        READ_ACTION,
+        request.entity_type,
+        entity_id,
+        entity,
+    )
+    .await
+    {
+        Ok(()) => Ok(true),
+        Err(response) if response.status() == axum::http::StatusCode::FORBIDDEN => Ok(false),
+        Err(response) => Err(QueryPlaneReadError::AuthorizationDenied(response)),
+    }
 }
 
 pub(super) fn apply_select_only(
@@ -176,7 +185,7 @@ pub(super) async fn materialize_and_authorize_ids(
     entity_ids: &[String],
     prefer_catalog: bool,
     counters: &mut ScanCounters,
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, QueryPlaneReadError> {
     counters.candidate_count += entity_ids.len();
     let materialized = materialize_entity_set_entities(
         request.state,
@@ -187,15 +196,26 @@ pub(super) async fn materialize_and_authorize_ids(
         prefer_catalog,
         None,
     )
-    .await;
+    .await
+    .map_err(|error| {
+        tracing::error!(
+            error = %error,
+            tenant = %request.tenant,
+            entity_type = request.entity_type,
+            "failed to validate or materialize OData collection candidates"
+        );
+        QueryPlaneReadError::StorageUnavailable
+    })?;
     counters.materialized_count += materialized.entities.len();
     counters.catalog_shadow_check_budget += materialized.catalog_shadow_check_budget;
     counters.catalog_shadow_check_scheduled += materialized.catalog_shadow_check_scheduled;
-    materialized
-        .entities
-        .into_iter()
-        .filter(|entity| is_authorized_entity(request, entity))
-        .collect()
+    let mut authorized = Vec::with_capacity(materialized.entities.len());
+    for entity in materialized.entities {
+        if is_authorized_entity(request, &entity).await? {
+            authorized.push(entity);
+        }
+    }
+    Ok(authorized)
 }
 
 pub(super) async fn materialize_filter_and_authorize_ids(
@@ -203,7 +223,7 @@ pub(super) async fn materialize_filter_and_authorize_ids(
     entity_ids: &[String],
     prefer_catalog: bool,
     counters: &mut ScanCounters,
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, QueryPlaneReadError> {
     counters.candidate_count += entity_ids.len();
     let materialized = materialize_entity_set_entities(
         request.state,
@@ -214,7 +234,16 @@ pub(super) async fn materialize_filter_and_authorize_ids(
         prefer_catalog,
         None,
     )
-    .await;
+    .await
+    .map_err(|error| {
+        tracing::error!(
+            error = %error,
+            tenant = %request.tenant,
+            entity_type = request.entity_type,
+            "failed to validate or materialize filtered OData candidates"
+        );
+        QueryPlaneReadError::StorageUnavailable
+    })?;
     counters.materialized_count += materialized.entities.len();
     counters.catalog_shadow_check_budget += materialized.catalog_shadow_check_budget;
     counters.catalog_shadow_check_scheduled += materialized.catalog_shadow_check_scheduled;
@@ -229,8 +258,11 @@ pub(super) async fn materialize_filter_and_authorize_ids(
         materialized.entities
     };
 
-    entities
-        .into_iter()
-        .filter(|entity| is_authorized_entity(request, entity))
-        .collect()
+    let mut authorized = Vec::with_capacity(entities.len());
+    for entity in entities {
+        if is_authorized_entity(request, &entity).await? {
+            authorized.push(entity);
+        }
+    }
+    Ok(authorized)
 }

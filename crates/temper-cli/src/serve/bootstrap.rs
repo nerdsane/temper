@@ -229,9 +229,13 @@ pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, Str
     for (tenant, _dir) in apps {
         let tenant_id = TenantId::new(tenant.as_str());
         if eager_hydrate {
-            state.server.hydrate_from_store(&tenant_id).await;
+            if let Err(error) = state.server.hydrate_from_store(&tenant_id).await {
+                tracing::warn!(%tenant_id, %error, "failed to hydrate entities");
+            }
         } else {
-            state.server.populate_index_from_store(&tenant_id).await;
+            if let Err(error) = state.server.populate_index_from_store(&tenant_id).await {
+                tracing::warn!(%tenant_id, %error, "failed to populate entity index");
+            }
         }
         all_tenants.push(tenant_id);
     }
@@ -245,9 +249,13 @@ pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, Str
         for tenant in provider.connected_tenants().await {
             let tenant_id = TenantId::new(&tenant);
             if eager_hydrate {
-                state.server.hydrate_from_store(&tenant_id).await;
+                if let Err(error) = state.server.hydrate_from_store(&tenant_id).await {
+                    tracing::warn!(%tenant_id, %error, "failed to hydrate entities");
+                }
             } else {
-                state.server.populate_index_from_store(&tenant_id).await;
+                if let Err(error) = state.server.populate_index_from_store(&tenant_id).await {
+                    tracing::warn!(%tenant_id, %error, "failed to populate entity index");
+                }
             }
             all_tenants.push(tenant_id);
         }
@@ -275,7 +283,30 @@ pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, Str
         }
         // Then the broad field index for OData filter push-down.
         for tenant_id in all_tenants {
-            server.populate_field_index_from_snapshots(&tenant_id).await;
+            let mut completed = false;
+            for attempt in 1..=3 {
+                match server.populate_field_index_from_snapshots(&tenant_id).await {
+                    Ok(()) => {
+                        completed = true;
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %tenant_id,
+                            %error,
+                            attempt,
+                            "query projection backfill attempt failed"
+                        );
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
+            if !completed {
+                tracing::error!(
+                    %tenant_id,
+                    "query projection backfill remains incomplete; health is degraded and a later restart must retry"
+                );
+            }
         }
     });
 }

@@ -13,6 +13,8 @@ use temper_spec::cross_invariant::{
 use crate::registry::RelationEdge;
 use crate::state::ServerState;
 
+const MAX_RESTRICT_RELATION_SCAN: usize = 512;
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConstraintViolationType {
@@ -81,6 +83,14 @@ impl ConstraintViolation {
             operation: operation.to_string(),
         }
     }
+}
+
+/// Delete relation checks distinguish a real reference conflict from an
+/// unavailable source of truth. Uncertainty must be retried, not reported as
+/// a domain-level 409 and never treated as permission to delete.
+pub enum PreDeleteRelationError {
+    Violation(ConstraintViolation),
+    Unavailable(String),
 }
 
 /// Check FK integrity for create/update style writes.
@@ -157,10 +167,31 @@ pub async fn pre_upsert_relation_checks(
                 operation,
             ));
         };
-        if !state
-            .ensure_entity_loaded(tenant, &edge.to_entity, target_id)
+        let target = match state
+            .get_tenant_entity_state_authoritative(tenant, &edge.to_entity, target_id)
             .await
         {
+            Ok(target) => target,
+            Err(error) => {
+                tracing::error!(
+                    tenant = %tenant_name,
+                    entity_type,
+                    entity_id,
+                    operation,
+                    target_entity = %edge.to_entity,
+                    target_id,
+                    error = %error,
+                    "relation target state is unavailable"
+                );
+                return Err(ConstraintViolation::relation(
+                    "relation target state is temporarily unavailable",
+                    entity_type,
+                    entity_id,
+                    operation,
+                ));
+            }
+        };
+        if target.is_none() {
             tracing::warn!(
                 tenant = %tenant_name, entity_type, entity_id, operation,
                 target_entity = %edge.to_entity, target_id,
@@ -192,7 +223,7 @@ pub async fn pre_delete_relation_checks(
     entity_type: &str,
     entity_id: &str,
     operation: &str,
-) -> Result<(), ConstraintViolation> {
+) -> Result<(), PreDeleteRelationError> {
     if !state.cross_invariant_enforce {
         state.metrics.record_cross_bypass();
         return Ok(());
@@ -217,26 +248,49 @@ pub async fn pre_delete_relation_checks(
         if edge.delete_policy != DeletePolicy::Restrict {
             continue;
         }
-        let source_ids = state.list_entity_ids_lazy(tenant, &edge.from_entity).await;
+        let source_ids = state
+            .list_entity_ids_lazy(tenant, &edge.from_entity)
+            .await
+            .map_err(|error| {
+                PreDeleteRelationError::Unavailable(format!(
+                    "failed to classify '{}' entities while checking references: {error}",
+                    edge.from_entity
+                ))
+            })?;
+        if source_ids.len() > MAX_RESTRICT_RELATION_SCAN {
+            return Err(PreDeleteRelationError::Unavailable(format!(
+                "restrict relation scan budget exceeded for '{}': {} candidates exceeds {MAX_RESTRICT_RELATION_SCAN}",
+                edge.from_entity,
+                source_ids.len()
+            )));
+        }
         for source_id in source_ids {
-            if let Ok(source_state) = state
-                .get_tenant_entity_state(tenant, &edge.from_entity, &source_id)
+            let source = state
+                .get_tenant_entity_state_authoritative(tenant, &edge.from_entity, &source_id)
                 .await
-            {
-                let source_fields =
-                    serde_json::to_value(&source_state.state.fields).unwrap_or_default();
-                if extract_field_as_str(&source_fields, &edge.source_field) == Some(entity_id) {
-                    tracing::warn!(
-                        tenant = %tenant_name, entity_type, entity_id, operation,
-                        from_entity = %edge.from_entity, source_id = %source_id,
-                        "constraint violation: cannot delete entity referenced by another"
-                    );
-                    state.metrics.record_relation_integrity_violation(
-                        &tenant_name,
-                        entity_type,
-                        operation,
-                    );
-                    return Err(ConstraintViolation::relation(
+                .map_err(|error| {
+                    PreDeleteRelationError::Unavailable(format!(
+                        "failed to load {}('{}') while checking references to {}('{}'): {error}",
+                        edge.from_entity, source_id, entity_type, entity_id
+                    ))
+                })?;
+            let Some(source) = source else {
+                continue;
+            };
+            let source_fields = source.state.fields;
+            if extract_field_as_str(&source_fields, &edge.source_field) == Some(entity_id) {
+                tracing::warn!(
+                    tenant = %tenant_name, entity_type, entity_id, operation,
+                    from_entity = %edge.from_entity, source_id = %source_id,
+                    "constraint violation: cannot delete entity referenced by another"
+                );
+                state.metrics.record_relation_integrity_violation(
+                    &tenant_name,
+                    entity_type,
+                    operation,
+                );
+                return Err(PreDeleteRelationError::Violation(
+                    ConstraintViolation::relation(
                         format!(
                             "cannot delete {}('{}'): referenced by {}('{}') via {}",
                             entity_type, entity_id, edge.from_entity, source_id, edge.source_field
@@ -244,8 +298,8 @@ pub async fn pre_delete_relation_checks(
                         entity_type,
                         entity_id,
                         operation,
-                    ));
-                }
+                    ),
+                ));
             }
         }
     }
@@ -333,95 +387,28 @@ pub async fn post_write_invariant_checks(
             ));
         };
 
-        if !state
-            .ensure_entity_loaded(tenant, &assertion.target_entity, target_id)
+        let target_state = match state
+            .get_tenant_entity_state_authoritative(tenant, &assertion.target_entity, target_id)
             .await
         {
-            tracing::warn!(
-                tenant = %tenant_name, entity_type, entity_id, invariant = %inv.name,
-                target_entity = %assertion.target_entity, target_id,
-                "constraint violation: related entity not found"
-            );
-            state.metrics.record_cross_invariant_violation(
-                &tenant_name,
-                &inv.name,
-                "target_missing",
-            );
-            let violation = ConstraintViolation::invariant(
-                &inv.name,
-                format!(
-                    "related entity {}('{}') not found",
-                    assertion.target_entity, target_id
-                ),
-                entity_type,
-                entity_id,
-                operation,
-            );
-            if inv.kind == InvariantKind::Eventual {
-                defer_eventual_invariant(state, &inv, &tenant_name, entity_type, entity_id);
-                continue;
-            }
-            return Err(violation);
-        }
-
-        let target_field_value = match state
-            .get_tenant_entity_state(tenant, &assertion.target_entity, target_id)
-            .await
-        {
-            Ok(resp) => {
-                if assertion.field_name == "status" {
-                    resp.state.status.clone()
-                } else {
-                    let target_fields =
-                        serde_json::to_value(&resp.state.fields).unwrap_or_default();
-                    let Some(value) =
-                        extract_field_as_string(&target_fields, &assertion.field_name)
-                    else {
-                        tracing::warn!(
-                            tenant = %tenant_name, entity_type, entity_id, invariant = %inv.name,
-                            target_entity = %assertion.target_entity, target_id,
-                            target_field = %assertion.field_name,
-                            "constraint violation: target field required by invariant is missing or not a scalar"
-                        );
-                        state.metrics.record_cross_invariant_violation(
-                            &tenant_name,
-                            &inv.name,
-                            "target_field_missing",
-                        );
-                        let violation = ConstraintViolation::invariant(
-                            &inv.name,
-                            format!(
-                                "related {}('{}') is missing field '{}' required by invariant",
-                                assertion.target_entity, target_id, assertion.field_name
-                            ),
-                            entity_type,
-                            entity_id,
-                            operation,
-                        );
-                        if inv.kind == InvariantKind::Eventual {
-                            defer_eventual_invariant(
-                                state,
-                                &inv,
-                                &tenant_name,
-                                entity_type,
-                                entity_id,
-                            );
-                            continue;
-                        }
-                        return Err(violation);
-                    };
-                    value
-                }
-            }
-            Err(e) => {
+            Ok(Some(response)) => response.state,
+            Ok(None) => {
+                tracing::warn!(
+                    tenant = %tenant_name, entity_type, entity_id, invariant = %inv.name,
+                    target_entity = %assertion.target_entity, target_id,
+                    "constraint violation: related entity not found"
+                );
                 state.metrics.record_cross_invariant_violation(
                     &tenant_name,
                     &inv.name,
-                    "target_read_error",
+                    "target_missing",
                 );
                 let violation = ConstraintViolation::invariant(
                     &inv.name,
-                    format!("failed to read related entity state: {e}"),
+                    format!(
+                        "related entity {}('{}') not found",
+                        assertion.target_entity, target_id
+                    ),
                     entity_type,
                     entity_id,
                     operation,
@@ -432,6 +419,66 @@ pub async fn post_write_invariant_checks(
                 }
                 return Err(violation);
             }
+            Err(error) => {
+                tracing::error!(
+                    tenant = %tenant_name, entity_type, entity_id, invariant = %inv.name,
+                    target_entity = %assertion.target_entity, target_id,
+                    error = %error,
+                    "cross-invariant target state is unavailable"
+                );
+                state.metrics.record_cross_invariant_violation(
+                    &tenant_name,
+                    &inv.name,
+                    "target_read_error",
+                );
+                let violation = ConstraintViolation::invariant(
+                    &inv.name,
+                    "related entity state is temporarily unavailable",
+                    entity_type,
+                    entity_id,
+                    operation,
+                );
+                if inv.kind == InvariantKind::Eventual {
+                    defer_eventual_invariant(state, &inv, &tenant_name, entity_type, entity_id);
+                    continue;
+                }
+                return Err(violation);
+            }
+        };
+
+        let target_field_value = if assertion.field_name == "status" {
+            target_state.status
+        } else {
+            let Some(value) = extract_field_as_string(&target_state.fields, &assertion.field_name)
+            else {
+                tracing::warn!(
+                    tenant = %tenant_name, entity_type, entity_id, invariant = %inv.name,
+                    target_entity = %assertion.target_entity, target_id,
+                    target_field = %assertion.field_name,
+                    "constraint violation: target field required by invariant is missing or not a scalar"
+                );
+                state.metrics.record_cross_invariant_violation(
+                    &tenant_name,
+                    &inv.name,
+                    "target_field_missing",
+                );
+                let violation = ConstraintViolation::invariant(
+                    &inv.name,
+                    format!(
+                        "related {}('{}') is missing field '{}' required by invariant",
+                        assertion.target_entity, target_id, assertion.field_name
+                    ),
+                    entity_type,
+                    entity_id,
+                    operation,
+                );
+                if inv.kind == InvariantKind::Eventual {
+                    defer_eventual_invariant(state, &inv, &tenant_name, entity_type, entity_id);
+                    continue;
+                }
+                return Err(violation);
+            };
+            value
         };
 
         let in_list = assertion.values.iter().any(|s| s == &target_field_value);

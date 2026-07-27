@@ -12,12 +12,16 @@ use temper_odata::query::types::{
     BinaryOperator, FilterExpr, ODataValue, OrderByClause, OrderDirection, QueryOptions,
 };
 use temper_runtime::ActorSystem;
-use temper_runtime::scheduler::sim_uuid;
+use temper_runtime::persistence::{
+    EventMetadata, EventStore, PersistenceAppend, PersistenceEnvelope, PersistenceError,
+};
+use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::parse_csdl;
-use temper_store_turso::TursoEventStore;
+use temper_store_turso::{QueryProjectionUpsert, TursoEventStore};
 
 mod dst_projection_lag;
+mod journal_validation;
 mod keyed_existence;
 mod paging;
 mod proof;
@@ -60,9 +64,53 @@ async fn upsert_order_projection(
     tenant: &TenantId,
     entity_id: &str,
     mut fields: serde_json::Value,
-    sequence_nr: u64,
+    _sequence_nr: u64,
 ) {
     fields["Id"] = serde_json::json!(entity_id);
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    let created = PersistenceEnvelope {
+        sequence_nr: 0,
+        event_type: "Created".to_string(),
+        payload: serde_json::json!({
+            "action": "Created",
+            "from_status": "",
+            "to_status": "Draft",
+            "timestamp": sim_now(),
+            "params": fields.clone(),
+            "idempotency_key": null
+        }),
+        metadata: EventMetadata {
+            event_id: sim_uuid(),
+            causation_id: sim_uuid(),
+            correlation_id: sim_uuid(),
+            timestamp: sim_now(),
+            actor_id: "query-plane-read-test".to_string(),
+        },
+    };
+    let sequence_nr = match store.append(&persistence_id, 0, &[created]).await {
+        Ok(sequence_nr) => sequence_nr,
+        Err(PersistenceError::ConcurrencyViolation { .. }) => {
+            store
+                .read_latest_events(std::slice::from_ref(&persistence_id))
+                .await
+                .unwrap()
+                .pop()
+                .flatten()
+                .expect("existing projection seed must have a journal tail")
+                .sequence_nr
+        }
+        Err(error) => panic!("failed to seed projection journal: {error}"),
+    };
+    write_order_projection(store, tenant, entity_id, fields, sequence_nr).await;
+}
+
+async fn write_order_projection(
+    store: &TursoEventStore,
+    tenant: &TenantId,
+    entity_id: &str,
+    fields: serde_json::Value,
+    sequence_nr: u64,
+) {
     let state_json = serde_json::json!({
         "entity_type": "Order",
         "entity_id": entity_id,
@@ -83,6 +131,77 @@ async fn upsert_order_projection(
         )
         .await
         .expect("upsert projection");
+}
+
+async fn insert_order_projections(
+    store: &TursoEventStore,
+    tenant: &TenantId,
+    rows: Vec<(String, serde_json::Value)>,
+) {
+    const SEED_BATCH_SIZE: usize = 128;
+
+    for rows in rows.chunks(SEED_BATCH_SIZE) {
+        let appends = rows
+            .iter()
+            .map(|(entity_id, fields)| PersistenceAppend {
+                persistence_id: format!("{tenant}:Order:{entity_id}"),
+                expected_sequence: 0,
+                events: vec![PersistenceEnvelope {
+                    sequence_nr: 0,
+                    event_type: "Created".to_string(),
+                    payload: serde_json::json!({
+                        "action": "Created",
+                        "from_status": "",
+                        "to_status": "Draft",
+                        "timestamp": sim_now(),
+                        "params": fields,
+                        "idempotency_key": null
+                    }),
+                    metadata: EventMetadata {
+                        event_id: sim_uuid(),
+                        causation_id: sim_uuid(),
+                        correlation_id: sim_uuid(),
+                        timestamp: sim_now(),
+                        actor_id: "query-plane-read-test".to_string(),
+                    },
+                }],
+                key_rows: None,
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
+            })
+            .collect::<Vec<_>>();
+        let results = store.append_batch(&appends).await.unwrap();
+        let projections = rows
+            .iter()
+            .zip(results)
+            .map(|((entity_id, fields), result)| {
+                let mut fields = fields.clone();
+                fields["Id"] = serde_json::json!(entity_id);
+                let state_fields = fields.clone();
+                QueryProjectionUpsert {
+                    entity_type: "Order".to_string(),
+                    entity_id: entity_id.clone(),
+                    status: "Created".to_string(),
+                    state: serde_json::json!({
+                        "entity_type": "Order",
+                        "entity_id": entity_id,
+                        "status": "Created",
+                        "fields": state_fields,
+                        "sequence_nr": result.sequence_nr,
+                        "events": [],
+                    }),
+                    indexed_fields: fields.clone(),
+                    fields,
+                    sequence_nr: result.sequence_nr,
+                    known_new: true,
+                }
+            })
+            .collect::<Vec<_>>();
+        store
+            .upsert_query_projections(tenant.as_str(), &projections)
+            .await
+            .expect("batch upsert projections");
+    }
 }
 
 #[test]
@@ -249,6 +368,9 @@ async fn row_authorized_count_over_budget_returns_413() {
         QueryPlaneReadError::InvalidContinuation => {
             panic!("no $skiptoken was supplied")
         }
+        QueryPlaneReadError::StorageUnavailable => {
+            panic!("test store should be available")
+        }
     }
 }
 
@@ -300,9 +422,13 @@ async fn projection_lagged_actor_write_repairs_missing_catalog_row() {
         .await
         .expect("create local turso db");
     let mut state = build_order_state("query-plane-lag-repair");
-    create_orders(&state, 1).await;
     state.set_storage_stack(StorageStack::from_turso(store.clone()));
+    create_orders(&state, 1).await;
     let tenant = TenantId::default();
+    store
+        .remove_query_projection(tenant.as_str(), "Order", "ord-00")
+        .await
+        .expect("simulate queued projection write");
 
     let security_ctx = SecurityContext::system();
     let query_options = QueryOptions {

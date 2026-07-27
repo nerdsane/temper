@@ -237,7 +237,7 @@ async fn create_agent_with_unknown_model_speed_is_rejected() {
 }
 
 #[tokio::test]
-async fn create_agent_archived_without_archived_at_is_rejected() {
+async fn create_agent_archived_directly_is_rejected_before_archive_invariants() {
     let state = build_crucible_state();
     let body = r#"{
         "id": "agent-bad-archive",
@@ -251,12 +251,12 @@ async fn create_agent_archived_without_archived_at_is_rejected() {
     let (status, body_out) = post(&state, "/tdata/ManagedAgents", body).await;
     assert_eq!(
         status,
-        StatusCode::CONFLICT,
-        "Archived without ArchivedAt must be rejected: {body_out:?}"
+        StatusCode::BAD_REQUEST,
+        "ManagedAgent creation must start in Active before archive invariants are evaluated: {body_out:?}"
     );
     assert_eq!(
-        body_out["error"]["details"]["invariant"].as_str(),
-        Some("ArchivedRequiresArchivedAt")
+        body_out["error"]["code"].as_str(),
+        Some("InvalidInitialStatus")
     );
 }
 

@@ -6446,6 +6446,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tokio-postgres",
+ "tracing",
  "url",
  "urlencoding",
  "uuid",

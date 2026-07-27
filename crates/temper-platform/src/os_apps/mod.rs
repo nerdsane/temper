@@ -19,9 +19,9 @@ use temper_spec::csdl::{emit_csdl_xml, merge_csdl, parse_csdl};
 
 use crate::bootstrap;
 use crate::state::PlatformState;
-
 mod agent_bootstrap;
 mod app_catalog;
+mod bootstrap_listing;
 mod closure_bootstrap;
 mod entity_aliases;
 mod policy_rows;
@@ -1690,7 +1690,7 @@ async fn bootstrap_app_entity(
     let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
 
     // Look for an existing App entity with this name.
-    let existing_ids = state.server.list_entity_ids_lazy(tenant_id, "App").await;
+    let existing_ids = bootstrap_listing::list_apps(state, tenant_id, tenant, app_name).await?;
     let mut existing_app_id = None;
     for id in &existing_ids {
         if let Ok(resp) = state

@@ -16,7 +16,7 @@ use tracing::{info, instrument, warn};
 
 use temper_runtime::persistence::{
     EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
-    storage_error,
+    PersistenceSequenceGuard, storage_error, validate_latest_event_batch,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -683,6 +683,38 @@ impl EventStore for TenantStoreRouter {
         store.append_batch(appends).await
     }
 
+    #[instrument(skip_all, fields(otel.name = "router.append_batch_guarded"))]
+    async fn append_batch_guarded(
+        &self,
+        appends: &[PersistenceAppend],
+        guards: &[PersistenceSequenceGuard],
+    ) -> Result<Vec<PersistenceAppendResult>, PersistenceError> {
+        let first_id = appends
+            .first()
+            .map(|append| append.persistence_id.as_str())
+            .or_else(|| guards.first().map(|guard| guard.persistence_id.as_str()));
+        let Some(first_id) = first_id else {
+            return Ok(Vec::new());
+        };
+        let (tenant, _, _) =
+            parse_persistence_id_parts(first_id).map_err(PersistenceError::Storage)?;
+        for persistence_id in appends
+            .iter()
+            .map(|append| append.persistence_id.as_str())
+            .chain(guards.iter().map(|guard| guard.persistence_id.as_str()))
+        {
+            let (next_tenant, _, _) =
+                parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+            if next_tenant != tenant {
+                return Err(PersistenceError::Storage(format!(
+                    "guarded append cannot span routed tenant databases: '{tenant}' and '{next_tenant}'"
+                )));
+            }
+        }
+        let store = self.store_for_tenant(tenant).await?;
+        store.append_batch_guarded(appends, guards).await
+    }
+
     #[instrument(skip_all, fields(persistence_id, otel.name = "router.read_events"))]
     async fn read_events(
         &self,
@@ -693,6 +725,59 @@ impl EventStore for TenantStoreRouter {
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let store = self.store_for_tenant(tenant).await?;
         store.read_events(persistence_id, from_sequence).await
+    }
+
+    #[instrument(skip_all, fields(persistence_id, limit, otel.name = "router.read_events_bounded"))]
+    async fn read_events_bounded(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        let (tenant, _, _) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .read_events_bounded(persistence_id, from_sequence, limit)
+            .await
+    }
+
+    #[instrument(skip_all, fields(otel.name = "router.read_latest_events"))]
+    async fn read_latest_events(
+        &self,
+        persistence_ids: &[String],
+    ) -> Result<Vec<Option<PersistenceEnvelope>>, PersistenceError> {
+        validate_latest_event_batch(persistence_ids)?;
+        let mut by_tenant: BTreeMap<String, Vec<(usize, String)>> = BTreeMap::new();
+        for (index, persistence_id) in persistence_ids.iter().enumerate() {
+            let (tenant, _, _) =
+                parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+            by_tenant
+                .entry(tenant.to_string())
+                .or_default()
+                .push((index, persistence_id.clone()));
+        }
+
+        let mut out = vec![None; persistence_ids.len()];
+        for (tenant, requests) in by_tenant {
+            let store = self.store_for_tenant(&tenant).await?;
+            let ids = requests
+                .iter()
+                .map(|(_, persistence_id)| persistence_id.clone())
+                .collect::<Vec<_>>();
+            let events = store.read_latest_events(&ids).await?;
+            if events.len() != requests.len() {
+                return Err(PersistenceError::Storage(format!(
+                    "tenant latest-event read returned {} rows for {} streams",
+                    events.len(),
+                    requests.len()
+                )));
+            }
+            for ((index, _), event) in requests.into_iter().zip(events) {
+                out[index] = event;
+            }
+        }
+        Ok(out)
     }
 
     #[instrument(skip_all, fields(persistence_id, otel.name = "router.save_snapshot"))]
@@ -830,6 +915,19 @@ impl EventStore for TenantStoreRouter {
             .vectored_entity_ids_for_type(tenant, entity_type)
             .await
     }
+
+    #[instrument(skip_all, fields(tenant, otel.name = "router.list_entity_ids_limited"))]
+    async fn list_entity_ids_limited(
+        &self,
+        tenant: &str,
+        entity_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .list_entity_ids_limited(tenant, entity_type, limit)
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -885,6 +983,18 @@ mod tests {
         let read_back = router.read_events(persistence_id, 0).await.expect("read");
         assert_eq!(read_back.len(), 1);
         assert_eq!(read_back[0].event_type, "OrderCreated");
+
+        router
+            .append("alpha:Order:order-2", 0, &events)
+            .await
+            .expect("append second routed stream");
+        assert_eq!(
+            router
+                .list_entity_ids_limited("alpha", Some("Order"), 1)
+                .await
+                .expect("bounded routed listing"),
+            vec![("Order".to_string(), "order-1".to_string())]
+        );
 
         // System tenant routes to platform DB.
         let sys_store = router

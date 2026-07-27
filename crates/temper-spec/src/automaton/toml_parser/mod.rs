@@ -28,6 +28,9 @@ enum Section {
     Integration,
     FieldInvariant,
     StateTimeout,
+    /// Cedar context-entity declarations. Extracted via serde so dropping one
+    /// cannot silently remove a server-derived authorization attribute.
+    ContextEntity,
     /// ADR-0153: `[[key]]` unique-key declarations. Passthrough; extracted via
     /// serde in the second pass.
     Key,
@@ -76,6 +79,7 @@ impl ParseState {
             // ADR-0049: state_timeouts use nested inline tables for params;
             // parse via serde in the second pass rather than field-by-field.
             "[[state_timeout]]" => self.start_passthrough_section(Section::StateTimeout),
+            "[[context_entity]]" => self.start_passthrough_section(Section::ContextEntity),
             // ADR-0153: [[key]] unique-key declarations — passthrough; serde
             // extracts them in the second pass.
             "[[key]]" => self.start_passthrough_section(Section::Key),
@@ -111,6 +115,7 @@ impl ParseState {
             Section::Integration => self.apply_integration_field(key, &value),
             Section::FieldInvariant
             | Section::StateTimeout
+            | Section::ContextEntity
             | Section::Key
             | Section::Vector
             | Section::Webhook
@@ -447,6 +452,9 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
     // an isolated pass. Errors are propagated — a silently-dropped timeout
     // would mean a trap state at runtime.
     automaton.state_timeouts = extract_state_timeouts(input)?;
+    // Context entities define server-derived Cedar attributes. Silently
+    // dropping one would let authorization observe an incomplete resource.
+    automaton.context_entities = extract_context_entities(input)?;
     // ADR-0153: [[key]] unique-key declarations; serde-extracted like timeouts.
     // A silently-dropped key would mean the declared access path is not indexed.
     automaton.keys = extract_keys(input)?;
@@ -716,6 +724,28 @@ fn extract_state_timeouts(
     toml::from_str::<StateTimeoutWrapper>(&slice)
         .map(|w| w.state_timeouts)
         .map_err(|e| AutomatonParseError::Toml(format!("state_timeout: {e}")))
+}
+
+/// Extract `[[context_entity]]` Cedar context declarations via serde.
+///
+/// Errors are propagated because silently dropping a declaration would remove
+/// the corresponding authoritative `ctx_<name>_status` attribute at runtime.
+fn extract_context_entities(
+    source: &str,
+) -> Result<Vec<super::types::ContextEntityDecl>, AutomatonParseError> {
+    let slice = isolate_sections(source, "[[context_entity]]");
+    if slice.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ContextEntityWrapper {
+        #[serde(default, rename = "context_entity")]
+        context_entities: Vec<super::types::ContextEntityDecl>,
+    }
+    toml::from_str::<ContextEntityWrapper>(&slice)
+        .map(|wrapper| wrapper.context_entities)
+        .map_err(|error| AutomatonParseError::Toml(format!("context_entity: {error}")))
 }
 
 /// Extract `[[key]]` unique-key declarations from TOML source via serde

@@ -60,24 +60,29 @@ impl ServerState {
         let owner_key = normalize_key(&owner_id);
         let name_key = normalize_key(&name);
 
-        for candidate_id in self.list_entity_ids_lazy(tenant, APP_ENTITY_TYPE).await {
+        for candidate_id in self
+            .list_entity_ids_lazy(tenant, APP_ENTITY_TYPE)
+            .await
+            .map_err(|error| {
+                CommonsAppUniquenessError::Internal(format!(
+                    "failed to list Apps for commons uniqueness: {error}"
+                ))
+            })?
+        {
             if candidate_id == entity_id {
                 continue;
             }
-            if !self
-                .ensure_entity_loaded(tenant, APP_ENTITY_TYPE, &candidate_id)
-                .await
-            {
-                continue;
-            }
             let candidate = self
-                .get_tenant_entity_state(tenant, APP_ENTITY_TYPE, &candidate_id)
+                .get_tenant_entity_state_authoritative(tenant, APP_ENTITY_TYPE, &candidate_id)
                 .await
                 .map_err(|e| {
                     CommonsAppUniquenessError::Internal(format!(
                         "failed to read App '{candidate_id}' for commons uniqueness: {e}"
                     ))
                 })?;
+            let Some(candidate) = candidate else {
+                continue;
+            };
             let candidate_owner = first_non_empty_string(&candidate.state.fields, &["OwnerId"]);
             let candidate_name = first_non_empty_string(&candidate.state.fields, &["Name"]);
             if candidate_owner.as_deref().map(normalize_key) == Some(owner_key.clone())

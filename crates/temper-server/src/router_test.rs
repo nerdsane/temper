@@ -2,8 +2,11 @@ use super::*;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use temper_runtime::ActorSystem;
+use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
+use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::parse_csdl;
+use temper_store_sim::SimEventStore;
 use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
@@ -25,6 +28,72 @@ fn test_state_with_ioa() -> ServerState {
     let mut specs = std::collections::BTreeMap::new();
     specs.insert("Order".to_string(), order_ioa.to_string());
     ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap()
+}
+
+fn test_state_with_ioa_and_sim_store(store: SimEventStore) -> ServerState {
+    let mut state = test_state_with_ioa();
+    state.set_storage_stack(StorageStack::from_sim(store, None));
+    state
+}
+
+fn test_state_with_context_ioa_and_sim_store(store: SimEventStore) -> ServerState {
+    let csdl_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.ContextTest" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Owner">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityType Name="Document">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="OwnerId" Type="Edm.String" Nullable="false"/>
+        <Property Name="Title" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="Container">
+        <EntitySet Name="Owners" EntityType="Temper.ContextTest.Owner"/>
+        <EntitySet Name="Documents" EntityType="Temper.ContextTest.Document"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+    let owner_ioa = r#"
+[automaton]
+name = "Owner"
+states = ["Allowed", "Revoked"]
+initial = "Allowed"
+
+[[action]]
+name = "Revoke"
+kind = "input"
+from = ["Allowed"]
+to = "Revoked"
+"#;
+    let document_ioa = r#"
+[automaton]
+name = "Document"
+states = ["Active"]
+initial = "Active"
+
+[[context_entity]]
+name = "owner"
+entity_type = "Owner"
+id_field = "OwnerId"
+"#;
+    let csdl = parse_csdl(csdl_xml).expect("parse context test CSDL");
+    let mut registry = crate::registry::SpecRegistry::new();
+    registry.register_tenant(
+        TenantId::default(),
+        csdl,
+        csdl_xml.to_string(),
+        &[("Owner", owner_ioa), ("Document", document_ioa)],
+    );
+    let mut state = ServerState::from_registry(ActorSystem::new("test-context-guard"), registry);
+    state.set_storage_stack(StorageStack::from_sim(store, None));
+    state
 }
 
 fn test_state_with_order_and_payment_ioa() -> ServerState {
@@ -308,6 +377,13 @@ kind = "input"
 from = ["PendingVerification", "Verified"]
 to = "Verified"
 params = ["VerificationProvider", "VerificationSubject", "VerifiedAt"]
+
+[[action]]
+name = "Suspend"
+kind = "input"
+from = ["Verified", "Suspended"]
+to = "Suspended"
+params = ["Reason"]
 "#;
     let repository_ioa = r#"
 [automaton]
@@ -639,8 +715,236 @@ async fn test_post_entity_creation_uses_odata_id_property() {
 }
 
 #[tokio::test]
+async fn test_post_entity_creation_rejects_conflicting_id_aliases() {
+    let state = test_state_with_ioa();
+    let app = build_router(state.clone());
+    let response = app
+        .oneshot(
+            Request::post("/tdata/Orders")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"id":"lower-id","Id":"odata-id"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["error"]["code"], "ConflictingEntityIdAliases");
+    assert!(!state.entity_exists(&TenantId::default(), "Order", "lower-id"));
+    assert!(!state.entity_exists(&TenantId::default(), "Order", "odata-id"));
+}
+
+#[tokio::test]
+async fn test_post_entity_creation_rejects_non_initial_lifecycle_alias() {
+    let state = test_state_with_ioa();
+    let app = build_router(state.clone());
+    let response = app
+        .oneshot(
+            Request::post("/tdata/Orders")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"Id":"order-forged-status","Status":"Cancelled"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["error"]["code"], "InvalidInitialStatus");
+    assert!(!state.entity_exists(&TenantId::default(), "Order", "order-forged-status"));
+}
+
+#[tokio::test]
+async fn create_collision_authorizes_the_durable_winner_and_returns_conflict() {
+    let store = SimEventStore::no_faults(811);
+    let state = test_state_with_ioa_and_sim_store(store.clone());
+    let tenant = TenantId::default();
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            "create-collision",
+            serde_json::json!({"OwnerId": "victim"}),
+        )
+        .await
+        .expect("seed durable winner");
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            r#"
+                permit(
+                  principal is Agent,
+                  action == Action::"create",
+                  resource is Order
+                ) when { resource.OwnerId == principal.id };
+            "#,
+        )
+        .expect("install owner-scoped create policy");
+    let app = build_router(state);
+
+    let denied = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Orders")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "attacker")
+                .header("X-Temper-Principal-Kind", "agent")
+                .body(Body::from(
+                    r#"{"Id":"create-collision","OwnerId":"attacker"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+    let visible_conflict = app
+        .oneshot(
+            Request::post("/tdata/Orders")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "victim")
+                .header("X-Temper-Principal-Kind", "agent")
+                .body(Body::from(
+                    r#"{"Id":"create-collision","OwnerId":"victim"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(visible_conflict.status(), StatusCode::CONFLICT);
+    let journal = store
+        .read_events("default:Order:create-collision", 0)
+        .await
+        .unwrap();
+    assert_eq!(journal.len(), 1);
+    let created: crate::entity_actor::EntityEvent =
+        serde_json::from_value(journal[0].payload.clone()).unwrap();
+    assert_eq!(created.params["OwnerId"], "victim");
+}
+
+#[tokio::test]
+async fn concurrent_collection_creates_commit_one_generation() {
+    let store = SimEventStore::no_faults(812);
+    let state = test_state_with_ioa_and_sim_store(store.clone());
+    let app = build_router(state);
+    let first = app.clone().oneshot(
+        Request::post("/tdata/Orders")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                r#"{"Id":"concurrent-create","OwnerId":"owner-a"}"#,
+            ))
+            .unwrap(),
+    );
+    let second = app.oneshot(
+        Request::post("/tdata/Orders")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                r#"{"Id":"concurrent-create","OwnerId":"owner-b"}"#,
+            ))
+            .unwrap(),
+    );
+    let (first, second) = tokio::join!(first, second);
+    let mut statuses = vec![first.unwrap().status(), second.unwrap().status()];
+    statuses.sort();
+    assert_eq!(statuses, vec![StatusCode::CREATED, StatusCode::CONFLICT]);
+    let journal = store
+        .read_events("default:Order:concurrent-create", 0)
+        .await
+        .unwrap();
+    assert_eq!(journal.len(), 1);
+    assert_eq!(journal[0].event_type, "Created");
+}
+
+#[tokio::test]
+async fn collection_create_can_start_a_new_generation_after_tombstone() {
+    let store = SimEventStore::no_faults(813);
+    let state = test_state_with_ioa_and_sim_store(store.clone());
+    let app = build_router(state);
+    let create_request = |owner: &'static str| {
+        Request::post("/tdata/Orders")
+            .header("Content-Type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"Id":"recreated-order","OwnerId":"{owner}"}}"#
+            )))
+            .unwrap()
+    };
+    let created = app.clone().oneshot(create_request("first")).await.unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let deleted = app
+        .clone()
+        .oneshot(
+            Request::delete("/tdata/Orders('recreated-order')")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    let recreated = app.oneshot(create_request("second")).await.unwrap();
+    assert_eq!(recreated.status(), StatusCode::CREATED);
+
+    let journal = store
+        .read_events("default:Order:recreated-order", 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        journal
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Created", "Deleted", "Created"]
+    );
+    let recreated_event: crate::entity_actor::EntityEvent =
+        serde_json::from_value(journal[2].payload.clone()).unwrap();
+    assert_eq!(recreated_event.params["OwnerId"], "second");
+}
+
+#[tokio::test]
 async fn test_data_only_entity_create_fast_path_persists_projection_without_actor_spawn() {
     let state = test_state_with_data_only_ioa_and_turso().await;
+    state
+        .authz
+        .reload_tenant_policies(
+            "default",
+            r#"
+                permit(
+                  principal is Agent,
+                  action == Action::"create",
+                  resource is LogEntry
+                ) when {
+                  resource.id == "entry-1" &&
+                  resource.Id == "entry-1" &&
+                  resource.status == "Recorded" &&
+                  resource.Status == "Recorded" &&
+                  !resource.has_spec
+                };
+
+                forbid(
+                  principal is Agent,
+                  action == Action::"create",
+                  resource is LogEntry
+                ) when {
+                  resource has ctx_owner_status
+                };
+
+                permit(
+                  principal,
+                  action == Action::"read",
+                  resource is LogEntry
+                );
+            "#,
+        )
+        .expect("install trusted-create policy");
     let app = build_router(state.clone());
 
     let create_response = app
@@ -648,8 +952,10 @@ async fn test_data_only_entity_create_fast_path_persists_projection_without_acto
         .oneshot(
             Request::post("/tdata/LogEntries")
                 .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "odata-create-test")
+                .header("X-Temper-Principal-Kind", "agent")
                 .body(Body::from(
-                    r#"{"Id": "entry-1", "Body": "created through fast path"}"#,
+                    r#"{"id":"entry-1","Status":"Recorded","status":"Recorded","has_spec":false,"ctx_owner_status":"Forged","Body":"created through fast path"}"#,
                 ))
                 .unwrap(),
         )
@@ -662,6 +968,16 @@ async fn test_data_only_entity_create_fast_path_persists_projection_without_acto
     let create_json: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
     assert_eq!(create_json["status"], "Recorded");
     assert_eq!(create_json["fields"]["Body"], "created through fast path");
+    assert_eq!(create_json["fields"]["Id"], "entry-1");
+    assert_eq!(create_json["fields"]["Status"], "Recorded");
+    assert_eq!(create_json["fields"]["id"], "entry-1");
+    assert_eq!(create_json["fields"]["status"], "Recorded");
+    for reserved in ["has_spec", "ctx_owner_status"] {
+        assert!(
+            create_json["fields"].get(reserved).is_none(),
+            "runtime-owned alias {reserved} must not enter durable fields"
+        );
+    }
 
     let actor_key = "default:LogEntry:entry-1";
     assert!(
@@ -686,6 +1002,29 @@ async fn test_data_only_entity_create_fast_path_persists_projection_without_acto
     assert_eq!(hydrated.state.status, "Recorded");
     assert_eq!(hydrated.state.sequence_nr, 1);
     assert_eq!(hydrated.state.fields["Body"], "created through fast path");
+    assert_eq!(hydrated.state.fields["Id"], "entry-1");
+    assert_eq!(hydrated.state.fields["Status"], "Recorded");
+    assert_eq!(hydrated.state.fields["id"], "entry-1");
+    assert_eq!(hydrated.state.fields["status"], "Recorded");
+    let created_params = &hydrated
+        .state
+        .events
+        .back()
+        .expect("Created event should replay")
+        .params;
+    for reserved in [
+        "Id",
+        "id",
+        "Status",
+        "status",
+        "has_spec",
+        "ctx_owner_status",
+    ] {
+        assert!(
+            created_params.get(reserved).is_none(),
+            "runtime-owned field {reserved} must not be persisted in event params"
+        );
+    }
     assert!(state.actor_registry.read().unwrap().contains_key(actor_key));
 }
 
@@ -961,6 +1300,48 @@ async fn test_blob_ingest_raw_applies_cedar_create_policy() {
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert!(state.list_entity_ids(&tenant, "Blob").is_empty());
+}
+
+#[tokio::test]
+async fn test_blob_ingest_raw_create_policy_uses_shared_authoritative_attributes() {
+    let state = test_state_with_blob_ioa();
+    let tenant = TenantId::default();
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            r#"
+                permit(
+                  principal is Agent,
+                  action == Action::"create",
+                  resource is Blob
+                ) when {
+                  resource.id == "f2ba8f84ab5c1bce84a7b441cb1959cfc7093b7f" &&
+                  resource.Id == "f2ba8f84ab5c1bce84a7b441cb1959cfc7093b7f" &&
+                  resource.status == "Durable" &&
+                  resource.Status == "Durable" &&
+                  !resource.has_spec
+                };
+            "#,
+        )
+        .expect("install content-addressed create policy");
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::post("/tdata/Blobs/Temper.IngestRaw")
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Length", "3")
+                .header("X-Repository-Id", "rp-acme-demo")
+                .header("X-Temper-Principal-Id", "blob-create-test")
+                .header("X-Temper-Principal-Kind", "agent")
+                .body(Body::from("abc"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert!(state.entity_exists(&tenant, "Blob", "f2ba8f84ab5c1bce84a7b441cb1959cfc7093b7f"));
 }
 
 #[tokio::test]
@@ -1379,6 +1760,97 @@ async fn commons_account_verification_blocks_owner_scoped_writes_until_verified(
 }
 
 #[tokio::test]
+async fn commons_account_verification_observes_remote_owner_suspension() {
+    let mut state = test_state_with_account_verification_ioa();
+    let store = SimEventStore::no_faults(192_710);
+    state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
+    state.enable_commons_guardrails("default");
+    let app = build_router(state);
+
+    let owner = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Owners")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "alice")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"alice","AccountId":"alice","DisplayName":"Alice","StorageCapBytes":1024,"RateLimitTier":"free"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(owner.status(), StatusCode::CREATED);
+
+    let verify = app
+        .clone()
+        .oneshot(
+            Request::post(
+                "/tdata/Owners('alice')/Temper.AccountVerificationTest.MarkVerified",
+            )
+            .header("Content-Type", "application/json")
+            .header("X-Temper-Principal-Id", "operator")
+            .header("X-Temper-Principal-Kind", "admin")
+            .body(Body::from(
+                r#"{"VerificationProvider":"email","VerificationSubject":"alice@example.test","VerifiedAt":"2026-07-10T00:00:00Z"}"#,
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(verify.status(), StatusCode::OK);
+
+    let persistence_id = "default:Owner:alice";
+    store
+        .append(
+            persistence_id,
+            2,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "Suspend".to_string(),
+                payload: serde_json::json!({
+                    "action": "Suspend",
+                    "from_status": "Verified",
+                    "to_status": "Suspended",
+                    "timestamp": sim_now(),
+                    "params": {"Reason": "remote risk decision"},
+                    "idempotency_key": null
+                }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: persistence_id.to_string(),
+                },
+            }],
+        )
+        .await
+        .expect("append remote suspension");
+
+    let repository = app
+        .oneshot(
+            Request::post("/tdata/Repositories")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "alice")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"rp-stale-owner","OwnerAccountId":"alice","Name":"blocked-after-suspension","Description":"","DefaultBranch":"refs/heads/main","Visibility":"public"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(repository.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(repository.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["code"], "OwnerSuspended");
+}
+
+#[tokio::test]
 async fn commons_app_name_unique_per_owner_on_create_and_patch() {
     let state = test_state_with_owner_app_ioa();
     state.enable_commons_guardrails("default");
@@ -1568,6 +2040,7 @@ async fn test_post_body_used_for_entity_creation() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     // Verify the body fields were stored
     assert_eq!(json["fields"]["customer"], "Bob");
+    assert_eq!(json["fields"]["Id"], "order-42");
     assert_eq!(json["fields"]["id"], "order-42");
 }
 
@@ -1646,6 +2119,390 @@ async fn test_patch_updates_entity() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["fields"]["customer"], "Bob");
+}
+
+#[tokio::test]
+async fn test_patch_and_put_are_durable_and_canonical_after_restart() {
+    let store = SimEventStore::no_faults(808);
+    let state = test_state_with_ioa_and_sim_store(store.clone());
+    let app = build_router(state.clone());
+
+    let create = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Orders")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"Id":"durable-fields","customer":"Alice","KeepField":"remove-me"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+    let create_body = axum::body::to_bytes(create.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let create_json: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
+    assert_eq!(create_json["entity_id"], "durable-fields");
+    assert_eq!(create_json["fields"]["Id"], "durable-fields");
+    let created_journal = store
+        .read_events("default:Order:durable-fields", 0)
+        .await
+        .expect("read Created event");
+    assert_eq!(
+        created_journal
+            .iter()
+            .map(|envelope| envelope.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Created"],
+        "create response: {create_json}; durable ids: {:?}",
+        store.list_entity_ids("default").await
+    );
+
+    let wrong_id = app
+        .clone()
+        .oneshot(
+            Request::patch("/tdata/Orders('durable-fields')")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"Id":"other-id","customer":"Mallory"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wrong_id.status(), StatusCode::BAD_REQUEST);
+
+    let wrong_status = app
+        .clone()
+        .oneshot(
+            Request::put("/tdata/Orders('durable-fields')")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"Status":"Cancelled","customer":"Mallory"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wrong_status.status(), StatusCode::BAD_REQUEST);
+
+    let patch = app
+        .clone()
+        .oneshot(
+            Request::patch("/tdata/Orders('durable-fields')")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"id":"durable-fields","Id":"durable-fields","status":"Draft","Status":"Draft","has_spec":false,"ctx_owner_status":"Forged","customer":"Bob"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch.status(), StatusCode::OK);
+
+    let put = app
+        .clone()
+        .oneshot(
+            Request::put("/tdata/Orders('durable-fields')")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"id":"durable-fields","Status":"Draft","has_spec":false,"ctx_owner_status":"Forged","customer":"Carol"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+    let put_body = axum::body::to_bytes(put.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let put_json: serde_json::Value = serde_json::from_slice(&put_body).unwrap();
+    assert_eq!(put_json["fields"]["Id"], "durable-fields");
+    assert_eq!(put_json["fields"]["Status"], "Draft");
+    assert_eq!(put_json["fields"]["id"], "durable-fields");
+    assert_eq!(put_json["fields"]["status"], "Draft");
+    assert_eq!(put_json["fields"]["customer"], "Carol");
+    assert!(put_json["fields"].get("KeepField").is_none());
+    for reserved in ["has_spec", "ctx_owner_status"] {
+        assert!(put_json["fields"].get(reserved).is_none());
+    }
+
+    let journal = store
+        .read_events("default:Order:durable-fields", 0)
+        .await
+        .expect("read durable field-update journal");
+    assert_eq!(
+        journal.len(),
+        3,
+        "journal event types: {:?}",
+        journal
+            .iter()
+            .map(|envelope| envelope.event_type.as_str())
+            .collect::<Vec<_>>()
+    );
+    let events = journal
+        .iter()
+        .map(|envelope| {
+            serde_json::from_value::<crate::entity_actor::EntityEvent>(envelope.payload.clone())
+                .expect("field-update event should deserialize")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(events[0].action, "Created");
+    assert_eq!(events[1].action, "FieldsPatched");
+    assert_eq!(events[2].action, "FieldsReplaced");
+    for event in &events[1..] {
+        for reserved in [
+            "id",
+            "Id",
+            "status",
+            "Status",
+            "has_spec",
+            "ctx_owner_status",
+        ] {
+            assert!(event.params.get(reserved).is_none());
+        }
+    }
+
+    drop(app);
+    drop(state);
+    let restarted = test_state_with_ioa_and_sim_store(store.clone());
+    let replayed = restarted
+        .get_tenant_entity_state(&TenantId::default(), "Order", "durable-fields")
+        .await
+        .expect("field updates should replay after restart");
+    assert_eq!(replayed.state.sequence_nr, 3);
+    assert_eq!(replayed.state.fields["Id"], "durable-fields");
+    assert_eq!(replayed.state.fields["Status"], "Draft");
+    assert_eq!(replayed.state.fields["id"], "durable-fields");
+    assert_eq!(replayed.state.fields["status"], "Draft");
+    assert_eq!(replayed.state.fields["customer"], "Carol");
+    assert!(replayed.state.fields.get("KeepField").is_none());
+    for reserved in ["has_spec", "ctx_owner_status"] {
+        assert!(replayed.state.fields.get(reserved).is_none());
+    }
+
+    let deleted = restarted
+        .delete_tenant_entity(&TenantId::default(), "Order", "durable-fields")
+        .await
+        .expect("delete after replay");
+    assert_eq!(deleted.state.status, "Deleted");
+    let update_error = restarted
+        .update_tenant_entity_fields(
+            &TenantId::default(),
+            "Order",
+            "durable-fields",
+            serde_json::json!({"customer": "after-delete"}),
+            false,
+        )
+        .await
+        .expect_err("field update must not append after a tombstone");
+    assert!(update_error.contains("after entity deletion"));
+    let final_journal = store
+        .read_events("default:Order:durable-fields", 0)
+        .await
+        .expect("read journal after rejected post-delete update");
+    assert_eq!(final_journal.len(), 4);
+    assert_eq!(final_journal[3].event_type, "Deleted");
+}
+
+#[tokio::test]
+async fn journaled_field_update_rejects_status_change_after_authorization() {
+    let store = SimEventStore::no_faults(809);
+    let state = test_state_with_ioa_and_sim_store(store.clone());
+    let tenant = TenantId::default();
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            "stale-status-auth",
+            serde_json::json!({"OwnerId": "owner-before"}),
+        )
+        .await
+        .expect("create durable order");
+    let authorized = state
+        .load_authz_resource_snapshot(&tenant, "Order", "stale-status-auth")
+        .await
+        .expect("load authorization snapshot");
+    let precondition =
+        crate::entity_actor::effects::field_update_precondition(&authorized.current_state.state);
+
+    let cancelled = state
+        .dispatch_tenant_action(
+            &tenant,
+            "Order",
+            "stale-status-auth",
+            "CancelOrder",
+            serde_json::json!({}),
+            &crate::request_context::AgentContext::for_service("field-update-race-test"),
+        )
+        .await
+        .expect("cancel after authorization snapshot");
+    assert_eq!(cancelled.state.status, "Cancelled");
+
+    let error = state
+        .update_tenant_entity_fields_authorized(
+            &tenant,
+            "Order",
+            "stale-status-auth",
+            serde_json::json!({"OwnerId": "attacker"}),
+            false,
+            crate::state::FieldUpdateAuthorization {
+                target_precondition: precondition,
+                context_guards: authorized.context_guards.clone(),
+                has_unguarded_context: authorized.has_unguarded_context,
+            },
+        )
+        .await
+        .expect_err("stale status authorization must fail inside actor mailbox");
+    assert!(error.contains("authorization became stale"));
+    let current = state
+        .get_tenant_entity_state(&tenant, "Order", "stale-status-auth")
+        .await
+        .expect("read order after rejected update");
+    assert_eq!(current.state.status, "Cancelled");
+    assert_eq!(current.state.fields["OwnerId"], "owner-before");
+    let journal = store
+        .read_events("default:Order:stale-status-auth", 0)
+        .await
+        .expect("read status-race journal");
+    assert_eq!(journal.len(), 2);
+    assert_eq!(journal[1].event_type, "CancelOrder");
+}
+
+#[tokio::test]
+async fn field_update_commit_rejects_changed_context_status() {
+    let store = SimEventStore::no_faults(810);
+    let state = test_state_with_context_ioa_and_sim_store(store.clone());
+    let tenant = TenantId::default();
+    state
+        .get_or_create_tenant_entity(&tenant, "Owner", "owner-guard", serde_json::json!({}))
+        .await
+        .expect("create context owner");
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Document",
+            "document-guard",
+            serde_json::json!({"OwnerId": "owner-guard", "Title": "before"}),
+        )
+        .await
+        .expect("create guarded document");
+
+    let authorized = state
+        .load_authz_resource_snapshot(&tenant, "Document", "document-guard")
+        .await
+        .expect("load context-aware authorization snapshot");
+    assert_eq!(
+        authorized.resource_attrs.get("ctx_owner_status"),
+        Some(&serde_json::json!("Allowed")),
+        "attrs={:?}, fields={}",
+        authorized.resource_attrs,
+        authorized.current_state.state.fields
+    );
+    assert_eq!(authorized.context_guards.len(), 1);
+    assert_eq!(
+        authorized.context_guards[0].persistence_id,
+        "default:Owner:owner-guard"
+    );
+    assert_eq!(authorized.context_guards[0].expected_sequence, 1);
+    let target_precondition =
+        crate::entity_actor::effects::field_update_precondition(&authorized.current_state.state);
+
+    state
+        .dispatch_tenant_action(
+            &tenant,
+            "Owner",
+            "owner-guard",
+            "Revoke",
+            serde_json::json!({}),
+            &crate::request_context::AgentContext::for_service("context-guard-race-test"),
+        )
+        .await
+        .expect("revoke owner after authorization");
+
+    let error = state
+        .update_tenant_entity_fields_authorized(
+            &tenant,
+            "Document",
+            "document-guard",
+            serde_json::json!({"Title": "must-not-commit"}),
+            false,
+            crate::state::FieldUpdateAuthorization {
+                target_precondition,
+                context_guards: authorized.context_guards,
+                has_unguarded_context: authorized.has_unguarded_context,
+            },
+        )
+        .await
+        .expect_err("context journal guard must reject the stale authorization decision");
+    assert!(error.contains("authorization became stale"));
+
+    let document = state
+        .get_tenant_entity_state(&tenant, "Document", "document-guard")
+        .await
+        .expect("read document after rejected context race");
+    assert_eq!(document.state.fields["Title"], "before");
+    let journal = store
+        .read_events("default:Document:document-guard", 0)
+        .await
+        .expect("read guarded document journal");
+    assert_eq!(journal.len(), 1);
+    assert_eq!(journal[0].event_type, "Created");
+}
+
+#[tokio::test]
+async fn in_memory_field_update_rejects_field_change_at_unchanged_sequence() {
+    let state = test_state_with_ioa();
+    let tenant = TenantId::default();
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            "stale-field-auth",
+            serde_json::json!({"OwnerId": "owner-before"}),
+        )
+        .await
+        .expect("create in-memory order");
+    let authorized = state
+        .load_authz_resource_snapshot(&tenant, "Order", "stale-field-auth")
+        .await
+        .expect("load in-memory authorization snapshot");
+    assert_eq!(authorized.current_state.state.sequence_nr, 0);
+    let precondition =
+        crate::entity_actor::effects::field_update_precondition(&authorized.current_state.state);
+
+    let winner = state
+        .update_tenant_entity_fields(
+            &tenant,
+            "Order",
+            "stale-field-auth",
+            serde_json::json!({"OwnerId": "owner-winner"}),
+            false,
+        )
+        .await
+        .expect("winning in-memory update");
+    assert_eq!(winner.state.sequence_nr, 0);
+
+    let error = state
+        .update_tenant_entity_fields_authorized(
+            &tenant,
+            "Order",
+            "stale-field-auth",
+            serde_json::json!({"OwnerId": "owner-stale"}),
+            false,
+            crate::state::FieldUpdateAuthorization {
+                target_precondition: precondition,
+                context_guards: authorized.context_guards.clone(),
+                has_unguarded_context: authorized.has_unguarded_context,
+            },
+        )
+        .await
+        .expect_err("field digest must catch no-journal races at sequence zero");
+    assert!(error.contains("authorization became stale"));
+    let current = state
+        .get_tenant_entity_state(&tenant, "Order", "stale-field-auth")
+        .await
+        .expect("read in-memory winner");
+    assert_eq!(current.state.sequence_nr, 0);
+    assert_eq!(current.state.fields["OwnerId"], "owner-winner");
 }
 
 #[tokio::test]

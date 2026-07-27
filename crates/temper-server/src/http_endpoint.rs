@@ -205,7 +205,27 @@ pub async fn rebuild_tenant_table(state: &crate::state::ServerState, tenant: &Te
     // rebuild sees 0 rows even when there ARE active HttpEndpoint
     // rows in durable storage. `list_entity_ids_lazy` handles the
     // populate-if-empty path.
-    let ids: Vec<String> = state.list_entity_ids_lazy(tenant, "HttpEndpoint").await;
+    let ids = match state.list_entity_ids_lazy(tenant, "HttpEndpoint").await {
+        Ok(ids) => ids,
+        Err(error) => {
+            tracing::error!(
+                tenant = %tenant,
+                %error,
+                "failed to rebuild HttpEndpoint table from durable entities"
+            );
+            // The previous table may contain endpoints that were deleted while
+            // the journal was unavailable. Keeping it would turn a storage
+            // outage into stale-route execution, so fail closed until a later
+            // successful reconciliation repopulates the table.
+            state
+                .http_endpoint_tables
+                .table_for(tenant)
+                .await
+                .replace(Vec::new())
+                .await;
+            return;
+        }
+    };
 
     // Force-materialise each actor from its snapshot/event log so
     // the subsequent ask(GetState) finds them in the registry.
@@ -583,6 +603,65 @@ mod tests {
         let table_b = tables.table_for(&t2).await;
         assert!(!std::sync::Arc::ptr_eq(&table_a, &table_b));
         assert_eq!(tables.tenant_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn rebuild_clears_stale_routes_when_durable_enumeration_fails() {
+        use temper_runtime::ActorSystem;
+        use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
+        use temper_runtime::scheduler::{sim_now, sim_uuid};
+        use temper_store_sim::SimEventStore;
+
+        let store = SimEventStore::no_faults(192_004);
+        let persistence_id = "tenant-a:HttpEndpoint:he-stale";
+        store
+            .append(
+                persistence_id,
+                0,
+                &[PersistenceEnvelope {
+                    sequence_nr: 0,
+                    event_type: "Created".to_string(),
+                    payload: serde_json::json!({"action": "Created"}),
+                    metadata: EventMetadata {
+                        event_id: sim_uuid(),
+                        causation_id: sim_uuid(),
+                        correlation_id: sim_uuid(),
+                        timestamp: sim_now(),
+                        actor_id: "http-endpoint-rebuild-test".to_string(),
+                    },
+                }],
+            )
+            .await
+            .unwrap();
+        let mut state = crate::state::ServerState::from_registry(
+            ActorSystem::new("http-endpoint-rebuild-failure"),
+            crate::registry::SpecRegistry::new(),
+        );
+        state.set_storage_stack(crate::storage::StorageStack::new(
+            crate::storage::BackendLabel::Sim,
+            crate::storage::BoxedEventStore::new(store.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ));
+        let tenant = TenantId::new("tenant-a");
+        let table = state.http_endpoint_tables.table_for(&tenant).await;
+        table
+            .replace(vec![route("he-stale", "/stale", &["GET"], "stale")])
+            .await;
+        store.fail_next_reads(persistence_id, 1);
+
+        rebuild_tenant_table(&state, &tenant).await;
+
+        assert!(
+            table.is_empty().await,
+            "an uncertain rebuild must fail closed instead of preserving executable stale routes"
+        );
     }
 
     #[tokio::test]

@@ -14,6 +14,7 @@
 
 mod data_only_create;
 pub mod dbm;
+mod latest_events;
 mod metrics;
 pub mod migration;
 pub mod platform;

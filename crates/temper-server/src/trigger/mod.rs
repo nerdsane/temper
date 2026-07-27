@@ -9,6 +9,8 @@
 //! fulfilment cascades.
 
 pub mod dispatcher;
+#[cfg(all(test, feature = "sim"))]
+mod dispatcher_test;
 pub(crate) mod guard;
 pub(crate) mod params;
 pub mod registry;

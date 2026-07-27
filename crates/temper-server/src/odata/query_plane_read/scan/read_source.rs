@@ -70,7 +70,7 @@ async fn read_source_cursor_without_filter_or_count(
             request.state.query_plane_store().is_some(),
             &mut counters,
         )
-        .await;
+        .await?;
         for entity in authorized {
             let index = authorized_seen;
             authorized_seen += 1;
@@ -136,7 +136,7 @@ async fn read_source_full_proof(
         request.state.query_plane_store().is_some(),
         &mut counters,
     )
-    .await;
+    .await?;
 
     if !missing_ids.is_empty() && request.query_options.filter.is_some() {
         let missing = missing_ids.iter().cloned().collect::<BTreeSet<_>>();
