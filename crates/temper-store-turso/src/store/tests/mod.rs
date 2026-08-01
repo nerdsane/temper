@@ -691,12 +691,79 @@ async fn policy_denial_patterns_roundtrip_and_merge() {
     assert!(ids.contains(&"ISSUE-2".to_string()));
 }
 
+/// The DDL itself must be idempotent — re-running every statement against an
+/// already-migrated database must succeed. The ARN-242 ledger short-circuits
+/// a stamped database, so this clears the ledger between runs to force the
+/// full DDL to execute again (otherwise the test would assert nothing).
 #[tokio::test]
 async fn migrate_is_idempotent() {
     let store = make_store("migrate-idempotent").await;
+    let conn = store.connection().expect("connection");
 
-    store.migrate().await.unwrap();
-    store.migrate().await.unwrap();
+    for _ in 0..2 {
+        conn.execute("DELETE FROM temper_schema_migrations", ())
+            .await
+            .expect("clear ledger so the DDL actually re-runs");
+        store
+            .migrate()
+            .await
+            .expect("re-running the DDL must succeed");
+    }
+}
+
+/// ARN-242 production-upgrade path: an EXISTING, fully-migrated database that
+/// predates the ledger is unstamped. The first boot on the new build must run
+/// the whole baseline against a populated schema — every ALTER hitting a
+/// duplicate column — and the fail-closed filter must tolerate exactly those
+/// and re-stamp. This is the highest-blast-radius path of the change: if any
+/// benign error string failed to match, boot would abort for every existing
+/// deployment.
+#[tokio::test]
+async fn migrate_upgrades_an_existing_unstamped_database() {
+    let url = sqlite_test_url("migrate-unstamped-upgrade");
+
+    // Boot once: fully migrated and stamped.
+    {
+        let store = TursoEventStore::new(&url, None).await.expect("first boot");
+        let conn = store.connection().expect("connection");
+        // Simulate a pre-ledger production database: fully migrated, no stamp.
+        conn.execute("DELETE FROM temper_schema_migrations", ())
+            .await
+            .expect("unstamp");
+    }
+
+    // Second boot on the same database: the full baseline re-runs against the
+    // populated schema and must succeed.
+    let store = TursoEventStore::new(&url, None)
+        .await
+        .expect("an existing unstamped database must upgrade cleanly");
+
+    let conn = store.connection().expect("connection");
+    let mut rows = conn
+        .query(
+            "SELECT version, fingerprint FROM temper_schema_migrations \
+             ORDER BY version DESC LIMIT 1",
+            (),
+        )
+        .await
+        .expect("ledger query");
+    let row = rows
+        .next()
+        .await
+        .expect("row")
+        .expect("the upgraded database must be re-stamped");
+    let version: i64 = row.get(0).expect("version");
+    let fingerprint: String = row.get(1).expect("fingerprint");
+    assert_eq!(
+        version,
+        super::SCHEMA_VERSION,
+        "the upgraded database must be re-stamped at the current schema version"
+    );
+    assert_eq!(
+        fingerprint,
+        super::SCHEMA_FINGERPRINT,
+        "the upgraded database must record the current schema fingerprint (the boot gate)"
+    );
 }
 
 /// Regression: append must be durable (readable from a fresh connection)
@@ -2025,5 +2092,226 @@ async fn upsert_wasm_module_stores_metadata_only_without_db_blob() {
     assert!(
         loaded.wasm_bytes.is_empty(),
         "Turso store should return metadata-only rows for new WASM artifacts"
+    );
+}
+
+/// ARN-242: `migrate()` must SURFACE real migration errors, not swallow them.
+///
+/// Thirteen `let _ = conn.execute(...)` sites discard every ALTER failure —
+/// intended for benign duplicate-column errors, but they equally swallow
+/// genuine ones. This poisons a DB so a swallowed ALTER fails for a REAL
+/// reason (a view shadows the `policies` table, so `ALTER TABLE policies
+/// ADD COLUMN enabled ...` cannot succeed): startup must fail loudly
+/// instead of serving against a half-migrated schema.
+#[tokio::test]
+async fn migrate_surfaces_real_alter_errors() {
+    let url = sqlite_test_url("migrate-real-error");
+
+    // Poison the DB before the store ever runs its schema: a VIEW named
+    // `policies` (CREATE TABLE IF NOT EXISTS tolerates it silently, but the
+    // ALTER on it fails with a non-duplicate-column error).
+    {
+        let db = libsql::Builder::new_local(url.strip_prefix("file:").unwrap_or(&url))
+            .build()
+            .await
+            .expect("build poison db");
+        let conn = db.connect().expect("connect poison db");
+        conn.execute("CREATE TABLE policies_backing (id TEXT)", ())
+            .await
+            .expect("backing table");
+        conn.execute(
+            "CREATE VIEW policies AS SELECT id FROM policies_backing",
+            (),
+        )
+        .await
+        .expect("shadow view");
+    }
+
+    let result = TursoEventStore::new(&url, None).await;
+    assert!(
+        result.is_err(),
+        "a migration statement failing for a real (non-duplicate-column) reason \
+         must fail startup, not be silently swallowed"
+    );
+}
+
+/// ARN-242: `migrate()` must record what it applied in a durable version
+/// ledger, so operators can see which schema a database is at and boots can
+/// short-circuit already-migrated databases.
+#[tokio::test]
+async fn migrate_records_schema_version_ledger() {
+    let store = make_store("migrate-ledger").await;
+    let conn = store.connection().expect("connection");
+    let mut rows = conn
+        .query("SELECT MAX(version) FROM temper_schema_migrations", ())
+        .await
+        .expect("the schema version ledger table must exist after migrate()");
+    let row = rows.next().await.expect("ledger row").expect("ledger row");
+    // MAX() over an empty ledger returns NULL — read as Option so an empty
+    // ledger fails with the real defect ("no applied version"), not a type error.
+    let version: Option<i64> = row.get(0).expect("version column");
+    let version = version.expect("the ledger must contain an applied version");
+    assert!(
+        version >= 1,
+        "the ledger must record the applied schema version, got {version}"
+    );
+}
+
+/// ARN-242 contract enforcement: a stamped database executes NO DDL, so a
+/// schema change that forgets to bump `SCHEMA_VERSION` would silently never
+/// reach existing databases — the same class of silent failure this issue
+/// exists to kill, and one that no other test can catch (every other test
+/// starts from a fresh, unstamped database and always runs the full DDL).
+///
+/// This test fingerprints the schema a fresh `migrate()` produces. ANY change
+/// to the DDL breaks it, and updating `SCHEMA_FINGERPRINT` — the boot gate —
+/// is what makes the change reach stamped databases. `SCHEMA_VERSION` is a
+/// human-readable label and is off the correctness path.
+#[tokio::test]
+async fn schema_fingerprint_matches_declared_version() {
+    use sha2::{Digest, Sha256};
+
+    let store = make_store("schema-fingerprint").await;
+    let conn = store.connection().expect("connection");
+    let mut rows = conn
+        .query(
+            "SELECT type, name, COALESCE(sql, '') FROM sqlite_master \
+             WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+            (),
+        )
+        .await
+        .expect("read schema");
+
+    let mut hasher = Sha256::new();
+    while let Some(row) = rows.next().await.expect("schema row") {
+        let kind: String = row.get(0).expect("type");
+        let name: String = row.get(1).expect("name");
+        let sql: String = row.get(2).expect("sql");
+        hasher.update(kind.as_bytes());
+        hasher.update([0]);
+        hasher.update(name.as_bytes());
+        hasher.update([0]);
+        hasher.update(sql.as_bytes());
+        hasher.update([0]);
+    }
+    let fingerprint = format!("{:x}", hasher.finalize());
+
+    assert_eq!(
+        fingerprint,
+        super::SCHEMA_FINGERPRINT,
+        "\n\nThe Turso schema changed (or the libsql/SQLite version changed how it\n\
+         renders stored DDL).\n\
+         SCHEMA_FINGERPRINT is the BOOT GATE: until it matches, stamped databases\n\
+         re-run the DDL — so updating it is what makes your change reach them.\n\
+         Set SCHEMA_FINGERPRINT (store/mod.rs) to:\n  {fingerprint}\n\
+         and bump SCHEMA_VERSION + SCHEMA_VERSION_NAME as the human-readable label.\n"
+    );
+}
+
+/// ARN-242 (F5): the ledger table sits BEFORE the gate that governs every
+/// other table, so it must migrate ITSELF, un-gated. A database whose ledger
+/// predates the `fingerprint` column must still boot: without the ledger's own
+/// ALTER, `CREATE TABLE IF NOT EXISTS` no-ops and the very next statement (the
+/// gate SELECT) dies at prepare time with "no such column: fingerprint" — a
+/// hard boot failure, and the exact class this issue exists to kill. This also
+/// pins the pattern for every future ledger column.
+#[tokio::test]
+async fn migrate_upgrades_a_ledger_that_predates_the_fingerprint_column() {
+    let url = sqlite_test_url("ledger-pre-fingerprint");
+
+    // A database migrated by a build whose ledger had no fingerprint column.
+    {
+        let store = TursoEventStore::new(&url, None).await.expect("first boot");
+        let conn = store.connection().expect("connection");
+        conn.execute("DROP TABLE temper_schema_migrations", ())
+            .await
+            .expect("drop ledger");
+        conn.execute(
+            "CREATE TABLE temper_schema_migrations (\
+                 version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)",
+            (),
+        )
+        .await
+        .expect("recreate pre-fingerprint ledger");
+        conn.execute(
+            "INSERT INTO temper_schema_migrations (version, name, applied_at) \
+             VALUES (1, 'baseline-idempotent-ddl', datetime('now'))",
+            (),
+        )
+        .await
+        .expect("stamp it the old way");
+    }
+
+    // The new build must self-migrate the ledger and boot cleanly.
+    let store = TursoEventStore::new(&url, None)
+        .await
+        .expect("a ledger predating the fingerprint column must upgrade, not fail boot");
+
+    let conn = store.connection().expect("connection");
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM temper_schema_migrations WHERE fingerprint = ?1",
+            libsql::params![super::SCHEMA_FINGERPRINT],
+        )
+        .await
+        .expect("ledger query");
+    let row = rows.next().await.expect("row").expect("row");
+    let count: i64 = row.get(0).expect("count");
+    assert_eq!(
+        count, 1,
+        "the upgraded ledger must record the current schema fingerprint"
+    );
+}
+
+/// ARN-242 (F6): a binary rolled back to an older schema must still SKIP the
+/// DDL — the gate asks "has this database EVER been migrated to the schema I
+/// declare", so the older binary finds its own retained ledger row instead of
+/// re-running all ~98 statements on every boot for as long as the rollback
+/// lasts.
+///
+/// The skip is observed, not merely predicted: a sentinel table dropped after
+/// the first boot must NOT be recreated by the second, because a skipping
+/// `migrate()` executes no DDL at all.
+#[tokio::test]
+async fn rolled_back_binary_skips_the_ddl() {
+    let url = sqlite_test_url("rollback-skip");
+
+    // This build boots and stamps its fingerprint.
+    let store = TursoEventStore::new(&url, None).await.expect("boot");
+    let conn = store.connection().expect("connection");
+
+    // A LATER build's schema is stamped on top (higher version, different fp),
+    // simulating an upgrade that was then rolled back.
+    conn.execute(
+        "INSERT INTO temper_schema_migrations (version, name, fingerprint, applied_at) \
+         VALUES (2, 'future-schema', 'future-fingerprint', datetime('now'))",
+        (),
+    )
+    .await
+    .expect("stamp a future schema");
+
+    // Drop a table the DDL would recreate. If the rolled-back boot re-ran the
+    // DDL, this table would come back.
+    conn.execute("DROP TABLE blobs", ())
+        .await
+        .expect("drop sentinel table");
+
+    // Roll back to this build: it must find its own retained row and skip.
+    let _rolled_back = TursoEventStore::new(&url, None)
+        .await
+        .expect("rolled-back boot");
+
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'blobs'",
+            (),
+        )
+        .await
+        .expect("sentinel query");
+    let row = rows.next().await.expect("row").expect("row");
+    let recreated: i64 = row.get(0).expect("count");
+    assert_eq!(
+        recreated, 0,
+        "a rolled-back binary must SKIP the DDL (the dropped table must not be recreated)"
     );
 }

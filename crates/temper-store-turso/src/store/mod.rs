@@ -41,6 +41,94 @@ mod write_gate;
 
 pub use field_index::QueryProjectionUpsert;
 use instrumentation::InstrumentedConnection;
+use libsql::params;
+
+/// ARN-242: a HUMAN-READABLE LABEL for the schema this build migrates to.
+///
+/// It is NOT the boot gate and is off the correctness path: the gate is
+/// `SCHEMA_FINGERPRINT` (see below), and bumping this constant alone changes
+/// nothing — the fingerprint is what decides whether a stamped database
+/// re-runs the DDL. Bump it alongside a fingerprint change to give the schema
+/// a name; never rely on it to make a migration reach existing databases.
+///
+/// Platform-registry DDL lives in `router.rs::migrate_platform`, OUTSIDE this
+/// ledger entirely; it runs every boot and must stay fail-closed.
+///
+/// INVARIANT: every statement in the migration must be idempotent AND safe to
+/// run concurrently with another booting server. Two servers can both observe
+/// an un-fingerprinted ledger and both run the full DDL; today every statement
+/// is `CREATE … IF NOT EXISTS` or a benign-tolerated `ADD COLUMN`, and the
+/// stamp is `INSERT OR REPLACE` on the version primary key — atomic within its
+/// statement, so concurrent stampers converge on one identical row. (REPLACE
+/// destroys the prior row for that version, which is what produces the
+/// rollback re-run caveat on `SELECT_SCHEMA_FINGERPRINT_APPLIED`.) A future
+/// version that backfills data or issues a bare `CREATE` must serialize the
+/// migration explicitly — and note the fingerprint gate is SCHEMA-shaped, so a
+/// data migration is invisible to it and needs its own gating row.
+const SCHEMA_VERSION: i64 = 1;
+/// Human-readable name recorded in the ledger for [`SCHEMA_VERSION`].
+const SCHEMA_VERSION_NAME: &str = "baseline-idempotent-ddl";
+
+/// SHA-256 of the schema a fresh `migrate()` produces — and the BOOT GATE.
+///
+/// A stamped database re-runs the DDL whenever this declared value differs
+/// from the one recorded in its ledger, so a schema change reaches existing
+/// databases even if the author forgets to bump [`SCHEMA_VERSION`] (which is
+/// a human-readable label, off the correctness path). Updating this constant
+/// is the very act that invalidates the skip — the contract cannot be
+/// satisfied without also making the migration run.
+///
+/// `schema_fingerprint_matches_declared_version` fails on ANY DDL change and
+/// prints the new value to paste here.
+const SCHEMA_FINGERPRINT: &str = "3b8b6b18aa49eeb8fc34e47f88660f65998b136576c4ef0507b757abfb66a34d";
+
+/// Execute an idempotent `ALTER TABLE … ADD COLUMN`, tolerating ONLY the
+/// benign already-applied errors (duplicate column / already exists). Every
+/// other failure — locked database, disk errors, a shadowed table, syntax —
+/// propagates with the failing statement in the message, so a real migration
+/// failure fails startup loudly instead of leaving a half-migrated schema in
+/// service (ARN-242; previously `let _ =` swallowed everything).
+///
+/// PRECONDITION: only `ADD COLUMN` statements may be routed here. SQLite's
+/// sole already-applied failure for ADD COLUMN is duplicate-column, so the
+/// benign filter cannot mask a real conflict — but an `already exists` from a
+/// CREATE would be a genuine object-name collision, and tolerating it would
+/// re-introduce the swallow this fixes.
+async fn execute_idempotent(
+    conn: &InstrumentedConnection,
+    stmt: &str,
+) -> Result<(), PersistenceError> {
+    // TigerStyle pre-assertion: the precondition above is what makes the
+    // benign filter safe. Routing a CREATE through here would let a genuine
+    // object-name collision ("already exists") be swallowed — exactly the
+    // defect this function removes.
+    debug_assert!(
+        stmt.to_ascii_uppercase().contains("ADD COLUMN"),
+        "PRECONDITION: only ADD COLUMN statements may use execute_idempotent; got: {stmt}"
+    );
+    match conn.execute(stmt, ()).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let msg = e.to_string().to_ascii_lowercase();
+            if msg.contains("duplicate column")
+                || msg.contains("already exists")
+                || msg.contains("already has")
+            {
+                Ok(())
+            } else {
+                let stmt_head: String = stmt.chars().take(120).collect();
+                tracing::error!(
+                    statement = %stmt_head,
+                    error = %e,
+                    "turso migration statement failed; startup will abort"
+                );
+                Err(storage_error(format!(
+                    "migration statement failed: {stmt_head}: {e}"
+                )))
+            }
+        }
+    }
+}
 pub use published_artifacts::{PublishedArtifactRow, PublishedArtifactUpsert};
 
 #[derive(Clone, Debug)]
@@ -108,6 +196,13 @@ impl TursoEventStore {
     }
 
     /// Run schema migrations on connect.
+    ///
+    /// ARN-242: guarded by a durable version ledger (`temper_schema_migrations`).
+    /// When the ledger already records [`SCHEMA_VERSION`], the DDL is skipped
+    /// entirely; otherwise the full idempotent schema runs FAIL-CLOSED (only
+    /// benign duplicate-column/already-exists errors are tolerated, via
+    /// [`execute_idempotent`]) and the version is stamped. EVERY schema change
+    /// must bump `SCHEMA_VERSION`, or already-stamped databases will skip it.
     #[instrument(skip_all, fields(otel.name = "turso.migrate"))]
     async fn migrate(&self) -> Result<(), PersistenceError> {
         let conn = self.connection()?;
@@ -125,12 +220,38 @@ impl TursoEventStore {
                 .map_err(storage_error)?;
         }
 
+        // The ledger's own DDL runs UN-GATED, before the gate can be read — it
+        // is the one table that sits in front of the gate, so it must migrate
+        // itself (see ALTER_SCHEMA_MIGRATIONS_ADD_FINGERPRINT).
+        conn.execute(schema::CREATE_SCHEMA_MIGRATIONS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        execute_idempotent(&conn, schema::ALTER_SCHEMA_MIGRATIONS_ADD_FINGERPRINT).await?;
+
+        let already_applied: bool = {
+            let mut rows = conn
+                .query(
+                    schema::SELECT_SCHEMA_FINGERPRINT_APPLIED,
+                    params![SCHEMA_FINGERPRINT],
+                )
+                .await
+                .map_err(storage_error)?;
+            let applied: i64 = match rows.next().await.map_err(storage_error)? {
+                Some(row) => row.get(0).map_err(storage_error)?,
+                None => 0,
+            };
+            // Drain and drop the statement so no read lock outlives the check.
+            while rows.next().await.map_err(storage_error)?.is_some() {}
+            applied != 0
+        };
+        if already_applied {
+            return Ok(());
+        }
+
         conn.execute(schema::CREATE_EVENTS_TABLE, ())
             .await
             .map_err(storage_error)?;
-        let _ = conn
-            .execute(schema::ALTER_EVENTS_ADD_SEGMENT_INDEX, ())
-            .await;
+        execute_idempotent(&conn, schema::ALTER_EVENTS_ADD_SEGMENT_INDEX).await?;
         conn.execute(schema::CREATE_EVENTS_ENTITY_INDEX, ())
             .await
             .map_err(storage_error)?;
@@ -170,21 +291,7 @@ impl TursoEventStore {
         // Idempotent ALTER for pre-existing DBs created before the source
         // column existed. Turso has no IF NOT EXISTS for ADD COLUMN, so we
         // ignore "duplicate column" errors.
-        match conn
-            .execute(schema::ADD_WASM_MODULES_SOURCE_COLUMN, ())
-            .await
-        {
-            Ok(_) => {}
-            Err(e) => {
-                let msg = e.to_string();
-                if !msg.contains("duplicate column")
-                    && !msg.contains("already exists")
-                    && !msg.contains("already has")
-                {
-                    return Err(storage_error(e));
-                }
-            }
-        }
+        execute_idempotent(&conn, schema::ADD_WASM_MODULES_SOURCE_COLUMN).await?;
         conn.execute(schema::CREATE_WASM_INVOCATION_LOGS_TABLE, ())
             .await
             .map_err(storage_error)?;
@@ -230,7 +337,7 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
         // Migration: add `enabled` column to existing `policies` tables.
-        let _ = conn.execute(schema::ALTER_POLICIES_ADD_ENABLED, ()).await;
+        execute_idempotent(&conn, schema::ALTER_POLICIES_ADD_ENABLED).await?;
         conn.execute(schema::CREATE_TENANT_INSTALLED_APPS_TABLE, ())
             .await
             .map_err(storage_error)?;
@@ -254,7 +361,7 @@ impl TursoEventStore {
             schema::ALTER_INSTALLED_APPS_ADD_LAST_RECONCILED_AT,
             schema::ALTER_INSTALLED_APPS_ADD_STATUS,
         ] {
-            let _ = conn.execute(stmt, ()).await;
+            execute_idempotent(&conn, stmt).await?;
         }
 
         // Phase 0: New tables for Turso-as-single-source-of-truth.
@@ -285,8 +392,8 @@ impl TursoEventStore {
             .map_err(storage_error)?;
 
         // Specs table extensions — add content_hash column for verification caching.
-        let _ = conn.execute(schema::ALTER_SPECS_ADD_CONTENT_HASH, ()).await;
-        let _ = conn.execute(schema::ALTER_SPECS_ADD_COMMITTED, ()).await;
+        execute_idempotent(&conn, schema::ALTER_SPECS_ADD_CONTENT_HASH).await?;
+        execute_idempotent(&conn, schema::ALTER_SPECS_ADD_COMMITTED).await?;
 
         // Trajectory table extensions — ALTER TABLE to add missing columns.
         // SQLite returns an error for duplicate columns, so we ignore failures.
@@ -302,7 +409,7 @@ impl TursoEventStore {
             schema::ALTER_TRAJECTORIES_ADD_INTENT,
             schema::ALTER_TRAJECTORIES_ADD_MATCHED_POLICY_IDS,
         ] {
-            let _ = conn.execute(stmt, ()).await; // ignore "duplicate column" errors
+            execute_idempotent(&conn, stmt).await?;
         }
         conn.execute(schema::CREATE_TRAJECTORIES_AGENT_INDEX, ())
             .await
@@ -318,7 +425,7 @@ impl TursoEventStore {
             schema::ALTER_OTS_TRAJECTORIES_ADD_LAST_ERROR,
             schema::ALTER_OTS_TRAJECTORIES_ADD_UPDATED_AT,
         ] {
-            let _ = conn.execute(stmt, ()).await;
+            execute_idempotent(&conn, stmt).await?;
         }
         conn.execute(schema::CREATE_OTS_TRAJECTORIES_AGENT_INDEX, ())
             .await
@@ -341,12 +448,7 @@ impl TursoEventStore {
         // ADR-0047: idempotent migration that adds `expires_at` to pre-existing
         // blobs tables. Duplicate-column errors are expected on newer deployments
         // that already have the column from `CREATE_BLOBS_TABLE`; swallow them.
-        if let Err(error) = conn.execute(schema::ALTER_BLOBS_ADD_EXPIRES_AT, ()).await {
-            let message = error.to_string().to_ascii_lowercase();
-            if !message.contains("duplicate column") {
-                return Err(storage_error(error));
-            }
-        }
+        execute_idempotent(&conn, schema::ALTER_BLOBS_ADD_EXPIRES_AT).await?;
         conn.execute(schema::CREATE_BLOBS_EXPIRES_AT_INDEX, ())
             .await
             .map_err(storage_error)?;
@@ -361,15 +463,9 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_ENTITY_CATALOG_STATUS_INDEX, ())
             .await
             .map_err(storage_error)?;
-        let _ = conn
-            .execute(schema::ALTER_ENTITY_CATALOG_ADD_PROJECTION_HASH, ())
-            .await;
-        let _ = conn
-            .execute(schema::ALTER_ENTITY_CATALOG_ADD_FIELDS, ())
-            .await;
-        let _ = conn
-            .execute(schema::ALTER_ENTITY_CATALOG_ADD_STATE, ())
-            .await;
+        execute_idempotent(&conn, schema::ALTER_ENTITY_CATALOG_ADD_PROJECTION_HASH).await?;
+        execute_idempotent(&conn, schema::ALTER_ENTITY_CATALOG_ADD_FIELDS).await?;
+        execute_idempotent(&conn, schema::ALTER_ENTITY_CATALOG_ADD_STATE).await?;
 
         // Entity field index — EAV table for OData filter push-down.
         conn.execute(schema::CREATE_ENTITY_FIELD_INDEX_TABLE, ())
@@ -405,6 +501,15 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_VECTOR_INDEX_BACKFILL_WATERMARK, ())
             .await
             .map_err(storage_error)?;
+
+        // Every statement above succeeded (or was a benign already-applied
+        // no-op): stamp the ledger so the next boot short-circuits.
+        conn.execute(
+            schema::INSERT_SCHEMA_VERSION,
+            params![SCHEMA_VERSION, SCHEMA_VERSION_NAME, SCHEMA_FINGERPRINT],
+        )
+        .await
+        .map_err(storage_error)?;
 
         Ok(())
     }
