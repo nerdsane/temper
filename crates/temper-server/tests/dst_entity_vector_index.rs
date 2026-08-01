@@ -189,3 +189,103 @@ async fn dst_nearest_by_reference_excludes_self() {
         );
     }
 }
+
+/// ARN-216: the vector backfill must not overwrite a NEWER live co-commit
+/// with rows built from a stale load.
+///
+/// The backfill is two store calls with nothing spanning them: (1) load the
+/// entity's state (snapshot/replay at some sequence), (2) reconcile the
+/// index to rows parsed from that load. A live write landing between them
+/// co-commits the new embedding — and step (2) then clobbers it with the
+/// stale one, after which the completion watermark declares the index
+/// authoritative. This test executes exactly that interleave.
+#[tokio::test]
+async fn dst_vector_backfill_must_not_overwrite_newer_live_write() {
+    for seed in 0..NUM_SEEDS {
+        let (_guard, _clock, _id) = install_deterministic_context(seed);
+        let store: BoxedEventStore = BoxedEventStore::new(SimEventStore::no_faults(seed));
+        let table = item_table();
+        let system = ActorSystem::new("dst-vector-race");
+        let entity_id = format!("item-race-{seed}");
+
+        // The entity exists with embedding E1.
+        create_item(
+            &system,
+            &table,
+            &store,
+            &entity_id,
+            &[1.0, 0.0, 0.0, 0.0],
+            "m1",
+        )
+        .await;
+
+        // BACKFILL step 1 (stale load): the rows the backfill would build
+        // from a load taken NOW — i.e. E1 at the current journal sequence.
+        // (The production code parses these from the replayed state; the
+        // parse result is exactly this row + this sequence.)
+        let stale_rows = vec![temper_runtime::persistence::EntityVectorRow {
+            decl_name: "embed".to_string(),
+            model_tag: "m1".to_string(),
+            vector: vec![1.0, 0.0, 0.0, 0.0],
+        }];
+        let stale_seq = {
+            let actor = EntityActor::with_persistence(
+                "Item",
+                &entity_id,
+                table.clone(),
+                serde_json::json!({}),
+                store.clone(),
+                BackendLabel::Sim,
+            )
+            .with_tenant("default");
+            let actor_ref = system.spawn(actor, format!("{entity_id}-probe"));
+            let state: EntityResponse = actor_ref
+                .ask(EntityMsg::GetState, Duration::from_secs(5))
+                .await
+                .expect("state probe");
+            state.state.sequence_nr
+        };
+
+        // LIVE WRITE lands between the backfill's load and its reconcile:
+        // the co-commit updates the index to E2.
+        let actor = EntityActor::with_persistence(
+            "Item",
+            &entity_id,
+            table.clone(),
+            serde_json::json!({}),
+            store.clone(),
+            BackendLabel::Sim,
+        )
+        .with_tenant("default");
+        let actor_ref = system.spawn(actor, format!("{entity_id}-live"));
+        let e2 = serde_json::to_string(&[0.0f32, 1.0, 0.0, 0.0]).unwrap();
+        let r = dispatch(
+            &actor_ref,
+            "Reembed",
+            serde_json::json!({ "Embedding": e2, "EmbeddingModel": "m1" }),
+        )
+        .await;
+        assert!(r.success, "seed {seed}: Reembed failed: {:?}", r.error);
+
+        // BACKFILL step 2: reconcile with the STALE rows.
+        store
+            .backfill_entity_vectors("default", "Item", &entity_id, &stale_rows, stale_seq)
+            .await
+            .expect("backfill reconcile");
+
+        // The index must still hold the newer live embedding E2.
+        let candidates = store
+            .vector_candidates("default", "Item", "embed", "m1", 1000)
+            .await
+            .expect("vector candidates");
+        let row = candidates
+            .iter()
+            .find(|c| c.entity_id == entity_id)
+            .expect("entity must be indexed");
+        assert_eq!(
+            row.vector,
+            vec![0.0, 1.0, 0.0, 0.0],
+            "seed {seed}: a stale backfill reconcile must not overwrite a newer live co-commit"
+        );
+    }
+}

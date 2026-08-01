@@ -474,6 +474,7 @@ impl EventStore for PostgresEventStore {
         entity_type: &str,
         entity_id: &str,
         vector_rows: &[EntityVectorRow],
+        as_of_sequence: u64,
     ) -> Result<(), PersistenceError> {
         // Reconcile: DELETE all of the entity's rows, then insert the current ones.
         // Empty `vector_rows` purges the entity (deleted / un-embedded). Always runs
@@ -483,6 +484,15 @@ impl EventStore for PostgresEventStore {
             .begin()
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        // ARN-216: the reconcile must not overwrite rows a NEWER live write
+        // co-committed. Under READ COMMITTED a SELECT-then-DELETE guard is not
+        // atomic (each statement gets a fresh snapshot), so the ordering is:
+        // DELETE first — taking row locks that serialize any concurrent
+        // reconcile of this entity behind this transaction — THEN check the
+        // journal sequence under those locks and ROLL BACK if it advanced past
+        // the sequence these rows were derived from. A live append committing
+        // before the DELETE is caught by the post-DELETE check; one starting
+        // after it blocks on the row locks until this transaction resolves.
         crate::dbm::postgres_query!(
             "DELETE FROM entity_vector_index \
              WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
@@ -493,6 +503,24 @@ impl EventStore for PostgresEventStore {
         .execute(&mut *tx)
         .await
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        // Aggregates always return exactly one row (COALESCE'd to 0 over an
+        // empty set), so fetch_one — no optional row to consider.
+        let (current_seq,): (i64,) = crate::dbm::postgres_query_as!(
+            "SELECT COALESCE(MAX(sequence_nr), 0) FROM events \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        if current_seq as u64 > as_of_sequence {
+            tx.rollback()
+                .await
+                .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            return Ok(());
+        }
         for row in vector_rows {
             crate::dbm::postgres_query!(
                 "INSERT INTO entity_vector_index \

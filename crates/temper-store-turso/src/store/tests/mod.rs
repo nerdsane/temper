@@ -126,7 +126,13 @@ async fn vector_index_write_behind_candidates_and_partitioning() {
 
     // Upsert: re-writing item-a's vector replaces (no duplicate row).
     store
-        .backfill_entity_vectors("t", "Item", "item-a", &[row("embed", "m1", vec![0.5, 0.5])])
+        .backfill_entity_vectors(
+            "t",
+            "Item",
+            "item-a",
+            &[row("embed", "m1", vec![0.5, 0.5])],
+            u64::MAX,
+        )
         .await
         .unwrap();
     let candidates = store
@@ -207,7 +213,7 @@ async fn vector_index_reconcile_purges_on_delete_and_empty_rows() {
 
     // The explicit backfill purge (empty rows) is idempotent.
     store
-        .backfill_entity_vectors("t", "Item", "item-a", &[])
+        .backfill_entity_vectors("t", "Item", "item-a", &[], u64::MAX)
         .await
         .unwrap();
     assert!(

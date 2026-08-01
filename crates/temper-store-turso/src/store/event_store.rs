@@ -184,7 +184,7 @@ impl EventStore for TursoEventStore {
                     tokio::time::sleep(Duration::from_millis(retry_delay_ms(attempt - 1))).await;
                 }
                 match self
-                    .backfill_entity_vectors(tenant, entity_type, entity_id, vector_rows)
+                    .backfill_entity_vectors(tenant, entity_type, entity_id, vector_rows, new_seq)
                     .await
                 {
                     Ok(()) => {
@@ -217,6 +217,7 @@ impl EventStore for TursoEventStore {
         entity_type: &str,
         entity_id: &str,
         vector_rows: &[EntityVectorRow],
+        as_of_sequence: u64,
     ) -> Result<(), PersistenceError> {
         // Reconcile: DELETE all of the entity's rows, then insert the current ones.
         // Empty `vector_rows` purges the entity (deleted / un-embedded). Always runs
@@ -229,6 +230,28 @@ impl EventStore for TursoEventStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(storage_error)?;
+        // ARN-216: skip when the journal advanced past the sequence these rows
+        // were derived from — a newer write's rows (write-behind or a later
+        // reconcile) must not be overwritten by a stale load.
+        let mut seq_rows = tx
+            .query(
+                "SELECT COALESCE(MAX(sequence_nr), 0) FROM events \
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                params![tenant, entity_type, entity_id],
+            )
+            .await
+            .map_err(storage_error)?;
+        let current_seq: i64 = match seq_rows.next().await.map_err(storage_error)? {
+            Some(row) => row.get(0).map_err(storage_error)?,
+            None => 0,
+        };
+        if current_seq as u64 > as_of_sequence {
+            // Explicit rollback: an Immediate transaction holds the RESERVED
+            // lock, and async Drop cannot await — release it deterministically
+            // rather than deferring to libsql's synchronous drop hook.
+            tx.rollback().await.map_err(storage_error)?;
+            return Ok(());
+        }
         tx.execute(
             "DELETE FROM entity_vector_index \
              WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
