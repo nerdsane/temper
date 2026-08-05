@@ -30,6 +30,20 @@ impl ReactionDispatcher {
         Self { registry }
     }
 
+    /// Snapshot every rule that may fire for a source action before it commits.
+    pub(crate) fn candidate_rules(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        action: &str,
+    ) -> Vec<super::types::ReactionRule> {
+        self.registry
+            .candidates(tenant, entity_type, action)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
     /// Dispatch reactions triggered by a successful entity action.
     ///
     /// This is called after the source action has been committed and the SSE
@@ -238,6 +252,7 @@ impl ReactionDispatcher {
                     effective_params,
                     &dispatch_ctx,
                     false,
+                    None,
                 )
                 .await;
 
@@ -392,7 +407,7 @@ fn resolve_trigger_principal(
     }
 }
 
-fn effective_trigger_security_context(agent_ctx: &AgentContext) -> SecurityContext {
+pub(crate) fn effective_trigger_security_context(agent_ctx: &AgentContext) -> SecurityContext {
     if let Some(security_ctx) = &agent_ctx.security_ctx {
         return security_ctx.clone();
     }

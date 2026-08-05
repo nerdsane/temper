@@ -41,6 +41,7 @@ async fn dispatch(
                 cross_entity_booleans: BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             Duration::from_secs(5),
         )

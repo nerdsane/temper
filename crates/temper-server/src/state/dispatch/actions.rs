@@ -170,6 +170,31 @@ impl crate::state::ServerState {
             self.reject_action_supplied_sub_writes(entity_type, action, &params)?;
         }
 
+        let dispatcher = self
+            .reaction_dispatcher
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let reaction_context = if let Some(dispatcher) = dispatcher.as_ref() {
+            let rules = dispatcher.candidate_rules(tenant, entity_type, action);
+            if rules.is_empty() {
+                None
+            } else {
+                let authority = serde_json::to_value(
+                    crate::trigger::dispatcher::effective_trigger_security_context(agent_ctx),
+                )
+                .map_err(|error| DispatchError::Internal(error.to_string()))?;
+                Some(crate::trigger::delivery::ReactionCommitContext {
+                    rules,
+                    authority,
+                    depth: 0,
+                    root_delivery_id: None,
+                })
+            }
+        } else {
+            None
+        };
+
         let response = self
             .dispatch_tenant_action_core(
                 tenant,
@@ -179,18 +204,12 @@ impl crate::state::ServerState {
                 params,
                 agent_ctx,
                 await_integration,
+                reaction_context,
             )
             .await?;
 
         // Dispatch cross-entity reactions (fire-and-forget, depth 0 = top-level)
         if response.success {
-            // A poisoned lock must not silently disable reactions: the slot
-            // only holds an Arc, so the data can't be torn — recover it.
-            let dispatcher = self
-                .reaction_dispatcher
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
             if let Some(dispatcher) = dispatcher {
                 let to_state = response.state.status.clone();
                 let fields = serde_json::to_value(&response.state.fields).unwrap_or_default();
@@ -338,6 +357,7 @@ impl crate::state::ServerState {
         params: serde_json::Value,
         agent_ctx: &AgentContext,
         await_integration: bool,
+        reaction_context: Option<crate::trigger::delivery::ReactionCommitContext>,
     ) -> Result<EntityResponse, DispatchError> {
         let explicit_workflow_context = agent_ctx.workflow_run_id.is_some()
             || agent_ctx.workflow_root_entity_type.is_some()
@@ -516,6 +536,7 @@ impl crate::state::ServerState {
         let action_name = action.to_string();
         let params_for_retry = params;
         let cross_for_retry = cross_entity_booleans;
+        let reactions_for_retry = reaction_context;
         let idempotency_key = Some(agent_ctx.idempotency_key.clone().unwrap_or_else(|| {
             format!(
                 "dispatch:{tenant}:{entity_type}:{entity_id}:{action}:{}",
@@ -540,6 +561,7 @@ impl crate::state::ServerState {
                     cross_entity_booleans: cross_for_retry.clone(),
                     idempotency_key: idempotency_key.clone(),
                     expected_sequence: agent_ctx.expected_entity_sequence,
+                    reaction_context: reactions_for_retry.clone(),
                 },
                 &policy,
             )

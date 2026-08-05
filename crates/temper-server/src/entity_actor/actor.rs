@@ -333,9 +333,48 @@ impl EntityActor {
         persistence_id: &str,
         state: &mut EntityState,
         event: &EntityEvent,
+        reaction_context: Option<&crate::trigger::delivery::ReactionCommitContext>,
     ) -> Result<u64, PersistenceError> {
-        let payload = serde_json::to_value(event)
+        let mut payload = serde_json::to_value(event)
             .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+        if let Some(context) = reaction_context {
+            let source_sequence = state.sequence_nr + 1;
+            let mut intents = Vec::with_capacity(context.rules.len());
+            for (trigger_index, rule) in context.rules.iter().enumerate() {
+                let delivery_id = crate::trigger::delivery::stable_delivery_id(
+                    self.tenant.as_str(),
+                    &self.entity_type,
+                    &self.entity_id,
+                    &event.action,
+                    source_sequence,
+                    &rule.name,
+                    trigger_index,
+                );
+                intents.push(crate::trigger::delivery::PersistedReactionIntent {
+                    root_delivery_id: context
+                        .root_delivery_id
+                        .clone()
+                        .unwrap_or_else(|| delivery_id.clone()),
+                    delivery_id,
+                    tenant: self.tenant.to_string(),
+                    source_entity_type: self.entity_type.clone(),
+                    source_entity_id: self.entity_id.clone(),
+                    source_action: event.action.clone(),
+                    source_sequence,
+                    source_to_state: event.to_status.clone(),
+                    source_fields: state.fields.clone(),
+                    trigger_name: rule.name.clone(),
+                    trigger_index,
+                    depth: context.depth,
+                    rule: serde_json::to_value(rule)
+                        .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
+                    authority: context.authority.clone(),
+                    created_at: event.timestamp,
+                });
+            }
+            crate::trigger::delivery::attach_intents(&mut payload, &intents)
+                .map_err(PersistenceError::Serialization)?;
+        }
         let envelope = PersistenceEnvelope {
             sequence_nr: state.sequence_nr + 1,
             event_type: event.action.clone(),
@@ -828,14 +867,21 @@ impl Actor for EntityActor {
 
             if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend)
             {
-                self.persist_event(store, backend, &self.persistence_id(), &mut state, &created)
-                    .await
-                    .map_err(|e| {
-                        ActorError::custom(format!(
-                            "failed to persist bootstrap Created event for {}:{}: {}",
-                            self.entity_type, self.entity_id, e
-                        ))
-                    })?;
+                self.persist_event(
+                    store,
+                    backend,
+                    &self.persistence_id(),
+                    &mut state,
+                    &created,
+                    None,
+                )
+                .await
+                .map_err(|e| {
+                    ActorError::custom(format!(
+                        "failed to persist bootstrap Created event for {}:{}: {}",
+                        self.entity_type, self.entity_id, e
+                    ))
+                })?;
             }
             state.push_event_bounded(created);
         }
@@ -856,6 +902,7 @@ impl Actor for EntityActor {
                 cross_entity_booleans,
                 idempotency_key,
                 expected_sequence,
+                reaction_context,
             } => {
                 // Capture start time for span duration (DST-safe: sim_now()
                 // returns logical clock in simulation, wall clock in production).
@@ -1037,7 +1084,14 @@ impl Actor for EntityActor {
                         (self.event_journal.as_ref(), self.event_backend)
                     {
                         let first_persist = self
-                            .persist_event(store, backend, &self.persistence_id(), state, &event)
+                            .persist_event(
+                                store,
+                                backend,
+                                &self.persistence_id(),
+                                state,
+                                &event,
+                                reaction_context.as_ref(),
+                            )
                             .await;
 
                         match first_persist {
@@ -1201,6 +1255,7 @@ impl Actor for EntityActor {
                                             &self.persistence_id(),
                                             state,
                                             &retry_event,
+                                            reaction_context.as_ref(),
                                         )
                                         .await
                                     {
@@ -1519,6 +1574,7 @@ impl Actor for EntityActor {
                             &self.persistence_id(),
                             &mut prospective,
                             &event,
+                            None,
                         )
                         .await
                     {
@@ -1585,7 +1641,14 @@ impl Actor for EntityActor {
                 if let (Some(store), Some(backend)) =
                     (self.event_journal.as_ref(), self.event_backend)
                     && let Err(e) = self
-                        .persist_event(store, backend, &self.persistence_id(), state, &deleted)
+                        .persist_event(
+                            store,
+                            backend,
+                            &self.persistence_id(),
+                            state,
+                            &deleted,
+                            None,
+                        )
                         .await
                 {
                     ctx.reply(EntityResponse {
