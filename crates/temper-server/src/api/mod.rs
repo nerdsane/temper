@@ -10,6 +10,7 @@ mod decisions_access;
 mod decisions_get;
 mod files;
 mod policies;
+mod reactions;
 mod repl;
 mod secrets;
 
@@ -158,6 +159,10 @@ pub fn build_api_router() -> Router<ServerState> {
         // Agent authorization + audit endpoints
         .route("/authorize", post(authorize::handle_authorize))
         .route("/audit", post(authorize::handle_audit))
+        .route(
+            "/reactions/{delivery_id}/retry",
+            post(reactions::handle_retry_reaction),
+        )
         // Cross-tenant decision endpoints
         .route("/decisions", get(decisions::handle_list_all_decisions))
         .route(

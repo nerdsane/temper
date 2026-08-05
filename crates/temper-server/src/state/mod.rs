@@ -985,8 +985,9 @@ impl ServerState {
     /// Attach a reaction dispatcher for cross-entity coordination.
     pub fn with_reaction_dispatcher(self, dispatcher: Arc<ReactionDispatcher>) -> Self {
         if let Ok(mut slot) = self.reaction_dispatcher.write() {
-            *slot = Some(dispatcher);
+            *slot = Some(Arc::clone(&dispatcher));
         }
+        self.spawn_reaction_recovery(dispatcher);
         self
     }
 
@@ -998,8 +999,38 @@ impl ServerState {
         };
         let dispatcher = Arc::new(ReactionDispatcher::new(Arc::new(reaction_registry)));
         if let Ok(mut slot) = self.reaction_dispatcher.write() {
-            *slot = Some(dispatcher);
+            *slot = Some(Arc::clone(&dispatcher));
         }
+        self.spawn_reaction_recovery(dispatcher);
+    }
+
+    fn spawn_reaction_recovery(&self, dispatcher: Arc<ReactionDispatcher>) {
+        if self.event_journal().is_none() || tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let tenants = dispatcher.tenant_ids();
+        if tenants.is_empty() {
+            return;
+        }
+        let state = self.clone();
+        tokio::spawn(async move {
+            // determinism-ok: production startup recovery uses the durable
+            // event-store contract; deterministic tests invoke the same scan
+            // directly under their simulated scheduler.
+            for tenant in tenants {
+                if let Err(error) = dispatcher
+                    .drain_tenant_deliveries(
+                        &state,
+                        &tenant,
+                        1_024,
+                        std::time::Duration::from_secs(60),
+                    )
+                    .await
+                {
+                    tracing::error!(tenant = %tenant, %error, "startup reaction recovery failed");
+                }
+            }
+        });
     }
 
     pub(crate) fn query_projection_fields(

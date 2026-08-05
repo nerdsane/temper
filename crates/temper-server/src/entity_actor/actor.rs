@@ -363,6 +363,11 @@ impl EntityActor {
                     source_sequence,
                     source_to_state: event.to_status.clone(),
                     source_fields: state.fields.clone(),
+                    target_entity_id: crate::trigger::resolver::resolve_target_id(
+                        &rule.resolve_target,
+                        &self.entity_id,
+                        &state.fields,
+                    ),
                     trigger_name: rule.name.clone(),
                     trigger_index,
                     depth: context.depth,
@@ -374,6 +379,10 @@ impl EntityActor {
             }
             crate::trigger::delivery::attach_intents(&mut payload, &intents)
                 .map_err(PersistenceError::Serialization)?;
+            if let Some(receipt) = context.receipt.as_ref() {
+                crate::trigger::delivery::attach_receipt(&mut payload, receipt)
+                    .map_err(PersistenceError::Serialization)?;
+            }
         }
         let envelope = PersistenceEnvelope {
             sequence_nr: state.sequence_nr + 1,

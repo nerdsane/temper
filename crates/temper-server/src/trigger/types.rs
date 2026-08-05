@@ -38,6 +38,10 @@ pub struct ReactionRule {
     /// source action.
     #[serde(default)]
     pub principal: Option<String>,
+    /// Whether a permanent delivery failure is an intentional best-effort
+    /// drop instead of a rejected reaction (ADR-0150 / ADR-0158).
+    #[serde(default)]
+    pub drop_ok: bool,
 }
 
 /// Trigger condition for a reaction rule.
@@ -251,6 +255,7 @@ mod tests {
                 field: "payment_id".to_string(),
             },
             principal: None,
+            drop_ok: false,
         };
 
         let json = serde_json::to_string(&rule).unwrap();

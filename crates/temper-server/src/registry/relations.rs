@@ -138,6 +138,7 @@ pub(super) fn synthesize_action_trigger_reaction(
         },
         resolve_target: target_resolver_to_target_resolver(&resolve_target),
         principal: trigger.principal.clone(),
+        drop_ok: trigger.drop_ok,
     })
 }
 
@@ -225,7 +226,7 @@ mod tests {
             to_state: Some("Ready".to_string()),
             guard: None,
             liveness: temper_spec::automaton::TriggerLiveness::BestEffort,
-            drop_ok: false,
+            drop_ok: true,
             llm: false,
             target_entity: Some("FileVersion".to_string()),
             target_action: Some("Create".to_string()),
@@ -254,6 +255,7 @@ mod tests {
         assert_eq!(rule.when.to_state.as_deref(), Some("Ready"));
         assert_eq!(rule.then.entity_type, "FileVersion");
         assert_eq!(rule.then.action, "Create");
+        assert!(rule.drop_ok, "drop_ok must survive trigger normalization");
         assert!(matches!(
             rule.resolve_target,
             TargetResolver::CreateIfMissing { .. }

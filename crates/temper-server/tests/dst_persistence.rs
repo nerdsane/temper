@@ -146,6 +146,7 @@ async fn source_event_atomically_contains_bound_reaction_intent() {
         },
         resolve_target: TargetResolver::SameId,
         principal: None,
+        drop_ok: false,
     };
 
     let response: EntityResponse = actor_ref
@@ -161,6 +162,7 @@ async fn source_event_atomically_contains_bound_reaction_intent() {
                     authority: serde_json::json!({"principal": {"id": "User::alice"}}),
                     depth: 0,
                     root_delivery_id: None,
+                    receipt: None,
                 }),
             },
             Duration::from_secs(5),

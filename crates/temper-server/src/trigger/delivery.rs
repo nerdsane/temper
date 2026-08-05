@@ -3,15 +3,22 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
+use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 use super::types::ReactionRule;
+use crate::storage::BoxedEventStore;
 
 /// Reserved event-payload field holding intents co-committed with a source event.
 pub const REACTION_INTENTS_FIELD: &str = "_temper_reaction_intents_v1";
+/// Reserved target-event field proving one fenced delivery reached commit.
+pub const REACTION_RECEIPT_FIELD: &str = "_temper_reaction_receipt_v1";
 /// Maximum automatic delivery attempts before transient failure dead-letters.
 pub const MAX_AUTOMATIC_ATTEMPTS: u32 = 5;
 /// Maximum operator-requested retries for one transient dead letter.
 pub const MAX_MANUAL_RETRIES: u32 = 3;
+/// Private synthetic entity type used for one journal per logical delivery.
+pub const REACTION_DELIVERY_ENTITY_TYPE: &str = "_ReactionDelivery";
 
 /// Bounded rule and authority snapshot supplied to the entity actor at commit.
 #[derive(Debug, Clone)]
@@ -24,6 +31,19 @@ pub struct ReactionCommitContext {
     pub depth: u32,
     /// Existing root delivery for cascades; absent for top-level source actions.
     pub root_delivery_id: Option<String>,
+    /// Receipt to co-commit when this action is a reaction target.
+    pub receipt: Option<ReactionReceipt>,
+}
+
+/// Receipt co-committed with a target event for reconciliation after crashes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReactionReceipt {
+    /// Stable logical delivery identity.
+    pub delivery_id: String,
+    /// Lease fence that authorized this target attempt.
+    pub fencing_token: u64,
+    /// Target commit time from the scheduler clock.
+    pub received_at: DateTime<Utc>,
 }
 
 /// Immutable normalized reaction input committed with the source event.
@@ -47,6 +67,8 @@ pub struct PersistedReactionIntent {
     pub source_to_state: String,
     /// Exact post-transition source fields used for resolution and guards.
     pub source_fields: serde_json::Value,
+    /// Target identifier resolved once at source commit.
+    pub target_entity_id: Option<String>,
     /// Stable trigger name.
     pub trigger_name: String,
     /// Stable trigger index within the action candidate set.
@@ -98,6 +120,9 @@ pub struct ReactionDeliveryRecord {
     pub fencing_token: u64,
     /// Lease expiry under the scheduler clock.
     pub lease_expires_at: Option<DateTime<Utc>>,
+    /// Earliest scheduler time at which another automatic claim is allowed.
+    #[serde(default)]
+    pub next_attempt_at: Option<DateTime<Utc>>,
     /// Whether the last terminal failure was classified transient.
     pub transient_failure: bool,
     /// Sanitized last failure reason.
@@ -114,6 +139,7 @@ impl ReactionDeliveryRecord {
             manual_retries: 0,
             fencing_token: 0,
             lease_expires_at: None,
+            next_attempt_at: None,
             transient_failure: false,
             last_error: None,
         }
@@ -127,12 +153,16 @@ impl ReactionDeliveryRecord {
         if lease <= Duration::zero() {
             return Err("delivery lease must be positive".to_string());
         }
+        if self.next_attempt_at.is_some_and(|next| next > now) {
+            return Err("delivery backoff has not elapsed".to_string());
+        }
         if self.attempts >= MAX_AUTOMATIC_ATTEMPTS {
             return Err("automatic delivery attempt budget exhausted".to_string());
         }
         self.attempts += 1;
         self.fencing_token = self.fencing_token.saturating_add(1);
         self.lease_expires_at = Some(now + lease);
+        self.next_attempt_at = None;
         self.status = ReactionDeliveryStatus::Claimed;
         Ok(self.fencing_token)
     }
@@ -185,6 +215,7 @@ impl ReactionDeliveryRecord {
         self.status = ReactionDeliveryStatus::Pending;
         self.transient_failure = false;
         self.last_error = None;
+        self.next_attempt_at = None;
         Ok(self.manual_retries)
     }
 
@@ -229,6 +260,144 @@ pub fn extract_intents(
     serde_json::from_value(value.clone()).map_err(|error| error.to_string())
 }
 
+/// Attach one delivery receipt to the target event before its append.
+pub fn attach_receipt(
+    payload: &mut serde_json::Value,
+    receipt: &ReactionReceipt,
+) -> Result<(), String> {
+    let object = payload
+        .as_object_mut()
+        .ok_or_else(|| "entity event payload must be an object".to_string())?;
+    let value = serde_json::to_value(receipt).map_err(|error| error.to_string())?;
+    object.insert(REACTION_RECEIPT_FIELD.to_string(), value);
+    Ok(())
+}
+
+/// Read a co-committed target receipt from a replayed event payload.
+pub fn extract_receipt(payload: &serde_json::Value) -> Result<Option<ReactionReceipt>, String> {
+    let Some(value) = payload.get(REACTION_RECEIPT_FIELD) else {
+        return Ok(None);
+    };
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+/// Persistence ID of the private lifecycle journal for an intent.
+pub fn delivery_journal_id(intent: &PersistedReactionIntent) -> String {
+    format!(
+        "{}:{REACTION_DELIVERY_ENTITY_TYPE}:{}",
+        intent.tenant, intent.delivery_id
+    )
+}
+
+/// Append one fenced lifecycle snapshot to the delivery's private journal.
+pub async fn append_delivery_record(
+    store: &BoxedEventStore,
+    expected_sequence: u64,
+    record: &ReactionDeliveryRecord,
+) -> Result<u64, PersistenceError> {
+    let payload = serde_json::to_value(record)
+        .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+    let persistence_id = delivery_journal_id(&record.intent);
+    let envelope = PersistenceEnvelope {
+        sequence_nr: expected_sequence + 1,
+        event_type: format!("ReactionDelivery::{:?}", record.status),
+        payload,
+        metadata: EventMetadata {
+            event_id: sim_uuid(),
+            causation_id: sim_uuid(),
+            correlation_id: sim_uuid(),
+            timestamp: sim_now(),
+            actor_id: persistence_id.clone(),
+        },
+    };
+    store
+        .append(&persistence_id, expected_sequence, &[envelope])
+        .await
+}
+
+/// Restore the latest lifecycle snapshot, inferring `Pending` from the atomic
+/// source intent when no lifecycle journal exists yet.
+pub async fn load_delivery_record(
+    store: &BoxedEventStore,
+    intent: PersistedReactionIntent,
+) -> Result<(ReactionDeliveryRecord, u64), PersistenceError> {
+    let persistence_id = delivery_journal_id(&intent);
+    let events = store.read_events(&persistence_id, 0).await?;
+    let Some(latest) = events.last() else {
+        return Ok((ReactionDeliveryRecord::pending(intent), 0));
+    };
+    let record: ReactionDeliveryRecord = serde_json::from_value(latest.payload.clone())
+        .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+    if record.intent.delivery_id != intent.delivery_id || record.intent.tenant != intent.tenant {
+        return Err(PersistenceError::Serialization(
+            "delivery journal identity does not match source intent".to_string(),
+        ));
+    }
+    Ok((record, latest.sequence_nr))
+}
+
+/// List bounded delivery records inferred from committed source intents.
+pub async fn list_delivery_records(
+    store: &BoxedEventStore,
+    tenant: &str,
+    limit: usize,
+) -> Result<Vec<(ReactionDeliveryRecord, u64)>, PersistenceError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let entities = store.list_entity_ids_limited(tenant, None, 10_000).await?;
+    let mut records = Vec::new();
+    for (entity_type, entity_id) in entities {
+        if entity_type == REACTION_DELIVERY_ENTITY_TYPE {
+            continue;
+        }
+        let events = store
+            .read_events(&format!("{tenant}:{entity_type}:{entity_id}"), 0)
+            .await?;
+        for event in events {
+            let intents =
+                extract_intents(&event.payload).map_err(PersistenceError::Serialization)?;
+            for intent in intents {
+                records.push(load_delivery_record(store, intent).await?);
+                if records.len() >= limit {
+                    return Ok(records);
+                }
+            }
+        }
+    }
+    Ok(records)
+}
+
+/// Find one tenant-scoped delivery record by stable identity.
+pub async fn find_delivery_record(
+    store: &BoxedEventStore,
+    tenant: &str,
+    delivery_id: &str,
+) -> Result<Option<(ReactionDeliveryRecord, u64)>, PersistenceError> {
+    let entities = store.list_entity_ids_limited(tenant, None, 10_000).await?;
+    for (entity_type, entity_id) in entities {
+        if entity_type == REACTION_DELIVERY_ENTITY_TYPE {
+            continue;
+        }
+        let events = store
+            .read_events(&format!("{tenant}:{entity_type}:{entity_id}"), 0)
+            .await?;
+        for event in events {
+            let intents =
+                extract_intents(&event.payload).map_err(PersistenceError::Serialization)?;
+            if let Some(intent) = intents
+                .into_iter()
+                .find(|intent| intent.delivery_id == delivery_id)
+            {
+                return load_delivery_record(store, intent).await.map(Some);
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Derive the immutable identity of one logical reaction delivery.
 ///
 /// Length-prefixing each component prevents delimiter ambiguity. The committed
@@ -264,10 +433,17 @@ pub fn stable_delivery_id(
 mod tests {
     use super::{
         PersistedReactionIntent, REACTION_INTENTS_FIELD, ReactionDeliveryRecord,
-        ReactionDeliveryStatus, attach_intents, extract_intents, stable_delivery_id,
+        ReactionDeliveryStatus, ReactionReceipt, append_delivery_record, attach_intents,
+        attach_receipt, delivery_journal_id, extract_intents, extract_receipt,
+        load_delivery_record, stable_delivery_id,
     };
     use chrono::{Duration, TimeZone, Utc};
     use serde_json::json;
+    use temper_runtime::persistence::PersistenceError;
+    use temper_runtime::scheduler::install_deterministic_context;
+    use temper_store_sim::SimEventStore;
+
+    use crate::storage::BoxedEventStore;
 
     fn intent() -> PersistedReactionIntent {
         PersistedReactionIntent {
@@ -280,6 +456,7 @@ mod tests {
             source_sequence: 42,
             source_to_state: "Confirmed".to_string(),
             source_fields: json!({"payment_id": "payment-9"}),
+            target_entity_id: Some("payment-9".to_string()),
             trigger_name: "create-payment".to_string(),
             trigger_index: 0,
             depth: 0,
@@ -345,6 +522,19 @@ mod tests {
     }
 
     #[test]
+    fn receipt_round_trips_inside_the_atomic_target_event_payload() {
+        let mut payload = json!({"action": "Create", "params": {}});
+        let receipt = ReactionReceipt {
+            delivery_id: "reaction-v1-a".to_string(),
+            fencing_token: 3,
+            received_at: Utc.timestamp_opt(1_800_000_001, 0).single().unwrap(),
+        };
+
+        attach_receipt(&mut payload, &receipt).unwrap();
+        assert_eq!(extract_receipt(&payload).unwrap(), Some(receipt));
+    }
+
+    #[test]
     fn lifecycle_uses_fenced_leases_and_bounds_manual_retry() {
         let now = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
         let mut delivery = ReactionDeliveryRecord::pending(intent());
@@ -372,5 +562,32 @@ mod tests {
             delivery.transient_failure = true;
         }
         assert!(delivery.request_manual_retry().is_err());
+    }
+
+    #[tokio::test]
+    async fn delivery_journal_restores_state_and_fences_competing_writers() {
+        let (_guard, _clock, _ids) = install_deterministic_context(414);
+        let inner = SimEventStore::no_faults(414);
+        let store = BoxedEventStore::new(inner.clone());
+        let mut record = ReactionDeliveryRecord::pending(intent());
+        let now = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
+        record.claim(now, Duration::seconds(30)).unwrap();
+
+        let sequence = append_delivery_record(&store, 0, &record).await.unwrap();
+        assert_eq!(sequence, 1);
+        let restored = load_delivery_record(&store, intent()).await.unwrap();
+        assert_eq!(restored, (record.clone(), 1));
+
+        let conflict = append_delivery_record(&store, 0, &record)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            conflict,
+            PersistenceError::ConcurrencyViolation { .. }
+        ));
+        assert_eq!(
+            delivery_journal_id(&intent()),
+            "tenant-a:_ReactionDelivery:reaction-v1-a"
+        );
     }
 }

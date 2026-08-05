@@ -124,6 +124,11 @@ impl ReactionRegistry {
     pub fn has_rules(&self, tenant: &TenantId) -> bool {
         self.tenants.get(tenant).is_some_and(|idx| !idx.is_empty())
     }
+
+    /// Tenants with registered reaction rules, in deterministic order.
+    pub fn tenant_ids(&self) -> Vec<TenantId> {
+        self.tenants.keys().cloned().collect()
+    }
 }
 
 /// Check if a rule's `to_state` filter matches the actual state.
@@ -148,6 +153,8 @@ struct ReactionToml {
     when: TriggerToml,
     then: TargetToml,
     resolve_target: ResolverToml,
+    #[serde(default)]
+    drop_ok: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -290,6 +297,7 @@ pub fn parse_reactions(toml_str: &str) -> Result<Vec<ReactionRule>, String> {
             // they dispatch with inherited invoking context under the new
             // dispatcher semantics (elevation requires [[action.triggers]]).
             principal: None,
+            drop_ok: r.drop_ok,
         });
     }
 
@@ -324,6 +332,7 @@ mod tests {
             },
             resolve_target: TargetResolver::SameId,
             principal: None,
+            drop_ok: false,
         }
     }
 
