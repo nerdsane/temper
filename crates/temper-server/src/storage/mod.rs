@@ -37,6 +37,7 @@ use crate::state::trajectory::TrajectoryEntry;
 mod published_artifacts;
 mod query_plane_impls;
 mod query_plane_read;
+mod trajectory_row;
 pub use published_artifacts::{
     PublishedArtifactStore, PublishedArtifactStoreRow, PublishedArtifactStoreUpsert,
 };
@@ -2676,8 +2677,6 @@ impl DataOnlyCreateStore for PostgresEventStore {
         .await
     }
 }
-
-mod trajectory_row;
 
 pub(crate) use trajectory_row::bounded_request_body;
 use trajectory_row::{
