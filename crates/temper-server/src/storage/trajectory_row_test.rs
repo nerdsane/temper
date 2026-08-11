@@ -98,32 +98,33 @@ fn escape_heavy_request_body_still_fits_the_cap() {
 }
 
 #[test]
-fn capture_time_bounding_passes_small_bodies_through_unchanged() {
+fn enqueue_bounding_passes_small_bodies_through_unchanged() {
     let body = serde_json::json!({"ProductId": "p-1", "Quantity": 2});
-    assert_eq!(bounded_request_body(&body), body);
+    assert_eq!(bounded_request_body(body.clone()), body);
 }
 
 #[test]
-fn capture_time_bounding_caps_oversized_bodies_before_the_outbox() {
+fn enqueue_bounding_caps_oversized_bodies_before_the_outbox() {
     let body = serde_json::json!({"Notes": "x".repeat(20_000)});
-    let bounded = bounded_request_body(&body);
+    let bounded = bounded_request_body(body);
 
     assert_eq!(bounded["_truncated"], serde_json::json!(true));
     assert!(
         bounded.to_string().len() <= TRAJECTORY_REQUEST_BODY_MAX_BYTES,
-        "a captured entry must never carry more than the cap into the outbox"
+        "an enqueued entry must never carry more than the cap into the outbox"
     );
 }
 
 #[test]
-fn capture_time_bounding_and_sink_encoding_agree() {
-    // Whether a body is bounded at capture or at the sink, the stored column
-    // must come out identical — otherwise the same action yields two shapes.
+fn enqueue_bounding_and_sink_encoding_agree() {
+    // Whether a body is bounded on the way into the outbox or at the sink, the
+    // stored column must come out identical — otherwise the same action yields
+    // two shapes depending on which path wrote it.
     let body = serde_json::json!({"Notes": "y".repeat(20_000)});
     let via_sink =
         trajectory_request_body_json(&entry_with_body(Some(body.clone()))).expect("sink");
-    let via_capture =
-        trajectory_request_body_json(&entry_with_body(Some(bounded_request_body(&body))))
-            .expect("capture");
-    assert_eq!(via_sink, via_capture);
+    let via_enqueue =
+        trajectory_request_body_json(&entry_with_body(Some(bounded_request_body(body))))
+            .expect("enqueue");
+    assert_eq!(via_sink, via_enqueue);
 }

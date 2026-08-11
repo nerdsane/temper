@@ -279,10 +279,17 @@ pub(crate) fn try_record(
 }
 
 impl crate::state::ServerState {
-    pub(crate) fn enqueue_trajectory_entry(&self, entry: TrajectoryEntry) -> bool {
+    pub(crate) fn enqueue_trajectory_entry(&self, mut entry: TrajectoryEntry) -> bool {
         let Some((backend, sink)) = self.trajectory_sink() else {
             return true;
         };
+        // Single choke point for every capture site: nothing enters the
+        // bounded outbox carrying more than the stored-body cap, so a stalled
+        // drain cannot accumulate whole request bodies in memory, and a new
+        // capture site cannot forget to bound its payload.
+        if let Some(body) = entry.request_body.take() {
+            entry.request_body = Some(crate::storage::bounded_request_body(body));
+        }
         try_record(backend, sink, entry)
     }
 }

@@ -292,9 +292,9 @@ impl crate::state::ServerState {
             // Captured on success as well as failure. A trajectory that
             // records only what failed cannot be replayed or learned from:
             // the successful action and the arguments that produced it are
-            // exactly the signal RL and replay consumers need. Bounded at
-            // capture so a backed-up outbox cannot hold whole request bodies.
-            request_body: Some(crate::storage::bounded_request_body(ctx.action_params)),
+            // exactly the signal RL and replay consumers need. Size is bounded
+            // when the entry is enqueued (see `enqueue_trajectory_entry`).
+            request_body: Some(ctx.action_params.clone()),
             intent: ctx.agent_ctx.intent.clone(),
             matched_policy_ids: None,
         };

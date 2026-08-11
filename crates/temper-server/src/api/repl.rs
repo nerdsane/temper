@@ -66,7 +66,7 @@ pub(crate) async fn handle_repl(
     let port = state.listen_port.get().copied().unwrap_or(4200);
     let code = body.code;
     // The submitted code is the request body of a REPL call; a failed run is
-    // unreadable without it. Size is bounded by the trajectory sink.
+    // unreadable without it. Size is bounded when the entry is enqueued.
     let submitted_code = code.clone();
     let tenant_for_repl = tenant.clone();
 

@@ -32,19 +32,19 @@ pub(super) fn trajectory_request_body_json(entry: &TrajectoryEntry) -> Option<St
     Some(truncated_request_body_value(&serialized).to_string())
 }
 
-/// Bound a request body at the moment of capture.
+/// Bound a request body before the entry enters the persistence outbox.
 ///
 /// Applies the same cap as the sink, one step earlier. Every dispatch now
 /// records its params, and entries wait in the bounded outbox before they are
-/// written, so capturing whole bodies would let a backed-up outbox hold
-/// megabytes per in-flight entry. Bounding here keeps the ceiling per entry at
-/// [`TRAJECTORY_REQUEST_BODY_MAX_BYTES`].
-pub(crate) fn bounded_request_body(value: &serde_json::Value) -> serde_json::Value {
-    match serde_json::to_string(value) {
+/// written, so admitting whole bodies would let a stalled drain hold megabytes
+/// per in-flight entry. Enforced at the single enqueue choke point rather than
+/// at each capture site, so a new capture site cannot forget it.
+pub(crate) fn bounded_request_body(value: serde_json::Value) -> serde_json::Value {
+    match serde_json::to_string(&value) {
         Ok(serialized) if serialized.len() > TRAJECTORY_REQUEST_BODY_MAX_BYTES => {
             truncated_request_body_value(&serialized)
         }
-        _ => value.clone(),
+        _ => value,
     }
 }
 

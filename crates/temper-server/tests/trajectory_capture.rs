@@ -335,3 +335,56 @@ async fn cedar_denied_action_persists_intent_and_evaluated_attributes() {
 
     let _ = std::fs::remove_file(db_path);
 }
+
+#[tokio::test]
+async fn oversized_request_body_is_bounded_before_persistence() {
+    // Capturing every successful action makes large bodies routine rather than
+    // rare. The stored row must stay bounded and stay parseable JSON — a
+    // byte-sliced prefix would read back as no body at all.
+    let (store, db_path) = temp_store("trajectory-oversized").await;
+    let state = build_turso_state("trajectory-capture-oversized", store);
+
+    let (status, body) = post_observed(
+        &state,
+        "/tdata/Orders",
+        serde_json::json!({"id": "ord-jcs-5", "Currency": "USD"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "seed create failed: {body:?}");
+
+    let (status, body) = post_observed(
+        &state,
+        "/tdata/Orders('ord-jcs-5')/Temper.AddItem",
+        serde_json::json!({"ProductId": "prod-big", "Quantity": 1, "Notes": "x".repeat(50_000)}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "AddItem failed: {body:?}");
+
+    let entry = await_trajectory(&state, "oversized AddItem", |entry| {
+        entry.action == "AddItem" && entry.entity_id == "ord-jcs-5" && entry.success
+    })
+    .await;
+
+    let request_body = entry
+        .request_body
+        .as_ref()
+        .expect("an oversized body must still round-trip as parseable JSON, not vanish");
+    assert_eq!(
+        request_body["_truncated"],
+        serde_json::json!(true),
+        "the stored row declares that it was truncated: {request_body}"
+    );
+    assert!(
+        request_body["_original_bytes"]
+            .as_u64()
+            .expect("original bytes")
+            > 50_000,
+        "the envelope records the pre-truncation size"
+    );
+    assert!(
+        request_body.to_string().len() <= 4096,
+        "the stored body respects the cap"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
