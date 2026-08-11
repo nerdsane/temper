@@ -45,6 +45,27 @@ pub struct OTSTurn {
     /// Decisions made in this turn
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decisions: Vec<OTSDecision>,
+
+    /// Token IDs of the prompt exactly as the serving stack tokenized it.
+    ///
+    /// RL consumers train on token IDs; re-tokenizing the rendered text
+    /// drifts from what the model actually saw. Populated only when the
+    /// serving stack exposes them, absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_token_ids: Option<Vec<u32>>,
+
+    /// Token IDs of the completion exactly as the serving stack emitted them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_token_ids: Option<Vec<u32>>,
+
+    /// Per-token loss mask: `1` for model-generated tokens, `0` for
+    /// tool output or otherwise injected tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_mask: Option<Vec<u8>>,
+
+    /// Per-token log probabilities reported by the serving stack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<Vec<f64>>,
 }
 
 impl OTSTurn {
@@ -62,6 +83,10 @@ impl OTSTurn {
             turn_reward: None,
             messages: Vec::new(),
             decisions: Vec::new(),
+            prompt_token_ids: None,
+            completion_token_ids: None,
+            response_mask: None,
+            logprobs: None,
         }
     }
 
@@ -116,6 +141,30 @@ impl OTSTurn {
     /// Set all decisions
     pub fn with_decisions(mut self, decisions: Vec<OTSDecision>) -> Self {
         self.decisions = decisions;
+        self
+    }
+
+    /// Set the prompt token IDs
+    pub fn with_prompt_token_ids(mut self, prompt_token_ids: Vec<u32>) -> Self {
+        self.prompt_token_ids = Some(prompt_token_ids);
+        self
+    }
+
+    /// Set the completion token IDs
+    pub fn with_completion_token_ids(mut self, completion_token_ids: Vec<u32>) -> Self {
+        self.completion_token_ids = Some(completion_token_ids);
+        self
+    }
+
+    /// Set the per-token response mask (`1` = model token, `0` = injected token)
+    pub fn with_response_mask(mut self, response_mask: Vec<u8>) -> Self {
+        self.response_mask = Some(response_mask);
+        self
+    }
+
+    /// Set the per-token log probabilities
+    pub fn with_logprobs(mut self, logprobs: Vec<f64>) -> Self {
+        self.logprobs = Some(logprobs);
         self
     }
 }

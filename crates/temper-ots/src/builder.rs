@@ -103,6 +103,55 @@ impl TrajectoryBuilder {
         self.system_message = Some(system_message);
     }
 
+    /// Record the actor spec version (hash or version) this run executed under.
+    pub fn set_spec_version(&mut self, spec_version: impl Into<String>) {
+        self.metadata.spec_version = Some(spec_version.into());
+    }
+
+    /// Record the harness that is driving this run (e.g. "temperpaw").
+    pub fn set_harness(&mut self, harness: impl Into<String>) {
+        self.metadata.harness = Some(harness.into());
+    }
+
+    /// Attach serving-stack token IDs to the current turn.
+    ///
+    /// Panics if no turn is in progress.
+    pub fn set_turn_token_ids(
+        &mut self,
+        prompt_token_ids: Vec<u32>,
+        completion_token_ids: Vec<u32>,
+    ) {
+        let turn = self
+            .current_turn
+            .as_mut()
+            .expect("Cannot set token ids: no turn in progress");
+        turn.prompt_token_ids = Some(prompt_token_ids);
+        turn.completion_token_ids = Some(completion_token_ids);
+    }
+
+    /// Attach the per-token response mask to the current turn.
+    ///
+    /// `1` marks a model-generated token, `0` a tool or otherwise injected
+    /// token. Panics if no turn is in progress.
+    pub fn set_turn_response_mask(&mut self, response_mask: Vec<u8>) {
+        let turn = self
+            .current_turn
+            .as_mut()
+            .expect("Cannot set response mask: no turn in progress");
+        turn.response_mask = Some(response_mask);
+    }
+
+    /// Attach per-token log probabilities to the current turn.
+    ///
+    /// Panics if no turn is in progress.
+    pub fn set_turn_logprobs(&mut self, logprobs: Vec<f64>) {
+        let turn = self
+            .current_turn
+            .as_mut()
+            .expect("Cannot set logprobs: no turn in progress");
+        turn.logprobs = Some(logprobs);
+    }
+
     /// Build the final trajectory, consuming the builder.
     ///
     /// If a turn is still in progress, it is automatically ended using
@@ -342,6 +391,100 @@ mod tests {
             OTSMessageContent::text("Orphan"),
             now,
         ));
+    }
+
+    #[test]
+    fn test_builder_records_spec_version_and_harness() {
+        let now = sim_now();
+        let metadata = OTSMetadata::new("Provenance", "agent-prov", OutcomeType::Success, now);
+        let mut builder = TrajectoryBuilder::new(metadata, OTSContext::new());
+
+        builder.set_spec_version("sha256:abc123");
+        builder.set_harness("temperpaw");
+
+        let trajectory = builder.build();
+        assert_eq!(
+            trajectory.metadata.spec_version.as_deref(),
+            Some("sha256:abc123")
+        );
+        assert_eq!(trajectory.metadata.harness.as_deref(), Some("temperpaw"));
+    }
+
+    #[test]
+    fn test_builder_records_turn_token_signals() {
+        let now = sim_now();
+        let metadata = OTSMetadata::new("Token signals", "agent-tok", OutcomeType::Success, now);
+        let mut builder = TrajectoryBuilder::new(metadata, OTSContext::new());
+
+        builder.start_turn(now);
+        builder.set_turn_token_ids(vec![1, 2, 3], vec![4, 5]);
+        builder.set_turn_response_mask(vec![1, 1, 0, 1, 1]);
+        builder.set_turn_logprobs(vec![-0.1, -0.2, -0.3, -0.4, -0.5]);
+        builder.end_turn(now);
+
+        let trajectory = builder.build();
+        let turn = &trajectory.turns[0];
+        assert_eq!(
+            turn.prompt_token_ids.as_deref(),
+            Some([1u32, 2, 3].as_ref())
+        );
+        assert_eq!(
+            turn.completion_token_ids.as_deref(),
+            Some([4u32, 5].as_ref())
+        );
+        assert_eq!(
+            turn.response_mask.as_deref(),
+            Some([1u8, 1, 0, 1, 1].as_ref())
+        );
+        assert_eq!(turn.logprobs.as_ref().map(Vec::len), Some(5));
+    }
+
+    #[test]
+    fn test_builder_snapshot_carries_token_signals() {
+        let now = sim_now();
+        let metadata = OTSMetadata::new("Snapshot tokens", "agent-snap", OutcomeType::Success, now);
+        let mut builder = TrajectoryBuilder::new(metadata, OTSContext::new());
+
+        builder.set_harness("claude-code");
+        builder.start_turn(now);
+        builder.set_turn_token_ids(vec![7, 8], vec![9]);
+
+        let snapshot = builder.snapshot();
+        assert_eq!(snapshot.metadata.harness.as_deref(), Some("claude-code"));
+        assert_eq!(
+            snapshot.turns[0].completion_token_ids.as_deref(),
+            Some([9u32].as_ref())
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot set token ids: no turn in progress")]
+    fn test_builder_token_ids_without_turn_panics() {
+        let now = sim_now();
+        let metadata = OTSMetadata::new("No turn", "agent-tok-2", OutcomeType::Success, now);
+        let mut builder = TrajectoryBuilder::new(metadata, OTSContext::new());
+
+        builder.set_turn_token_ids(vec![1], vec![2]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot set response mask: no turn in progress")]
+    fn test_builder_response_mask_without_turn_panics() {
+        let now = sim_now();
+        let metadata = OTSMetadata::new("No turn", "agent-tok-3", OutcomeType::Success, now);
+        let mut builder = TrajectoryBuilder::new(metadata, OTSContext::new());
+
+        builder.set_turn_response_mask(vec![1]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot set logprobs: no turn in progress")]
+    fn test_builder_logprobs_without_turn_panics() {
+        let now = sim_now();
+        let metadata = OTSMetadata::new("No turn", "agent-tok-4", OutcomeType::Success, now);
+        let mut builder = TrajectoryBuilder::new(metadata, OTSContext::new());
+
+        builder.set_turn_logprobs(vec![-0.1]);
     }
 
     #[test]
