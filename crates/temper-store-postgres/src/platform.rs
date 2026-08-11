@@ -1753,6 +1753,40 @@ impl PostgresEventStore {
         Ok(rows.into_iter().map(row_to_trajectory).collect())
     }
 
+    /// Query one session's trajectory rows in the order the kernel wrote them.
+    ///
+    /// Ordered ascending — oldest first — because the conformance checker
+    /// replays a session as a state-machine run and a newest-first read would
+    /// hand it the run backwards. `id` breaks ties so rows written inside the
+    /// same `created_at` tick still come back in write order.
+    pub async fn query_trajectories_by_session(
+        &self,
+        session_id: &str,
+        tenant: Option<&str>,
+        entity_type: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<PostgresTrajectoryRow>, PersistenceError> {
+        let rows = crate::dbm::postgres_query!(
+            "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
+                    agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, \
+                    created_at, request_body, intent, matched_policy_ids \
+             FROM trajectories \
+             WHERE session_id = $1 \
+               AND ($2::text IS NULL OR tenant = $2) \
+               AND ($3::text IS NULL OR entity_type = $3) \
+             ORDER BY created_at ASC, id ASC \
+             LIMIT $4",
+        )
+        .bind(session_id)
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.into_iter().map(row_to_trajectory).collect())
+    }
+
     pub async fn query_agent_summaries(
         &self,
         tenant: Option<&str>,
@@ -2109,13 +2143,20 @@ impl PostgresEventStore {
         Ok(rows.into_iter().map(row_to_ots_trajectory).collect())
     }
 
+    /// Load full OTS trajectory data by tenant and ID.
+    ///
+    /// The tenant is part of the lookup rather than a post-filter: one store
+    /// holds every tenant's rows, so a caller that takes the trajectory id
+    /// from a request path would otherwise read across tenants.
     pub async fn get_ots_trajectory(
         &self,
+        tenant: &str,
         trajectory_id: &str,
     ) -> Result<Option<String>, PersistenceError> {
         let row: Option<serde_json::Value> = crate::dbm::postgres_query_scalar!(
-            "SELECT data FROM ots_trajectories WHERE trajectory_id = $1"
+            "SELECT data FROM ots_trajectories WHERE tenant = $1 AND trajectory_id = $2"
         )
+        .bind(tenant)
         .bind(trajectory_id)
         .fetch_optional(self.pool())
         .await

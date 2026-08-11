@@ -445,6 +445,52 @@ impl TursoEventStore {
         Ok(out)
     }
 
+    /// Query one session's trajectory rows in the order the kernel wrote them.
+    ///
+    /// Ordered ascending — oldest first — because the conformance checker
+    /// replays a session as a state-machine run and a newest-first read would
+    /// hand it the run backwards. `id` breaks ties so rows written inside the
+    /// same `created_at` tick still come back in write order.
+    #[instrument(skip_all, fields(session_id, otel.name = "turso.query_trajectories_by_session"))]
+    pub async fn query_trajectories_by_session(
+        &self,
+        session_id: &str,
+        tenant: Option<&str>,
+        entity_type: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.query_trajectories_by_session");
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
+                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids \
+                 FROM trajectories \
+                 WHERE session_id = ?1 \
+                   AND (?2 IS NULL OR tenant = ?2) \
+                   AND (?3 IS NULL OR entity_type = ?3) \
+                 ORDER BY created_at ASC, id ASC \
+                 LIMIT ?4",
+                params![session_id, tenant, entity_type, limit],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(Self::row_to_trajectory(&row)?);
+        }
+        tracing::info!(
+            session_id,
+            tenant,
+            entity_type,
+            limit,
+            count = out.len(),
+            "trajectory.store.read"
+        );
+        Ok(out)
+    }
+
     /// Query agent summaries (grouped by agent_id).
     #[instrument(skip_all, fields(otel.name = "turso.query_agent_summaries"))]
     pub async fn query_agent_summaries(
@@ -514,4 +560,85 @@ fn trajectory_max_attempts() -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(DEFAULT_TRAJECTORY_MAX_ATTEMPTS)
         .max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::TursoTrajectoryInsert;
+
+    async fn test_store() -> (TursoEventStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let db_path = dir.path().join("trajectory-session.db");
+        let db_url = format!("file:{}", db_path.display());
+        let store = TursoEventStore::new(&db_url, None)
+            .await
+            .expect("create local turso store");
+        (store, dir)
+    }
+
+    fn insert<'a>(
+        action: &'a str,
+        session_id: &'a str,
+        created_at: &'a str,
+    ) -> TursoTrajectoryInsert<'a> {
+        TursoTrajectoryInsert {
+            tenant: "tenant",
+            entity_type: "Order",
+            entity_id: "order-1",
+            action,
+            success: true,
+            from_status: None,
+            to_status: None,
+            error: None,
+            agent_id: Some("agent-1"),
+            session_id: Some(session_id),
+            authz_denied: None,
+            denied_resource: None,
+            denied_module: None,
+            source: Some("Entity"),
+            spec_governed: Some(true),
+            created_at,
+            request_body: None,
+            intent: None,
+            matched_policy_ids: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn session_query_returns_write_order_and_only_that_session() {
+        let (store, _dir) = test_store().await;
+        // Same `created_at` on the first two rows: the tiebreaker, not the
+        // timestamp, has to keep them in write order.
+        for entry in [
+            insert("AddItem", "session-a", "2026-01-01T00:00:00Z"),
+            insert("SubmitOrder", "session-a", "2026-01-01T00:00:00Z"),
+            insert("ConfirmOrder", "session-a", "2026-01-01T00:00:01Z"),
+            insert("CancelOrder", "session-b", "2026-01-01T00:00:02Z"),
+        ] {
+            store
+                .persist_trajectory(entry)
+                .await
+                .expect("persist trajectory");
+        }
+
+        let rows = store
+            .query_trajectories_by_session("session-a", Some("tenant"), None, 100)
+            .await
+            .expect("query session");
+        let actions: Vec<&str> = rows.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(actions, vec!["AddItem", "SubmitOrder", "ConfirmOrder"]);
+
+        let other_tenant = store
+            .query_trajectories_by_session("session-a", Some("elsewhere"), None, 100)
+            .await
+            .expect("query session for a foreign tenant");
+        assert!(other_tenant.is_empty());
+
+        let filtered = store
+            .query_trajectories_by_session("session-a", Some("tenant"), Some("Invoice"), 100)
+            .await
+            .expect("query session with entity filter");
+        assert!(filtered.is_empty());
+    }
 }

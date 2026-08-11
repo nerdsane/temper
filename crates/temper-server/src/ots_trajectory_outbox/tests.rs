@@ -104,6 +104,7 @@ impl OtsStore for FakeOtsStore {
 
     async fn get_ots_trajectory(
         &self,
+        _tenant: &str,
         _trajectory_id: &str,
     ) -> Result<Option<String>, PersistenceError> {
         Ok(None)

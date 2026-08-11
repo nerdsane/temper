@@ -856,6 +856,18 @@ pub trait ObserveReadStore: Send + Sync {
         limit: i64,
     ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError>;
 
+    /// One session's rows, oldest first, in the order the kernel wrote them.
+    ///
+    /// Conformance replays a session as a state-machine run, so the ordering
+    /// is part of the contract, not an implementation detail.
+    async fn query_trajectories_by_session(
+        &self,
+        session_id: &str,
+        tenant: Option<&str>,
+        entity_type: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError>;
+
     async fn query_agent_summaries(
         &self,
         tenant: Option<&str>,
@@ -973,8 +985,13 @@ pub trait OtsStore: Send + Sync {
         limit: i64,
     ) -> Result<Vec<OtsTrajectoryRow>, PersistenceError>;
 
+    /// Load a full OTS trajectory by tenant and ID.
+    ///
+    /// Tenant is part of the lookup so a trajectory id taken from a request
+    /// path cannot read another tenant's trace out of a shared store.
     async fn get_ots_trajectory(
         &self,
+        tenant: &str,
         trajectory_id: &str,
     ) -> Result<Option<String>, PersistenceError>;
 }
@@ -1792,6 +1809,18 @@ impl ObserveReadStore for PostgresEventStore {
             .map(|rows| rows.into_iter().map(pg_trajectory_to_turso).collect())
     }
 
+    async fn query_trajectories_by_session(
+        &self,
+        session_id: &str,
+        tenant: Option<&str>,
+        entity_type: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError> {
+        self.query_trajectories_by_session(session_id, tenant, entity_type, limit)
+            .await
+            .map(|rows| rows.into_iter().map(pg_trajectory_to_turso).collect())
+    }
+
     async fn query_agent_summaries(
         &self,
         tenant: Option<&str>,
@@ -1846,6 +1875,17 @@ impl ObserveReadStore for TursoEventStore {
         limit: i64,
     ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError> {
         self.query_trajectories_by_agent(agent_id, tenant, entity_type, limit)
+            .await
+    }
+
+    async fn query_trajectories_by_session(
+        &self,
+        session_id: &str,
+        tenant: Option<&str>,
+        entity_type: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError> {
+        self.query_trajectories_by_session(session_id, tenant, entity_type, limit)
             .await
     }
 
@@ -2161,9 +2201,10 @@ impl OtsStore for PostgresEventStore {
 
     async fn get_ots_trajectory(
         &self,
+        tenant: &str,
         trajectory_id: &str,
     ) -> Result<Option<String>, PersistenceError> {
-        self.get_ots_trajectory(trajectory_id).await
+        self.get_ots_trajectory(tenant, trajectory_id).await
     }
 }
 
@@ -2218,9 +2259,10 @@ impl OtsStore for TursoEventStore {
 
     async fn get_ots_trajectory(
         &self,
+        tenant: &str,
         trajectory_id: &str,
     ) -> Result<Option<String>, PersistenceError> {
-        self.get_ots_trajectory(trajectory_id).await
+        self.get_ots_trajectory(tenant, trajectory_id).await
     }
 }
 

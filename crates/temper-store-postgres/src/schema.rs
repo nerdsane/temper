@@ -117,6 +117,13 @@ CREATE INDEX IF NOT EXISTS idx_trajectories_success ON trajectories (success, cr
 pub const CREATE_TRAJECTORIES_ENTITY_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_trajectories_entity ON trajectories (entity_type, action);";
 
+/// CREATE INDEX statement for session-scoped trajectory replay.
+///
+/// Conformance checking reads one session's rows in write order, so the index
+/// covers the ordering columns and the read stays a range scan.
+pub const CREATE_TRAJECTORIES_SESSION_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_trajectories_session ON trajectories (session_id, created_at, id);";
+
 /// CREATE TABLE statement for persisted design-time workflow events.
 pub const CREATE_DESIGN_TIME_EVENTS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS design_time_events (

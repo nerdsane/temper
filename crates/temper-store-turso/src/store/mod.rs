@@ -307,6 +307,9 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_TRAJECTORIES_AGENT_INDEX, ())
             .await
             .map_err(storage_error)?;
+        conn.execute(schema::CREATE_TRAJECTORIES_SESSION_INDEX, ())
+            .await
+            .map_err(storage_error)?;
 
         // OTS trajectory storage — full agent execution traces for GEPA.
         conn.execute(schema::CREATE_OTS_TRAJECTORIES_TABLE, ())

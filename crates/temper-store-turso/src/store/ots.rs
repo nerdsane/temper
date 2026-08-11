@@ -245,18 +245,23 @@ impl TursoEventStore {
         Ok(result)
     }
 
-    /// Load full OTS trajectory data by ID.
+    /// Load full OTS trajectory data by tenant and ID.
+    ///
+    /// The tenant is part of the lookup rather than a post-filter: one store
+    /// can hold every tenant's rows, so a caller that takes the trajectory id
+    /// from a request path would otherwise read across tenants.
     #[instrument(skip_all, fields(otel.name = "turso.get_ots_trajectory"))]
     pub async fn get_ots_trajectory(
         &self,
+        tenant: &str,
         trajectory_id: &str,
     ) -> Result<Option<String>, PersistenceError> {
         let _timer = TursoQueryTimer::start("turso.get_ots_trajectory");
         let conn = self.connection()?;
         let mut rows = conn
             .query(
-                "SELECT data FROM ots_trajectories WHERE trajectory_id = ?1",
-                params![trajectory_id.to_string()],
+                "SELECT data FROM ots_trajectories WHERE tenant = ?1 AND trajectory_id = ?2",
+                params![tenant.to_string(), trajectory_id.to_string()],
             )
             .await
             .map_err(storage_error)?;
@@ -347,5 +352,31 @@ mod tests {
         assert_eq!(rows[0].persistence_status, "failed");
         assert_eq!(rows[0].persist_attempts, 1);
         assert_eq!(rows[0].last_error.as_deref(), Some("transient"));
+    }
+
+    #[tokio::test]
+    async fn get_ots_trajectory_is_scoped_to_its_tenant() {
+        let (store, _dir) = test_store().await;
+        let data = r#"{"trajectory_id":"traj-tenant-a","turns":[]}"#;
+        store
+            .persist_ots_trajectory(&params("traj-tenant-a", data))
+            .await
+            .expect("persist trajectory");
+
+        assert_eq!(
+            store
+                .get_ots_trajectory("tenant", "traj-tenant-a")
+                .await
+                .expect("read own tenant"),
+            Some(data.to_string()),
+        );
+        assert_eq!(
+            store
+                .get_ots_trajectory("other-tenant", "traj-tenant-a")
+                .await
+                .expect("read foreign tenant"),
+            None,
+            "a foreign tenant must not read another tenant's trajectory by id"
+        );
     }
 }

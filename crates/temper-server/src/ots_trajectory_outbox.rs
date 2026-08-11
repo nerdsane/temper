@@ -461,9 +461,10 @@ impl OtsStore for MetadataOtsStore {
 
     async fn get_ots_trajectory(
         &self,
+        tenant: &str,
         trajectory_id: &str,
     ) -> Result<Option<String>, PersistenceError> {
-        self.inner.get_ots_trajectory(trajectory_id).await
+        self.inner.get_ots_trajectory(tenant, trajectory_id).await
     }
 }
 

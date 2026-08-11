@@ -966,7 +966,7 @@ async fn migrate_ots_trajectories(
     let mut rows_with_data = Vec::new();
     for row in rows {
         let data = source
-            .get_ots_trajectory(&row.trajectory_id)
+            .get_ots_trajectory(&row.tenant, &row.trajectory_id)
             .await?
             .unwrap_or_else(|| "{}".to_string());
         values.push(json!({

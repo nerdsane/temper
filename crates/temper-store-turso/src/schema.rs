@@ -306,6 +306,15 @@ pub const CREATE_TRAJECTORIES_AGENT_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_trajectories_agent
     ON trajectories(agent_id);";
 
+/// Index on session_id for session-scoped trajectory replay.
+///
+/// Conformance checking reads one session's rows in the order the kernel
+/// wrote them, so the index covers the ordering column too and the read is
+/// a range scan rather than a table scan.
+pub const CREATE_TRAJECTORIES_SESSION_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_trajectories_session
+    ON trajectories(session_id, created_at, id);";
+
 /// Feature request records generated from trajectory analysis.
 pub const CREATE_FEATURE_REQUESTS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS feature_requests (
