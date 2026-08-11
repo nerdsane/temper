@@ -289,11 +289,12 @@ impl crate::state::ServerState {
             source: Some(TrajectorySource::Entity),
             spec_governed: None,
             agent_type: ctx.agent_ctx.agent_type.clone(),
-            request_body: if response.success {
-                None
-            } else {
-                Some(ctx.action_params.clone())
-            },
+            // Captured on success as well as failure. A trajectory that
+            // records only what failed cannot be replayed or learned from:
+            // the successful action and the arguments that produced it are
+            // exactly the signal RL and replay consumers need. Bounded at
+            // capture so a backed-up outbox cannot hold whole request bodies.
+            request_body: Some(crate::storage::bounded_request_body(ctx.action_params)),
             intent: ctx.agent_ctx.intent.clone(),
             matched_policy_ids: None,
         };
@@ -448,6 +449,9 @@ impl crate::state::ServerState {
                 source: Some(TrajectorySource::Entity),
                 spec_governed: None,
                 agent_type: ctx.agent_ctx.agent_type.clone(),
+                // Deliberately absent, unlike the persisted trajectory entry:
+                // webhook payloads leave the deployment, so action arguments
+                // are not egressed to third-party endpoints.
                 request_body: None,
                 intent: ctx.agent_ctx.intent.clone(),
                 matched_policy_ids: None,

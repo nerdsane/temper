@@ -11,7 +11,7 @@ use temper_authz::SecurityContext;
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
-use crate::request_context::AgentContext;
+use crate::request_context::{AgentContext, intent_from_headers};
 use crate::state::{PendingDecision, TrajectoryEntry, TrajectorySource};
 
 /// Extract `X-Temper-*` headers from an axum `HeaderMap` into `(key, value)` pairs
@@ -145,6 +145,12 @@ pub(crate) struct DenialInput<'a> {
     pub module_name: Option<String>,
     /// Entity status at the time of denial.
     pub from_status: Option<String>,
+    /// Caller-supplied intent (`X-Intent`) for the denied request.
+    ///
+    /// A denial without the intent behind it tells the Evolution Engine what
+    /// was blocked but not what the agent was trying to accomplish, which is
+    /// the half that drives policy proposals.
+    pub intent: Option<String>,
 }
 
 /// Input for a resumable management mutation authorization check.
@@ -220,6 +226,7 @@ pub(crate) async fn require_governed_mutation_auth(
                 reason: &reason,
                 module_name: input.module_name.map(str::to_string),
                 from_status: input.from_status.map(str::to_string),
+                intent: intent_from_headers(headers),
             },
         )
         .await;
@@ -261,6 +268,7 @@ pub(crate) async fn record_authz_denial(
         .agent_id_override
         .unwrap_or(input.security_ctx.principal.id.as_str());
     let denied_module = input.module_name.clone();
+    let denial_request_body = input.resource_attrs.clone();
     let session_id = input
         .security_ctx
         .context_attrs
@@ -360,8 +368,11 @@ pub(crate) async fn record_authz_denial(
         source: Some(TrajectorySource::Authz),
         spec_governed: None,
         agent_type: input.security_ctx.principal.agent_type.clone(),
-        request_body: None,
-        intent: None,
+        // The Cedar-evaluated resource attributes are the request payload for
+        // an authorization decision; without them a denial cannot be replayed
+        // against a revised policy.
+        request_body: Some(denial_request_body),
+        intent: input.intent.clone(),
         matched_policy_ids: None,
     };
     if !state.enqueue_trajectory_entry(traj.clone()) {

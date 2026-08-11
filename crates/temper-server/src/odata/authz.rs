@@ -164,6 +164,7 @@ pub(super) async fn authorize_mutation(
                 .get("status")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
+            intent: agent_ctx.intent.clone(),
         },
     )
     .await;

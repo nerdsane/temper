@@ -32,7 +32,7 @@ use temper_store_turso::{
 use crate::platform_store::PlatformStore;
 #[cfg(feature = "sim")]
 use crate::platform_store::SimPlatformStore;
-use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
+use crate::state::trajectory::TrajectoryEntry;
 
 mod published_artifacts;
 mod query_plane_impls;
@@ -2677,35 +2677,12 @@ impl DataOnlyCreateStore for PostgresEventStore {
     }
 }
 
-fn trajectory_source_label(source: &TrajectorySource) -> &'static str {
-    match source {
-        TrajectorySource::Entity => "Entity",
-        TrajectorySource::Platform => "Platform",
-        TrajectorySource::Authz => "Authz",
-    }
-}
+mod trajectory_row;
 
-fn trajectory_request_body_json(entry: &TrajectoryEntry) -> Option<String> {
-    entry.request_body.as_ref().and_then(|value| {
-        let serialized = serde_json::to_string(value).ok()?;
-        Some(if serialized.len() > 4096 {
-            let mut end = 4096;
-            while !serialized.is_char_boundary(end) {
-                end -= 1;
-            }
-            serialized[..end].to_string()
-        } else {
-            serialized
-        })
-    })
-}
-
-fn trajectory_matched_policy_ids_json(entry: &TrajectoryEntry) -> Option<String> {
-    entry
-        .matched_policy_ids
-        .as_ref()
-        .and_then(|ids| serde_json::to_string(ids).ok())
-}
+pub(crate) use trajectory_row::bounded_request_body;
+use trajectory_row::{
+    trajectory_matched_policy_ids_json, trajectory_request_body_json, trajectory_source_label,
+};
 
 #[async_trait::async_trait]
 impl TrajectorySink for PostgresEventStore {

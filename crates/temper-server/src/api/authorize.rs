@@ -74,6 +74,7 @@ pub(crate) async fn handle_authorize(
                     reason: &reason,
                     module_name: None,
                     from_status: None,
+                    intent: crate::request_context::intent_from_headers(&headers),
                 },
             )
             .await;

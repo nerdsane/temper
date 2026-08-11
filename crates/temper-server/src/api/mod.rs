@@ -208,6 +208,7 @@ pub(crate) async fn require_policy_auth(
                 reason: &reason,
                 module_name: None,
                 from_status: None,
+                intent: crate::request_context::intent_from_headers(headers),
             },
         )
         .await;
