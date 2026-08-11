@@ -206,3 +206,55 @@ fn dispatch_context_sets_root_workflow_and_current_span_parent() {
             .is_some_and(|id| id.len() == 16)
     );
 }
+
+#[test]
+fn session_and_intent_helpers_prefer_the_observe_prefixed_spelling() {
+    // Both spellings are accepted; the canonical `X-Temper-Observe-*` form
+    // wins when a caller sends both, matching `extract_agent_context`.
+    let mut headers = HeaderMap::new();
+    headers.insert("x-session-id", HeaderValue::from_static("short"));
+    headers.insert(
+        "x-temper-observe-session-id",
+        HeaderValue::from_static("canonical"),
+    );
+    headers.insert("x-intent", HeaderValue::from_static("short intent"));
+    headers.insert(
+        "x-temper-observe-intent",
+        HeaderValue::from_static("canonical intent"),
+    );
+
+    assert_eq!(
+        session_id_from_headers(&headers).as_deref(),
+        Some("canonical")
+    );
+    assert_eq!(
+        intent_from_headers(&headers).as_deref(),
+        Some("canonical intent")
+    );
+
+    let ctx = extract_agent_context(&headers);
+    assert_eq!(ctx.session_id, session_id_from_headers(&headers));
+    assert_eq!(ctx.intent, intent_from_headers(&headers));
+}
+
+#[test]
+fn session_and_intent_helpers_fall_back_to_the_short_aliases() {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-session-id", HeaderValue::from_static("short"));
+    headers.insert("x-intent", HeaderValue::from_static("short intent"));
+
+    assert_eq!(session_id_from_headers(&headers).as_deref(), Some("short"));
+    assert_eq!(
+        intent_from_headers(&headers).as_deref(),
+        Some("short intent")
+    );
+}
+
+#[test]
+fn session_and_intent_helpers_ignore_blank_and_missing_headers() {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-session-id", HeaderValue::from_static("   "));
+    assert!(session_id_from_headers(&headers).is_none());
+    assert!(intent_from_headers(&headers).is_none());
+    assert!(session_id_from_headers(&HeaderMap::new()).is_none());
+}
