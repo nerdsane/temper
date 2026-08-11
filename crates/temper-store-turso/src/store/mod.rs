@@ -2,7 +2,7 @@
 //!
 //! Split into domain-focused sub-modules for cohesion:
 //! - [`specs`]: Spec CRUD (upsert, verification, load)
-//! - [`trajectory`]: Trajectory persistence and queries
+//! - [`trajectory`] / [`trajectory_queries`]: Trajectory writes and reads
 //! - [`evolution`]: Feature requests, evolution records, design-time events
 //! - [`authz`]: Authorization decisions and Cedar policies
 //! - [`wasm`]: WASM module storage and invocation logs
@@ -36,6 +36,7 @@ mod specs;
 #[cfg(test)]
 mod tests;
 mod trajectory;
+mod trajectory_queries;
 mod wasm;
 mod write_gate;
 
