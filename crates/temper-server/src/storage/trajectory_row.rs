@@ -22,8 +22,8 @@ pub(crate) const TRAJECTORY_REQUEST_BODY_MAX_BYTES: usize = 4096;
 /// An oversized body becomes a valid JSON envelope carrying a bounded preview
 /// rather than a byte-sliced prefix. The column is read back with
 /// `serde_json::from_str`, so a sliced prefix parses as nothing and the row
-/// loses its body entirely. Successful actions now record their params too, so
-/// a large body is an ordinary case rather than a rare one.
+/// loses its body entirely. Every action records its params, successful ones
+/// included, which makes a large body an ordinary case rather than a rare one.
 pub(super) fn trajectory_request_body_json(entry: &TrajectoryEntry) -> Option<String> {
     let serialized = serde_json::to_string(entry.request_body.as_ref()?).ok()?;
     if serialized.len() <= TRAJECTORY_REQUEST_BODY_MAX_BYTES {
