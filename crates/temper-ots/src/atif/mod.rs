@@ -56,7 +56,7 @@
 //! | Key | Location | Content |
 //! | --- | --- | --- |
 //! | `temper.ots_version` | root `extra` | the OTS document `version` |
-//! | `temper.metadata` | root `extra` | the whole `OTSMetadata` verbatim, including `spec_version`, `harness`, `outcome`, `feedback_score`, `human_reviewed`, `tags`, `domain`, `environment`, `parent_trajectory_id` |
+//! | `temper.metadata` | root `extra` | the whole `OTSMetadata` verbatim, including `spec_version`, `harness`, `agent_version`, `outcome`, `feedback_score`, `human_reviewed`, `tags`, `domain`, `environment`, `parent_trajectory_id` |
 //! | `temper.context` | root `extra` | the `OTSContext` verbatim, when non-empty |
 //! | `temper.final_reward` | root `extra` | `final_reward` |
 //! | `temper.agent_id` / `temper.framework` / `temper.harness` / `temper.spec_version` | `agent.extra` | the originals, so the `agent.name` fallback chain stays reversible and the governing spec stays readable without being mistaken for the agent release |

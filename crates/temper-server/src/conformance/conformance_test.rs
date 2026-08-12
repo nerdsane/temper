@@ -706,3 +706,21 @@ fn a_thinking_decision_is_not_reported_as_an_action() {
     assert_eq!(report.stats.ots_decisions_checked, 0);
     assert_eq!(report.stats.ots_decisions_skipped_as_thinking, 1);
 }
+
+#[test]
+fn an_undeclared_action_that_moved_the_entity_is_reported_once() {
+    // The undeclared row is the fault. If the walk forgot where that row left
+    // the entity, the next legal row would look like a discontinuity and the
+    // same fault would be reported a second time under another kind.
+    let rows = vec![
+        row("AddItem", Some("Draft"), Some("Draft")),
+        row("Frobnicate", Some("Draft"), Some("Submitted")),
+        row("ConfirmOrder", Some("Submitted"), Some("Confirmed")),
+    ];
+
+    let report = check(&order_automaton(), &rows, None);
+
+    let violation = only_violation(&report);
+    assert_eq!(violation.index, 1);
+    assert_eq!(violation.kind, ViolationKind::UnknownAction);
+}

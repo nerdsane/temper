@@ -86,6 +86,11 @@ pub(super) fn check_row(
             entity_type: row.entity_type.clone(),
             detail: undeclared_detail(kind, spec.entity_name),
         });
+        // The row is not judged further — there is no declared action to judge
+        // it against — but it still moved the entity, and the walk has to know
+        // where to. Leaving the state behind would make the next legal row
+        // look like a discontinuity, reporting one fault twice.
+        record_state_progress(spec, walk, index, row);
         return;
     };
 
