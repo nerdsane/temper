@@ -104,6 +104,26 @@ mod tests {
     }
 
     #[test]
+    fn capture_order_column_exists_on_both_schema_paths() {
+        // A fresh bootstrap reads schema.rs and an existing database reads the
+        // migration; a session read that orders by `capture_seq` fails on
+        // whichever path forgets it.
+        let migration = include_str!("../migrations/0014_trajectory_capture_seq.sql");
+        assert!(
+            migration.contains("ADD COLUMN IF NOT EXISTS capture_seq"),
+            "migration 0014 must add the capture-order column idempotently"
+        );
+        assert!(
+            migration.contains("idx_trajectories_session_capture"),
+            "migration 0014 must cover the session read's ordering columns"
+        );
+        assert!(
+            schema::CREATE_TRAJECTORIES_TABLE.contains("capture_seq"),
+            "a freshly bootstrapped trajectories table must carry the capture-order column"
+        );
+    }
+
+    #[test]
     fn migration_sql_is_idempotent() {
         // Both schemas must use IF NOT EXISTS so repeated execution is safe.
         assert!(
