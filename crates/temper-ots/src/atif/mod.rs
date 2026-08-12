@@ -58,7 +58,7 @@
 //! | `temper.decisions` | step `extra` | each decision verbatim: `decision_type`, `state`, `alternatives`, `evaluation`, `credit_assignment`, `embedding`, and the choice `rationale` / `confidence` — ATIF's `ToolCallSchema` carries none of it |
 //! | `temper.assistant_content` | step `extra` | assistant message payloads that are not plain text (tool-call, tool-response, widget content) |
 //! | `temper.consequence` | `observation.results[].extra` | `success` and `error_type` of the decision that produced the result |
-//! | `temper.response_mask` / `temper.turn_reward` | `metrics.extra` | the per-token loss mask and the per-turn reward |
+//! | `temper.response_mask` / `temper.turn_reward` | `metrics.extra` | the per-token loss mask (completion-aligned, same length as `completion_token_ids`) and the per-turn reward |
 //!
 //! ## Cannot round-trip
 //!
@@ -79,6 +79,11 @@
 //!   token ids cannot exist in OTS — counts are derived from ids — so an ATIF
 //!   document imported into OTS and exported again loses any count whose ids
 //!   were absent.
+//! - **Context compaction.** ATIF links trajectory segments across a
+//!   summarization boundary with `continued_trajectory_ref` and marks carried
+//!   steps `is_copied_context`. OTS models neither, so both are always absent;
+//!   a Temper session that compacts its context records no boundary for the
+//!   export to point at.
 
 mod types;
 

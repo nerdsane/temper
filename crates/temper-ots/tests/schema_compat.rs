@@ -95,8 +95,11 @@ fn fully_populated_extension_fields_round_trip() {
         ))
         .with_decision(decision)
         .with_prompt_token_ids(vec![128000, 9906, 1917])
+        // Completion-side signals are aligned position for position: four
+        // completion tokens, four mask entries, four log probabilities. The
+        // `0` marks a token the environment injected into the response.
         .with_completion_token_ids(vec![40, 2846, 389, 433])
-        .with_response_mask(vec![0, 0, 0, 1, 1, 1, 1])
+        .with_response_mask(vec![1, 1, 0, 1])
         .with_logprobs(vec![-0.01, -0.42, -1.75, -0.03]);
 
     let trajectory = OTSTrajectory::new(metadata)
@@ -127,8 +130,9 @@ fn fully_populated_extension_fields_round_trip() {
     );
     assert_eq!(
         parsed_turn.response_mask.as_deref(),
-        Some([0u8, 0, 0, 1, 1, 1, 1].as_ref()),
-        "1 marks model tokens, 0 marks tool/injected tokens"
+        Some([1u8, 1, 0, 1].as_ref()),
+        "completion-aligned: one entry per completion token, 1 for model \
+         tokens and 0 for tool or otherwise injected tokens"
     );
     assert_eq!(
         parsed_turn.logprobs.as_deref(),

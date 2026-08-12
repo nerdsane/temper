@@ -51,19 +51,34 @@ pub struct OTSTurn {
     /// RL consumers train on token IDs; re-tokenizing the rendered text
     /// drifts from what the model actually saw. Populated only when the
     /// serving stack exposes them, absent otherwise.
+    ///
+    /// Prompt-aligned, and the only prompt-side signal on the turn: nothing
+    /// else indexes into it. Prompt tokens are never trained on, so they carry
+    /// neither a mask nor log probabilities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_token_ids: Option<Vec<u32>>,
 
     /// Token IDs of the completion exactly as the serving stack emitted them.
+    ///
+    /// The alignment anchor for the completion side: `response_mask` and
+    /// `logprobs` index into this array position for position. See
+    /// [`OTSTurn::validate_token_signals`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_token_ids: Option<Vec<u32>>,
 
-    /// Per-token loss mask: `1` for model-generated tokens, `0` for
-    /// tool output or otherwise injected tokens.
+    /// Per-token loss mask over the completion: `1` for model-generated
+    /// tokens, `0` for tool output or otherwise injected tokens.
+    ///
+    /// A multi-turn completion interleaves what the model wrote with what the
+    /// environment injected back into the same response segment; the mask is
+    /// what tells them apart at training time. Completion-aligned: exactly one
+    /// entry per `completion_token_ids` entry, each `0` or `1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_mask: Option<Vec<u8>>,
 
     /// Per-token log probabilities reported by the serving stack.
+    ///
+    /// Completion-aligned: exactly one entry per `completion_token_ids` entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<Vec<f64>>,
 }
@@ -150,22 +165,95 @@ impl OTSTurn {
         self
     }
 
-    /// Set the completion token IDs
+    /// Set the completion token IDs.
+    ///
+    /// Panics if a completion-aligned signal is already set at a different
+    /// length.
     pub fn with_completion_token_ids(mut self, completion_token_ids: Vec<u32>) -> Self {
+        self.assert_completion_aligned("completion_token_ids", completion_token_ids.len());
         self.completion_token_ids = Some(completion_token_ids);
         self
     }
 
-    /// Set the per-token response mask (`1` = model token, `0` = injected token)
+    /// Set the per-token response mask (`1` = model token, `0` = injected token).
+    ///
+    /// Panics if any entry is outside `{0, 1}`, or if a completion-aligned
+    /// signal is already set at a different length.
     pub fn with_response_mask(mut self, response_mask: Vec<u8>) -> Self {
+        if let Some(value) = response_mask.iter().find(|value| **value > 1) {
+            panic!("response_mask entries must be 0 or 1, got {value}");
+        }
+        self.assert_completion_aligned("response_mask", response_mask.len());
         self.response_mask = Some(response_mask);
         self
     }
 
-    /// Set the per-token log probabilities
+    /// Set the per-token log probabilities.
+    ///
+    /// Panics if a completion-aligned signal is already set at a different
+    /// length.
     pub fn with_logprobs(mut self, logprobs: Vec<f64>) -> Self {
+        self.assert_completion_aligned("logprobs", logprobs.len());
         self.logprobs = Some(logprobs);
         self
+    }
+
+    /// Check that the completion-side signals agree.
+    ///
+    /// The setters catch every pairwise length disagreement whatever order
+    /// they are called in, but they cannot see a signal that is never set:
+    /// a mask or a logprob array with no `completion_token_ids` has nothing
+    /// to index into and is meaningless. This is the whole-turn check, and it
+    /// is what [`TrajectoryBuilder::end_turn`](crate::TrajectoryBuilder) runs
+    /// before a turn is sealed.
+    pub fn validate_token_signals(&self) -> Result<(), String> {
+        let completion = self.completion_token_ids.as_ref().map(Vec::len);
+        for (name, len) in [
+            ("response_mask", self.response_mask.as_ref().map(Vec::len)),
+            ("logprobs", self.logprobs.as_ref().map(Vec::len)),
+        ] {
+            let Some(len) = len else { continue };
+            match completion {
+                None => {
+                    return Err(format!(
+                        "turn {} carries {name} with no completion_token_ids to align it against",
+                        self.turn_id
+                    ));
+                }
+                Some(completion) if completion != len => {
+                    return Err(format!(
+                        "turn {} has {len} {name} entries but {completion} completion_token_ids; \
+                         completion-side signals are aligned position for position",
+                        self.turn_id
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Panic when `len` disagrees with a completion-aligned signal that is
+    /// already set. Order-independent: whichever setter runs last sees at
+    /// least one counterpart and trips.
+    fn assert_completion_aligned(&self, name: &str, len: usize) {
+        for (other_name, other_len) in [
+            (
+                "completion_token_ids",
+                self.completion_token_ids.as_ref().map(Vec::len),
+            ),
+            ("response_mask", self.response_mask.as_ref().map(Vec::len)),
+            ("logprobs", self.logprobs.as_ref().map(Vec::len)),
+        ] {
+            if let Some(other_len) = other_len
+                && other_len != len
+            {
+                panic!(
+                    "{name} has {len} entries but {other_name} has {other_len}; \
+                     completion-side signals are aligned position for position"
+                );
+            }
+        }
     }
 }
 
@@ -248,6 +336,62 @@ mod tests {
 
         let json_str = serde_json::to_string(&turn).unwrap();
         assert!(json_str.contains("\"error\":true"));
+    }
+
+    #[test]
+    fn completion_side_signals_must_agree_in_length() {
+        let timestamp = sim_now();
+        let turn = OTSTurn::new(1, timestamp)
+            .with_completion_token_ids(vec![4, 5])
+            .with_response_mask(vec![1, 0])
+            .with_logprobs(vec![-0.1, -0.2]);
+        assert!(turn.validate_token_signals().is_ok());
+    }
+
+    #[test]
+    #[should_panic(expected = "response_mask has 3 entries but completion_token_ids has 2")]
+    fn a_mask_longer_than_the_completion_panics() {
+        let timestamp = sim_now();
+        OTSTurn::new(1, timestamp)
+            .with_completion_token_ids(vec![4, 5])
+            .with_response_mask(vec![1, 0, 1]);
+    }
+
+    #[test]
+    #[should_panic(expected = "completion_token_ids has 2 entries but response_mask has 3")]
+    fn the_alignment_check_does_not_depend_on_setter_order() {
+        let timestamp = sim_now();
+        OTSTurn::new(1, timestamp)
+            .with_response_mask(vec![1, 0, 1])
+            .with_completion_token_ids(vec![4, 5]);
+    }
+
+    #[test]
+    #[should_panic(expected = "response_mask entries must be 0 or 1, got 2")]
+    fn a_mask_outside_the_zero_one_domain_panics() {
+        let timestamp = sim_now();
+        OTSTurn::new(1, timestamp).with_response_mask(vec![1, 2]);
+    }
+
+    #[test]
+    fn a_signal_with_nothing_to_align_against_is_rejected_by_validation() {
+        let timestamp = sim_now();
+        // The setters cannot catch this: there is no counterpart to compare
+        // against, so only the whole-turn check sees it.
+        let turn = OTSTurn::new(1, timestamp).with_response_mask(vec![1, 0]);
+        let error = turn
+            .validate_token_signals()
+            .expect_err("a mask with no completion tokens is meaningless");
+        assert!(error.contains("no completion_token_ids"), "{error}");
+    }
+
+    #[test]
+    fn a_turn_with_no_token_signals_validates() {
+        let timestamp = sim_now();
+        assert!(
+            OTSTurn::new(1, timestamp).validate_token_signals().is_ok(),
+            "token signals are optional; absent is not misaligned"
+        );
     }
 
     #[test]
