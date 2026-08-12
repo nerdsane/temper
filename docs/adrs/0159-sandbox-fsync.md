@@ -1,11 +1,11 @@
-# ADR-0033: Sandbox Fsync to TemperFS
+# ADR-0159: Sandbox Fsync to TemperFS
 
 - Status: Accepted
 - Date: 2026-03-17
 - Deciders: Temper core maintainers
 - Related:
   - ADR-0029: TemperFS (workspace, file, blob storage)
-  - ADR-0031: Temper-native agent (IOA spec-driven agent loop)
+  - ADR-0156: Temper-native agent (IOA spec-driven agent loop)
   - `os-apps/temper-agent/wasm/tool_runner/src/lib.rs`
   - `os-apps/temper-fs/wasm/blob_adapter/src/lib.rs`
 

@@ -1,4 +1,4 @@
-# ADR-0045: Field-Overflow Inline Ceiling
+# ADR-0166: Field-Overflow Inline Ceiling
 
 - Status: Accepted
 - Date: 2026-04-16

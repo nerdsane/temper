@@ -5,14 +5,14 @@
 - Deciders: Temper core maintainers
 - Related:
   - ADR-0059: Workflow Trace Context Propagation
-  - ADR-0084: Long-Lived Workflow Root Spans
+  - ADR-0176: Long-Lived Workflow Root Spans
   - ADR-0098: Background WASM Trace Retention
   - ADR-0100: WASM Invocation Phase Observability
   - `crates/temper-server/src/workflow_tracing.rs`
 
 ## Context
 
-ADR-0084 keeps workflow root spans open across asynchronous entity actions. To
+ADR-0176 keeps workflow root spans open across asynchronous entity actions. To
 avoid dropping final post-dispatch telemetry, the root span currently remains
 open for a fixed two-second grace period after the root entity reaches a
 terminal state.
@@ -83,7 +83,7 @@ OTS trajectory cost where trace-proven, and projection correctness proof.
 
 - Datadog traces explain why workflow roots include a two-second tail.
 - Latency slicing can distinguish product work from observability grace.
-- The trace-retention behavior from ADR-0084 remains intact.
+- The trace-retention behavior from ADR-0176 remains intact.
 
 ### Negative
 
@@ -117,7 +117,7 @@ OTS trajectory cost where trace-proven, and projection correctness proof.
 ## Alternatives Considered
 
 1. **Remove the drain** - Rejected because final post-dispatch telemetry could
-   detach from the workflow root, undoing the trace-shape gains of ADR-0084.
+   detach from the workflow root, undoing the trace-shape gains of ADR-0176.
 2. **Only document the caveat in the report** - Rejected because future Datadog
    users and agents would still see misleading root spans unless the trace
    itself explains the drain.

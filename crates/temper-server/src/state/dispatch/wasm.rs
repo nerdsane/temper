@@ -548,7 +548,7 @@ impl crate::state::ServerState {
                 .integration_config
                 .insert("temper_api_url".to_string(), api_url);
         }
-        // ADR-0046: inline-hydrate blob refs below the 128KB ceiling; defer
+        // ADR-0169: inline-hydrate blob refs below the 128KB ceiling; defer
         // oversize refs into a blob_cache the WASM guest can read via
         // host_read_field_stream. No-op on tenants without a Turso store.
         let blob_cache = instrument_wasm_dispatch_phase(
@@ -608,7 +608,7 @@ impl crate::state::ServerState {
                 //
                 // When no explicit `timeout_secs` is configured, fall back to the
                 // platform default (`WasmResourceLimits::default().max_duration`, 120s
-                // per ADR-0045). The fallback is observable:
+                // per ADR-0167). The fallback is observable:
                 //   - `tracing::warn!` for human debugging
                 //   - counter `temper_wasm_integration_default_timeout_used_total` for alerting
                 //   - span attribute `wasm.timeout_source = default` for APM correlation

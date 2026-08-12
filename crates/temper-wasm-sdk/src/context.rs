@@ -39,7 +39,7 @@ pub struct SubWrite {
     pub params: Value,
 }
 
-/// Builder for ADR-0040 Composite action integration results.
+/// Builder for ADR-0161 Composite action integration results.
 ///
 /// The builder only produces the `sub_writes` data envelope. The WASM module
 /// does not dispatch actions; it returns this data from a spec-declared
@@ -671,7 +671,7 @@ impl Context {
     /// for blob-ref fields the return bytes are the original decoded payload;
     /// for other JSON values the return bytes are the JSON serialization.
     ///
-    /// See ADR-0046.
+    /// See ADR-0169.
     pub fn read_field_bytes(&self, field_name: &str) -> Result<Vec<u8>, String> {
         // Probe with a zero-length buffer to get the required size.
         let needed = unsafe {

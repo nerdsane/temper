@@ -4,7 +4,7 @@
 - Date: 2026-04-24
 - Deciders: Temper core maintainers
 - Related:
-  - ADR-0046: Optimistic concurrency retry
+  - ADR-0168: Optimistic concurrency retry
   - ADR-0056: Durable state timeouts and silent-exit prevention
   - openpaw ADR-0026: durable query plane and bounded actor residency
   - `crates/temper-spec/src/automaton/types.rs`

@@ -468,7 +468,7 @@ impl ProductionWasmHost {
     /// Create with pre-loaded secrets and default HTTP timeout.
     ///
     /// The default timeout matches `WasmResourceLimits::default().max_duration`
-    /// (120s per ADR-0045).
+    /// (120s per ADR-0167).
     pub fn new(secrets: BTreeMap<String, String>) -> Self {
         Self::with_timeout(secrets, crate::WasmResourceLimits::default().max_duration)
     }
@@ -883,7 +883,7 @@ impl WasmHost for ProductionWasmHost {
         })?;
         let status = resp.status().as_u16();
 
-        // Loud auth failure logging for internal API calls (ADR-0043).
+        // Loud auth failure logging for internal API calls (ADR-0165).
         if is_internal && (status == 401 || status == 403) {
             let (module, agent) = self
                 .invocation_context

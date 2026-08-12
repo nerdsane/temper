@@ -1,10 +1,10 @@
-# ADR-0032: host_connect_call — Connect Protocol Support for WASM Modules
+# ADR-0157: host_connect_call — Connect Protocol Support for WASM Modules
 
 - Status: Accepted
 - Date: 2026-03-17
 - Deciders: Temper core maintainers
 - Related:
-  - ADR-0031: temper-native-agent (agent architecture)
+  - ADR-0156: temper-native-agent (agent architecture)
   - `crates/temper-wasm/src/host_trait.rs` (WasmHost trait)
   - `crates/temper-wasm/src/engine.rs` (host function linking)
   - `crates/temper-wasm/src/authorized_host.rs` (Cedar authz gate)

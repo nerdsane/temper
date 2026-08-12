@@ -5,9 +5,9 @@
 - Deciders: Temper core maintainers
 - Related:
   - ADR-0027: OS App Catalog
-  - ADR-0032: Platform Store Trait and Sim Platform DST
+  - ADR-0158: Platform Store Trait and Sim Platform DST
   - ADR-0048: Dispatch Retry and Error Taxonomy
-  - ADR-0057: Native Immutable File Read Plane for TemperFS
+  - ADR-0170: Native Immutable File Read Plane for TemperFS
   - `crates/temper-platform/src/os_apps/mod.rs`
   - `crates/temper-server/src/platform_store.rs`
   - `crates/temper-store-turso/src/store/specs.rs`

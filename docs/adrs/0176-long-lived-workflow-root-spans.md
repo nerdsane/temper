@@ -1,4 +1,4 @@
-# ADR-0084: Long-Lived Workflow Root Spans
+# ADR-0176: Long-Lived Workflow Root Spans
 
 - Status: Accepted
 - Date: 2026-05-12
@@ -7,7 +7,7 @@
   - ADR-0052: Instrumentation as policy
   - ADR-0057: Canonical Dispatch Traces and Selective Wide-Event Projection
   - ADR-0059: Workflow Trace Context Propagation
-  - ADR-0083: WASM Host Span Hints Must Be Datadog-Visible
+  - ADR-0175: WASM Host Span Hints Must Be Datadog-Visible
   - `crates/temper-server/src/state/dispatch/actions.rs`
   - `crates/temper-server/src/workflow_tracing.rs`
 
@@ -126,7 +126,7 @@ no-exporter test runs and non-traced dispatch paths.
 
 - Durable span storage or cross-process span recovery.
 - New workflow orchestration outside entity transitions.
-- Inside-WASM guest-created APM spans; ADR-0083 still owns that limitation and
+- Inside-WASM guest-created APM spans; ADR-0175 still owns that limitation and
   follow-up path.
 
 ## Alternatives Considered

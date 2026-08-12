@@ -1,4 +1,4 @@
-# ADR-0041: Runtime Action Observability Metadata
+# ADR-0164: Runtime Action Observability Metadata
 
 - Status: Accepted
 - Date: 2026-06-08

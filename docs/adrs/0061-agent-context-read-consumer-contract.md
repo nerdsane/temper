@@ -5,13 +5,13 @@
 - Deciders: Temper core maintainers
 - Related:
   - ADR-0029: TemperFS - A Governed File System on Temper Primitives
-  - ADR-0057: Native Immutable File Read Plane for TemperFS
+  - ADR-0170: Native Immutable File Read Plane for TemperFS
   - `crates/temper-server/src/api/files.rs`
   - `crates/temper-server/src/state/file_reads.rs`
 
 ## Context
 
-ADR-0057 added the native TemperFS read plane for content-heavy consumers:
+ADR-0170 added the native TemperFS read plane for content-heavy consumers:
 
 - `POST /api/files/read-text-batch` for current `File` head reads
 - `POST /api/files/read-version-text-batch` for immutable `FileVersion` reads
@@ -39,7 +39,7 @@ The intended contract is:
 
 ## Consequences
 
-- Platform work from ADR-0057 remains the single clean read primitive for agent
+- Platform work from ADR-0170 remains the single clean read primitive for agent
   context prep and future filesystem-shaped consumers.
 - OpenPaw regressions can be detected by checking whether the active context
   preparation module uses batch current-file/version reads rather than a serial

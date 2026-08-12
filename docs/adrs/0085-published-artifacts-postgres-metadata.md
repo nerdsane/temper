@@ -4,7 +4,7 @@ Status: Accepted
 
 ## Context
 
-ADR-0082 introduced generic published artifacts as a rebuildable read model for
+ADR-0173 introduced generic published artifacts as a rebuildable read model for
 public TemperFS bytes. The implementation persisted that read model through the
 Turso store path, but production now runs on the Postgres storage stack. Live
 TemperPaw verification on 2026-05-13 showed `POST /api/files/publish-artifact`

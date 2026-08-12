@@ -1,4 +1,4 @@
-# ADR-0032: PlatformStore Trait and Simulation-Level Platform DST
+# ADR-0158: PlatformStore Trait and Simulation-Level Platform DST
 
 - Status: Proposed
 - Date: 2026-03-16

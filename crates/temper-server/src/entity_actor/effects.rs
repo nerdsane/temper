@@ -730,7 +730,7 @@ pub fn apply_new_state_fallback(state: &mut EntityState, from_status: &str, new_
 /// rest of `entity_state` (counters, booleans, lists, other fields) while
 /// covering p99 of observed oversize-field traffic.
 ///
-/// See ADR-0045.
+/// See ADR-0166.
 pub const DEFAULT_FIELD_INLINE_MAX: usize = 131_072; // 128 KB
 
 /// Sync all state variables into the `fields` JSON object.
@@ -740,7 +740,7 @@ pub const DEFAULT_FIELD_INLINE_MAX: usize = 131_072; // 128 KB
 /// the effective per-field inline ceiling are either truncated or projected
 /// through blob refs, depending on `mode`. When `state_var_metadata` is
 /// `Some`, per-field `overflow_inline_max_bytes` and `overflow_ttl_seconds`
-/// overrides are consulted (ADR-0045, ADR-0047).
+/// overrides are consulted (ADR-0166, ADR-0047).
 pub fn sync_fields(
     state: &mut EntityState,
     params: &serde_json::Value,
@@ -1782,7 +1782,7 @@ params = ["NewCommitSha"]
 
     #[test]
     fn field_over_legacy_32k_stays_inline_under_new_ceiling() {
-        // Regression test for ADR-0045: fields in the 32KB-128KB band that
+        // Regression test for ADR-0166: fields in the 32KB-128KB band that
         // previously overflowed now stay inline.
         let mut state = make_state("Session", "s-1");
         let mid = "z".repeat(80 * 1024); // 80 KB — above old 32KB cap, below new 128KB

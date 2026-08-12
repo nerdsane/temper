@@ -232,7 +232,7 @@ fn resource_limits_default() {
     let limits = WasmResourceLimits::default();
     assert_eq!(limits.max_fuel, 1_000_000_000);
     assert_eq!(limits.max_memory, 64 * 1024 * 1024);
-    // ADR-0045: raised from 30s to cover HTTP-fronted integrations under load.
+    // ADR-0167: raised from 30s to cover HTTP-fronted integrations under load.
     assert_eq!(limits.max_duration, std::time::Duration::from_secs(120));
     assert_eq!(limits.max_response_bytes, 1024 * 1024);
 }

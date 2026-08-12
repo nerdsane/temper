@@ -1,4 +1,4 @@
-# ADR-0082: Generic Published Artifacts
+# ADR-0173: Generic Published Artifacts
 
 Status: Accepted
 

@@ -1,4 +1,4 @@
-# ADR-0083: WASM Host Span Hints Must Be Datadog-Visible
+# ADR-0175: WASM Host Span Hints Must Be Datadog-Visible
 
 Date: 2026-05-12
 

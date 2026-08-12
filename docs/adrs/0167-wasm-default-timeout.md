@@ -1,4 +1,4 @@
-# ADR-0045: Raise WASM Integration Default Timeout to 120s
+# ADR-0167: Raise WASM Integration Default Timeout to 120s
 
 - Status: Accepted
 - Date: 2026-04-16

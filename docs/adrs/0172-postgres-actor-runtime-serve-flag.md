@@ -1,4 +1,4 @@
-# ADR-0081: Postgres Actor Runtime Serve Flag
+# ADR-0172: Postgres Actor Runtime Serve Flag
 
 - Status: Accepted
 - Date: 2026-05-11

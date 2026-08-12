@@ -6,7 +6,7 @@
 - Related:
   - ADR-0002: wasm-integration-for-agent-generated-api-calls (WASM integration shape)
   - ADR-0012: oauth2-enablement-webhooks-timers-secret-templates (inbound Webhook receiver — action-centric, not streaming)
-  - ADR-0032: host-connect-call (outbound streaming host call; this is the inbound dual)
+  - ADR-0157: host-connect-call (outbound streaming host call; this is the inbound dual)
   - `crates/temper-server/src/router.rs` (axum router to extend)
   - `crates/temper-server/src/webhooks/receiver.rs` (existing inbound receiver — useful contrast)
 

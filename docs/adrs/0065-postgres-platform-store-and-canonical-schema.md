@@ -4,7 +4,7 @@
 - Date: 2026-04-28
 - Deciders: Temper core maintainers
 - Related:
-  - ADR-0033: Multi-tenant isolation
+  - ADR-0160: Multi-tenant isolation
   - ADR-0058: Query-plane hot field opt-out and stable projections
   - ADR-0063: Object store for blob bytes
   - `crates/temper-store-postgres`

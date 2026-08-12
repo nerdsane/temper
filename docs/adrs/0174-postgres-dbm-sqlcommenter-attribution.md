@@ -1,4 +1,4 @@
-# ADR-0082: Postgres DBM SQLCommenter Attribution
+# ADR-0174: Postgres DBM SQLCommenter Attribution
 
 Date: 2026-05-12
 

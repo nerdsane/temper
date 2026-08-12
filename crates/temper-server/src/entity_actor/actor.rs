@@ -641,7 +641,7 @@ impl EntityActor {
                             // action already persisted the blob, INSERT OR IGNORE
                             // is a no-op. If the prior server died between emitting
                             // the event and persisting the blob, this is the
-                            // recovery path. See ADR-0040, ADR-0045.
+                            // recovery path. See ADR-0040, ADR-0166.
                             if !overflow_blobs.is_empty()
                                 && let Err(e) =
                                     Self::persist_overflow_blobs(blob_store, &overflow_blobs).await
@@ -948,7 +948,7 @@ impl Actor for EntityActor {
                     return Ok(());
                 }
 
-                // Captured BEFORE the action applies. The retry path (ADR-0046)
+                // Captured BEFORE the action applies. The retry path (ADR-0168)
                 // updates these in lockstep with replay so postconditions hold
                 // across the race window.
                 let mut event_count_before = state.total_event_count;
@@ -956,7 +956,7 @@ impl Actor for EntityActor {
                 let field_sync_mode =
                     Self::field_sync_mode_for_backend(self.event_backend, self.blob_store.as_ref());
 
-                // `result` and `event` are `mut` so that a successful ADR-0046
+                // `result` and `event` are `mut` so that a successful ADR-0168
                 // retry can replace them with values re-evaluated against the
                 // caught-up state. The downstream telemetry and reply use
                 // whichever pair last succeeded in persist.
@@ -1000,7 +1000,7 @@ impl Actor for EntityActor {
                     }
 
                     // Persist to Postgres (if configured). On
-                    // `ConcurrencyViolation` enter the ADR-0046 retry cycle —
+                    // `ConcurrencyViolation` enter the ADR-0168 retry cycle —
                     // replay events, re-evaluate the action against the caught-up
                     // state, and retry the persist up to two more times. Other
                     // error variants fail immediately (same as before).
@@ -1019,7 +1019,7 @@ impl Actor for EntityActor {
                                 expected: _,
                                 actual,
                             }) => {
-                                // ADR-0046 Sub-Decision 3: dedicated APM span
+                                // ADR-0168 Sub-Decision 3: dedicated APM span
                                 // covering the retry cycle. `attempts` and
                                 // `outcome` are recorded at the end so Datadog
                                 // APM can filter and chart conflict-handling
@@ -1039,17 +1039,17 @@ impl Actor for EntityActor {
                                     entity = %state.entity_id,
                                     action = %name,
                                     actual_seq = actual,
-                                    "persist hit optimistic-concurrency violation; entering ADR-0046 retry"
+                                    "persist hit optimistic-concurrency violation; entering ADR-0168 retry"
                                 );
 
-                                // 2 retries + 1 initial = 3 total attempts (ADR-0046).
+                                // 2 retries + 1 initial = 3 total attempts (ADR-0168).
                                 const MAX_RETRIES: u32 = 2;
                                 let mut retry_idx: u32 = 0;
                                 let mut retry_final: Option<(
                                     crate::runtime_metrics::ConcurrencyRetryOutcome,
                                     Option<String>,
                                 )> = None;
-                                // ADR-0046 Sub-Decision 4: track the most
+                                // ADR-0168 Sub-Decision 4: track the most
                                 // recent authoritative sequence across retries
                                 // so the post-replay assertion catches a
                                 // divergent replay even on a multi-conflict
@@ -1077,7 +1077,7 @@ impl Actor for EntityActor {
                                     )
                                     .await?;
 
-                                    // ADR-0046 Sub-Decision 4: replay must at
+                                    // ADR-0168 Sub-Decision 4: replay must at
                                     // minimum reach the sequence the store
                                     // reported. Reaching further is fine (a
                                     // later writer may have appended during
@@ -1150,7 +1150,7 @@ impl Actor for EntityActor {
                                     tokio::time::sleep(std::time::Duration::from_millis(
                                         backoff_ms,
                                     ))
-                                    .await; // determinism-ok: rare retry backoff (ADR-0046)
+                                    .await; // determinism-ok: rare retry backoff (ADR-0168)
 
                                     match self
                                         .persist_event(
@@ -1218,7 +1218,7 @@ impl Actor for EntityActor {
                                 // 1-based; `retry_idx` counts completed retries.
                                 let total_attempts = u64::from(1 + retry_idx);
                                 if let Some((outcome, err_msg)) = retry_final {
-                                    // Close the ADR-0046 APM span with the
+                                    // Close the ADR-0168 APM span with the
                                     // final attempt count + outcome so APM
                                     // views can filter by either.
                                     retry_span.record("attempts", total_attempts);

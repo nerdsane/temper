@@ -75,7 +75,7 @@ impl TransitionTable {
                 .push(i);
         }
 
-        // ADR-0045 / ADR-0047: collect per-state-variable overflow metadata.
+        // ADR-0166 / ADR-0047: collect per-state-variable overflow metadata.
         let mut state_var_metadata = std::collections::BTreeMap::new();
         for sv in &automaton.state {
             if sv.overflow_inline_max_bytes.is_some() || sv.overflow_ttl_seconds.is_some() {

@@ -4,7 +4,7 @@
 - Date: 2026-04-17
 - Deciders: Temper core maintainers
 - Related:
-  - ADR-0046: Optimistic-concurrency retry (pattern reference; different scope)
+  - ADR-0168: Optimistic-concurrency retry (pattern reference; different scope)
   - ADR-0028: Memory-bounded lazy hydration and passivation (interaction with cold-start latency)
   - `crates/temper-server/src/state/dispatch/actions.rs` (primary change site)
   - `crates/temper-runtime/src/actor/actor_ref.rs`
@@ -22,7 +22,7 @@ Two production incidents on 2026-04-17 demonstrate the hole this leaves:
 
 The production evidence is unambiguous: callers already retry; the retry logic just lives in the wrong place, gets rewritten per call-site, and leaks as 500s to end users before anyone catches it.
 
-ADR-0046 added optimistic-concurrency retry *inside* the actor for persistence conflicts. That pattern is correct; this ADR applies the same shape *outside* the actor, for reaching the actor.
+ADR-0168 added optimistic-concurrency retry *inside* the actor for persistence conflicts. That pattern is correct; this ADR applies the same shape *outside* the actor, for reaching the actor.
 
 ## Decision
 

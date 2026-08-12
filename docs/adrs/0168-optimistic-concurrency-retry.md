@@ -1,4 +1,4 @@
-# ADR-0046: Optimistic Concurrency Retry in Entity Actor Persistence
+# ADR-0168: Optimistic Concurrency Retry in Entity Actor Persistence
 
 - Status: Accepted
 - Date: 2026-04-16

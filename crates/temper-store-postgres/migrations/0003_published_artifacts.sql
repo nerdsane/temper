@@ -1,6 +1,6 @@
 -- 0003_published_artifacts.sql
 --
--- Persist ADR-0082 generic PublishedArtifact metadata on the canonical
+-- Persist ADR-0173 generic PublishedArtifact metadata on the canonical
 -- Postgres storage backend. The table is a rebuildable read model for public
 -- artifact provenance; application entities remain the publication authority.
 

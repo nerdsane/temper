@@ -127,7 +127,7 @@ pub struct StateVar {
     /// Initial value (as a string, parsed by type).
     pub initial: String,
     /// Optional per-field inline ceiling in bytes for the field-overflow
-    /// primitive (ADR-0045). Values above this size are moved to the blob
+    /// primitive (ADR-0166). Values above this size are moved to the blob
     /// store; values at or below stay inline in `fields`. When `None`, the
     /// crate-wide `DEFAULT_FIELD_INLINE_MAX` applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -220,10 +220,10 @@ pub struct Action {
     /// source). Kind-specific fields are validated at parse time.
     #[serde(default, rename = "triggers")]
     pub triggers: Vec<ActionTrigger>,
-    /// Composite-action Cedar gate declaration (ADR-0040).
+    /// Composite-action Cedar gate declaration (ADR-0161).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cedar_gate: Option<CompositeCedarGate>,
-    /// Declared sub-write contract for Composite actions (ADR-0040).
+    /// Declared sub-write contract for Composite actions (ADR-0161).
     #[serde(default, rename = "sub_writes")]
     pub sub_writes: Vec<SubWriteSpec>,
 }

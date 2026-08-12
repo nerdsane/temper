@@ -57,12 +57,12 @@ pub struct TransitionTable {
     /// kNN reads (`Temper.Nearest`). Empty when the spec declared no `[[vector]]`.
     #[serde(default)]
     pub vectors: Vec<DeclaredVector>,
-    /// Per-state-variable metadata for platform primitives (ADR-0045, ADR-0047).
+    /// Per-state-variable metadata for platform primitives (ADR-0166, ADR-0047).
     /// Keyed by state-variable name. Empty map when the IOA spec did not
     /// declare any per-field overrides.
     #[serde(default)]
     pub state_var_metadata: BTreeMap<String, StateVarMetadata>,
-    /// Composite-action metadata keyed by action name (ADR-0040).
+    /// Composite-action metadata keyed by action name (ADR-0161).
     #[serde(default)]
     pub composite_actions: BTreeMap<String, CompositeActionMetadata>,
     /// Pre-built index: action name → indices into `rules`.
@@ -77,14 +77,14 @@ pub struct TransitionTable {
 
 /// Platform-primitive metadata for a single state variable.
 ///
-/// - `overflow_inline_max_bytes` (ADR-0045): serialized-byte ceiling above
+/// - `overflow_inline_max_bytes` (ADR-0166): serialized-byte ceiling above
 ///   which the value is moved to the content-addressed blob store. `None`
 ///   falls back to the crate-wide `DEFAULT_FIELD_INLINE_MAX` (128KB).
 /// - `overflow_ttl_seconds` (ADR-0047): TTL for overflow blobs written on
 ///   behalf of this field. `None` = permanent (pre-ADR behavior).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StateVarMetadata {
-    /// Per-field inline byte ceiling for field overflow (ADR-0045).
+    /// Per-field inline byte ceiling for field overflow (ADR-0166).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overflow_inline_max_bytes: Option<usize>,
     /// Per-field TTL in seconds for overflow blobs (ADR-0047).

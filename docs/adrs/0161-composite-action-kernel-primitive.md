@@ -1,4 +1,4 @@
-# ADR-0040: Composite-action kernel primitive
+# ADR-0161: Composite-action kernel primitive
 
 - Status: Proposed
 - Date: 2026-05-18
@@ -6,7 +6,7 @@
 - Supersedes: (none — extends ADR-0019 and related WASM-integration ADRs)
 - Related:
   - ADR-0002: WASM integration for agent-generated API calls
-  - ADR-0033: Tenant database isolation
+  - ADR-0160: Tenant database isolation
   - ADR-0039: Latency observability acceleration program
   - `nerdsane/temper-git` RFC-0003: Genesis app registry
   - `nerdsane/temper-git` RFC-0002: push and clone (the missing

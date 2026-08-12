@@ -1,4 +1,4 @@
-# ADR-0043: WASM Host-Injected Auth Headers for Internal API Calls
+# ADR-0165: WASM Host-Injected Auth Headers for Internal API Calls
 
 - Status: Accepted
 - Date: 2026-04-15
