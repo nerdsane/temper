@@ -131,6 +131,7 @@ serial_test = "3"
 prost = "0.14"
 prost-types = "0.14"
 futures = "0.3"
+futures-util = "0.3"
 
 # Internal crates
 temper-macros = { path = "crates/temper-macros" }

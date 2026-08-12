@@ -363,16 +363,38 @@ pub(crate) async fn list_genesis_follow_updates(
 }
 
 /// `POST /api/genesis/apps/install` — install a pinned Genesis app into this instance.
+///
+/// Requires platform-admin principal (ARN-210 / ADR-0157). Unauthenticated
+/// callers must not drive registry fetches or cache materialization.
 pub(crate) async fn install_genesis_app(
     State(state): State<PlatformState>,
+    headers: HeaderMap,
     Json(req): Json<crate::genesis_install::GenesisRegistryInstallRequest>,
 ) -> impl IntoResponse {
+    if let Err(status) = crate::genesis_install_security::require_platform_admin(&headers) {
+        return (
+            status,
+            Json(serde_json::json!({
+                "error": "platform admin authorization required for Genesis install"
+            })),
+        );
+    }
     match crate::genesis_install::install_genesis_app_from_registry(&state, req).await {
         Ok(result) => (StatusCode::OK, Json(serde_json::json!(result))),
         Err(error) if error.contains("not found") => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": error })),
         ),
+        Err(error)
+            if error.contains("registry_url")
+                || error.contains("blocked")
+                || error.contains("allowlist") =>
+        {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": error })),
+            )
+        }
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": error })),
