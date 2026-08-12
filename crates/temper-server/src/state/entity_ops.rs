@@ -121,6 +121,96 @@ fn record_projection_update_error(
     );
 }
 
+/// Why an entity could not be created.
+///
+/// The create path used to return a bare `String`, so every failure — a key
+/// collision, a store outage, a missing spec — reached the HTTP layer as one
+/// undifferentiated message and left as `500 CreateError`. A caller could not
+/// tell "change your request" from "try again in a second", which is how a
+/// single declared-key collision turned into hundreds of identical retries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntityCreateError {
+    /// A declared-key uniqueness constraint rejected the write: another entity
+    /// of the same type already holds this key value (ADR-0153). Terminal —
+    /// the same body collides with the same holder every time.
+    DeclaredKeyConflict {
+        /// The store's own rejection, which names the key and its holder.
+        detail: String,
+    },
+    /// A dependency needed to create the entity was briefly unavailable.
+    /// Worth retrying after a short pause.
+    TransientDependency {
+        /// The underlying failure, verbatim.
+        detail: String,
+    },
+    /// Anything else. Retrying does not help.
+    Internal {
+        /// The underlying failure, verbatim.
+        detail: String,
+    },
+}
+
+impl EntityCreateError {
+    /// Classify an actor failure surfaced by an `ask`.
+    ///
+    /// The classification rides on the error (see `InitFailureKind`); nothing
+    /// here inspects message text to decide what kind of failure it was.
+    pub(crate) fn from_actor_error(err: &temper_runtime::actor::ActorError) -> Self {
+        use temper_runtime::actor::InitFailureKind;
+        let detail = err.to_string();
+        match err.init_failure_kind() {
+            Some(InitFailureKind::Constraint) => Self::DeclaredKeyConflict { detail },
+            Some(InitFailureKind::TransientDependency) => Self::TransientDependency { detail },
+            Some(InitFailureKind::Defect) => Self::Internal { detail },
+            None if err.is_transient() => Self::TransientDependency { detail },
+            None => Self::Internal { detail },
+        }
+    }
+
+    /// Classify a persistence failure raised on the data-only create fast path,
+    /// which writes without an actor.
+    pub(crate) fn from_persistence_error(context: &str, err: &PersistenceError) -> Self {
+        match err {
+            PersistenceError::DeclaredKeyConflict { .. } => Self::DeclaredKeyConflict {
+                detail: err.to_string(),
+            },
+            other if other.is_transient() => Self::TransientDependency {
+                detail: format!("{context}: {other}"),
+            },
+            other => Self::Internal {
+                detail: format!("{context}: {other}"),
+            },
+        }
+    }
+
+    /// Stable label for metrics and logs.
+    pub(crate) fn metric_label(&self) -> &'static str {
+        match self {
+            Self::DeclaredKeyConflict { .. } => "declared_key_conflict",
+            Self::TransientDependency { .. } => "transient_dependency",
+            Self::Internal { .. } => "internal",
+        }
+    }
+}
+
+impl std::fmt::Display for EntityCreateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DeclaredKeyConflict { detail }
+            | Self::TransientDependency { detail }
+            | Self::Internal { detail } => write!(f, "{detail}"),
+        }
+    }
+}
+
+impl std::error::Error for EntityCreateError {}
+
+impl From<EntityCreateError> for String {
+    fn from(err: EntityCreateError) -> Self {
+        err.to_string()
+    }
+}
+
 /// Error returned when the verification gate blocks an operation.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VerificationGateError {
@@ -152,6 +242,224 @@ pub struct FailedLevelInfo {
 pub(crate) struct AuthzResourceSnapshot {
     pub(crate) current_state: EntityResponse,
     pub(crate) resource_attrs: BTreeMap<String, serde_json::Value>,
+}
+
+/// Where a registration also listed the entity for collection queries:
+/// the `{tenant}:{entity_type}` index key and the id inside it.
+#[derive(Clone, Copy)]
+pub(crate) struct IndexedAs<'a> {
+    index_key: &'a str,
+    entity_id: &'a str,
+}
+
+/// The in-memory bookkeeping that one entity spawn creates, and the only place
+/// allowed to create or destroy it.
+///
+/// Three maps have to agree about every live actor: the actor registry a
+/// request asks through, the entity index collection queries read, and the
+/// access stamps passivation reads. Every registration and every removal
+/// publishes its edits to all three inside a **single critical section held on
+/// the actor-registry write lock** — the lock every reader already takes first
+/// (`get_or_spawn_tenant_actor_with_fields`, `passivate_idle_actors`,
+/// `observe::entities`). Two properties follow, and they are the point of this
+/// type:
+///
+/// - no caller can observe an entity that is half-registered or half-removed
+///   (registry entry gone while the index still lists it, or the reverse);
+/// - a removal aimed at one incarnation cannot straddle a concurrent respawn
+///   and delete the replacement's index entry or access stamp — the identity
+///   check and the edits it guards are inside the same section.
+///
+/// It holds `Arc` clones rather than a `ServerState` reference because the
+/// failed-init retraction runs inside the dead actor's own task, where there is
+/// no `ServerState` to borrow.
+#[derive(Clone)]
+pub(crate) struct ActorDirectory {
+    actor_registry: Arc<RwLock<BTreeMap<String, ActorRef<EntityMsg>>>>,
+    entity_index: Arc<RwLock<BTreeMap<String, std::collections::BTreeSet<String>>>>,
+    last_accessed: Arc<RwLock<BTreeMap<String, chrono::DateTime<chrono::Utc>>>>,
+}
+
+impl ActorDirectory {
+    pub(crate) fn of(state: &ServerState) -> Self {
+        Self {
+            actor_registry: state.actor_registry.clone(),
+            entity_index: state.entity_index.clone(),
+            last_accessed: state.last_accessed.clone(),
+        }
+    }
+
+    /// Register `spawn()`'s actor for `key` unless one is already registered.
+    ///
+    /// Returns the live actor and whether this call is the one that spawned it.
+    /// The spawn happens under the lock, so the actor cannot fail and retract
+    /// itself before the registration it is meant to undo is visible.
+    fn get_or_register(
+        &self,
+        key: &str,
+        indexed_as: IndexedAs<'_>,
+        spawn: impl FnOnce() -> ActorRef<EntityMsg>,
+    ) -> (ActorRef<EntityMsg>, bool) {
+        let mut registry = self.write_registry();
+        if let Some(existing) = registry.get(key) {
+            let existing = existing.clone();
+            self.stamp_access(key);
+            return (existing, false);
+        }
+        let actor_ref = spawn();
+        registry.insert(key.to_string(), actor_ref.clone());
+        // Nested in the same order as every removal (registry → access stamp →
+        // index) so the two never form a cycle, even though the registry lock
+        // they both hold already makes them mutually exclusive.
+        self.stamp_access(key);
+        self.write_index()
+            .entry(indexed_as.index_key.to_string())
+            .or_default()
+            .insert(indexed_as.entity_id.to_string());
+        (actor_ref, true)
+    }
+
+    /// Remove the registration of one specific incarnation.
+    ///
+    /// A replacement spawned in the meantime carries a different `ActorId`, so
+    /// the identity check makes this call either take that exact incarnation
+    /// down whole or touch nothing at all.
+    ///
+    /// `unlist` additionally drops the entity-index entry. Pass it only when the
+    /// entity provably does not exist; an actor that merely died (a failed
+    /// hydration, an idle passivation) says nothing about whether the entity is
+    /// there, and un-listing on that basis hides real data from collection
+    /// queries.
+    ///
+    /// Returns whether anything was removed.
+    fn unregister(
+        &self,
+        key: &str,
+        incarnation: &temper_runtime::actor::ActorId,
+        unlist: Option<IndexedAs<'_>>,
+    ) -> bool {
+        let mut registry = self.write_registry();
+        match registry.get(key) {
+            Some(current) if current.id().uid == incarnation.uid => {}
+            _ => return false,
+        }
+        self.evict_locked(&mut registry, key, unlist);
+        true
+    }
+
+    /// Remove whatever is registered for `key`, returning it so the caller can
+    /// stop it once the lock is released.
+    ///
+    /// The delete path's counterpart to [`Self::unregister`]: no identity check
+    /// (a delete evicts whichever incarnation is serving the entity) but the
+    /// same single critical section, so a delete is no more observable
+    /// half-applied than a retraction is.
+    fn unregister_any(&self, key: &str, unlist: IndexedAs<'_>) -> Option<ActorRef<EntityMsg>> {
+        let mut registry = self.write_registry();
+        self.evict_locked(&mut registry, key, Some(unlist))
+    }
+
+    /// The removal itself. Takes the guard by `&mut` so the type system carries
+    /// the proof that the whole eviction runs under the registry write lock.
+    fn evict_locked(
+        &self,
+        registry: &mut BTreeMap<String, ActorRef<EntityMsg>>,
+        key: &str,
+        unlist: Option<IndexedAs<'_>>,
+    ) -> Option<ActorRef<EntityMsg>> {
+        let removed = registry.remove(key);
+        self.write_last_accessed().remove(key);
+        if let Some(IndexedAs {
+            index_key,
+            entity_id,
+        }) = unlist
+        {
+            let mut index = self.write_index();
+            if let Some(ids) = index.get_mut(index_key) {
+                ids.remove(entity_id);
+                if ids.is_empty() {
+                    index.remove(index_key);
+                }
+            }
+        }
+        removed
+    }
+
+    /// Retract the spawn bookkeeping for an actor that permanently failed to
+    /// initialize. Wired as the cell's `InitFailureObserver`, so it runs once
+    /// per dead incarnation whether or not a caller is there to be told.
+    fn retract_failed_init(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        failed: &temper_runtime::actor::ActorId,
+        err: &temper_runtime::actor::ActorError,
+    ) {
+        let Some(kind) = err.init_failure_kind() else {
+            return;
+        };
+        // A constraint rejection can only come from the bootstrap append, which
+        // the actor performs solely when the entity has no events at all — so
+        // the entity provably does not exist and must not be listed. Every other
+        // init failure may belong to an entity that *does* exist and merely
+        // failed to hydrate (an oversized replay tail, a store blip); un-listing
+        // those would hide real data, so only the dead actor is retracted.
+        let entity_provably_absent = kind == temper_runtime::actor::InitFailureKind::Constraint;
+        let key = format!("{tenant}:{entity_type}:{entity_id}");
+        let index_key = format!("{tenant}:{entity_type}");
+        let unlist = entity_provably_absent.then_some(IndexedAs {
+            index_key: &index_key,
+            entity_id,
+        });
+        if !self.unregister(&key, failed, unlist) {
+            return;
+        }
+        tracing::warn!(
+            tenant = %tenant,
+            entity_type = %entity_type,
+            entity_id = %entity_id,
+            failure = kind.as_str(),
+            unlisted = entity_provably_absent,
+            error = %err,
+            "retracted the spawn of an actor that never initialized"
+        );
+        runtime_metrics::record_actor_directory_metrics(&self.actor_registry, &self.entity_index);
+    }
+
+    fn stamp_access(&self, key: &str) {
+        self.write_last_accessed()
+            .insert(key.to_string(), sim_now());
+    }
+
+    // A panic elsewhere must not strand entity bookkeeping: recovering the
+    // guard keeps registration and removal working against a poisoned lock,
+    // where bailing out would leave exactly the corpse this type exists to
+    // prevent. The maps hold no invariant a panicking writer could have broken
+    // mid-update — every edit here is a single map operation.
+    fn write_registry(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, BTreeMap<String, ActorRef<EntityMsg>>> {
+        self.actor_registry
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn write_index(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, BTreeMap<String, std::collections::BTreeSet<String>>> {
+        self.entity_index
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn write_last_accessed(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, BTreeMap<String, chrono::DateTime<chrono::Utc>>> {
+        self.last_accessed
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 impl ServerState {
@@ -744,58 +1052,74 @@ impl ServerState {
                 .with_blob_store(tenant_blob_store),
         };
 
-        // Slow-path: atomically re-check and spawn under write lock.
-        // This prevents duplicate actors when concurrent requests race to create
-        // the same (tenant, entity_type, entity_id) key.
-        let actor_ref = {
-            let mut registry = self.actor_registry.write().unwrap();
-            if let Some(existing) = registry.get(&key) {
-                return Some(existing.clone());
-            }
-            let actor_ref = self.actor_system.spawn(actor, &key);
-            registry.insert(key.clone(), actor_ref.clone());
-            actor_ref
+        // Slow-path: atomically re-check, spawn, and publish the bookkeeping
+        // under one write lock. This prevents duplicate actors when concurrent
+        // requests race to create the same (tenant, entity_type, entity_id)
+        // key, and keeps the registry entry, the entity-index membership and
+        // the access stamp indivisible — a retraction cannot land between them.
+        let directory = ActorDirectory::of(self);
+        let index_key = format!("{tenant}:{entity_type}");
+        let on_init_failure: temper_runtime::actor::InitFailureObserver = {
+            // The cell calls this when it permanently gives up on `pre_start`,
+            // from its own task, before answering anyone — so the retraction
+            // happens even when no caller is waiting (an abandoned request, an
+            // actor spawned by a read that timed out) and is already done by
+            // the time a caller is handed the failure.
+            let directory = directory.clone();
+            let tenant = tenant.clone();
+            let entity_type = entity_type.to_string();
+            let entity_id = entity_id.to_string();
+            Arc::new(move |failed: &temper_runtime::actor::ActorId, err: &_| {
+                directory.retract_failed_init(&tenant, &entity_type, &entity_id, failed, err);
+            })
         };
 
-        // Track in entity index for collection queries
-        {
-            let index_key = format!("{tenant}:{entity_type}");
-            let mut index = self.entity_index.write().unwrap();
-            index
-                .entry(index_key)
-                .or_default()
-                .insert(entity_id.to_string());
+        // The actor's own name is the registry key; `spawn` takes it by value,
+        // so this clone replaces the allocation `spawn` would make anyway.
+        let actor_name = key.clone();
+        let indexed_as = IndexedAs {
+            index_key: &index_key,
+            entity_id,
+        };
+        let (actor_ref, spawned) = directory.get_or_register(&key, indexed_as, move || {
+            self.actor_system
+                .spawn_observing_init_failure(actor, actor_name, on_init_failure)
+        });
+        if spawned {
+            runtime_metrics::record_server_state_metrics(self);
         }
-        self.touch_actor_access(&key);
-        runtime_metrics::record_server_state_metrics(self);
 
         Some(actor_ref)
+    }
+
+    /// Count a create that failed before the entity existed, and hand the error
+    /// back unchanged.
+    ///
+    /// A create that dies before its first event writes no trajectory row, so
+    /// the per-entity-type success rate on `/observe/trajectories` stayed near
+    /// 100% straight through an outage in which every create failed. This is
+    /// the counter that makes a degraded entity type visible; it is exported
+    /// both to OTLP and to `/observe/metrics`.
+    fn record_create_failure(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        error: EntityCreateError,
+    ) -> EntityCreateError {
+        runtime_metrics::record_entity_spawn_failure(
+            tenant.as_str(),
+            entity_type,
+            error.metric_label(),
+        );
+        self.metrics
+            .record_entity_spawn_failure(entity_type, error.metric_label());
+        error
     }
 
     /// Remove an entity from the index and actor registry.
     #[instrument(skip_all, fields(otel.name = "entity.remove_entity", tenant = %tenant, entity_type, entity_id))]
     pub fn remove_entity(&self, tenant: &TenantId, entity_type: &str, entity_id: &str) {
-        let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
-
-        // Remove from actor registry
-        {
-            let mut registry = self.actor_registry.write().unwrap();
-            registry.remove(&actor_key);
-        }
-        {
-            let mut last_accessed = self.last_accessed.write().unwrap();
-            last_accessed.remove(&actor_key);
-        }
-
-        // Remove from entity index
-        {
-            let index_key = format!("{tenant}:{entity_type}");
-            let mut index = self.entity_index.write().unwrap();
-            if let Some(ids) = index.get_mut(&index_key) {
-                ids.remove(entity_id);
-            }
-        }
-        runtime_metrics::record_server_state_metrics(self);
+        self.evict_entity(tenant, entity_type, entity_id, false);
     }
 
     /// Stop and evict an entity actor plus its in-memory indexes.
@@ -810,21 +1134,28 @@ impl ServerState {
         entity_type: &str,
         entity_id: &str,
     ) {
-        let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
+        self.evict_entity(tenant, entity_type, entity_id, true);
+    }
 
-        if let Ok(mut registry) = self.actor_registry.write()
-            && let Some(actor_ref) = registry.remove(&actor_key)
-        {
+    /// Drop the registry entry, the entity-index membership and the access
+    /// stamp together, optionally stopping the actor that was registered.
+    ///
+    /// One critical section for all three maps, the same one every other
+    /// mutation of them uses — see [`ActorDirectory`]. The actor is stopped
+    /// after the lock is released; `stop` is a mailbox send, and holding the
+    /// registry across it would pin the lock behind a channel.
+    fn evict_entity(&self, tenant: &TenantId, entity_type: &str, entity_id: &str, stop: bool) {
+        let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
+        let index_key = format!("{tenant}:{entity_type}");
+        let removed = ActorDirectory::of(self).unregister_any(
+            &actor_key,
+            IndexedAs {
+                index_key: &index_key,
+                entity_id,
+            },
+        );
+        if stop && let Some(actor_ref) = removed {
             let _ = actor_ref.stop();
-        }
-        if let Ok(mut last_accessed) = self.last_accessed.write() {
-            last_accessed.remove(&actor_key);
-        }
-        if let Ok(mut index) = self.entity_index.write() {
-            let index_key = format!("{tenant}:{entity_type}");
-            if let Some(ids) = index.get_mut(&index_key) {
-                ids.remove(entity_id);
-            }
         }
         runtime_metrics::record_server_state_metrics(self);
     }
@@ -968,22 +1299,48 @@ impl ServerState {
         entity_type: &str,
         entity_id: &str,
         initial_fields: serde_json::Value,
-    ) -> Result<EntityResponse, String> {
+    ) -> Result<EntityResponse, EntityCreateError> {
         let actor_ref = self
             .get_or_spawn_tenant_actor_with_fields(tenant, entity_type, entity_id, initial_fields)
-            .ok_or_else(|| {
-                format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
+            .ok_or_else(|| EntityCreateError::Internal {
+                detail: format!(
+                    "No transition table for tenant '{tenant}', entity type '{entity_type}'"
+                ),
             })?;
 
         let policy = self.dispatch_retry_policy();
-        let response = retry::ask_with_backoff::<_, EntityResponse, _>(
+        let response = match retry::ask_with_backoff::<_, EntityResponse, _>(
             &actor_ref,
             || EntityMsg::GetState,
             &policy,
         )
         .await
         .result
-        .map_err(|e| format!("Actor query failed: {e}"))?;
+        {
+            Ok(response) => response,
+            Err(err) => {
+                // An actor that could not initialize left nothing durable. Its
+                // registry entry and index id are already retracted by the time
+                // this error arrives — the cell does that before answering
+                // anyone — so the retry respawns instead of asking a dead
+                // mailbox. All that is left here is to count the failure per
+                // entity type and report the classified cause.
+                let create_error = self.record_create_failure(
+                    tenant,
+                    entity_type,
+                    EntityCreateError::from_actor_error(&err),
+                );
+                tracing::error!(
+                    tenant = %tenant,
+                    entity_type = %entity_type,
+                    entity_id = %entity_id,
+                    failure = create_error.metric_label(),
+                    error = %create_error,
+                    "entity create failed before the entity existed"
+                );
+                return Err(create_error);
+            }
+        };
 
         // Broadcast entity creation event for SSE subscribers
         let seq = self.next_entity_event_sequence(tenant.as_str(), entity_type, entity_id);
@@ -1054,7 +1411,14 @@ impl ServerState {
                     entity_id = %entity_id,
                     "failed to update query projection during create"
                 );
-                return Err(format!("query projection write failed during create: {e}"));
+                return Err(self.record_create_failure(
+                    tenant,
+                    entity_type,
+                    EntityCreateError::from_persistence_error(
+                        "query projection write failed during create",
+                        &e,
+                    ),
+                ));
             }
             record_projection_update_success(
                 tenant,
@@ -1081,7 +1445,7 @@ impl ServerState {
         entity_type: &str,
         entity_id: &str,
         initial_fields: serde_json::Value,
-    ) -> Result<Option<EntityResponse>, String> {
+    ) -> Result<Option<EntityResponse>, EntityCreateError> {
         if !initial_fields.is_object() {
             return Ok(None);
         }
@@ -1150,8 +1514,9 @@ impl ServerState {
             params: initial_fields,
             idempotency_key: None,
         };
-        let payload = serde_json::to_value(&created)
-            .map_err(|e| format!("failed to serialize Created event: {e}"))?;
+        let payload = serde_json::to_value(&created).map_err(|e| EntityCreateError::Internal {
+            detail: format!("failed to serialize Created event: {e}"),
+        })?;
         let envelope = PersistenceEnvelope {
             sequence_nr: 1,
             event_type: created.action.clone(),
@@ -1231,8 +1596,15 @@ impl ServerState {
                         entity_id = %entity_id,
                         "failed to update query projection during native data-only create fast path"
                     );
-                    return Err(format!(
-                        "native data-only create failed for {entity_type}:{entity_id}: {e}"
+                    return Err(self.record_create_failure(
+                        tenant,
+                        entity_type,
+                        EntityCreateError::from_persistence_error(
+                            &format!(
+                                "native data-only create failed for {entity_type}:{entity_id}"
+                            ),
+                            &e,
+                        ),
                     ));
                 }
             }
@@ -1254,8 +1626,15 @@ impl ServerState {
                     return Ok(None);
                 }
                 Err(e) => {
-                    return Err(format!(
-                        "failed to persist data-only Created event for {entity_type}:{entity_id}: {e}"
+                    return Err(self.record_create_failure(
+                        tenant,
+                        entity_type,
+                        EntityCreateError::from_persistence_error(
+                            &format!(
+                                "failed to persist data-only Created event for {entity_type}:{entity_id}"
+                            ),
+                            &e,
+                        ),
                     ));
                 }
             }
@@ -1290,8 +1669,13 @@ impl ServerState {
                     entity_id = %entity_id,
                     "failed to update query projection during data-only create fast path"
                 );
-                return Err(format!(
-                    "query projection write failed during data-only create: {e}"
+                return Err(self.record_create_failure(
+                    tenant,
+                    entity_type,
+                    EntityCreateError::from_persistence_error(
+                        "query projection write failed during data-only create",
+                        &e,
+                    ),
                 ));
             }
             record_projection_update_success(
@@ -1695,25 +2079,17 @@ impl ServerState {
 
             let _ = actor_ref.stop();
 
-            let removed = {
-                let Ok(mut registry) = self.actor_registry.write() else {
-                    continue;
-                };
-                if registry
-                    .get(&actor_key)
-                    .is_some_and(|current| current.id().uid == actor_ref.id().uid)
-                {
-                    registry.remove(&actor_key);
-                    true
-                } else {
-                    false
-                }
-            };
+            // Registry entry and access stamp go together: a respawn that lands
+            // between them would keep its registry entry but lose its stamp,
+            // and an actor with no stamp is never a passivation candidate
+            // again. The identity check inside covers both.
+            //
+            // The entity index is deliberately left alone — passivation says
+            // the actor is idle, not that the entity is gone, and the index is
+            // what lets the next access lazy-spawn it.
+            let removed = ActorDirectory::of(self).unregister(&actor_key, actor_ref.id(), None);
 
             if removed {
-                if let Ok(mut last_accessed) = self.last_accessed.write() {
-                    last_accessed.remove(&actor_key);
-                }
                 // Evict the state cache entry so stale status doesn't linger.
                 if let Ok(mut cache) = self.entity_state_cache.lock() {
                     cache.pop(&actor_key);
@@ -1860,3 +2236,345 @@ impl ServerState {
 
 use temper_authz::{AuthzDecision, AuthzDenial, SecurityContext};
 use temper_runtime::actor::ActorRef;
+
+#[cfg(test)]
+mod actor_directory_tests {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, RwLock};
+    use std::time::{Duration, Instant};
+
+    use temper_jit::table::TransitionTable;
+    use temper_runtime::ActorSystem;
+    use temper_runtime::actor::ActorRef;
+
+    use super::{ActorDirectory, IndexedAs};
+    use crate::entity_actor::{EntityActor, EntityMsg};
+
+    const DOC_IOA: &str = include_str!("../../../../test-fixtures/specs/keyed_doc.ioa.toml");
+
+    fn directory() -> ActorDirectory {
+        ActorDirectory {
+            actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
+            entity_index: Arc::new(RwLock::new(BTreeMap::new())),
+            last_accessed: Arc::new(RwLock::new(BTreeMap::new())),
+        }
+    }
+
+    /// A healthy actor, so the directory is exercised without an init failure
+    /// racing the assertions.
+    fn spawn_doc(system: &ActorSystem, entity_id: &str) -> ActorRef<EntityMsg> {
+        let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(DOC_IOA)));
+        system.spawn(
+            EntityActor::new("Doc", entity_id, table, serde_json::json!({})).with_tenant("default"),
+            format!("default:Doc:{entity_id}"),
+        )
+    }
+
+    fn indexed_as<'a>(index_key: &'a str, entity_id: &'a str) -> IndexedAs<'a> {
+        IndexedAs {
+            index_key,
+            entity_id,
+        }
+    }
+
+    /// Registration publishes the registry entry, the index membership and the
+    /// access stamp together.
+    #[tokio::test]
+    async fn registration_publishes_all_three_maps() {
+        let system = ActorSystem::new("directory-register");
+        let directory = directory();
+        let key = "default:Doc:doc-1";
+
+        let (_actor, spawned) =
+            directory.get_or_register(key, indexed_as("default:Doc", "doc-1"), || {
+                spawn_doc(&system, "doc-1")
+            });
+
+        assert!(spawned, "an empty directory spawns");
+        assert!(directory.actor_registry.read().unwrap().contains_key(key));
+        assert!(
+            directory.entity_index.read().unwrap()["default:Doc"].contains("doc-1"),
+            "a registered actor's entity must be listed for collection queries"
+        );
+        assert!(directory.last_accessed.read().unwrap().contains_key(key));
+
+        // A second call finds the incumbent and does not spawn again.
+        let (_again, spawned_again) =
+            directory.get_or_register(key, indexed_as("default:Doc", "doc-1"), || {
+                panic!("must not spawn a second incarnation for a registered key")
+            });
+        assert!(!spawned_again);
+    }
+
+    /// The whole retraction — identity check, registry removal, un-listing,
+    /// access stamp — is one critical section on the registry write lock.
+    ///
+    /// Proof by obstruction: hold the entity index, then start a retraction
+    /// that has to un-list. If it still holds the registry while it waits for
+    /// the index, the registry write lock is unavailable to anyone else; if it
+    /// released the registry first (removing the actor, then reaching for the
+    /// index), the registry is free — and a concurrent caller could see the
+    /// actor gone while the entity is still listed, or respawn and have its
+    /// fresh index entry deleted by the tail of this cleanup.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retraction_holds_the_registry_lock_across_the_whole_cleanup() {
+        let system = ActorSystem::new("directory-retract");
+        let directory = directory();
+        let key = "default:Doc:doc-2";
+
+        let (actor, _) = directory.get_or_register(key, indexed_as("default:Doc", "doc-2"), || {
+            spawn_doc(&system, "doc-2")
+        });
+        let incarnation = actor.id().clone();
+
+        let index_held = directory.entity_index.write().unwrap();
+
+        let retractor = {
+            let directory = directory.clone();
+            std::thread::spawn(move || {
+                directory.unregister(
+                    "default:Doc:doc-2",
+                    &incarnation,
+                    Some(indexed_as("default:Doc", "doc-2")),
+                )
+            })
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut registry_stayed_locked = false;
+        while Instant::now() < deadline {
+            if directory.actor_registry.try_write().is_err() {
+                registry_stayed_locked = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(
+            registry_stayed_locked,
+            "the retraction reached the entity index without holding the actor \
+             registry — the window where an entity is deregistered but still \
+             listed is observable, and a respawn can slip into it"
+        );
+
+        drop(index_held);
+        assert!(retractor.join().expect("the retraction thread finished"));
+        assert!(!directory.actor_registry.read().unwrap().contains_key(key));
+        assert!(
+            !directory
+                .entity_index
+                .read()
+                .unwrap()
+                .contains_key("default:Doc"),
+            "the last id of a type leaves no empty index bucket behind"
+        );
+        assert!(!directory.last_accessed.read().unwrap().contains_key(key));
+    }
+
+    /// The identity check guards every edit, not just the registry removal: a
+    /// retraction aimed at a dead incarnation must leave a live successor's
+    /// index entry and access stamp completely alone.
+    #[tokio::test]
+    async fn a_stale_retraction_cannot_touch_the_successor() {
+        let system = ActorSystem::new("directory-stale");
+        let directory = directory();
+        let key = "default:Doc:doc-3";
+
+        let (dead, _) = directory.get_or_register(key, indexed_as("default:Doc", "doc-3"), || {
+            spawn_doc(&system, "doc-3")
+        });
+        let dead_incarnation = dead.id().clone();
+
+        // The first incarnation goes away and a fresh one takes the key.
+        assert!(directory.unregister(key, &dead_incarnation, None));
+        let (successor, spawned) =
+            directory.get_or_register(key, indexed_as("default:Doc", "doc-3"), || {
+                spawn_doc(&system, "doc-3")
+            });
+        assert!(spawned, "the key was free, so this is a new incarnation");
+        assert_ne!(successor.id().uid, dead_incarnation.uid);
+
+        // The dead incarnation's cleanup arrives late.
+        assert!(!directory.unregister(
+            key,
+            &dead_incarnation,
+            Some(indexed_as("default:Doc", "doc-3"))
+        ));
+
+        assert!(
+            directory.actor_registry.read().unwrap().contains_key(key),
+            "the successor must still be registered"
+        );
+        assert!(
+            directory.entity_index.read().unwrap()["default:Doc"].contains("doc-3"),
+            "the successor's entity must still be listed — un-listing it would \
+             hide a live entity from every collection query"
+        );
+        assert!(
+            directory.last_accessed.read().unwrap().contains_key(key),
+            "an actor with no access stamp is never passivated again"
+        );
+    }
+
+    /// An unconditional eviction (the delete path) drops all three together and
+    /// hands back the actor so the caller can stop it outside the lock.
+    #[tokio::test]
+    async fn eviction_drops_all_three_maps_and_returns_the_actor() {
+        let system = ActorSystem::new("directory-evict");
+        let directory = directory();
+        let key = "default:Doc:doc-4";
+
+        let (actor, _) = directory.get_or_register(key, indexed_as("default:Doc", "doc-4"), || {
+            spawn_doc(&system, "doc-4")
+        });
+
+        let removed = directory
+            .unregister_any(key, indexed_as("default:Doc", "doc-4"))
+            .expect("the registered actor comes back so the caller can stop it");
+        assert_eq!(removed.id().uid, actor.id().uid);
+
+        assert!(directory.actor_registry.read().unwrap().is_empty());
+        assert!(
+            directory.entity_index.read().unwrap().is_empty(),
+            "the deleted entity must not stay listed"
+        );
+        assert!(directory.last_accessed.read().unwrap().is_empty());
+
+        assert!(
+            directory
+                .unregister_any(key, indexed_as("default:Doc", "doc-4"))
+                .is_none(),
+            "a second delete finds nothing and says so"
+        );
+    }
+}
+
+#[cfg(test)]
+mod entity_create_error_tests {
+    use super::EntityCreateError;
+    use temper_runtime::actor::{ActorError, InitFailureKind};
+    use temper_runtime::persistence::PersistenceError;
+
+    #[test]
+    fn a_constraint_init_failure_becomes_a_conflict() {
+        let err = ActorError::init_failed(
+            "failed to persist bootstrap Created event for File:fl-2: \
+             duplicate declared key 'ws_path' for File: held by fl-1",
+            InitFailureKind::Constraint,
+        );
+        match EntityCreateError::from_actor_error(&err) {
+            EntityCreateError::DeclaredKeyConflict { detail } => {
+                // The key and the holder are what the caller needs to act; they
+                // must survive from the store to the response.
+                assert!(detail.contains("ws_path"), "lost the key name: {detail}");
+                assert!(detail.contains("fl-1"), "lost the holder id: {detail}");
+            }
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_dependency_init_failure_becomes_retryable() {
+        let err =
+            ActorError::init_failed("storage error: reset", InitFailureKind::TransientDependency);
+        assert!(matches!(
+            EntityCreateError::from_actor_error(&err),
+            EntityCreateError::TransientDependency { .. }
+        ));
+    }
+
+    #[test]
+    fn an_actor_error_that_is_not_an_init_failure_is_classified_by_transience() {
+        // A dropped or timed-out ask is not an init failure, but a timeout is
+        // still worth retrying and must not be reported as a hard error.
+        assert!(matches!(
+            EntityCreateError::from_actor_error(&ActorError::AskTimeout(
+                std::time::Duration::from_secs(5)
+            )),
+            EntityCreateError::TransientDependency { .. }
+        ));
+        assert!(matches!(
+            EntityCreateError::from_actor_error(&ActorError::MailboxFull),
+            EntityCreateError::TransientDependency { .. }
+        ));
+        assert!(matches!(
+            EntityCreateError::from_actor_error(&ActorError::Stopped),
+            EntityCreateError::Internal { .. }
+        ));
+        assert!(matches!(
+            EntityCreateError::from_actor_error(&ActorError::init_failed(
+                "budget exceeded",
+                InitFailureKind::Defect
+            )),
+            EntityCreateError::Internal { .. }
+        ));
+    }
+
+    #[test]
+    fn the_data_only_path_classifies_the_same_way() {
+        // The fast path writes without an actor, so it classifies the typed
+        // persistence error directly — same three outcomes, same wire contract.
+        let conflict = PersistenceError::DeclaredKeyConflict {
+            entity_type: "File".to_string(),
+            key_name: "ws_path".to_string(),
+            holder_id: "fl-1".to_string(),
+        };
+        match EntityCreateError::from_persistence_error("create failed", &conflict) {
+            EntityCreateError::DeclaredKeyConflict { detail } => {
+                assert!(detail.contains("ws_path") && detail.contains("fl-1"));
+            }
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+
+        assert!(matches!(
+            EntityCreateError::from_persistence_error(
+                "create failed",
+                &PersistenceError::Storage("connection reset".into())
+            ),
+            EntityCreateError::TransientDependency { .. }
+        ));
+        assert!(matches!(
+            EntityCreateError::from_persistence_error(
+                "create failed",
+                &PersistenceError::Serialization("bad json".into())
+            ),
+            EntityCreateError::Internal { .. }
+        ));
+    }
+
+    #[test]
+    fn metric_labels_are_stable() {
+        // Dashboards and monitors key off these strings.
+        assert_eq!(
+            EntityCreateError::DeclaredKeyConflict {
+                detail: String::new()
+            }
+            .metric_label(),
+            "declared_key_conflict"
+        );
+        assert_eq!(
+            EntityCreateError::TransientDependency {
+                detail: String::new()
+            }
+            .metric_label(),
+            "transient_dependency"
+        );
+        assert_eq!(
+            EntityCreateError::Internal {
+                detail: String::new()
+            }
+            .metric_label(),
+            "internal"
+        );
+    }
+
+    #[test]
+    fn display_keeps_the_cause_intact_for_string_callers() {
+        // Callers that still take a String must not lose the reason.
+        let err = EntityCreateError::TransientDependency {
+            detail: "storage error: connection reset".to_string(),
+        };
+        assert_eq!(String::from(err.clone()), "storage error: connection reset");
+        assert_eq!(err.to_string(), "storage error: connection reset");
+    }
+}

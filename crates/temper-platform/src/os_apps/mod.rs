@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::Serialize;
+use temper_authz::{PolicySource, unlabelled_source_label};
 use temper_runtime::tenant::TenantId;
 use temper_server::state::WasmModuleSource;
 use temper_spec::automaton;
@@ -79,19 +80,105 @@ fn cached_or_active_tenant_policy_text(state: &PlatformState, tenant: &str) -> S
         .unwrap_or_default()
 }
 
-fn merge_bundle_policies(existing: &str, cedar_policies: &[String]) -> String {
-    let mut policy_text = existing.trim_end().to_string();
-    for policy in cedar_policies {
-        let policy = policy.trim();
-        if policy.is_empty() || policy_text.contains(policy) {
-            continue;
-        }
-        if !policy_text.is_empty() {
-            policy_text.push('\n');
-        }
-        policy_text.push_str(policy);
+/// Label for one Cedar file in an app bundle: `"{app}/{path under policies/}"`.
+///
+/// This is what a denial diagnostic shows — `katagami-commons/art_style.cedar#2`
+/// — so it must name a file a human can actually open (ARN-286). The path
+/// below `policies/` is kept rather than just the file name so
+/// `policies/commons/x.cedar` and `policies/x.cedar` stay distinct.
+fn bundle_policy_label(app_name: &str, relative_path: &str) -> String {
+    let path = relative_path.trim_start_matches('/');
+    let path = path.strip_prefix("policies/").unwrap_or(path);
+    format!("{app_name}/{path}")
+}
+
+/// Build the tenant's labelled Cedar policy sources after installing `app_name`.
+///
+/// Starts from the labelled sources already active for the tenant, so apps
+/// installed earlier keep their provenance, then upserts one entry per policy
+/// file in this bundle. Loading these labelled — rather than as one
+/// concatenated tenant blob — is what turns `denied by policy: policy1874`
+/// into `denied by policy: katagami-commons/art_style.cedar#2`.
+///
+/// A tenant whose policies were last loaded as an unlabelled blob keeps that
+/// blob as a single leading entry, minus any text this bundle is about to
+/// re-contribute under a proper label — without that subtraction, reinstalling
+/// an app would leave a second, unlabelled copy of its statements behind.
+fn merge_bundle_policy_sources(
+    existing_sources: Vec<PolicySource>,
+    existing_text: &str,
+    tenant: &str,
+    app_name: &str,
+    bundle_sources: &[CedarPolicySource],
+) -> Vec<PolicySource> {
+    let incoming: Vec<(String, &str)> = bundle_sources
+        .iter()
+        .map(|source| {
+            (
+                bundle_policy_label(app_name, &source.relative_path),
+                source.text.trim(),
+            )
+        })
+        .filter(|(_, text)| !text.is_empty())
+        .collect();
+
+    let mut sources = existing_sources;
+    if sources.is_empty() {
+        let labelled_texts: Vec<&str> = incoming.iter().map(|(_, text)| *text).collect();
+        sources.extend(carry_unlabelled_blob(
+            tenant,
+            existing_text,
+            &labelled_texts,
+        ));
     }
-    policy_text
+
+    for (label, text) in incoming {
+        match sources.iter_mut().find(|(existing, _)| *existing == label) {
+            Some(entry) => entry.1 = text.to_string(),
+            None => sources.push((label, text.to_string())),
+        }
+    }
+    sources
+}
+
+/// Carry an unlabelled policy blob forward as one source, minus any text that
+/// is also arriving under a proper label.
+///
+/// Two loaders can hold the same statements: the tenant's aggregate blob and
+/// the per-file rows written beside it. Without the subtraction both copies
+/// load, so a denial cites the unlabelled blob alongside the file — and the
+/// tenant carries twice the policies it needs. Matching on exact text is the
+/// same rule the blob merge has always used to decide a policy is already
+/// present.
+///
+/// Returns `None` when nothing is left to carry.
+pub(crate) fn carry_unlabelled_blob(
+    tenant: &str,
+    blob: &str,
+    labelled_texts: &[&str],
+) -> Option<PolicySource> {
+    let mut remaining = blob.trim().to_string();
+    for text in labelled_texts {
+        let text = text.trim();
+        if !text.is_empty() && remaining.contains(text) {
+            remaining = remaining.replace(text, "");
+        }
+    }
+    let remaining = remaining.trim();
+    if remaining.is_empty() {
+        return None;
+    }
+    Some((unlabelled_source_label(tenant), remaining.to_string()))
+}
+
+/// Flatten labelled sources into the single blob that durable storage and the
+/// in-memory text cache still speak in.
+fn combined_policy_text(sources: &[PolicySource]) -> String {
+    sources
+        .iter()
+        .map(|(_, text)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ── Agent / Skill / Seed Data types ─────────────────────────────────
@@ -1135,6 +1222,17 @@ pub(super) async fn install_os_app_with_plan(
         );
     }
 
+    // Steps 1-3 rebuild tenant-wide state — the merged CSDL and the Cedar
+    // policy set — by reading what the tenant already has, merging this bundle
+    // into it, and writing the result back, with durable writes and
+    // verification in between. Two installs into the same tenant running
+    // concurrently would read the same pre-state and the later write would
+    // drop the other app's policies while both installs reported success. This
+    // guard makes that sequence one at a time per tenant. It is released
+    // before Step 5 onward, which dispatches entity actions that can re-enter
+    // this installer through the Genesis bound-action hook.
+    let install_guard = state.install_locks.lock(tenant).await;
+
     // Classify each bundle spec as added / updated / skipped, and compute the
     // merged CSDL only when the reconcile plan needs spec work.
     let (mut added, mut updated, mut skipped, merged_csdl) = if plan.specs {
@@ -1186,13 +1284,31 @@ pub(super) async fn install_os_app_with_plan(
     updated.sort();
     skipped.sort();
 
-    // Build the full Cedar policy text for this tenant (existing + new).
-    let combined_policy = if plan.policies && !bundle.cedar_policies.is_empty() {
-        let existing = cached_or_active_tenant_policy_text(state, tenant);
-        Some(merge_bundle_policies(&existing, &bundle.cedar_policies))
+    // Build this tenant's Cedar policy sources (existing + this bundle's
+    // files), each still labelled with the file it came from so denials can
+    // name it. The flattened text is what durable storage speaks in.
+    //
+    // The tenant's unlabelled blob is read once here and reused when Step 3
+    // re-runs this merge inside the authz engine's lock: reading it again from
+    // there would re-enter the engine while it holds that lock.
+    let existing_policy_text = if plan.policies && !bundle.cedar_policy_sources.is_empty() {
+        Some(cached_or_active_tenant_policy_text(state, tenant))
     } else {
         None
     };
+    let policy_sources = existing_policy_text.as_deref().map(|existing_text| {
+        merge_bundle_policy_sources(
+            state.server.authz.tenant_policy_sources(tenant),
+            existing_text,
+            tenant,
+            app_name,
+            &bundle.cedar_policy_sources,
+        )
+    });
+    let combined_policy = policy_sources
+        .as_deref()
+        .map(combined_policy_text)
+        .filter(|text| !text.trim().is_empty());
 
     // ── Step 1: Persist to Turso FIRST (if available). ──────────────
     // If any write fails, bail before touching in-memory state.
@@ -1368,22 +1484,49 @@ pub(super) async fn install_os_app_with_plan(
     }
 
     // ── Step 3: Load Cedar policies into memory. ────────────────────
-    if let Some(ref policy_text) = combined_policy {
-        if let Err(e) = state
+    // Loaded per source file, so a denial names the file and statement that
+    // produced it rather than a positional `policy1874` (ARN-286).
+    // A failed reload is FATAL to the install, like every other step in this
+    // function. Warn-and-continue would return success while the tenant silently
+    // kept its previous policy set — a published policy change that never took
+    // effect, visible only as one warn line. Reachable via a Cedar parse error in
+    // any published `.cedar`, or a duplicate label in `sources` (which aborts the
+    // whole reload). Authorization state must never fail open.
+    //
+    // The bundle is merged into whatever the tenant holds *now*, inside the
+    // engine's tenant lock, rather than replacing its policy set with the
+    // snapshot read at the top of this function. A policy generated from an
+    // approved governance decision lands through that same engine while an
+    // install is running; replacing from the snapshot would silently drop it.
+    if combined_policy.is_some()
+        && let Some(existing_text) = existing_policy_text.as_deref()
+    {
+        let installed_text = state
             .server
             .authz
-            .reload_tenant_policies(tenant, policy_text)
-        {
-            tracing::warn!(
-                tenant,
-                error = %e,
-                "Failed to reload tenant Cedar policies after os-app install"
-            );
-        } else {
-            let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-            policies.insert(tenant.to_string(), policy_text.clone());
-        }
+            .update_tenant_policy_sources(tenant, |existing_sources| {
+                merge_bundle_policy_sources(
+                    existing_sources,
+                    existing_text,
+                    tenant,
+                    app_name,
+                    &bundle.cedar_policy_sources,
+                )
+            })
+            .map_err(|e| {
+                format!("Failed to reload tenant Cedar policies after os-app install: {e}")
+            })?;
+        // Mirror what the engine actually installed, not what was computed
+        // before the merge.
+        let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+        policies.insert(tenant.to_string(), installed_text);
     }
+
+    // Everything tenant-wide has been rebuilt and published. The remaining
+    // steps write per-module and per-entity rows, and Step 5 onward dispatches
+    // actions that can re-enter this installer via the Genesis bound-action
+    // hook — which would deadlock on a held guard.
+    drop(install_guard);
 
     // ── Step 4: Persist/register WASM modules, warming only eager modules. ──
     //

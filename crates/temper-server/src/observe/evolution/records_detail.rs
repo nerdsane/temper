@@ -97,7 +97,7 @@ pub(crate) async fn handle_decide(
         )
     {
         tracing::warn!(reason = %denial, "unauthorized decide attempt");
-        return Err(StatusCode::FORBIDDEN);
+        return Err(crate::authz::denial_status(&denial));
     }
 
     // Verify the target record exists.

@@ -16,6 +16,165 @@ use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoSpecVerificationUpdate;
 use temper_verify::cascade::VerificationCascade;
 
+fn cedar_source(path: &str, text: &str) -> CedarPolicySource {
+    CedarPolicySource {
+        relative_path: path.to_string(),
+        text: text.to_string(),
+    }
+}
+
+#[test]
+fn bundle_policy_label_names_the_file_under_policies() {
+    assert_eq!(
+        bundle_policy_label("katagami-commons", "policies/art_style.cedar"),
+        "katagami-commons/art_style.cedar"
+    );
+    // Nested files keep their sub-path so two same-named files stay distinct.
+    assert_eq!(
+        bundle_policy_label("katagami-commons", "policies/commons/art_style.cedar"),
+        "katagami-commons/commons/art_style.cedar"
+    );
+}
+
+#[test]
+fn bundle_sources_are_labelled_per_file() {
+    let sources = merge_bundle_policy_sources(
+        Vec::new(),
+        "",
+        "katagami",
+        "katagami-commons",
+        &[
+            cedar_source(
+                "policies/art_style.cedar",
+                "permit(principal, action, resource);",
+            ),
+            cedar_source(
+                "policies/palette.cedar",
+                "forbid(principal, action, resource);",
+            ),
+        ],
+    );
+
+    assert_eq!(
+        sources,
+        vec![
+            (
+                "katagami-commons/art_style.cedar".to_string(),
+                "permit(principal, action, resource);".to_string()
+            ),
+            (
+                "katagami-commons/palette.cedar".to_string(),
+                "forbid(principal, action, resource);".to_string()
+            ),
+        ]
+    );
+    assert_eq!(
+        combined_policy_text(&sources),
+        "permit(principal, action, resource);\nforbid(principal, action, resource);"
+    );
+}
+
+#[test]
+fn installing_a_second_app_keeps_the_first_apps_labels() {
+    let commons = merge_bundle_policy_sources(
+        Vec::new(),
+        "",
+        "katagami",
+        "katagami-commons",
+        &[cedar_source(
+            "policies/art_style.cedar",
+            "permit(principal, action, resource);",
+        )],
+    );
+
+    let both = merge_bundle_policy_sources(
+        commons,
+        "",
+        "katagami",
+        "katagami-curation",
+        &[cedar_source(
+            "policies/review.cedar",
+            "forbid(principal, action, resource);",
+        )],
+    );
+
+    let labels: Vec<&str> = both.iter().map(|(label, _)| label.as_str()).collect();
+    assert_eq!(
+        labels,
+        vec![
+            "katagami-commons/art_style.cedar",
+            "katagami-curation/review.cedar"
+        ],
+        "an app install must not flatten the labels of apps installed before it"
+    );
+}
+
+#[test]
+fn reinstalling_an_app_replaces_its_entry_rather_than_appending() {
+    let first = merge_bundle_policy_sources(
+        Vec::new(),
+        "",
+        "katagami",
+        "katagami-commons",
+        &[cedar_source(
+            "policies/art_style.cedar",
+            r#"permit(principal, action == Action::"read", resource);"#,
+        )],
+    );
+
+    let second = merge_bundle_policy_sources(
+        first,
+        "",
+        "katagami",
+        "katagami-commons",
+        &[cedar_source(
+            "policies/art_style.cedar",
+            r#"permit(principal, action == Action::"update", resource);"#,
+        )],
+    );
+
+    assert_eq!(
+        second,
+        vec![(
+            "katagami-commons/art_style.cedar".to_string(),
+            r#"permit(principal, action == Action::"update", resource);"#.to_string()
+        )],
+        "a changed policy file must supersede its previous text, not stack on it"
+    );
+}
+
+#[test]
+fn unlabelled_tenant_blob_is_carried_forward_without_duplicating_bundle_text() {
+    let bundle_text = r#"permit(principal, action == Action::"read", resource);"#;
+    let other_text = r#"permit(principal, action == Action::"list", resource);"#;
+    let blob = format!("{other_text}\n{bundle_text}");
+
+    let sources = merge_bundle_policy_sources(
+        Vec::new(),
+        &blob,
+        "katagami",
+        "katagami-commons",
+        &[cedar_source("policies/art_style.cedar", bundle_text)],
+    );
+
+    assert_eq!(
+        sources,
+        vec![
+            (unlabelled_source_label("katagami"), other_text.to_string()),
+            (
+                "katagami-commons/art_style.cedar".to_string(),
+                bundle_text.to_string()
+            ),
+        ],
+        "text the bundle re-contributes under a label must be removed from the blob"
+    );
+    assert_eq!(
+        combined_policy_text(&sources).matches(bundle_text).count(),
+        1,
+        "the bundle's statements must appear exactly once"
+    );
+}
+
 #[test]
 fn test_pm_specs_parse() {
     let bundle = get_os_app("project-management").expect("PM app not found");
@@ -1372,11 +1531,17 @@ async fn test_install_os_app_persists_granular_policy_rows() {
         .expect("load granular policies");
     assert!(
         rows.iter().any(|row| {
-            row.policy_id == "project-management-issue"
+            row.policy_id == "project-management/issue.cedar"
                 && row.enabled
                 && row.cedar_text.contains("resource is Issue")
         }),
         "project-management install should persist policies/issue.cedar as a granular row: {rows:?}"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.policy_id == "project-management-issue"),
+        "the pre-ARN-286 slug row must not survive alongside the labelled one: {rows:?}"
     );
 
     let turso_ref = state.server.platform_turso_store().unwrap();
@@ -1831,13 +1996,15 @@ mode = "commons"
         source_paths,
         vec!["policies/base.cedar", "policies/commons/guardrail.cedar"]
     );
+    // The row id is the label a denial reports, so it names a file a human can
+    // open: "katagami-commons/art_style.cedar#2" (ARN-286).
     assert_eq!(
         os_app_policy_row_id("katagami-commons", "policies/palette_system.cedar"),
-        "katagami-commons-palette_system"
+        "katagami-commons/palette_system.cedar"
     );
     assert_eq!(
         os_app_policy_row_id("katagami-commons", "policies/commons/guardrail.cedar"),
-        "katagami-commons-commons-guardrail"
+        "katagami-commons/commons/guardrail.cedar"
     );
     assert!(
         bundle
@@ -3418,6 +3585,246 @@ async fn test_local_stream_uploads_create_real_file_version_lineage() {
     );
     assert_eq!(previous.state.counters.get("version_number"), Some(&1));
 
+    let _ = fs::remove_file(&db_path);
+    let _ = fs::remove_file(format!("{db_path}-wal"));
+    let _ = fs::remove_file(format!("{db_path}-shm"));
+}
+
+/// Write a minimal policies-only app bundle into `app_root`.
+fn write_policy_only_app(app_root: &std::path::Path, app_name: &str, cedar_text: &str) {
+    let app_dir = app_root.join(app_name);
+    fs::create_dir_all(app_dir.join("policies")).unwrap();
+    fs::write(
+        app_dir.join("app.toml"),
+        format!(
+            "name = \"{app_name}\"\ndescription = \"Concurrent install policy test app\"\nversion = \"0.1.0\"\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("APP.md"),
+        format!("# {app_name}\n\nConcurrent install policy test app.\n"),
+    )
+    .unwrap();
+    fs::write(app_dir.join("policies").join("access.cedar"), cedar_text).unwrap();
+}
+
+/// Two apps installed into the same tenant at the same time must both end up
+/// with their policies active.
+///
+/// The regression: the install path read the tenant's policy sources, ran its
+/// durable writes and verification, then wrote a rebuilt set back — a
+/// read-modify-write spanning many awaits with nothing serializing it. Both
+/// installs read the same pre-state and the second write dropped the first
+/// app's policies, while both installs returned `Ok`.
+///
+/// This asserts the end state. Whether two spawned installs actually overlap
+/// is up to the scheduler, so the guarantee itself — that the second install
+/// waits for the first — is pinned deterministically by
+/// [`test_install_waits_for_the_tenant_install_lock`].
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_concurrent_installs_into_one_tenant_keep_both_policy_sets() {
+    use std::sync::Arc;
+    use temper_store_turso::TursoEventStore;
+    use tokio::sync::Barrier;
+
+    let app_root = std::env::temp_dir().join(format!(
+        "temper-os-apps-concurrent-policies-{}",
+        uuid::Uuid::new_v4()
+    ));
+    write_policy_only_app(
+        &app_root,
+        "concurrent-policy-app-a",
+        r#"permit(principal is Customer, action == Action::"ReadAlpha", resource is Alpha);"#,
+    );
+    write_policy_only_app(
+        &app_root,
+        "concurrent-policy-app-b",
+        r#"permit(principal is Customer, action == Action::"ReadBeta", resource is Beta);"#,
+    );
+    add_os_apps_dir(app_root.clone());
+
+    let db_path = format!(
+        "/tmp/temper-concurrent-install-policies-{}.db",
+        uuid::Uuid::new_v4()
+    );
+    let db_url = format!("file:{db_path}");
+    let turso = TursoEventStore::new(&db_url, None).await.unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+    let tenant = format!("test-concurrent-install-{}", uuid::Uuid::new_v4());
+
+    // Start both installs at the same instant so their reads of the tenant's
+    // policy state overlap.
+    let barrier = Arc::new(Barrier::new(2));
+    let installs: Vec<_> = ["concurrent-policy-app-a", "concurrent-policy-app-b"]
+        .into_iter()
+        .map(|app_name| {
+            let state = state.clone();
+            let tenant = tenant.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                install_os_app(&state, &tenant, app_name).await
+            })
+        })
+        .collect();
+    for install in installs {
+        install
+            .await
+            .expect("install task should not panic")
+            .expect("concurrent install should succeed");
+    }
+
+    let labels: Vec<String> = state
+        .server
+        .authz
+        .tenant_policy_sources(&tenant)
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect();
+    assert!(
+        labels.contains(&"concurrent-policy-app-a/access.cedar".to_string()),
+        "app A's policy file must stay loaded, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"concurrent-policy-app-b/access.cedar".to_string()),
+        "app B's policy file must stay loaded, got: {labels:?}"
+    );
+
+    // Both apps' policies are in effect, not merely recorded.
+    let customer_ctx = SecurityContext::from_headers(&[
+        ("X-Temper-Principal-Id".to_string(), "cust-1".to_string()),
+        (
+            "X-Temper-Principal-Kind".to_string(),
+            "customer".to_string(),
+        ),
+    ]);
+    let mut attrs = HashMap::new();
+    attrs.insert("id".to_string(), serde_json::json!("res-1"));
+    for (action, resource_type) in [("ReadAlpha", "Alpha"), ("ReadBeta", "Beta")] {
+        assert!(
+            state
+                .server
+                .authz
+                .authorize_for_tenant(&tenant, &customer_ctx, action, resource_type, &attrs)
+                .is_allowed(),
+            "'{action}' on '{resource_type}' should be permitted after both installs"
+        );
+    }
+
+    // The text cache mirrors the merged set, so a later install that starts
+    // from it does not resurrect a half-tenant.
+    let cached_text = state
+        .server
+        .tenant_policies
+        .read()
+        .unwrap()
+        .get(&tenant)
+        .cloned()
+        .expect("tenant policy text cache should hold the merged text");
+    assert!(cached_text.contains("ReadAlpha"), "cached: {cached_text}");
+    assert!(cached_text.contains("ReadBeta"), "cached: {cached_text}");
+
+    let _ = fs::remove_dir_all(&app_root);
+    let _ = fs::remove_file(&db_path);
+    let _ = fs::remove_file(format!("{db_path}-wal"));
+    let _ = fs::remove_file(format!("{db_path}-shm"));
+}
+
+/// An install must not touch a tenant's policy set while another holder of
+/// that tenant's install lock is inside the critical section.
+///
+/// This is the deterministic half of the regression above. The install path
+/// rebuilds tenant-wide state by reading what the tenant has, running its
+/// durable writes and verification, and writing the result back; without a
+/// per-tenant lock that sequence interleaves and one app's policies are lost
+/// with both installs reporting success. Here the lock is held by the test, so
+/// an install that does not wait for it publishes its policies during the
+/// window below and fails the assertion — no scheduling luck involved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_install_waits_for_the_tenant_install_lock() {
+    use temper_store_turso::TursoEventStore;
+
+    let app_root = std::env::temp_dir().join(format!(
+        "temper-os-apps-install-lock-{}",
+        uuid::Uuid::new_v4()
+    ));
+    write_policy_only_app(
+        &app_root,
+        "install-lock-app-a",
+        r#"permit(principal is Customer, action == Action::"ReadAlpha", resource is Alpha);"#,
+    );
+    write_policy_only_app(
+        &app_root,
+        "install-lock-app-b",
+        r#"permit(principal is Customer, action == Action::"ReadBeta", resource is Beta);"#,
+    );
+    add_os_apps_dir(app_root.clone());
+
+    let db_path = format!("/tmp/temper-install-lock-{}.db", uuid::Uuid::new_v4());
+    let db_url = format!("file:{db_path}");
+    let turso = TursoEventStore::new(&db_url, None).await.unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+    let tenant = format!("test-install-lock-{}", uuid::Uuid::new_v4());
+
+    install_os_app(&state, &tenant, "install-lock-app-a")
+        .await
+        .expect("first install should succeed");
+
+    let policy_labels = |state: &PlatformState, tenant: &str| -> Vec<String> {
+        state
+            .server
+            .authz
+            .tenant_policy_sources(tenant)
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect()
+    };
+
+    let guard = state.install_locks.lock(&tenant).await;
+    let second_install = tokio::spawn({
+        let state = state.clone();
+        let tenant = tenant.clone();
+        async move { install_os_app(&state, &tenant, "install-lock-app-b").await }
+    });
+
+    // Comfortably longer than an install of these bundles takes when nothing
+    // blocks it — the two installs in the test above complete in well under a
+    // second including their assertions.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !second_install.is_finished(),
+        "an install must wait for the tenant install lock"
+    );
+    let labels = policy_labels(&state, &tenant);
+    assert!(
+        !labels.contains(&"install-lock-app-b/access.cedar".to_string()),
+        "the blocked install must not have rebuilt the tenant policy set, got: {labels:?}"
+    );
+
+    drop(guard);
+    second_install
+        .await
+        .expect("install task should not panic")
+        .expect("install should succeed once the lock is released");
+
+    let labels = policy_labels(&state, &tenant);
+    assert!(
+        labels.contains(&"install-lock-app-a/access.cedar".to_string()),
+        "the first app's policy must survive the second install, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"install-lock-app-b/access.cedar".to_string()),
+        "the second app's policy must be loaded, got: {labels:?}"
+    );
+
+    let _ = fs::remove_dir_all(&app_root);
     let _ = fs::remove_file(&db_path);
     let _ = fs::remove_file(format!("{db_path}-wal"));
     let _ = fs::remove_file(format!("{db_path}-shm"));

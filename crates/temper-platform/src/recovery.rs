@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use temper_authz::PolicySource;
 use temper_runtime::tenant::TenantId;
 use temper_server::platform_store::PlatformStore;
 use temper_server::registry::VerificationStatus;
@@ -99,38 +100,46 @@ pub async fn recover_cedar_policies(state: &PlatformState, ps: &dyn PlatformStor
     for tenant in tenants {
         let entries = granular_entries.remove(&tenant).unwrap_or_default();
         let has_primary_granular = entries.iter().any(|(policy_id, _)| policy_id == "primary");
-        let mut policy_text = String::new();
-        let mut entry_count = 0usize;
+        let mut sources: Vec<PolicySource> = Vec::new();
 
         // `primary` is the durable aggregate policy row for newer installs. If
         // it exists, prefer it over the legacy blob to avoid loading the same
         // multi-megabyte generated policy twice.
         if !has_primary_granular {
             if let Some(legacy_text) = legacy_entries.get(&tenant) {
-                append_cedar_policy_text(&mut policy_text, legacy_text);
-                entry_count += 1;
+                // The aggregate blob written at install time repeats what the
+                // per-file rows already hold. Carry only what the labelled
+                // rows do not cover, so a denial cites the file rather than
+                // both the file and an unlabelled copy of it.
+                let labelled_texts: Vec<&str> =
+                    entries.iter().map(|(_, text)| text.as_str()).collect();
+                sources.extend(os_apps::carry_unlabelled_blob(
+                    &tenant,
+                    legacy_text,
+                    &labelled_texts,
+                ));
             }
         } else if legacy_entries.contains_key(&tenant) {
             skipped_legacy_count += 1;
         }
 
-        for (_, cedar_text) in entries {
-            append_cedar_policy_text(&mut policy_text, &cedar_text);
-            entry_count += 1;
-        }
+        // Each durable row keeps its own label, so a denial after a restart
+        // still names the file the statement came from rather than its
+        // position in a concatenated blob (ARN-286). This costs one shallow
+        // policy clone per statement at boot — a large `primary` row makes
+        // that tens of thousands of clones — which is the price of denial
+        // diagnostics that survive a restart.
+        sources.extend(entries);
 
-        if policy_text.trim().is_empty() {
+        let entry_count = sources.len();
+        if sources.iter().all(|(_, text)| text.trim().is_empty()) {
             continue;
         }
 
-        // Use the raw policy reload path here instead of per-row PolicyId
-        // rewriting. Production primary policies can contain tens of thousands
-        // of generated statements; raw reload matches the pre-existing startup
-        // path and avoids deep Cedar policy cloning during restart recovery.
         if let Err(e) = state
             .server
             .authz
-            .reload_tenant_policies(&tenant, &policy_text)
+            .reload_tenant_policies_named(&tenant, &sources)
         {
             tracing::warn!(tenant, error = %e, "Skipping invalid Cedar policies for tenant");
             continue;
@@ -154,13 +163,6 @@ pub async fn recover_cedar_policies(state: &PlatformState, ps: &dyn PlatformStor
             "Restored Cedar policies from durable storage."
         );
     }
-}
-
-fn append_cedar_policy_text(target: &mut String, cedar_text: &str) {
-    if !target.is_empty() {
-        target.push('\n');
-    }
-    target.push_str(cedar_text);
 }
 
 /// Restore previously installed OS apps from the platform store.
@@ -338,131 +340,5 @@ fn tenant_has_ready_app_specs(state: &PlatformState, tenant: &str, app_name: &st
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use temper_authz::SecurityContext;
-    use temper_store_turso::TursoEventStore;
-
-    use super::*;
-
-    fn sqlite_test_url(test_name: &str) -> String {
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "temper-recovery-{test_name}-{}.db",
-            uuid::Uuid::new_v4()
-        ));
-        format!("file:{}", path.display())
-    }
-
-    #[tokio::test]
-    async fn recover_cedar_policies_activates_granular_policy_rows() {
-        let store = TursoEventStore::new(&sqlite_test_url("granular-policies"), None)
-            .await
-            .expect("create test store");
-        let policy = r#"
-permit(
-  principal is Agent,
-  action == Action::"http_call",
-  resource is HttpEndpoint
-) when {
-  context.module == "build_session_message"
-};
-"#;
-        store
-            .save_policy("default", "katagami-curation-wasm", policy, "test")
-            .await
-            .expect("save granular policy");
-
-        let state = PlatformState::new(None);
-        recover_cedar_policies(&state, &store).await;
-
-        let mut resource_attrs = HashMap::new();
-        resource_attrs.insert(
-            "id".to_string(),
-            serde_json::json!("__trigger__:Submit:build_session_message"),
-        );
-        resource_attrs.insert(
-            "module".to_string(),
-            serde_json::json!("build_session_message"),
-        );
-
-        let decision = state.server.authz.authorize_for_tenant(
-            "default",
-            &SecurityContext::from_resolved_identity("wasm-module", "wasm_module", None),
-            "http_call",
-            "HttpEndpoint",
-            &resource_attrs,
-        );
-
-        assert!(
-            decision.is_allowed(),
-            "granular policy rows should be active after recovery, got {decision:?}"
-        );
-        assert!(
-            state
-                .server
-                .authz
-                .get_tenant_policy_text("default")
-                .expect("tenant policy text")
-                .contains("build_session_message")
-        );
-    }
-
-    #[tokio::test]
-    async fn recover_cedar_policies_prefers_primary_row_over_legacy_blob() {
-        let store = TursoEventStore::new(&sqlite_test_url("primary-policy-recovery"), None)
-            .await
-            .expect("create test store");
-        store
-            .upsert_tenant_policy(
-                "default",
-                r#"permit(principal, action == Action::"legacy_only", resource);"#,
-            )
-            .await
-            .expect("save legacy policy");
-        store
-            .save_policy(
-                "default",
-                "primary",
-                r#"permit(principal, action == Action::"read", resource);"#,
-                "test",
-            )
-            .await
-            .expect("save primary policy");
-        store
-            .save_policy(
-                "default",
-                "katagami-curation-wasm",
-                r#"
-permit(
-  principal is Agent,
-  action == Action::"http_call",
-  resource is HttpEndpoint
-) when {
-  context.module == "build_session_message"
-};
-"#,
-                "test",
-            )
-            .await
-            .expect("save granular policy");
-
-        let state = PlatformState::new(None);
-        recover_cedar_policies(&state, &store).await;
-
-        let tenant_text = state
-            .server
-            .authz
-            .get_tenant_policy_text("default")
-            .expect("tenant policy text");
-        assert!(
-            tenant_text.contains("build_session_message"),
-            "granular app policy should be appended to primary policy"
-        );
-        assert!(
-            !tenant_text.contains("legacy_only"),
-            "legacy blob should be skipped when durable primary policy row exists"
-        );
-    }
-}
+#[path = "recovery_test.rs"]
+mod tests;

@@ -3,7 +3,8 @@
 //! [`PlatformState`] extends `ServerState` with the broadcast channel
 //! for internal event propagation and the Claude API key.
 
-use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::sync::broadcast;
 
@@ -15,6 +16,40 @@ use temper_server::identity::IdentityResolver;
 
 use crate::protocol::PlatformEvent;
 use crate::spec_store::SpecStore;
+
+/// Per-tenant serialization for app installs.
+///
+/// An install rebuilds tenant-wide state — the merged CSDL and the Cedar
+/// policy set — by reading what the tenant has, merging the bundle into it and
+/// writing the result back, with durable writes and verification in between.
+/// Two installs into the same tenant running concurrently would each read the
+/// same pre-state and the second write would drop the first app's policies,
+/// with both installs reporting success. Holding this lock across the
+/// read-modify-write makes the sequence one at a time per tenant; installs
+/// into different tenants stay parallel.
+#[derive(Default)]
+pub struct TenantInstallLocks {
+    locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl TenantInstallLocks {
+    /// Wait for exclusive rights to mutate `tenant`'s installed surface.
+    ///
+    /// The guard is owned, so a caller can hold it across awaits and release
+    /// it early with `drop`. Never hold it across a step that dispatches
+    /// entity actions — a bound-action hook can re-enter the installer for
+    /// the same tenant, and this mutex is not reentrant.
+    pub async fn lock(&self, tenant: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let tenant_lock = {
+            let mut locks = self
+                .locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            locks.entry(tenant.to_string()).or_default().clone()
+        };
+        tenant_lock.lock_owned().await
+    }
+}
 
 /// Shared state for the Temper hosting platform.
 ///
@@ -37,6 +72,8 @@ pub struct PlatformState {
     pub spec_store: Arc<RwLock<SpecStore>>,
     /// Agent identity resolver — maps bearer tokens to verified identities.
     pub identity_resolver: Arc<IdentityResolver>,
+    /// Serializes the install read-modify-write per tenant.
+    pub install_locks: Arc<TenantInstallLocks>,
 }
 
 /// Default broadcast channel capacity.
@@ -91,6 +128,7 @@ impl PlatformState {
             api_token: None,
             spec_store,
             identity_resolver: Arc::new(IdentityResolver::new()),
+            install_locks: Arc::new(TenantInstallLocks::default()),
         };
         state.server.bound_action_hook = Some(Arc::new(
             crate::genesis_install::GenesisInstallHook::new(state.clone()),
@@ -127,6 +165,7 @@ impl PlatformState {
             api_token: None,
             spec_store,
             identity_resolver: Arc::new(IdentityResolver::new()),
+            install_locks: Arc::new(TenantInstallLocks::default()),
         };
         state.server.bound_action_hook = Some(Arc::new(
             crate::genesis_install::GenesisInstallHook::new(state.clone()),

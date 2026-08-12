@@ -1,11 +1,27 @@
+use std::sync::Arc;
+
 use tracing::{error, info, warn};
 
 use super::actor_ref::{ActorId, ActorRef, Envelope, SystemSignal};
 use super::context::ActorContext;
-use super::errors::ActorError;
-use super::traits::Actor;
+use super::errors::{ActorError, InitFailureKind};
+use super::traits::{Actor, Message};
 use crate::mailbox::{self, DEFAULT_MAILBOX_CAPACITY, MailboxReceiver};
 use crate::supervision::SupervisionStrategy;
+
+/// Notified exactly once when a cell permanently gives up on initialization.
+///
+/// Spawning an actor usually means recording it somewhere — a registry, an
+/// index — before `pre_start` has had a chance to run. That bookkeeping has to
+/// be undone when the actor never starts, and the cell is the only place that
+/// knows it has stopped trying: it fires after the supervision strategy is
+/// exhausted, whether or not anyone is waiting for a reply, and *before* the
+/// waiting callers are answered, so a caller that sees an init failure can rely
+/// on the retraction having already happened.
+///
+/// The observer runs on the actor's own task. It must not block for long and
+/// must not send to the actor it describes.
+pub type InitFailureObserver = Arc<dyn Fn(&ActorId, &ActorError) + Send + Sync>;
 
 /// The ActorCell is the runtime container for an actor instance.
 /// It owns the actor, its state, its mailbox receiver, and drives the message loop.
@@ -14,6 +30,7 @@ pub struct ActorCell<A: Actor> {
     actor: A,
     id: ActorId,
     mailbox_capacity: usize,
+    on_init_failure: Option<InitFailureObserver>,
 }
 
 impl<A: Actor> ActorCell<A> {
@@ -23,12 +40,19 @@ impl<A: Actor> ActorCell<A> {
             actor,
             id,
             mailbox_capacity: DEFAULT_MAILBOX_CAPACITY,
+            on_init_failure: None,
         }
     }
 
     /// Set custom mailbox capacity (TigerStyle: explicit budgets).
     pub fn with_mailbox_capacity(mut self, capacity: usize) -> Self {
         self.mailbox_capacity = capacity;
+        self
+    }
+
+    /// Observe a permanent initialization failure — see [`InitFailureObserver`].
+    pub fn with_init_failure_observer(mut self, observer: InitFailureObserver) -> Self {
+        self.on_init_failure = Some(observer);
         self
     }
 
@@ -54,6 +78,7 @@ impl<A: Actor> ActorCell<A> {
     async fn run(self, mut rx: MailboxReceiver<A::Msg>) {
         let actor = self.actor;
         let id = self.id;
+        let on_init_failure = self.on_init_failure;
         let strategy = actor.supervision_strategy();
 
         let mut restart_count: u32 = 0;
@@ -78,7 +103,28 @@ impl<A: Actor> ActorCell<A> {
                         tokio::time::sleep(backoff).await; // determinism-ok: production actor cell, backoff between restarts
                         continue;
                     } else {
-                        error!(actor = %id, "actor permanently failed during init");
+                        // The cell is giving up. Tell the observer first: the
+                        // spawner's bookkeeping has to be retracted even when
+                        // the mailbox is empty (nobody ever asked, or the only
+                        // caller walked away), and a caller that is about to be
+                        // handed this failure must find the retraction already
+                        // done rather than race it.
+                        if let Some(observer) = on_init_failure.as_ref() {
+                            observer(&id, &e);
+                        }
+                        // Everything already queued is owed an answer: dropping
+                        // the reply channels turns every waiting `ask` into a
+                        // bare `Stopped` ("actor stopped") and throws the real
+                        // cause away, which is how an init failure became an
+                        // unexplained 500.
+                        let (asks, tells) = fail_pending(&mut rx, &e);
+                        error!(
+                            actor = %id,
+                            error = %e,
+                            failed_asks = asks,
+                            dropped_tells = tells,
+                            "actor permanently failed during init"
+                        );
                         return;
                     }
                 }
@@ -156,38 +202,49 @@ fn should_restart(strategy: &SupervisionStrategy, current_restarts: u32) -> bool
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
+/// Close the mailbox and answer everything still queued with the init failure
+/// that killed the actor.
+///
+/// Returns `(asks_failed, tells_dropped)`. Closing first means a sender racing
+/// this shutdown gets `SendFailed` instead of queueing behind us forever.
+fn fail_pending<M: Message>(rx: &mut MailboxReceiver<M>, cause: &ActorError) -> (usize, usize) {
+    rx.close();
 
-    #[test]
-    fn stop_strategy_never_restarts() {
-        let strategy = SupervisionStrategy::Stop;
-        assert!(!should_restart(&strategy, 0));
-        assert!(!should_restart(&strategy, 1));
-        assert!(!should_restart(&strategy, 100));
+    let mut asks = 0usize;
+    let mut tells = 0usize;
+    while let Some(envelope) = rx.try_recv() {
+        match envelope {
+            Envelope::Ask { reply, .. } => {
+                // One error per waiting caller: ActorError is not Clone
+                // (anyhow::Error is not), so re-derive it from the cause.
+                let _ = reply.send(Err(init_failure_for(cause)));
+                asks += 1;
+            }
+            Envelope::Tell(_) | Envelope::Signal(_) => tells += 1,
+        }
     }
+    (asks, tells)
+}
 
-    #[test]
-    fn restart_strategy_respects_max_retries() {
-        let strategy = SupervisionStrategy::Restart {
-            max_retries: 3,
-            backoff_base: Duration::from_millis(100),
-        };
-        assert!(should_restart(&strategy, 0));
-        assert!(should_restart(&strategy, 1));
-        assert!(should_restart(&strategy, 2));
-        assert!(!should_restart(&strategy, 3));
-        assert!(!should_restart(&strategy, 4));
-    }
-
-    #[test]
-    fn restart_strategy_zero_retries_never_restarts() {
-        let strategy = SupervisionStrategy::Restart {
-            max_retries: 0,
-            backoff_base: Duration::from_millis(100),
-        };
-        assert!(!should_restart(&strategy, 0));
+/// Restate a `pre_start` error as the init failure the caller should see.
+///
+/// An actor that classified its own failure (see [`ActorError::init_failed`])
+/// keeps that classification; anything else is preserved verbatim as the cause
+/// and inherits the transience the error already declares.
+fn init_failure_for(cause: &ActorError) -> ActorError {
+    match cause {
+        ActorError::InitFailed { cause, kind } => ActorError::init_failed(cause.clone(), *kind),
+        other => ActorError::init_failed(
+            other.to_string(),
+            if other.is_transient() {
+                InitFailureKind::TransientDependency
+            } else {
+                InitFailureKind::Defect
+            },
+        ),
     }
 }
+
+#[cfg(test)]
+#[path = "cell_test.rs"]
+mod tests;

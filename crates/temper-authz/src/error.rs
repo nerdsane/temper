@@ -47,6 +47,59 @@ pub enum AuthzDenial {
     EngineError(String),
 }
 
+/// What kind of thing an [`AuthzDenial`] actually is.
+///
+/// Only [`DenialClass::Policy`] is an authorization *decision*. The other two
+/// are faults: the request never became a well-formed Cedar question, or the
+/// engine failed while answering it. Callers use this to pick an HTTP status
+/// and — critically — to decide whether the denial belongs in the human
+/// approval queue. Recording a fault as a pending decision produces a row
+/// nobody can ever approve, because no policy change can make it allow
+/// (ARN-287).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenialClass {
+    /// Cedar evaluated the request and refused it. Reviewable by a human and
+    /// fixable by a policy change.
+    Policy,
+    /// The request could not be turned into a Cedar question — malformed
+    /// principal, action, resource, or context. The caller must fix the
+    /// request.
+    RequestFault,
+    /// The authorization engine itself failed (poisoned lock, entity store
+    /// construction failure). Nothing about the request is wrong.
+    EngineFault,
+}
+
+impl AuthzDenial {
+    /// Classify this denial as a policy decision, a request fault, or an
+    /// engine fault.
+    pub fn class(&self) -> DenialClass {
+        match self {
+            AuthzDenial::PolicyDenied { .. } | AuthzDenial::NoMatchingPermit => DenialClass::Policy,
+            AuthzDenial::InvalidPrincipal(_)
+            | AuthzDenial::InvalidAction(_)
+            | AuthzDenial::InvalidResource(_)
+            | AuthzDenial::InvalidContext(_) => DenialClass::RequestFault,
+            AuthzDenial::EngineError(_) => DenialClass::EngineFault,
+        }
+    }
+
+    /// Whether this denial is a real policy decision — the only kind that may
+    /// be recorded as a pending decision for human approval.
+    pub fn is_policy_decision(&self) -> bool {
+        self.class() == DenialClass::Policy
+    }
+
+    /// Stable machine-readable error code for API error bodies.
+    pub fn error_code(&self) -> &'static str {
+        match self.class() {
+            DenialClass::Policy => "AuthorizationDenied",
+            DenialClass::RequestFault => "InvalidAuthorizationRequest",
+            DenialClass::EngineFault => "AuthorizationEngineError",
+        }
+    }
+}
+
 impl std::fmt::Display for AuthzDenial {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -148,6 +201,45 @@ mod tests {
             AuthzDenial::EngineError("crash".into()).to_string(),
             "authorization engine error: crash"
         );
+    }
+
+    #[test]
+    fn policy_outcomes_are_decisions() {
+        for denial in [
+            AuthzDenial::PolicyDenied {
+                policy_ids: vec!["katagami-commons/art_style.cedar#2".into()],
+            },
+            AuthzDenial::NoMatchingPermit,
+        ] {
+            assert_eq!(denial.class(), DenialClass::Policy, "{denial}");
+            assert!(denial.is_policy_decision(), "{denial}");
+            assert_eq!(denial.error_code(), "AuthorizationDenied");
+        }
+    }
+
+    #[test]
+    fn malformed_requests_are_faults_not_decisions() {
+        for denial in [
+            AuthzDenial::InvalidPrincipal("bad".into()),
+            AuthzDenial::InvalidAction("bad".into()),
+            AuthzDenial::InvalidResource("unexpected token `fl`".into()),
+            AuthzDenial::InvalidContext("bad".into()),
+        ] {
+            assert_eq!(denial.class(), DenialClass::RequestFault, "{denial}");
+            assert!(
+                !denial.is_policy_decision(),
+                "{denial} must never reach the approval queue"
+            );
+            assert_eq!(denial.error_code(), "InvalidAuthorizationRequest");
+        }
+    }
+
+    #[test]
+    fn engine_failures_are_faults_not_decisions() {
+        let denial = AuthzDenial::EngineError("policy lock poisoned".into());
+        assert_eq!(denial.class(), DenialClass::EngineFault);
+        assert!(!denial.is_policy_decision());
+        assert_eq!(denial.error_code(), "AuthorizationEngineError");
     }
 
     #[test]

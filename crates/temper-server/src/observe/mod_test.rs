@@ -1555,6 +1555,59 @@ async fn test_metrics_returns_prometheus_format() {
     );
 }
 
+/// A create that dies before the entity exists emits no transition and no
+/// trajectory row, so `/observe/trajectories` reported a fully broken entity
+/// type at ~100% success straight through an outage. This counter is the only
+/// place that shows up, so it has to reach the exposition.
+#[tokio::test]
+async fn test_metrics_exposes_entity_spawn_failures_per_type() {
+    let state = test_state_with_registry();
+    state
+        .metrics
+        .record_entity_spawn_failure("File", "declared_key_conflict");
+    state
+        .metrics
+        .record_entity_spawn_failure("File", "declared_key_conflict");
+    state
+        .metrics
+        .record_entity_spawn_failure("Workspace", "transient_dependency");
+
+    let app = Router::new()
+        .nest("/observe", build_observe_router())
+        .nest("/api", crate::api::build_api_router())
+        .with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::get("/observe/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+
+    assert!(
+        text.contains("# TYPE temper_entity_spawn_failure_total counter"),
+        "the counter must be declared for scrapers, got:\n{text}"
+    );
+    assert!(
+        text.contains(
+            "temper_entity_spawn_failure_total{entity_type=\"File\",reason=\"declared_key_conflict\"} 2"
+        ),
+        "per-type, per-reason counts must be exposed, got:\n{text}"
+    );
+    assert!(
+        text.contains(
+            "temper_entity_spawn_failure_total{entity_type=\"Workspace\",reason=\"transient_dependency\"} 1"
+        ),
+        "one degraded type must be distinguishable from another, got:\n{text}"
+    );
+}
+
 // -- Trajectory endpoint tests --
 
 #[tokio::test]

@@ -8,13 +8,15 @@ use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use temper_authz::SecurityContext;
+use temper_authz::{DenialClass, SecurityContext};
 
 use super::account_verification::enforce_commons_account_verified_for_action;
 use super::common::run_write_prechecks;
 use super::rate_limit::{enforce_commons_write_rate_limit, owner_id_from_action};
 use super::response::annotate_entity;
-use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
+use crate::authz::{
+    DenialInput, denial_status, record_denial_if_policy, security_context_from_headers,
+};
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::identity::ResolvedIdentity;
 use crate::request_context::AgentContext;
@@ -194,8 +196,9 @@ pub(super) async fn dispatch_bound_action(
     );
     if let Err(denial) = authz_result {
         let reason = denial.to_string();
-        let pd = record_authz_denial(
+        let pd = record_denial_if_policy(
             state,
+            &denial,
             DenialInput {
                 tenant: tenant.as_str(),
                 security_ctx: &security_ctx,
@@ -215,13 +218,11 @@ pub(super) async fn dispatch_bound_action(
         http_span.set_status(Status::error(reason.clone()));
         let end_time: std::time::SystemTime = sim_now().into();
         http_span.end_with_timestamp(end_time);
-        let reason_with_id = format!("{reason} (decision: {})", pd.id);
-        return odata_error(
-            StatusCode::FORBIDDEN,
-            "AuthorizationDenied",
-            &reason_with_id,
-        )
-        .into_response();
+        let message = match pd {
+            Some(pd) => format!("{reason} (decision: {})", pd.id),
+            None => reason,
+        };
+        return odata_error(denial_status(&denial), denial.error_code(), &message).into_response();
     }
 
     let current_fields = current_state.state.fields.clone();
@@ -362,10 +363,23 @@ pub(super) async fn dispatch_bound_action(
             http_span.set_attribute(OtelKeyValue::new("http.status_code", 404i64));
             odata_error(StatusCode::NOT_FOUND, "EntityTypeNotGoverned", &reason).into_response()
         }
-        Err(DispatchError::AuthzDenied(reason)) => {
+        Err(DispatchError::AuthzDenied { class, reason }) => {
+            let (status, code) = match class {
+                DenialClass::Policy => (StatusCode::FORBIDDEN, "AuthorizationDenied"),
+                DenialClass::RequestFault => {
+                    (StatusCode::BAD_REQUEST, "InvalidAuthorizationRequest")
+                }
+                DenialClass::EngineFault => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "AuthorizationEngineError",
+                ),
+            };
             http_span.set_status(Status::error(reason.clone()));
-            http_span.set_attribute(OtelKeyValue::new("http.status_code", 403i64));
-            odata_error(StatusCode::FORBIDDEN, "AuthorizationDenied", &reason).into_response()
+            http_span.set_attribute(OtelKeyValue::new(
+                "http.status_code",
+                i64::from(status.as_u16()),
+            ));
+            odata_error(status, code, &reason).into_response()
         }
         Err(DispatchError::QuotaExceeded(reason)) => {
             http_span.set_status(Status::error(reason.clone()));

@@ -27,7 +27,7 @@ use std::time::Instant;
 
 use temper_jit::table::{Effect, TransitionTable};
 use temper_observe::wide_event;
-use temper_runtime::actor::{Actor, ActorContext, ActorError};
+use temper_runtime::actor::{Actor, ActorContext, ActorError, InitFailureKind};
 use temper_runtime::persistence::{
     COMPOSITE_EVENT_TYPE, EventMetadata, PersistenceEnvelope, PersistenceError,
 };
@@ -44,6 +44,23 @@ use super::types::{
     EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_SINCE_SNAPSHOT,
     MAX_ITEMS_PER_ENTITY,
 };
+
+/// Restate a persistence failure that happened during `pre_start` as a
+/// classified actor init failure.
+///
+/// The classification is what lets the HTTP layer answer honestly: a declared-key
+/// rejection is the caller's input (409), a store fault may clear on its own
+/// (503), and anything else is ours (500). Deriving it here — where the typed
+/// `PersistenceError` still exists — keeps every layer above from re-deriving it
+/// by matching on message text.
+pub(crate) fn init_failure_from_persistence(context: String, err: &PersistenceError) -> ActorError {
+    let kind = match err {
+        PersistenceError::DeclaredKeyConflict { .. } => InitFailureKind::Constraint,
+        other if other.is_transient() => InitFailureKind::TransientDependency,
+        _ => InitFailureKind::Defect,
+    };
+    ActorError::init_failed(format!("{context}: {err}"), kind)
+}
 
 fn event_budget_workspace_id(state: &EntityState) -> String {
     if state.entity_type == "Workspace" {
@@ -548,13 +565,19 @@ impl EntityActor {
         match store.read_events(persistence_id, from_sequence).await {
             Ok(envelopes) => {
                 if envelopes.len() > MAX_EVENTS_SINCE_SNAPSHOT {
-                    return Err(ActorError::custom(format!(
-                        "snapshot tail replay budget exceeded for {}:{} ({} > {} events since snapshot)",
-                        state.entity_type,
-                        state.entity_id,
-                        envelopes.len(),
-                        MAX_EVENTS_SINCE_SNAPSHOT
-                    )));
+                    // A blown replay budget means snapshotting fell behind —
+                    // retrying replays the same oversized tail, so it is ours
+                    // to fix, not the caller's to retry.
+                    return Err(ActorError::init_failed(
+                        format!(
+                            "snapshot tail replay budget exceeded for {}:{} ({} > {} events since snapshot)",
+                            state.entity_type,
+                            state.entity_id,
+                            envelopes.len(),
+                            MAX_EVENTS_SINCE_SNAPSHOT
+                        ),
+                        InitFailureKind::Defect,
+                    ));
                 }
                 for env in &envelopes {
                     if env.event_type == COMPOSITE_EVENT_TYPE {
@@ -711,10 +734,13 @@ impl EntityActor {
             }
             Err(e) => {
                 if strict_journal_read {
-                    return Err(ActorError::custom(format!(
-                        "failed to read events for replay of {}:{}: {e}",
-                        state.entity_type, state.entity_id
-                    )));
+                    return Err(init_failure_from_persistence(
+                        format!(
+                            "failed to read events for replay of {}:{}",
+                            state.entity_type, state.entity_id
+                        ),
+                        &e,
+                    ));
                 }
                 tracing::error!(
                     entity = %state.entity_id, error = %e,
@@ -815,10 +841,13 @@ impl Actor for EntityActor {
                 self.persist_event(store, backend, &self.persistence_id(), &mut state, &created)
                     .await
                     .map_err(|e| {
-                        ActorError::custom(format!(
-                            "failed to persist bootstrap Created event for {}:{}: {}",
-                            self.entity_type, self.entity_id, e
-                        ))
+                        init_failure_from_persistence(
+                            format!(
+                                "failed to persist bootstrap Created event for {}:{}",
+                                self.entity_type, self.entity_id
+                            ),
+                            &e,
+                        )
                     })?;
             }
             state.push_event_bounded(created);

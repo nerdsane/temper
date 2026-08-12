@@ -157,10 +157,11 @@ impl EventStore for PostgresEventStore {
             if let Some((existing,)) = holder
                 && existing != entity_id
             {
-                return Err(PersistenceError::Storage(format!(
-                    "duplicate declared key '{}' for {entity_type}: held by {existing}",
-                    key.key_name
-                )));
+                return Err(PersistenceError::DeclaredKeyConflict {
+                    entity_type: entity_type.to_string(),
+                    key_name: key.key_name.clone(),
+                    holder_id: existing,
+                });
             }
         }
 

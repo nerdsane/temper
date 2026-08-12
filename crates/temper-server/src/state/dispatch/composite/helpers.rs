@@ -362,6 +362,11 @@ pub(super) fn composite_batch_persistence_error(error: PersistenceError) -> Disp
         PersistenceError::ConcurrencyViolation { .. } => {
             DispatchError::Conflict(format!("composite batch persistence conflict: {error}"))
         }
+        // A declared key already held by another entity is a conflict the
+        // caller must resolve, not an internal fault to page on.
+        PersistenceError::DeclaredKeyConflict { .. } => {
+            DispatchError::Conflict(format!("composite batch persistence conflict: {error}"))
+        }
         PersistenceError::Serialization(_) | PersistenceError::Storage(_) => {
             DispatchError::Internal(format!("composite batch persistence failed: {error}"))
         }
@@ -371,7 +376,10 @@ pub(super) fn composite_batch_persistence_error(error: PersistenceError) -> Disp
 pub(super) fn composite_storage_cap_error(error: CommonsStorageCapError) -> DispatchError {
     match error {
         CommonsStorageCapError::Exceeded(_) => DispatchError::QuotaExceeded(error.to_string()),
-        CommonsStorageCapError::OwnerSuspended(_) => DispatchError::AuthzDenied(error.to_string()),
+        CommonsStorageCapError::OwnerSuspended(_) => DispatchError::AuthzDenied {
+            class: temper_authz::DenialClass::Policy,
+            reason: error.to_string(),
+        },
         CommonsStorageCapError::MissingAttribution(_) | CommonsStorageCapError::Internal(_) => {
             DispatchError::Internal(error.to_string())
         }
@@ -384,9 +392,10 @@ pub(super) fn composite_account_verification_error(
     match error {
         CommonsAccountVerificationError::Required(_)
         | CommonsAccountVerificationError::MissingOwner(_)
-        | CommonsAccountVerificationError::OwnerSuspended(_) => {
-            DispatchError::AuthzDenied(error.to_string())
-        }
+        | CommonsAccountVerificationError::OwnerSuspended(_) => DispatchError::AuthzDenied {
+            class: temper_authz::DenialClass::Policy,
+            reason: error.to_string(),
+        },
         CommonsAccountVerificationError::Internal(_) => DispatchError::Internal(error.to_string()),
     }
 }

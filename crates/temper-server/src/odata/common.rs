@@ -41,6 +41,13 @@ pub(crate) fn extract_tenant(
     Ok(TenantId::default())
 }
 
+/// Flatten a parsed OData key into the entity id used downstream.
+///
+/// The key arrives already unquoted from [`temper_odata::path`], which strips
+/// the string delimiters for both `'…'` and the `"…"` spelling some clients
+/// send. That matters here: this id is what Cedar builds `Type::"id"` from, so
+/// a surviving delimiter breaks UID parsing and turns every request into a 403
+/// no policy change can fix (ARN-287).
 pub(super) fn extract_key(key: &KeyValue) -> String {
     match key {
         KeyValue::Single(k) => k.clone(),
@@ -269,5 +276,92 @@ pub(super) fn check_has_stream_or_400(
             &format!("Entity type '{entity_type}' does not support $value (HasStream=false)"),
         )
         .into_response())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use temper_authz::{AuthzDenial, AuthzEngine, SecurityContext};
+    use temper_odata::path::{ODataPath, parse_path};
+
+    use super::extract_key;
+
+    const FILE_ID: &str = "fl-019efde0-3fa5-7000-8000-000000000001";
+
+    fn key_from_url(path: &str) -> String {
+        match parse_path(path).expect("path should parse") {
+            ODataPath::Entity(_, key) => extract_key(&key),
+            other => panic!("expected an entity path, got {other:?}"),
+        }
+    }
+
+    fn engine_permitting_update_of(id: &str) -> AuthzEngine {
+        let engine = AuthzEngine::empty();
+        engine
+            .reload_tenant_policies_named(
+                "t",
+                &[(
+                    "app/files.cedar".to_string(),
+                    format!(
+                        r#"permit(principal, action == Action::"update", resource == File::"{id}");"#
+                    ),
+                )],
+            )
+            .expect("policy should parse");
+        engine
+    }
+
+    fn id_attrs(id: &str) -> HashMap<String, serde_json::Value> {
+        HashMap::from([("id".to_string(), serde_json::Value::String(id.to_string()))])
+    }
+
+    /// ARN-287: production saw 20x ('File','update') denials reading
+    /// "invalid resource: unexpected token `fl`", with the resource id still
+    /// wearing its double quotes. Both URL spellings of a key must reach Cedar
+    /// as the same UID.
+    #[test]
+    fn quoted_key_authorizes_against_the_same_uid_as_an_unquoted_one() {
+        let single_quoted = key_from_url(&format!("/Files('{FILE_ID}')"));
+        let double_quoted = key_from_url(&format!("/Files(\"{FILE_ID}\")"));
+
+        assert_eq!(single_quoted, FILE_ID);
+        assert_eq!(double_quoted, single_quoted);
+
+        let engine = engine_permitting_update_of(FILE_ID);
+        let ctx = SecurityContext::from_headers(&[]);
+        for key in [single_quoted.as_str(), double_quoted.as_str()] {
+            let decision = engine.authorize_for_tenant("t", &ctx, "update", "File", &id_attrs(key));
+            assert!(
+                decision.is_allowed(),
+                "key spelled as {key:?} should authorize, got {decision:?}"
+            );
+        }
+    }
+
+    /// The failure the fix removes: an id that still carries its delimiter
+    /// cannot even be turned into a Cedar UID, so no policy can permit it.
+    #[test]
+    fn an_id_that_kept_its_delimiter_cannot_build_a_cedar_uid() {
+        let engine = engine_permitting_update_of(FILE_ID);
+        let ctx = SecurityContext::from_headers(&[]);
+
+        let decision = engine.authorize_for_tenant(
+            "t",
+            &ctx,
+            "update",
+            "File",
+            &id_attrs(&format!("\"{FILE_ID}\"")),
+        );
+
+        assert!(
+            matches!(decision.denial(), Some(AuthzDenial::InvalidResource(_))),
+            "a quoted id must fail UID construction, got {decision:?}"
+        );
+        assert!(
+            !decision.denial().expect("denial").is_policy_decision(),
+            "and it is a request fault, not something a human can approve"
+        );
     }
 }

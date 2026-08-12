@@ -74,9 +74,9 @@ async fn resolve_parent_entity(
                 security_ctx,
             )
             .await
-            .map_err(|_| {
+            .map_err(|response| {
                 (
-                    StatusCode::FORBIDDEN,
+                    response.status(),
                     format!("Read access denied for parent entity '{parent_type}'"),
                 )
             })?;
@@ -93,9 +93,9 @@ async fn resolve_parent_entity(
                 security_ctx,
             )
             .await
-            .map_err(|_| {
+            .map_err(|response| {
                 (
-                    StatusCode::FORBIDDEN,
+                    response.status(),
                     format!("Read access denied for navigation property '{property}'"),
                 )
             })?;

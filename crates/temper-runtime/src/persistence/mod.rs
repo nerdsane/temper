@@ -503,12 +503,117 @@ pub enum PersistenceError {
     #[error("serialization error: {0}")]
     Serialization(String),
 
+    /// A declared-key uniqueness constraint rejected the append (ADR-0153):
+    /// a *different* entity of the same type already holds this key value.
+    ///
+    /// Kept separate from [`PersistenceError::Storage`] because it is a
+    /// constraint decision, not a backend fault: the caller sent a conflicting
+    /// value and retrying the same write can never succeed. Callers map it to
+    /// a conflict (HTTP 409) and surface `key_name` + `holder_id` so the writer
+    /// can see which key collided and who holds it.
+    #[error("duplicate declared key '{key_name}' for {entity_type}: held by {holder_id}")]
+    DeclaredKeyConflict {
+        /// Entity type the declared key belongs to.
+        entity_type: String,
+        /// Declared key name (as written in the spec).
+        key_name: String,
+        /// Entity id that currently holds the key value.
+        holder_id: String,
+    },
+
     /// Underlying storage backend returned an error.
     #[error("storage error: {0}")]
     Storage(String),
 }
 
+impl PersistenceError {
+    /// Returns `true` if retrying the identical write may succeed.
+    ///
+    /// - `Storage` — the backend failed for a reason it did not name
+    ///   (connection reset, statement timeout, deadlock); a retry may land.
+    /// - `ConcurrencyViolation` — another writer won the race; a retry
+    ///   re-reads the sequence and may land.
+    /// - `DeclaredKeyConflict` / `Serialization` — terminal. The same input
+    ///   fails the same way every time, so a retry only adds load.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::Storage(_) | Self::ConcurrencyViolation { .. })
+    }
+
+    /// Returns `true` if the error is terminal for this write. Every variant is
+    /// exactly one of transient or permanent, never both.
+    pub fn is_permanent(&self) -> bool {
+        !self.is_transient()
+    }
+}
+
 /// Convert backend-specific errors into [`PersistenceError::Storage`].
 pub fn storage_error(err: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Storage(err.to_string())
+}
+
+#[cfg(test)]
+mod persistence_error_tests {
+    use super::PersistenceError;
+
+    #[test]
+    fn declared_key_conflict_names_the_key_and_the_holder() {
+        let err = PersistenceError::DeclaredKeyConflict {
+            entity_type: "File".to_string(),
+            key_name: "ws_path".to_string(),
+            holder_id: "fl-019efda8".to_string(),
+        };
+        // Callers surface this text straight to the writer, so it must stay
+        // self-explanatory.
+        assert_eq!(
+            err.to_string(),
+            "duplicate declared key 'ws_path' for File: held by fl-019efda8"
+        );
+    }
+
+    #[test]
+    fn a_constraint_rejection_is_not_a_backend_fault() {
+        // The distinction the outage turned on: a rejected write is terminal
+        // and must not be retried; an unexplained backend error may clear.
+        let conflict = PersistenceError::DeclaredKeyConflict {
+            entity_type: "File".to_string(),
+            key_name: "ws_path".to_string(),
+            holder_id: "fl-1".to_string(),
+        };
+        assert!(conflict.is_permanent());
+        assert!(!conflict.is_transient());
+
+        assert!(PersistenceError::Storage("connection reset".into()).is_transient());
+        assert!(
+            PersistenceError::ConcurrencyViolation {
+                expected: 1,
+                actual: 2
+            }
+            .is_transient()
+        );
+        assert!(PersistenceError::Serialization("bad json".into()).is_permanent());
+    }
+
+    #[test]
+    fn transient_and_permanent_are_mutually_exclusive() {
+        let all = [
+            PersistenceError::ConcurrencyViolation {
+                expected: 0,
+                actual: 1,
+            },
+            PersistenceError::Serialization("s".into()),
+            PersistenceError::DeclaredKeyConflict {
+                entity_type: "T".into(),
+                key_name: "k".into(),
+                holder_id: "h".into(),
+            },
+            PersistenceError::Storage("s".into()),
+        ];
+        for err in all {
+            assert_ne!(
+                err.is_transient(),
+                err.is_permanent(),
+                "{err} is both (or neither) transient and permanent"
+            );
+        }
+    }
 }

@@ -85,6 +85,23 @@ impl<M: Message> MailboxReceiver<M> {
     pub async fn recv(&mut self) -> Option<Envelope<M>> {
         self.inner.recv().await
     }
+
+    /// Take the next already-queued message without waiting. Returns `None`
+    /// when the mailbox is momentarily empty *or* closed — used by the actor
+    /// cell to drain queued work when it is about to give up, so pending asks
+    /// get an answer instead of a dropped reply channel.
+    pub fn try_recv(&mut self) -> Option<Envelope<M>> {
+        self.inner.try_recv().ok()
+    }
+
+    /// Refuse further sends while leaving queued messages receivable.
+    ///
+    /// The cell closes the mailbox before draining so a sender racing the
+    /// shutdown gets a deterministic `SendFailed` rather than queueing into a
+    /// mailbox nobody will ever read.
+    pub fn close(&mut self) {
+        self.inner.close();
+    }
 }
 
 impl<M: Message> Clone for MailboxSender<M> {

@@ -700,16 +700,203 @@ fn test_named_policies_produce_meaningful_ids() {
 
     // Check that the denial includes meaningful policy IDs.
     if let AuthzDecision::Deny(AuthzDenial::PolicyDenied { policy_ids }) = &decision {
-        // Should contain something like "default:decision:abc" not "policy0".
+        // Should name the source, e.g. "decision:abc#1", never "policy0".
         let has_meaningful = policy_ids
             .iter()
-            .any(|id| id.contains("default:") || id.contains("decision:"));
+            .any(|id| id.starts_with("os-app:pm#") || id.starts_with("decision:abc#"));
         assert!(
             has_meaningful,
             "policy IDs should be meaningful, got: {policy_ids:?}"
         );
     }
     // NoMatchingPermit is also acceptable since user-1 != bot-1
+}
+
+#[test]
+fn denial_names_the_cedar_file_a_statement_came_from() {
+    // ARN-286: the rendered denial must point a human at a file and at the
+    // statement inside it, not at a positional id like "policy1874".
+    let engine = AuthzEngine::empty();
+
+    engine
+        .reload_tenant_policies_named(
+            "katagami",
+            &[(
+                "katagami-commons/art_style.cedar".to_string(),
+                concat!(
+                    "permit(principal is Customer, action == Action::\"read\", resource is ArtStyle);\n",
+                    "forbid(principal is Customer, action == Action::\"update\", resource is ArtStyle);\n",
+                )
+                .to_string(),
+            )],
+        )
+        .unwrap();
+
+    let ctx = customer_context("user-1");
+    let mut attrs = HashMap::new();
+    attrs.insert("id".to_string(), serde_json::json!("as-1"));
+
+    let decision = engine.authorize_for_tenant("katagami", &ctx, "update", "ArtStyle", &attrs);
+    let AuthzDecision::Deny(denial) = decision else {
+        panic!("forbid statement should deny the update");
+    };
+
+    assert_eq!(
+        denial.to_string(),
+        "denied by policy: katagami-commons/art_style.cedar#2",
+        "the denial must name the source file and the statement within it"
+    );
+}
+
+#[test]
+fn named_policy_ids_are_stable_when_a_sibling_statement_is_added() {
+    // Every statement carries a "#n" suffix, including the only statement in a
+    // one-statement file, so adding a second statement later does not silently
+    // change what an already-reported id refers to.
+    let engine = AuthzEngine::empty();
+    engine
+        .reload_tenant_policies_named(
+            "t",
+            &[(
+                "app/only.cedar".to_string(),
+                r#"forbid(principal is Customer, action == Action::"read", resource is Doc);"#
+                    .to_string(),
+            )],
+        )
+        .unwrap();
+
+    let ctx = customer_context("user-1");
+    let mut attrs = HashMap::new();
+    attrs.insert("id".to_string(), serde_json::json!("d-1"));
+
+    let decision = engine.authorize_for_tenant("t", &ctx, "read", "Doc", &attrs);
+    let AuthzDecision::Deny(AuthzDenial::PolicyDenied { policy_ids }) = decision else {
+        panic!("expected a policy denial");
+    };
+    assert_eq!(policy_ids, vec!["app/only.cedar#1".to_string()]);
+}
+
+#[test]
+fn adding_one_policy_keeps_the_labels_of_the_others() {
+    // Approving a governance decision adds a policy. It must not flatten the
+    // tenant back to positional ids for everything else (ARN-286).
+    let engine = AuthzEngine::empty();
+    engine
+        .reload_tenant_policies_named(
+            "katagami",
+            &[(
+                "katagami-commons/art_style.cedar".to_string(),
+                concat!(
+                    "permit(principal is Customer, action == Action::\"read\", resource is ArtStyle);\n",
+                    "forbid(principal is Customer, action == Action::\"update\", resource is ArtStyle);\n",
+                )
+                .to_string(),
+            )],
+        )
+        .unwrap();
+
+    engine
+        .upsert_tenant_policy_source(
+            "katagami",
+            "katagami/generated/GD-1.cedar",
+            r#"permit(principal is Customer, action == Action::"list", resource is ArtStyle);"#,
+        )
+        .unwrap();
+
+    let ctx = customer_context("user-1");
+    let mut attrs = HashMap::new();
+    attrs.insert("id".to_string(), serde_json::json!("as-1"));
+
+    // The generated policy took effect...
+    assert!(
+        engine
+            .authorize_for_tenant("katagami", &ctx, "list", "ArtStyle", &attrs)
+            .is_allowed()
+    );
+
+    // ...and the pre-existing file still names itself in a denial.
+    let decision = engine.authorize_for_tenant("katagami", &ctx, "update", "ArtStyle", &attrs);
+    let AuthzDecision::Deny(denial) = decision else {
+        panic!("forbid statement should still deny the update");
+    };
+    assert_eq!(
+        denial.to_string(),
+        "denied by policy: katagami-commons/art_style.cedar#2"
+    );
+}
+
+#[test]
+fn adding_a_policy_to_a_blob_loaded_tenant_labels_the_blob_once() {
+    let engine = AuthzEngine::empty();
+    engine
+        .reload_tenant_policies(
+            "blobby",
+            r#"forbid(principal is Customer, action == Action::"read", resource is Doc);"#,
+        )
+        .unwrap();
+
+    engine
+        .upsert_tenant_policy_source(
+            "blobby",
+            "blobby/generated/GD-1.cedar",
+            r#"permit(principal is Customer, action == Action::"list", resource is Doc);"#,
+        )
+        .unwrap();
+
+    let labels: Vec<String> = engine
+        .tenant_policy_sources("blobby")
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect();
+    assert_eq!(
+        labels,
+        vec![
+            unlabelled_source_label("blobby"),
+            "blobby/generated/GD-1.cedar".to_string()
+        ]
+    );
+
+    // The blob's statements still apply, now under a label that says where
+    // they came from.
+    let ctx = customer_context("user-1");
+    let mut attrs = HashMap::new();
+    attrs.insert("id".to_string(), serde_json::json!("d-1"));
+    let decision = engine.authorize_for_tenant("blobby", &ctx, "read", "Doc", &attrs);
+    let AuthzDecision::Deny(AuthzDenial::PolicyDenied { policy_ids }) = decision else {
+        panic!("expected the blob's forbid to still deny");
+    };
+    assert_eq!(
+        policy_ids,
+        vec![format!("{}#1", unlabelled_source_label("blobby"))]
+    );
+}
+
+#[test]
+fn labelled_sources_are_readable_back_for_rebuilds() {
+    let engine = AuthzEngine::empty();
+    let sources = vec![
+        (
+            "katagami-commons/art_style.cedar".to_string(),
+            r#"permit(principal is Customer, action == Action::"read", resource is ArtStyle);"#
+                .to_string(),
+        ),
+        (
+            "katagami-curation/review.cedar".to_string(),
+            r#"permit(principal is Customer, action == Action::"read", resource is Review);"#
+                .to_string(),
+        ),
+    ];
+    engine
+        .reload_tenant_policies_named("katagami", &sources)
+        .unwrap();
+
+    assert_eq!(engine.tenant_policy_sources("katagami"), sources);
+
+    // An unlabelled blob reload reports no sources rather than inventing one.
+    engine
+        .reload_tenant_policies("blobby", "permit(principal, action, resource);")
+        .unwrap();
+    assert!(engine.tenant_policy_sources("blobby").is_empty());
 }
 
 #[test]
@@ -754,9 +941,141 @@ fn candidate_filter_preserves_named_forbid_policy_ids() {
     };
 
     assert!(
-        policy_ids
-            .iter()
-            .any(|id| id == "default:decision:block-issue-1"),
+        policy_ids.iter().any(|id| id == "decision:block-issue-1#1"),
         "candidate filtering must preserve named policy diagnostics, got: {policy_ids:?}"
     );
+}
+
+/// Two policy applications that overlap in time must both survive.
+///
+/// The regression: `upsert_tenant_policy_source` used to read the tenant's
+/// sources under a read lock, mutate a local `Vec`, then reload under a write
+/// lock. A reads, B reads, A writes, B writes — A's policy is gone and both
+/// calls returned `Ok`. Here the first writer is parked *inside* the
+/// critical section while the second runs start to finish, so a non-atomic
+/// sequence loses one of them every run rather than occasionally.
+#[test]
+fn concurrent_policy_upserts_do_not_lose_each_other() {
+    use std::sync::Arc;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let engine = Arc::new(AuthzEngine::empty());
+    engine
+        .reload_tenant_policies_named(
+            "katagami",
+            &[(
+                "katagami-commons/art_style.cedar".to_string(),
+                r#"permit(principal is Customer, action == Action::"read", resource is ArtStyle);"#
+                    .to_string(),
+            )],
+        )
+        .unwrap();
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let slow_writer = {
+        let engine = Arc::clone(&engine);
+        std::thread::spawn(move || {
+            engine
+                .update_tenant_policy_sources("katagami", move |mut sources| {
+                    entered_tx.send(()).unwrap();
+                    // Hold the critical section open long enough for the other
+                    // writer to complete if nothing is serializing them.
+                    std::thread::sleep(Duration::from_millis(300));
+                    sources.push((
+                        "katagami/generated/GD-slow.cedar".to_string(),
+                        r#"permit(principal is Customer, action == Action::"list", resource is ArtStyle);"#
+                            .to_string(),
+                    ));
+                    sources
+                })
+                .unwrap();
+        })
+    };
+
+    entered_rx.recv().unwrap();
+    engine
+        .upsert_tenant_policy_source(
+            "katagami",
+            "katagami/generated/GD-fast.cedar",
+            r#"permit(principal is Customer, action == Action::"create", resource is ArtStyle);"#,
+        )
+        .unwrap();
+    slow_writer.join().unwrap();
+
+    let labels: Vec<String> = engine
+        .tenant_policy_sources("katagami")
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect();
+    assert!(
+        labels.contains(&"katagami-commons/art_style.cedar".to_string()),
+        "the pre-existing app policy must survive both upserts, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"katagami/generated/GD-slow.cedar".to_string()),
+        "the parked writer's policy must survive, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"katagami/generated/GD-fast.cedar".to_string()),
+        "the concurrent writer's policy must survive, got: {labels:?}"
+    );
+
+    // Both generated policies are actually in effect, not merely recorded.
+    let ctx = customer_context("user-1");
+    let mut attrs = HashMap::new();
+    attrs.insert("id".to_string(), serde_json::json!("as-1"));
+    for action in ["read", "list", "create"] {
+        assert!(
+            engine
+                .authorize_for_tenant("katagami", &ctx, action, "ArtStyle", &attrs)
+                .is_allowed(),
+            "action '{action}' should be permitted after both upserts"
+        );
+    }
+}
+
+/// The same guarantee under real contention: every writer's policy is present
+/// once all of them have returned.
+#[test]
+fn every_racing_policy_upsert_is_retained() {
+    use std::sync::{Arc, Barrier};
+
+    const WRITERS: usize = 8;
+
+    let engine = Arc::new(AuthzEngine::empty());
+    let barrier = Arc::new(Barrier::new(WRITERS));
+    let writers: Vec<_> = (0..WRITERS)
+        .map(|i| {
+            let engine = Arc::clone(&engine);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                engine
+                    .upsert_tenant_policy_source(
+                        "katagami",
+                        &format!("katagami/generated/GD-{i}.cedar"),
+                        &format!(
+                            r#"permit(principal is Customer, action == Action::"read", resource == ArtStyle::"as-{i}");"#
+                        ),
+                    )
+                    .unwrap();
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().unwrap();
+    }
+
+    let labels: Vec<String> = engine
+        .tenant_policy_sources("katagami")
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect();
+    for i in 0..WRITERS {
+        assert!(
+            labels.contains(&format!("katagami/generated/GD-{i}.cedar")),
+            "writer {i}'s policy was lost, got: {labels:?}"
+        );
+    }
 }

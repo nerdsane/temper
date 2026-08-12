@@ -204,6 +204,24 @@ pub(crate) async fn handle_metrics(
             .load(std::sync::atomic::Ordering::Relaxed)
     ));
 
+    // -- temper_entity_spawn_failure_total --
+    // Creates that failed before the entity existed. They emit no transition
+    // and no trajectory row, so this is the only signal that separates a
+    // healthy entity type from one where every create is failing.
+    lines.push(
+        "# HELP temper_entity_spawn_failure_total Entity creates that failed before the entity existed, by entity type and reason.".to_string(),
+    );
+    lines.push("# TYPE temper_entity_spawn_failure_total counter".to_string());
+    if let Ok(map) = state.metrics.entity_spawn_failures.read() {
+        for (key, count) in map.iter() {
+            if let Some((entity_type, reason)) = key.split_once(':') {
+                lines.push(format!(
+                    "temper_entity_spawn_failure_total{{entity_type=\"{entity_type}\",reason=\"{reason}\"}} {count}"
+                ));
+            }
+        }
+    }
+
     lines.push(String::new()); // trailing newline
     let body = lines.join("\n");
 
