@@ -968,6 +968,7 @@ async fn migrate_ots_trajectories(
         let data = source
             .get_ots_trajectory(&row.tenant, &row.trajectory_id)
             .await?
+            .map(|document| document.data)
             .unwrap_or_else(|| "{}".to_string());
         values.push(json!({
             "trajectory_id": row.trajectory_id,

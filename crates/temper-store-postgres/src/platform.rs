@@ -400,6 +400,18 @@ pub struct PostgresOtsTrajectoryRow {
     pub updated_at: String,
 }
 
+/// A stored OTS trajectory document together with the run identity recorded
+/// alongside it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PostgresOtsTrajectoryDocument {
+    pub trajectory_id: String,
+    pub tenant: String,
+    pub agent_id: String,
+    pub session_id: String,
+    pub outcome: String,
+    pub data: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PostgresQueuedOtsTrajectoryRow {
     pub trajectory_id: String,
@@ -2152,16 +2164,17 @@ impl PostgresEventStore {
         &self,
         tenant: &str,
         trajectory_id: &str,
-    ) -> Result<Option<String>, PersistenceError> {
-        let row: Option<serde_json::Value> = crate::dbm::postgres_query_scalar!(
-            "SELECT data FROM ots_trajectories WHERE tenant = $1 AND trajectory_id = $2"
+    ) -> Result<Option<PostgresOtsTrajectoryDocument>, PersistenceError> {
+        let row = crate::dbm::postgres_query!(
+            "SELECT agent_id, COALESCE(session_id, '') AS session_id, outcome, data \
+             FROM ots_trajectories WHERE tenant = $1 AND trajectory_id = $2"
         )
         .bind(tenant)
         .bind(trajectory_id)
         .fetch_optional(self.pool())
         .await
         .map_err(storage_error)?;
-        Ok(row.map(|value| value.to_string()))
+        Ok(row.map(|row| row_to_ots_document(row, tenant.to_string(), trajectory_id.to_string())))
     }
 
     pub async fn put_blob(&self, key: &str, data: &[u8]) -> Result<(), String> {

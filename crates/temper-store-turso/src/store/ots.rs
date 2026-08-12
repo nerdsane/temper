@@ -23,6 +23,22 @@ pub struct OtsTrajectoryRow {
     pub updated_at: String,
 }
 
+/// A stored OTS trajectory document together with the run identity recorded
+/// alongside it.
+///
+/// The document itself carries no session or tenant — those live on the row —
+/// so any consumer that needs the run identity would otherwise have to list
+/// the table to find what it already asked for by id.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OtsTrajectoryDocument {
+    pub trajectory_id: String,
+    pub tenant: String,
+    pub agent_id: String,
+    pub session_id: String,
+    pub outcome: String,
+    pub data: String,
+}
+
 /// Durable queued OTS trajectory row ready for outbox replay.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OtsQueuedTrajectoryRow {
@@ -255,20 +271,27 @@ impl TursoEventStore {
         &self,
         tenant: &str,
         trajectory_id: &str,
-    ) -> Result<Option<String>, PersistenceError> {
+    ) -> Result<Option<OtsTrajectoryDocument>, PersistenceError> {
         let _timer = TursoQueryTimer::start("turso.get_ots_trajectory");
         let conn = self.connection()?;
         let mut rows = conn
             .query(
-                "SELECT data FROM ots_trajectories WHERE tenant = ?1 AND trajectory_id = ?2",
+                "SELECT agent_id, COALESCE(session_id, ''), outcome, data \
+                 FROM ots_trajectories WHERE tenant = ?1 AND trajectory_id = ?2",
                 params![tenant.to_string(), trajectory_id.to_string()],
             )
             .await
             .map_err(storage_error)?;
 
         if let Some(row) = rows.next().await.map_err(storage_error)? {
-            let data: String = row.get(0).unwrap_or_default();
-            Ok(Some(data))
+            Ok(Some(OtsTrajectoryDocument {
+                trajectory_id: trajectory_id.to_string(),
+                tenant: tenant.to_string(),
+                agent_id: row.get(0).unwrap_or_default(),
+                session_id: row.get(1).unwrap_or_default(),
+                outcome: row.get(2).unwrap_or_default(),
+                data: row.get(3).unwrap_or_default(),
+            }))
         } else {
             Ok(None)
         }
@@ -363,19 +386,20 @@ mod tests {
             .await
             .expect("persist trajectory");
 
-        assert_eq!(
-            store
-                .get_ots_trajectory("tenant", "traj-tenant-a")
-                .await
-                .expect("read own tenant"),
-            Some(data.to_string()),
-        );
-        assert_eq!(
+        let document = store
+            .get_ots_trajectory("tenant", "traj-tenant-a")
+            .await
+            .expect("read own tenant")
+            .expect("document present");
+        assert_eq!(document.data, data);
+        assert_eq!(document.session_id, "session");
+        assert_eq!(document.agent_id, "agent");
+        assert!(
             store
                 .get_ots_trajectory("other-tenant", "traj-tenant-a")
                 .await
-                .expect("read foreign tenant"),
-            None,
+                .expect("read foreign tenant")
+                .is_none(),
             "a foreign tenant must not read another tenant's trajectory by id"
         );
     }

@@ -77,5 +77,5 @@ pub use store::{
     QueryProjectionUpsert, TursoBlobRow, TursoEventStore, TursoInstalledAppRow,
     TursoQueryProjectionRow, TursoSpecRow, TursoTenantConstraintRow, TursoTrajectoryRow,
     TursoWasmInvocationRow, TursoWasmModuleMetadataRow, TursoWasmModuleRow, UnmetIntentAggRow,
-    ots::{OtsQueuedTrajectoryRow, OtsTrajectoryParams, OtsTrajectoryRow},
+    ots::{OtsQueuedTrajectoryRow, OtsTrajectoryDocument, OtsTrajectoryParams, OtsTrajectoryRow},
 };

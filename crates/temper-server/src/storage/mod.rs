@@ -23,10 +23,10 @@ use temper_runtime::persistence::{
 use temper_store_postgres::{PostgresEventStore, PostgresPolicyRow, PostgresTrajectoryInsert};
 use temper_store_turso::{
     ActionStats, AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow,
-    OtsQueuedTrajectoryRow, OtsTrajectoryParams, OtsTrajectoryRow, PolicyDenialPatternRow,
-    PolicyRow as TursoPolicyRow, TenantStoreRouter, TenantUserRow, TursoEventStore,
-    TursoTrajectoryInsert, TursoTrajectoryRow, TursoWasmInvocationInsert, TursoWasmInvocationRow,
-    TursoWasmModuleMetadataRow, UnmetIntentAggRow, store::TrajectoryStats,
+    OtsQueuedTrajectoryRow, OtsTrajectoryDocument, OtsTrajectoryParams, OtsTrajectoryRow,
+    PolicyDenialPatternRow, PolicyRow as TursoPolicyRow, TenantStoreRouter, TenantUserRow,
+    TursoEventStore, TursoTrajectoryInsert, TursoTrajectoryRow, TursoWasmInvocationInsert,
+    TursoWasmInvocationRow, TursoWasmModuleMetadataRow, UnmetIntentAggRow, store::TrajectoryStats,
 };
 
 use crate::platform_store::PlatformStore;
@@ -994,7 +994,7 @@ pub trait OtsStore: Send + Sync {
         &self,
         tenant: &str,
         trajectory_id: &str,
-    ) -> Result<Option<String>, PersistenceError>;
+    ) -> Result<Option<OtsTrajectoryDocument>, PersistenceError>;
 }
 
 /// Legacy database-backed blob capability.
@@ -2063,8 +2063,10 @@ impl OtsStore for PostgresEventStore {
         &self,
         tenant: &str,
         trajectory_id: &str,
-    ) -> Result<Option<String>, PersistenceError> {
-        self.get_ots_trajectory(tenant, trajectory_id).await
+    ) -> Result<Option<OtsTrajectoryDocument>, PersistenceError> {
+        self.get_ots_trajectory(tenant, trajectory_id)
+            .await
+            .map(|document| document.map(pg_ots_document_to_turso))
     }
 }
 
@@ -2121,7 +2123,7 @@ impl OtsStore for TursoEventStore {
         &self,
         tenant: &str,
         trajectory_id: &str,
-    ) -> Result<Option<String>, PersistenceError> {
+    ) -> Result<Option<OtsTrajectoryDocument>, PersistenceError> {
         self.get_ots_trajectory(tenant, trajectory_id).await
     }
 }
@@ -2514,6 +2516,19 @@ fn pg_queued_ots_to_turso(
         turn_count: row.turn_count,
         data: row.data,
         persist_attempts: row.persist_attempts,
+    }
+}
+
+fn pg_ots_document_to_turso(
+    document: temper_store_postgres::PostgresOtsTrajectoryDocument,
+) -> OtsTrajectoryDocument {
+    OtsTrajectoryDocument {
+        trajectory_id: document.trajectory_id,
+        tenant: document.tenant,
+        agent_id: document.agent_id,
+        session_id: document.session_id,
+        outcome: document.outcome,
+        data: document.data,
     }
 }
 

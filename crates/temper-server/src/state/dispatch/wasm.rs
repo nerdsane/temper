@@ -873,7 +873,7 @@ impl crate::state::ServerState {
                 .ok()
                 .flatten()
             {
-                Some(d) => d,
+                Some(document) => document.data,
                 None => continue,
             };
             let trajectory = match serde_json::from_str::<Value>(&data) {

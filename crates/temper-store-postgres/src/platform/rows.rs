@@ -252,6 +252,22 @@ pub(super) fn row_to_ots_trajectory(row: sqlx::postgres::PgRow) -> PostgresOtsTr
     }
 }
 
+pub(super) fn row_to_ots_document(
+    row: sqlx::postgres::PgRow,
+    tenant: String,
+    trajectory_id: String,
+) -> PostgresOtsTrajectoryDocument {
+    let data: serde_json::Value = row.get("data");
+    PostgresOtsTrajectoryDocument {
+        trajectory_id,
+        tenant,
+        agent_id: row.get("agent_id"),
+        session_id: row.get("session_id"),
+        outcome: row.get("outcome"),
+        data: data.to_string(),
+    }
+}
+
 pub(super) fn row_to_queued_ots_trajectory(
     row: sqlx::postgres::PgRow,
 ) -> PostgresQueuedOtsTrajectoryRow {

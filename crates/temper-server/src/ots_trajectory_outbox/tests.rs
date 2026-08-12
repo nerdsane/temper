@@ -106,7 +106,7 @@ impl OtsStore for FakeOtsStore {
         &self,
         _tenant: &str,
         _trajectory_id: &str,
-    ) -> Result<Option<String>, PersistenceError> {
+    ) -> Result<Option<temper_store_turso::OtsTrajectoryDocument>, PersistenceError> {
         Ok(None)
     }
 }

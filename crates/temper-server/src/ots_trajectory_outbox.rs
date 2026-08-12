@@ -463,7 +463,7 @@ impl OtsStore for MetadataOtsStore {
         &self,
         tenant: &str,
         trajectory_id: &str,
-    ) -> Result<Option<String>, PersistenceError> {
+    ) -> Result<Option<temper_store_turso::OtsTrajectoryDocument>, PersistenceError> {
         self.inner.get_ots_trajectory(tenant, trajectory_id).await
     }
 }
