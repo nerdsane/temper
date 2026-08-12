@@ -1,5 +1,4 @@
 use super::*;
-use super::*;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 
 fn entry(id: &str) -> TrajectoryEntry {
