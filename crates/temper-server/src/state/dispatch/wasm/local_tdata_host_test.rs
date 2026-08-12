@@ -310,6 +310,31 @@ async fn local_tdata_calls_use_odata_handlers() {
     assert_eq!(submitted["status"], "Submitted");
 }
 
+/// ARN-170 regression guard for the direct-invocation (blob_adapter) loopback.
+///
+/// This drives the real production helper `ServerState::local_tdata_direct_host`
+/// that `invoke_wasm_direct` uses, so it guards the actual authority decision (not
+/// just the `LocalTDataWasmHost` contract): the helper must build the loopback
+/// WITH server-minted authority. The delegate is `FailingHost`, so if the helper
+/// regresses to no authority the `/tdata` call falls through to it and the test
+/// fails — exactly the silent-401 blob regression ARN-170 introduced and this
+/// fix closes.
+#[tokio::test]
+async fn direct_invocation_loopback_dispatches_in_process_with_system_authority() {
+    let state = test_state();
+    let host = state.local_tdata_direct_host(&TenantId::default(), Arc::new(FailingHost));
+    let headers = vec![
+        ("x-tenant-id".to_string(), "default".to_string()),
+        ("accept".to_string(), "application/json".to_string()),
+    ];
+
+    let (status, _body) = host
+        .http_call("GET", "http://127.0.0.1:8787/tdata/Orders", &headers, "")
+        .await
+        .expect("direct-invocation loopback must dispatch in-process, not delegate");
+    assert_eq!(status, StatusCode::OK.as_u16());
+}
+
 #[tokio::test]
 async fn local_tdata_forged_admin_headers_cannot_upgrade_customer() {
     let state = test_state();

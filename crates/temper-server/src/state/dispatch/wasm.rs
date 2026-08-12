@@ -1416,6 +1416,29 @@ impl crate::state::ServerState {
     /// the entire blob lifecycle (auth, hashing, caching, upload/download) via
     /// streaming host functions. Bytes never enter WASM memory.
     #[allow(clippy::too_many_arguments)]
+    /// Build the in-process `/tdata` loopback host for a direct WASM invocation
+    /// (e.g. `blob_adapter`), wrapping `production_host` as the boundary delegate.
+    ///
+    /// The loopback must carry server-minted invocation authority
+    /// (`SecurityContext::system()`, never client-supplied) so its OData calls
+    /// dispatch in-process. ARN-170: with no authority the calls fall through to a
+    /// real HTTP request the hardened ingress edge rejects (401), silently
+    /// breaking blob reads/writes. Centralised here so the authority decision has
+    /// one tested home rather than being inlined at the call site.
+    pub(crate) fn local_tdata_direct_host(
+        &self,
+        tenant: &TenantId,
+        production_host: Arc<dyn WasmHost>,
+    ) -> Arc<dyn WasmHost> {
+        let internal_ctx = SecurityContext::system();
+        Arc::new(LocalTDataWasmHost::new(
+            self.clone(),
+            tenant.clone(),
+            Some(&internal_ctx),
+            production_host,
+        ))
+    }
+
     pub(crate) async fn invoke_wasm_direct(
         &self,
         tenant: &TenantId,
@@ -1481,12 +1504,7 @@ impl crate::state::ServerState {
             base_host = base_host.with_binary_http_interceptor(interceptor);
         }
         let production_host: Arc<dyn WasmHost> = Arc::new(base_host);
-        let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
-            self.clone(),
-            tenant.clone(),
-            None,
-            production_host,
-        ));
+        let inner = self.local_tdata_direct_host(tenant, production_host);
         let host: Arc<dyn WasmHost> =
             Arc::new(AuthorizedWasmHost::new(inner, base_gate, authz_ctx));
         let limits = WasmResourceLimits::default();
