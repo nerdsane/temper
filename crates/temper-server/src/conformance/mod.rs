@@ -119,7 +119,7 @@ use temper_spec::automaton::Automaton;
 use temper_store_turso::TursoTrajectoryRow;
 
 use decisions::{DecisionActions, decision_actions};
-use report::evidence_gaps;
+use report::{EvidenceContext, evidence_gaps};
 use spec_view::SpecView;
 use walk::{RowDisposition, Walk, check_row, row_disposition, undeclared_detail};
 
@@ -180,6 +180,10 @@ pub struct ConformanceInput<'a> {
     pub rows_truncated: bool,
     /// Whether `automaton` is provably the spec that governed the run.
     pub spec_resolution: SpecResolution,
+    /// Whether the server holding these rows has lost captured rows it could
+    /// not record against any session. When true, no session read from it can
+    /// be assumed whole, so the report says so and cannot pass.
+    pub capture_degraded: bool,
 }
 
 /// Check one recorded run against the spec that governed it.
@@ -193,6 +197,7 @@ pub fn check_conformance(input: ConformanceInput<'_>) -> ConformanceReport {
         ots_trajectory,
         rows_truncated,
         spec_resolution,
+        capture_degraded,
     } = input;
     let spec = SpecView::new(automaton);
     let mut walk = Walk::default();
@@ -215,11 +220,27 @@ pub fn check_conformance(input: ConformanceInput<'_>) -> ConformanceReport {
             .or_insert(0) += 1;
     }
 
-    let gaps = evidence_gaps(&stats, kernel_rows.len(), rows_truncated, spec_resolution);
+    let gaps = evidence_gaps(
+        &stats,
+        &EvidenceContext {
+            kernel_rows_read: kernel_rows.len(),
+            rows_truncated,
+            spec_resolution,
+            capture_degraded,
+        },
+    );
     ConformanceReport::new(violations, gaps, spec_resolution, stats)
 }
 
 /// Judge the actions the agent decided on that no kernel row accounts for.
+///
+/// Decisions are a one-way input. They can raise violations, and so fail a run;
+/// they never count toward passing one. A decision is the agent's own account
+/// of what it chose — it names an action and carries no observed state, so it
+/// cannot show that anything happened, let alone that it happened legally.
+/// [`ConformanceStats::ots_decisions_checked`] is a record of what was looked
+/// at, not evidence, which is why the "nothing was checked" gap in
+/// [`report`] keys on kernel rows alone.
 fn check_decisions(
     spec: &SpecView<'_>,
     trajectory: &OTSTrajectory,

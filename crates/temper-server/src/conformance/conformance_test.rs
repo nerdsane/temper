@@ -116,6 +116,7 @@ fn check(
         ots_trajectory,
         rows_truncated: false,
         spec_resolution: SpecResolution::Pinned,
+        capture_degraded: false,
     })
 }
 
@@ -453,6 +454,62 @@ fn ots_with_decisions(actions: &[&str]) -> OTSTrajectory {
 }
 
 #[test]
+fn a_declared_decision_over_an_empty_session_cannot_pass() {
+    // The fail-open this test exists for: a decision naming an action the spec
+    // declares raises no violation, and it used to be enough to suppress the
+    // "nothing was checked" gap. A caller able to upload a trajectory could
+    // then get `passed: true` for a session the kernel has no row for — a run
+    // nobody has any evidence ever happened.
+    let ots = ots_with_decisions(&["AddItem"]);
+
+    let report = check(&order_automaton(), &[], Some(&ots));
+
+    assert!(report.violations.is_empty(), "AddItem is declared");
+    assert_eq!(report.stats.actor_rows, 0);
+    assert_eq!(report.stats.ots_decisions_checked, 1);
+    assert_eq!(
+        report.verdict,
+        Verdict::Indeterminate,
+        "a decision proves an action name is in the spec, not that the run followed it"
+    );
+    assert!(!report.passed);
+    assert!(!report.evidence_complete);
+}
+
+#[test]
+fn decisions_never_substitute_for_the_rows_a_run_did_not_leave() {
+    // The same shape with several declared decisions: quantity of agent-side
+    // claims must not add up to evidence the kernel never recorded.
+    let ots = ots_with_decisions(&["AddItem", "SubmitOrder", "ConfirmOrder"]);
+
+    let report = check(&order_automaton(), &[], Some(&ots));
+
+    assert!(report.violations.is_empty());
+    assert_eq!(report.stats.ots_decisions_checked, 3);
+    assert!(!report.passed);
+    assert!(
+        report
+            .evidence_gaps
+            .iter()
+            .any(|gap| gap.contains("no governed action")),
+        "{:?}",
+        report.evidence_gaps
+    );
+}
+
+#[test]
+fn a_run_with_no_actor_rows_still_fails_on_a_disagreeing_decision() {
+    // The other half of the rule: decisions still *fail* a run. Only the path
+    // to Pass is closed to them.
+    let ots = ots_with_decisions(&["Frobnicate"]);
+
+    let report = check(&order_automaton(), &[], Some(&ots));
+
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert_eq!(only_violation(&report).kind, ViolationKind::UnknownAction);
+}
+
+#[test]
 fn ots_decisions_the_kernel_never_recorded_are_checked_after_the_rows() {
     let rows = vec![row("AddItem", Some("Draft"), Some("Draft"))];
     // `AddItem` already has a row and must not be double-counted; `Frobnicate`
@@ -504,7 +561,7 @@ fn an_empty_session_is_indeterminate_rather_than_passing() {
         report
             .evidence_gaps
             .iter()
-            .any(|gap| gap.contains("nothing about this run was checked")),
+            .any(|gap| gap.contains("no governed action")),
         "{:?}",
         report.evidence_gaps
     );
@@ -520,6 +577,7 @@ fn a_truncated_read_is_indeterminate_even_with_no_violations() {
         ots_trajectory: None,
         rows_truncated: true,
         spec_resolution: SpecResolution::Pinned,
+        capture_degraded: false,
     });
 
     assert!(report.violations.is_empty());
@@ -553,6 +611,7 @@ fn a_violation_in_a_truncated_prefix_still_fails() {
         ots_trajectory: None,
         rows_truncated: true,
         spec_resolution: SpecResolution::Pinned,
+        capture_degraded: false,
     });
 
     assert_eq!(
@@ -786,6 +845,7 @@ fn a_run_whose_governing_spec_is_unresolved_cannot_pass() {
         ots_trajectory: None,
         rows_truncated: false,
         spec_resolution: SpecResolution::Unresolved,
+        capture_degraded: false,
     });
 
     assert!(report.violations.is_empty());

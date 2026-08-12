@@ -195,13 +195,27 @@ impl ConformanceReport {
     }
 }
 
+/// What the checker knows about its inputs, beyond the rows themselves.
+pub(super) struct EvidenceContext {
+    /// Kernel rows the read returned.
+    pub kernel_rows_read: usize,
+    /// Whether the read stopped at its cap rather than the end of the session.
+    pub rows_truncated: bool,
+    /// Whether the spec judged is provably the one that governed the run.
+    pub spec_resolution: SpecResolution,
+    /// Whether this server has lost captured rows it could not attribute to
+    /// any session.
+    pub capture_degraded: bool,
+}
+
 /// Every reason this report is not evidence of a conforming run.
-pub(super) fn evidence_gaps(
-    stats: &ConformanceStats,
-    kernel_rows_read: usize,
-    rows_truncated: bool,
-    spec_resolution: SpecResolution,
-) -> Vec<String> {
+pub(super) fn evidence_gaps(stats: &ConformanceStats, context: &EvidenceContext) -> Vec<String> {
+    let EvidenceContext {
+        kernel_rows_read,
+        rows_truncated,
+        spec_resolution,
+        capture_degraded,
+    } = *context;
     let mut gaps = Vec::new();
     if spec_resolution == SpecResolution::Unresolved {
         gaps.push(
@@ -225,9 +239,26 @@ pub(super) fn evidence_gaps(
             stats.capture_loss_markers
         ));
     }
-    if stats.actor_rows == 0 && stats.ots_decisions_checked == 0 {
+    // A marker says which session lost a row. This says a row was lost and the
+    // marker for it could not be written either, so no session's record can be
+    // trusted to be whole — including this one, whether or not it has a marker.
+    if capture_degraded {
         gaps.push(
-            "no rows and no decisions were judged, so nothing about this run was checked"
+            "this server has lost captured rows it could not record against any session, so any \
+             session read from it may be missing rows with nothing to say so"
+                .to_string(),
+        );
+    }
+    // Keyed on the kernel's rows alone. An agent-side decision names an action
+    // and carries no observed state, so it can contradict a spec but can never
+    // show that a run followed one. Counting decisions here would let a
+    // trajectory naming a single declared action stand in as the whole
+    // evidence for a session the kernel recorded nothing about.
+    if stats.actor_rows == 0 {
+        gaps.push(
+            "the kernel recorded no governed action for this actor, so nothing about what the \
+             run did was checked; agent-side decisions can disagree with a spec but never \
+             establish that a run followed one, because they carry no observed state"
                 .to_string(),
         );
     }

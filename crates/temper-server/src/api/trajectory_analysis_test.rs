@@ -755,6 +755,117 @@ fn ots_upload(trajectory_id: &str) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn a_trajectory_alone_cannot_make_a_session_pass() {
+    // The end-to-end shape of the fail-open: an uploaded trajectory whose one
+    // decision names a declared action (`ots_upload` sends `SubmitOrder`),
+    // against a session the kernel recorded nothing for, with the spec version
+    // pinned so the resolution is not the thing holding it back. Everything a
+    // caller controls is present and nothing the kernel controls is.
+    let (app, store) = test_app().await;
+    let registered = registered_spec_version();
+    let mut data = ots_upload("traj-no-rows");
+    data["metadata"]["spec_version"] = serde_json::json!(format!("sha256:{registered}"));
+    store
+        .persist_ots_trajectory(&OtsTrajectoryParams {
+            trajectory_id: "traj-no-rows",
+            tenant: "default",
+            agent_id: "agent-1",
+            session_id: "session-1",
+            outcome: "success",
+            turn_count: 1,
+            data: &data.to_string(),
+        })
+        .await
+        .expect("persist OTS trajectory");
+
+    let response = app
+        .oneshot(admin_post(
+            "/api/conformance/check",
+            serde_json::json!({
+                "entity_type": "Order",
+                "session_id": "session-1",
+                "trajectory_id": "traj-no-rows",
+            }),
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await;
+    assert_eq!(body["report"]["spec_resolution"], "pinned");
+    assert_eq!(body["report"]["violations"], serde_json::json!([]));
+    assert_eq!(body["report"]["stats"]["actor_rows"], serde_json::json!(0));
+    assert_eq!(
+        body["report"]["stats"]["ots_decisions_checked"],
+        serde_json::json!(1),
+        "the decision was looked at, which is what used to be mistaken for evidence"
+    );
+    assert_eq!(body["report"]["verdict"], "indeterminate");
+    assert_eq!(
+        body["report"]["passed"],
+        serde_json::json!(false),
+        "an uploaded trajectory is the agent's own account and cannot pass a run on its own"
+    );
+    assert_eq!(
+        body["report"]["evidence_complete"],
+        serde_json::json!(false)
+    );
+}
+
+#[tokio::test]
+async fn a_trajectory_stored_without_a_session_is_refused() {
+    // An upload that carried no `X-Session-Id` is tied to no run. Read as a
+    // wildcard it folded into whichever session the caller named, which is how
+    // one unattributed upload could be presented as evidence about every run.
+    let (app, store) = test_app().await;
+    seed_row(
+        &store,
+        "AddItem",
+        Some("Draft"),
+        Some("Draft"),
+        "2026-01-01T00:00:00Z",
+    )
+    .await;
+    store
+        .persist_ots_trajectory(&OtsTrajectoryParams {
+            trajectory_id: "traj-sessionless",
+            tenant: "default",
+            agent_id: "agent-1",
+            session_id: "",
+            outcome: "success",
+            turn_count: 1,
+            data: &ots_upload("traj-sessionless").to_string(),
+        })
+        .await
+        .expect("persist OTS trajectory");
+
+    let response = app
+        .oneshot(admin_post(
+            "/api/conformance/check",
+            serde_json::json!({
+                "entity_type": "Order",
+                "session_id": "session-1",
+                "trajectory_id": "traj-sessionless",
+            }),
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "a trajectory tied to no run cannot be folded into this one"
+    );
+    let detail = response_text(response).await;
+    assert!(
+        detail.contains("without a session"),
+        "the refusal must say why: {detail}"
+    );
+}
+
+#[tokio::test]
 async fn an_uploaded_trajectory_is_addressable_by_the_id_it_was_uploaded_with() {
     // The upload path and the read path must agree on the run's identity.
     // Seeding storage directly would prove nothing about the POST handler.

@@ -460,6 +460,7 @@ mod tests {
             ots_trajectory: None,
             rows_truncated: false,
             spec_resolution: SpecResolution::Pinned,
+            capture_degraded: false,
         });
 
         assert!(

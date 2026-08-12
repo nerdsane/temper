@@ -141,8 +141,26 @@ pub(crate) async fn handle_conformance_check(
             let (ots_session_id, trajectory) =
                 load_ots_trajectory(&store, &tenant, trajectory_id).await?;
             // Folding another run's decisions into this session's report would
-            // produce violations that belong to neither run.
-            if !ots_session_id.is_empty() && ots_session_id != request.session_id {
+            // produce violations that belong to neither run, so the stored
+            // trajectory has to say which run it came from, and it has to be
+            // this one.
+            //
+            // An empty session column matches nothing rather than everything:
+            // the upload carried no `X-Session-Id`, so the trajectory is tied
+            // to no run at all. Read as a wildcard it let one unattributed
+            // upload be folded into every session a caller cared to name.
+            if ots_session_id.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "trajectory `{trajectory_id}` was stored without a session, so nothing \
+                         ties it to session `{}`; re-upload it with an `X-Session-Id` header \
+                         naming the run it came from",
+                        request.session_id
+                    ),
+                ));
+            }
+            if ots_session_id != request.session_id {
                 return Err((
                     StatusCode::BAD_REQUEST,
                     format!(
@@ -165,12 +183,17 @@ pub(crate) async fn handle_conformance_check(
         &request.entity_type,
     )?;
 
+    // Asked of this server's own capture path: a loss it could not attribute
+    // to any session means the rows just read may be missing some, with no
+    // marker in them to say so.
+    let capture_degraded = state.capture_health.unrecorded_losses() > 0;
     let report = check_conformance(ConformanceInput {
         automaton: &spec.automaton,
         kernel_rows: &rows,
         ots_trajectory: ots.as_ref(),
         rows_truncated: truncated,
         spec_resolution,
+        capture_degraded,
     });
     tracing::info!(
         tenant = %tenant,

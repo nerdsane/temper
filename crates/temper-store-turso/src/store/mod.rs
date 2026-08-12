@@ -425,6 +425,14 @@ impl TursoEventStore {
     /// key is to rebuild the table. The rebuild runs once: it reads the stored
     /// DDL first and returns immediately on a table that is already scoped, so
     /// it costs one `sqlite_master` read per startup after that.
+    ///
+    /// All four steps run in one transaction. Run as separate statements, a
+    /// process that died between the `DROP` and the `RENAME` would leave no
+    /// `ots_trajectories` at all: the next boot's `CREATE TABLE IF NOT EXISTS`
+    /// would make an empty one, already carrying the tenant-scoped marker, so
+    /// this function would skip the rebuild and every stored trajectory would
+    /// stay stranded in `ots_trajectories_rebuild`. SQLite's DDL is
+    /// transactional, so the whole rekey either lands or does not.
     async fn rebuild_ots_trajectories_for_tenant_identity(
         conn: &InstrumentedConnection,
     ) -> Result<(), PersistenceError> {
@@ -447,14 +455,29 @@ impl TursoEventStore {
         }
 
         tracing::info!("rekeying ots_trajectories by (tenant, trajectory_id)");
+        conn.execute("BEGIN IMMEDIATE", ())
+            .await
+            .map_err(storage_error)?;
         for stmt in [
             schema::CREATE_OTS_TRAJECTORIES_REBUILD_TABLE,
             schema::COPY_OTS_TRAJECTORIES_INTO_REBUILD,
             schema::DROP_OTS_TRAJECTORIES_LEGACY_TABLE,
             schema::RENAME_OTS_TRAJECTORIES_REBUILD,
         ] {
-            conn.execute(stmt, ()).await.map_err(storage_error)?;
+            if let Err(error) = conn.execute(stmt, ()).await {
+                // Leaving the transaction open would hold a write lock for the
+                // life of the connection, so the rollback runs before the
+                // error is returned and its own failure is reported alongside.
+                if let Err(rollback) = conn.execute("ROLLBACK", ()).await {
+                    tracing::error!(
+                        error = %rollback,
+                        "failed to roll back the ots_trajectories rekey"
+                    );
+                }
+                return Err(storage_error(error));
+            }
         }
+        conn.execute("COMMIT", ()).await.map_err(storage_error)?;
         Ok(())
     }
 

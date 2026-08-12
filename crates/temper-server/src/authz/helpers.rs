@@ -113,6 +113,14 @@ pub(crate) fn require_observe_auth(
 /// `GET /api/ots/trajectories`, which carry no authorization check at all) is
 /// ARN-187, in flight on `claude/arn-187-ots-auth-gate`; duplicating that gate
 /// here would collide with it on merge. Neither is rebuilt on this branch.
+///
+/// `POST /api/audit` belongs to the same set: it writes trajectory rows with a
+/// caller-chosen tenant, entity type, action, and session, unauthenticated for
+/// the same reason the OTS routes are. What keeps it out of a conformance
+/// verdict is not authorization but the row it writes — `spec_governed = false`,
+/// which the checker skips (`crate::conformance::walk::row_disposition`) — so a
+/// caller can add rows to the observe views but not to what a run is judged on.
+/// The authorization half of it is ARN-187's.
 pub(crate) fn require_trajectory_content_auth(
     state: &crate::state::ServerState,
     headers: &HeaderMap,
