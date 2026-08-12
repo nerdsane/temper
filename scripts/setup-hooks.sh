@@ -1,11 +1,16 @@
 #!/bin/bash
 # Item 15: Git Hook Installer
-# Installs pre-commit, pre-push, and post-commit hooks into .git/hooks/
+# Installs pre-commit, pre-push, and post-commit hooks into Git's shared hooks
+# directory, including when invoked from a linked worktree.
 # Idempotent — safe to run multiple times.
 set -euo pipefail
 
 WORKSPACE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HOOKS_DIR="$WORKSPACE_ROOT/.git/hooks"
+GIT_COMMON_DIR="$(git -C "$WORKSPACE_ROOT" rev-parse --git-common-dir)"
+if [[ "$GIT_COMMON_DIR" != /* ]]; then
+    GIT_COMMON_DIR="$WORKSPACE_ROOT/$GIT_COMMON_DIR"
+fi
+HOOKS_DIR="$GIT_COMMON_DIR/hooks"
 SOURCE_DIR="$WORKSPACE_ROOT/.claude/hooks"
 
 echo "=== Installing Git Hooks ==="

@@ -17,6 +17,7 @@
 //!
 //! ```sh
 //! cargo run --quiet --bin verify_specs -- os-apps crates
+//! cargo run --quiet --bin verify_specs -- --syntax-only path/to/entity.ioa.toml
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -25,12 +26,19 @@ use std::process::ExitCode;
 use temper_spec::automaton::{LivenessEnforcement, parse_automaton_with_liveness};
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let liveness_mode = if args.first().is_some_and(|arg| arg == "--syntax-only") {
+        args.remove(0);
+        LivenessEnforcement::WarnOnly
+    } else {
+        LivenessEnforcement::Enforce
+    };
     if args.is_empty() {
         eprintln!(
-            "usage: verify_specs <dir> [<dir> ...]\n\
+            "usage: verify_specs [--syntax-only] <path> [<path> ...]\n\
              Walks each directory recursively, parses every *.ioa.toml, and\n\
-             enforces ADR-0050 liveness coverage. Exits non-zero on any failure."
+             enforces ADR-0050 liveness coverage unless --syntax-only is set.\n\
+             Exits non-zero on any failure."
         );
         return ExitCode::from(2);
     }
@@ -44,17 +52,18 @@ fn main() -> ExitCode {
             eprintln!("verify_specs: path does not exist: {}", root.display());
             return ExitCode::from(2);
         }
-        if let Err(e) = walk(&root, &mut specs_found, &mut failures) {
+        if let Err(e) = walk(&root, liveness_mode, &mut specs_found, &mut failures) {
             eprintln!("verify_specs: walk failed under {}: {e}", root.display());
             return ExitCode::from(2);
         }
     }
 
     if failures.is_empty() {
-        println!(
-            "verify_specs: {} spec(s) passed (ADR-0050 liveness enforce mode)",
-            specs_found
-        );
+        let mode = match liveness_mode {
+            LivenessEnforcement::WarnOnly => "schema validation mode",
+            LivenessEnforcement::Enforce => "ADR-0050 liveness enforce mode",
+        };
+        println!("verify_specs: {specs_found} spec(s) passed ({mode})");
         return ExitCode::SUCCESS;
     }
 
@@ -75,12 +84,13 @@ fn main() -> ExitCode {
 
 fn walk(
     dir: &Path,
+    liveness_mode: LivenessEnforcement,
     specs_found: &mut u64,
     failures: &mut Vec<(PathBuf, String)>,
 ) -> std::io::Result<()> {
     if dir.is_file() {
         if is_ioa_spec(dir) {
-            check_spec(dir, specs_found, failures);
+            check_spec(dir, liveness_mode, specs_found, failures);
         }
         return Ok(());
     }
@@ -94,9 +104,9 @@ fn walk(
             {
                 continue;
             }
-            walk(&path, specs_found, failures)?;
+            walk(&path, liveness_mode, specs_found, failures)?;
         } else if is_ioa_spec(&path) {
-            check_spec(&path, specs_found, failures);
+            check_spec(&path, liveness_mode, specs_found, failures);
         }
     }
     Ok(())
@@ -108,13 +118,18 @@ fn is_ioa_spec(path: &Path) -> bool {
         .is_some_and(|n| n.ends_with(".ioa.toml"))
 }
 
-fn check_spec(path: &Path, specs_found: &mut u64, failures: &mut Vec<(PathBuf, String)>) {
+fn check_spec(
+    path: &Path,
+    liveness_mode: LivenessEnforcement,
+    specs_found: &mut u64,
+    failures: &mut Vec<(PathBuf, String)>,
+) {
     *specs_found += 1;
     let Ok(source) = std::fs::read_to_string(path) else {
         failures.push((path.to_path_buf(), "could not read file".to_string()));
         return;
     };
-    if let Err(e) = parse_automaton_with_liveness(&source, LivenessEnforcement::Enforce) {
+    if let Err(e) = parse_automaton_with_liveness(&source, liveness_mode) {
         failures.push((path.to_path_buf(), e.to_string()));
     }
 }

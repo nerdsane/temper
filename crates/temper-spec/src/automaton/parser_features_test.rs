@@ -209,7 +209,7 @@ initial = "Active"
 name = "AddTask"
 from = ["Active"]
 effect = [
-  { type = "spawn_entity", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create" },
+  { type = "spawn_entity", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create", copy_fields = "system_prompt, model, tools_enabled" },
   { type = "emit_event", event = "TaskAdded" }
 ]
 "#;
@@ -219,10 +219,18 @@ effect = [
         .iter()
         .find(|action| action.name == "AddTask")
         .expect("AddTask action should exist");
-    assert!(matches!(
-        add_task.effect.first(),
-        Some(Effect::Spawn { .. })
-    ));
+    let Some(Effect::Spawn { copy_fields, .. }) = add_task.effect.first() else {
+        panic!(
+            "expected a spawn effect, got: {:?}",
+            add_task.effect.first()
+        );
+    };
+    assert_eq!(
+        copy_fields
+            .as_ref()
+            .expect("legacy copy_fields should be preserved"),
+        &["system_prompt", "model", "tools_enabled"].map(ToString::to_string)
+    );
     assert!(matches!(add_task.effect.get(1), Some(Effect::Emit { .. })));
 }
 

@@ -69,7 +69,7 @@ if [ -n "$STAGED_SPECS" ]; then
 
     for SPEC in $STAGED_SPECS; do
         # Try parsing the spec (syntax check only, not full cascade)
-        if ! cargo run -p temper-cli --quiet -- verify --specs-dir "$(dirname "$SPEC")" 2>/dev/null; then
+        if ! cargo run -p temper-spec --quiet --bin verify_specs -- --syntax-only "$SPEC" 2>/dev/null; then
             echo "BLOCKED: Spec syntax error in $SPEC" >&2
             echo "Fix the spec before committing." >&2
             exit 1

@@ -229,6 +229,7 @@ type = "wasm"
 module = "http_fetch"
 on_success = "FetchSucceeded"
 on_failure = "FetchFailed"
+config = "legacy-config"
 url = "https://api.open-meteo.com/v1/forecast"
 method = "GET"
 "#;
@@ -246,10 +247,25 @@ method = "GET"
         integration.config.get("method").map(String::as_str),
         Some("GET")
     );
+    assert_eq!(
+        integration.config.get("config").map(String::as_str),
+        Some("legacy-config")
+    );
     assert!(!integration.config.contains_key("name"));
     assert!(!integration.config.contains_key("trigger"));
     assert!(!integration.config.contains_key("type"));
     assert!(!integration.config.contains_key("module"));
+
+    let canonical = toml::to_string(&automaton).expect("integration should serialize");
+    let reparsed = parse_automaton(&canonical).expect("canonical integration should reparse");
+    assert_eq!(
+        reparsed.integrations[0]
+            .config
+            .get("config")
+            .map(String::as_str),
+        Some("legacy-config"),
+        "legacy scalar config key must survive canonical nested serialization"
+    );
 }
 
 #[test]

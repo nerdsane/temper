@@ -105,11 +105,6 @@ type = "string"
 initial = ""
 
 [[state]]
-name = "temper_api_url"
-type = "string"
-initial = "http://127.0.0.1:3000"
-
-[[state]]
 name = "file_manifest_id"
 type = "string"
 initial = ""
