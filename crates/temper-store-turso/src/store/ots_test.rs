@@ -1,5 +1,4 @@
 use super::*;
-use super::*;
 
 async fn test_store() -> (TursoEventStore, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("create temp dir");
