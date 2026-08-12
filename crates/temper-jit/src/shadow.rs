@@ -115,6 +115,7 @@ mod tests {
             entity_name: "Order".into(),
             states: vec!["Draft".into(), "Submitted".into(), "Cancelled".into()],
             initial_state: "Draft".into(),
+            state_var_initials: Default::default(),
             keys: vec![],
             vectors: vec![],
             rules: vec![
@@ -141,6 +142,8 @@ mod tests {
             ],
             state_var_metadata: Default::default(),
             composite_actions: Default::default(),
+            runtime_invariants: Default::default(),
+            model_protected_state_vars: Default::default(),
             rule_index: Default::default(),
         };
         table.rebuild_index();

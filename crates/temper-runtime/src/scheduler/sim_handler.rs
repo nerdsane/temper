@@ -28,6 +28,11 @@ pub struct SpecInvariant {
 /// `And(vec![BoolRequired{"migrations_ok", true}, BoolRequired{"typecheck_ok", true}])`.
 #[derive(Debug, Clone)]
 pub enum SpecAssert {
+    /// Assertion enforced atomically by the shared tentative-state contract.
+    RuntimeEnforced { enforcement_version: u32 },
+    /// An assertion outside the runtime simulation's supported typed forms.
+    /// This is retained explicitly and always fails instead of being omitted.
+    Unsupported { expression: String },
     /// A counter variable must be positive (e.g., `items > 0`).
     CounterPositive { var: String },
     /// The entity is in a terminal state — no further transitions allowed.
@@ -110,6 +115,14 @@ pub trait SimActorHandler: Send {
     /// `BoolRequired` evaluators). Override this to expose booleans
     /// from the underlying entity state. Default: no boolean state.
     fn bool_field(&self, _var: &str) -> Option<bool> {
+        None
+    }
+
+    /// Read a counter state variable by name for invariant evaluation.
+    ///
+    /// Returns `None` when the counter is absent, which fails closed in typed
+    /// counter assertions. Default: no counter state.
+    fn counter_field(&self, _var: &str) -> Option<usize> {
         None
     }
 

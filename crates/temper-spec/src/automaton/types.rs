@@ -394,6 +394,33 @@ pub struct Invariant {
     pub when: Vec<String>,
     /// The assertion (a simple expression).
     pub assert: String,
+    /// Exact source range of the assertion expression, excluding TOML quotes.
+    ///
+    /// This parser metadata is not part of the serialized specification. It is
+    /// retained so verification diagnostics can identify an unsupported safety
+    /// claim without reparsing or guessing its location.
+    #[serde(skip)]
+    pub assert_span: Option<SourceSpan>,
+}
+
+/// A one-based source position with its zero-based UTF-8 byte offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourcePosition {
+    /// Zero-based UTF-8 byte offset from the start of the specification.
+    pub byte: usize,
+    /// One-based line number.
+    pub line: usize,
+    /// One-based Unicode scalar column.
+    pub column: usize,
+}
+
+/// A half-open source range: `start` is inclusive and `end` is exclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceSpan {
+    /// Inclusive start position.
+    pub start: SourcePosition,
+    /// Exclusive end position.
+    pub end: SourcePosition,
 }
 
 /// A liveness property.

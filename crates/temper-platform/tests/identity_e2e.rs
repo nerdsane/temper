@@ -15,6 +15,7 @@ use axum::http::{Request, StatusCode};
 use std::collections::BTreeMap;
 use temper_platform::bootstrap::{bootstrap_agent_specs, bootstrap_system_tenant};
 use temper_platform::state::PlatformState;
+use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 use temper_server::identity::{IdentityResolver, hash_token};
 use temper_server::request_context::AgentContext;
@@ -428,7 +429,10 @@ async fn e2e_http_identity_resolve_exempt_from_auth() {
 /// Bearer auth: valid agent credential resolves identity on HTTP requests.
 #[tokio::test]
 async fn e2e_http_agent_credential_auth() {
-    let app = identity_test_router();
+    let mut state = identity_test_state();
+    state.api_token = Some("admin-test-key".to_string());
+    let server = state.server.clone();
+    let app = temper_platform::router::build_platform_router(state);
 
     // 1. Create AgentType (as admin)
     let response = app
@@ -470,6 +474,31 @@ async fn e2e_http_agent_credential_auth() {
     let agent_key = "tmpr_http-auth-test-key";
     let key_hash = hash_token(agent_key);
 
+    // Deterministically model a concurrent read at the actor-spawn boundary:
+    // the pristine credential actor exists, but validation/publication has not
+    // completed. Neither direct nor collection reads may discover it.
+    server
+        .get_or_spawn_tenant_actor_with_fields(
+            &TenantId::new(TEST_TENANT),
+            "AgentCredential",
+            &key_hash,
+            serde_json::json!({}),
+        )
+        .expect("credential actor should spawn");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/tdata/AgentCredentials('{key_hash}')"))
+                .header("Authorization", "Bearer admin-test-key")
+                .header("X-Temper-Principal-Kind", "admin")
+                .header("X-Tenant-Id", TEST_TENANT)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
     let response = app
         .clone()
         .oneshot(
@@ -484,6 +513,29 @@ async fn e2e_http_agent_credential_auth() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata/AgentCredentials")
+                .header("Authorization", "Bearer admin-test-key")
+                .header("X-Temper-Principal-Kind", "admin")
+                .header("X-Tenant-Id", TEST_TENANT)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let collection = body_json(response).await;
+    assert!(
+        !collection["value"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|item| item["entity_id"] == key_hash),
+        "uninitialized credential must not be query-visible"
+    );
 
     // Issue the credential
     let response = app
@@ -506,6 +558,92 @@ async fn e2e_http_agent_credential_auth() {
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
     assert_eq!(json["status"], "Active");
+
+    let mut initialized = None;
+    for _ in 0..50 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/tdata/AgentCredentials")
+                    .header("Authorization", "Bearer admin-test-key")
+                    .header("X-Temper-Principal-Kind", "admin")
+                    .header("X-Tenant-Id", TEST_TENANT)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let collection = body_json(response).await;
+        initialized = collection["value"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|item| item["entity_id"] == key_hash)
+            .cloned();
+        if initialized.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let initialized = initialized.expect("initialized credential must become query-visible");
+    assert_eq!(initialized["status"], "Active");
+    assert_eq!(initialized["fields"]["agent_type_id"], "http-cc-type");
+
+    // In-memory-only initialized state has no replay source. Idle passivation
+    // must retain the live actor, and both keyed and collection reads must keep
+    // returning the initialized state rather than a pristine invalid shell.
+    let actor_key = format!("{TEST_TENANT}:AgentCredential:{key_hash}");
+    server.last_accessed.write().unwrap().insert(
+        actor_key.clone(),
+        sim_now() - chrono::Duration::seconds(600),
+    );
+    server.passivate_idle_actors().await;
+    assert!(
+        server
+            .actor_registry
+            .read()
+            .unwrap()
+            .contains_key(&actor_key)
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/tdata/AgentCredentials('{key_hash}')"))
+                .header("Authorization", "Bearer admin-test-key")
+                .header("X-Temper-Principal-Kind", "admin")
+                .header("X-Tenant-Id", TEST_TENANT)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_json(response).await["status"], "Active");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata/AgentCredentials")
+                .header("Authorization", "Bearer admin-test-key")
+                .header("X-Temper-Principal-Kind", "admin")
+                .header("X-Tenant-Id", TEST_TENANT)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let collection = body_json(response).await;
+    assert!(
+        collection["value"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|item| item["entity_id"] == key_hash && item["status"] == "Active"),
+        "initialized credential must remain collection-visible after passivation sweep"
+    );
 
     // 3. Use the agent credential as Bearer token — should be accepted
     let response = app

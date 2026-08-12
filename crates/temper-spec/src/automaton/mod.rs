@@ -18,6 +18,7 @@ mod initial;
 mod lint;
 pub mod metadata;
 pub mod parser;
+mod runtime_assert;
 mod toml_parser;
 pub mod translate;
 pub mod trigger_graph;
@@ -35,6 +36,11 @@ pub use metadata::{LivenessViolation, SpecMetadata};
 pub use parser::{
     LivenessEnforcement, LivenessViolationReporter, parse_automaton, parse_automaton_with_liveness,
     set_liveness_violation_reporter, to_state_machine,
+};
+pub use runtime_assert::{
+    RUNTIME_INVARIANT_ENFORCEMENT_VERSION, RuntimeAssert, RuntimeInvariant,
+    compile_runtime_invariants, evaluate_runtime_assert, model_protected_state_var_names,
+    unsupported_safety_invariant_names,
 };
 pub use translate::{ResolvedAction, ResolvedEffect, ResolvedGuard, translate_actions};
 pub use trigger_graph::{TriggerEdge, TriggerGraph};

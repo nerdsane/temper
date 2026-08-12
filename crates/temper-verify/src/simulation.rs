@@ -143,6 +143,16 @@ pub fn run_multi_seed_simulation_from_ioa(
     num_seeds: u64,
 ) -> Result<Vec<SimulationResult>, String> {
     let model = build_model_from_ioa(ioa_toml, base_config.max_counter)?;
+    if let Some(invariant) = model
+        .invariants
+        .iter()
+        .find(|invariant| matches!(invariant.kind, InvariantKind::Unverifiable { .. }))
+    {
+        return Err(format!(
+            "unsupported safety invariant '{}': verification capability failure",
+            invariant.name
+        ));
+    }
     Ok((0..num_seeds)
         .map(|i| {
             let mut config = base_config.clone();
@@ -153,6 +163,32 @@ pub fn run_multi_seed_simulation_from_ioa(
 }
 
 fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationResult {
+    if let Some(invariant) = model
+        .invariants
+        .iter()
+        .find(|invariant| matches!(invariant.kind, InvariantKind::Unverifiable { .. }))
+    {
+        let initial = model.init_states()[0].clone();
+        return SimulationResult {
+            all_invariants_held: false,
+            ticks: 0,
+            total_transitions: 0,
+            total_messages: 0,
+            total_dropped: 0,
+            violations: vec![InvariantViolation {
+                actor_id: "verification-capability".to_string(),
+                action: "preflight".to_string(),
+                state_before: initial.clone(),
+                state_after: initial.clone(),
+                invariant: invariant.name.clone(),
+                tick: 0,
+            }],
+            liveness_violations: Vec::new(),
+            seed: config.seed,
+            actor_final_states: vec![("verification-capability".to_string(), initial)],
+        };
+    }
+
     let mut sched = SimScheduler::new(config.seed, config.faults.clone());
     let mut rng = DeterministicRng::new(config.seed.wrapping_add(1));
 
@@ -408,7 +444,8 @@ fn sim_kind_violated(
         InvariantKind::Or(parts) => parts
             .iter()
             .all(|k| sim_kind_violated(k, required_states, model, state_after)),
-        InvariantKind::Unverifiable { .. } => false,
+        InvariantKind::RuntimeEnforced(_) => false,
+        InvariantKind::Unverifiable { .. } => true,
     }
 }
 

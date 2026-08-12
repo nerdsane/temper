@@ -248,9 +248,10 @@ fn check_invariant_induction(model: &TemperModel, max_counter: usize) -> Vec<(St
                     // simulation (proptest_gen/simulation) catches violations.
                     true
                 }
+                InvariantKind::RuntimeEnforced(_) => true,
                 InvariantKind::Unverifiable { .. } => {
-                    // Not checkable at model level — trivially inductive.
-                    true
+                    // An unrepresentable safety claim can never count as proof.
+                    false
                 }
             };
 
@@ -301,7 +302,9 @@ fn kind_inductive_smt(
         InvariantKind::And(parts) => parts
             .iter()
             .all(|p| kind_inductive_smt(model, trigger_states, p, max_counter)),
-        InvariantKind::Or(_) | InvariantKind::Unverifiable { .. } => true,
+        InvariantKind::Or(_) => true,
+        InvariantKind::RuntimeEnforced(_) => true,
+        InvariantKind::Unverifiable { .. } => false,
     }
 }
 

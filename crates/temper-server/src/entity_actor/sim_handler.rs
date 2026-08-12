@@ -6,6 +6,7 @@
 //! `EntityActor::handle()`: same `evaluate()` call, same effect application,
 //! same event recording. No async, no persistence, no telemetry.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use temper_jit::table::{EvalContext, TransitionTable};
@@ -23,6 +24,7 @@ use super::types::EntityState;
 pub struct EntityActorHandler {
     table: Arc<TransitionTable>,
     state: EntityState,
+    initial_fields: serde_json::Value,
     invariants: Vec<SpecInvariant>,
     /// Custom effects from the last successful action (integration triggers).
     last_custom_effects: Vec<String>,
@@ -40,30 +42,28 @@ impl EntityActorHandler {
         let entity_type = entity_type.into();
         let entity_id = entity_id.into();
 
-        let state = EntityState {
-            entity_type,
-            entity_id,
-            status: table.initial_state.clone(),
-            item_count: 0,
-            counters: std::collections::BTreeMap::new(),
-            booleans: std::collections::BTreeMap::new(),
-            lists: std::collections::BTreeMap::new(),
-            fields: serde_json::json!({}),
-            events: std::collections::VecDeque::new(),
-            total_event_count: 0,
-            events_since_snapshot: 0,
-            last_snapshot_sequence_nr: 0,
-            sequence_nr: 0,
-            processed_idempotency_keys: std::collections::BTreeMap::new(),
-        };
+        let state = super::effects::build_initial_entity_state(
+            &entity_type,
+            &entity_id,
+            &table,
+            &serde_json::json!({}),
+        )
+        .expect("compiled initial state values must be well typed");
 
         Self {
             table,
             state,
+            initial_fields: serde_json::json!({}),
             invariants: Vec::new(),
             last_custom_effects: Vec::new(),
             last_scheduled_actions: Vec::new(),
         }
+    }
+
+    /// Supply the same creation fields used to initialize a production actor.
+    pub fn with_initial_fields(mut self, initial_fields: serde_json::Value) -> Self {
+        self.initial_fields = initial_fields;
+        self
     }
 
     /// Build an [`EvalContext`] from the current entity state.
@@ -78,23 +78,50 @@ impl EntityActorHandler {
     pub fn with_ioa_invariants(mut self, ioa_toml: &str) -> Self {
         let automaton = temper_spec::automaton::parse_automaton(ioa_toml)
             .expect("failed to parse I/O Automaton TOML for invariants");
-        let declared_bools: std::collections::BTreeSet<_> = automaton
-            .state
-            .iter()
-            .filter(|state| is_declared_bool(state))
-            .map(|state| state.name.clone())
-            .collect();
+        let declared_bools = declared_names(&automaton.state, "bool");
+        let declared_counters = declared_names(&automaton.state, "counter");
+        let declared_strings = declared_names(&automaton.state, "string");
+        let declared_statuses: BTreeSet<_> = automaton.automaton.states.iter().cloned().collect();
+        let compiled_runtime = temper_spec::automaton::compile_runtime_invariants(&automaton);
 
         self.invariants = automaton
             .invariants
             .iter()
-            .filter_map(|inv| {
-                let assert_kind = parse_assert_expr(&inv.assert, &declared_bools)?;
-                Some(SpecInvariant {
+            .map(|inv| {
+                let references_declared_states = inv
+                    .when
+                    .iter()
+                    .all(|state| declared_statuses.contains(state));
+                let mut assert_kind = if references_declared_states {
+                    parse_assert_expr(
+                        &inv.assert,
+                        &declared_bools,
+                        &declared_counters,
+                        &declared_strings,
+                        &declared_statuses,
+                    )
+                } else {
+                    None
+                }
+                .unwrap_or_else(|| SpecAssert::Unsupported {
+                    expression: inv.assert.clone(),
+                });
+                if matches!(assert_kind, SpecAssert::RuntimeEnforced { .. }) {
+                    let attached = compiled_runtime
+                        .iter()
+                        .find(|runtime| runtime.name == inv.name)
+                        .is_some_and(|runtime| self.table.runtime_invariants.contains(runtime));
+                    if !attached {
+                        assert_kind = SpecAssert::Unsupported {
+                            expression: inv.assert.clone(),
+                        };
+                    }
+                }
+                SpecInvariant {
                     name: inv.name.clone(),
                     when: inv.when.clone(),
                     assert: assert_kind,
-                })
+                }
             })
             .collect();
 
@@ -109,24 +136,32 @@ impl EntityActorHandler {
 /// that the framework cannot check automatically.
 fn parse_assert_expr(
     expr: &str,
-    declared_bools: &std::collections::BTreeSet<String>,
+    declared_bools: &BTreeSet<String>,
+    declared_counters: &BTreeSet<String>,
+    declared_strings: &BTreeSet<String>,
+    declared_statuses: &BTreeSet<String>,
 ) -> Option<SpecAssert> {
     use temper_spec::automaton::parse_assert_expr as parse;
-    translate_parsed(parse(expr)?, declared_bools)
+    let parsed = parse(expr)?;
+    if !parsed.is_supported_safety_assertion(
+        declared_bools,
+        declared_counters,
+        declared_strings,
+        declared_statuses,
+    ) {
+        return None;
+    }
+    translate_parsed(parsed)
 }
 
-fn translate_parsed(
-    parsed: temper_spec::automaton::ParsedAssert,
-    declared_bools: &std::collections::BTreeSet<String>,
-) -> Option<SpecAssert> {
+fn translate_parsed(parsed: temper_spec::automaton::ParsedAssert) -> Option<SpecAssert> {
     use temper_spec::automaton::{AssertCompareOp, ParsedAssert};
 
     match parsed {
+        ParsedAssert::Always => Some(SpecAssert::And(Vec::new())),
         ParsedAssert::CounterPositive { var } => Some(SpecAssert::CounterPositive { var }),
         ParsedAssert::NoFurtherTransitions => Some(SpecAssert::NoFurtherTransitions),
-        ParsedAssert::OrderingConstraint { before, after } => {
-            Some(SpecAssert::OrderingConstraint { before, after })
-        }
+        ParsedAssert::OrderingConstraint { .. } => None,
         ParsedAssert::NeverState { state } => Some(SpecAssert::NeverState { state }),
         ParsedAssert::CounterCompare { var, op, value } => {
             let runtime_op = match op {
@@ -142,48 +177,41 @@ fn translate_parsed(
                 value,
             })
         }
-        ParsedAssert::BoolRequired { var, expect } => declared_bools
-            .contains(&var)
-            .then_some(SpecAssert::BoolRequired { var, expect }),
+        ParsedAssert::CounterVarCompare { .. } | ParsedAssert::StringNonEmpty { .. } => {
+            Some(SpecAssert::RuntimeEnforced {
+                enforcement_version: temper_spec::automaton::RUNTIME_INVARIANT_ENFORCEMENT_VERSION,
+            })
+        }
+        ParsedAssert::BoolRequired { var, expect } => {
+            Some(SpecAssert::BoolRequired { var, expect })
+        }
         ParsedAssert::And(parts) => {
-            let mapped: Option<Vec<_>> = parts
-                .into_iter()
-                .map(|part| translate_parsed(part, declared_bools))
-                .collect();
+            let mapped: Option<Vec<_>> = parts.into_iter().map(translate_parsed).collect();
             mapped.map(SpecAssert::And)
         }
         ParsedAssert::Or(parts) => {
-            let mapped: Option<Vec<_>> = parts
-                .into_iter()
-                .map(|part| translate_parsed(part, declared_bools))
-                .collect();
+            let mapped: Option<Vec<_>> = parts.into_iter().map(translate_parsed).collect();
             mapped.map(SpecAssert::Or)
         }
     }
 }
 
-fn is_declared_bool(state: &StateVar) -> bool {
-    state.var_type == "bool"
+fn declared_names(states: &[StateVar], var_type: &str) -> BTreeSet<String> {
+    states
+        .iter()
+        .filter(|state| state.var_type == var_type)
+        .map(|state| state.name.clone())
+        .collect()
 }
 
 impl SimActorHandler for EntityActorHandler {
     fn init(&mut self) -> Result<serde_json::Value, String> {
-        // Reset to initial state
-        self.state.status = self.table.initial_state.clone();
-        self.state.item_count = 0;
-        self.state.counters.clear();
-        self.state.booleans.clear();
-        self.state.lists.clear();
-        self.state.events.clear();
-        self.state.total_event_count = 0;
-        self.state.events_since_snapshot = 0;
-        self.state.last_snapshot_sequence_nr = 0;
-        self.state.sequence_nr = 0;
-        self.state.fields = serde_json::json!({
-            "Id": self.state.entity_id,
-            "Status": self.state.status,
-        });
-
+        self.state = super::effects::build_initial_entity_state(
+            &self.state.entity_type,
+            &self.state.entity_id,
+            &self.table,
+            &self.initial_fields,
+        )?;
         Ok(serde_json::to_value(&self.state).unwrap_or_default())
     }
 
@@ -250,6 +278,10 @@ impl SimActorHandler for EntityActorHandler {
 
     fn bool_field(&self, var: &str) -> Option<bool> {
         self.state.booleans.get(var).copied()
+    }
+
+    fn counter_field(&self, var: &str) -> Option<usize> {
+        self.state.counters.get(var).copied()
     }
 
     fn pending_callbacks(&self) -> Vec<String> {
@@ -372,10 +404,7 @@ mod tests {
             names.contains(&"CancelledIsFinal"),
             "should have CancelledIsFinal, got: {names:?}"
         );
-        assert!(
-            !names.contains(&"ShipRequiresPayment"),
-            "undeclared bool invariants should be skipped in simulation, got: {names:?}"
-        );
+        assert!(names.contains(&"ShipRequiresPayment"));
     }
 
     #[test]
@@ -386,3 +415,7 @@ mod tests {
         assert!(handler.spec_invariants().is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "sim_handler/runtime_invariant_tests.rs"]
+mod runtime_invariant_tests;

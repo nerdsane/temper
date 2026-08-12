@@ -242,6 +242,9 @@ async fn load_existing_entity_body(
         .get_tenant_entity_state(tenant, entity_type, key)
         .await
         .map_err(|_| resource_not_found_response(set_name, key))?;
+    if !response.success {
+        return Err(resource_not_found_response(set_name, key));
+    }
     let mut body = serde_json::to_value(&response.state).unwrap_or_default();
     hydrate_blob_refs_for_tenant(state, tenant, &mut body).await;
     if let Some(obj) = body.as_object_mut() {

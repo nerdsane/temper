@@ -197,6 +197,27 @@ impl SimActorSystem {
     pub fn register_actor(&mut self, id: &str, mut handler: Box<dyn SimActorHandler>) {
         self.scheduler.register_actor(id);
         handler.init().expect("actor init should succeed");
+        let status = handler.current_status();
+        for invariant in handler.spec_invariants() {
+            if matches!(
+                &invariant.assert,
+                super::sim_handler::SpecAssert::Unsupported { .. }
+            ) {
+                self.recorded_invariants
+                    .push((id.to_string(), invariant.name.clone(), false));
+                self.violations.push(ActorInvariantViolation {
+                    actor_id: id.to_string(),
+                    action: "<registration>".to_string(),
+                    status_before: status.clone(),
+                    status_after: status.clone(),
+                    description: format!(
+                        "{}: unsupported safety assertion at actor registration",
+                        invariant.name
+                    ),
+                    tick: self.clock.tick(),
+                });
+            }
+        }
         self.actors.insert(id.to_string(), handler);
         self.action_counts.insert(id.to_string(), 0);
     }
@@ -595,7 +616,11 @@ impl SimActorSystem {
         if let Some(handler) = self.actors.get(actor_id) {
             let invariants: Vec<_> = handler.spec_invariants().to_vec();
             for inv in &invariants {
-                let triggered = inv.when.is_empty() || inv.when.iter().any(|s| s == status_after);
+                let triggered = matches!(
+                    inv.assert,
+                    super::sim_handler::SpecAssert::Unsupported { .. }
+                ) || inv.when.is_empty()
+                    || inv.when.iter().any(|s| s == status_after);
                 if !triggered {
                     continue;
                 }
@@ -606,7 +631,6 @@ impl SimActorSystem {
                     &inv.when,
                     status_before,
                     status_after,
-                    item_count,
                 );
                 let violated = !passed;
 
@@ -650,17 +674,14 @@ fn evaluate_spec_assert(
     when: &[String],
     status_before: &str,
     status_after: &str,
-    item_count: usize,
 ) -> bool {
     use super::sim_handler::{CompareOp, SpecAssert};
 
     match assert {
+        SpecAssert::RuntimeEnforced { .. } => true,
+        SpecAssert::Unsupported { .. } => false,
         SpecAssert::CounterPositive { var } => {
-            if var == "items" {
-                item_count > 0
-            } else {
-                true // Unknown counter: not in scope for invariant checking here.
-            }
+            handler.counter_field(var).is_some_and(|value| value > 0)
         }
         SpecAssert::NoFurtherTransitions => {
             // Holds unless status_before was a terminal state in `when`.
@@ -682,7 +703,9 @@ fn evaluate_spec_assert(
         }
         SpecAssert::NeverState { state } => status_after != state.as_str(),
         SpecAssert::CounterCompare { var, op, value } => {
-            let counter_val = if var == "items" { item_count } else { 0 };
+            let Some(counter_val) = handler.counter_field(var) else {
+                return false;
+            };
             match op {
                 CompareOp::Gt => counter_val > *value,
                 CompareOp::Gte => counter_val >= *value,
@@ -694,12 +717,12 @@ fn evaluate_spec_assert(
         SpecAssert::BoolRequired { var, expect } => {
             handler.bool_field(var).unwrap_or(false) == *expect
         }
-        SpecAssert::And(parts) => parts.iter().all(|p| {
-            evaluate_spec_assert(p, handler, when, status_before, status_after, item_count)
-        }),
-        SpecAssert::Or(parts) => parts.iter().any(|p| {
-            evaluate_spec_assert(p, handler, when, status_before, status_after, item_count)
-        }),
+        SpecAssert::And(parts) => parts
+            .iter()
+            .all(|p| evaluate_spec_assert(p, handler, when, status_before, status_after)),
+        SpecAssert::Or(parts) => parts
+            .iter()
+            .any(|p| evaluate_spec_assert(p, handler, when, status_before, status_after)),
     }
 }
 

@@ -10,15 +10,20 @@
 //! that are directly checkable on a single-entity `TemperModelState`:
 //! `StatusInSet`, `CounterPositive`, `NeverState`, `BoolRequired`,
 //! `NoReachingState`, `NoFurtherTransitions`. `Unverifiable` invariants
-//! are treated as true (the single-entity cascade issues a warning;
-//! the composite checker inherits that warning via the plan's
-//! warnings vector).
+//! fail closed so a composite proof cannot silently omit a safety claim.
 
 use crate::model::{InvariantKind, TemperModel, TemperModelState};
 
 /// Evaluate every invariant on `model` against `state` (a single
 /// entity's slice of the joint state). Returns `true` iff all pass.
 pub(super) fn all_local_invariants_hold(model: &TemperModel, state: &TemperModelState) -> bool {
+    if model
+        .invariants
+        .iter()
+        .any(|invariant| matches!(invariant.kind, InvariantKind::Unverifiable { .. }))
+    {
+        return false;
+    }
     for inv in &model.invariants {
         if !triggers_on(&inv.trigger_states, &state.status) {
             continue;
@@ -66,7 +71,8 @@ fn evaluate_one(kind: &InvariantKind, state: &TemperModelState) -> bool {
         }
         InvariantKind::And(kinds) => kinds.iter().all(|k| evaluate_one(k, state)),
         InvariantKind::Or(kinds) => kinds.iter().any(|k| evaluate_one(k, state)),
-        InvariantKind::Unverifiable { .. } => true, // warning issued elsewhere
+        InvariantKind::RuntimeEnforced(_) => true,
+        InvariantKind::Unverifiable { .. } => false,
     }
 }
 
@@ -128,5 +134,24 @@ to = "B"
         let model = build(spec);
         assert!(all_local_invariants_hold(&model, &state("A")));
         assert!(all_local_invariants_hold(&model, &state("B")));
+    }
+
+    #[test]
+    fn unsupported_invariant_fails_composite_evaluation() {
+        let spec = r#"
+[automaton]
+name = "Workspace"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[invariant]]
+name = "Unsupported"
+when = ["NeverReached"]
+assert = "left_counter <= right_counter"
+"#;
+        let model = build(spec);
+
+        assert!(!all_local_invariants_hold(&model, &state("Active")));
     }
 }

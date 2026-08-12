@@ -237,6 +237,95 @@ mod tests {
     }
 
     #[test]
+    fn serde_roundtrip_preserves_runtime_invariant_contract() {
+        let table = TransitionTable::from_ioa_source(
+            r#"
+[automaton]
+name = "Goal"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "goal"
+type = "string"
+initial = ""
+
+[[invariant]]
+name = "GoalRequired"
+when = ["Active"]
+assert = "goal != ''"
+"#,
+        );
+
+        let json = serde_json::to_string(&table).expect("serialize runtime contract");
+        let restored: TransitionTable =
+            serde_json::from_str(&json).expect("deserialize runtime contract");
+
+        assert_eq!(restored.runtime_invariants, table.runtime_invariants);
+        assert_eq!(restored.runtime_invariants.len(), 1);
+        assert_eq!(
+            restored.runtime_invariants[0].enforcement_version,
+            temper_spec::automaton::RUNTIME_INVARIANT_ENFORCEMENT_VERSION
+        );
+    }
+
+    #[test]
+    fn serialized_table_without_runtime_contract_field_is_rejected() {
+        let table = order_table();
+        let mut value = serde_json::to_value(table).expect("serialize table");
+        value
+            .as_object_mut()
+            .expect("table JSON object")
+            .remove("runtime_invariants");
+
+        let restored = serde_json::from_value::<TransitionTable>(value);
+        assert!(
+            restored.is_err(),
+            "pre-contract artifacts must be rebuilt from source"
+        );
+    }
+
+    #[test]
+    fn serialized_table_without_model_protection_contract_is_rejected() {
+        let table = TransitionTable::from_ioa_source(
+            r#"
+[automaton]
+name = "Payment"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "payment_captured"
+type = "bool"
+initial = "true"
+
+[[invariant]]
+name = "PaymentCaptured"
+when = ["Active"]
+assert = "payment_captured"
+"#,
+        );
+        assert!(
+            table
+                .model_protected_state_vars
+                .contains("payment_captured")
+        );
+        let mut value = serde_json::to_value(table).expect("serialize table");
+        value
+            .as_object_mut()
+            .expect("table JSON object")
+            .remove("model_protected_state_vars");
+
+        let restored = serde_json::from_value::<TransitionTable>(value);
+        assert!(
+            restored.is_err(),
+            "pre-protection artifacts must be rebuilt from source"
+        );
+    }
+
+    #[test]
     fn guard_rejection_carries_guard_failure_identity() {
         let table = order_table();
         // SubmitOrder from Draft requires items > 0; with 0 items the guard

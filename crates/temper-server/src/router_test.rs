@@ -2,8 +2,14 @@ use super::*;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use temper_runtime::ActorSystem;
+#[cfg(feature = "sim")]
+use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
+#[cfg(feature = "sim")]
+use temper_runtime::scheduler::{install_deterministic_context, sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::parse_csdl;
+#[cfg(feature = "sim")]
+use temper_store_sim::SimEventStore;
 use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
@@ -464,6 +470,11 @@ initial = "Recorded"
 name = "Body"
 type = "string"
 initial = ""
+
+[[invariant]]
+name = "BodyRequired"
+when = ["Recorded"]
+assert = "Body != ''"
 "#;
     let csdl = parse_csdl(csdl_xml).unwrap();
     let system = ActorSystem::new("test-data-only-fast-path");
@@ -704,6 +715,144 @@ async fn test_data_only_create_fast_path_declines_action_bearing_entities() {
     assert!(
         response.is_none(),
         "entities with transition rules must stay on the actor-backed create path"
+    );
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn failed_lazy_hydration_stops_and_evicts_the_spawned_actor() {
+    let (_guard, _clock, _id_gen) = install_deterministic_context(213);
+    let csdl_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.HydrationTest" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="ToolCall">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+        <Property Name="agent_id" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="Container">
+        <EntitySet Name="ToolCalls" EntityType="Temper.HydrationTest.ToolCall"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+    let ioa = r#"
+[automaton]
+name = "ToolCall"
+states = ["Pending"]
+initial = "Pending"
+allow_indefinite_states = ["Pending"]
+
+[[state]]
+name = "agent_id"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Initialize"
+kind = "input"
+from = ["Pending"]
+params = ["agent_id"]
+
+[[invariant]]
+name = "RequiresAgentId"
+when = ["Pending"]
+assert = "agent_id != ''"
+"#;
+    let store = SimEventStore::no_faults(213);
+    let persistence_id = "default:ToolCall:invalid-hydration";
+    store
+        .append(
+            persistence_id,
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "Initialize".to_string(),
+                payload: serde_json::json!({
+                    "action": "Initialize",
+                    "from_status": "Pending",
+                    "to_status": "Pending",
+                    "timestamp": "2024-01-01T00:00:00Z",
+                    "params": {"agent_id": ""}
+                }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: persistence_id.to_string(),
+                },
+            }],
+        )
+        .await
+        .expect("seed invalid durable history");
+
+    let mut specs = std::collections::BTreeMap::new();
+    specs.insert("ToolCall".to_string(), ioa.to_string());
+    let state = ServerState::with_storage_stack(
+        ActorSystem::new("failed-hydration-eviction"),
+        parse_csdl(csdl_xml).expect("parse hydration test CSDL"),
+        csdl_xml.to_string(),
+        specs,
+        StorageStack::from_sim(store, None),
+    )
+    .expect("build hydration test state");
+    let tenant = TenantId::default();
+
+    assert!(
+        !state
+            .ensure_entity_loaded(&tenant, "ToolCall", "invalid-hydration")
+            .await,
+        "runtime-invalid durable history must fail hydration"
+    );
+    assert!(
+        !state
+            .actor_registry
+            .read()
+            .unwrap()
+            .contains_key(persistence_id),
+        "failed hydration must not orphan the spawned actor"
+    );
+    assert!(!state.entity_exists(&tenant, "ToolCall", "invalid-hydration"));
+}
+
+#[tokio::test]
+async fn data_only_create_rejects_invalid_runtime_state_before_journal_or_projection_write() {
+    let state = test_state_with_data_only_ioa_and_turso().await;
+    let entity_id = "entry-invalid-runtime";
+
+    let error = state
+        .try_create_data_only_tenant_entity(
+            &TenantId::default(),
+            "LogEntry",
+            entity_id,
+            serde_json::json!({"Id": entity_id, "Body": ""}),
+        )
+        .await
+        .expect_err("empty body must fail the data-only runtime safety gate");
+    assert!(error.contains("BodyRequired"), "unexpected error: {error}");
+
+    let (journal, _) = state.event_journal().expect("turso event journal");
+    assert!(
+        journal
+            .read_events(&format!("default:LogEntry:{entity_id}"), 0)
+            .await
+            .expect("read rejected journal")
+            .is_empty(),
+        "rejected data-only creation must not append Created"
+    );
+
+    let query_plane = state.query_plane_store().expect("turso query plane");
+    let rows = query_plane
+        .load_entity_catalog_rows("default", "LogEntry", &[entity_id.to_string()])
+        .await
+        .expect("read rejected projection")
+        .expect("turso supports catalog reads");
+    assert!(
+        rows.is_empty(),
+        "rejected data-only creation must not publish a projection row"
     );
 }
 

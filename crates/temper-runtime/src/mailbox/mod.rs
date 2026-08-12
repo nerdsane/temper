@@ -85,6 +85,11 @@ impl<M: Message> MailboxReceiver<M> {
     pub async fn recv(&mut self) -> Option<Envelope<M>> {
         self.inner.recv().await
     }
+
+    /// Close the receiving side so no messages can enter during actor cleanup.
+    pub(crate) fn close(&mut self) {
+        self.inner.close();
+    }
 }
 
 impl<M: Message> Clone for MailboxSender<M> {

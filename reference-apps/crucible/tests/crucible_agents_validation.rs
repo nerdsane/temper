@@ -100,6 +100,8 @@ fn build_crucible_state() -> ServerState {
                         summary: "OK".to_string(),
                         details: None,
                     }],
+                    warnings: Vec::new(),
+                    errors: Vec::new(),
                     verified_at: "2026-04-11T00:00:00Z".to_string(),
                 }),
             );

@@ -14,6 +14,7 @@ use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
 use temper_store_turso::spec_content_hash;
 use temper_verify::cascade::VerificationCascade;
+use temper_verify::{runtime_enforcement_warnings_from_ioa, unsupported_invariant_errors_from_ioa};
 
 use crate::state::PlatformState;
 
@@ -140,13 +141,22 @@ fn bootstrap_tenant_specs_inner(
     for (entity_type, ioa_source) in specs {
         automaton::parse_automaton(ioa_source)
             .unwrap_or_else(|e| panic!("{label} spec {entity_type} failed to parse: {e}"));
+        let capability_errors = unsupported_invariant_errors_from_ioa(ioa_source)
+            .unwrap_or_else(|e| panic!("{label} spec {entity_type} failed to build: {e}"));
+        assert!(
+            capability_errors.is_empty(),
+            "{label} spec {entity_type} declares unsupported safety invariants: {capability_errors:?}"
+        );
     }
 
     // Hash-gated verification: only run the cascade for specs whose
     // content has changed since the last successful verification.
     let mut spec_hashes = Vec::with_capacity(specs.len());
+    let mut runtime_warnings_by_entity = BTreeMap::new();
     for (entity_type, ioa_source) in specs {
         let hash = spec_content_hash(ioa_source);
+        let runtime_warnings = runtime_enforcement_warnings_from_ioa(ioa_source)
+            .unwrap_or_else(|e| panic!("{label} spec {entity_type} failed to build: {e}"));
         let already_verified = verified_cache
             .get(*entity_type)
             .is_some_and(|(cached_hash, verified)| *verified && cached_hash == &hash);
@@ -175,6 +185,7 @@ fn bootstrap_tenant_specs_inner(
                 "{label} spec {entity_type} failed verification cascade"
             );
         }
+        runtime_warnings_by_entity.insert(entity_type.to_string(), runtime_warnings);
         spec_hashes.push((entity_type.to_string(), hash));
     }
 
@@ -210,6 +221,11 @@ fn bootstrap_tenant_specs_inner(
                         summary: "Pre-verified at bootstrap".to_string(),
                         details: None,
                     }],
+                    warnings: runtime_warnings_by_entity
+                        .get(*entity_type)
+                        .cloned()
+                        .unwrap_or_default(),
+                    errors: Vec::new(),
                     verified_at: now.clone(),
                 }),
             );
@@ -314,6 +330,22 @@ pub(crate) async fn persist_bootstrap_verification(
         wrote_specs = true;
 
         // Mark as verified (bootstrap panics on failure, so all specs here passed).
+        let runtime_warnings = runtime_enforcement_warnings_from_ioa(ioa_source)
+            .expect("bootstrap IOA already passed capability preflight");
+        let verification_result = EntityVerificationResult {
+            all_passed: true,
+            levels: vec![EntityLevelSummary {
+                level: "Bootstrap".to_string(),
+                passed: true,
+                summary: "Pre-verified at bootstrap".to_string(),
+                details: None,
+            }],
+            warnings: runtime_warnings,
+            errors: Vec::new(),
+            verified_at: temper_runtime::scheduler::sim_now().to_rfc3339(),
+        };
+        let verification_result_json = serde_json::to_string(&verification_result)
+            .expect("bootstrap verification result must serialize");
         if let Err(e) = store
             .persist_spec_verification(
                 tenant,
@@ -323,7 +355,7 @@ pub(crate) async fn persist_bootstrap_verification(
                     verified: true,
                     levels_passed: None,
                     levels_total: None,
-                    verification_result_json: None,
+                    verification_result_json: Some(&verification_result_json),
                 },
             )
             .await
@@ -770,6 +802,119 @@ initial = "Created"
                 ("Task".to_string(), "sha256:task".to_string()),
             ]
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "declares unsupported safety invariants")]
+    fn cached_trusted_spec_cannot_bypass_invariant_capability_gate() {
+        let source = r#"
+[automaton]
+name = "Workspace"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "used_bytes"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "quota_limit"
+type = "counter"
+initial = "1"
+
+[[invariant]]
+name = "WithinQuota"
+when = ["Active"]
+assert = "used_bytes ** quota_limit"
+"#;
+        let mut verified_cache = BTreeMap::new();
+        verified_cache.insert("Workspace".to_string(), (spec_content_hash(source), true));
+        let state = PlatformState::new(None);
+
+        bootstrap_tenant_specs(
+            &state,
+            "cached-tenant",
+            SYSTEM_CSDL,
+            &[("Workspace", source)],
+            BootstrapTenantSpecsOptions {
+                merge: false,
+                label: "CachedBundle",
+                verified_cache: &verified_cache,
+                cross_invariants_source: None,
+                verification_mode: BootstrapSpecVerificationMode::TrustBundle,
+            },
+        );
+    }
+
+    #[test]
+    fn cached_bootstrap_status_retains_runtime_enforcement_disclosure() {
+        let csdl = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Example" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Widget">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="ExampleService">
+        <EntitySet Name="Widgets" EntityType="Temper.Example.Widget"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+        let source = r#"
+[automaton]
+name = "Widget"
+states = ["Active"]
+initial = "Active"
+
+[[state]]
+name = "budget"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "SetBudget"
+from = ["Active"]
+to = "Active"
+params = ["amount"]
+effect = [{ type = "set_counter_from_param", var = "budget", param = "amount" }]
+
+[[invariant]]
+name = "BudgetBound"
+when = ["Active"]
+assert = "budget <= 10"
+"#;
+        let mut verified_cache = BTreeMap::new();
+        verified_cache.insert("Widget".to_string(), (spec_content_hash(source), true));
+        let state = PlatformState::new(None);
+
+        bootstrap_tenant_specs(
+            &state,
+            "cached-runtime-tenant",
+            csdl,
+            &[("Widget", source)],
+            BootstrapTenantSpecsOptions {
+                merge: false,
+                label: "CachedRuntime",
+                verified_cache: &verified_cache,
+                cross_invariants_source: None,
+                verification_mode: BootstrapSpecVerificationMode::TrustBundle,
+            },
+        );
+
+        let registry = state.registry.read().unwrap();
+        let status = registry
+            .get_verification_status(&TenantId::new("cached-runtime-tenant"), "Widget")
+            .expect("cached runtime status");
+        let VerificationStatus::Completed(result) = status else {
+            panic!("expected completed cached status");
+        };
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("BudgetBound"));
+        assert!(result.warnings[0].contains("version 2"));
     }
 
     #[test]

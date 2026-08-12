@@ -13,7 +13,7 @@ use temper_runtime::tenant::TenantId;
 
 use super::dispatch::retry;
 use super::{ServerState, projection_backfill};
-use crate::entity_actor::{EntityActor, EntityEvent, EntityMsg, EntityResponse, EntityState};
+use crate::entity_actor::{EntityActor, EntityEvent, EntityMsg, EntityResponse};
 use crate::events::EntityStateChange;
 use crate::registry::{VerificationDetail, VerificationStatus};
 use crate::runtime_metrics;
@@ -757,19 +757,59 @@ impl ServerState {
             actor_ref
         };
 
-        // Track in entity index for collection queries
-        {
-            let index_key = format!("{tenant}:{entity_type}");
-            let mut index = self.entity_index.write().unwrap();
+        self.touch_actor_access(&key);
+        runtime_metrics::record_server_state_metrics(self);
+
+        Some(actor_ref)
+    }
+
+    /// Publish a validated entity state to collection discovery, or remove a
+    /// tombstone. Actor spawn alone is deliberately not a publication event:
+    /// action-backed initialization may require a transient pristine actor.
+    pub(crate) fn update_entity_index_visibility(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+    ) {
+        let index_key = format!("{tenant}:{entity_type}");
+        let mut index = self.entity_index.write().unwrap();
+        if status == "Deleted" {
+            if let Some(ids) = index.get_mut(&index_key) {
+                ids.remove(entity_id);
+            }
+        } else {
             index
                 .entry(index_key)
                 .or_default()
                 .insert(entity_id.to_string());
         }
-        self.touch_actor_access(&key);
-        runtime_metrics::record_server_state_metrics(self);
+    }
 
-        Some(actor_ref)
+    /// Resolve the collection-visible status at an actor response boundary.
+    ///
+    /// A rejected first mutation can still leave a valid pristine entity (for
+    /// example, a no-journal actor whose initial state already satisfies every
+    /// runtime invariant). Re-read only that zero-event rejection so invalid
+    /// action-backed shells stay hidden while valid bootstrap state remains
+    /// discoverable.
+    pub(crate) async fn visible_status_after_response(
+        &self,
+        actor_ref: &ActorRef<EntityMsg>,
+        response: &EntityResponse,
+    ) -> Option<String> {
+        if response.success || response.state.sequence_nr > 0 {
+            return Some(response.state.status.clone());
+        }
+
+        let policy = self.dispatch_retry_policy();
+        retry::ask_with_backoff::<_, EntityResponse, _>(actor_ref, || EntityMsg::GetState, &policy)
+            .await
+            .result
+            .ok()
+            .filter(|state| state.success)
+            .map(|state| state.state.status)
     }
 
     /// Remove an entity from the index and actor registry.
@@ -985,6 +1025,12 @@ impl ServerState {
         .result
         .map_err(|e| format!("Actor query failed: {e}"))?;
 
+        if !response.success {
+            return Ok(response);
+        }
+
+        self.update_entity_index_visibility(tenant, entity_type, entity_id, &response.state.status);
+
         // Broadcast entity creation event for SSE subscribers
         let seq = self.next_entity_event_sequence(tenant.as_str(), entity_type, entity_id);
         let change = EntityStateChange {
@@ -1117,30 +1163,18 @@ impl ServerState {
         };
 
         let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
-        let mut fields = initial_fields.clone();
-        if let Some(obj) = fields.as_object_mut() {
-            obj.entry("Id".to_string())
-                .or_insert(serde_json::Value::String(entity_id.to_string()));
-            obj.entry("Status".to_string())
-                .or_insert(serde_json::Value::String(table.initial_state.clone()));
+        let mut state = crate::entity_actor::effects::build_initial_entity_state(
+            entity_type,
+            entity_id,
+            &table,
+            &initial_fields,
+        )?;
+        if let Some(error) = crate::entity_actor::effects::runtime_invariant_failure(&state, &table)
+        {
+            return Err(format!(
+                "initial data-only entity violates runtime safety contract: {error}"
+            ));
         }
-
-        let mut state = EntityState {
-            entity_type: entity_type.to_string(),
-            entity_id: entity_id.to_string(),
-            status: table.initial_state.clone(),
-            item_count: 0,
-            counters: BTreeMap::new(),
-            booleans: BTreeMap::new(),
-            lists: BTreeMap::new(),
-            fields,
-            events: std::collections::VecDeque::new(),
-            total_event_count: 0,
-            events_since_snapshot: 0,
-            last_snapshot_sequence_nr: 0,
-            sequence_nr: 0,
-            processed_idempotency_keys: BTreeMap::new(),
-        };
 
         let created = EntityEvent {
             action: "Created".to_string(),
@@ -1379,6 +1413,13 @@ impl ServerState {
         .result
         .map_err(|e| format!("Actor update failed: {e}"))?;
 
+        if let Some(visible_status) = self
+            .visible_status_after_response(&actor_ref, &response)
+            .await
+        {
+            self.update_entity_index_visibility(tenant, entity_type, entity_id, &visible_status);
+        }
+
         if response.success
             && let Some(query_plane) = self.query_plane_store()
         {
@@ -1574,13 +1615,24 @@ impl ServerState {
         .await;
         match outcome.result {
             Ok(response) if response.state.status == "Deleted" => {
-                let _ = actor_ref.stop();
-                self.remove_entity(tenant, entity_type, entity_id);
+                self.stop_and_remove_entity(tenant, entity_type, entity_id);
                 false
             }
-            Ok(_) => true,
+            Ok(response) if response.success => {
+                self.update_entity_index_visibility(
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    &response.state.status,
+                );
+                true
+            }
+            Ok(_) => {
+                self.stop_and_remove_entity(tenant, entity_type, entity_id);
+                false
+            }
             Err(_) => {
-                self.remove_entity(tenant, entity_type, entity_id);
+                self.stop_and_remove_entity(tenant, entity_type, entity_id);
                 false
             }
         }
@@ -1621,9 +1673,14 @@ impl ServerState {
 
     /// Passivate actors that have been idle longer than the configured timeout.
     ///
-    /// Keeps `entity_index` entries intact so future accesses can lazy-spawn.
+    /// Keeps `entity_index` entries intact so durable actors can lazy-spawn.
+    /// In-memory-only actors cannot be reconstructed and therefore remain live.
     #[instrument(skip_all, fields(otel.name = "entity.passivate_idle_actors"))]
     pub async fn passivate_idle_actors(&self) {
+        let Some((_store, _backend)) = self.event_journal() else {
+            return;
+        };
+
         let timeout_secs = actor_idle_timeout_secs();
         let cutoff = sim_now() - chrono::Duration::seconds(timeout_secs);
 
@@ -1653,48 +1710,34 @@ impl ServerState {
 
         let mut passivated = 0usize;
         let policy = self.dispatch_retry_policy();
-        let journal = self.event_journal();
         for (actor_key, actor_ref) in candidates {
             // ADR-0048: retry transient failures so passivation is not skipped
             // by a single AskTimeout under load.
-            let snapshot_outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
+            let passivation_outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
                 &actor_ref,
-                || EntityMsg::GetState,
+                || EntityMsg::Passivate,
                 &policy,
             )
             .await;
-            if let Some((store, _backend)) = journal.as_ref()
-                && let Ok(response) = snapshot_outcome.result
-                && response.state.sequence_nr > 0
-            {
-                // Snapshot excludes bounded in-memory recent event history.
-                let mut snapshot_value = match serde_json::to_value(&response.state) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!(actor_key = %actor_key, error = %e, "failed to encode snapshot value");
-                        serde_json::Value::Null
-                    }
-                };
-                if let Some(obj) = snapshot_value.as_object_mut() {
-                    obj.remove("events");
-                }
-                if !snapshot_value.is_null()
-                    && let Ok(snapshot_bytes) = serde_json::to_vec(&snapshot_value)
-                    && let Err(e) = store
-                        .save_snapshot(&actor_key, response.state.sequence_nr, &snapshot_bytes)
-                        .await
-                {
+            match passivation_outcome.result {
+                Ok(response) if response.success => {}
+                Ok(response) => {
                     tracing::warn!(
                         actor_key = %actor_key,
-                        seq = response.state.sequence_nr,
-                        error = %e,
-                        "failed to save snapshot during passivation"
+                        error = ?response.error,
+                        "actor declined passivation; retaining actor"
                     );
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(actor_key = %actor_key, %error, "failed to passivate actor; retaining actor");
+                    continue;
                 }
             }
 
-            let _ = actor_ref.stop();
-
+            // The actor stopped itself immediately after replying, before its
+            // mailbox could admit another mutation. Removing only the same UID
+            // avoids racing a concurrent lazy respawn.
             let removed = {
                 let Ok(mut registry) = self.actor_registry.write() else {
                     continue;
@@ -1710,16 +1753,18 @@ impl ServerState {
                 }
             };
 
-            if removed {
-                if let Ok(mut last_accessed) = self.last_accessed.write() {
-                    last_accessed.remove(&actor_key);
-                }
-                // Evict the state cache entry so stale status doesn't linger.
-                if let Ok(mut cache) = self.entity_state_cache.lock() {
-                    cache.pop(&actor_key);
-                }
-                passivated += 1;
+            if !removed {
+                continue;
             }
+
+            if let Ok(mut last_accessed) = self.last_accessed.write() {
+                last_accessed.remove(&actor_key);
+            }
+            // Evict the state cache entry so stale status doesn't linger.
+            if let Ok(mut cache) = self.entity_state_cache.lock() {
+                cache.pop(&actor_key);
+            }
+            passivated += 1;
         }
 
         if passivated > 0 {

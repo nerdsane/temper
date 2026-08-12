@@ -9,6 +9,7 @@
 pub mod cascade;
 pub mod checker;
 pub mod composite;
+pub mod diagnostic;
 pub mod model;
 pub mod paths;
 pub mod proptest_gen;
@@ -19,6 +20,10 @@ pub mod smt;
 pub use cascade::{ActorSimResult, CascadeLevel, CascadeResult, LevelResult, VerificationCascade};
 pub use checker::{VerificationResult, check_model};
 pub use composite::{CompositePlanError, CompositeVerificationPlan};
+pub use diagnostic::{
+    InvariantCapabilityError, UNSUPPORTED_INVARIANT_CODE, runtime_enforcement_warnings_from_ioa,
+    unsupported_invariant_errors_from_ioa,
+};
 pub use model::{
     InvariantKind, ModelEffect, ModelGuard, ResolvedTransition, TemperModel, TemperModelAction,
     TemperModelState, build_model_from_ioa,

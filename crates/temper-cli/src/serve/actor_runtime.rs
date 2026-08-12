@@ -252,6 +252,13 @@ fn validate_actor_runtime_compatible(
     entity_type: &str,
     spec: &EntitySpec,
 ) -> Result<()> {
+    let runtime_invariants = temper_spec::automaton::compile_runtime_invariants(&spec.automaton);
+    if !runtime_invariants.is_empty() {
+        bail!(
+            "tenant {tenant} entity {entity_type} declares runtime-enforced invariants, which are not yet supported by --actor-runtime postgres"
+        );
+    }
+
     if !spec.integrations.is_empty() {
         bail!(
             "tenant {tenant} entity {entity_type} declares legacy integrations, which are not yet supported by --actor-runtime postgres"
@@ -401,6 +408,64 @@ mod tests {
         let err = collect_actor_runtime_definitions(&registry, &["Process".into()]).unwrap_err();
 
         assert!(err.to_string().contains("not yet supported"));
+    }
+
+    #[test]
+    fn rejects_runtime_enforced_invariants_on_postgres_actor_runtime() {
+        let ioa = r#"
+[automaton]
+name = "Goal"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "goal"
+type = "string"
+initial = ""
+
+[[invariant]]
+name = "GoalRequired"
+when = ["Active"]
+assert = "goal != ''"
+"#;
+        let registry = registry_with("alpha", "Goal", ioa);
+        let error = collect_actor_runtime_definitions(&registry, &["Goal".into()]).unwrap_err();
+
+        assert!(error.to_string().contains("runtime-enforced invariants"));
+    }
+
+    #[test]
+    fn accepts_model_only_counter_invariant_on_postgres_actor_runtime() {
+        let ioa = r#"
+[automaton]
+name = "Counter"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "items"
+type = "counter"
+initial = "1"
+
+[[action]]
+name = "Add"
+kind = "input"
+from = ["Active"]
+to = "Active"
+effect = [{ type = "increment", var = "items" }]
+
+[[invariant]]
+name = "HasItems"
+when = ["Active"]
+assert = "items > 0"
+"#;
+        let registry = registry_with("alpha", "Counter", ioa);
+        let definitions = collect_actor_runtime_definitions(&registry, &["Counter".into()])
+            .expect("model-only counter invariant remains actor-runtime compatible");
+
+        assert!(definitions.actor_backed_keys.contains("Counter"));
     }
 
     #[test]

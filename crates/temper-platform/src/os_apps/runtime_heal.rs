@@ -2,6 +2,7 @@ use temper_runtime::tenant::TenantId;
 use temper_server::platform_store::{PlatformStore, SpecVerificationUpdate};
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
 use temper_spec::csdl::parse_csdl;
+use temper_verify::runtime_enforcement_warnings_from_ioa;
 
 use super::AppBundle;
 use crate::state::PlatformState;
@@ -157,29 +158,23 @@ async fn mark_app_specs_restored_from_matching_digest(
 
     let tenant_id = TenantId::new(tenant);
     let verified_at = temper_runtime::scheduler::sim_now().to_rfc3339();
-    let result = EntityVerificationResult {
-        all_passed: true,
-        levels: vec![EntityLevelSummary {
-            level: "BundleDigest".to_string(),
-            passed: true,
-            summary: format!("Restored from matching OS app bundle digest ({app_name})"),
-            details: None,
-        }],
-        verified_at,
-    };
 
     {
         let mut registry = state.registry.write().expect("Spec registry lock poisoned");
-        for (entity_type, _) in &bundle.specs {
+        for (entity_type, ioa_source) in &bundle.specs {
+            let result = restored_bundle_verification(app_name, ioa_source, &verified_at);
             registry.set_verification_status(
                 &tenant_id,
                 entity_type,
-                VerificationStatus::Restored(result.clone()),
+                VerificationStatus::Restored(result),
             );
         }
     }
 
-    for (entity_type, _) in &bundle.specs {
+    for (entity_type, ioa_source) in &bundle.specs {
+        let result = restored_bundle_verification(app_name, ioa_source, &verified_at);
+        let result_json = serde_json::to_string(&result)
+            .expect("restored bundle verification result must serialize");
         if let Err(error) = ps
             .persist_spec_verification(
                 tenant,
@@ -189,7 +184,7 @@ async fn mark_app_specs_restored_from_matching_digest(
                     verified: true,
                     levels_passed: Some(1),
                     levels_total: Some(1),
-                    verification_result_json: None,
+                    verification_result_json: Some(&result_json),
                 },
             )
             .await
@@ -202,6 +197,26 @@ async fn mark_app_specs_restored_from_matching_digest(
                 "Failed to persist restored OS app spec verification status"
             );
         }
+    }
+}
+
+fn restored_bundle_verification(
+    app_name: &str,
+    ioa_source: &str,
+    verified_at: &str,
+) -> EntityVerificationResult {
+    EntityVerificationResult {
+        all_passed: true,
+        levels: vec![EntityLevelSummary {
+            level: "BundleDigest".to_string(),
+            passed: true,
+            summary: format!("Restored from matching OS app bundle digest ({app_name})"),
+            details: None,
+        }],
+        warnings: runtime_enforcement_warnings_from_ioa(ioa_source)
+            .expect("restored bundle IOA must retain a valid runtime safety contract"),
+        errors: Vec::new(),
+        verified_at: verified_at.to_string(),
     }
 }
 

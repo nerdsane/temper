@@ -699,6 +699,16 @@ impl crate::state::ServerState {
             }
         };
 
+        // The actor response is the durable mutation boundary. Publish the
+        // committed state before fallible post-dispatch effects so an effect
+        // failure cannot leave durable events absent from discovery indexes.
+        if let Some(visible_status) = self
+            .visible_status_after_response(&actor_ref, &response)
+            .await
+        {
+            self.update_entity_index_visibility(tenant, entity_type, entity_id, &visible_status);
+        }
+
         // Run all post-dispatch effects through the dedicated pipeline.
         let ctx = PostDispatchContext {
             tenant,
@@ -710,7 +720,11 @@ impl crate::state::ServerState {
             action_params: &action_params,
             await_integration,
         };
-        let response = self.run_post_dispatch_effects(&ctx, response).await;
+        // Post-dispatch integrations can synchronously dispatch a callback.
+        // Keep that nested future on the heap so blocking WASM callbacks do
+        // not accumulate the full dispatch state machine on the Tokio worker
+        // stack.
+        let response = Box::pin(self.run_post_dispatch_effects(&ctx, response)).await;
         if response.success
             && let Some(ref idem_key) = idempotency_key
         {

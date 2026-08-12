@@ -51,6 +51,8 @@ pub enum EntityMsg {
     },
     /// Get the current entity state.
     GetState,
+    /// Persist a final snapshot and stop without admitting another mutation.
+    Passivate,
     /// Get a specific field value.
     GetField { field: String },
     /// Update entity fields (PATCH: merge, PUT: replace).

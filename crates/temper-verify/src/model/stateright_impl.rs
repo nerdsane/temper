@@ -101,7 +101,8 @@ fn kind_holds(
         InvariantKind::Or(parts) => parts
             .iter()
             .any(|k| kind_holds(k, required_states, model, state)),
-        InvariantKind::Unverifiable { .. } => true,
+        InvariantKind::RuntimeEnforced(_) => true,
+        InvariantKind::Unverifiable { .. } => false,
     }
 }
 
@@ -117,6 +118,14 @@ fn check_compound_invariants(model: &TemperModel, state: &TemperModelState) -> b
         }
     }
     true
+}
+
+/// Reject a model containing any safety claim outside the shared typed IR.
+fn check_invariant_capability(model: &TemperModel, _state: &TemperModelState) -> bool {
+    !model
+        .invariants
+        .iter()
+        .any(|invariant| matches!(invariant.kind, InvariantKind::Unverifiable { .. }))
 }
 
 /// Check all NoFurtherTransitions invariants: when status is in triggers,
@@ -434,7 +443,16 @@ impl Model for TemperModel {
             ));
         }
 
-        // Note: Unverifiable invariants generate no properties (skipped).
+        let has_unverifiable = self
+            .invariants
+            .iter()
+            .any(|i| matches!(i.kind, InvariantKind::Unverifiable { .. }));
+        if has_unverifiable {
+            props.push(Property::always(
+                "InvariantCapability",
+                check_invariant_capability,
+            ));
+        }
 
         // Liveness: NoDeadlock (expressed as safety: "always has actions")
         let has_no_deadlock = self

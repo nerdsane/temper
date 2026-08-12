@@ -130,6 +130,42 @@ fn populate_registry_merges_csdl_fragments_from_all_restored_rows() {
 }
 
 #[test]
+fn populate_registry_rejects_restored_unsupported_safety_invariant() {
+    let unsupported = format!(
+        r#"{}
+
+[[invariant]]
+name = "UnsupportedRestoredSafety"
+when = ["Draft"]
+assert = "ghost ** quota"
+"#,
+        include_str!("../../../test-fixtures/specs/order.ioa.toml")
+    );
+    let rows = vec![MockSpecRow {
+        entity_type: "Order".to_string(),
+        ioa_source: unsupported,
+        csdl_xml: csdl_xml_for("Order", "Orders"),
+        status: "passed".to_string(),
+        verified: true,
+    }];
+    let mut grouped = BTreeMap::new();
+    grouped.insert("default".to_string(), rows);
+    let mut registry = SpecRegistry::new();
+
+    let error = populate_registry(
+        &mut registry,
+        grouped,
+        &mut BTreeMap::new(),
+        |row| Some(row.csdl_xml.clone()),
+        |row| (row.entity_type.clone(), row.ioa_source.clone()),
+    )
+    .expect_err("unsupported restored safety must not activate");
+
+    assert!(error.contains("UnsupportedRestoredSafety"));
+    assert!(registry.get_tenant(&TenantId::default()).is_none());
+}
+
+#[test]
 fn row_to_registry_status_pending() {
     let status = row_to_registry_status(&MockRow {
         status: "pending".into(),

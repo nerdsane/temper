@@ -337,6 +337,8 @@ fn operations_allowed_after_verification_passes() {
                         details: None,
                     },
                 ],
+                warnings: Vec::new(),
+                errors: Vec::new(),
                 verified_at: "2026-02-18T00:00:00Z".to_string(),
             }),
         );
@@ -378,6 +380,8 @@ async fn operations_blocked_after_verification_fails() {
                         }]),
                     },
                 ],
+                warnings: Vec::new(),
+                errors: Vec::new(),
                 verified_at: "2026-02-18T00:00:00Z".to_string(),
             }),
         );
@@ -437,6 +441,8 @@ fn per_entity_gating_isolation() {
                     summary: "OK".to_string(),
                     details: None,
                 }],
+                warnings: Vec::new(),
+                errors: Vec::new(),
                 verified_at: "2026-02-18T00:00:00Z".to_string(),
             }),
         );

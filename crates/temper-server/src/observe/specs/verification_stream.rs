@@ -209,87 +209,10 @@ pub(super) fn build_verification_stream_response(
                         }
                     }
 
-                    // Build EntityVerificationResult for registry
-                    let entity_result = crate::registry::EntityVerificationResult {
-                        all_passed: cascade_result.all_passed,
-                        levels: cascade_result
-                            .levels
-                            .iter()
-                            .map(|l| {
-                                let details: Option<Vec<crate::registry::VerificationDetail>> = if !l.passed {
-                                    let mut dets = Vec::new();
-                                    if let Some(sim) = &l.simulation {
-                                        for v in &sim.liveness_violations {
-                                            dets.push(crate::registry::VerificationDetail {
-                                                kind: "liveness_violation".into(),
-                                                property: v.property.clone(),
-                                                description: v.description.clone(),
-                                                actor_id: Some(v.actor_id.clone()),
-                                            });
-                                        }
-                                        for v in &sim.violations {
-                                            dets.push(crate::registry::VerificationDetail {
-                                                kind: "invariant_violation".into(),
-                                                property: v.invariant.clone(),
-                                                description: format!(
-                                                    "Actor {} violated invariant at tick {} during action {}",
-                                                    v.actor_id, v.tick, v.action
-                                                ),
-                                                actor_id: Some(v.actor_id.clone()),
-                                            });
-                                        }
-                                    }
-                                    if let Some(mc) = &l.verification {
-                                        for cx in &mc.counterexamples {
-                                            dets.push(crate::registry::VerificationDetail {
-                                                kind: "counterexample".into(),
-                                                property: cx.property.clone(),
-                                                description: format!(
-                                                    "Counterexample found with {} step trace",
-                                                    cx.trace.len()
-                                                ),
-                                                actor_id: None,
-                                            });
-                                        }
-                                        for transition in &mc.dead_transitions {
-                                            dets.push(crate::registry::VerificationDetail {
-                                                kind: "dead_transition".into(),
-                                                property: transition.clone(),
-                                                description:
-                                                    "Transition is unreachable in model check"
-                                                        .into(),
-                                                actor_id: None,
-                                            });
-                                        }
-                                    }
-                                    if let Some(pt) = &l.prop_test
-                                        && let Some(failure) = &pt.failure
-                                    {
-                                        dets.push(crate::registry::VerificationDetail {
-                                            kind: "proptest_failure".into(),
-                                            property: failure.invariant.clone(),
-                                            description: format!(
-                                                "Property test failed after sequence: {}",
-                                                failure.action_sequence.join(" -> ")
-                                            ),
-                                            actor_id: None,
-                                        });
-                                    }
-                                    if dets.is_empty() { None } else { Some(dets) }
-                                } else {
-                                    None
-                                };
-
-                                crate::registry::EntityLevelSummary {
-                                    level: format!("{}", l.level),
-                                    passed: l.passed,
-                                    summary: l.summary.clone(),
-                                    details,
-                                }
-                            })
-                            .collect(),
-                        verified_at: sim_now().to_rfc3339(),
-                    };
+                    let entity_result = crate::registry::EntityVerificationResult::from_cascade(
+                        &cascade_result,
+                        sim_now().to_rfc3339(),
+                    );
 
                     // Stream verification_result with full level details
                     let levels_json: Vec<serde_json::Value> = entity_result
@@ -314,6 +237,8 @@ pub(super) fn build_verification_stream_response(
                                 "entity": entity_name,
                                 "all_passed": cascade_result.all_passed,
                                 "levels": levels_json,
+                                "warnings": &entity_result.warnings,
+                                "errors": &entity_result.errors,
                             }))
                             .unwrap() // ci-ok: infallible serialization
                                 + "\n"))
@@ -395,6 +320,8 @@ pub(super) fn build_verification_stream_response(
                             summary: format!("Verification failed for {entity_name}: {e}"),
                             details: None,
                         }],
+                        warnings: Vec::new(),
+                        errors: Vec::new(),
                         verified_at: sim_now().to_rfc3339(),
                     };
                     if let Err(persist_err) = state_for_task

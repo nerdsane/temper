@@ -231,6 +231,8 @@ fn mark_file_verified(state: &ServerState) {
                 summary: "test fixture verified".to_string(),
                 details: None,
             }],
+            warnings: Vec::new(),
+            errors: Vec::new(),
             verified_at: "2026-05-15T00:00:00Z".to_string(),
         }),
     );
@@ -391,6 +393,10 @@ async fn odata_file_value_put_applies_cedar_update_policy() {
         .get_or_create_tenant_entity(&tenant, "File", "fl-write-denied", serde_json::json!({}))
         .await
         .expect("create File state");
+    let before = state
+        .get_tenant_entity_state(&tenant, "File", "fl-write-denied")
+        .await
+        .expect("read File state before denied update");
     state
         .authz
         .reload_tenant_policies(
@@ -416,7 +422,9 @@ async fn odata_file_value_put_applies_cedar_update_policy() {
         .get_tenant_entity_state(&tenant, "File", "fl-write-denied")
         .await
         .expect("File state should remain readable");
-    assert!(entity.state.fields.get("content_hash").is_none());
+    assert_eq!(entity.state.status, before.state.status);
+    assert_eq!(entity.state.sequence_nr, before.state.sequence_nr);
+    assert_eq!(entity.state.fields, before.state.fields);
 }
 
 #[tokio::test]
