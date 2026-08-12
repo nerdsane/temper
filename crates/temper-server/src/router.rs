@@ -13,6 +13,10 @@ use crate::odata;
 use crate::state::ServerState;
 use crate::webhooks::receiver as webhook_receiver;
 
+use crate::git_pkt::{
+    http_404_response, sanitize_git_report_text, sideband_channel_one, write_pkt_flush,
+    write_pkt_line,
+};
 use axum::body::Body;
 use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
@@ -275,19 +279,16 @@ async fn dispatch_matched_route(
 
     // Open an inbound exchange on the shared registry.
     let streams = state.http_stream_registry.clone();
-    let exchange = streams.open_inbound_exchange().await;
+    let exchange = match crate::http_stream_dispatch::open_inbound_exchange(&streams).await {
+        Ok(ex) => ex,
+        Err(resp) => return resp,
+    };
     let guest_request_body = exchange.guest_request_body;
     let guest_response_body = exchange.guest_response_body;
     let kernel_request_body = exchange.kernel_request_body;
     let kernel_response_body = exchange.kernel_response_body;
 
-    // Spawn task A: axum body → kernel_request_body handle.
-    // Streaming pump: each Frame::data() chunk is forwarded as it
-    // arrives, so guests reading via the WASM SDK's request_body()
-    // see bytes the moment axum hands them over rather than after
-    // the whole request has been buffered. This is what makes the
-    // ADR-0057 inbound exchange end-to-end streaming — without it,
-    // even SDK-streaming guests are bounded by the buffered limit.
+    // Task A: stream axum body into the guest-visible request handle.
     let pump_streams = streams.clone();
     tokio::spawn(async move {
         use tokio_stream::StreamExt as _;
@@ -359,16 +360,20 @@ async fn dispatch_matched_route(
         }),
     };
 
-    // Build a per-request host that shares the registry.
+    // Per-request host: shared registry + guest-end grants only (ADR-0156).
     let secrets: std::collections::BTreeMap<String, String> = state
         .secrets_vault
         .as_ref()
         .map(|v| v.get_tenant_secrets(tenant_id.as_str()))
         .unwrap_or_default();
-    let host: std::sync::Arc<dyn temper_wasm::WasmHost> = std::sync::Arc::new(
-        temper_wasm::ProductionWasmHost::with_shared_streams(secrets, streams.clone())
-            .with_invocation_context(ctx.clone()),
-    );
+    let host: std::sync::Arc<dyn temper_wasm::WasmHost> =
+        std::sync::Arc::new(crate::http_stream_dispatch::host_with_inbound_grants(
+            secrets,
+            streams.clone(),
+            ctx.clone(),
+            guest_request_body,
+            guest_response_body,
+        ));
 
     // Spawn task B: invoke the WASM module. Runs to completion
     // (guest writes head + body via FFI; we drain on the axum side).
@@ -471,8 +476,6 @@ async fn dispatch_matched_route(
         }
     });
 
-    // Await the guest's response head — bounded by the route's
-    // configured timeout so a bad guest doesn't wedge the request.
     let head_timeout = std::time::Duration::from_secs(route.route.timeout_secs as u64);
     let head_result = tokio::time::timeout(
         head_timeout,
@@ -484,6 +487,16 @@ async fn dispatch_matched_route(
         Ok(Err(e)) => {
             tracing::warn!(error = %e, "HttpEndpoint: guest did not submit response head");
             invoke_task.abort();
+            crate::http_stream_dispatch::close_inbound_handles(
+                &streams,
+                [
+                    guest_request_body,
+                    guest_response_body,
+                    kernel_request_body,
+                    kernel_response_body,
+                ],
+            )
+            .await;
             return axum::http::Response::builder()
                 .status(axum::http::StatusCode::BAD_GATEWAY)
                 .body(Body::from(format!(
@@ -497,6 +510,16 @@ async fn dispatch_matched_route(
                 "HttpEndpoint: guest timed out before submitting response head"
             );
             invoke_task.abort();
+            crate::http_stream_dispatch::close_inbound_handles(
+                &streams,
+                [
+                    guest_request_body,
+                    guest_response_body,
+                    kernel_request_body,
+                    kernel_response_body,
+                ],
+            )
+            .await;
             return axum::http::Response::builder()
                 .status(axum::http::StatusCode::GATEWAY_TIMEOUT)
                 .body(Body::from(
@@ -939,57 +962,6 @@ fn git_receive_pack_response(refs: &[String], sideband: bool, error: Option<&str
         .header("content-type", "application/x-git-receive-pack-result")
         .header("cache-control", "no-cache")
         .body(Body::from(body))
-        .expect("response builder")
-}
-
-fn sideband_channel_one(inner: Vec<u8>) -> Vec<u8> {
-    let mut response = Vec::new();
-    for chunk in inner.chunks(65_515) {
-        let mut payload = Vec::with_capacity(1 + chunk.len());
-        payload.push(0x01);
-        payload.extend_from_slice(chunk);
-        write_pkt_line(&mut response, &payload);
-    }
-    write_pkt_flush(&mut response);
-    response
-}
-
-fn write_pkt_line(out: &mut Vec<u8>, payload: &[u8]) {
-    let len = payload.len() + 4;
-    out.extend_from_slice(format!("{len:04x}").as_bytes());
-    out.extend_from_slice(payload);
-}
-
-fn write_pkt_flush(out: &mut Vec<u8>) {
-    out.extend_from_slice(b"0000");
-}
-
-fn sanitize_git_report_text(input: &str) -> String {
-    let mut out = input
-        .chars()
-        .map(|c| match c {
-            '\r' | '\n' | '\t' => ' ',
-            c if c.is_control() => ' ',
-            c => c,
-        })
-        .collect::<String>();
-    if out.len() > 240 {
-        out.truncate(240);
-    }
-    if out.trim().is_empty() {
-        "failed".to_string()
-    } else {
-        out
-    }
-}
-
-fn http_404_response(path: &str) -> Response {
-    axum::http::Response::builder()
-        .status(axum::http::StatusCode::NOT_FOUND)
-        .header("content-type", "application/json")
-        .body(Body::from(format!(
-            "{{\"error\":\"no route matches\",\"path\":\"{path}\"}}"
-        )))
         .expect("response builder")
 }
 

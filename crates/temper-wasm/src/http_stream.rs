@@ -18,10 +18,18 @@
 //! Capacity: 64 chunks × 16 KiB = 1 MiB per handle for SDK-originated
 //! writes. Host-originated chunks can be larger; bounded reads split
 //! those chunks across guest buffers while preserving stream order.
+//!
+//! ## Authority (ADR-0156 / ARN-207)
+//!
+//! Handle IDs are opaque and unguessable. Guest authority is **not** the
+//! integer itself: `ProductionWasmHost` holds an invocation-scoped grant
+//! table, and guest-facing ops require a grant. Kernel/bridge code uses
+//! the privileged registry methods with the exact ends it created.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc, oneshot};
+use uuid::Uuid;
 
 /// Chunk size used by SDK adapters when splitting writes. A single
 /// SDK-originated chunk may be smaller (short writes), but never larger.
@@ -32,9 +40,18 @@ pub const STREAM_CHUNK_BYTES: usize = 16 * 1024;
 /// 1 MiB per handle, 2 MiB per bidirectional exchange.
 pub const STREAM_CHANNEL_CAPACITY: usize = 64;
 
+/// Maximum live handles in one process-global registry (DoS bound).
+pub const MAX_STREAM_HANDLES_GLOBAL: usize = 16_384;
+
+/// Maximum guest stream grants per invocation host (DoS bound).
+pub const MAX_STREAM_GRANTS_PER_INVOCATION: usize = 64;
+
 /// Opaque handle identifying one end of a streaming channel. Passed
 /// from guest to host via FFI; host-side lookups go through
 /// [`HttpStreamRegistry`].
+///
+/// The raw `u32` is **not** an authority-bearing capability (ADR-0156).
+/// Guests may only operate on handles granted to their invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StreamHandle(pub u32);
 
@@ -159,15 +176,15 @@ enum ChannelEnd {
 }
 
 /// Registry of active stream handles. Lives on `ProductionWasmHost`
-/// (and any other host that implements streaming). One registry per
-/// host instance; handle IDs are unique within a host but not across
-/// hosts — they're opaque u32s.
+/// (and any other host that implements streaming). One registry may be
+/// shared process-wide (`ServerState.http_stream_registry`); handle IDs
+/// are opaque unguessable `u32`s and are **not** authority by themselves
+/// (ADR-0156 / ARN-207).
 pub struct HttpStreamRegistry {
     inner: Mutex<RegistryState>,
 }
 
 struct RegistryState {
-    next_id: u32,
     handles: BTreeMap<u32, ChannelEnd>,
     /// Outbound: oneshot receivers keyed on response-body handle ID.
     /// Bridge task holds the Sender and fires once the HTTP response
@@ -182,11 +199,45 @@ struct RegistryState {
     pending_reads: BTreeMap<u32, Vec<u8>>,
 }
 
+impl RegistryState {
+    /// Allocate an unguessable free handle id. Not sequential — raw
+    /// integers must not be enumerable capabilities (ARN-207).
+    ///
+    /// `// determinism-ok: production host I/O path; not SimActor scheduling.`
+    fn alloc_id(&mut self) -> Result<u32, StreamError> {
+        if self.handles.len() >= MAX_STREAM_HANDLES_GLOBAL {
+            return Err(StreamError::Aborted(
+                "stream handle budget exhausted".into(),
+            ));
+        }
+        // determinism-ok: production host I/O path; not SimActor scheduling.
+        // ~31 bits of unguessability (low bit forced 1 so id is never 0).
+        // Grants remain the authority boundary; opacity is defense-in-depth.
+        for _ in 0..64 {
+            let id = (Uuid::new_v4().as_u128() as u32) | 1;
+            if !self.handles.contains_key(&id) {
+                return Ok(id);
+            }
+        }
+        // Extremely unlikely: fall back to a linear probe from a fresh seed.
+        // determinism-ok: production host I/O path; not SimActor scheduling.
+        let mut probe = (Uuid::new_v4().as_u128() as u32) | 1;
+        for _ in 0..1024 {
+            if probe != 0 && !self.handles.contains_key(&probe) {
+                return Ok(probe);
+            }
+            probe = probe.wrapping_add(1).max(1);
+        }
+        Err(StreamError::Aborted(
+            "failed to allocate stream handle id".into(),
+        ))
+    }
+}
+
 impl HttpStreamRegistry {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(RegistryState {
-                next_id: 1,
                 handles: BTreeMap::new(),
                 response_head_receivers: BTreeMap::new(),
                 inbound_head_senders: BTreeMap::new(),
@@ -199,18 +250,30 @@ impl HttpStreamRegistry {
     /// Allocate a new paired (sender, receiver) channel. Returns
     /// (write_handle, read_handle) — guests write into the first,
     /// the other end reads from the second.
-    pub async fn create_pair(&self) -> (StreamHandle, StreamHandle) {
+    pub async fn create_pair(&self) -> Result<(StreamHandle, StreamHandle), StreamError> {
         let (tx, rx) = mpsc::channel::<Vec<u8>>(STREAM_CHANNEL_CAPACITY);
         let mut state = self.inner.lock().await;
-        let write_id = state.next_id;
-        state.next_id += 1;
-        let read_id = state.next_id;
-        state.next_id += 1;
+        // Need room for two ends.
+        if state.handles.len() + 2 > MAX_STREAM_HANDLES_GLOBAL {
+            return Err(StreamError::Aborted(
+                "stream handle budget exhausted".into(),
+            ));
+        }
+        let write_id = state.alloc_id()?;
+        // Temporarily insert a placeholder so the second alloc cannot collide
+        // with write_id (alloc_id only checks `handles`).
         state.handles.insert(write_id, ChannelEnd::Sender(tx));
+        let read_id = match state.alloc_id() {
+            Ok(id) => id,
+            Err(e) => {
+                state.handles.remove(&write_id);
+                return Err(e);
+            }
+        };
         state
             .handles
             .insert(read_id, ChannelEnd::Receiver(Arc::new(Mutex::new(rx))));
-        (StreamHandle(write_id), StreamHandle(read_id))
+        Ok((StreamHandle(write_id), StreamHandle(read_id)))
     }
 
     /// Write `chunk` to the handle's channel. Suspends if the
@@ -291,21 +354,29 @@ impl HttpStreamRegistry {
     /// is kept on the bridge task until the HTTP response arrives; the
     /// receiver is stored in the registry and handed to the guest on
     /// its first `await_response_head(response_body)` call.
-    pub async fn open_outbound_exchange(&self) -> OutboundExchange {
-        let (req_writer, req_reader) = self.create_pair().await;
-        let (resp_writer, resp_reader) = self.create_pair().await;
+    pub async fn open_outbound_exchange(&self) -> Result<OutboundExchange, StreamError> {
+        let (req_writer, req_reader) = self.create_pair().await?;
+        let (resp_writer, resp_reader) = match self.create_pair().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                // Best-effort cleanup of the first pair on budget failure.
+                let _ = self.close(req_writer).await;
+                let _ = self.close(req_reader).await;
+                return Err(e);
+            }
+        };
         let (head_tx, head_rx) = oneshot::channel();
         {
             let mut state = self.inner.lock().await;
             state.response_head_receivers.insert(resp_reader.0, head_rx);
         }
-        OutboundExchange {
+        Ok(OutboundExchange {
             guest_request_body: req_writer,
             guest_response_body: resp_reader,
             bridge_request_body: req_reader,
             bridge_response_body: resp_writer,
             bridge_head_sender: head_tx,
-        }
+        })
     }
 
     /// Await the response head for the given response-body handle.
@@ -335,9 +406,16 @@ impl HttpStreamRegistry {
     /// `kernel_response_body`. Guest fires the response head with
     /// `submit_inbound_response_head`; kernel awaits it via
     /// `await_inbound_response_head`.
-    pub async fn open_inbound_exchange(&self) -> InboundExchange {
-        let (kern_req_writer, guest_req_reader) = self.create_pair().await;
-        let (guest_resp_writer, kern_resp_reader) = self.create_pair().await;
+    pub async fn open_inbound_exchange(&self) -> Result<InboundExchange, StreamError> {
+        let (kern_req_writer, guest_req_reader) = self.create_pair().await?;
+        let (guest_resp_writer, kern_resp_reader) = match self.create_pair().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                let _ = self.close(kern_req_writer).await;
+                let _ = self.close(guest_req_reader).await;
+                return Err(e);
+            }
+        };
         let (head_tx, head_rx) = oneshot::channel();
         {
             let mut state = self.inner.lock().await;
@@ -348,12 +426,20 @@ impl HttpStreamRegistry {
                 .inbound_head_receivers
                 .insert(guest_resp_writer.0, head_rx);
         }
-        InboundExchange {
+        Ok(InboundExchange {
             guest_request_body: guest_req_reader,
             guest_response_body: guest_resp_writer,
             kernel_request_body: kern_req_writer,
             kernel_response_body: kern_resp_reader,
             kernel_head_receiver_slot: guest_resp_writer,
+        })
+    }
+
+    /// Close every listed handle that still exists. Used for RAII-style
+    /// cleanup on timeout / cancel / request end (ARN-207).
+    pub async fn close_handles(&self, handles: impl IntoIterator<Item = StreamHandle>) {
+        for handle in handles {
+            let _ = self.close(handle).await;
         }
     }
 
@@ -465,7 +551,7 @@ mod tests {
     #[tokio::test]
     async fn create_pair_returns_distinct_ids() {
         let reg = HttpStreamRegistry::new();
-        let (w, r) = reg.create_pair().await;
+        let (w, r) = reg.create_pair().await.unwrap();
         assert_ne!(w.0, r.0);
         assert_eq!(reg.handle_count().await, 2);
     }
@@ -473,7 +559,7 @@ mod tests {
     #[tokio::test]
     async fn write_then_read_roundtrips_chunk() {
         let reg = HttpStreamRegistry::new();
-        let (w, r) = reg.create_pair().await;
+        let (w, r) = reg.create_pair().await.unwrap();
         let n = reg.write(w, b"hello".to_vec()).await.unwrap();
         assert_eq!(n, 5);
         let chunk = reg.read(r).await.unwrap();
@@ -483,7 +569,7 @@ mod tests {
     #[tokio::test]
     async fn bounded_read_splits_oversized_chunk_and_preserves_order() {
         let reg = HttpStreamRegistry::new();
-        let (w, r) = reg.create_pair().await;
+        let (w, r) = reg.create_pair().await.unwrap();
         reg.write(w, b"abcdefghij".to_vec()).await.unwrap();
         reg.write(w, b"next".to_vec()).await.unwrap();
 
@@ -501,7 +587,7 @@ mod tests {
     #[tokio::test]
     async fn write_into_receiver_handle_is_invalid() {
         let reg = HttpStreamRegistry::new();
-        let (_w, r) = reg.create_pair().await;
+        let (_w, r) = reg.create_pair().await.unwrap();
         let err = reg.write(r, b"hi".to_vec()).await.unwrap_err();
         assert_eq!(err, StreamError::InvalidHandle);
     }
@@ -509,7 +595,7 @@ mod tests {
     #[tokio::test]
     async fn read_from_sender_handle_is_invalid() {
         let reg = HttpStreamRegistry::new();
-        let (w, _r) = reg.create_pair().await;
+        let (w, _r) = reg.create_pair().await.unwrap();
         let err = reg.read(w).await.unwrap_err();
         assert_eq!(err, StreamError::InvalidHandle);
     }
@@ -517,7 +603,7 @@ mod tests {
     #[tokio::test]
     async fn try_write_returns_wouldblock_when_full() {
         let reg = HttpStreamRegistry::new();
-        let (w, _r) = reg.create_pair().await;
+        let (w, _r) = reg.create_pair().await.unwrap();
         // Fill the channel to capacity.
         for _ in 0..STREAM_CHANNEL_CAPACITY {
             reg.try_write(w, vec![0u8; 8]).await.unwrap();
@@ -530,7 +616,7 @@ mod tests {
     #[tokio::test]
     async fn close_sender_causes_receiver_eof() {
         let reg = HttpStreamRegistry::new();
-        let (w, r) = reg.create_pair().await;
+        let (w, r) = reg.create_pair().await.unwrap();
         reg.write(w, b"first".to_vec()).await.unwrap();
         reg.close(w).await.unwrap();
         // Drain buffered chunk then EOF.
@@ -543,7 +629,7 @@ mod tests {
     #[tokio::test]
     async fn write_after_receiver_close_returns_closed() {
         let reg = HttpStreamRegistry::new();
-        let (w, r) = reg.create_pair().await;
+        let (w, r) = reg.create_pair().await.unwrap();
         reg.close(r).await.unwrap();
         let err = reg.write(w, b"x".to_vec()).await.unwrap_err();
         assert_eq!(err, StreamError::Closed);
@@ -559,7 +645,7 @@ mod tests {
     #[tokio::test]
     async fn inbound_exchange_roundtrips_head_and_body() {
         let reg = HttpStreamRegistry::new();
-        let exchange = reg.open_inbound_exchange().await;
+        let exchange = reg.open_inbound_exchange().await.unwrap();
 
         // Kernel pushes request body.
         reg.write(
@@ -619,12 +705,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_ids_monotonic_within_registry() {
+    async fn handle_ids_are_unique_and_non_zero() {
         let reg = HttpStreamRegistry::new();
-        let (w1, r1) = reg.create_pair().await;
-        let (w2, r2) = reg.create_pair().await;
-        assert!(w1.0 < r1.0);
-        assert!(r1.0 < w2.0);
-        assert!(w2.0 < r2.0);
+        let (w1, r1) = reg.create_pair().await.unwrap();
+        let (w2, r2) = reg.create_pair().await.unwrap();
+        let ids = [w1.0, r1.0, w2.0, r2.0];
+        assert!(ids.iter().all(|&id| id != 0));
+        let set: std::collections::BTreeSet<_> = ids.into_iter().collect();
+        assert_eq!(set.len(), 4, "handle ids must be unique");
+    }
+
+    #[tokio::test]
+    async fn handle_ids_are_not_dense_low_integers() {
+        // Sequential allocation made 1..=N guessable. Opaque IDs must not
+        // land in a tiny low range that enumeration can cover cheaply.
+        let reg = HttpStreamRegistry::new();
+        let (w, r) = reg.create_pair().await.unwrap();
+        // Probabilistically: two random u32s both < 256 is vanishingly rare.
+        // If both are small, something regressed to sequential allocation.
+        let both_tiny = w.0 < 256 && r.0 < 256;
+        assert!(
+            !both_tiny,
+            "expected unguessable handle ids, got w={} r={}",
+            w.0, r.0
+        );
     }
 }

@@ -352,8 +352,12 @@ pub struct ProductionWasmHost {
     /// Invocation context for auto-enriching guest telemetry.
     invocation_context: Option<WasmInvocationContext>,
     /// Registry of active streaming HTTP exchanges (ADR-0057).
-    /// One per host instance; handle IDs are unique within the host.
+    /// May be shared process-wide; handle IDs are opaque and not
+    /// authority-bearing (ADR-0156 / ARN-207).
     http_streams: Arc<crate::http_stream::HttpStreamRegistry>,
+    /// Invocation-scoped grants: guest stream ops require membership
+    /// in this set. Fail closed when empty (ARN-207).
+    stream_grants: Arc<std::sync::Mutex<std::collections::BTreeSet<u32>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -531,7 +535,78 @@ impl ProductionWasmHost {
             text_http_interceptor: None,
             invocation_context: None,
             http_streams: Arc::new(crate::http_stream::HttpStreamRegistry::new()),
+            stream_grants: Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new())),
         }
+    }
+
+    /// Grant guest-facing stream handles to this invocation host.
+    ///
+    /// Used by the HttpEndpoint dispatcher after minting an inbound
+    /// exchange so the guest may operate only on those ends (ADR-0156).
+    /// Returns `Err` when the per-invocation grant budget would be
+    /// exceeded so callers can roll back registry allocation.
+    pub fn grant_stream_handles(
+        &self,
+        handles: impl IntoIterator<Item = crate::http_stream::StreamHandle>,
+    ) -> Result<(), crate::http_stream::StreamError> {
+        let mut grants = self.stream_grants.lock().unwrap_or_else(|e| e.into_inner());
+        let incoming: Vec<_> = handles.into_iter().collect();
+        let new_unique = incoming.iter().filter(|h| !grants.contains(&h.0)).count();
+        if grants.len().saturating_add(new_unique)
+            > crate::http_stream::MAX_STREAM_GRANTS_PER_INVOCATION
+        {
+            return Err(crate::http_stream::StreamError::Aborted(
+                "stream grant budget exhausted".into(),
+            ));
+        }
+        for handle in incoming {
+            grants.insert(handle.0);
+        }
+        Ok(())
+    }
+
+    /// Whether this host holds a grant for `handle`.
+    pub fn has_stream_grant(&self, handle: crate::http_stream::StreamHandle) -> bool {
+        self.stream_grants
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&handle.0)
+    }
+
+    fn require_stream_grant(
+        &self,
+        handle: crate::http_stream::StreamHandle,
+    ) -> Result<(), crate::http_stream::StreamError> {
+        if self.has_stream_grant(handle) {
+            Ok(())
+        } else {
+            Err(crate::http_stream::StreamError::InvalidHandle)
+        }
+    }
+
+    fn revoke_stream_grant(&self, handle: crate::http_stream::StreamHandle) {
+        // Match grant/require paths: recover from a poisoned lock so a
+        // prior panic cannot leave a stale capability in place.
+        let mut grants = self.stream_grants.lock().unwrap_or_else(|e| e.into_inner());
+        grants.remove(&handle.0);
+    }
+
+    /// Close every still-granted stream handle and clear the grant set.
+    /// Used on request-end teardown (cancel / dispatcher abort).
+    pub async fn close_granted_streams(&self) {
+        let granted: Vec<crate::http_stream::StreamHandle> = {
+            let grants = self.stream_grants.lock().unwrap_or_else(|e| e.into_inner());
+            grants
+                .iter()
+                .copied()
+                .map(crate::http_stream::StreamHandle)
+                .collect()
+        };
+        self.http_streams.close_handles(granted).await;
+        // Recover from a poisoned lock so teardown always clears grants
+        // (same pattern as grant/require/revoke — Greptile ARN-207).
+        let mut grants = self.stream_grants.lock().unwrap_or_else(|e| e.into_inner());
+        grants.clear();
     }
 
     /// Create with a spec evaluator for `host_evaluate_spec` support.
@@ -1593,8 +1668,26 @@ impl WasmHost for ProductionWasmHost {
         use futures_util::StreamExt;
         use tracing::Instrument;
 
-        let exchange = self.http_streams.open_outbound_exchange().await;
+        let exchange = self
+            .http_streams
+            .open_outbound_exchange()
+            .await
+            .map_err(|e| e.to_string())?;
         let guest = exchange.guest_handles();
+        // Invocation-scoped grants: only these ends are guest-operable.
+        // If the grant budget is exhausted, roll back the exchange so we
+        // do not leave unusable registry slots behind.
+        if let Err(e) = self.grant_stream_handles([guest.request_body, guest.response_body]) {
+            self.http_streams
+                .close_handles([
+                    guest.request_body,
+                    guest.response_body,
+                    exchange.bridge_request_body,
+                    exchange.bridge_response_body,
+                ])
+                .await;
+            return Err(e.to_string());
+        }
         let bridge_req = exchange.bridge_request_body;
         let bridge_resp = exchange.bridge_response_body;
         let head_tx = exchange.bridge_head_sender;
@@ -1750,6 +1843,7 @@ impl WasmHost for ProductionWasmHost {
         &self,
         handle: crate::http_stream::StreamHandle,
     ) -> Result<Vec<u8>, crate::http_stream::StreamError> {
+        self.require_stream_grant(handle)?;
         self.http_streams.read(handle).await
     }
 
@@ -1758,6 +1852,7 @@ impl WasmHost for ProductionWasmHost {
         handle: crate::http_stream::StreamHandle,
         max_bytes: usize,
     ) -> Result<Vec<u8>, crate::http_stream::StreamError> {
+        self.require_stream_grant(handle)?;
         self.http_streams.read_bounded(handle, max_bytes).await
     }
 
@@ -1766,6 +1861,7 @@ impl WasmHost for ProductionWasmHost {
         handle: crate::http_stream::StreamHandle,
         chunk: Vec<u8>,
     ) -> Result<usize, crate::http_stream::StreamError> {
+        self.require_stream_grant(handle)?;
         self.http_streams.try_write(handle, chunk).await
     }
 
@@ -1773,13 +1869,20 @@ impl WasmHost for ProductionWasmHost {
         &self,
         handle: crate::http_stream::StreamHandle,
     ) -> Result<(), crate::http_stream::StreamError> {
-        self.http_streams.close(handle).await
+        self.require_stream_grant(handle)?;
+        self.http_streams.close(handle).await?;
+        // Drop capability after successful close so a later ID reuse
+        // in the same host cannot resurrect authority.
+        self.revoke_stream_grant(handle);
+        Ok(())
     }
 
     async fn http_stream_response_head(
         &self,
         response_body: crate::http_stream::StreamHandle,
     ) -> Result<crate::http_stream::HttpResponseHead, String> {
+        self.require_stream_grant(response_body)
+            .map_err(|e| e.to_string())?;
         self.http_streams
             .await_response_head(response_body)
             .await
@@ -1791,6 +1894,7 @@ impl WasmHost for ProductionWasmHost {
         response_body: crate::http_stream::StreamHandle,
         head: crate::http_stream::HttpResponseHead,
     ) -> Result<(), crate::http_stream::StreamError> {
+        self.require_stream_grant(response_body)?;
         self.http_streams
             .submit_inbound_response_head(response_body, head)
             .await

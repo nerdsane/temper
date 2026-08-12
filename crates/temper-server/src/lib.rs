@@ -20,7 +20,9 @@ pub mod entity_actor;
 pub mod event_budget_metrics;
 pub mod events;
 pub mod eventual_invariants;
+mod git_pkt;
 pub mod http_endpoint;
+mod http_stream_dispatch;
 pub mod idempotency;
 pub mod identity;
 /// ADR-0153: declared composite-key index hashing (the negative-existence access path).
