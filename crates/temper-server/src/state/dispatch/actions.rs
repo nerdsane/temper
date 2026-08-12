@@ -646,6 +646,7 @@ impl crate::state::ServerState {
                     request_body: Some(action_params.clone()),
                     intent: agent_ctx.intent.clone(),
                     matched_policy_ids: None,
+                    capture_seq: None,
                 };
                 let request_body_str = truncate_request_body_for_log(&action_params.to_string());
                 let from_status = entry.from_status.as_deref().unwrap_or("unknown");

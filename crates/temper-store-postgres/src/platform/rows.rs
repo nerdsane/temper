@@ -149,6 +149,7 @@ pub(super) fn row_to_trajectory(row: sqlx::postgres::PgRow) -> PostgresTrajector
         intent: row.get("intent"),
         matched_policy_ids: matched_policy_ids
             .and_then(|value| serde_json::from_value::<Vec<String>>(value).ok()),
+        capture_seq: row.try_get("capture_seq").ok().flatten(),
     }
 }
 

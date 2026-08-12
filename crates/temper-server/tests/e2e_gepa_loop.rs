@@ -300,6 +300,7 @@ async fn e2e_gepa_sentinel_detects_failure_cluster() {
             request_body: None,
             intent: Some("reassign issue to different agent".to_string()),
             matched_policy_ids: None,
+            capture_seq: None,
         })
         .collect();
 
@@ -1048,6 +1049,7 @@ async fn e2e_gepa_full_loop() {
             request_body: None,
             intent: None,
             matched_policy_ids: None,
+            capture_seq: None,
         })
         .collect();
 

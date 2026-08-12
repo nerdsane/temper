@@ -23,6 +23,7 @@ fn entry(entity_type: &str, action: &str, success: bool) -> TrajectoryEntry {
         request_body: None,
         intent: None,
         matched_policy_ids: None,
+        capture_seq: None,
     }
 }
 

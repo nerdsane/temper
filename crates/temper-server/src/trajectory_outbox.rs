@@ -278,17 +278,38 @@ pub(crate) fn try_record(
     global().try_record(backend, sink, entry)
 }
 
+/// Next position in this process's capture order.
+///
+/// Monotonic and gap-free within the process, which is all the session read
+/// needs: it is a tie-break inside one `created_at` tick, and a restart always
+/// advances the wall clock past the tick it was in.
+fn next_capture_seq() -> i64 {
+    static CAPTURE_SEQ: AtomicU64 = AtomicU64::new(0);
+    // Saturating rather than wrapping: a wrap would sort later rows before
+    // earlier ones, and 2^63 captures in one process is not reachable.
+    CAPTURE_SEQ
+        .fetch_add(1, Ordering::Relaxed)
+        .min(i64::MAX as u64) as i64
+}
+
 impl crate::state::ServerState {
     pub(crate) fn enqueue_trajectory_entry(&self, mut entry: TrajectoryEntry) -> bool {
         let Some((backend, sink)) = self.trajectory_sink() else {
             return true;
         };
-        // Single choke point for every capture site: nothing enters the
-        // bounded outbox carrying more than the stored-body cap, so a stalled
-        // drain cannot accumulate whole request bodies in memory, and a new
-        // capture site cannot forget to bound its payload.
+        // Stamped here rather than at each capture site: this is the single
+        // point every captured entry passes through, and it is still on the
+        // capturing thread, before the entry is handed to a persistence task
+        // that may land in any order.
+        entry.capture_seq = Some(next_capture_seq());
+        // Single choke point for every capture site: a captured body is
+        // scrubbed of secret-named fields and then bounded, so a new capture
+        // site cannot forget either, a stalled drain cannot accumulate whole
+        // request bodies in memory, and the truncation preview can never carry
+        // a value the full body would have had redacted.
         if let Some(body) = entry.request_body.take() {
-            entry.request_body = Some(crate::storage::bounded_request_body(body));
+            let redacted = crate::storage::redact_secrets(body);
+            entry.request_body = Some(crate::storage::bounded_request_body(redacted));
         }
         try_record(backend, sink, entry)
     }
@@ -321,6 +342,7 @@ mod tests {
             request_body: None,
             intent: None,
             matched_policy_ids: None,
+            capture_seq: None,
         }
     }
 

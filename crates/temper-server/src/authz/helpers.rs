@@ -80,6 +80,50 @@ pub(crate) fn require_observe_auth(
     Ok(())
 }
 
+/// Check Cedar authorization for an endpoint that returns recorded agent
+/// content, with no principal-kind bypass.
+///
+/// [`require_observe_auth`] lets an Admin or System principal past Cedar
+/// without a policy, and the principal kind is read straight off the request
+/// headers ([`temper_authz::SecurityContext::from_headers`]) because the
+/// platform has no request authentication in front of it yet. That combination
+/// is survivable for aggregate counters. It is not survivable for a surface
+/// that returns one named run's prompts, tool results, and request bodies, so
+/// these endpoints do not use it: every caller must be permitted by a Cedar
+/// policy in the tenant, whatever kind it declares itself to be.
+///
+/// System is not reachable here — `from_headers` refuses to build a System
+/// principal precisely to stop header-declared escalation — and platform code
+/// paths that legitimately act as System are covered by the built-in
+/// `system-platform` permit rather than by a bypass in this function.
+pub(crate) fn require_trajectory_content_auth(
+    state: &crate::state::ServerState,
+    headers: &HeaderMap,
+    action: &str,
+    resource_type: &str,
+    tenant: &str,
+) -> Result<(), StatusCode> {
+    let security_ctx = security_context_from_headers(headers, None, None, None);
+    if let Err(denial) = state.authorize_with_context(
+        &security_ctx,
+        action,
+        resource_type,
+        &BTreeMap::new(),
+        tenant,
+    ) {
+        tracing::warn!(
+            reason = %denial,
+            action,
+            resource_type,
+            tenant,
+            principal_kind = ?security_ctx.principal.kind,
+            "unauthorized trajectory content access"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(())
+}
+
 /// Resolve the tenant scope for an observe endpoint.
 ///
 /// Returns `Some(tenant)` when results should be filtered to a single tenant,
@@ -374,6 +418,7 @@ pub(crate) async fn record_authz_denial(
         request_body: Some(denial_request_body),
         intent: input.intent.clone(),
         matched_policy_ids: None,
+        capture_seq: None,
     };
     if !state.enqueue_trajectory_entry(traj.clone()) {
         tracing::warn!("failed to enqueue authz trajectory");

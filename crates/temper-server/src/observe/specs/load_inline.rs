@@ -294,6 +294,7 @@ pub(crate) async fn handle_load_inline(
                 request_body: warning_context.clone(),
                 intent: crate::request_context::intent_from_headers(&headers),
                 matched_policy_ids: None,
+                capture_seq: None,
             };
             if !state.enqueue_trajectory_entry(traj) {
                 tracing::warn!("failed to enqueue spec submission trajectory");

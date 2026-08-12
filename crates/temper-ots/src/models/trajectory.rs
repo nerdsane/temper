@@ -74,6 +74,16 @@ pub struct OTSMetadata {
     /// `harness` names the runner that drove the loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
+
+    /// Release identifier of the agent system itself (e.g. "temperpaw 3.2").
+    ///
+    /// The build that ran, not the spec it ran under. Two runs of the same
+    /// build under different specs share this value; one build upgraded under
+    /// an unchanged spec changes it. `spec_version` answers the other
+    /// question, and the two are never interchangeable — a consumer grouping
+    /// runs by agent release must not be handed a spec hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_version: Option<String>,
 }
 
 impl OTSMetadata {
@@ -102,6 +112,7 @@ impl OTSMetadata {
             parent_trajectory_id: None,
             spec_version: None,
             harness: None,
+            agent_version: None,
         }
     }
 
@@ -185,6 +196,12 @@ impl OTSMetadata {
     /// Set the harness that produced this trajectory
     pub fn with_harness(mut self, harness: impl Into<String>) -> Self {
         self.harness = Some(harness.into());
+        self
+    }
+
+    /// Set the release identifier of the agent system that ran
+    pub fn with_agent_version(mut self, agent_version: impl Into<String>) -> Self {
+        self.agent_version = Some(agent_version.into());
         self
     }
 }

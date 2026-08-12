@@ -48,8 +48,8 @@ impl TursoEventStore {
                         .execute(
                         "INSERT INTO trajectories \
                          (tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
-                          agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                          agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids, capture_seq) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                         params![
                             entry.tenant,
                             entry.entity_type,
@@ -69,7 +69,8 @@ impl TursoEventStore {
                             entry.created_at,
                             entry.request_body,
                             entry.intent,
-                            entry.matched_policy_ids
+                            entry.matched_policy_ids,
+                            entry.capture_seq
                         ],
                     )
                     .await
@@ -188,6 +189,7 @@ mod tests {
             request_body: None,
             intent: None,
             matched_policy_ids: None,
+            capture_seq: None,
         }
     }
 
@@ -226,5 +228,62 @@ mod tests {
             .await
             .expect("query session with entity filter");
         assert!(filtered.is_empty());
+    }
+
+    #[tokio::test]
+    async fn capture_order_outranks_insert_order_inside_one_timestamp() {
+        // Rows are written by independently spawned tasks, so the row that was
+        // captured first can be inserted second. Inside one `created_at` tick
+        // the autoincrement id would then replay the run backwards; the
+        // capture sequence is what puts it right.
+        let (store, _dir) = test_store().await;
+        for (action, capture_seq) in [("SubmitOrder", 2i64), ("AddItem", 1i64)] {
+            store
+                .persist_trajectory(TursoTrajectoryInsert {
+                    capture_seq: Some(capture_seq),
+                    ..insert(action, "session-race", "2026-01-01T00:00:00Z")
+                })
+                .await
+                .expect("persist trajectory");
+        }
+
+        let rows = store
+            .query_trajectories_by_session("session-race", Some("tenant"), None, 100)
+            .await
+            .expect("query session");
+        let actions: Vec<&str> = rows.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            vec!["AddItem", "SubmitOrder"],
+            "the read must follow capture order, not the order the writes landed"
+        );
+        assert_eq!(
+            rows.iter()
+                .filter_map(|r| r.capture_seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[tokio::test]
+    async fn rows_without_a_capture_sequence_still_order_by_write_order() {
+        // Rows written before the column existed carry no sequence; they must
+        // still read back deterministically rather than in engine-defined
+        // NULL order.
+        let (store, _dir) = test_store().await;
+        for action in ["AddItem", "SubmitOrder", "ConfirmOrder"] {
+            store
+                .persist_trajectory(insert(action, "session-legacy", "2026-01-01T00:00:00Z"))
+                .await
+                .expect("persist trajectory");
+        }
+
+        let rows = store
+            .query_trajectories_by_session("session-legacy", Some("tenant"), None, 100)
+            .await
+            .expect("query session");
+        let actions: Vec<&str> = rows.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(actions, vec!["AddItem", "SubmitOrder", "ConfirmOrder"]);
+        assert!(rows.iter().all(|r| r.capture_seq.is_none()));
     }
 }

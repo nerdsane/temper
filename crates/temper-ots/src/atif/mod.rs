@@ -26,14 +26,20 @@
 //! | system-role message text | step with `source = "system"` |
 //! | assistant-role text messages | agent step `message` (joined with newlines) |
 //! | assistant `reasoning` | `steps[].reasoning_content` |
-//! | `decisions[].choice.action` | `tool_calls[].function_name` |
-//! | `decisions[].choice.arguments` | `tool_calls[].arguments` |
-//! | `decisions[].cause_id` (else `decision_id`) | `tool_calls[].tool_call_id` and the matching `observation.results[].source_call_id` |
-//! | `decisions[].consequence.result_summary` | `observation.results[].content` |
+//! | invoking `decisions[].choice.action` | `tool_calls[].function_name` |
+//! | invoking `decisions[].choice.arguments` | `tool_calls[].arguments` |
+//! | invoking `decisions[].cause_id` (else `decision_id`) | `tool_calls[].tool_call_id` and the matching `observation.results[].source_call_id` |
+//! | invoking `decisions[].consequence.result_summary` | `observation.results[].content` |
 //! | tool-role message content | `observation.results[]` with no `source_call_id` (OTS does not link tool messages to a call id) |
 //! | `turns[].prompt_token_ids` / `completion_token_ids` / `logprobs` | `metrics` fields of the same name |
 //! | `metadata.harness` (else `framework`, else `agent_id`) | `agent.name` |
-//! | `metadata.spec_version` (else the OTS document `version`) | `agent.version` |
+//! | `metadata.agent_version` (else [`UNKNOWN_AGENT_VERSION`]) | `agent.version` |
+//!
+//! "Invoking" means a decision whose type reports
+//! [`DecisionType::is_invocation`](crate::models::DecisionType::is_invocation):
+//! a tool selection or a parameter choice. A reasoning step or a response
+//! formulation names a thought rather than a callable, so it produces no tool
+//! call and no observation result — only its `temper.decisions` entry.
 //!
 //! ## Derived
 //!
@@ -53,7 +59,7 @@
 //! | `temper.metadata` | root `extra` | the whole `OTSMetadata` verbatim, including `spec_version`, `harness`, `outcome`, `feedback_score`, `human_reviewed`, `tags`, `domain`, `environment`, `parent_trajectory_id` |
 //! | `temper.context` | root `extra` | the `OTSContext` verbatim, when non-empty |
 //! | `temper.final_reward` | root `extra` | `final_reward` |
-//! | `temper.agent_id` / `temper.framework` / `temper.harness` / `temper.spec_version` | `agent.extra` | the originals, so the `agent.name` / `agent.version` fallback chains stay reversible |
+//! | `temper.agent_id` / `temper.framework` / `temper.harness` / `temper.spec_version` | `agent.extra` | the originals, so the `agent.name` fallback chain stays reversible and the governing spec stays readable without being mistaken for the agent release |
 //! | `temper.turn_id` / `temper.span_id` / `temper.parent_span_id` / `temper.duration_ms` / `temper.error` | step `extra` | per-turn identity and outcome |
 //! | `temper.decisions` | step `extra` | each decision verbatim: `decision_type`, `state`, `alternatives`, `evaluation`, `credit_assignment`, `embedding`, and the choice `rationale` / `confidence` — ATIF's `ToolCallSchema` carries none of it |
 //! | `temper.assistant_content` | step `extra` | assistant message payloads that are not plain text (tool-call, tool-response, widget content) |
@@ -101,14 +107,58 @@ use crate::models::{
     ContentType, MessageRole, OTSDecision, OTSMessage, OTSMessageContent, OTSTrajectory, OTSTurn,
 };
 
+/// `agent.version` for a trajectory whose producer did not report the agent
+/// system's release.
+///
+/// ATIF requires the field. OTS only knows it when the harness fills
+/// `metadata.agent_version`, and no other OTS value answers the question — the
+/// spec hash identifies the governing spec and the document `version`
+/// identifies the OTS format, so substituting either would tell a consumer
+/// that unrelated builds are the same release.
+pub const UNKNOWN_AGENT_VERSION: &str = "unknown";
+
+/// Why an OTS trajectory could not be exported as ATIF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtifExportError {
+    /// The trajectory produced no steps.
+    ///
+    /// ATIF v1.7 models a trajectory as its step list, and a document with an
+    /// empty one describes no run. It happens for a session finalized before
+    /// anything ran: no system message, no turn that carried a message, a
+    /// decision, or token metrics.
+    NoSteps,
+}
+
+impl std::fmt::Display for AtifExportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoSteps => write!(
+                f,
+                "the trajectory produced no ATIF steps; ATIF v1.7 requires at least one, and a \
+                 run with no system message, no messages, no decisions, and no token metrics has \
+                 nothing to export"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AtifExportError {}
+
 /// Export an OTS trajectory as an ATIF v1.7 document.
 ///
 /// `session_id` is supplied by the caller because OTS keeps the session on the
 /// storage row rather than in the document. Pass `None` when the session is
 /// unknown; ATIF v1.7 makes `session_id` optional.
 ///
+/// Fails with [`AtifExportError::NoSteps`] when the trajectory yields no
+/// steps: a stepless document passes Rust's type checker and fails Harbor's
+/// validator, so it is refused here rather than handed on as valid ATIF.
+///
 /// See the module docs for the full field-by-field mapping.
-pub fn to_atif(trajectory: &OTSTrajectory, session_id: Option<&str>) -> AtifTrajectory {
+pub fn to_atif(
+    trajectory: &OTSTrajectory,
+    session_id: Option<&str>,
+) -> Result<AtifTrajectory, AtifExportError> {
     let mut steps: Vec<AtifStep> = Vec::new();
     let mut next_step_id: i64 = 1;
 
@@ -154,6 +204,10 @@ pub fn to_atif(trajectory: &OTSTrajectory, session_id: Option<&str>) -> AtifTraj
         }
     }
 
+    if steps.is_empty() {
+        return Err(AtifExportError::NoSteps);
+    }
+
     let mut extra = BTreeMap::new();
     insert_json(&mut extra, "temper.ots_version", &trajectory.version);
     insert_json(&mut extra, "temper.metadata", &trajectory.metadata);
@@ -164,7 +218,7 @@ pub fn to_atif(trajectory: &OTSTrajectory, session_id: Option<&str>) -> AtifTraj
         insert_json(&mut extra, "temper.final_reward", &final_reward);
     }
 
-    AtifTrajectory {
+    Ok(AtifTrajectory {
         schema_version: ATIF_SCHEMA_VERSION.to_string(),
         session_id: session_id.map(str::to_string),
         trajectory_id: Some(trajectory.trajectory_id.clone()),
@@ -173,7 +227,7 @@ pub fn to_atif(trajectory: &OTSTrajectory, session_id: Option<&str>) -> AtifTraj
         subagent_trajectories: None,
         extra,
         steps,
-    }
+    })
 }
 
 fn agent_block(trajectory: &OTSTrajectory) -> AtifAgent {
@@ -183,10 +237,14 @@ fn agent_block(trajectory: &OTSTrajectory) -> AtifAgent {
         .clone()
         .or_else(|| metadata.framework.clone())
         .unwrap_or_else(|| metadata.agent_id.clone());
+    // ATIF's `agent.version` is the version of the agent system. The spec hash
+    // and the OTS document version answer different questions, so neither
+    // stands in for it: a consumer grouping runs by agent release would split
+    // one build across specs and merge unrelated builds that share one.
     let version = metadata
-        .spec_version
+        .agent_version
         .clone()
-        .unwrap_or_else(|| trajectory.version.clone());
+        .unwrap_or_else(|| UNKNOWN_AGENT_VERSION.to_string());
 
     let mut extra = BTreeMap::new();
     insert_json(&mut extra, "temper.agent_id", &metadata.agent_id);
@@ -222,6 +280,14 @@ fn agent_step(turn: &OTSTurn, step_id: i64) -> Option<AtifStep> {
         .filter(|m| m.role == MessageRole::Tool)
         .collect();
 
+    // Only invoking decisions describe an environment interaction; the rest
+    // name a thought and are carried in `temper.decisions` alone.
+    let invocations: Vec<&OTSDecision> = turn
+        .decisions
+        .iter()
+        .filter(|decision| decision.decision_type.is_invocation())
+        .collect();
+
     let metrics = turn_metrics(turn);
     let has_agent_content = !assistant_messages.is_empty()
         || !tool_messages.is_empty()
@@ -242,8 +308,7 @@ fn agent_step(turn: &OTSTurn, step_id: i64) -> Option<AtifStep> {
         .filter_map(|m| m.reasoning.clone())
         .find(|reasoning| !reasoning.is_empty());
 
-    let tool_calls: Vec<AtifToolCall> = turn
-        .decisions
+    let tool_calls: Vec<AtifToolCall> = invocations
         .iter()
         .map(|decision| AtifToolCall {
             tool_call_id: tool_call_id(decision),
@@ -252,8 +317,7 @@ fn agent_step(turn: &OTSTurn, step_id: i64) -> Option<AtifStep> {
         })
         .collect();
 
-    let mut results: Vec<AtifObservationResult> = turn
-        .decisions
+    let mut results: Vec<AtifObservationResult> = invocations
         .iter()
         .map(|decision| {
             let mut extra = BTreeMap::new();
@@ -472,9 +536,96 @@ mod tests {
             .with_system_message(OTSSystemMessage::new("be helpful", now))
             .with_turn(turn);
 
-        let atif = to_atif(&trajectory, None);
+        let atif = to_atif(&trajectory, None).expect("the system message alone is a step");
         let sources: Vec<AtifSource> = atif.steps.iter().map(|step| step.source).collect();
         assert_eq!(sources, vec![AtifSource::System, AtifSource::User]);
         assert_eq!(atif.steps[1].step_id, 2);
+    }
+
+    #[test]
+    fn a_trajectory_with_nothing_in_it_is_not_exportable() {
+        let now = sim_now();
+        let metadata = OTSMetadata::new("task", "agent-1", OutcomeType::Failure, now);
+        let trajectory = OTSTrajectory::new(metadata);
+        assert_eq!(
+            to_atif(&trajectory, None),
+            Err(AtifExportError::NoSteps),
+            "ATIF v1.7 requires at least one step; a stepless document is not valid ATIF"
+        );
+    }
+
+    #[test]
+    fn a_reasoning_decision_is_not_exported_as_a_tool_call() {
+        let now = sim_now();
+        let metadata = OTSMetadata::new("task", "agent-1", OutcomeType::Success, now);
+        let reasoning = OTSDecision::new(
+            DecisionType::ReasoningStep,
+            OTSChoice::new("compare shipping options"),
+            OTSConsequence::success(),
+        );
+        let invocation = OTSDecision::new(
+            DecisionType::ToolSelection,
+            OTSChoice::new("Ship"),
+            OTSConsequence::success(),
+        );
+        let trajectory = OTSTrajectory::new(metadata).with_turn(
+            OTSTurn::new(1, now)
+                .with_decision(reasoning)
+                .with_decision(invocation),
+        );
+
+        let atif = to_atif(&trajectory, None).expect("export");
+        let step = &atif.steps[0];
+        let called: Vec<&str> = step
+            .tool_calls
+            .iter()
+            .map(|call| call.function_name.as_str())
+            .collect();
+        assert_eq!(
+            called,
+            vec!["Ship"],
+            "a reasoning step names a thought, not a callable"
+        );
+        assert_eq!(
+            step.observation
+                .as_ref()
+                .expect("observation")
+                .results
+                .len(),
+            1,
+            "no environment result is fabricated for a thought"
+        );
+        assert_eq!(
+            step.extra["temper.decisions"]
+                .as_array()
+                .expect("decisions")
+                .len(),
+            2,
+            "both decisions are still carried verbatim"
+        );
+    }
+
+    #[test]
+    fn agent_version_reports_the_agent_release_not_the_spec() {
+        let now = sim_now();
+        let metadata = OTSMetadata::new("task", "agent-1", OutcomeType::Success, now)
+            .with_spec_version("sha256:abcd")
+            .with_harness("temperpaw");
+        let trajectory = OTSTrajectory::new(metadata.clone())
+            .with_system_message(OTSSystemMessage::new("be helpful", now));
+
+        let atif = to_atif(&trajectory, None).expect("export");
+        assert_eq!(
+            atif.agent.version, UNKNOWN_AGENT_VERSION,
+            "a spec hash is not an agent release"
+        );
+        assert_eq!(atif.agent.extra["temper.spec_version"], "sha256:abcd");
+
+        let versioned = OTSTrajectory::new(metadata.with_agent_version("temperpaw 3.2"))
+            .with_system_message(OTSSystemMessage::new("be helpful", now));
+        assert_eq!(
+            to_atif(&versioned, None).expect("export").agent.version,
+            "temperpaw 3.2"
+        );
     }
 }

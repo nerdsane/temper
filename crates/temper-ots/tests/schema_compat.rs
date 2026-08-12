@@ -1,8 +1,8 @@
 //! Schema-compatibility tests for the JCS trajectory-core OTS extensions.
 //!
-//! The extension fields (`spec_version`/`harness` on metadata, token IDs,
-//! response mask and logprobs on turns, `cause_id` on decisions) are optional
-//! and additive. Two properties must hold for every stored row:
+//! The extension fields (`spec_version`/`harness`/`agent_version` on
+//! metadata, token IDs, response mask and logprobs on turns, `cause_id` on
+//! decisions) are optional and additive. Two properties must hold for every stored row:
 //!
 //! 1. Rows written before the extension still deserialize (back-compat).
 //! 2. A trajectory carrying every extension field round-trips losslessly.
@@ -36,6 +36,7 @@ fn pre_extension_trajectory_still_deserializes() {
     // Every extension field is absent, not defaulted to a wrong value.
     assert!(trajectory.metadata.spec_version.is_none());
     assert!(trajectory.metadata.harness.is_none());
+    assert!(trajectory.metadata.agent_version.is_none());
     assert!(trajectory.turns[0].prompt_token_ids.is_none());
     assert!(trajectory.turns[0].completion_token_ids.is_none());
     assert!(trajectory.turns[0].response_mask.is_none());
@@ -52,6 +53,7 @@ fn pre_extension_trajectory_reserializes_without_extension_keys() {
     for absent_key in [
         "spec_version",
         "harness",
+        "agent_version",
         "prompt_token_ids",
         "completion_token_ids",
         "response_mask",
@@ -76,7 +78,8 @@ fn fully_populated_extension_fields_round_trip() {
         now,
     )
     .with_spec_version("sha256:9f1c2d")
-    .with_harness("temperpaw");
+    .with_harness("temperpaw")
+    .with_agent_version("temperpaw 3.2");
 
     let decision = OTSDecision::new(
         DecisionType::ToolSelection,
@@ -118,6 +121,11 @@ fn fully_populated_extension_fields_round_trip() {
         Some("sha256:9f1c2d")
     );
     assert_eq!(parsed.metadata.harness.as_deref(), Some("temperpaw"));
+    assert_eq!(
+        parsed.metadata.agent_version.as_deref(),
+        Some("temperpaw 3.2"),
+        "the agent release is a field of its own, never folded into spec_version"
+    );
 
     let parsed_turn = &parsed.turns[0];
     assert_eq!(
@@ -152,7 +160,8 @@ fn extension_field_names_match_the_cross_repo_contract() {
     let now = fixed_timestamp();
     let metadata = OTSMetadata::new("contract", "agent", OutcomeType::Success, now)
         .with_spec_version("v1")
-        .with_harness("claude-code");
+        .with_harness("claude-code")
+        .with_agent_version("claude-code 2.4");
     let turn = OTSTurn::new(1, now)
         .with_decision(
             OTSDecision::new(
@@ -172,6 +181,7 @@ fn extension_field_names_match_the_cross_repo_contract() {
     let metadata_json = &json["metadata"];
     assert_eq!(metadata_json["spec_version"], "v1");
     assert_eq!(metadata_json["harness"], "claude-code");
+    assert_eq!(metadata_json["agent_version"], "claude-code 2.4");
 
     let turn_json = &json["turns"][0];
     assert_eq!(turn_json["prompt_token_ids"], serde_json::json!([1]));

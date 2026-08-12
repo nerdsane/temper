@@ -53,6 +53,10 @@ pub struct TursoTrajectoryInsert<'a> {
     pub request_body: Option<&'a str>,
     pub intent: Option<&'a str>,
     pub matched_policy_ids: Option<&'a str>,
+    /// Monotonic capture order stamped by the recording process, so a session
+    /// reads back in the order the kernel captured it rather than the order
+    /// independent persistence tasks happened to land.
+    pub capture_seq: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug)]

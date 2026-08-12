@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS trajectories (
     request_body  JSONB,
     intent        TEXT,
     matched_policy_ids JSONB,
+    capture_seq   BIGINT,
     agent_type    TEXT,
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT now()
 );";

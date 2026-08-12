@@ -38,6 +38,7 @@ mod observe_read;
 mod published_artifacts;
 mod query_plane_impls;
 mod query_plane_read;
+mod redaction;
 mod trajectory_row;
 pub use published_artifacts::{
     PublishedArtifactStore, PublishedArtifactStoreRow, PublishedArtifactStoreUpsert,
@@ -2387,6 +2388,7 @@ fn pg_trajectory_to_turso(row: temper_store_postgres::PostgresTrajectoryRow) -> 
         request_body: row.request_body,
         intent: row.intent,
         matched_policy_ids: row.matched_policy_ids,
+        capture_seq: row.capture_seq,
     }
 }
 
@@ -2595,6 +2597,7 @@ impl DataOnlyCreateStore for PostgresEventStore {
     }
 }
 
+pub(crate) use redaction::redact_secrets;
 pub(crate) use trajectory_row::bounded_request_body;
 use trajectory_row::{
     trajectory_matched_policy_ids_json, trajectory_request_body_json, trajectory_source_label,
@@ -2627,6 +2630,7 @@ impl TrajectorySink for PostgresEventStore {
             request_body: request_body_json.as_deref(),
             intent: entry.intent.as_deref(),
             matched_policy_ids: matched_policy_ids_json.as_deref(),
+            capture_seq: entry.capture_seq,
         })
         .await
         .map_err(|e| {
@@ -2665,6 +2669,7 @@ impl TrajectorySink for TursoEventStore {
             request_body: request_body_json.as_deref(),
             intent: entry.intent.as_deref(),
             matched_policy_ids: matched_policy_ids_json.as_deref(),
+            capture_seq: entry.capture_seq,
         })
         .await
         .map_err(|e| {
@@ -2710,6 +2715,7 @@ impl TrajectorySink for TenantStoreRouter {
                 request_body: request_body_json.as_deref(),
                 intent: entry.intent.as_deref(),
                 matched_policy_ids: matched_policy_ids_json.as_deref(),
+                capture_seq: entry.capture_seq,
             })
             .await
             .map_err(|e| {

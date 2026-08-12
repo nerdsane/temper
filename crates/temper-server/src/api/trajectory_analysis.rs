@@ -1,13 +1,17 @@
 //! Trajectory analysis endpoints: conformance checking and ATIF export.
 //!
-//! Both read recorded trajectories, so both carry the same authorization as
-//! the other trajectory reads under `/observe`: `read_trajectories` on
-//! `Trajectory`, with the tenant resolved through `observe_tenant_scope`.
+//! Both return one named run's recorded content — its prompts, its decisions,
+//! its tool results, its request bodies — so both are gated by
+//! [`require_trajectory_content_auth`]: a Cedar permit for `read_trajectories`
+//! on `Trajectory` in the addressed tenant, with no principal-kind bypass. The
+//! aggregate `/observe/trajectories` view lets an Admin principal past Cedar
+//! without a policy, and the principal kind is a request header the platform
+//! does not yet authenticate; these two endpoints do not inherit that.
 //!
-//! Unlike the aggregate `/observe/trajectories` view, these two endpoints
-//! address one tenant's data by identifier — a session id, a trajectory id —
-//! so a cross-tenant admin view has nothing to resolve against. Both require
-//! an explicit `X-Tenant-Id` and answer `400` without one.
+//! Unlike that aggregate view, these two address one tenant's data by
+//! identifier — a session id, a trajectory id — so a cross-tenant admin view
+//! has nothing to resolve against. Both require an explicit `X-Tenant-Id` and
+//! answer `400` without one.
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -19,8 +23,8 @@ use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::Automaton;
 use tracing::instrument;
 
-use crate::authz::{observe_tenant_scope, require_observe_auth};
-use crate::conformance::check_conformance;
+use crate::authz::{observe_tenant_scope, require_trajectory_content_auth};
+use crate::conformance::{ConformanceInput, check_conformance};
 use crate::state::ServerState;
 
 /// Largest session the conformance checker will read in one request.
@@ -28,6 +32,15 @@ use crate::state::ServerState;
 /// The checker holds the whole session in memory and the state-machine walk is
 /// order-dependent, so it cannot be paged; the cap bounds the read instead.
 const MAX_CONFORMANCE_ROWS: i64 = 5_000;
+
+/// Denial body for both endpoints.
+///
+/// Names the permit an operator has to install, because the gate has no
+/// principal-kind bypass and a bare "unauthorized" leaves them guessing which
+/// action and resource Cedar was asked about.
+const UNAUTHORIZED_DETAIL: &str = "unauthorized: this endpoint returns recorded agent content and \
+     requires a Cedar permit for action `read_trajectories` on resource `Trajectory` in the \
+     addressed tenant";
 
 /// Body of `POST /api/conformance/check`.
 #[derive(Debug, Deserialize)]
@@ -39,6 +52,12 @@ pub(crate) struct ConformanceCheckRequest {
     /// Optional OTS trajectory contributing the agent-side decisions.
     #[serde(default)]
     trajectory_id: Option<String>,
+    /// The spec version the run executed under, when the caller knows it.
+    ///
+    /// Checked against the registered spec so a run is never judged by a spec
+    /// that did not govern it. See [`resolve_governing_spec`].
+    #[serde(default)]
+    spec_version: Option<String>,
     /// Cap on rows read, bounded by [`MAX_CONFORMANCE_ROWS`].
     #[serde(default)]
     limit: Option<i64>,
@@ -51,9 +70,15 @@ pub(crate) async fn handle_conformance_check(
     headers: HeaderMap,
     Json(request): Json<ConformanceCheckRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    require_observe_auth(&state, &headers, "read_trajectories", "Trajectory")
-        .map_err(|status| (status, "unauthorized".to_string()))?;
     let tenant = required_tenant(&state, &headers)?;
+    require_trajectory_content_auth(
+        &state,
+        &headers,
+        "read_trajectories",
+        "Trajectory",
+        tenant.as_str(),
+    )
+    .map_err(|status| (status, UNAUTHORIZED_DETAIL.to_string()))?;
 
     let limit = match request.limit {
         Some(limit) if !(1..=MAX_CONFORMANCE_ROWS).contains(&limit) => {
@@ -66,7 +91,7 @@ pub(crate) async fn handle_conformance_check(
         None => MAX_CONFORMANCE_ROWS,
     };
 
-    let automaton = automaton_for(&state, &tenant, &request.entity_type)?;
+    let spec = registered_spec(&state, &tenant, &request.entity_type)?;
 
     let Some(store) = state.metadata_store_for_tenant(tenant.as_str()).await else {
         return Err((
@@ -79,8 +104,17 @@ pub(crate) async fn handle_conformance_check(
     // Entity type is deliberately not pushed into the query: the checker
     // reports rows from other actors as skipped, which is how a caller learns
     // a session touched entities this spec does not govern.
-    let rows = store
-        .query_trajectories_by_session(&request.session_id, Some(tenant.as_str()), None, limit)
+    //
+    // One row past the cap is read so a session that ends exactly on the cap
+    // is reported complete instead of partial. The extra row is dropped before
+    // the walk, which must see a prefix and nothing beyond it.
+    let mut rows = store
+        .query_trajectories_by_session(
+            &request.session_id,
+            Some(tenant.as_str()),
+            None,
+            limit.saturating_add(1),
+        )
         .await
         .map_err(|error| {
             tracing::warn!(error = %error, "failed to read session trajectories");
@@ -89,6 +123,8 @@ pub(crate) async fn handle_conformance_check(
                 format!("failed to read session trajectories: {error}"),
             )
         })?;
+    let truncated = rows.len() as i64 > limit;
+    rows.truncate(limit as usize);
 
     let ots = match request.trajectory_id.as_deref() {
         Some(trajectory_id) => {
@@ -111,17 +147,26 @@ pub(crate) async fn handle_conformance_check(
         None => None,
     };
 
-    let report = check_conformance(&automaton, &rows, ots.as_ref());
-    // The walk is order-dependent and cannot be paged, so a session larger
-    // than the cap is checked only up to the cap. Say so rather than let the
-    // caller read a partial report as a whole one.
-    let truncated = rows.len() as i64 == limit;
+    let declared_spec_version = request
+        .spec_version
+        .as_deref()
+        .or_else(|| ots.as_ref()?.metadata.spec_version.as_deref());
+    resolve_governing_spec(&spec, declared_spec_version, &request.entity_type)?;
+
+    let report = check_conformance(ConformanceInput {
+        automaton: &spec.automaton,
+        kernel_rows: &rows,
+        ots_trajectory: ots.as_ref(),
+        rows_truncated: truncated,
+    });
     tracing::info!(
         tenant = %tenant,
         entity_type = %request.entity_type,
         session_id = %request.session_id,
+        spec_version = %spec.version,
         rows = rows.len(),
         truncated,
+        verdict = ?report.verdict,
         passed = report.passed,
         violations = report.violations.len(),
         "conformance.check"
@@ -132,6 +177,9 @@ pub(crate) async fn handle_conformance_check(
         "entity_type": request.entity_type,
         "session_id": request.session_id,
         "trajectory_id": request.trajectory_id,
+        // The spec the run was judged against, so a report can never be read
+        // without knowing which version produced it.
+        "spec_version": spec.version,
         "row_limit": limit,
         "truncated": truncated,
         "report": report,
@@ -145,9 +193,15 @@ pub(crate) async fn handle_get_ots_trajectory_atif(
     headers: HeaderMap,
     Path(trajectory_id): Path<String>,
 ) -> Result<Json<AtifTrajectory>, (StatusCode, String)> {
-    require_observe_auth(&state, &headers, "read_trajectories", "Trajectory")
-        .map_err(|status| (status, "unauthorized".to_string()))?;
     let tenant = required_tenant(&state, &headers)?;
+    require_trajectory_content_auth(
+        &state,
+        &headers,
+        "read_trajectories",
+        "Trajectory",
+        tenant.as_str(),
+    )
+    .map_err(|status| (status, UNAUTHORIZED_DETAIL.to_string()))?;
 
     let Some(store) = state.metadata_store_for_tenant(tenant.as_str()).await else {
         return Err((
@@ -161,10 +215,15 @@ pub(crate) async fn handle_get_ots_trajectory_atif(
     // column means the upload carried no session header, so ATIF omits it
     // rather than reporting an empty run identity.
     let session_id = (!session_id.is_empty()).then_some(session_id);
-    Ok(Json(temper_ots::to_atif(
-        &trajectory,
-        session_id.as_deref(),
-    )))
+    let atif = temper_ots::to_atif(&trajectory, session_id.as_deref()).map_err(|error| {
+        // The stored trajectory is intact; it just has no valid ATIF
+        // rendering, which is the caller's answer rather than a server fault.
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("trajectory `{trajectory_id}` cannot be exported as ATIF: {error}"),
+        )
+    })?;
+    Ok(Json(atif))
 }
 
 /// Resolve the tenant, requiring an explicit one.
@@ -172,20 +231,32 @@ fn required_tenant(
     state: &ServerState,
     headers: &HeaderMap,
 ) -> Result<TenantId, (StatusCode, String)> {
-    let scope = observe_tenant_scope(state, headers)
-        .map_err(|status| (status, "unauthorized".to_string()))?;
+    let scope = observe_tenant_scope(state, headers).map_err(|status| {
+        (
+            status,
+            "unauthorized: no tenant scope could be resolved for this request".to_string(),
+        )
+    })?;
     scope.ok_or((
         StatusCode::BAD_REQUEST,
         "X-Tenant-Id is required: this endpoint addresses one tenant's trajectories".to_string(),
     ))
 }
 
+/// A registered spec and the identity of the source it was parsed from.
+struct RegisteredSpec {
+    automaton: Automaton,
+    /// Content hash of the IOA source, the same identity the spec store keeps
+    /// and the value a harness records as `metadata.spec_version`.
+    version: String,
+}
+
 /// Load the actor spec for `entity_type`, cloned out of the registry lock.
-fn automaton_for(
+fn registered_spec(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
-) -> Result<Automaton, (StatusCode, String)> {
+) -> Result<RegisteredSpec, (StatusCode, String)> {
     let registry = state.registry.read().map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -194,11 +265,54 @@ fn automaton_for(
     })?;
     registry
         .get_spec(tenant, entity_type)
-        .map(|spec| spec.automaton.clone())
+        .map(|spec| RegisteredSpec {
+            automaton: spec.automaton.clone(),
+            version: temper_store_turso::spec_content_hash(&spec.ioa_source),
+        })
         .ok_or((
             StatusCode::NOT_FOUND,
             format!("no spec registered for entity type `{entity_type}` in tenant `{tenant}`"),
         ))
+}
+
+/// Refuse to judge a run by a spec that did not govern it.
+///
+/// A conformance report only means something against the spec the run
+/// executed under. Temper keeps one spec per (tenant, entity type) — a submit
+/// replaces the previous version rather than versioning it — so when a run
+/// declares a spec version that is not the registered one, the governing spec
+/// is not available to check against. Answering with a report against the
+/// current spec would pass behaviour that violated the old one and condemn
+/// behaviour that was legal under it, so the request is refused instead.
+///
+/// A run that declares no spec version is checked against the registered spec,
+/// and the response says which version that was.
+fn resolve_governing_spec(
+    spec: &RegisteredSpec,
+    declared_spec_version: Option<&str>,
+    entity_type: &str,
+) -> Result<(), (StatusCode, String)> {
+    let Some(declared) = declared_spec_version else {
+        return Ok(());
+    };
+    // A harness may record the hash bare or prefixed; both name the same spec.
+    let matches = declared == spec.version
+        || declared
+            .strip_prefix("sha256:")
+            .is_some_and(|hash| hash == spec.version);
+    if matches {
+        return Ok(());
+    }
+    Err((
+        StatusCode::CONFLICT,
+        format!(
+            "the run declares spec version `{declared}` for `{entity_type}`, but the registered \
+             spec is `{}`; Temper stores one version per entity type, so the governing spec is \
+             not available to check against and a report against the current one would judge the \
+             run by rules it never ran under",
+            spec.version
+        ),
+    ))
 }
 
 /// Load and parse a stored OTS trajectory, returning its session id with it.

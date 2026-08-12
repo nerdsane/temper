@@ -52,6 +52,28 @@ fn dispatch_trajectory_persistence_mode() -> DispatchTrajectoryPersistenceMode {
     DispatchTrajectoryPersistenceMode::Background
 }
 
+/// The state the action was attempted from.
+///
+/// A successful dispatch appends an event whose `from_status` is exactly that
+/// state, so the newest event answers the question. A rejected one appends no
+/// event (`entity_actor::effects::process_action` returns `event: None` on a
+/// guard or state mismatch), so the newest event belongs to the *previous*
+/// successful transition and names a state the entity has already left.
+///
+/// Reading it anyway hides the fault the row exists to record: a second
+/// `SubmitOrder` refused in `Submitted` would be stored as attempted from
+/// `Draft`, where it is legal, and every downstream reader — the conformance
+/// checker first among them — would see a legal source state for an illegal
+/// retry. A rejected action changes nothing, so the entity's current status is
+/// where the attempt was made.
+fn source_status(response: &EntityResponse) -> Option<String> {
+    if response.success {
+        response.state.events.back().map(|e| e.from_status.clone())
+    } else {
+        Some(response.state.status.clone())
+    }
+}
+
 impl crate::state::ServerState {
     pub(super) fn persist_trajectory_entry_background(&self, entry: TrajectoryEntry) {
         debug_assert_eq!(
@@ -269,7 +291,7 @@ impl crate::state::ServerState {
             entity_id: ctx.entity_id.to_string(),
             action: ctx.action.to_string(),
             success: response.success,
-            from_status: response.state.events.back().map(|e| e.from_status.clone()),
+            from_status: source_status(response),
             to_status: Some(response.state.status.clone()),
             error: if response.success {
                 None
@@ -297,6 +319,7 @@ impl crate::state::ServerState {
             request_body: Some(ctx.action_params.clone()),
             intent: ctx.agent_ctx.intent.clone(),
             matched_policy_ids: None,
+            capture_seq: None,
         };
         let from_status = entry.from_status.as_deref().unwrap_or("unknown");
         let to_status = entry.to_status.as_deref().unwrap_or("unknown");
@@ -438,7 +461,7 @@ impl crate::state::ServerState {
                 entity_id: ctx.entity_id.to_string(),
                 action: ctx.action.to_string(),
                 success: response.success,
-                from_status: response.state.events.back().map(|e| e.from_status.clone()),
+                from_status: source_status(response),
                 to_status: Some(response.state.status.clone()),
                 error: response.error.clone(),
                 agent_id: ctx.agent_ctx.agent_id.clone(),
@@ -455,6 +478,7 @@ impl crate::state::ServerState {
                 request_body: None,
                 intent: ctx.agent_ctx.intent.clone(),
                 matched_policy_ids: None,
+                capture_seq: None,
             };
             let from_status = entry.from_status.as_deref().unwrap_or("unknown");
             let to_status = entry.to_status.as_deref().unwrap_or("unknown");

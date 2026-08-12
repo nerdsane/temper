@@ -10,8 +10,17 @@ use temper_runtime::scheduler::sim_uuid;
 
 /// One LLM interaction cycle
 ///
-/// Contains messages and extracted decisions
+/// Contains messages and extracted decisions.
+///
+/// # The token-signal contract holds on every construction path
+///
+/// The builder setters enforce completion-side alignment as they run, and
+/// deserialization enforces the same contract through [`OTSTurnWire`]: a turn
+/// that arrives over the wire misaligned is a deserialization error, not a
+/// stored training sample. Direct struct literals are the one remaining path,
+/// and they are inside this crate's control.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "OTSTurnWire")]
 pub struct OTSTurn {
     /// Turn number in sequence
     pub turn_id: i32,
@@ -81,6 +90,63 @@ pub struct OTSTurn {
     /// Completion-aligned: exactly one entry per `completion_token_ids` entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<Vec<f64>>,
+}
+
+/// The deserialization shape of [`OTSTurn`].
+///
+/// Exists so that every parsed turn passes through
+/// [`OTSTurn::validate_token_signals`]. Without it, `serde` would build the
+/// struct field by field and a misaligned upload would be accepted as valid
+/// RL data. Field set, defaults, and names mirror [`OTSTurn`] exactly.
+#[derive(Deserialize)]
+struct OTSTurnWire {
+    turn_id: i32,
+    span_id: String,
+    #[serde(default)]
+    parent_span_id: Option<String>,
+    timestamp: DateTime<Utc>,
+    #[serde(default)]
+    duration_ms: Option<f64>,
+    #[serde(default)]
+    error: bool,
+    #[serde(default)]
+    turn_reward: Option<f64>,
+    #[serde(default)]
+    messages: Vec<OTSMessage>,
+    #[serde(default)]
+    decisions: Vec<OTSDecision>,
+    #[serde(default)]
+    prompt_token_ids: Option<Vec<u32>>,
+    #[serde(default)]
+    completion_token_ids: Option<Vec<u32>>,
+    #[serde(default)]
+    response_mask: Option<Vec<u8>>,
+    #[serde(default)]
+    logprobs: Option<Vec<f64>>,
+}
+
+impl TryFrom<OTSTurnWire> for OTSTurn {
+    type Error = String;
+
+    fn try_from(wire: OTSTurnWire) -> Result<Self, Self::Error> {
+        let turn = Self {
+            turn_id: wire.turn_id,
+            span_id: wire.span_id,
+            parent_span_id: wire.parent_span_id,
+            timestamp: wire.timestamp,
+            duration_ms: wire.duration_ms,
+            error: wire.error,
+            turn_reward: wire.turn_reward,
+            messages: wire.messages,
+            decisions: wire.decisions,
+            prompt_token_ids: wire.prompt_token_ids,
+            completion_token_ids: wire.completion_token_ids,
+            response_mask: wire.response_mask,
+            logprobs: wire.logprobs,
+        };
+        turn.validate_token_signals()?;
+        Ok(turn)
+    }
 }
 
 impl OTSTurn {
@@ -204,9 +270,19 @@ impl OTSTurn {
     /// they are called in, but they cannot see a signal that is never set:
     /// a mask or a logprob array with no `completion_token_ids` has nothing
     /// to index into and is meaningless. This is the whole-turn check, and it
-    /// is what [`TrajectoryBuilder::end_turn`](crate::TrajectoryBuilder) runs
-    /// before a turn is sealed.
+    /// runs on three paths: [`TrajectoryBuilder::end_turn`](crate::TrajectoryBuilder)
+    /// before a turn is sealed, deserialization of any turn that arrives over
+    /// the wire, and any caller that wants to check a hand-built turn.
     pub fn validate_token_signals(&self) -> Result<(), String> {
+        if let Some(response_mask) = &self.response_mask
+            && let Some(value) = response_mask.iter().find(|value| **value > 1)
+        {
+            return Err(format!(
+                "turn {} has a response_mask entry of {value}; the mask is a per-token loss \
+                 switch and every entry is 0 or 1",
+                self.turn_id
+            ));
+        }
         let completion = self.completion_token_ids.as_ref().map(Vec::len);
         for (name, len) in [
             ("response_mask", self.response_mask.as_ref().map(Vec::len)),
@@ -392,6 +468,62 @@ mod tests {
             OTSTurn::new(1, timestamp).validate_token_signals().is_ok(),
             "token signals are optional; absent is not misaligned"
         );
+    }
+
+    #[test]
+    fn deserialization_rejects_a_misaligned_turn() {
+        let json = serde_json::json!({
+            "turn_id": 1,
+            "span_id": "span-1",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "completion_token_ids": [4, 5],
+            "logprobs": [-0.1, -0.2, -0.3],
+        });
+        let error = serde_json::from_value::<OTSTurn>(json)
+            .expect_err("a turn with three logprobs over two tokens is not valid RL data");
+        assert!(error.to_string().contains("logprobs"), "{error}");
+    }
+
+    #[test]
+    fn deserialization_rejects_a_signal_with_nothing_to_align_against() {
+        let json = serde_json::json!({
+            "turn_id": 1,
+            "span_id": "span-1",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "response_mask": [1, 0],
+        });
+        let error = serde_json::from_value::<OTSTurn>(json)
+            .expect_err("a mask with no completion tokens indexes into nothing");
+        assert!(
+            error.to_string().contains("no completion_token_ids"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn deserialization_rejects_a_mask_outside_the_zero_one_domain() {
+        let json = serde_json::json!({
+            "turn_id": 1,
+            "span_id": "span-1",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "completion_token_ids": [4, 5],
+            "response_mask": [1, 7],
+        });
+        let error = serde_json::from_value::<OTSTurn>(json)
+            .expect_err("a mask entry of 7 is not a loss switch");
+        assert!(error.to_string().contains("0 or 1"), "{error}");
+    }
+
+    #[test]
+    fn an_aligned_turn_round_trips_through_serde() {
+        let timestamp = sim_now();
+        let turn = OTSTurn::new(1, timestamp)
+            .with_completion_token_ids(vec![4, 5])
+            .with_response_mask(vec![1, 0])
+            .with_logprobs(vec![-0.1, -0.2]);
+        let json = serde_json::to_string(&turn).expect("serialize");
+        let parsed: OTSTurn = serde_json::from_str(&json).expect("aligned turns deserialize");
+        assert_eq!(parsed, turn);
     }
 
     #[test]

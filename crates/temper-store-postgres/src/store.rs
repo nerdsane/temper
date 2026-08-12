@@ -1257,6 +1257,7 @@ mod tests {
                 request_body: Some("{\"ok\":true}"),
                 intent: Some("test"),
                 matched_policy_ids: Some("[\"policy:test\"]"),
+                capture_seq: Some(1),
             });
             let _ = store.save_policy(
                 "tenant",

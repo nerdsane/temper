@@ -302,6 +302,7 @@ impl TursoEventStore {
             schema::ALTER_TRAJECTORIES_ADD_REQUEST_BODY,
             schema::ALTER_TRAJECTORIES_ADD_INTENT,
             schema::ALTER_TRAJECTORIES_ADD_MATCHED_POLICY_IDS,
+            schema::ALTER_TRAJECTORIES_ADD_CAPTURE_SEQ,
         ] {
             let _ = conn.execute(stmt, ()).await; // ignore "duplicate column" errors
         }
@@ -585,6 +586,11 @@ pub struct TursoTrajectoryRow {
     pub intent: Option<String>,
     /// Cedar policy IDs that contributed to the authorization decision (JSON array).
     pub matched_policy_ids: Option<Vec<String>>,
+    /// Monotonic capture order stamped by the process that recorded the row.
+    ///
+    /// Null on rows written before the column existed; see
+    /// [`crate::schema::ALTER_TRAJECTORIES_ADD_CAPTURE_SEQ`].
+    pub capture_seq: Option<i64>,
 }
 
 /// Aggregated trajectory statistics.

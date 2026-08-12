@@ -27,7 +27,7 @@ impl TursoEventStore {
         let mut rows = conn
             .query(
                 "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
-                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids \
+                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids, capture_seq \
                  FROM trajectories \
                  ORDER BY created_at DESC \
                  LIMIT ?1",
@@ -185,6 +185,7 @@ impl TursoEventStore {
                 .get::<Option<String>>(18)
                 .map_err(storage_error)?
                 .and_then(|s| serde_json::from_str(&s).ok()),
+            capture_seq: row.get::<Option<i64>>(19).map_err(storage_error)?,
         })
     }
 
@@ -254,7 +255,7 @@ impl TursoEventStore {
         let mut rows = conn
             .query(
                 "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
-                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids \
+                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids, capture_seq \
                  FROM trajectories \
                  WHERE success = 0 \
                  ORDER BY created_at DESC \
@@ -308,7 +309,7 @@ impl TursoEventStore {
         let mut rows = conn
             .query(
                 "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
-                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids \
+                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids, capture_seq \
                  FROM trajectories \
                  WHERE agent_id = ?1 \
                    AND (?2 IS NULL OR tenant = ?2) \
@@ -339,8 +340,16 @@ impl TursoEventStore {
     ///
     /// Ordered ascending — oldest first — because the conformance checker
     /// replays a session as a state-machine run and a newest-first read would
-    /// hand it the run backwards. `id` breaks ties so rows written inside the
-    /// same `created_at` tick still come back in write order.
+    /// hand it the run backwards.
+    ///
+    /// Ties inside one `created_at` tick are broken by `capture_seq`, the
+    /// order the capturing process stamped on the entry, and only then by
+    /// `id`. `id` alone is the order the writes landed: rows are persisted by
+    /// independently spawned tasks, so two entries captured in one logical
+    /// tick can be inserted in either order and a denial/retry pair would be
+    /// replayed backwards. `COALESCE` sorts rows written before the column
+    /// existed first and identically on both backends, rather than leaving it
+    /// to each engine's NULL ordering.
     #[instrument(skip_all, fields(session_id, otel.name = "turso.query_trajectories_by_session"))]
     pub async fn query_trajectories_by_session(
         &self,
@@ -354,12 +363,12 @@ impl TursoEventStore {
         let mut rows = conn
             .query(
                 "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
-                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids \
+                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids, capture_seq \
                  FROM trajectories \
                  WHERE session_id = ?1 \
                    AND (?2 IS NULL OR tenant = ?2) \
                    AND (?3 IS NULL OR entity_type = ?3) \
-                 ORDER BY created_at ASC, id ASC \
+                 ORDER BY created_at ASC, COALESCE(capture_seq, 0) ASC, id ASC \
                  LIMIT ?4",
                 params![session_id, tenant, entity_type, limit],
             )

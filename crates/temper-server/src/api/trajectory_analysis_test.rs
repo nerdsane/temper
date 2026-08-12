@@ -24,7 +24,7 @@ async fn test_app() -> (Router, TursoEventStore) {
 }
 
 /// An app whose Cedar engine carries no permits beyond the built-in
-/// system-platform policy, so every non-admin principal hits default-deny.
+/// system-platform policy, so every principal hits default-deny.
 ///
 /// `ServerState::from_registry` installs a permissive engine, and a gate proven
 /// only against that proves nothing.
@@ -32,9 +32,16 @@ async fn strict_authz_app() -> Router {
     build_app(AuthzMode::Strict).await.0
 }
 
+/// An app whose Cedar engine permits exactly the trajectory read these
+/// endpoints gate on, and nothing else.
+async fn policy_permitted_app() -> (Router, TursoEventStore) {
+    build_app(AuthzMode::PermitTrajectoryReads).await
+}
+
 enum AuthzMode {
     Permissive,
     Strict,
+    PermitTrajectoryReads,
 }
 
 async fn build_app(authz: AuthzMode) -> (Router, TursoEventStore) {
@@ -59,8 +66,21 @@ async fn build_app(authz: AuthzMode) -> (Router, TursoEventStore) {
         &[("Order", ORDER_IOA)],
     );
     let mut state = ServerState::from_registry(ActorSystem::new("test-conformance"), registry);
-    if matches!(authz, AuthzMode::Strict) {
-        state.authz = std::sync::Arc::new(temper_authz::AuthzEngine::empty());
+    match authz {
+        AuthzMode::Permissive => {}
+        AuthzMode::Strict => {
+            state.authz = std::sync::Arc::new(temper_authz::AuthzEngine::empty());
+        }
+        AuthzMode::PermitTrajectoryReads => {
+            let engine = temper_authz::AuthzEngine::empty();
+            engine
+                .reload_tenant_policies(
+                    "default",
+                    r#"permit(principal, action == Action::"read_trajectories", resource is Trajectory);"#,
+                )
+                .expect("policy parses");
+            state.authz = std::sync::Arc::new(engine);
+        }
     }
     state.data_dir = dir;
     state.set_storage_stack(StorageStack::from_turso(turso.clone()));
@@ -99,6 +119,7 @@ async fn seed_row(
             request_body: None,
             intent: None,
             matched_policy_ids: None,
+            capture_seq: None,
         })
         .await
         .expect("persist trajectory row");
@@ -429,7 +450,8 @@ async fn atif_export_returns_a_v1_7_document_with_the_stored_session() {
             "outcome": "success",
             "human_reviewed": false,
             "harness": "temperpaw",
-            "spec_version": "sha256:abcd"
+            "spec_version": "sha256:abcd",
+            "agent_version": "temperpaw 3.2"
         },
         "context": {},
         "turns": [{
@@ -483,7 +505,14 @@ async fn atif_export_returns_a_v1_7_document_with_the_stored_session() {
         "the session comes from the storage row, not the document"
     );
     assert_eq!(body["agent"]["name"], "temperpaw");
-    assert_eq!(body["agent"]["version"], "sha256:abcd");
+    assert_eq!(
+        body["agent"]["version"], "temperpaw 3.2",
+        "agent.version is the agent system's release"
+    );
+    assert_eq!(
+        body["agent"]["extra"]["temper.spec_version"], "sha256:abcd",
+        "the governing spec stays readable without posing as the agent release"
+    );
     let steps = body["steps"].as_array().expect("steps");
     assert_eq!(steps.len(), 1);
     assert_eq!(steps[0]["source"], "agent");
@@ -588,11 +617,16 @@ async fn both_endpoints_reject_an_unauthorized_principal() {
         .await
         .unwrap();
     assert_eq!(export.status(), StatusCode::FORBIDDEN);
+}
 
-    // Positive control: the same routes under the same strict engine still
-    // answer an authorized caller, so the 403s above come from the gate rather
-    // than from a route that never resolves.
-    let admin_check = app
+#[tokio::test]
+async fn a_self_declared_admin_header_does_not_open_either_endpoint() {
+    // The principal kind is a request header the platform does not
+    // authenticate, so it must buy nothing on a surface that returns one
+    // named run's prompts, decisions, and request bodies.
+    let app = strict_authz_app().await;
+
+    let check = app
         .clone()
         .oneshot(admin_post(
             "/api/conformance/check",
@@ -601,18 +635,404 @@ async fn both_endpoints_reject_an_unauthorized_principal() {
         ))
         .await
         .unwrap();
-    assert_eq!(admin_check.status(), StatusCode::OK);
+    assert_eq!(
+        check.status(),
+        StatusCode::FORBIDDEN,
+        "declaring yourself admin must not substitute for a Cedar permit"
+    );
 
-    let admin_export = app
+    let export = app
         .oneshot(admin_get(
             "/api/ots/trajectories/traj-atif/atif",
             Some("default"),
         ))
         .await
         .unwrap();
+    assert_eq!(export.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_cedar_permitted_caller_is_let_through() {
+    // Positive control for the two 403 tests above: under an engine whose only
+    // permit is this read, an ordinary principal reaches both handlers, so the
+    // denials come from the gate rather than from a route that never resolves.
+    let (app, store) = policy_permitted_app().await;
+    seed_row(
+        &store,
+        "AddItem",
+        Some("Draft"),
+        Some("Draft"),
+        "2026-01-01T00:00:00Z",
+    )
+    .await;
+
+    let check = app
+        .clone()
+        .oneshot(
+            Request::post("/api/conformance/check")
+                .header("X-Temper-Principal-Kind", "agent")
+                .header("X-Tenant-Id", "default")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"entity_type": "Order", "session_id": "session-1"})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(check.status(), StatusCode::OK);
+
+    let export = app
+        .oneshot(
+            Request::get("/api/ots/trajectories/traj-atif/atif")
+                .header("X-Temper-Principal-Kind", "agent")
+                .header("X-Tenant-Id", "default")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(
-        admin_export.status(),
+        export.status(),
         StatusCode::NOT_FOUND,
         "authorized, and the trajectory simply does not exist in this app"
+    );
+}
+
+/// The OTS document a producer uploads: the id is top-level, as the model
+/// defines it.
+fn ots_upload(trajectory_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "trajectory_id": trajectory_id,
+        "version": "0.1.0",
+        "metadata": {
+            "task_description": "place an order",
+            "timestamp_start": "2026-01-01T00:00:00Z",
+            "agent_id": "agent-1",
+            "outcome": "success",
+            "human_reviewed": false
+        },
+        "context": {},
+        "turns": [{
+            "turn_id": 1,
+            "span_id": "span-1",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "error": false,
+            "decisions": [{
+                "decision_id": "decision-1",
+                "decision_type": "tool_selection",
+                "choice": {"action": "SubmitOrder"},
+                "consequence": {"success": true}
+            }]
+        }]
+    })
+}
+
+#[tokio::test]
+async fn an_uploaded_trajectory_is_addressable_by_the_id_it_was_uploaded_with() {
+    // The upload path and the read path must agree on the run's identity.
+    // Seeding storage directly would prove nothing about the POST handler.
+    let (app, _store) = test_app().await;
+
+    let upload = app
+        .clone()
+        .oneshot(
+            Request::post("/api/ots/trajectories")
+                .header("X-Temper-Principal-Kind", "admin")
+                .header("X-Tenant-Id", "default")
+                .header("X-Session-Id", "session-42")
+                .header("Content-Type", "application/json")
+                .body(Body::from(ots_upload("traj-roundtrip").to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(upload.status(), StatusCode::ACCEPTED);
+
+    let export = app
+        .oneshot(admin_get(
+            "/api/ots/trajectories/traj-roundtrip/atif",
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        export.status(),
+        StatusCode::OK,
+        "the uploader holds `traj-roundtrip` and must be able to read it back"
+    );
+    let body = json_body(export).await;
+    assert_eq!(body["trajectory_id"], "traj-roundtrip");
+    assert_eq!(body["session_id"], "session-42");
+}
+
+#[tokio::test]
+async fn an_upload_with_misaligned_token_signals_is_rejected() {
+    let (app, _store) = test_app().await;
+    let mut upload = ots_upload("traj-misaligned");
+    upload["turns"][0]["completion_token_ids"] = serde_json::json!([4, 5]);
+    upload["turns"][0]["response_mask"] = serde_json::json!([7]);
+    upload["turns"][0]["logprobs"] = serde_json::json!([-0.1, -0.2, -0.3]);
+
+    let response = app
+        .oneshot(
+            Request::post("/api/ots/trajectories")
+                .header("X-Temper-Principal-Kind", "admin")
+                .header("X-Tenant-Id", "default")
+                .header("Content-Type", "application/json")
+                .body(Body::from(upload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "positionally inconsistent RL data must not be persisted"
+    );
+}
+
+#[tokio::test]
+async fn a_session_ending_exactly_on_the_limit_is_not_reported_truncated() {
+    let (app, store) = test_app().await;
+    seed_row(
+        &store,
+        "AddItem",
+        Some("Draft"),
+        Some("Draft"),
+        "2026-01-01T00:00:00Z",
+    )
+    .await;
+    seed_row(
+        &store,
+        "SubmitOrder",
+        Some("Draft"),
+        Some("Submitted"),
+        "2026-01-01T00:00:01Z",
+    )
+    .await;
+
+    let response = app
+        .oneshot(admin_post(
+            "/api/conformance/check",
+            serde_json::json!({"entity_type": "Order", "session_id": "session-1", "limit": 2}),
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await;
+    assert_eq!(
+        body["truncated"],
+        serde_json::json!(false),
+        "a complete session that happens to be limit-sized is complete"
+    );
+    assert_eq!(body["report"]["verdict"], "pass");
+    assert_eq!(body["report"]["passed"], serde_json::json!(true));
+}
+
+#[tokio::test]
+async fn a_truncated_session_is_indeterminate_rather_than_passing() {
+    let (app, store) = test_app().await;
+    seed_row(
+        &store,
+        "AddItem",
+        Some("Draft"),
+        Some("Draft"),
+        "2026-01-01T00:00:00Z",
+    )
+    .await;
+    seed_row(
+        &store,
+        "SubmitOrder",
+        Some("Draft"),
+        Some("Submitted"),
+        "2026-01-01T00:00:01Z",
+    )
+    .await;
+
+    let response = app
+        .oneshot(admin_post(
+            "/api/conformance/check",
+            serde_json::json!({"entity_type": "Order", "session_id": "session-1", "limit": 1}),
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await;
+    assert_eq!(body["truncated"], serde_json::json!(true));
+    assert_eq!(body["report"]["verdict"], "indeterminate");
+    assert_eq!(
+        body["report"]["passed"],
+        serde_json::json!(false),
+        "a consumer gating on `passed` must not accept a partially read run"
+    );
+}
+
+#[tokio::test]
+async fn a_session_with_no_rows_is_indeterminate_rather_than_passing() {
+    let (app, _store) = test_app().await;
+
+    let response = app
+        .oneshot(admin_post(
+            "/api/conformance/check",
+            serde_json::json!({"entity_type": "Order", "session_id": "no-such-session"}),
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await;
+    assert_eq!(body["report"]["verdict"], "indeterminate");
+    assert_eq!(body["report"]["passed"], serde_json::json!(false));
+}
+
+#[tokio::test]
+async fn a_run_under_another_spec_version_is_refused_rather_than_judged() {
+    let (app, store) = test_app().await;
+    seed_row(
+        &store,
+        "AddItem",
+        Some("Draft"),
+        Some("Draft"),
+        "2026-01-01T00:00:00Z",
+    )
+    .await;
+
+    let response = app
+        .oneshot(admin_post(
+            "/api/conformance/check",
+            serde_json::json!({
+                "entity_type": "Order",
+                "session_id": "session-1",
+                "spec_version": "sha256:a-spec-that-is-not-loaded"
+            }),
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "judging a run by a spec it never ran under is worse than refusing"
+    );
+}
+
+#[tokio::test]
+async fn a_run_under_the_registered_spec_version_is_checked() {
+    let (app, store) = test_app().await;
+    seed_row(
+        &store,
+        "AddItem",
+        Some("Draft"),
+        Some("Draft"),
+        "2026-01-01T00:00:00Z",
+    )
+    .await;
+    let registered = temper_store_turso::spec_content_hash(ORDER_IOA);
+
+    let response = app
+        .oneshot(admin_post(
+            "/api/conformance/check",
+            serde_json::json!({
+                "entity_type": "Order",
+                "session_id": "session-1",
+                "spec_version": format!("sha256:{registered}")
+            }),
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await;
+    assert_eq!(
+        body["spec_version"], registered,
+        "the report names the spec it was produced against"
+    );
+}
+
+#[tokio::test]
+async fn an_ots_trajectory_declaring_another_spec_version_is_refused() {
+    let (app, store) = test_app().await;
+    seed_row(
+        &store,
+        "AddItem",
+        Some("Draft"),
+        Some("Draft"),
+        "2026-01-01T00:00:00Z",
+    )
+    .await;
+    let mut data = ots_upload("traj-oldspec");
+    data["metadata"]["spec_version"] = serde_json::json!("sha256:v1-long-gone");
+    store
+        .persist_ots_trajectory(&OtsTrajectoryParams {
+            trajectory_id: "traj-oldspec",
+            tenant: "default",
+            agent_id: "agent-1",
+            session_id: "session-1",
+            outcome: "success",
+            turn_count: 1,
+            data: &data.to_string(),
+        })
+        .await
+        .expect("persist OTS trajectory");
+
+    let response = app
+        .oneshot(admin_post(
+            "/api/conformance/check",
+            serde_json::json!({
+                "entity_type": "Order",
+                "session_id": "session-1",
+                "trajectory_id": "traj-oldspec"
+            }),
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "the run records which spec governed it, and it is not the loaded one"
+    );
+}
+
+#[tokio::test]
+async fn a_trajectory_with_no_steps_is_not_exported_as_stepless_atif() {
+    let (app, store) = test_app().await;
+    let data = r#"{"trajectory_id":"traj-empty","version":"0.1.0","metadata":{"task_description":"t","timestamp_start":"2026-01-01T00:00:00Z","agent_id":"a","outcome":"success","human_reviewed":false},"context":{}}"#;
+    store
+        .persist_ots_trajectory(&OtsTrajectoryParams {
+            trajectory_id: "traj-empty",
+            tenant: "default",
+            agent_id: "agent-1",
+            session_id: "session-1",
+            outcome: "success",
+            turn_count: 0,
+            data,
+        })
+        .await
+        .expect("persist OTS trajectory");
+
+    let response = app
+        .oneshot(admin_get(
+            "/api/ots/trajectories/traj-empty/atif",
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "ATIF v1.7 requires at least one step; a stepless document is not valid ATIF"
     );
 }

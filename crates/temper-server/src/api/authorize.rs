@@ -151,6 +151,7 @@ pub(crate) async fn handle_audit(
         request_body: body.request_body,
         intent: body.intent,
         matched_policy_ids: None,
+        capture_seq: None,
     };
 
     if !state.enqueue_trajectory_entry(entry) {

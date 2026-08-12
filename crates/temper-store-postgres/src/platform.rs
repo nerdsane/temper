@@ -307,6 +307,9 @@ pub struct PostgresTrajectoryRow {
     pub request_body: Option<String>,
     pub intent: Option<String>,
     pub matched_policy_ids: Option<Vec<String>>,
+    /// Monotonic capture order stamped by the process that recorded the row.
+    /// Null on rows written before the column existed.
+    pub capture_seq: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -490,6 +493,10 @@ pub struct PostgresTrajectoryInsert<'a> {
     pub request_body: Option<&'a str>,
     pub intent: Option<&'a str>,
     pub matched_policy_ids: Option<&'a str>,
+    /// Monotonic capture order stamped by the recording process, so a session
+    /// reads back in the order the kernel captured it rather than the order
+    /// independent persistence tasks happened to land.
+    pub capture_seq: Option<i64>,
 }
 
 impl PostgresEventStore {
@@ -504,8 +511,8 @@ impl PostgresEventStore {
             "INSERT INTO trajectories \
              (tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
               agent_id, session_id, authz_denied, denied_resource, denied_module, source, \
-              spec_governed, created_at, request_body, intent, matched_policy_ids) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)",
+              spec_governed, created_at, request_body, intent, matched_policy_ids, capture_seq) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
         )
         .bind(entry.tenant)
         .bind(entry.entity_type)
@@ -526,6 +533,7 @@ impl PostgresEventStore {
         .bind(request_body)
         .bind(entry.intent)
         .bind(matched_policy_ids)
+        .bind(entry.capture_seq)
         .execute(self.pool())
         .await
         .map_err(storage_error)?;
@@ -1597,7 +1605,7 @@ impl PostgresEventStore {
         let rows = crate::dbm::postgres_query!(
             "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
                     agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, \
-                    created_at, request_body, intent, matched_policy_ids \
+                    created_at, request_body, intent, matched_policy_ids, capture_seq \
              FROM trajectories \
              ORDER BY created_at DESC \
              LIMIT $1",
@@ -1711,7 +1719,7 @@ impl PostgresEventStore {
         let failed_rows = crate::dbm::postgres_query!(
             "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
                     agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, \
-                    created_at, request_body, intent, matched_policy_ids \
+                    created_at, request_body, intent, matched_policy_ids, capture_seq \
              FROM trajectories \
              WHERE success = false \
              ORDER BY created_at DESC \
@@ -1747,7 +1755,7 @@ impl PostgresEventStore {
         let rows = crate::dbm::postgres_query!(
             "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
                     agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, \
-                    created_at, request_body, intent, matched_policy_ids \
+                    created_at, request_body, intent, matched_policy_ids, capture_seq \
              FROM trajectories \
              WHERE agent_id = $1 \
                AND ($2::text IS NULL OR tenant = $2) \
@@ -1769,8 +1777,16 @@ impl PostgresEventStore {
     ///
     /// Ordered ascending — oldest first — because the conformance checker
     /// replays a session as a state-machine run and a newest-first read would
-    /// hand it the run backwards. `id` breaks ties so rows written inside the
-    /// same `created_at` tick still come back in write order.
+    /// hand it the run backwards.
+    ///
+    /// Ties inside one `created_at` tick are broken by `capture_seq`, the
+    /// order the capturing process stamped on the entry, and only then by
+    /// `id`. `id` alone is the order the writes landed: rows are persisted by
+    /// independently spawned tasks, so two entries captured in one tick can be
+    /// inserted in either order and a denial/retry pair would be replayed
+    /// backwards. `COALESCE` sorts rows written before the column existed
+    /// first and identically on both backends, rather than leaving it to each
+    /// engine's NULL ordering.
     pub async fn query_trajectories_by_session(
         &self,
         session_id: &str,
@@ -1781,12 +1797,12 @@ impl PostgresEventStore {
         let rows = crate::dbm::postgres_query!(
             "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
                     agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, \
-                    created_at, request_body, intent, matched_policy_ids \
+                    created_at, request_body, intent, matched_policy_ids, capture_seq \
              FROM trajectories \
              WHERE session_id = $1 \
                AND ($2::text IS NULL OR tenant = $2) \
                AND ($3::text IS NULL OR entity_type = $3) \
-             ORDER BY created_at ASC, id ASC \
+             ORDER BY created_at ASC, COALESCE(capture_seq, 0) ASC, id ASC \
              LIMIT $4",
         )
         .bind(session_id)

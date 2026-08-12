@@ -388,3 +388,181 @@ async fn oversized_request_body_is_bounded_before_persistence() {
 
     let _ = std::fs::remove_file(db_path);
 }
+
+#[tokio::test]
+async fn secret_named_parameters_are_redacted_before_persistence() {
+    // Every successful action now records its arguments, so an action that
+    // takes a credential would put it in a durable row that trajectory
+    // observation and training exports both read.
+    let (store, db_path) = temp_store("trajectory-secrets").await;
+    let state = build_turso_state("trajectory-capture-secrets", store);
+
+    let (status, body) = post_observed(
+        &state,
+        "/tdata/Orders",
+        serde_json::json!({"id": "ord-jcs-6", "Currency": "USD"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "seed create failed: {body:?}");
+
+    let (status, body) = post_observed(
+        &state,
+        "/tdata/Orders('ord-jcs-6')/Temper.AddItem",
+        serde_json::json!({
+            "ProductId": "prod-secret",
+            "Quantity": 1,
+            "api_token": "sk-live-must-not-be-stored",
+            "payment": {"card_number": "4111111111111111", "cvv": "123"}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "AddItem failed: {body:?}");
+
+    let entry = await_trajectory(&state, "AddItem with secrets", |entry| {
+        entry.action == "AddItem" && entry.entity_id == "ord-jcs-6" && entry.success
+    })
+    .await;
+
+    let request_body = entry.request_body.as_ref().expect("request body persisted");
+    let rendered = request_body.to_string();
+    assert!(
+        !rendered.contains("sk-live-must-not-be-stored"),
+        "the token must not survive into storage: {rendered}"
+    );
+    assert!(
+        !rendered.contains("4111111111111111") && !rendered.contains("\"123\""),
+        "nested payment details must not survive into storage: {rendered}"
+    );
+    assert_eq!(
+        request_body["ProductId"],
+        serde_json::json!("prod-secret"),
+        "ordinary arguments are still captured"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn a_rejected_retry_records_the_state_it_was_attempted_from() {
+    // A guard failure appends no event, so reading the newest event would
+    // report the source state of the *previous* successful transition — the
+    // state where the action was legal — and hide the illegal retry.
+    let (store, db_path) = temp_store("trajectory-retry-source").await;
+    let state = build_turso_state("trajectory-capture-retry-source", store);
+
+    let (status, body) = post_observed(
+        &state,
+        "/tdata/Orders",
+        serde_json::json!({"id": "ord-jcs-7", "Currency": "USD"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "seed create failed: {body:?}");
+
+    let (status, body) = post_observed(
+        &state,
+        "/tdata/Orders('ord-jcs-7')/Temper.AddItem",
+        serde_json::json!({"ProductId": "prod-1", "Quantity": 1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "AddItem failed: {body:?}");
+
+    let (status, body) = post_observed(
+        &state,
+        "/tdata/Orders('ord-jcs-7')/Temper.SubmitOrder",
+        serde_json::json!({"ShippingAddressId": "addr-1", "PaymentMethod": "card"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "SubmitOrder failed: {body:?}");
+
+    // Second SubmitOrder: the order is already Submitted, where the action is
+    // illegal, so the guard rejects it.
+    let (status, _body) = post_observed(
+        &state,
+        "/tdata/Orders('ord-jcs-7')/Temper.SubmitOrder",
+        serde_json::json!({"ShippingAddressId": "addr-1", "PaymentMethod": "card"}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "SubmitOrder from Submitted must be rejected"
+    );
+
+    let entry = await_trajectory(&state, "rejected SubmitOrder retry", |entry| {
+        entry.action == "SubmitOrder" && entry.entity_id == "ord-jcs-7" && !entry.success
+    })
+    .await;
+
+    assert_eq!(
+        entry.from_status.as_deref(),
+        Some("Submitted"),
+        "the rejected attempt was made from Submitted, not from the Draft the \
+         previous successful transition started in"
+    );
+    assert_eq!(entry.to_status.as_deref(), Some("Submitted"));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn a_session_reads_back_in_capture_order() {
+    // Rows are persisted by independently spawned tasks, so the storage id is
+    // the order the writes landed. The session read must reproduce the order
+    // the kernel captured, which is what the conformance walk replays.
+    let (store, db_path) = temp_store("trajectory-capture-order").await;
+    let state = build_turso_state("trajectory-capture-order", store.clone());
+
+    let (status, body) = post_observed(
+        &state,
+        "/tdata/Orders",
+        serde_json::json!({"id": "ord-jcs-8", "Currency": "USD"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "seed create failed: {body:?}");
+
+    for quantity in 1..=6 {
+        let (status, body) = post_observed(
+            &state,
+            "/tdata/Orders('ord-jcs-8')/Temper.AddItem",
+            serde_json::json!({"ProductId": format!("prod-{quantity}"), "Quantity": quantity}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "AddItem failed: {body:?}");
+    }
+    let (status, body) = post_observed(
+        &state,
+        "/tdata/Orders('ord-jcs-8')/Temper.SubmitOrder",
+        serde_json::json!({"ShippingAddressId": "addr-1", "PaymentMethod": "card"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "SubmitOrder failed: {body:?}");
+
+    // Wait for the last captured row to land, then read the session back.
+    let _ = await_trajectory(&state, "SubmitOrder", |entry| {
+        entry.action == "SubmitOrder" && entry.entity_id == "ord-jcs-8" && entry.success
+    })
+    .await;
+
+    let rows = store
+        .query_trajectories_by_session(SESSION_ID, Some("default"), Some("Order"), 100)
+        .await
+        .expect("read session");
+    let sequences: Vec<i64> = rows.iter().filter_map(|row| row.capture_seq).collect();
+    assert_eq!(
+        sequences.len(),
+        rows.len(),
+        "every captured row carries its capture order"
+    );
+    assert!(
+        sequences.windows(2).all(|pair| pair[0] < pair[1]),
+        "the session must read back in capture order, got {sequences:?}"
+    );
+    let actions: Vec<&str> = rows.iter().map(|row| row.action.as_str()).collect();
+    assert_eq!(
+        actions.last(),
+        Some(&"SubmitOrder"),
+        "the last captured action is last in the read: {actions:?}"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}

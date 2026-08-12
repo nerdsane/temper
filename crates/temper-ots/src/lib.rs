@@ -17,7 +17,9 @@ pub mod builder;
 pub mod models;
 
 // Re-exports for convenience
-pub use atif::{ATIF_SCHEMA_VERSION, AtifTrajectory, to_atif};
+pub use atif::{
+    ATIF_SCHEMA_VERSION, AtifExportError, AtifTrajectory, UNKNOWN_AGENT_VERSION, to_atif,
+};
 pub use builder::TrajectoryBuilder;
 pub use models::{
     DecisionType, EvaluatorType, MessageRole, OTSAnnotation, OTSChoice, OTSConsequence, OTSContext,

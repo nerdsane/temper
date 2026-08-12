@@ -24,6 +24,7 @@ fn entry_with_body(request_body: Option<serde_json::Value>) -> TrajectoryEntry {
         request_body,
         intent: None,
         matched_policy_ids: None,
+        capture_seq: None,
     }
 }
 

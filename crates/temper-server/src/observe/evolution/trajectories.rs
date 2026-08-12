@@ -194,6 +194,7 @@ pub(crate) async fn handle_unmet_intent(
             .map(str::to_string)
             .or_else(|| Some(intent.to_string())),
         matched_policy_ids: None,
+        capture_seq: None,
     };
     if !state.enqueue_trajectory_entry(entry) {
         tracing::warn!("failed to enqueue unmet-intent trajectory");
@@ -215,50 +216,64 @@ pub(crate) struct OtsTrajectoryQueryParams {
 }
 
 /// POST /api/ots/trajectories — receive a full OTS trajectory from an MCP session.
+///
+/// The body is parsed as an [`OTSTrajectory`], not as free JSON. Two things
+/// depend on that:
+///
+/// - **Identity.** The run's id is the document's top-level `trajectory_id`.
+///   It is what the uploader holds and what
+///   `GET /api/ots/trajectories/{id}/atif` and a conformance check address the
+///   row by, so storing anything else makes a successfully uploaded run
+///   unreachable.
+/// - **The token-signal contract.** `OTSTurn` refuses to deserialize a turn
+///   whose completion-side signals disagree, so a misaligned training sample
+///   is rejected at the door instead of persisted and later exported as valid
+///   RL data.
 #[instrument(skip_all, fields(otel.name = "POST /api/ots/trajectories"))]
 pub(crate) async fn handle_post_ots_trajectory(
     State(state): State<ServerState>,
     headers: HeaderMap,
     body: String,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    // Parse the OTS trajectory JSON to extract indexed fields.
-    let trajectory: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")))?;
+    let trajectory: temper_ots::models::OTSTrajectory =
+        serde_json::from_str(&body).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("not a valid OTS trajectory: {e}"),
+            )
+        })?;
 
-    let trajectory_id = trajectory
-        .get("metadata")
-        .and_then(|m| m.get("trajectory_id"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| sim_uuid().to_string());
+    let trajectory_id = if trajectory.trajectory_id.is_empty() {
+        // Uploads have carried an id since the format existed; generating one
+        // keeps a legacy producer working, at the cost of an id it cannot
+        // address the row by.
+        let generated = sim_uuid().to_string();
+        tracing::warn!(
+            generated_trajectory_id = %generated,
+            "OTS upload carried no trajectory_id; storing under a generated id"
+        );
+        generated
+    } else {
+        trajectory.trajectory_id.clone()
+    };
 
     let agent_id = headers
         .get("X-Agent-Id")
         .and_then(|v| v.to_str().ok())
-        .or_else(|| {
-            trajectory
-                .get("metadata")
-                .and_then(|m| m.get("agent_id"))
-                .and_then(|v| v.as_str())
-        })
-        .unwrap_or("unknown");
+        .unwrap_or(trajectory.metadata.agent_id.as_str());
 
     let session_id = headers
         .get("X-Session-Id")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let outcome = trajectory
-        .get("metadata")
-        .and_then(|m| m.get("outcome"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+    let outcome = match trajectory.metadata.outcome {
+        temper_ots::models::OutcomeType::Success => "success",
+        temper_ots::models::OutcomeType::PartialSuccess => "partial_success",
+        temper_ots::models::OutcomeType::Failure => "failure",
+    };
 
-    let turn_count = trajectory
-        .get("turns")
-        .and_then(|t| t.as_array())
-        .map(|a| a.len() as i64)
-        .unwrap_or(0);
+    let turn_count = trajectory.turns.len() as i64;
 
     let tenant = headers
         .get("X-Tenant-Id")

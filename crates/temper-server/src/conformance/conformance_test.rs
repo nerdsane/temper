@@ -34,6 +34,24 @@ from = ["Working"]
 to = "Closed"
 "#;
 
+/// An actor with an always-enabled input action: no `from`, no `state_in`.
+const ALWAYS_ENABLED_IOA: &str = r#"
+[automaton]
+name = "Beacon"
+states = ["Active", "Closed"]
+initial = "Active"
+
+[[action]]
+name = "Close"
+kind = "input"
+from = ["Active"]
+to = "Closed"
+
+[[action]]
+name = "Heartbeat"
+kind = "input"
+"#;
+
 fn order_automaton() -> temper_spec::automaton::Automaton {
     parse_automaton(ORDER_IOA).expect("order fixture parses")
 }
@@ -60,6 +78,7 @@ fn row(action: &str, from: Option<&str>, to: Option<&str>) -> TursoTrajectoryRow
         request_body: None,
         intent: None,
         matched_policy_ids: None,
+        capture_seq: None,
     }
 }
 
@@ -83,6 +102,21 @@ fn failed(action: &str, from: Option<&str>) -> TursoTrajectoryRow {
     }
 }
 
+/// Run the checker over a complete read: the tests that care about truncation
+/// build their own [`ConformanceInput`].
+fn check(
+    automaton: &temper_spec::automaton::Automaton,
+    kernel_rows: &[TursoTrajectoryRow],
+    ots_trajectory: Option<&OTSTrajectory>,
+) -> ConformanceReport {
+    check_conformance(ConformanceInput {
+        automaton,
+        kernel_rows,
+        ots_trajectory,
+        rows_truncated: false,
+    })
+}
+
 fn only_violation(report: &ConformanceReport) -> &Violation {
     assert_eq!(
         report.violations.len(),
@@ -104,7 +138,7 @@ fn a_legal_run_passes_with_no_violations() {
         row("DeliverOrder", Some("Shipped"), Some("Delivered")),
     ];
 
-    let report = check_conformance(&order_automaton(), &rows, None);
+    let report = check(&order_automaton(), &rows, None);
 
     assert!(report.passed, "violations: {:?}", report.violations);
     assert!(report.violations.is_empty());
@@ -126,7 +160,7 @@ fn illegal_transition_reports_the_offending_index() {
         row("ShipOrder", Some("Draft"), Some("Shipped")),
     ];
 
-    let report = check_conformance(&order_automaton(), &rows, None);
+    let report = check(&order_automaton(), &rows, None);
 
     assert!(!report.passed);
     let violation = only_violation(&report);
@@ -152,7 +186,7 @@ fn a_state_in_guard_stands_in_for_a_missing_from_list() {
         ..row("Work", Some("Working"), Some("Working"))
     }];
 
-    let report = check_conformance(&automaton, &rows, None);
+    let report = check(&automaton, &rows, None);
 
     let violation = only_violation(&report);
     assert_eq!(violation.index, 0);
@@ -174,7 +208,7 @@ fn a_guarded_action_keeps_its_source_states_out_of_the_terminal_set() {
         ..row("Work", Some("Open"), Some("Working"))
     }];
 
-    let report = check_conformance(&automaton, &rows, None);
+    let report = check(&automaton, &rows, None);
 
     assert!(report.passed, "violations: {:?}", report.violations);
     assert_eq!(report.stats.terminal_entities, 0);
@@ -189,7 +223,7 @@ fn forbidden_action_flags_a_platform_action_the_actor_does_not_declare() {
         row("Created", Some("Draft"), Some("Draft")),
     ];
 
-    let report = check_conformance(&order_automaton(), &rows, None);
+    let report = check(&order_automaton(), &rows, None);
 
     let violation = only_violation(&report);
     assert_eq!(violation.index, 1);
@@ -205,7 +239,7 @@ fn unknown_action_flags_a_name_no_spec_defines() {
         row("Frobnicate", Some("Draft"), None),
     ];
 
-    let report = check_conformance(&order_automaton(), &rows, None);
+    let report = check(&order_automaton(), &rows, None);
 
     let violation = only_violation(&report);
     assert_eq!(violation.index, 1);
@@ -221,7 +255,7 @@ fn post_terminal_flags_every_action_after_the_terminal_transition() {
         row("AddItem", Some("Cancelled"), Some("Cancelled")),
     ];
 
-    let report = check_conformance(&order_automaton(), &rows, None);
+    let report = check(&order_automaton(), &rows, None);
 
     let violation = only_violation(&report);
     assert_eq!(violation.index, 1);
@@ -248,7 +282,7 @@ fn post_terminal_is_caught_when_the_session_starts_after_the_terminal_transition
     // alone has to be enough.
     let rows = vec![row("AddItem", Some("Cancelled"), Some("Cancelled"))];
 
-    let report = check_conformance(&order_automaton(), &rows, None);
+    let report = check(&order_automaton(), &rows, None);
 
     let violation = only_violation(&report);
     assert_eq!(violation.index, 0);
@@ -263,7 +297,7 @@ fn denied_then_retried_flags_a_blind_retry() {
         failed("SubmitOrder", Some("Draft")),
     ];
 
-    let report = check_conformance(&order_automaton(), &rows, None);
+    let report = check(&order_automaton(), &rows, None);
 
     let violation = only_violation(&report);
     assert_eq!(violation.index, 1);
@@ -284,7 +318,7 @@ fn a_retry_after_a_state_change_is_not_a_violation() {
         failed("CancelOrder", Some("Submitted")),
     ];
 
-    let report = check_conformance(&order_automaton(), &rows, None);
+    let report = check(&order_automaton(), &rows, None);
 
     assert!(
         report.passed,
@@ -300,7 +334,7 @@ fn a_retry_that_succeeds_is_not_a_violation() {
         row("SubmitOrder", Some("Draft"), Some("Submitted")),
     ];
 
-    let report = check_conformance(&order_automaton(), &rows, None);
+    let report = check(&order_automaton(), &rows, None);
 
     assert!(
         report.passed,
@@ -319,7 +353,7 @@ fn a_denial_on_a_different_entity_does_not_arm_the_retry_check() {
         },
     ];
 
-    let report = check_conformance(&order_automaton(), &rows, None);
+    let report = check(&order_automaton(), &rows, None);
 
     assert!(report.passed, "violations: {:?}", report.violations);
 }
@@ -332,7 +366,7 @@ fn three_denials_report_each_blind_retry() {
         denied("SubmitOrder", Some("Draft")),
     ];
 
-    let report = check_conformance(&order_automaton(), &rows, None);
+    let report = check(&order_automaton(), &rows, None);
 
     let indices: Vec<usize> = report.violations.iter().map(|v| v.index).collect();
     assert_eq!(indices, vec![1, 2]);
@@ -362,7 +396,7 @@ fn platform_rows_and_other_entities_are_counted_but_not_judged() {
         row("AddItem", Some("Draft"), Some("Draft")),
     ];
 
-    let report = check_conformance(&order_automaton(), &rows, None);
+    let report = check(&order_automaton(), &rows, None);
 
     assert!(report.passed, "violations: {:?}", report.violations);
     assert_eq!(report.stats.stream_length, 3);
@@ -375,10 +409,24 @@ fn platform_rows_and_other_entities_are_counted_but_not_judged() {
 fn a_row_without_a_source_state_is_counted_as_unchecked() {
     let rows = vec![row("ShipOrder", None, Some("Shipped"))];
 
-    let report = check_conformance(&order_automaton(), &rows, None);
+    let report = check(&order_automaton(), &rows, None);
 
-    assert!(report.passed, "violations: {:?}", report.violations);
+    assert!(report.violations.is_empty(), "{:?}", report.violations);
     assert_eq!(report.stats.transitions_unchecked, 1);
+    assert_eq!(
+        report.verdict,
+        Verdict::Indeterminate,
+        "a transition that could not be checked is not a transition that passed"
+    );
+    assert!(!report.passed);
+    assert!(
+        report
+            .evidence_gaps
+            .iter()
+            .any(|gap| gap.contains("source state")),
+        "the gap must say what was missing: {:?}",
+        report.evidence_gaps
+    );
 }
 
 fn ots_with_decisions(actions: &[&str]) -> OTSTrajectory {
@@ -409,7 +457,7 @@ fn ots_decisions_the_kernel_never_recorded_are_checked_after_the_rows() {
     // never reached the kernel at all.
     let ots = ots_with_decisions(&["AddItem", "Frobnicate"]);
 
-    let report = check_conformance(&order_automaton(), &rows, Some(&ots));
+    let report = check(&order_automaton(), &rows, Some(&ots));
 
     let violation = only_violation(&report);
     assert_eq!(
@@ -428,17 +476,233 @@ fn ots_decisions_on_declared_actions_raise_nothing() {
     let rows = vec![row("AddItem", Some("Draft"), Some("Draft"))];
     let ots = ots_with_decisions(&["CancelOrder"]);
 
-    let report = check_conformance(&order_automaton(), &rows, Some(&ots));
+    let report = check(&order_automaton(), &rows, Some(&ots));
 
     assert!(report.passed, "violations: {:?}", report.violations);
     assert_eq!(report.stats.ots_decisions_checked, 1);
 }
 
 #[test]
-fn an_empty_session_passes_with_an_empty_stream() {
-    let report = check_conformance(&order_automaton(), &[], None);
+fn an_empty_session_is_indeterminate_rather_than_passing() {
+    let report = check(&order_automaton(), &[], None);
 
-    assert!(report.passed);
+    assert_eq!(
+        report.verdict,
+        Verdict::Indeterminate,
+        "a session with no rows is no evidence of conformance"
+    );
+    assert!(
+        !report.passed,
+        "a consumer gating on `passed` must not accept a run nobody checked"
+    );
+    assert!(report.violations.is_empty());
     assert_eq!(report.stats.stream_length, 0);
     assert_eq!(report.stats.actor_rows, 0);
+    assert!(
+        report
+            .evidence_gaps
+            .iter()
+            .any(|gap| gap.contains("nothing about this run was checked")),
+        "{:?}",
+        report.evidence_gaps
+    );
+}
+
+#[test]
+fn a_truncated_read_is_indeterminate_even_with_no_violations() {
+    let rows = vec![row("AddItem", Some("Draft"), Some("Draft"))];
+
+    let report = check_conformance(ConformanceInput {
+        automaton: &order_automaton(),
+        kernel_rows: &rows,
+        ots_trajectory: None,
+        rows_truncated: true,
+    });
+
+    assert!(report.violations.is_empty());
+    assert_eq!(
+        report.verdict,
+        Verdict::Indeterminate,
+        "the unread tail of the session could hold anything"
+    );
+    assert!(!report.passed);
+    assert!(
+        report
+            .evidence_gaps
+            .iter()
+            .any(|gap| gap.contains("row cap")),
+        "{:?}",
+        report.evidence_gaps
+    );
+}
+
+#[test]
+fn a_violation_in_a_truncated_prefix_still_fails() {
+    let rows = vec![
+        row("AddItem", Some("Draft"), Some("Draft")),
+        row("ShipOrder", Some("Draft"), Some("Shipped")),
+    ];
+
+    let report = check_conformance(ConformanceInput {
+        automaton: &order_automaton(),
+        kernel_rows: &rows,
+        ots_trajectory: None,
+        rows_truncated: true,
+    });
+
+    assert_eq!(
+        report.verdict,
+        Verdict::Fail,
+        "a disagreement found in a prefix is still a disagreement"
+    );
+    assert!(!report.passed);
+}
+
+#[test]
+fn a_gap_between_two_individually_legal_rows_is_a_violation() {
+    // Both source states are legal for their own action. Nothing recorded ever
+    // moved the entity from Submitted to Processing.
+    let rows = vec![
+        row("SubmitOrder", Some("Draft"), Some("Submitted")),
+        row("ShipOrder", Some("Processing"), Some("Shipped")),
+    ];
+
+    let report = check(&order_automaton(), &rows, None);
+
+    let violation = only_violation(&report);
+    assert_eq!(violation.index, 1);
+    assert_eq!(violation.kind, ViolationKind::StateDiscontinuity);
+    assert!(
+        violation.detail.contains("Submitted") && violation.detail.contains("Processing"),
+        "detail must name both ends of the gap: {}",
+        violation.detail
+    );
+}
+
+#[test]
+fn a_success_landing_somewhere_the_action_does_not_go_is_a_violation() {
+    // SubmitOrder is legal from Draft and lands in Submitted, never Cancelled.
+    let rows = vec![row("SubmitOrder", Some("Draft"), Some("Cancelled"))];
+
+    let report = check(&order_automaton(), &rows, None);
+
+    let violation = only_violation(&report);
+    assert_eq!(violation.index, 0);
+    assert_eq!(violation.kind, ViolationKind::UnexpectedTargetState);
+    assert!(
+        violation.detail.contains("Cancelled") && violation.detail.contains("Submitted"),
+        "detail must name both the observed and the declared target: {}",
+        violation.detail
+    );
+}
+
+#[test]
+fn an_action_with_no_target_must_leave_the_state_where_it_was() {
+    // AddItem declares no `to`, so the state holds.
+    let rows = vec![row("AddItem", Some("Draft"), Some("Submitted"))];
+
+    let report = check(&order_automaton(), &rows, None);
+
+    let violation = only_violation(&report);
+    assert_eq!(violation.kind, ViolationKind::UnexpectedTargetState);
+    assert!(
+        violation.detail.contains("declares no `to`"),
+        "{}",
+        violation.detail
+    );
+}
+
+#[test]
+fn an_always_enabled_action_empties_the_terminal_set() {
+    // `Heartbeat` is an input action with neither `from` nor a state_in guard,
+    // so the kernel enables it from every state — including `Closed`, which no
+    // other action lists as a source.
+    let automaton = parse_automaton(ALWAYS_ENABLED_IOA).expect("fixture parses");
+    let rows = vec![TursoTrajectoryRow {
+        entity_type: "Beacon".to_string(),
+        ..row("Heartbeat", Some("Closed"), Some("Closed"))
+    }];
+
+    let report = check(&automaton, &rows, None);
+
+    assert!(
+        report.passed,
+        "an always-enabled action is legal from a state nothing else leaves: {:?}",
+        report.violations
+    );
+    assert_eq!(report.stats.terminal_entities, 0);
+}
+
+#[test]
+fn a_caller_supplied_audit_row_cannot_inject_a_violation() {
+    // POST /api/audit writes rows with a caller-chosen session, entity type,
+    // and action name, marked spec_governed = false.
+    let rows = vec![
+        row("AddItem", Some("Draft"), Some("Draft")),
+        TursoTrajectoryRow {
+            spec_governed: Some(false),
+            ..row("Frobnicate", Some("Draft"), Some("Draft"))
+        },
+    ];
+
+    let report = check(&order_automaton(), &rows, None);
+
+    assert!(
+        report.passed,
+        "a non-governed audit record is not this actor executing its spec: {:?}",
+        report.violations
+    );
+    assert_eq!(report.stats.non_governed_rows_skipped, 1);
+    assert_eq!(report.stats.actor_rows, 1);
+}
+
+#[test]
+fn a_row_on_another_entity_does_not_account_for_a_decision_on_this_one() {
+    // The kernel recorded PayInvoice against Invoice. That says nothing about
+    // whether the agent's PayInvoice decision against Order ever reached the
+    // governed path.
+    let rows = vec![
+        row("AddItem", Some("Draft"), Some("Draft")),
+        TursoTrajectoryRow {
+            entity_type: "Invoice".to_string(),
+            ..row("PayInvoice", Some("Due"), Some("Paid"))
+        },
+    ];
+    let ots = ots_with_decisions(&["PayInvoice"]);
+
+    let report = check(&order_automaton(), &rows, Some(&ots));
+
+    let violation = only_violation(&report);
+    assert_eq!(violation.kind, ViolationKind::UnknownAction);
+    assert_eq!(violation.action, "PayInvoice");
+    assert_eq!(violation.entity_type, "Order");
+}
+
+#[test]
+fn a_thinking_decision_is_not_reported_as_an_action() {
+    let rows = vec![row("AddItem", Some("Draft"), Some("Draft"))];
+    let now = "2026-01-01T00:00:00Z"
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .expect("timestamp parses");
+    let ots = OTSTrajectory::new(OTSMetadata::new(
+        "task",
+        "agent-1",
+        OutcomeType::Success,
+        now,
+    ))
+    .with_turn(OTSTurn::new(1, now).with_decision(OTSDecision::new(
+        DecisionType::ReasoningStep,
+        OTSChoice::new("compare shipping options"),
+        OTSConsequence::success(),
+    )));
+
+    let report = check(&order_automaton(), &rows, Some(&ots));
+
+    assert!(
+        report.passed,
+        "a reasoning step names a thought, not a callable: {:?}",
+        report.violations
+    );
+    assert_eq!(report.stats.ots_decisions_checked, 0);
+    assert_eq!(report.stats.ots_decisions_skipped_as_thinking, 1);
 }

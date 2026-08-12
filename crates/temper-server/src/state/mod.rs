@@ -1391,6 +1391,7 @@ impl ServerState {
                         request_body: r.request_body.and_then(|s| serde_json::from_str(&s).ok()),
                         intent: r.intent,
                         matched_policy_ids: r.matched_policy_ids,
+                        capture_seq: r.capture_seq,
                     }));
                 }
                 Err(e) => {

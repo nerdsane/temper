@@ -130,6 +130,7 @@ pub(crate) async fn handle_repl(
                 request_body: Some(serde_json::json!({ "code": submitted_code })),
                 intent: agent_ctx.intent.clone(),
                 matched_policy_ids: None,
+                capture_seq: None,
             };
             if !state.enqueue_trajectory_entry(entry) {
                 tracing::warn!("failed to enqueue REPL trajectory entry");

@@ -1,14 +1,17 @@
 //! Golden tests for the OTS -> ATIF v1.7 export.
 //!
-//! Two shapes are pinned:
+//! Three shapes are pinned:
 //!
 //! 1. A fully populated trajectory — every OTS field the mapping touches is
 //!    set, and the resulting ATIF document is asserted field by field.
-//! 2. A minimal trajectory — nothing optional is set, and the export must
-//!    still be a valid ATIF document with the optional keys absent rather
-//!    than present-and-null.
+//! 2. A minimal trajectory — nothing optional is set beyond the one step ATIF
+//!    requires, and the export must still be a valid ATIF document with the
+//!    optional keys absent rather than present-and-null.
+//! 3. A trajectory with nothing in it at all, which is not exportable: ATIF
+//!    v1.7 models a trajectory as its step list and has no valid stepless
+//!    document.
 
-use temper_ots::atif::{ATIF_SCHEMA_VERSION, to_atif};
+use temper_ots::atif::{ATIF_SCHEMA_VERSION, AtifExportError, UNKNOWN_AGENT_VERSION, to_atif};
 use temper_ots::models::{
     ContentType, DecisionType, MessageRole, OTSAlternative, OTSChoice, OTSConsequence, OTSContext,
     OTSCreditAssignment, OTSDecision, OTSDecisionEvaluation, OTSEntity, OTSMessage,
@@ -35,6 +38,7 @@ fn full_trajectory() -> OTSTrajectory {
     .with_duration_ms(30_000.0)
     .with_framework("langchain")
     .with_harness("temperpaw")
+    .with_agent_version("temperpaw 3.2")
     .with_spec_version("sha256:9f2c")
     .with_environment("production")
     .with_feedback_score(0.9)
@@ -113,7 +117,7 @@ fn full_trajectory() -> OTSTrajectory {
 
 #[test]
 fn full_trajectory_exports_field_by_field() {
-    let atif = to_atif(&full_trajectory(), Some("session-42"));
+    let atif = to_atif(&full_trajectory(), Some("session-42")).expect("export");
 
     // -- Root ------------------------------------------------------------
     assert_eq!(atif.schema_version, ATIF_SCHEMA_VERSION);
@@ -131,8 +135,8 @@ fn full_trajectory_exports_field_by_field() {
         "harness names the agent system and outranks framework"
     );
     assert_eq!(
-        atif.agent.version, "sha256:9f2c",
-        "the governing spec version is the agent version"
+        atif.agent.version, "temperpaw 3.2",
+        "agent.version is the agent system's release, never the spec hash"
     );
     assert!(
         atif.agent.model_name.is_none(),
@@ -318,26 +322,34 @@ fn full_trajectory_exports_field_by_field() {
 #[test]
 fn minimal_trajectory_exports_valid_atif_with_optionals_absent() {
     let metadata = OTSMetadata::new("minimal task", "agent-2", OutcomeType::Failure, at(0));
-    let trajectory = OTSTrajectory::new(metadata).with_trajectory_id("traj-minimal-0001");
+    // One step is the ATIF floor, so the smallest exportable trajectory is a
+    // system message and nothing else.
+    let trajectory = OTSTrajectory::new(metadata)
+        .with_trajectory_id("traj-minimal-0001")
+        .with_system_message(OTSSystemMessage::new("be brief", at(0)));
 
-    let atif = to_atif(&trajectory, None);
+    let atif = to_atif(&trajectory, None).expect("a system message is a step");
     assert_eq!(atif.schema_version, "ATIF-v1.7");
     assert!(atif.session_id.is_none());
-    assert!(atif.steps.is_empty());
+    assert_eq!(atif.steps.len(), 1);
     assert_eq!(
         atif.agent.name, "agent-2",
         "with neither harness nor framework the agent id names the system"
     );
     assert_eq!(
-        atif.agent.version, "0.1.0",
-        "with no spec version the OTS document version stands in"
+        atif.agent.version, UNKNOWN_AGENT_VERSION,
+        "an unreported agent release is unknown, not the OTS format version"
     );
 
     let json = serde_json::to_value(&atif).expect("serialize ATIF");
     let object = json.as_object().expect("ATIF root is an object");
     assert_eq!(object["schema_version"], "ATIF-v1.7");
     assert_eq!(object["trajectory_id"], "traj-minimal-0001");
-    assert_eq!(object["steps"], serde_json::json!([]));
+    assert_eq!(
+        object["steps"].as_array().expect("steps").len(),
+        1,
+        "ATIF v1.7 requires at least one step"
+    );
 
     // Optional keys must be absent, not present-and-null.
     for absent in ["session_id", "subagent_trajectories"] {
@@ -355,7 +367,7 @@ fn minimal_trajectory_exports_valid_atif_with_optionals_absent() {
 
     // A trajectory with no turns still reports its step total.
     let final_metrics = &object["final_metrics"];
-    assert_eq!(final_metrics["total_steps"], serde_json::json!(0));
+    assert_eq!(final_metrics["total_steps"], serde_json::json!(1));
     assert!(
         !final_metrics
             .as_object()
@@ -369,6 +381,79 @@ fn minimal_trajectory_exports_valid_atif_with_optionals_absent() {
     assert!(!extra.contains_key("temper.context"));
     assert!(!extra.contains_key("temper.final_reward"));
     assert_eq!(extra["temper.ots_version"], "0.1.0");
+}
+
+#[test]
+fn a_trajectory_with_no_steps_is_refused_rather_than_exported_stepless() {
+    let metadata = OTSMetadata::new("nothing ran", "agent-2", OutcomeType::Failure, at(0));
+    let trajectory = OTSTrajectory::new(metadata).with_trajectory_id("traj-empty-0001");
+
+    assert_eq!(
+        to_atif(&trajectory, Some("session-empty")),
+        Err(AtifExportError::NoSteps),
+        "a session finalized before anything ran has no valid ATIF document"
+    );
+}
+
+#[test]
+fn thinking_decisions_do_not_become_environment_interactions() {
+    let metadata = OTSMetadata::new("think then act", "agent-4", OutcomeType::Success, at(0));
+    let reasoning = OTSDecision::new(
+        DecisionType::ReasoningStep,
+        OTSChoice::new("compare shipping options"),
+        OTSConsequence::success(),
+    )
+    .with_decision_id("decision-think");
+    let response = OTSDecision::new(
+        DecisionType::ResponseFormulation,
+        OTSChoice::new("apologise and offer a refund"),
+        OTSConsequence::success(),
+    )
+    .with_decision_id("decision-say");
+    let invocation = OTSDecision::new(
+        DecisionType::ParameterChoice,
+        OTSChoice::new("ShipOrder").with_arguments(serde_json::json!({"carrier": "dhl"})),
+        OTSConsequence::success().with_result_summary("Shipped"),
+    )
+    .with_decision_id("decision-ship");
+
+    let trajectory = OTSTrajectory::new(metadata)
+        .with_trajectory_id("traj-thinking-0001")
+        .with_turn(
+            OTSTurn::new(1, at(1))
+                .with_span_id("span-1")
+                .with_decision(reasoning)
+                .with_decision(response)
+                .with_decision(invocation),
+        );
+
+    let atif = to_atif(&trajectory, None).expect("export");
+    let step = &atif.steps[0];
+    let called: Vec<&str> = step
+        .tool_calls
+        .iter()
+        .map(|call| call.function_name.as_str())
+        .collect();
+    assert_eq!(
+        called,
+        vec!["ShipOrder"],
+        "only tool selections and parameter choices name a callable"
+    );
+    let results = &step.observation.as_ref().expect("observation").results;
+    assert_eq!(
+        results.len(),
+        1,
+        "a thought produces no environment observation"
+    );
+    assert_eq!(results[0].source_call_id.as_deref(), Some("decision-ship"));
+    assert_eq!(
+        step.extra["temper.decisions"]
+            .as_array()
+            .expect("decisions")
+            .len(),
+        3,
+        "every decision is still carried verbatim in extra"
+    );
 }
 
 #[test]
@@ -388,7 +473,7 @@ fn errored_turn_and_fallback_call_id_are_recorded() {
         .with_trajectory_id("traj-error-0001")
         .with_turn(turn);
 
-    let atif = to_atif(&trajectory, Some("session-9"));
+    let atif = to_atif(&trajectory, Some("session-9")).expect("export");
     assert_eq!(atif.steps.len(), 1);
     let step = &atif.steps[0];
     assert_eq!(step.message, "", "no assistant text means an empty message");

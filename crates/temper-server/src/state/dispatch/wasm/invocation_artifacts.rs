@@ -281,6 +281,7 @@ impl crate::state::ServerState {
             })),
             intent: agent_ctx.intent.clone(),
             matched_policy_ids: None,
+            capture_seq: None,
         };
         tracing::info!(
             tenant = %traj.tenant,

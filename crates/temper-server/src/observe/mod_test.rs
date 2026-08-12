@@ -1648,6 +1648,7 @@ async fn test_intent_evidence_returns_richer_intent_candidates() {
             request_body: Some(serde_json::json!({"customer_id":"c-1"})),
             intent: Some(intent.to_string()),
             matched_policy_ids: None,
+            capture_seq: None,
         })
         .await
         .unwrap();
@@ -1673,6 +1674,7 @@ async fn test_intent_evidence_returns_richer_intent_candidates() {
             request_body: Some(serde_json::json!({"customer_id":"c-1"})),
             intent: Some(intent.to_string()),
             matched_policy_ids: None,
+            capture_seq: None,
         })
         .await
         .unwrap();
