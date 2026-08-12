@@ -168,22 +168,25 @@ impl<'a> ActionVocabulary<'a> {
     }
 }
 
-/// Whether this row records the kernel dispatching an action, which is the only
-/// thing that proves a name is an action at all.
+/// Whether this row records the kernel dispatching an action on an entity,
+/// which is the closest thing to proof that a name is an action at all.
 ///
-/// Written as an allowlist of one source, because the question is whether the
-/// KERNEL chose this name, and only the entity dispatch path
-/// ([`TrajectorySource::Entity`](crate::state::TrajectorySource)) answers yes.
-/// The other two both carry names a caller can choose:
+/// Written as an allowlist of one source
+/// ([`TrajectorySource::Entity`](crate::state::TrajectorySource)), because that
+/// is the only path on which the kernel routed the name to an actor. The other
+/// two both carry names a caller can choose:
 ///
 /// - `Authz` rows come from `authz::helpers::record_authz_denial`, which
 ///   `POST /api/authorize` reaches with a caller-supplied action name, resource
 ///   type and `X-Temper-Ctx-SessionId`. They are written with `spec_governed`
 ///   unset, so testing that flag alone lets them through.
-/// - `Platform` rows are kernel bookkeeping. Their names are the kernel's, but
-///   they are already in [`KERNEL_PLATFORM_ACTIONS`], so admitting them adds
-///   nothing — and it is what would let a capture-loss marker's `CaptureLost`
-///   into the vocabulary.
+/// - `Platform` rows are kernel bookkeeping, so their names are the kernel's
+///   own and admitting them would be safe. They are left out because the ones
+///   that matter to an actor are already in [`KERNEL_PLATFORM_ACTIONS`], while
+///   admitting the source is what would let a capture-loss marker's
+///   `CaptureLost` in. The cost is exact and small: a decision naming a
+///   platform-source action that the list does not carry — `policy_saved`,
+///   `repl_execution` — is counted rather than judged.
 ///
 /// `spec_governed = false` is then checked on top: `POST /api/audit` and
 /// `POST /api/evolution/trajectories/unmet` write caller-named rows and mark
@@ -195,6 +198,28 @@ impl<'a> ActionVocabulary<'a> {
 /// followed. A row that cannot be placed here simply does not widen the
 /// vocabulary, which is the safe direction — it can only cause a decision to be
 /// counted rather than judged.
+///
+/// # What this does NOT shut out
+///
+/// Two things, both stated so nobody reads this filter as closing the class.
+///
+/// `Entity` is where the kernel routed the name, not always where it invented
+/// one: a Cedar-permitted dispatch of an action no spec declares is refused
+/// inside the actor and still recorded here, so a caller who is allowed to
+/// dispatch at all can put a name of their choosing into the vocabulary.
+///
+/// More important, the same unauthenticated `POST /api/authorize` still reaches
+/// the ROW walk. Point its `resource_type` at the entity type under check
+/// instead of some other one and the denial row is judged as this actor's
+/// execution ([`row_disposition`](super::walk::row_disposition) diverts only
+/// `Platform` and `spec_governed = false`), so its caller-chosen name is
+/// reported as `unknown_action` directly — no vocabulary involved. That is
+/// older than this module and is not repaired here, because denial rows are
+/// deliberately judged (it is how `denied_then_retried` sees a denial) and
+/// changing that is a decision about denial-row provenance, not about how a
+/// decision is classified. Closing it properly means either binding the session
+/// on that endpoint to an authenticated principal or teaching the walk that an
+/// `Authz` row records a question rather than an act.
 fn names_a_kernel_dispatch(row: &TursoTrajectoryRow) -> bool {
     row.source.as_deref() == Some(ENTITY_DISPATCH_SOURCE)
         && row.spec_governed != Some(false)
