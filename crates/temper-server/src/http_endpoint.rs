@@ -28,6 +28,13 @@ use tokio::sync::RwLock;
 
 const ACTOR_ASK_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Fuel floor for git pack-transfer modules (upload-pack / receive-pack).
+/// Their instruction count scales with repo size, so these bulk-streaming
+/// modules are bounded by timeout and memory rather than a fixed instruction
+/// budget. 10T is ~100x the previous 100B manual override — effectively
+/// unbounded for any realistic pack while remaining a runaway safety bound.
+const GIT_PACK_FUEL_FLOOR: u64 = 10_000_000_000_000;
+
 /// One row of the table. Derived from an `HttpEndpoint` entity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpEndpointRoute {
@@ -344,10 +351,20 @@ pub fn route_from_entity_fields(id: &str, fields: &serde_json::Value) -> Option<
         .unwrap_or(60);
     let git_pack_defaults =
         integration_module == "git_receive_pack" || integration_module == "git_upload_pack";
-    let max_fuel = obj
-        .get("MaxFuel")
-        .and_then(|v| v.as_u64())
-        .or_else(|| git_pack_defaults.then_some(20_000_000_000));
+    let configured_fuel = obj.get("MaxFuel").and_then(|v| v.as_u64());
+    let max_fuel = if git_pack_defaults {
+        // Pack emission (upload-pack) and ingest (receive-pack) are bulk
+        // byte-streaming: their instruction count scales with repo size, so
+        // ANY fixed fuel ceiling silently truncates clones/pushes once a repo
+        // outgrows it — the recurring ARN-57/278/284 failure class (raise to
+        // 20B, then 100B, then it exhausts again). These are trusted internal
+        // modules bounded by timeout and memory, not instruction count.
+        // Enforce a floor so large-repo transfers don't fuel-exhaust; the
+        // endpoint's stored MaxFuel can only raise it further, never lower it.
+        Some(configured_fuel.unwrap_or(0).max(GIT_PACK_FUEL_FLOOR))
+    } else {
+        configured_fuel
+    };
     let max_memory = obj
         .get("MaxMemory")
         .and_then(|v| v.as_u64())
@@ -634,10 +651,35 @@ mod tests {
         assert_eq!(r.integration_module, "git_upload_pack");
         assert!(r.requires_auth);
         assert_eq!(r.timeout_secs, 120);
-        assert_eq!(r.max_fuel, Some(20_000_000_000));
+        // Git pack modules are floor-raised: a stored 20B (below the floor)
+        // becomes the 10T git-pack floor so large transfers do not exhaust.
+        assert_eq!(r.max_fuel, Some(GIT_PACK_FUEL_FLOOR));
         assert_eq!(r.max_memory, Some(536_870_912));
         assert_eq!(r.max_response_bytes, Some(134_217_728));
         assert!(r.action_bridge.is_none());
+    }
+
+    #[tokio::test]
+    async fn git_pack_fuel_floor_can_be_raised_but_not_lowered() {
+        // A stored value above the floor is preserved (floor only raises).
+        let high = serde_json::json!({
+            "PathPrefix": "/{owner}/{repo}.git/git-upload-pack",
+            "Methods": "POST",
+            "IntegrationModule": "git_upload_pack",
+            "MaxFuel": 50_000_000_000_000u64,
+        });
+        let r = route_from_entity_fields("he-high", &high).unwrap();
+        assert_eq!(r.max_fuel, Some(50_000_000_000_000));
+
+        // A non-git module's explicit fuel is untouched by the floor.
+        let other = serde_json::json!({
+            "PathPrefix": "/api/thing",
+            "Methods": "POST",
+            "IntegrationModule": "some_other_module",
+            "MaxFuel": 5_000_000u64,
+        });
+        let r = route_from_entity_fields("he-other", &other).unwrap();
+        assert_eq!(r.max_fuel, Some(5_000_000));
     }
 
     #[tokio::test]
@@ -654,7 +696,7 @@ mod tests {
             "ActionBridgeResponse": "git-receive-pack",
         });
         let r = route_from_entity_fields("he-receive", &fields).unwrap();
-        assert_eq!(r.max_fuel, Some(20_000_000_000));
+        assert_eq!(r.max_fuel, Some(GIT_PACK_FUEL_FLOOR));
         assert_eq!(r.max_memory, Some(512 * 1024 * 1024));
         assert_eq!(r.max_response_bytes, Some(128 * 1024 * 1024));
         let bridge = r.action_bridge.unwrap();
