@@ -1,25 +1,27 @@
-//! Native agent adapter integrations for `type = "adapter"` execution.
+//! Native integration adapters for `type = "adapter"` execution.
 //!
-//! Adapters run in platform Rust code (not WASM), enabling capabilities like
-//! CLI process execution and WebSocket gateway sessions while preserving
-//! IOA-declared integration intent.
+//! ADR-0160 / ARN-228: the kernel keeps only a generic HTTP adapter behind a
+//! fail-closed egress gate. App-specific agent CLIs (Claude Code, Codex,
+//! OpenClaw) are **not** registered here — they execute in capability-scoped
+//! TemperPaw workers (follow-up).
 
-mod claude_code;
-mod codex;
+mod egress;
 mod http_webhook;
-mod openclaw;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
-pub use claude_code::ClaudeCodeAdapter;
-pub use codex::CodexAdapter;
+pub use egress::{
+    ADAPTER_HTTP_TIMEOUT_SECS, ADAPTER_MAX_RESPONSE_BYTES, is_blocked_ip, validate_adapter_http_url,
+};
 pub use http_webhook::HttpWebhookAdapter;
-pub use openclaw::OpenClawAdapter;
 
 /// Agent identity context provided to adapter executions.
+///
+/// Platform credentials (`agent_api_key`) are intentionally never populated
+/// for in-kernel adapters (ADR-0160).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct AdapterAgentContext {
     /// Calling principal ID.
@@ -28,11 +30,8 @@ pub struct AdapterAgentContext {
     pub session_id: Option<String>,
     /// Calling agent type classification.
     pub agent_type: Option<String>,
-    /// Platform-minted API key for credential-based identity resolution.
-    ///
-    /// Set by the adapter dispatch flow when the entity has an `agent_type_id`.
-    /// The adapter passes this to the spawned process via `TEMPER_API_KEY`.
-    /// Never persisted — exists only for the lifetime of the adapter invocation.
+    /// Deprecated: always `None` for in-kernel adapters (ARN-228).
+    /// Kept on the struct so serde of historical test fixtures stays stable.
     #[serde(skip)]
     pub agent_api_key: Option<String>,
 }
@@ -52,16 +51,20 @@ pub struct AdapterContext {
     pub trigger_params: serde_json::Value,
     /// Serialized current entity state.
     pub entity_state: serde_json::Value,
-    /// Integration config with secret templates resolved.
+    /// Integration config with secret templates resolved (least privilege).
     pub integration_config: BTreeMap<String, String>,
-    /// Agent identity context.
+    /// Agent identity context (no ambient platform credential).
     pub agent_ctx: AdapterAgentContext,
-    /// Per-tenant secrets snapshot for adapter use.
+    /// Always empty for in-kernel adapters (ADR-0160). Secret values appear only
+    /// where `{secret:KEY}` templates expanded into `integration_config`.
     pub secrets: BTreeMap<String, String>,
 }
 
 impl AdapterContext {
-    /// Retrieve a secret value by key from the invocation snapshot.
+    /// Retrieve a secret value by key.
+    ///
+    /// Always returns `None` for production in-kernel adapters — the full
+    /// tenant secret map is never attached (ARN-228).
     pub fn get_secret(&self, key: &str) -> Option<String> {
         self.secrets.get(key).cloned()
     }
@@ -145,12 +148,11 @@ impl AdapterRegistry {
         }
     }
 
-    /// Create a registry with built-in adapter implementations registered.
+    /// Create a registry with built-in **kernel-safe** adapters only.
+    ///
+    /// ADR-0160: no Claude Code / Codex / OpenClaw process spawners.
     pub fn with_builtins() -> Self {
         let mut registry = Self::new();
-        registry.register(Arc::new(ClaudeCodeAdapter));
-        registry.register(Arc::new(CodexAdapter));
-        registry.register(Arc::new(OpenClawAdapter));
         registry.register(Arc::new(HttpWebhookAdapter));
         registry
     }
@@ -177,21 +179,13 @@ mod tests {
     use super::AdapterRegistry;
 
     #[test]
-    fn builtins_are_registered() {
+    fn builtins_are_http_only() {
         let registry = AdapterRegistry::with_builtins();
         let adapter_types = registry.adapter_types();
-        assert!(adapter_types.contains(&"claude_code".to_string()));
-        assert!(adapter_types.contains(&"codex".to_string()));
-        assert!(adapter_types.contains(&"openclaw".to_string()));
-        assert!(adapter_types.contains(&"http".to_string()));
-    }
-
-    #[test]
-    fn lookup_returns_registered_adapter() {
-        let registry = AdapterRegistry::with_builtins();
-        assert!(registry.get("claude_code").is_some());
-        assert!(registry.get("codex").is_some());
-        assert!(registry.get("openclaw").is_some());
+        assert_eq!(adapter_types, vec!["http".to_string()]);
+        assert!(registry.get("claude_code").is_none());
+        assert!(registry.get("codex").is_none());
+        assert!(registry.get("openclaw").is_none());
         assert!(registry.get("http").is_some());
         assert!(registry.get("missing").is_none());
     }

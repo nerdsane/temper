@@ -1,11 +1,11 @@
+use std::collections::BTreeMap;
+
 use tracing::{Instrument, instrument};
 
 use crate::adapters::{AdapterAgentContext, AdapterContext, AdapterResult};
 use crate::entity_actor::{EntityResponse, EntityState};
-use crate::identity::hash_token;
 use crate::request_context::AgentContext;
 use crate::secrets::template::resolve_secret_templates;
-use temper_runtime::scheduler::sim_uuid;
 use temper_runtime::tenant::TenantId;
 
 use super::{WasmDispatchMode, WasmDispatchRequest, WasmEntityRef, record_workflow_span_attrs};
@@ -175,15 +175,15 @@ impl crate::state::ServerState {
         entity_state: &EntityState,
         action_params: &serde_json::Value,
     ) -> Result<Option<EntityResponse>, String> {
-        let adapter_type = entity_state
-            .fields
-            .get("adapter_type")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
+        // ADR-0160 / ARN-228: adapter type comes only from the declared
+        // integration. Entity fields must not select or escalate the adapter.
+        let adapter_type = integration
+            .config
+            .get("adapter")
+            .or_else(|| integration.config.get("adapter_type"))
+            .map(|s| s.trim())
             .filter(|v| !v.is_empty())
             .map(str::to_string)
-            .or_else(|| integration.config.get("adapter").cloned())
-            .or_else(|| integration.config.get("adapter_type").cloned())
             .ok_or_else(|| {
                 format!(
                     "adapter integration '{}' is missing required config key 'adapter'",
@@ -196,28 +196,21 @@ impl crate::state::ServerState {
                 .handle_adapter_failure(
                     ctx,
                     integration,
-                    format!("adapter '{adapter_type}' not found in registry"),
+                    format!(
+                        "adapter '{adapter_type}' not found in registry (undeclared or removed host adapter)"
+                    ),
                     0,
                 )
                 .await;
         };
 
         let tenant = ctx.entity_ref.tenant.to_string();
+        // Resolve only `{secret:KEY}` templates into the integration config.
+        // Never attach the full tenant secret map (ARN-228).
         let integration_config = match self.secrets_vault.as_ref() {
             Some(vault) => resolve_secret_templates(&integration.config, vault, &tenant),
             None => integration.config.clone(),
         };
-        let secrets = self
-            .secrets_vault
-            .as_ref()
-            .map(|vault| vault.get_tenant_secrets(&tenant))
-            .unwrap_or_default();
-
-        // Mint a platform credential if the entity references an AgentType (ADR-0033).
-        // The plaintext key is passed to the adapter and never persisted.
-        let agent_api_key = self
-            .mint_agent_credential_if_needed(ctx.entity_ref.tenant, entity_state, ctx.agent_ctx)
-            .await;
 
         let adapter_ctx = AdapterContext {
             tenant,
@@ -231,9 +224,10 @@ impl crate::state::ServerState {
                 agent_id: ctx.agent_ctx.agent_id.clone(),
                 session_id: ctx.agent_ctx.session_id.clone(),
                 agent_type: ctx.agent_ctx.agent_type.clone(),
-                agent_api_key,
+                // ADR-0160: no ambient platform credential for in-kernel adapters.
+                agent_api_key: None,
             },
-            secrets,
+            secrets: BTreeMap::new(),
         };
 
         let result = match adapter.execute(adapter_ctx).await {
@@ -358,86 +352,6 @@ impl crate::state::ServerState {
                     msg
                 })?;
                 Ok(None)
-            }
-        }
-    }
-
-    /// Mint a platform credential for adapter execution if the entity has an `agent_type_id`.
-    ///
-    /// Generates a random API key, hashes it, creates an `AgentCredential` entity
-    /// via the `Issue` action, and returns the plaintext key. The key is never
-    /// persisted — it exists only for the lifetime of this adapter invocation.
-    ///
-    /// See ADR-0033: Platform-Assigned Agent Identity.
-    async fn mint_agent_credential_if_needed(
-        &self,
-        tenant: &TenantId,
-        entity_state: &EntityState,
-        agent_ctx: &AgentContext,
-    ) -> Option<String> {
-        let agent_type_id = entity_state
-            .fields
-            .get("agent_type_id")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|v| !v.is_empty())?;
-
-        // Generate a random API key from a UUIDv7 (deterministic in simulation).
-        let key_uuid = sim_uuid();
-        let plaintext_key = format!("tmpr_{key_uuid}");
-        let key_hash = hash_token(&plaintext_key);
-        let key_prefix = &plaintext_key[..9]; // "tmpr_" + first 4 chars of UUID
-        let agent_instance_id = sim_uuid().to_string();
-
-        let issue_params = serde_json::json!({
-            "agent_type_id": agent_type_id,
-            "agent_instance_id": agent_instance_id,
-            "key_hash": key_hash,
-            "key_prefix": key_prefix,
-            "description": format!("Auto-minted for adapter invocation"),
-            "created_by": "platform",
-            "expires_at": "",
-        });
-
-        // Create the AgentCredential entity using key_hash as entity ID for O(1) lookup.
-        let dispatch_ctx = AgentContext::for_service_inheriting("platform-dispatch", agent_ctx);
-        let result = self
-            .dispatch_tenant_action(
-                tenant,
-                "AgentCredential",
-                &key_hash,
-                "Issue",
-                issue_params,
-                &dispatch_ctx,
-            )
-            .await;
-
-        match result {
-            Ok(resp) if resp.success => {
-                tracing::info!(
-                    tenant = %tenant,
-                    agent_type_id = agent_type_id,
-                    agent_instance_id = %agent_instance_id,
-                    key_prefix = key_prefix,
-                    "minted agent credential for adapter execution"
-                );
-                Some(plaintext_key)
-            }
-            Ok(resp) => {
-                tracing::warn!(
-                    tenant = %tenant,
-                    error = ?resp.error,
-                    "failed to mint agent credential — adapter will run without credential"
-                );
-                None
-            }
-            Err(e) => {
-                tracing::warn!(
-                    tenant = %tenant,
-                    error = %e,
-                    "failed to mint agent credential — adapter will run without credential"
-                );
-                None
             }
         }
     }
