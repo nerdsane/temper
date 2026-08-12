@@ -628,9 +628,12 @@ impl crate::state::ServerState {
                     tenant.as_str(),
                 )
                 .map_err(|denial| {
-                    DispatchError::AuthzDenied(format!(
-                        "composite {entity_type}.{action} sub-write {idx} denied for {sub_entity_type}.{sub_action}: {denial}"
-                    ))
+                    DispatchError::AuthzDenied {
+                        class: denial.class(),
+                        reason: format!(
+                            "composite {entity_type}.{action} sub-write {idx} denied for {sub_entity_type}.{sub_action}: {denial}"
+                        ),
+                    }
                 })?;
             }
 

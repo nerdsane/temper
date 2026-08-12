@@ -32,10 +32,48 @@ use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::identity::ResolvedIdentity;
 use crate::request_context::{AgentContext, extract_agent_context, remote_parent_context};
 use crate::response::{ODataResponse, odata_error};
-use crate::state::ServerState;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
+use crate::state::{EntityCreateError, ServerState};
 
 type ODataWriteError = Box<axum::response::Response>;
+
+/// Seconds a client should wait before retrying a create that failed on a
+/// dependency. Matches the conservative default used for transient dispatch
+/// exhaustion in `bindings.rs`.
+const CREATE_RETRY_AFTER_SECS: &str = "1";
+
+/// Turn a failed create into the status the caller can act on.
+///
+/// Every create failure used to leave as `500 CreateError` with the cause
+/// flattened into a sentence, so a caller could not tell a key collision it
+/// must fix from a store blip it should wait out — and retried the
+/// unretryable hundreds of times. The classification comes from the typed
+/// error, never from inspecting the message.
+fn create_error_response(err: &EntityCreateError) -> axum::response::Response {
+    match err {
+        // The write is rejected by a uniqueness constraint. The detail is the
+        // store's own message, which names the declared key and the entity id
+        // holding it — the two things a caller needs to resolve the collision.
+        EntityCreateError::DeclaredKeyConflict { detail } => {
+            odata_error(StatusCode::CONFLICT, "DeclaredKeyConflict", detail).into_response()
+        }
+        // A dependency was briefly unavailable: say so, and say when to come
+        // back, so clients and proxies back off instead of hammering.
+        EntityCreateError::TransientDependency { detail } => {
+            let mut response =
+                odata_error(StatusCode::SERVICE_UNAVAILABLE, "CreateUnavailable", detail)
+                    .into_response();
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static(CREATE_RETRY_AFTER_SECS),
+            );
+            response
+        }
+        EntityCreateError::Internal { detail } => {
+            odata_error(StatusCode::INTERNAL_SERVER_ERROR, "CreateError", detail).into_response()
+        }
+    }
+}
 
 fn parse_odata_path_or_400(path: &str) -> Result<ODataPath, ODataWriteError> {
     parse_path(&format!("/{path}")).map_err(|e| {
@@ -514,10 +552,7 @@ pub async fn handle_odata_post(
                     .into_response();
                 }
                 Ok(None) => {}
-                Err(e) => {
-                    return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "CreateError", &e)
-                        .into_response();
-                }
+                Err(e) => return create_error_response(&e),
             }
 
             match state
@@ -542,8 +577,7 @@ pub async fn handle_odata_post(
                     }
                     .into_response()
                 }
-                Err(e) => odata_error(StatusCode::INTERNAL_SERVER_ERROR, "CreateError", &e)
-                    .into_response(),
+                Err(e) => create_error_response(&e),
             }
         }
 
@@ -1201,5 +1235,53 @@ fn entity_type_prefix(entity_type: &str) -> &'static str {
         "Monitor" => "mn-",
         "AlertCycle" => "ac-",
         _ => "en-",
+    }
+}
+
+#[cfg(test)]
+mod create_error_response_tests {
+    use super::*;
+
+    fn detail_of(response: &axum::response::Response) -> StatusCode {
+        response.status()
+    }
+
+    #[test]
+    fn a_key_collision_is_a_conflict_not_a_server_error() {
+        let response = create_error_response(&EntityCreateError::DeclaredKeyConflict {
+            detail: "duplicate declared key 'ws_path' for File: held by fl-019efda8".to_string(),
+        });
+        assert_eq!(detail_of(&response), StatusCode::CONFLICT);
+        assert!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .is_none(),
+            "there is nothing to wait for — the same request collides forever"
+        );
+    }
+
+    #[test]
+    fn a_dependency_outage_is_unavailable_with_a_retry_hint() {
+        let response = create_error_response(&EntityCreateError::TransientDependency {
+            detail: "storage error: connection reset".to_string(),
+        });
+        assert_eq!(detail_of(&response), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1"),
+            "a retryable failure must say when to come back"
+        );
+    }
+
+    #[test]
+    fn an_unclassified_failure_is_still_a_server_error() {
+        let response = create_error_response(&EntityCreateError::Internal {
+            detail: "no transition table".to_string(),
+        });
+        assert_eq!(detail_of(&response), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

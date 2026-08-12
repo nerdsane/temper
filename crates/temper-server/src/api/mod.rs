@@ -23,7 +23,9 @@ use axum::response::IntoResponse;
 use axum::routing::{get, patch, post, put};
 use temper_authz::PrincipalKind;
 
-use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
+use crate::authz::{
+    DenialInput, denial_status, record_denial_if_policy, security_context_from_headers,
+};
 use crate::state::ServerState;
 
 /// Build the management API router (mounted at /api).
@@ -208,8 +210,9 @@ pub(crate) async fn require_policy_auth(
         tenant,
     ) {
         let reason = denial.to_string();
-        let pd = record_authz_denial(
+        let pd = record_denial_if_policy(
             state,
+            &denial,
             DenialInput {
                 tenant,
                 security_ctx: &security_ctx,
@@ -225,13 +228,17 @@ pub(crate) async fn require_policy_auth(
             },
         )
         .await;
+        let message = match pd {
+            Some(pd) => format!("{reason} Decision {}", pd.id),
+            None => reason,
+        };
         return Some(
             (
-                StatusCode::FORBIDDEN,
+                denial_status(&denial),
                 axum::Json(serde_json::json!({
                     "error": {
-                        "code": "AuthorizationDenied",
-                        "message": format!("{reason} Decision {}", pd.id),
+                        "code": denial.error_code(),
+                        "message": message,
                     }
                 })),
             )

@@ -334,15 +334,38 @@ fn parse_function_params(args_str: &str) -> Result<Vec<(String, String)>, ODataE
     Ok(params)
 }
 
+/// String delimiters recognised around a key literal.
+///
+/// OData spells string keys with single quotes (`'abc'`). Clients that borrow
+/// JSON habits emit double quotes (`"abc"`) instead, so both are recognised —
+/// see [`parse_key_literal`] for why the delimiter must never survive parsing.
+const KEY_DELIMITERS: [char; 2] = ['\'', '"'];
+
+fn is_key_delimiter(ch: char) -> bool {
+    KEY_DELIMITERS.contains(&ch)
+}
+
+/// Track whether the scanner is inside a quoted literal.
+///
+/// Only the delimiter that opened the literal closes it, so a double quote
+/// inside `'it"s'` is ordinary text rather than a state change.
+fn step_quote_state(open: Option<char>, ch: char) -> Option<char> {
+    match open {
+        Some(delim) if ch == delim => None,
+        Some(delim) => Some(delim),
+        None if is_key_delimiter(ch) => Some(ch),
+        None => None,
+    }
+}
+
 /// Check if a key expression is a composite key (has `=` outside quotes).
 fn is_composite_key(s: &str) -> bool {
-    let mut in_quotes = false;
+    let mut open: Option<char> = None;
     for ch in s.chars() {
-        match ch {
-            '\'' => in_quotes = !in_quotes,
-            '=' if !in_quotes => return true,
-            _ => {}
+        if ch == '=' && open.is_none() {
+            return true;
         }
+        open = step_quote_state(open, ch);
     }
     false
 }
@@ -351,24 +374,18 @@ fn is_composite_key(s: &str) -> bool {
 fn split_composite_key(s: &str) -> Result<Vec<String>, ODataError> {
     let mut parts = Vec::new();
     let mut current = String::new();
-    let mut in_quotes = false;
+    let mut open: Option<char> = None;
 
     for ch in s.chars() {
-        match ch {
-            '\'' => {
-                in_quotes = !in_quotes;
-                current.push(ch);
-            }
-            ',' if !in_quotes => {
-                parts.push(std::mem::take(&mut current));
-            }
-            _ => {
-                current.push(ch);
-            }
+        if ch == ',' && open.is_none() {
+            parts.push(std::mem::take(&mut current));
+            continue;
         }
+        open = step_quote_state(open, ch);
+        current.push(ch);
     }
 
-    if in_quotes {
+    if open.is_some() {
         return Err(ODataError::InvalidPath {
             message: "unmatched quote in key value".into(),
         });
@@ -381,43 +398,52 @@ fn split_composite_key(s: &str) -> Result<Vec<String>, ODataError> {
     Ok(parts)
 }
 
-/// Parse an OData key literal, unquoting single-quoted strings.
+/// Parse an OData key literal, stripping the string delimiters.
 ///
-/// Per OData v4 (ABNF `string` rule), a single quote inside a quoted
-/// literal is escaped by doubling it: `'abc''123'` denotes the value
-/// `abc'123`. A bare (un-doubled) quote inside the literal, trailing
-/// text after the closing quote, and an unterminated literal are all
-/// parse errors. Unquoted literals (integers, GUIDs) are returned
-/// unchanged but must not contain quote characters.
+/// Per OData v4 (ABNF `string` rule), a single quote inside a quoted literal
+/// is escaped by doubling it: `'abc''123'` denotes the value `abc'123`. The
+/// same rule is applied to double-quoted literals (`"abc"`), which OData does
+/// not define but clients do send.
+///
+/// The delimiter must never survive into the returned value: the key becomes
+/// the entity id, and an id that still carries its quotes fails Cedar's
+/// `Type::"id"` UID parsing, turning an ordinary policy question into a 403
+/// that no policy change can fix (ARN-287).
+///
+/// A bare (un-doubled) quote inside the literal, trailing text after the
+/// closing quote, and an unterminated literal are all parse errors. Unquoted
+/// literals (integers, GUIDs) are returned unchanged but must not contain
+/// quote characters.
 fn parse_key_literal(s: &str) -> Result<String, ODataError> {
-    let Some(interior) = s.strip_prefix('\'') else {
+    let Some(delimiter) = s.chars().next().filter(|ch| is_key_delimiter(*ch)) else {
         // Unquoted literal (integer, GUID, …) — quotes are not allowed.
-        if s.contains('\'') {
+        if s.contains(KEY_DELIMITERS) {
             return Err(ODataError::InvalidPath {
-                message: format!("unquoted key literal '{s}' contains a single quote"),
+                message: format!("unquoted key literal '{s}' contains a quote"),
             });
         }
         return Ok(s.to_string());
     };
 
+    let interior = &s[delimiter.len_utf8()..];
     let mut value = String::with_capacity(interior.len());
     let mut chars = interior.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch != '\'' {
+        if ch != delimiter {
             value.push(ch);
             continue;
         }
-        // Doubled quote — an escaped literal quote.
-        if chars.peek() == Some(&'\'') {
+        // Doubled delimiter — an escaped literal quote.
+        if chars.peek() == Some(&delimiter) {
             chars.next();
-            value.push('\'');
+            value.push(delimiter);
             continue;
         }
-        // Lone quote — closes the literal; it must be the final character.
+        // Lone delimiter — closes the literal; it must be the final character.
         if chars.next().is_some() {
             return Err(ODataError::InvalidPath {
                 message: format!(
-                    "invalid key literal {s}: quotes inside a key must be escaped as ''"
+                    "invalid key literal {s}: a {delimiter} inside a key must be escaped by doubling it"
                 ),
             });
         }
@@ -714,6 +740,74 @@ mod tests {
     #[test]
     fn parse_entity_key_unquoted_with_quote_rejected() {
         assert!(parse_path("/Orders(abc'def)").is_err());
+    }
+
+    #[test]
+    fn parse_entity_key_double_quoted_matches_single_quoted() {
+        // ARN-287: a double-quoted key must yield the same entity id as the
+        // OData-spelled single-quoted one — the delimiter never reaches Cedar.
+        assert_eq!(
+            parse_path("/Files(\"fl-019efde0-3fa5\")").unwrap(),
+            parse_path("/Files('fl-019efde0-3fa5')").unwrap()
+        );
+        assert_eq!(
+            parse_path("/Files(\"fl-019efde0-3fa5\")").unwrap(),
+            ODataPath::Entity("Files".into(), KeyValue::Single("fl-019efde0-3fa5".into()))
+        );
+    }
+
+    #[test]
+    fn parse_entity_key_double_quoted_with_escaped_quote() {
+        assert_eq!(
+            parse_path("/Orders(\"abc\"\"123\")").unwrap(),
+            ODataPath::Entity("Orders".into(), KeyValue::Single("abc\"123".into()))
+        );
+    }
+
+    #[test]
+    fn parse_entity_key_single_quoted_keeps_interior_double_quotes() {
+        // Only the outermost delimiter is stripped; a double quote inside a
+        // single-quoted literal is ordinary key text.
+        assert_eq!(
+            parse_path("/Orders('a\"b')").unwrap(),
+            ODataPath::Entity("Orders".into(), KeyValue::Single("a\"b".into()))
+        );
+    }
+
+    #[test]
+    fn parse_entity_key_unquoted_with_double_quote_rejected() {
+        assert!(parse_path("/Orders(abc\"def)").is_err());
+    }
+
+    #[test]
+    fn parse_entity_key_double_quoted_unterminated_rejected() {
+        assert!(parse_path("/Orders(\"abc)").is_err());
+    }
+
+    #[test]
+    fn parse_composite_key_double_quoted_values() {
+        assert_eq!(
+            parse_path("/OrderItems(OrderId=\"a,b\",LineNo=1)").unwrap(),
+            ODataPath::Entity(
+                "OrderItems".into(),
+                KeyValue::Composite(vec![
+                    ("OrderId".into(), "a,b".into()),
+                    ("LineNo".into(), "1".into()),
+                ])
+            )
+        );
+    }
+
+    #[test]
+    fn parse_bound_function_double_quoted_argument() {
+        assert_eq!(
+            parse_path("/Refs/Temper.Nearest(decl=\"taste\",k=10)").unwrap(),
+            ODataPath::BoundFunction {
+                parent: Box::new(ODataPath::EntitySet("Refs".into())),
+                function: "Temper.Nearest".into(),
+                params: vec![("decl".into(), "taste".into()), ("k".into(), "10".into()),],
+            }
+        );
     }
 
     #[test]

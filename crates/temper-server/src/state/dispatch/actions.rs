@@ -580,7 +580,19 @@ impl crate::state::ServerState {
                     temper_runtime::actor::ActorError::Stopped => "stopped",
                     temper_runtime::actor::ActorError::SendFailed => "send_failed",
                     temper_runtime::actor::ActorError::Panicked(_) => "panicked",
-                    temper_runtime::actor::ActorError::InitFailed(_) => "init_failed",
+                    // Split by classification: a dispatch that fails because the
+                    // actor could not initialize needs the reason in the metric,
+                    // not one lump "init_failed" that hides whether it was the
+                    // caller's key, a store blip, or a defect.
+                    temper_runtime::actor::ActorError::InitFailed { kind, .. } => match kind {
+                        temper_runtime::actor::InitFailureKind::Constraint => {
+                            "init_failed_constraint"
+                        }
+                        temper_runtime::actor::InitFailureKind::TransientDependency => {
+                            "init_failed_transient_dependency"
+                        }
+                        temper_runtime::actor::InitFailureKind::Defect => "init_failed_defect",
+                    },
                     temper_runtime::actor::ActorError::MaxRestartsExceeded(_) => {
                         "max_restarts_exceeded"
                     }

@@ -11,8 +11,8 @@ mod metrics;
 mod policy_gen;
 
 pub use context::{Principal, PrincipalKind, SecurityContext};
-pub use engine::{AuthzDecision, AuthzEngine};
-pub use error::{AuthzDenial, AuthzError};
+pub use engine::{AuthzDecision, AuthzEngine, PolicySource, unlabelled_source_label};
+pub use error::{AuthzDenial, AuthzError, DenialClass};
 pub use metrics::init_metrics;
 pub use policy_gen::{
     ActionScope, DurationScope, PolicyScopeMatrix, PrincipalScope, ResourceScope,

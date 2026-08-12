@@ -2,12 +2,14 @@
 
 use std::collections::BTreeMap;
 
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use temper_authz::SecurityContext;
 use temper_runtime::tenant::TenantId;
 
-use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
+use crate::authz::{
+    DenialInput, denial_status, record_denial_if_policy, security_context_from_headers,
+};
 use crate::identity::ResolvedIdentity;
 use crate::request_context::AgentContext;
 use crate::response::odata_error;
@@ -113,8 +115,8 @@ pub(crate) fn authorize_read(
         .map_err(|denial| {
             Box::new(
                 odata_error(
-                    StatusCode::FORBIDDEN,
-                    "AuthorizationDenied",
+                    denial_status(&denial),
+                    denial.error_code(),
                     &denial.to_string(),
                 )
                 .into_response(),
@@ -148,8 +150,9 @@ pub(super) async fn authorize_mutation(
     };
 
     let reason = denial.to_string();
-    let decision = record_authz_denial(
+    let decision = record_denial_if_policy(
         state,
+        &denial,
         DenialInput {
             tenant: tenant.as_str(),
             security_ctx,
@@ -169,10 +172,9 @@ pub(super) async fn authorize_mutation(
     )
     .await;
 
-    Err(odata_error(
-        StatusCode::FORBIDDEN,
-        "AuthorizationDenied",
-        &format!("{reason} (decision: {})", decision.id),
-    )
-    .into_response())
+    let message = match decision {
+        Some(pd) => format!("{reason} (decision: {})", pd.id),
+        None => reason,
+    };
+    Err(odata_error(denial_status(&denial), denial.error_code(), &message).into_response())
 }

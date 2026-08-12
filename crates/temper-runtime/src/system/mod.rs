@@ -1,5 +1,5 @@
 use crate::actor::actor_ref::{ActorId, ActorRef};
-use crate::actor::cell::ActorCell;
+use crate::actor::cell::{ActorCell, InitFailureObserver};
 use crate::actor::traits::Actor;
 
 /// The ActorSystem is the top-level container for all actors.
@@ -20,11 +20,38 @@ impl ActorSystem {
     /// Spawn a new top-level actor in this system.
     /// Returns an ActorRef for communicating with the actor.
     pub fn spawn<A: Actor>(&self, actor: A, name: impl Into<String>) -> ActorRef<A::Msg> {
+        self.spawn_cell(actor, name, None)
+    }
+
+    /// Spawn an actor whose permanent initialization failure must be observed.
+    ///
+    /// For spawners that record the actor somewhere before it starts: the
+    /// observer is how that record gets retracted when `pre_start` never
+    /// succeeds, including when no caller is waiting to be told. See
+    /// [`InitFailureObserver`].
+    pub fn spawn_observing_init_failure<A: Actor>(
+        &self,
+        actor: A,
+        name: impl Into<String>,
+        on_init_failure: InitFailureObserver,
+    ) -> ActorRef<A::Msg> {
+        self.spawn_cell(actor, name, Some(on_init_failure))
+    }
+
+    fn spawn_cell<A: Actor>(
+        &self,
+        actor: A,
+        name: impl Into<String>,
+        on_init_failure: Option<InitFailureObserver>,
+    ) -> ActorRef<A::Msg> {
         let actor_name = name.into();
         let path = format!("/{}/{}", self.name, actor_name);
         let id = ActorId::new(&actor_name, &path);
 
-        let cell = ActorCell::new(actor, id);
+        let mut cell = ActorCell::new(actor, id);
+        if let Some(observer) = on_init_failure {
+            cell = cell.with_init_failure_observer(observer);
+        }
         cell.spawn()
     }
 

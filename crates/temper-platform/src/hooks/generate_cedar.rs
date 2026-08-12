@@ -1,5 +1,13 @@
 use temper_server::ServerState;
 
+/// Label for a policy generated from an approved governance decision.
+///
+/// Named after the decision that produced it, so a denial or an allow that
+/// cites it points straight back at the approval it came from (ARN-286).
+pub(crate) fn generated_policy_label(tenant: &str, entity_id: &str) -> String {
+    format!("{tenant}/generated/{entity_id}.cedar")
+}
+
 /// Generate Cedar policy from entity state fields.
 ///
 /// Reads agent_id, action_name, resource_type, resource_id, scope, tenant,
@@ -88,21 +96,26 @@ pub(super) fn handle_generate_cedar_from_fields(
         "GenerateCedarPolicy hook: generated policy, validating and loading"
     );
 
-    {
+    // Load the generated policy as its own labelled source. Appending it to
+    // the tenant blob and reloading raw would rename every statement in the
+    // tenant positionally, so approving one decision would erase the file
+    // provenance of every other policy (ARN-286).
+    if let Err(e) = server.authz.upsert_tenant_policy_source(
+        tenant,
+        &generated_policy_label(tenant, entity_id),
+        &generated_policy,
+    ) {
+        tracing::error!(error = %e, "GenerateCedarPolicy: failed to reload policies");
+        return Err(format!("Failed to reload policies: {e}"));
+    }
+
+    // Mirror the engine's authoritative text into the cache only once the
+    // reload succeeded, so a policy the engine rejected never lands in it.
+    if let Some(tenant_text) = server.authz.get_tenant_policy_text(tenant) {
         let Ok(mut policies) = server.tenant_policies.write() else {
             return Err("tenant_policies lock poisoned".to_string());
         };
-        let entry = policies.entry(tenant.to_string()).or_default();
-        if !entry.is_empty() {
-            entry.push('\n');
-        }
-        entry.push_str(&generated_policy);
-
-        let tenant_text = entry.clone();
-        if let Err(e) = server.authz.reload_tenant_policies(tenant, &tenant_text) {
-            tracing::error!(error = %e, "GenerateCedarPolicy: failed to reload policies");
-            return Err(format!("Failed to reload policies: {e}"));
-        }
+        policies.insert(tenant.to_string(), tenant_text);
     }
 
     tracing::info!(

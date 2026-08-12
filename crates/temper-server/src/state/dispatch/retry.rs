@@ -179,7 +179,7 @@ where
             }
             Err(err) if err.is_permanent() => {
                 return AskResult {
-                    result: Err(err),
+                    result: Err(most_diagnostic(last_err, err)),
                     attempts: attempt + 1,
                     elapsed: start.elapsed(),
                     retried_after_transient: saw_transient,
@@ -199,6 +199,24 @@ where
         attempts: max_attempts,
         elapsed: start.elapsed(),
         retried_after_transient: saw_transient,
+    }
+}
+
+/// Pick the error worth reporting when an attempt fails after an earlier one.
+///
+/// An actor that dies in `pre_start` drains its mailbox, answers the in-flight
+/// ask with the real cause, and closes. The *next* attempt therefore cannot even
+/// enqueue and comes back `SendFailed` — "send failed: actor not running", which
+/// is true and useless. Keeping the init failure preserves the only error that
+/// explains the outage.
+fn most_diagnostic(previous: Option<ActorError>, current: ActorError) -> ActorError {
+    match previous {
+        Some(prev @ ActorError::InitFailed { .. })
+            if matches!(current, ActorError::SendFailed | ActorError::Stopped) =>
+        {
+            prev
+        }
+        _ => current,
     }
 }
 
@@ -327,6 +345,49 @@ mod tests {
         // layer depends on.
         let effective = p.max_attempts.max(1);
         assert_eq!(effective, 1);
+    }
+
+    #[test]
+    fn send_failed_after_an_init_failure_keeps_the_init_cause() {
+        // The dead-cell sequence: attempt 0 gets the classified init failure,
+        // attempt 1 cannot enqueue because the cell closed its mailbox.
+        let init = ActorError::init_failed(
+            "duplicate declared key 'ws_path' for File: held by fl-019efda8",
+            temper_runtime::actor::InitFailureKind::Constraint,
+        );
+        let kept = most_diagnostic(Some(init), ActorError::SendFailed);
+        assert!(
+            kept.to_string().contains("ws_path"),
+            "the init cause must survive the follow-up SendFailed, got: {kept}"
+        );
+        assert_eq!(
+            kept.init_failure_kind(),
+            Some(temper_runtime::actor::InitFailureKind::Constraint)
+        );
+    }
+
+    #[test]
+    fn a_real_permanent_error_is_not_masked_by_an_earlier_transient() {
+        // Only SendFailed / Stopped are treated as the echo of a dead cell.
+        // Anything else is the truth of this attempt and must win.
+        let earlier = ActorError::init_failed(
+            "store unavailable",
+            temper_runtime::actor::InitFailureKind::TransientDependency,
+        );
+        let now = ActorError::Panicked("handler exploded".into());
+        let kept = most_diagnostic(Some(earlier), now);
+        assert!(matches!(kept, ActorError::Panicked(_)));
+
+        // No prior error at all — the current one is reported unchanged.
+        let kept = most_diagnostic(None, ActorError::SendFailed);
+        assert_eq!(kept, ActorError::SendFailed);
+
+        // A prior AskTimeout is not an init failure and must not be resurrected.
+        let kept = most_diagnostic(
+            Some(ActorError::AskTimeout(Duration::from_secs(5))),
+            ActorError::SendFailed,
+        );
+        assert_eq!(kept, ActorError::SendFailed);
     }
 
     #[test]

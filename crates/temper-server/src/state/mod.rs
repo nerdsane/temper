@@ -27,7 +27,7 @@ pub mod wasm_invocation_log;
 
 pub use admission::{AdmissionController, AdmissionOutcome, AdmissionPermit};
 pub use dispatch::{DispatchCommand, DispatchError, DispatchExtOptions, StateTimeoutTracker};
-pub use entity_ops::{FailedLevelInfo, VerificationGateError};
+pub use entity_ops::{EntityCreateError, FailedLevelInfo, VerificationGateError};
 pub use file_reads::{IndexedFileStreamRead, TextFileReadResult, TextFileVersionReadResult};
 pub(crate) use file_writes::FileStreamContentError;
 pub use metrics::MetricsCollector;

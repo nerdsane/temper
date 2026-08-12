@@ -41,6 +41,13 @@ pub struct MetricsCollector {
     pub cross_invariant_eval_duration_ms_bucket: RwLock<BTreeMap<String, u64>>,
     /// Enforcement bypass count.
     pub cross_invariant_bypass_total: AtomicU64,
+    /// Entity creates that failed before the entity existed:
+    /// key = "entity_type:reason".
+    ///
+    /// A create that dies before its first event produces no transition and no
+    /// trajectory row, so it is invisible in every success-rate view. This is
+    /// the only place a fully broken entity type shows up.
+    pub entity_spawn_failures: RwLock<BTreeMap<String, u64>>,
 }
 
 impl Default for MetricsCollector {
@@ -61,6 +68,19 @@ impl MetricsCollector {
             relation_integrity_violations: RwLock::new(BTreeMap::new()),
             cross_invariant_eval_duration_ms_bucket: RwLock::new(BTreeMap::new()),
             cross_invariant_bypass_total: AtomicU64::new(0),
+            entity_spawn_failures: RwLock::new(BTreeMap::new()),
+        }
+    }
+
+    /// Record an entity create that failed before the entity existed.
+    ///
+    /// `reason` is a stable label — `declared_key_conflict`,
+    /// `transient_dependency`, or `internal`.
+    pub fn record_entity_spawn_failure(&self, entity_type: &str, reason: &str) {
+        let key = format!("{entity_type}:{reason}");
+        if let Ok(mut map) = self.entity_spawn_failures.write() {
+            *map.entry(key).or_insert(0) += 1;
+            evict_least_incremented(&mut map);
         }
     }
 
@@ -131,5 +151,32 @@ impl MetricsCollector {
     pub fn record_cross_bypass(&self) {
         self.cross_invariant_bypass_total
             .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MetricsCollector;
+
+    #[test]
+    fn spawn_failures_are_counted_per_type_and_reason() {
+        let metrics = MetricsCollector::new();
+        metrics.record_entity_spawn_failure("File", "declared_key_conflict");
+        metrics.record_entity_spawn_failure("File", "declared_key_conflict");
+        metrics.record_entity_spawn_failure("File", "transient_dependency");
+        metrics.record_entity_spawn_failure("Workspace", "internal");
+
+        let map = metrics.entity_spawn_failures.read().unwrap();
+        assert_eq!(map.get("File:declared_key_conflict"), Some(&2));
+        // A degraded dependency must not be lumped in with a caller error,
+        // and one broken type must not hide behind a healthy one.
+        assert_eq!(map.get("File:transient_dependency"), Some(&1));
+        assert_eq!(map.get("Workspace:internal"), Some(&1));
+    }
+
+    #[test]
+    fn an_untouched_collector_reports_nothing() {
+        let metrics = MetricsCollector::new();
+        assert!(metrics.entity_spawn_failures.read().unwrap().is_empty());
     }
 }

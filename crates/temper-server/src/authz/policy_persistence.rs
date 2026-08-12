@@ -133,16 +133,17 @@ pub async fn load_and_activate_tenant_policies(state: &ServerState, tenant: &str
         return;
     }
 
-    // Build named policy entries for per-policy PolicyId assignment.
+    // Build named policy entries for per-policy PolicyId assignment. A row's
+    // `policy_id` is the label, so os-app rows carry their source file.
     let enabled_count = rows.iter().filter(|r| r.enabled).count();
-    let named_policies: Vec<(String, String)> = rows
+    let named_policies: Vec<temper_authz::PolicySource> = rows
         .iter()
         .filter(|r| r.enabled)
         .map(|r| (r.policy_id.clone(), r.cedar_text.clone()))
         .collect();
 
     // Load into the per-tenant Cedar engine with meaningful PolicyIds
-    // (e.g., "default:os-app:project-management:2" instead of "policy0").
+    // (e.g. "katagami-commons/art_style.cedar#2" instead of "policy1874").
     if let Err(e) = state
         .authz
         .reload_tenant_policies_named(tenant, &named_policies)

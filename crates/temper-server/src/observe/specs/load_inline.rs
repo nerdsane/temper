@@ -71,6 +71,24 @@ pub(crate) async fn handle_load_inline(
     );
     if let Err(denial) = authz_result {
         let reason = denial.to_string();
+
+        // A malformed request or an engine failure is not a governance event:
+        // there is no decision for a human to approve and no policy gap to
+        // analyse, so it must not open an O/A record chain or land in the
+        // approval queue (ARN-287).
+        if !denial.is_policy_decision() {
+            return Err((
+                crate::authz::denial_status(&denial),
+                serde_json::json!({
+                    "error": {
+                        "code": denial.error_code(),
+                        "message": reason,
+                    }
+                })
+                .to_string(),
+            ));
+        }
+
         // Record denials and use the first decision ID as the primary chain anchor.
         // Record a single denial per authz check. The resource_id must match
         // what Cedar evaluated: SpecRegistry::"<tenant>".

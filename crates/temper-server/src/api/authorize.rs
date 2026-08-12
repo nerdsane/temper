@@ -9,7 +9,9 @@ use axum::response::IntoResponse;
 use temper_runtime::scheduler::sim_now;
 use tracing::instrument;
 
-use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
+use crate::authz::{
+    DenialInput, denial_status, record_denial_if_policy, security_context_from_headers,
+};
 use crate::odata::extract_tenant;
 use crate::state::{ServerState, TrajectoryEntry, TrajectorySource};
 
@@ -58,8 +60,9 @@ pub(crate) async fn handle_authorize(
         Err(denial) => {
             let reason = denial.to_string();
 
-            let pd = record_authz_denial(
+            let pd = record_denial_if_policy(
                 &state,
+                &denial,
                 DenialInput {
                     tenant: tenant.as_str(),
                     security_ctx: &security_ctx,
@@ -78,6 +81,23 @@ pub(crate) async fn handle_authorize(
                 },
             )
             .await;
+
+            // A policy denial is an answer: 200 with `allowed: false` and a
+            // decision the human can approve. A request or engine fault is not
+            // an answer at all, so it surfaces as an error status instead of
+            // being reported as a decision nobody made (ARN-287).
+            let Some(pd) = pd else {
+                return (
+                    denial_status(&denial),
+                    axum::Json(serde_json::json!({
+                        "error": {
+                            "code": denial.error_code(),
+                            "message": reason,
+                        }
+                    })),
+                )
+                    .into_response();
+            };
 
             (
                 StatusCode::OK,

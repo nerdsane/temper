@@ -7,12 +7,68 @@
 use std::collections::BTreeMap;
 
 use axum::http::{HeaderMap, StatusCode};
-use temper_authz::SecurityContext;
+use temper_authz::{AuthzDenial, DenialClass, SecurityContext};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
 use crate::request_context::{AgentContext, intent_from_headers};
 use crate::state::{PendingDecision, TrajectoryEntry, TrajectorySource};
+
+/// HTTP status for an authorization denial, by what the denial actually is.
+///
+/// A policy decision is a 403: the request was understood and refused, and a
+/// policy change can make it succeed. A request fault is a 400: the caller
+/// sent something that never became a valid Cedar question, so retrying or
+/// widening policy cannot help. An engine fault is a 500: the request was
+/// fine, we failed (ARN-287).
+pub(crate) fn denial_status(denial: &AuthzDenial) -> StatusCode {
+    match denial.class() {
+        DenialClass::Policy => StatusCode::FORBIDDEN,
+        DenialClass::RequestFault => StatusCode::BAD_REQUEST,
+        DenialClass::EngineFault => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// Record an authorization denial for human review — but only when it is a
+/// policy decision.
+///
+/// Request and engine faults are dropped from the approval queue on purpose:
+/// "invalid resource: unexpected token `fl`" is not something a human can
+/// approve, and recording it buries the decisions that are (ARN-287). Faults
+/// are logged instead, at the severity their class deserves.
+///
+/// Returns `None` when nothing was recorded.
+pub(crate) async fn record_denial_if_policy(
+    state: &crate::state::ServerState,
+    denial: &AuthzDenial,
+    input: DenialInput<'_>,
+) -> Option<PendingDecision> {
+    match denial.class() {
+        DenialClass::Policy => Some(record_authz_denial(state, input).await),
+        DenialClass::RequestFault => {
+            tracing::warn!(
+                reason = %denial,
+                tenant = input.tenant,
+                action = input.action,
+                resource_type = input.resource_type,
+                resource_id = input.resource_id,
+                "malformed authorization request; not recorded as a pending decision"
+            );
+            None
+        }
+        DenialClass::EngineFault => {
+            tracing::error!(
+                reason = %denial,
+                tenant = input.tenant,
+                action = input.action,
+                resource_type = input.resource_type,
+                resource_id = input.resource_id,
+                "authorization engine failure; not recorded as a pending decision"
+            );
+            None
+        }
+    }
+}
 
 /// Extract `X-Temper-*` headers from an axum `HeaderMap` into `(key, value)` pairs
 /// suitable for `SecurityContext::from_headers`.
@@ -48,8 +104,9 @@ pub(crate) fn security_context_from_headers(
 /// Check Cedar authorization for observe endpoints.
 ///
 /// Admin and System principals bypass the check. Other principals must have the
-/// specified `action` on `resource_type`. Returns `Ok(())` if authorized or
-/// `Err(StatusCode::FORBIDDEN)` if denied.
+/// specified `action` on `resource_type`. Returns `Ok(())` if authorized, or
+/// the status matching the denial's class — 403 for a policy denial, 400 for a
+/// malformed request, 500 for an engine failure.
 pub(crate) fn require_observe_auth(
     state: &crate::state::ServerState,
     headers: &HeaderMap,
@@ -75,7 +132,7 @@ pub(crate) fn require_observe_auth(
         tenant,
     ) {
         tracing::warn!(reason = %denial, action, resource_type, "unauthorized observe access");
-        return Err(axum::http::StatusCode::FORBIDDEN);
+        return Err(denial_status(&denial));
     }
     Ok(())
 }
@@ -241,6 +298,10 @@ pub(crate) struct GovernedMutationAuth<'a> {
 /// `PendingDecision` records. Non-agent or sessionless denials stay ordinary
 /// `403 Forbidden` responses so passive/admin surfaces do not generate noisy
 /// approval work.
+///
+/// Only policy denials become decisions. Request and engine faults return
+/// their own status (400/500) with no `decision_id`, because there is nothing
+/// to approve — see [`record_denial_if_policy`].
 #[allow(unused)] // Staged for governed management endpoints after the latency package lands.
 pub(crate) async fn require_governed_mutation_auth(
     state: &crate::state::ServerState,
@@ -282,8 +343,9 @@ pub(crate) async fn require_governed_mutation_auth(
     {
         let resource_attrs_json =
             serde_json::to_value(&input.resource_attrs).unwrap_or_else(|_| serde_json::json!({}));
-        let pd = record_authz_denial(
+        let pd = record_denial_if_policy(
             state,
+            &denial,
             DenialInput {
                 tenant: input.tenant,
                 security_ctx: &security_ctx,
@@ -299,13 +361,27 @@ pub(crate) async fn require_governed_mutation_auth(
             },
         )
         .await;
+        if let Some(pd) = pd {
+            return Some((
+                StatusCode::FORBIDDEN,
+                serde_json::json!({
+                    "decision_id": pd.id,
+                    "error": {
+                        "code": "AuthorizationDenied",
+                        "message": format!("{reason} Decision {}", pd.id),
+                    }
+                })
+                .to_string(),
+            ));
+        }
+        // Fault, not a decision: there is no `decision_id` to hand back and
+        // nothing for a human to approve.
         return Some((
-            StatusCode::FORBIDDEN,
+            denial_status(&denial),
             serde_json::json!({
-                "decision_id": pd.id,
                 "error": {
-                    "code": "AuthorizationDenied",
-                    "message": format!("{reason} Decision {}", pd.id),
+                    "code": denial.error_code(),
+                    "message": reason,
                 }
             })
             .to_string(),
@@ -319,7 +395,7 @@ pub(crate) async fn require_governed_mutation_auth(
         resource_id = input.resource_id,
         "unauthorized non-resumable governed mutation"
     );
-    Some((StatusCode::FORBIDDEN, reason))
+    Some((denial_status(&denial), reason))
 }
 
 /// Record result of an authorization denial.
@@ -329,6 +405,11 @@ pub(crate) async fn require_governed_mutation_auth(
 ///
 /// Returns the `PendingDecision` so callers can include the decision ID in
 /// their HTTP response.
+///
+/// Call this only for denials a human could actually act on. Callers holding
+/// an [`AuthzDenial`] should go through [`record_denial_if_policy`], which
+/// enforces that; a request or engine fault recorded here becomes an approval
+/// queue row that can never be approved (ARN-287).
 pub(crate) async fn record_authz_denial(
     state: &crate::state::ServerState,
     input: DenialInput<'_>,
@@ -484,6 +565,114 @@ mod tests {
     use axum::http::{HeaderMap, HeaderName, HeaderValue};
     use serde_json::Value;
     use temper_authz::PrincipalKind;
+    use temper_runtime::ActorSystem;
+    use temper_spec::csdl::parse_csdl;
+
+    fn test_state() -> crate::state::ServerState {
+        let csdl_xml = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
+        let csdl = parse_csdl(csdl_xml).expect("CSDL should parse");
+        crate::state::ServerState::new(
+            ActorSystem::new("authz-denial-taxonomy-test"),
+            csdl,
+            csdl_xml.to_string(),
+        )
+    }
+
+    fn denial_input<'a>(security_ctx: &'a SecurityContext, reason: &'a str) -> DenialInput<'a> {
+        DenialInput {
+            tenant: "t",
+            security_ctx,
+            agent_id_override: None,
+            action: "update",
+            resource_type: "File",
+            resource_id: "fl-1",
+            resource_attrs: serde_json::json!({}),
+            reason,
+            module_name: None,
+            from_status: None,
+            intent: None,
+        }
+    }
+
+    #[test]
+    fn policy_denials_are_403_faults_are_400_and_500() {
+        assert_eq!(
+            denial_status(&AuthzDenial::NoMatchingPermit),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            denial_status(&AuthzDenial::PolicyDenied {
+                policy_ids: vec!["katagami-commons/art_style.cedar#2".into()],
+            }),
+            StatusCode::FORBIDDEN
+        );
+        for fault in [
+            AuthzDenial::InvalidPrincipal("bad".into()),
+            AuthzDenial::InvalidAction("bad".into()),
+            AuthzDenial::InvalidResource("unexpected token `fl`".into()),
+            AuthzDenial::InvalidContext("bad".into()),
+        ] {
+            assert_eq!(
+                denial_status(&fault),
+                StatusCode::BAD_REQUEST,
+                "{fault} is the caller's mistake, not a refusal"
+            );
+        }
+        assert_eq!(
+            denial_status(&AuthzDenial::EngineError("poisoned".into())),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
+    async fn request_and_engine_faults_are_not_recorded_as_decisions() {
+        // ARN-287: an "invalid resource" is not something a human can approve.
+        // Recording it fills the approval queue with rows nobody can action.
+        let state = test_state();
+        let ctx = SecurityContext::from_headers(&[]);
+        let mut decisions = state.pending_decision_tx.subscribe();
+
+        for fault in [
+            AuthzDenial::InvalidResource("unexpected token `fl`".into()),
+            AuthzDenial::InvalidPrincipal("bad".into()),
+            AuthzDenial::InvalidAction("bad".into()),
+            AuthzDenial::InvalidContext("bad".into()),
+            AuthzDenial::EngineError("policy lock poisoned".into()),
+        ] {
+            let reason = fault.to_string();
+            let recorded =
+                record_denial_if_policy(&state, &fault, denial_input(&ctx, &reason)).await;
+            assert!(
+                recorded.is_none(),
+                "{fault} must not become a pending decision"
+            );
+        }
+
+        assert!(
+            decisions.try_recv().is_err(),
+            "no pending decision should have been broadcast for a fault"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_denials_are_still_recorded_as_decisions() {
+        let state = test_state();
+        let ctx = SecurityContext::from_headers(&[]);
+        let mut decisions = state.pending_decision_tx.subscribe();
+
+        let denial = AuthzDenial::PolicyDenied {
+            policy_ids: vec!["katagami-commons/art_style.cedar#2".into()],
+        };
+        let reason = denial.to_string();
+        let recorded = record_denial_if_policy(&state, &denial, denial_input(&ctx, &reason)).await;
+
+        let recorded = recorded.expect("a policy denial is a decision a human can approve");
+        assert_eq!(recorded.action, "update");
+        let broadcast = decisions
+            .try_recv()
+            .expect("the decision should reach the Observe UI");
+        assert_eq!(broadcast.id, recorded.id);
+    }
 
     #[test]
     fn extract_temper_headers_filters_correctly() {

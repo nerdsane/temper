@@ -466,10 +466,11 @@ impl EventStore for SimEventStore {
                     row.key_hash.clone(),
                 )) && existing.as_str() != entity_id
                 {
-                    return Err(PersistenceError::Storage(format!(
-                        "duplicate declared key '{}' for {entity_type}: held by {existing}",
-                        row.key_name
-                    )));
+                    return Err(PersistenceError::DeclaredKeyConflict {
+                        entity_type: entity_type.to_string(),
+                        key_name: row.key_name.clone(),
+                        holder_id: existing.clone(),
+                    });
                 }
             }
         }

@@ -5,7 +5,7 @@
 //! sampler live in `state::runtime_metrics` via `spawn_runtime_metrics_loop`.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
 use opentelemetry::metrics::{Counter, Gauge, Histogram};
@@ -35,6 +35,7 @@ struct RuntimeMetrics {
     dispatch_ask_latency_ms: Histogram<f64>,
     dispatch_ask_outcome_total: Counter<u64>,
     dispatch_ask_error_total: Counter<u64>,
+    entity_spawn_failure_total: Counter<u64>,
     // --- ADR-0049: state-entry timeouts -----------------------------------
     state_timeout_fired_total: Counter<u64>,
     state_timeout_cancelled_total: Counter<u64>,
@@ -178,6 +179,15 @@ fn metrics() -> &'static RuntimeMetrics {
                 .with_description(
                     "ADR-0048: ActorError kind breakdown (ask_timeout, mailbox_full, \
                      stopped, send_failed, panicked, init_failed, max_restarts_exceeded).",
+                )
+                .build(),
+            entity_spawn_failure_total: meter
+                .u64_counter("temper_entity_spawn_failure_total")
+                .with_description(
+                    "Entity creates that failed before the entity existed, by tenant, \
+                     entity_type and reason (declared_key_conflict, transient_dependency, \
+                     internal). These writes produce no trajectory row, so without this \
+                     counter a fully broken entity type still reads as healthy.",
                 )
                 .build(),
             state_timeout_fired_total: meter
@@ -422,11 +432,28 @@ fn metrics() -> &'static RuntimeMetrics {
 
 /// Record actor and entity counts from the current server state snapshot.
 pub fn record_server_state_metrics(state: &ServerState) {
-    if let Ok(registry) = state.actor_registry.read() {
+    record_actor_directory_metrics(&state.actor_registry, &state.entity_index);
+}
+
+/// Record the same actor and entity gauges straight from the maps that back
+/// them.
+///
+/// Split out of [`record_server_state_metrics`] for the failed-spawn retraction,
+/// which runs inside the failed actor's own task (see
+/// `state::entity_ops::ActorDirectory`) and holds those maps directly with no
+/// `ServerState` to borrow — but moves these gauges just as much as any other
+/// registry edit.
+pub fn record_actor_directory_metrics(
+    actor_registry: &RwLock<
+        BTreeMap<String, temper_runtime::actor::ActorRef<crate::entity_actor::EntityMsg>>,
+    >,
+    entity_index: &RwLock<BTreeMap<String, BTreeSet<String>>>,
+) {
+    if let Ok(registry) = actor_registry.read() {
         record_active_actor_count(registry.len());
         record_actor_mailbox_metrics(&registry);
     }
-    if let Ok(index) = state.entity_index.read() {
+    if let Ok(index) = entity_index.read() {
         record_active_entity_counts(&index);
     }
 }
@@ -643,6 +670,22 @@ pub fn record_dispatch_error(
             KeyValue::new("entity_type", entity_type.to_string()),
             KeyValue::new("action", action.to_string()),
             KeyValue::new("error_kind", error_kind),
+        ],
+    );
+}
+
+/// Record an entity create that failed before the entity existed.
+///
+/// `reason` is one of `declared_key_conflict`, `transient_dependency`,
+/// `internal`. Counted per entity type so one degraded type is visible even
+/// while every other type is healthy.
+pub fn record_entity_spawn_failure(tenant: &str, entity_type: &str, reason: &'static str) {
+    metrics().entity_spawn_failure_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("reason", reason),
         ],
     );
 }

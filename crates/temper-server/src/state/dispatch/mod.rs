@@ -98,10 +98,17 @@ pub enum DispatchError {
     #[allow(dead_code)] // Reserved for structured error handling migration
     WasmFailed(String),
 
-    /// An authorization check denied the action.
-    #[error("authorization denied: {0}")]
-    #[allow(dead_code)] // Reserved for structured error handling migration
-    AuthzDenied(String),
+    /// An authorization check refused the action.
+    ///
+    /// `class` preserves *why* it was refused: a Cedar policy decision, a
+    /// request the engine could not evaluate, or an engine failure. Without
+    /// it the HTTP boundary reports an engine crash as "denied by policy",
+    /// which sends the caller chasing a policy that does not exist (ARN-287).
+    #[error("authorization denied: {reason}")]
+    AuthzDenied {
+        class: temper_authz::DenialClass,
+        reason: String,
+    },
 
     /// A tenant or owner quota denied the action before dispatch.
     #[error("quota exceeded: {0}")]
@@ -160,11 +167,13 @@ mod dispatch_error_tests {
 
     #[test]
     fn permanent_actor_errors_map_to_permanent_dispatch_variant() {
+        use temper_runtime::actor::InitFailureKind;
         for err in [
             ActorError::Stopped,
             ActorError::SendFailed,
             ActorError::Panicked("boom".into()),
-            ActorError::InitFailed("init".into()),
+            ActorError::init_failed("init", InitFailureKind::Defect),
+            ActorError::init_failed("dup key", InitFailureKind::Constraint),
             ActorError::MaxRestartsExceeded(4),
             ActorError::custom("misc"),
         ] {
@@ -173,6 +182,20 @@ mod dispatch_error_tests {
                 DispatchError::Permanent { .. } => {}
                 other => panic!("expected Permanent for {label}, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn an_init_failure_on_a_dependency_maps_to_transient() {
+        // A store blip during spawn is retryable; before the taxonomy split
+        // every init failure was permanent and this dispatch was given up on.
+        let err = ActorError::init_failed(
+            "store unavailable",
+            temper_runtime::actor::InitFailureKind::TransientDependency,
+        );
+        match DispatchError::from_actor_error(err, 2) {
+            DispatchError::Transient { attempts, .. } => assert_eq!(attempts, 2),
+            other => panic!("expected Transient, got {other:?}"),
         }
     }
 }
@@ -423,69 +446,5 @@ impl crate::state::ServerState {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use temper_runtime::ActorSystem;
-    use temper_spec::csdl::parse_csdl;
-
-    fn test_state() -> crate::state::ServerState {
-        let csdl_xml = include_str!("../../../../../test-fixtures/specs/model.csdl.xml");
-        let csdl = parse_csdl(csdl_xml).expect("CSDL should parse");
-        crate::state::ServerState::new(
-            ActorSystem::new("dispatch-wasm-authz-test"),
-            csdl,
-            csdl_xml.to_string(),
-        )
-    }
-
-    #[test]
-    fn wasm_authz_gate_evaluates_cedar_when_policy_set_is_empty() {
-        let state = test_state();
-        state
-            .authz
-            .reload_policies("")
-            .expect("empty policy set should parse");
-
-        let gate = state.wasm_authz_gate();
-        let decision = gate.authorize_http_call(
-            "api.example.com",
-            "GET",
-            "https://api.example.com/v1/ping",
-            &WasmAuthzContext::test_fixture(),
-        );
-
-        assert_eq!(
-            decision,
-            WasmAuthzDecision::Deny("no matching permit policy".to_string())
-        );
-    }
-
-    #[test]
-    fn wasm_authz_gate_allows_when_cedar_policy_matches() {
-        let state = test_state();
-        state
-            .authz
-            .reload_policies(
-                r#"
-                permit(
-                    principal is Agent,
-                    action == Action::"http_call",
-                    resource is HttpEndpoint
-                ) when {
-                    context.module == "stripe_charge"
-                };
-                "#,
-            )
-            .expect("policy should parse");
-
-        let gate = state.wasm_authz_gate();
-        let decision = gate.authorize_http_call(
-            "api.stripe.com",
-            "POST",
-            "https://api.stripe.com/v1/charges",
-            &WasmAuthzContext::test_fixture(),
-        );
-
-        assert_eq!(decision, WasmAuthzDecision::Allow);
-    }
-}
+#[path = "dispatch_mod_test.rs"]
+mod tests;

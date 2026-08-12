@@ -10,8 +10,8 @@ use std::sync::RwLock;
 use std::time::Instant;
 
 use cedar_policy::{
-    Authorizer, Context, Decision, Entities, Entity, EntityUid, Policy, PolicyId, PolicySet,
-    Request, Response as CedarResponse,
+    Authorizer, Context, Decision, Entities, Entity, EntityUid, PolicyId, PolicySet, Request,
+    Response as CedarResponse,
 };
 
 use crate::context::{PrincipalKind, SecurityContext};
@@ -21,6 +21,7 @@ use crate::metrics::{CedarDecisionMetric, CedarPhaseOutcome};
 mod candidates;
 
 #[cfg(test)]
+#[path = "engine_test.rs"]
 mod tests;
 
 /// The result of an authorization check.
@@ -71,10 +72,103 @@ impl CompiledPolicies {
     }
 }
 
+/// A labelled chunk of Cedar policy text: `(label, cedar_text)`.
+///
+/// The label names where the text came from — `"katagami-commons/art_style.cedar"`
+/// — and becomes the prefix of every `PolicyId` parsed out of it, so a denial
+/// reads `denied by policy: katagami-commons/art_style.cedar#2` instead of
+/// `policy1874`. See [`policy_statement_id`].
+pub type PolicySource = (String, String);
+
+/// Build the `PolicyId` for the `index`-th statement (0-based) of `label`.
+///
+/// Rendered as `"{label}#{n}"` with `n` 1-based, so `#2` names the second
+/// `permit`/`forbid` statement in the file a human would open. Every statement
+/// is suffixed, including the only one in a single-statement file, so an
+/// existing id does not shift meaning when a sibling statement is added.
+fn policy_statement_id(label: &str, index: usize) -> PolicyId {
+    PolicyId::new(format!("{label}#{}", index + 1))
+}
+
+/// Label for a tenant's carried-over unlabelled policy blob.
+///
+/// Statements inside it are still positional, but the id at least says they
+/// came from the tenant blob rather than a named file. The label disappears
+/// once the apps owning those statements have been loaded from labelled
+/// sources. Every caller that carries a blob forward uses this one label, so a
+/// tenant never accumulates two differently-named copies of the same text.
+pub fn unlabelled_source_label(tenant: &str) -> String {
+    format!("{tenant}:unlabelled")
+}
+
 /// Per-tenant policy data: the compiled policies and the source text.
 struct TenantPolicies {
     policies: CompiledPolicies,
     source_text: String,
+    /// The labelled sources this policy set was built from, in load order.
+    /// Empty when the tenant was loaded from an unlabelled blob via
+    /// [`AuthzEngine::reload_tenant_policies`]. Callers that rebuild a
+    /// tenant's policy set — an os-app install, say — read this back so
+    /// provenance established by earlier loads is not flattened away.
+    sources: Vec<PolicySource>,
+}
+
+/// Compile labelled sources into a tenant's policy set.
+///
+/// Each `(label, cedar_text)` pair is parsed on its own and every statement it
+/// contains is re-keyed to `"{label}#{n}"` (`n` 1-based) — see
+/// [`AuthzEngine::reload_tenant_policies_named`] for why the labels matter.
+///
+/// Takes no locks, so a caller holding the tenant write lock across a
+/// read-modify-write can compile inside that critical section.
+fn compile_tenant_policies(policies: &[PolicySource]) -> Result<TenantPolicies, AuthzError> {
+    let mut combined_set = PolicySet::new();
+    let mut combined_text = String::new();
+
+    for (label, cedar_text) in policies {
+        // Parse each entry's Cedar text individually.
+        let entry_set: PolicySet = cedar_text
+            .parse()
+            .map_err(|e| AuthzError::PolicyParse(format!("{label}: {e}")))?;
+
+        // Re-add each statement under an id that names its source.
+        for (idx, policy) in entry_set.policies().enumerate() {
+            let named = policy.clone().new_id(policy_statement_id(label, idx));
+            combined_set
+                .add(named)
+                .map_err(|e| AuthzError::PolicyParse(format!("{label}: {e}")))?;
+        }
+
+        if !combined_text.is_empty() {
+            combined_text.push('\n');
+        }
+        combined_text.push_str(cedar_text);
+    }
+
+    merge_system_platform_policy(&mut combined_set);
+
+    Ok(TenantPolicies {
+        policies: CompiledPolicies::new(combined_set),
+        source_text: combined_text,
+        sources: policies.to_vec(),
+    })
+}
+
+/// A tenant's labelled sources, or its unlabelled blob as a single entry.
+///
+/// Takes the tenant's entry rather than the engine so it can be called with
+/// the tenant lock already held.
+fn tenant_sources_or_blob(tenant: &str, existing: Option<&TenantPolicies>) -> Vec<PolicySource> {
+    let Some(tp) = existing else {
+        return Vec::new();
+    };
+    if !tp.sources.is_empty() {
+        return tp.sources.clone();
+    }
+    if tp.source_text.trim().is_empty() {
+        return Vec::new();
+    }
+    vec![(unlabelled_source_label(tenant), tp.source_text.clone())]
 }
 
 /// The authorization engine. Holds per-tenant compiled Cedar policies and
@@ -165,74 +259,124 @@ impl AuthzEngine {
             TenantPolicies {
                 policies: CompiledPolicies::new(new_policy_set),
                 source_text: policy_text.to_string(),
+                sources: Vec::new(),
             },
         );
         Ok(())
     }
 
-    /// Hot-reload Cedar policies for a tenant from individually named policy
-    /// entries. Each `(policy_id, cedar_text)` pair is parsed individually and
-    /// assigned a meaningful `PolicyId` of the form `"{tenant}:{policy_id}"`.
+    /// Hot-reload Cedar policies for a tenant from labelled sources.
     ///
-    /// Multiple permit/forbid statements in one `cedar_text` are suffixed:
-    /// `"{tenant}:{policy_id}:0"`, `":1"`, etc.
+    /// Each `(label, cedar_text)` pair is parsed on its own and every statement
+    /// it contains is re-keyed to `"{label}#{n}"` (`n` 1-based). Labelling the
+    /// source is the whole point: Cedar names policies positionally within
+    /// whatever text it was handed, so a concatenated tenant blob yields ids
+    /// like `policy1874` that map back to nothing, and a denial diagnostic
+    /// becomes unreadable (ARN-286). With a `"{app}/{file}.cedar"` label the
+    /// same denial reads `denied by policy: katagami-commons/art_style.cedar#2`.
     ///
-    /// This enables meaningful policy IDs in denial diagnostics instead of
-    /// auto-generated names like `"policy0"`.
+    /// The labelled sources are retained so a later caller can rebuild the
+    /// tenant's set without losing provenance — see [`tenant_policy_sources`](Self::tenant_policy_sources).
     pub fn reload_tenant_policies_named(
         &self,
         tenant: &str,
-        policies: &[(String, String)], // (policy_id, cedar_text)
+        policies: &[PolicySource],
     ) -> Result<(), AuthzError> {
-        let mut combined_set = PolicySet::new();
-        let mut combined_text = String::new();
-
-        for (policy_id, cedar_text) in policies {
-            // Parse each entry's Cedar text individually.
-            let entry_set: PolicySet = cedar_text
-                .parse()
-                .map_err(|e| AuthzError::PolicyParse(format!("{policy_id}: {e}")))?;
-
-            // Re-add each policy with a meaningful PolicyId.
-            let entry_policies: Vec<Policy> = entry_set.policies().cloned().collect();
-            if entry_policies.len() == 1 {
-                let named = entry_policies
-                    .into_iter()
-                    .next()
-                    .unwrap() // ci-ok: checked len == 1
-                    .new_id(PolicyId::new(format!("{tenant}:{policy_id}")));
-                combined_set
-                    .add(named)
-                    .map_err(|e| AuthzError::PolicyParse(e.to_string()))?;
-            } else {
-                for (idx, p) in entry_policies.into_iter().enumerate() {
-                    let named = p.new_id(PolicyId::new(format!("{tenant}:{policy_id}:{idx}")));
-                    combined_set
-                        .add(named)
-                        .map_err(|e| AuthzError::PolicyParse(e.to_string()))?;
-                }
-            }
-
-            if !combined_text.is_empty() {
-                combined_text.push('\n');
-            }
-            combined_text.push_str(cedar_text);
-        }
-
-        merge_system_platform_policy(&mut combined_set);
+        let compiled = compile_tenant_policies(policies)?;
 
         let mut tenants = self
             .tenant_policies
             .write()
             .map_err(|e| AuthzError::Engine(format!("tenant policy lock poisoned: {e}")))?;
 
-        tenants.insert(
-            tenant.to_string(),
-            TenantPolicies {
-                policies: CompiledPolicies::new(combined_set),
-                source_text: combined_text,
-            },
-        );
+        tenants.insert(tenant.to_string(), compiled);
+        Ok(())
+    }
+
+    /// The labelled policy sources currently active for a tenant, in load
+    /// order.
+    ///
+    /// Empty when the tenant's policies were loaded from an unlabelled blob.
+    /// Callers rebuilding a tenant's policy set start from this so labels
+    /// contributed by earlier loads survive.
+    pub fn tenant_policy_sources(&self, tenant: &str) -> Vec<PolicySource> {
+        self.tenant_policies
+            .read()
+            .ok()
+            .and_then(|t| t.get(tenant).map(|tp| tp.sources.clone()))
+            .unwrap_or_default()
+    }
+
+    /// Rebuild a tenant's labelled policy sources under a single lock.
+    ///
+    /// `update` receives the sources currently active for the tenant — or its
+    /// unlabelled blob as one entry — and returns the set to install. Reading
+    /// the current sources, applying `update`, compiling the result and
+    /// swapping it in all happen while this call holds the tenant write lock,
+    /// so two concurrent rebuilds serialize. Splitting that into a read
+    /// followed by a separate [`reload_tenant_policies_named`](Self::reload_tenant_policies_named)
+    /// loses updates: both callers read the same pre-state, both write, and
+    /// the first caller's policies are gone while both calls returned `Ok`.
+    ///
+    /// Returns the tenant's combined policy text as installed, so a caller
+    /// mirroring that text into a cache writes what the engine actually holds
+    /// rather than what it computed before the merge.
+    ///
+    /// `update` runs with the tenant lock held, so it must not call back into
+    /// this engine — [`get_tenant_policy_text`](Self::get_tenant_policy_text),
+    /// [`tenant_policy_sources`](Self::tenant_policy_sources) or another
+    /// update would deadlock. Read anything it needs from the engine before
+    /// calling. Cedar compilation also happens under the lock, so a tenant
+    /// with a large policy set has its authorization requests briefly queued
+    /// behind a rebuild; that is the cost of the sequence being atomic.
+    ///
+    /// If the updated sources do not parse, the tenant keeps the policies it
+    /// had.
+    pub fn update_tenant_policy_sources<F>(
+        &self,
+        tenant: &str,
+        update: F,
+    ) -> Result<String, AuthzError>
+    where
+        F: FnOnce(Vec<PolicySource>) -> Vec<PolicySource>,
+    {
+        let mut tenants = self
+            .tenant_policies
+            .write()
+            .map_err(|e| AuthzError::Engine(format!("tenant policy lock poisoned: {e}")))?;
+
+        let current = tenant_sources_or_blob(tenant, tenants.get(tenant));
+        let updated = update(current);
+        // Compile before touching the map: a parse failure leaves the tenant
+        // on the policies it already had.
+        let compiled = compile_tenant_policies(&updated)?;
+        let policy_text = compiled.source_text.clone();
+        tenants.insert(tenant.to_string(), compiled);
+        Ok(policy_text)
+    }
+
+    /// Add or replace a single labelled policy source and reload the tenant.
+    ///
+    /// For paths that contribute one policy to a tenant that already has some
+    /// — generating a policy from an approved governance decision, say.
+    /// Sources already loaded keep their labels, so adding a policy does not
+    /// flatten a tenant back to positional `policy1874` ids (ARN-286). If the
+    /// new text does not parse, the tenant's existing policies stay in effect.
+    ///
+    /// Atomic: two policies upserted concurrently both survive.
+    pub fn upsert_tenant_policy_source(
+        &self,
+        tenant: &str,
+        label: &str,
+        cedar_text: &str,
+    ) -> Result<(), AuthzError> {
+        self.update_tenant_policy_sources(tenant, |mut sources| {
+            match sources.iter_mut().find(|(existing, _)| existing == label) {
+                Some(entry) => entry.1 = cedar_text.to_string(),
+                None => sources.push((label.to_string(), cedar_text.to_string())),
+            }
+            sources
+        })?;
         Ok(())
     }
 
