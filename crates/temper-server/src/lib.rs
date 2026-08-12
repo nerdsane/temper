@@ -14,6 +14,8 @@ pub mod blob_store;
 pub mod blob_sweeper;
 mod blob_transport_observability;
 pub mod blobs;
+/// Deterministic conformance checking of a recorded run against its IOA spec.
+pub mod conformance;
 pub mod entity_actor;
 pub mod event_budget_metrics;
 pub mod events;

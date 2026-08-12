@@ -12,6 +12,7 @@ mod files;
 mod policies;
 mod repl;
 mod secrets;
+mod trajectory_analysis;
 
 use axum::Router;
 use axum::extract::{FromRequestParts, Path, State};
@@ -40,6 +41,8 @@ use crate::state::ServerState;
 /// - POST   /api/files/read-text-batch                  -> batch current-file text reads via projections + blobs
 /// - POST   /api/files/read-version-text-batch          -> batch immutable file-version text reads
 /// - POST   /api/files/publish-artifact                 -> promote a governed file to a public immutable artifact
+/// - GET    /api/ots/trajectories/{id}/atif             -> export an OTS trajectory as ATIF v1.7
+/// - POST   /api/conformance/check                      -> check a session against its actor spec
 pub fn build_api_router() -> Router<ServerState> {
     Router::new()
         .route(
@@ -96,6 +99,15 @@ pub fn build_api_router() -> Router<ServerState> {
             "/ots/trajectories",
             post(crate::observe::evolution::handle_post_ots_trajectory)
                 .get(crate::observe::evolution::handle_get_ots_trajectories),
+        )
+        .route(
+            "/ots/trajectories/{trajectory_id}/atif",
+            get(trajectory_analysis::handle_get_ots_trajectory_atif),
+        )
+        // Deterministic conformance checking of a recorded run against its spec
+        .route(
+            "/conformance/check",
+            post(trajectory_analysis::handle_conformance_check),
         )
         .route(
             "/tenants/{tenant}/secrets/{key_name}",
