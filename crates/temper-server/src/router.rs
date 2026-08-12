@@ -314,7 +314,8 @@ async fn dispatch_matched_route(
         let _ = pump_streams.close(kernel_request_body).await;
     });
 
-    // Build the invocation context.
+    // Build the invocation context. Strip credential/principal headers so
+    // guests never receive ambient authority material (ADR-0161 / ARN-208).
     let header_pairs: Vec<(String, String)> = headers
         .iter()
         .filter_map(|(k, v)| {
@@ -323,6 +324,7 @@ async fn dispatch_matched_route(
                 .map(|s| (k.as_str().to_string(), s.to_string()))
         })
         .collect();
+    let header_pairs = crate::http_endpoint_host::guest_safe_headers(&header_pairs);
     let route_params = git_route_params_for_http_dispatch(
         &route.route.integration_module,
         uri.path(),
@@ -359,15 +361,14 @@ async fn dispatch_matched_route(
         }),
     };
 
-    // Build a per-request host that shares the registry.
-    let secrets: std::collections::BTreeMap<String, String> = state
-        .secrets_vault
-        .as_ref()
-        .map(|v| v.get_tenant_secrets(tenant_id.as_str()))
-        .unwrap_or_default();
-    let host: std::sync::Arc<dyn temper_wasm::WasmHost> = std::sync::Arc::new(
-        temper_wasm::ProductionWasmHost::with_shared_streams(secrets, streams.clone())
-            .with_invocation_context(ctx.clone()),
+    // ADR-0161 / ARN-208: governed host (AuthorizedWasmHost + bootstrap
+    // secrets + gated resolver). Never attach the full tenant secret map.
+    let host = crate::http_endpoint_host::build_httpendpoint_wasm_host(
+        &state,
+        &tenant_id,
+        &route.route.integration_module,
+        streams.clone(),
+        ctx.clone(),
     );
 
     // Spawn task B: invoke the WASM module. Runs to completion
