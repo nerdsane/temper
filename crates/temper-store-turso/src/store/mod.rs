@@ -325,6 +325,10 @@ impl TursoEventStore {
         ] {
             let _ = conn.execute(stmt, ()).await;
         }
+        // Runs after the column migrations, so the rebuild copies a table that
+        // already has every column, and before the indexes, which the rebuild
+        // drops along with the old table.
+        Self::rebuild_ots_trajectories_for_tenant_identity(&conn).await?;
         conn.execute(schema::CREATE_OTS_TRAJECTORIES_AGENT_INDEX, ())
             .await
             .map_err(storage_error)?;
@@ -411,6 +415,46 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
 
+        Ok(())
+    }
+
+    /// Rekey an existing `ots_trajectories` table from `trajectory_id` alone to
+    /// `(tenant, trajectory_id)`.
+    ///
+    /// SQLite has no `ALTER TABLE ... PRIMARY KEY`, so the only way to change a
+    /// key is to rebuild the table. The rebuild runs once: it reads the stored
+    /// DDL first and returns immediately on a table that is already scoped, so
+    /// it costs one `sqlite_master` read per startup after that.
+    async fn rebuild_ots_trajectories_for_tenant_identity(
+        conn: &InstrumentedConnection,
+    ) -> Result<(), PersistenceError> {
+        // Scoped so the cursor is closed before the rebuild runs: an open read
+        // on `sqlite_master` holds a lock that `DROP TABLE` cannot take.
+        let ddl = {
+            let mut rows = conn
+                .query(schema::SELECT_OTS_TRAJECTORIES_DDL, ())
+                .await
+                .map_err(storage_error)?;
+            match rows.next().await.map_err(storage_error)? {
+                Some(row) => row.get::<String>(0).unwrap_or_default(),
+                // No table at all: the CREATE above did not run, so there is
+                // nothing to rebuild and nothing to check.
+                None => return Ok(()),
+            }
+        };
+        if ddl.contains(schema::OTS_TRAJECTORIES_TENANT_IDENTITY_MARKER) {
+            return Ok(());
+        }
+
+        tracing::info!("rekeying ots_trajectories by (tenant, trajectory_id)");
+        for stmt in [
+            schema::CREATE_OTS_TRAJECTORIES_REBUILD_TABLE,
+            schema::COPY_OTS_TRAJECTORIES_INTO_REBUILD,
+            schema::DROP_OTS_TRAJECTORIES_LEGACY_TABLE,
+            schema::RENAME_OTS_TRAJECTORIES_REBUILD,
+        ] {
+            conn.execute(stmt, ()).await.map_err(storage_error)?;
+        }
         Ok(())
     }
 

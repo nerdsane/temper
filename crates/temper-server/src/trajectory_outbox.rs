@@ -1,7 +1,14 @@
 //! Bounded background persistence for observe trajectory entries.
+//!
+//! The queue is bounded and its writes can fail, so this path can lose a
+//! captured entry. A loss that only shows up as a log line lets a run with
+//! holes in it later pass a conformance check, so every loss is counted and —
+//! once per session — written to storage as a marker row the checker reads as
+//! an evidence gap (`crate::conformance::CAPTURE_LOSS_ENTITY_TYPE`).
 
+use std::collections::HashSet;
 use std::sync::{
-    Arc, OnceLock,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -10,18 +17,27 @@ use opentelemetry::{
     KeyValue, global,
     metrics::{Counter, Gauge, Histogram},
 };
+use temper_runtime::scheduler::sim_now;
 use tracing::Instrument;
 
-use crate::state::trajectory::TrajectoryEntry;
+use crate::conformance::{CAPTURE_LOSS_ACTION, CAPTURE_LOSS_ENTITY_TYPE};
+use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 use crate::storage::TrajectorySink;
 
 const DEFAULT_CAPACITY: usize = 8_192;
+
+/// Cap on sessions this process remembers having marked.
+///
+/// Past the cap the counter still records every loss; only the durable marker
+/// is skipped, so a long-lived process cannot grow the set without bound.
+const MAX_MARKED_SESSIONS: usize = 4_096;
 
 struct TrajectoryOutboxMetrics {
     outbox_depth: Gauge<u64>,
     outbox_capacity: Gauge<u64>,
     enqueued_total: Counter<u64>,
     dropped_total: Counter<u64>,
+    capture_loss_marker_total: Counter<u64>,
     persist_latency_ms: Histogram<f64>,
 }
 
@@ -44,7 +60,11 @@ fn metrics() -> &'static TrajectoryOutboxMetrics {
                 .build(),
             dropped_total: meter
                 .u64_counter("temper_trajectory_outbox_dropped_total")
-                .with_description("Trajectory entries dropped because the persistence outbox was unavailable or full.")
+                .with_description("Captured trajectory entries that never reached storage, by reason: the outbox was full or unavailable, or the write failed.")
+                .build(),
+            capture_loss_marker_total: meter
+                .u64_counter("temper_trajectory_capture_loss_marker_total")
+                .with_description("Attempts to write the per-session marker that records a capture loss, by result.")
                 .build(),
             persist_latency_ms: meter
                 .f64_histogram("temper_trajectory_outbox_persist_latency_ms")
@@ -98,6 +118,16 @@ fn record_dropped(entry: &TrajectoryEntry, backend: &str, reason: &str) {
         KeyValue::new("reason", reason.to_string()),
     ];
     metrics().dropped_total.add(1, &attrs);
+}
+
+fn record_capture_loss_marker(tenant: &str, result: &'static str) {
+    metrics().capture_loss_marker_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("result", result),
+        ],
+    );
 }
 
 fn record_persist_latency(
@@ -168,14 +198,7 @@ impl TrajectoryOutbox {
             self.depth.fetch_sub(1, Ordering::Relaxed);
             self.dropped_total.fetch_add(1, Ordering::Relaxed);
             record_depth(self.depth.load(Ordering::Relaxed));
-            record_dropped(&metric_entry, backend, "outbox_full");
-            tracing::warn!(
-                tenant = %metric_entry.tenant,
-                entity_type = %metric_entry.entity_type,
-                entity_id = %metric_entry.entity_id,
-                action = %metric_entry.action,
-                "trajectory outbox full; dropping entry"
-            );
+            record_capture_loss(sink.clone(), backend, &metric_entry, "outbox_full");
             return false;
         }
         record_enqueued(&metric_entry, backend);
@@ -258,11 +281,159 @@ async fn persist_drained(item: QueuedTrajectory) {
             Err(error) => {
                 record_persist_latency(&entry, backend, "error", started_at.elapsed());
                 tracing::error!(error = %error, "failed to persist trajectory entry from outbox");
+                // A write that failed loses the entry exactly as surely as a
+                // full queue does. Both go through one place, so neither can
+                // be the one that stays silent.
+                record_capture_loss(Some(Arc::clone(&sink)), backend, &entry, "persist_failed");
             }
         }
     }
     .instrument(span)
     .await;
+}
+
+/// Sessions this process has already written a capture-loss marker for.
+///
+/// One marker per session is the whole signal: it says this session's stored
+/// record has holes. Writing another on every subsequent loss would put a
+/// write storm on the backend that is already the reason entries are being
+/// lost.
+fn marked_sessions() -> &'static Mutex<HashSet<(String, String)>> {
+    static MARKED: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
+    MARKED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Claim the right to write this session's one marker.
+///
+/// Returns false when a marker is already written or in flight, or when the
+/// remembered set is full.
+fn claim_capture_loss_marker(tenant: &str, session_id: &str) -> bool {
+    let Ok(mut marked) = marked_sessions().lock() else {
+        return false;
+    };
+    if marked.len() >= MAX_MARKED_SESSIONS {
+        return false;
+    }
+    marked.insert((tenant.to_string(), session_id.to_string()))
+}
+
+/// Give the claim back so a later loss in the same session tries again.
+fn release_capture_loss_marker(tenant: &str, session_id: &str) {
+    if let Ok(mut marked) = marked_sessions().lock() {
+        marked.remove(&(tenant.to_string(), session_id.to_string()));
+    }
+}
+
+/// Record that a captured entry never reached storage.
+///
+/// Two things happen. The loss is counted, tagged with the reason, so the rate
+/// is visible without reading logs. And the first time a session loses an
+/// entry, a marker row is written for it, so a conformance check that reads
+/// the session later learns the record it is walking is incomplete instead of
+/// passing a run it only partly saw.
+///
+/// The marker goes straight to the sink rather than back through this outbox:
+/// the outbox is what just failed, and a marker it drops says nothing.
+fn record_capture_loss(
+    sink: Option<Arc<dyn TrajectorySink>>,
+    backend: &'static str,
+    lost: &TrajectoryEntry,
+    reason: &'static str,
+) {
+    record_dropped(lost, backend, reason);
+    tracing::warn!(
+        tenant = %lost.tenant,
+        entity_type = %lost.entity_type,
+        entity_id = %lost.entity_id,
+        action = %lost.action,
+        session_id = lost.session_id.as_deref().unwrap_or(""),
+        reason,
+        "trajectory capture lost an entry"
+    );
+
+    // An entry with no session belongs to no run a conformance check can read,
+    // so there is no session record to mark; the counter carries the loss.
+    let Some(session_id) = lost
+        .session_id
+        .as_deref()
+        .filter(|session| !session.is_empty())
+    else {
+        return;
+    };
+    let Some(sink) = sink else {
+        return;
+    };
+    if !claim_capture_loss_marker(&lost.tenant, session_id) {
+        return;
+    }
+
+    // Off the caller's path: a loss is already a degraded state and the caller
+    // is not waiting on the marker.
+    tokio::spawn(persist_capture_loss_marker(
+        sink,
+        lost.tenant.clone(),
+        session_id.to_string(),
+        reason,
+    ));
+}
+
+/// Write this session's capture-loss marker.
+async fn persist_capture_loss_marker(
+    sink: Arc<dyn TrajectorySink>,
+    tenant: String,
+    session_id: String,
+    reason: &'static str,
+) {
+    let marker = capture_loss_marker(&tenant, &session_id, reason);
+    match sink.persist_trajectory_entry(&marker).await {
+        Ok(()) => record_capture_loss_marker(&tenant, "stored"),
+        Err(error) => {
+            record_capture_loss_marker(&tenant, "failed");
+            // Nothing durable now says this session lost an entry, so let the
+            // next loss in it try again rather than staying silent.
+            release_capture_loss_marker(&tenant, &session_id);
+            tracing::error!(
+                error = %error,
+                tenant = %tenant,
+                session_id = %session_id,
+                "failed to persist trajectory capture-loss marker"
+            );
+        }
+    }
+}
+
+/// The row that tells a later reader this session's record is incomplete.
+///
+/// Not an actor's entity type and not a declared action, so the conformance
+/// checker counts it as an evidence gap rather than judging it
+/// (`crate::conformance::walk::row_disposition`).
+fn capture_loss_marker(tenant: &str, session_id: &str, reason: &str) -> TrajectoryEntry {
+    TrajectoryEntry {
+        timestamp: sim_now().to_rfc3339(),
+        tenant: tenant.to_string(),
+        entity_type: CAPTURE_LOSS_ENTITY_TYPE.to_string(),
+        entity_id: session_id.to_string(),
+        action: CAPTURE_LOSS_ACTION.to_string(),
+        success: false,
+        from_status: None,
+        to_status: None,
+        error: Some(format!(
+            "trajectory capture lost at least one entry for this session ({reason}); the stored \
+             record of this run is incomplete"
+        )),
+        agent_id: None,
+        session_id: Some(session_id.to_string()),
+        authz_denied: None,
+        denied_resource: None,
+        denied_module: None,
+        source: Some(TrajectorySource::Platform),
+        spec_governed: Some(false),
+        agent_type: None,
+        request_body: None,
+        intent: None,
+        matched_policy_ids: None,
+        capture_seq: Some(next_capture_seq()),
+    }
 }
 
 fn global() -> &'static TrajectoryOutbox {
@@ -353,5 +524,77 @@ mod tests {
         assert!(!outbox.try_record_for_test(entry("two")));
         assert_eq!(outbox.dropped_total(), 1);
         assert_eq!(outbox.depth(), 1);
+    }
+
+    #[test]
+    fn a_session_is_marked_once() {
+        // A backlog drops entries in bursts. One marker says the session's
+        // record has holes; a thousand say the same thing to a backend that is
+        // already the reason they are being dropped.
+        assert!(claim_capture_loss_marker("tenant", "burst-session"));
+        assert!(!claim_capture_loss_marker("tenant", "burst-session"));
+        release_capture_loss_marker("tenant", "burst-session");
+        assert!(
+            claim_capture_loss_marker("tenant", "burst-session"),
+            "a marker that failed to store leaves the session unmarked, so the next loss retries"
+        );
+        release_capture_loss_marker("tenant", "burst-session");
+    }
+
+    #[tokio::test]
+    async fn a_lost_entry_leaves_a_marker_the_checker_reads_as_missing_evidence() {
+        // The end the finding cares about: after a loss, a conformance check
+        // of that session must not come back `passed`.
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let db_url = format!("file:{}", dir.path().join("capture-loss.db").display());
+        let store = temper_store_turso::TursoEventStore::new(&db_url, None)
+            .await
+            .expect("create local turso store");
+        let session = "capture-loss-session";
+
+        crate::storage::TrajectorySink::persist_trajectory_entry(
+            &store,
+            &TrajectoryEntry {
+                session_id: Some(session.to_string()),
+                ..entry("order-1")
+            },
+        )
+        .await
+        .expect("persist the entry that survived");
+
+        persist_capture_loss_marker(
+            Arc::new(store.clone()),
+            "tenant".to_string(),
+            session.to_string(),
+            "outbox_full",
+        )
+        .await;
+        release_capture_loss_marker("tenant", session);
+
+        let rows = store
+            .query_trajectories_by_session(session, Some("tenant"), None, 10)
+            .await
+            .expect("read the session back");
+        assert_eq!(rows.len(), 2, "the marker is stored alongside the run");
+
+        let automaton = temper_spec::automaton::parse_automaton(include_str!(
+            "../../../test-fixtures/specs/order.ioa.toml"
+        ))
+        .expect("order fixture parses");
+        let report = crate::conformance::check_conformance(crate::conformance::ConformanceInput {
+            automaton: &automaton,
+            kernel_rows: &rows,
+            ots_trajectory: None,
+            rows_truncated: false,
+            spec_resolution: crate::conformance::SpecResolution::Pinned,
+        });
+
+        assert_eq!(report.stats.capture_loss_markers, 1);
+        assert!(
+            !report.passed,
+            "a run whose capture is known to have lost rows cannot pass: {:?}",
+            report.evidence_gaps
+        );
+        assert!(!report.evidence_complete);
     }
 }

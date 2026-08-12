@@ -10,24 +10,34 @@ use temper_spec::automaton::Action;
 use temper_store_turso::TursoTrajectoryRow;
 
 use super::spec_view::{SourceStates, SpecView};
+use super::{CAPTURE_LOSS_ACTION, CAPTURE_LOSS_ENTITY_TYPE};
 use super::{ConformanceStats, Violation, ViolationKind};
 
 /// Whether a row records something this actor's spec governs.
 ///
-/// Three kinds of row reach the checker and only one of them is the actor
+/// Four kinds of row reach the checker and only one of them is the actor
 /// executing its spec:
 ///
+/// - a capture-loss marker, which is the capture path reporting that a row for
+///   this session never reached storage;
 /// - another actor's row, whose spec the checker was not given;
 /// - kernel bookkeeping (`source = Platform`);
 /// - a row explicitly marked `spec_governed = false`, which is a caller-supplied
-///   audit record rather than a governed dispatch. `POST /api/audit` writes
-///   these with a caller-chosen session, entity type, and action name, so
-///   judging them would let any caller inject violations into another
-///   session's report.
+///   audit record rather than a governed dispatch. `POST /api/audit` and
+///   `POST /api/evolution/trajectories/unmet` write these with a caller-chosen
+///   session, entity type, and action name, so judging them would let any
+///   caller inject violations into another session's report.
 ///
 /// A row with `spec_governed` absent is a governed dispatch: the kernel capture
-/// sites leave the column unset, and only the audit endpoint sets it false.
+/// sites leave the column unset, and only the caller-supplied endpoints set it
+/// false.
 pub(super) fn row_disposition(spec: &SpecView<'_>, row: &TursoTrajectoryRow) -> RowDisposition {
+    // Checked before the entity comparison: a marker's entity type is the
+    // capture path's own, so the `OtherEntity` arm would otherwise swallow it
+    // and the evidence gap it reports would be lost.
+    if row.entity_type == CAPTURE_LOSS_ENTITY_TYPE && row.action == CAPTURE_LOSS_ACTION {
+        return RowDisposition::CaptureLoss;
+    }
     if row.entity_type != spec.entity_name {
         return RowDisposition::OtherEntity;
     }
@@ -45,6 +55,8 @@ pub(super) fn row_disposition(spec: &SpecView<'_>, row: &TursoTrajectoryRow) -> 
 pub(super) enum RowDisposition {
     /// This actor executing its spec: judged.
     ActorExecution,
+    /// The capture path reporting a row it failed to store.
+    CaptureLoss,
     /// Another actor's row.
     OtherEntity,
     /// Kernel bookkeeping.
@@ -61,6 +73,10 @@ pub(super) fn check_row(
     violations: &mut Vec<Violation>,
 ) {
     match row_disposition(spec, row) {
+        RowDisposition::CaptureLoss => {
+            walk.capture_loss_markers += 1;
+            return;
+        }
         RowDisposition::OtherEntity => {
             walk.other_entity_rows_skipped += 1;
             return;
@@ -342,6 +358,7 @@ pub(super) struct Walk {
     platform_rows_skipped: usize,
     other_entity_rows_skipped: usize,
     non_governed_rows_skipped: usize,
+    capture_loss_markers: usize,
     transitions_unchecked: usize,
     targets_unchecked: usize,
     /// Index at which each entity first reached a terminal state.
@@ -362,10 +379,12 @@ impl Walk {
             platform_rows_skipped: self.platform_rows_skipped,
             other_entity_rows_skipped: self.other_entity_rows_skipped,
             non_governed_rows_skipped: self.non_governed_rows_skipped,
+            capture_loss_markers: self.capture_loss_markers,
             transitions_unchecked: self.transitions_unchecked,
             targets_unchecked: self.targets_unchecked,
             ots_decisions_checked: 0,
             ots_decisions_skipped_as_thinking: 0,
+            ots_decisions_skipped_as_harness_tool: 0,
             terminal_entities: self.terminal_at.len(),
             violations_by_kind: BTreeMap::new(),
         }

@@ -96,6 +96,23 @@ pub(crate) fn require_observe_auth(
 /// principal precisely to stop header-declared escalation — and platform code
 /// paths that legitimately act as System are covered by the built-in
 /// `system-platform` permit rather than by a bypass in this function.
+///
+/// # What this does not fix
+///
+/// The principal itself is still self-declared: [`SecurityContext`] is built
+/// from `X-Temper-*` request headers ([`temper_authz::SecurityContext::from_headers`],
+/// consumed at `crate::state::ServerState::authorize_with_context`), and no
+/// component in front of this one authenticates them. A Cedar permit therefore
+/// binds a claimed principal id, not a verified one. This function is the
+/// strictest gate the platform has today, not a sufficient one.
+///
+/// Closing that gap is ARN-255 — a platform-run authorization server issuing
+/// verified principals — and it is a platform-wide change to how every request
+/// is authenticated, not something these endpoints can do locally. Gating the
+/// pre-existing OTS routes (`POST /api/ots/trajectories`,
+/// `GET /api/ots/trajectories`, which carry no authorization check at all) is
+/// ARN-187, in flight on `claude/arn-187-ots-auth-gate`; duplicating that gate
+/// here would collide with it on merge. Neither is rebuilt on this branch.
 pub(crate) fn require_trajectory_content_auth(
     state: &crate::state::ServerState,
     headers: &HeaderMap,

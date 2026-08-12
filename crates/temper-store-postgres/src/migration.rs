@@ -124,6 +124,31 @@ mod tests {
     }
 
     #[test]
+    fn ots_trajectory_identity_is_tenant_scoped_on_both_schema_paths() {
+        // A fresh bootstrap reads schema.rs and an existing database reads the
+        // migration. Whichever path keeps the global key lets one tenant's
+        // upload overwrite another tenant's trajectory.
+        let migration = include_str!("../migrations/0015_ots_trajectory_tenant_identity.sql");
+        assert!(
+            migration.contains("DROP CONSTRAINT IF EXISTS ots_trajectories_pkey"),
+            "migration 0015 must drop the globally keyed primary key idempotently"
+        );
+        assert!(
+            migration.contains("PRIMARY KEY (tenant, trajectory_id)"),
+            "migration 0015 must rekey the table by (tenant, trajectory_id)"
+        );
+        assert!(
+            schema::CREATE_OTS_TRAJECTORIES_TABLE.contains("PRIMARY KEY (tenant, trajectory_id)"),
+            "a freshly bootstrapped ots_trajectories table must be keyed by tenant and id"
+        );
+        assert!(
+            !schema::CREATE_OTS_TRAJECTORIES_TABLE
+                .contains("trajectory_id TEXT         PRIMARY KEY"),
+            "the globally keyed column definition must be gone, not shadowed"
+        );
+    }
+
+    #[test]
     fn migration_sql_is_idempotent() {
         // Both schemas must use IF NOT EXISTS so repeated execution is safe.
         assert!(

@@ -12,6 +12,12 @@
 //! identifier — a session id, a trajectory id — so a cross-tenant admin view
 //! has nothing to resolve against. Both require an explicit `X-Tenant-Id` and
 //! answer `400` without one.
+//!
+//! That gate is the strictest one the platform currently has, and it is not a
+//! sufficient one: the principal it evaluates is read off unauthenticated
+//! request headers. See [`require_trajectory_content_auth`] for what remains
+//! open, ARN-255 for the platform-wide fix, and ARN-187 for the gate over the
+//! pre-existing OTS upload and list routes.
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -24,7 +30,7 @@ use temper_spec::automaton::Automaton;
 use tracing::instrument;
 
 use crate::authz::{observe_tenant_scope, require_trajectory_content_auth};
-use crate::conformance::{ConformanceInput, check_conformance};
+use crate::conformance::{ConformanceInput, SpecResolution, check_conformance};
 use crate::state::ServerState;
 
 /// Largest session the conformance checker will read in one request.
@@ -52,10 +58,12 @@ pub(crate) struct ConformanceCheckRequest {
     /// Optional OTS trajectory contributing the agent-side decisions.
     #[serde(default)]
     trajectory_id: Option<String>,
-    /// The spec version the run executed under, when the caller knows it.
+    /// The spec version the run executed under, for a run whose trajectory
+    /// does not carry one.
     ///
-    /// Checked against the registered spec so a run is never judged by a spec
-    /// that did not govern it. See [`resolve_governing_spec`].
+    /// A hint, never an override: when the trajectory pins a version, that one
+    /// governs and a conflicting hint is refused. See
+    /// [`resolve_governing_spec`].
     #[serde(default)]
     spec_version: Option<String>,
     /// Cap on rows read, bounded by [`MAX_CONFORMANCE_ROWS`].
@@ -147,27 +155,32 @@ pub(crate) async fn handle_conformance_check(
         None => None,
     };
 
-    let declared_spec_version = request
-        .spec_version
-        .as_deref()
-        .or_else(|| ots.as_ref()?.metadata.spec_version.as_deref());
-    resolve_governing_spec(&spec, declared_spec_version, &request.entity_type)?;
+    let spec_resolution = resolve_governing_spec(
+        &spec,
+        ots.as_ref()
+            .and_then(|ots| ots.metadata.spec_version.as_deref()),
+        request.spec_version.as_deref(),
+        &request.entity_type,
+    )?;
 
     let report = check_conformance(ConformanceInput {
         automaton: &spec.automaton,
         kernel_rows: &rows,
         ots_trajectory: ots.as_ref(),
         rows_truncated: truncated,
+        spec_resolution,
     });
     tracing::info!(
         tenant = %tenant,
         entity_type = %request.entity_type,
         session_id = %request.session_id,
         spec_version = %spec.version,
+        spec_resolution = ?spec_resolution,
         rows = rows.len(),
         truncated,
         verdict = ?report.verdict,
         passed = report.passed,
+        evidence_complete = report.evidence_complete,
         violations = report.violations.len(),
         "conformance.check"
     );
@@ -277,42 +290,78 @@ fn registered_spec(
 
 /// Refuse to judge a run by a spec that did not govern it.
 ///
-/// A conformance report only means something against the spec the run
-/// executed under. Temper keeps one spec per (tenant, entity type) — a submit
-/// replaces the previous version rather than versioning it — so when a run
-/// declares a spec version that is not the registered one, the governing spec
-/// is not available to check against. Answering with a report against the
-/// current spec would pass behaviour that violated the old one and condemn
-/// behaviour that was legal under it, so the request is refused instead.
+/// A conformance report only means something against the spec the run executed
+/// under. Temper keeps one spec per (tenant, entity type) — a submit replaces
+/// the previous version rather than versioning it — so the registered spec is
+/// whatever was submitted last, which need not be the one in force when the run
+/// happened. Three cases follow.
 ///
-/// A run that declares no spec version is checked against the registered spec,
-/// and the response says which version that was.
+/// **The trajectory pins a version.** `OTSMetadata.spec_version` is written by
+/// the harness that drove the run, from inside the run; it is the provenance.
+/// It governs. A request that names a different version is refused rather than
+/// honoured: the request body is the one part of this input a caller chooses
+/// freely, and letting it override the recorded provenance would turn "check
+/// this run against its spec" into "check this run against whichever spec makes
+/// it pass".
+///
+/// **Only the request names a version.** Nothing recorded contradicts it, so it
+/// is used — and, like a pinned version, it has to match the registered spec or
+/// the check has nothing to run against.
+///
+/// **A named version is not the registered one.** The governing spec is gone,
+/// so there is nothing to check against. A report against the current spec
+/// would pass behaviour that violated the old one and condemn behaviour that
+/// was legal under it, so the request is refused.
+///
+/// **Nothing names a version.** The check runs against the registered spec and
+/// says so: the resolution is [`SpecResolution::Unresolved`], which the report
+/// carries as an evidence gap, so the run cannot come back `passed`.
 fn resolve_governing_spec(
     spec: &RegisteredSpec,
-    declared_spec_version: Option<&str>,
+    pinned_spec_version: Option<&str>,
+    requested_spec_version: Option<&str>,
     entity_type: &str,
-) -> Result<(), (StatusCode, String)> {
-    let Some(declared) = declared_spec_version else {
-        return Ok(());
+) -> Result<SpecResolution, (StatusCode, String)> {
+    let governing = match (pinned_spec_version, requested_spec_version) {
+        (Some(pinned), Some(requested)) if !names_same_spec(pinned, requested) => {
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "the request asks to check `{entity_type}` against spec version \
+                     `{requested}`, but the trajectory records that the run executed under \
+                     `{pinned}`; the recorded version is the run's provenance and a request \
+                     cannot override it"
+                ),
+            ));
+        }
+        (Some(pinned), _) => pinned,
+        (None, Some(requested)) => requested,
+        (None, None) => return Ok(SpecResolution::Unresolved),
     };
-    // A harness may record the hash bare or prefixed; both name the same spec.
-    let matches = declared == spec.version
-        || declared
-            .strip_prefix("sha256:")
-            .is_some_and(|hash| hash == spec.version);
-    if matches {
-        return Ok(());
+    if names_same_spec(governing, &spec.version) {
+        return Ok(SpecResolution::Pinned);
     }
     Err((
         StatusCode::CONFLICT,
         format!(
-            "the run declares spec version `{declared}` for `{entity_type}`, but the registered \
-             spec is `{}`; Temper stores one version per entity type, so the governing spec is \
-             not available to check against and a report against the current one would judge the \
-             run by rules it never ran under",
+            "the run executed under spec version `{governing}` for `{entity_type}`, but the \
+             registered spec is `{}`; Temper stores one version per entity type, so the governing \
+             spec is not available to check against and a report against the current one would \
+             judge the run by rules it never ran under",
             spec.version
         ),
     ))
+}
+
+/// Whether two recorded spec versions name the same spec.
+///
+/// A harness may record the content hash bare or `sha256:`-prefixed; both name
+/// the same spec, and a string comparison alone would read them as a conflict.
+fn names_same_spec(left: &str, right: &str) -> bool {
+    fn bare(version: &str) -> &str {
+        version.strip_prefix("sha256:").unwrap_or(version)
+    }
+    bare(left) == bare(right)
 }
 
 /// Load and parse a stored OTS trajectory, returning its session id with it.

@@ -330,7 +330,7 @@ async fn persist_with_retries(
             let started_at = Instant::now();
             match queued
                 .store
-                .mark_ots_trajectory_persisted(&queued.item.trajectory_id)
+                .mark_ots_trajectory_persisted(&queued.item.tenant, &queued.item.trajectory_id)
                 .await
             {
                 Ok(()) => {
@@ -379,7 +379,11 @@ async fn persist_with_retries(
                     failed_total.fetch_add(1, Ordering::Relaxed);
                     if let Err(mark_error) = queued
                         .store
-                        .mark_ots_trajectory_failed(&queued.item.trajectory_id, &error.to_string())
+                        .mark_ots_trajectory_failed(
+                            &queued.item.tenant,
+                            &queued.item.trajectory_id,
+                            &error.to_string(),
+                        )
                         .await
                     {
                         tracing::error!(
@@ -423,20 +427,22 @@ impl OtsStore for MetadataOtsStore {
 
     async fn mark_ots_trajectory_persisted(
         &self,
+        tenant: &str,
         trajectory_id: &str,
     ) -> Result<(), PersistenceError> {
         self.inner
-            .mark_ots_trajectory_persisted(trajectory_id)
+            .mark_ots_trajectory_persisted(tenant, trajectory_id)
             .await
     }
 
     async fn mark_ots_trajectory_failed(
         &self,
+        tenant: &str,
         trajectory_id: &str,
         error: &str,
     ) -> Result<(), PersistenceError> {
         self.inner
-            .mark_ots_trajectory_failed(trajectory_id, error)
+            .mark_ots_trajectory_failed(tenant, trajectory_id, error)
             .await
     }
 

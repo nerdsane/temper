@@ -127,6 +127,14 @@ pub(crate) async fn handle_trajectories(
 ///
 /// Called by the production chat proxy when a user asks for something
 /// that doesn't map to any available action. This feeds the Evolution Engine.
+///
+/// Every field of the row comes from the request body — tenant, entity type,
+/// action name, session — so the row is a caller's account of something that
+/// never reached a governed dispatch. It is written `spec_governed = false` for
+/// that reason: the conformance checker judges governed dispatches, and a row
+/// any caller can post under any session and entity type would otherwise let
+/// one caller inject violations into another run's report
+/// (`crate::conformance::walk::row_disposition`).
 #[instrument(skip_all, fields(otel.name = "POST /api/evolution/trajectories/unmet"))]
 pub(crate) async fn handle_unmet_intent(
     State(state): State<ServerState>,
@@ -136,6 +144,15 @@ pub(crate) async fn handle_unmet_intent(
     require_observe_auth(&state, &headers, "write_trajectories", "Trajectory")
         .map_err(|sc| (sc, "unauthorized".to_string()))?;
 
+    if !state.enqueue_trajectory_entry(unmet_intent_entry(&body)) {
+        tracing::warn!("failed to enqueue unmet-intent trajectory");
+    }
+
+    Ok(StatusCode::CREATED)
+}
+
+/// Build the row an unmet-intent report becomes.
+fn unmet_intent_entry(body: &serde_json::Value) -> TrajectoryEntry {
     let intent = body
         .get("action")
         .or_else(|| body.get("intent"))
@@ -151,7 +168,7 @@ pub(crate) async fn handle_unmet_intent(
         .unwrap_or("");
     let error_msg = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
 
-    let entry = TrajectoryEntry {
+    TrajectoryEntry {
         timestamp: sim_now().to_rfc3339(),
         tenant: tenant.to_string(),
         entity_type: entity_type.to_string(),
@@ -185,7 +202,10 @@ pub(crate) async fn handle_unmet_intent(
         } else {
             error_msg.to_string()
         }),
-        spec_governed: None,
+        // An unmet intent is by definition an action the kernel never
+        // dispatched, and the whole row is caller-supplied. Both make it a
+        // report about the run rather than a record of it.
+        spec_governed: Some(false),
         agent_type: None,
         request_body: body.get("request_body").cloned(),
         intent: body
@@ -195,12 +215,7 @@ pub(crate) async fn handle_unmet_intent(
             .or_else(|| Some(intent.to_string())),
         matched_policy_ids: None,
         capture_seq: None,
-    };
-    if !state.enqueue_trajectory_entry(entry) {
-        tracing::warn!("failed to enqueue unmet-intent trajectory");
     }
-
-    Ok(StatusCode::CREATED)
 }
 
 // ---------------------------------------------------------------------------
@@ -379,5 +394,80 @@ pub(crate) async fn handle_get_ots_trajectories(
                 "total": 0,
             })))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conformance::{ConformanceInput, SpecResolution, check_conformance};
+    use temper_spec::automaton::parse_automaton;
+
+    const ORDER_IOA: &str = include_str!("../../../../../test-fixtures/specs/order.ioa.toml");
+
+    #[test]
+    fn an_unmet_intent_row_is_never_a_governed_dispatch() {
+        // Even when the caller declares an entity source, a governed session,
+        // and a real actor's entity type.
+        let entry = unmet_intent_entry(&serde_json::json!({
+            "tenant": "default",
+            "entity_type": "Order",
+            "action": "ShipOrder",
+            "session_id": "session-1",
+            "source": "entity",
+        }));
+
+        assert_eq!(
+            entry.spec_governed,
+            Some(false),
+            "the kernel never dispatched this action; the row is a report about the run"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unmet_intent_row_cannot_inject_a_violation_into_a_session() {
+        // The whole row is caller-chosen, so without the exclusion any caller
+        // could post an illegal transition into another run's report. Written
+        // and read back through a real store, because what the checker sees is
+        // the stored row, not the entry.
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let db_url = format!("file:{}", dir.path().join("unmet.db").display());
+        let store = temper_store_turso::TursoEventStore::new(&db_url, None)
+            .await
+            .expect("create local turso store");
+
+        let entry = unmet_intent_entry(&serde_json::json!({
+            "tenant": "default",
+            "entity_type": "Order",
+            "action": "ShipOrder",
+            "session_id": "session-1",
+            "source": "entity",
+        }));
+        crate::storage::TrajectorySink::persist_trajectory_entry(&store, &entry)
+            .await
+            .expect("persist unmet intent");
+
+        let rows = store
+            .query_trajectories_by_session("session-1", Some("default"), None, 10)
+            .await
+            .expect("read the session back");
+        assert_eq!(rows.len(), 1, "the row is stored and readable");
+
+        let automaton = parse_automaton(ORDER_IOA).expect("order fixture parses");
+        let report = check_conformance(ConformanceInput {
+            automaton: &automaton,
+            kernel_rows: &rows,
+            ots_trajectory: None,
+            rows_truncated: false,
+            spec_resolution: SpecResolution::Pinned,
+        });
+
+        assert!(
+            report.violations.is_empty(),
+            "a caller-supplied unmet intent is not this actor executing its spec: {:?}",
+            report.violations
+        );
+        assert_eq!(report.stats.non_governed_rows_skipped, 1);
+        assert_eq!(report.stats.actor_rows, 0);
     }
 }

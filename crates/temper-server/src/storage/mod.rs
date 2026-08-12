@@ -963,13 +963,21 @@ pub trait OtsStore: Send + Sync {
         params: &OtsTrajectoryParams<'_>,
     ) -> Result<(), PersistenceError>;
 
+    /// Mark a queued trajectory as persisted.
+    ///
+    /// Addressed by `(tenant, trajectory_id)`, the identity the row is keyed
+    /// by: the id comes from the uploading harness, so two tenants can hold
+    /// the same one.
     async fn mark_ots_trajectory_persisted(
         &self,
+        tenant: &str,
         trajectory_id: &str,
     ) -> Result<(), PersistenceError>;
 
+    /// Mark a queued trajectory as failed, addressed the same way.
     async fn mark_ots_trajectory_failed(
         &self,
+        tenant: &str,
         trajectory_id: &str,
         error: &str,
     ) -> Result<(), PersistenceError>;
@@ -2026,17 +2034,21 @@ impl OtsStore for PostgresEventStore {
 
     async fn mark_ots_trajectory_persisted(
         &self,
+        tenant: &str,
         trajectory_id: &str,
     ) -> Result<(), PersistenceError> {
-        self.mark_ots_trajectory_persisted(trajectory_id).await
+        self.mark_ots_trajectory_persisted(tenant, trajectory_id)
+            .await
     }
 
     async fn mark_ots_trajectory_failed(
         &self,
+        tenant: &str,
         trajectory_id: &str,
         error: &str,
     ) -> Result<(), PersistenceError> {
-        self.mark_ots_trajectory_failed(trajectory_id, error).await
+        self.mark_ots_trajectory_failed(tenant, trajectory_id, error)
+            .await
     }
 
     async fn list_queued_ots_trajectories(
@@ -2089,17 +2101,21 @@ impl OtsStore for TursoEventStore {
 
     async fn mark_ots_trajectory_persisted(
         &self,
+        tenant: &str,
         trajectory_id: &str,
     ) -> Result<(), PersistenceError> {
-        self.mark_ots_trajectory_persisted(trajectory_id).await
+        self.mark_ots_trajectory_persisted(tenant, trajectory_id)
+            .await
     }
 
     async fn mark_ots_trajectory_failed(
         &self,
+        tenant: &str,
         trajectory_id: &str,
         error: &str,
     ) -> Result<(), PersistenceError> {
-        self.mark_ots_trajectory_failed(trajectory_id, error).await
+        self.mark_ots_trajectory_failed(tenant, trajectory_id, error)
+            .await
     }
 
     async fn list_queued_ots_trajectories(

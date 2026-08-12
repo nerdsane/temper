@@ -150,6 +150,14 @@ async fn json_body(response: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&body).expect("body is JSON")
 }
 
+/// The content hash of the spec [`build_app`] registers.
+///
+/// A check that names no version cannot come back `passed` — the governing
+/// spec is unresolved — so every test asserting a pass names this one.
+fn registered_spec_version() -> String {
+    temper_store_turso::spec_content_hash(ORDER_IOA)
+}
+
 #[tokio::test]
 async fn conformance_check_reports_a_clean_session() {
     let (app, store) = test_app().await;
@@ -173,7 +181,11 @@ async fn conformance_check_reports_a_clean_session() {
     let response = app
         .oneshot(admin_post(
             "/api/conformance/check",
-            serde_json::json!({"entity_type": "Order", "session_id": "session-1"}),
+            serde_json::json!({
+                "entity_type": "Order",
+                "session_id": "session-1",
+                "spec_version": registered_spec_version(),
+            }),
             Some("default"),
         ))
         .await
@@ -184,6 +196,12 @@ async fn conformance_check_reports_a_clean_session() {
     assert_eq!(body["tenant"], "default");
     assert_eq!(body["session_id"], "session-1");
     assert_eq!(body["report"]["passed"], serde_json::json!(true));
+    assert_eq!(body["report"]["spec_resolution"], "pinned");
+    assert_eq!(
+        body["report"]["evidence_complete"],
+        serde_json::json!(true),
+        "a resolved spec and a complete read leave nothing unseen"
+    );
     assert_eq!(body["report"]["violations"], serde_json::json!([]));
     assert_eq!(body["report"]["stats"]["actor_rows"], serde_json::json!(2));
 }
@@ -817,7 +835,12 @@ async fn a_session_ending_exactly_on_the_limit_is_not_reported_truncated() {
     let response = app
         .oneshot(admin_post(
             "/api/conformance/check",
-            serde_json::json!({"entity_type": "Order", "session_id": "session-1", "limit": 2}),
+            serde_json::json!({
+                "entity_type": "Order",
+                "session_id": "session-1",
+                "limit": 2,
+                "spec_version": registered_spec_version(),
+            }),
             Some("default"),
         ))
         .await
@@ -1003,6 +1026,160 @@ async fn an_ots_trajectory_declaring_another_spec_version_is_refused() {
         StatusCode::CONFLICT,
         "the run records which spec governed it, and it is not the loaded one"
     );
+}
+
+#[tokio::test]
+async fn a_run_naming_no_spec_version_is_indeterminate_rather_than_passing() {
+    // Nothing says this run executed under the spec that is registered now, and
+    // a submit replaces a spec rather than versioning it. Agreeing with
+    // whatever is loaded today is not evidence about what ran yesterday.
+    let (app, store) = test_app().await;
+    seed_row(
+        &store,
+        "AddItem",
+        Some("Draft"),
+        Some("Draft"),
+        "2026-01-01T00:00:00Z",
+    )
+    .await;
+
+    let response = app
+        .oneshot(admin_post(
+            "/api/conformance/check",
+            serde_json::json!({"entity_type": "Order", "session_id": "session-1"}),
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await;
+    assert_eq!(body["report"]["spec_resolution"], "unresolved");
+    assert_eq!(body["report"]["verdict"], "indeterminate");
+    assert_eq!(
+        body["report"]["passed"],
+        serde_json::json!(false),
+        "a consumer gating on `passed` must not accept a run whose governing spec is unknown"
+    );
+    assert_eq!(
+        body["report"]["evidence_complete"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        body["report"]["violations"],
+        serde_json::json!([]),
+        "an unresolved spec is missing evidence, not a disagreement"
+    );
+}
+
+#[tokio::test]
+async fn a_request_cannot_override_the_spec_version_the_trajectory_pins() {
+    // The request body is the one input a caller chooses freely. Letting it
+    // pick the spec turns "check this run against its spec" into "check this
+    // run against whichever spec makes it pass".
+    let (app, store) = test_app().await;
+    seed_row(
+        &store,
+        "AddItem",
+        Some("Draft"),
+        Some("Draft"),
+        "2026-01-01T00:00:00Z",
+    )
+    .await;
+    let mut data = ots_upload("traj-pinned");
+    data["metadata"]["spec_version"] = serde_json::json!("sha256:v1-long-gone");
+    store
+        .persist_ots_trajectory(&OtsTrajectoryParams {
+            trajectory_id: "traj-pinned",
+            tenant: "default",
+            agent_id: "agent-1",
+            session_id: "session-1",
+            outcome: "success",
+            turn_count: 1,
+            data: &data.to_string(),
+        })
+        .await
+        .expect("persist OTS trajectory");
+
+    let response = app
+        .oneshot(admin_post(
+            "/api/conformance/check",
+            serde_json::json!({
+                "entity_type": "Order",
+                "session_id": "session-1",
+                "trajectory_id": "traj-pinned",
+                // The registered spec: without the pin this would be accepted.
+                "spec_version": registered_spec_version(),
+            }),
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "the recorded version is the run's provenance and a request cannot replace it"
+    );
+    let detail = String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read body")
+            .to_vec(),
+    )
+    .expect("body is text");
+    assert!(
+        detail.contains("v1-long-gone"),
+        "the refusal must name the version the run actually executed under: {detail}"
+    );
+}
+
+#[tokio::test]
+async fn a_request_agreeing_with_the_pinned_spec_version_is_checked() {
+    // Same version, one written bare and one `sha256:`-prefixed: two spellings
+    // of one spec must not read as a conflict.
+    let (app, store) = test_app().await;
+    seed_row(
+        &store,
+        "AddItem",
+        Some("Draft"),
+        Some("Draft"),
+        "2026-01-01T00:00:00Z",
+    )
+    .await;
+    let registered = registered_spec_version();
+    let mut data = ots_upload("traj-current");
+    data["metadata"]["spec_version"] = serde_json::json!(format!("sha256:{registered}"));
+    store
+        .persist_ots_trajectory(&OtsTrajectoryParams {
+            trajectory_id: "traj-current",
+            tenant: "default",
+            agent_id: "agent-1",
+            session_id: "session-1",
+            outcome: "success",
+            turn_count: 1,
+            data: &data.to_string(),
+        })
+        .await
+        .expect("persist OTS trajectory");
+
+    let response = app
+        .oneshot(admin_post(
+            "/api/conformance/check",
+            serde_json::json!({
+                "entity_type": "Order",
+                "session_id": "session-1",
+                "trajectory_id": "traj-current",
+                "spec_version": registered,
+            }),
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await;
+    assert_eq!(body["report"]["spec_resolution"], "pinned");
 }
 
 #[tokio::test]

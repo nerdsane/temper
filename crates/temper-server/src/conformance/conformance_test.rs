@@ -102,8 +102,9 @@ fn failed(action: &str, from: Option<&str>) -> TursoTrajectoryRow {
     }
 }
 
-/// Run the checker over a complete read: the tests that care about truncation
-/// build their own [`ConformanceInput`].
+/// Run the checker over a complete read of a run whose governing spec is
+/// known: the tests that care about truncation or about an unresolved
+/// governing spec build their own [`ConformanceInput`].
 fn check(
     automaton: &temper_spec::automaton::Automaton,
     kernel_rows: &[TursoTrajectoryRow],
@@ -114,6 +115,7 @@ fn check(
         kernel_rows,
         ots_trajectory,
         rows_truncated: false,
+        spec_resolution: SpecResolution::Pinned,
     })
 }
 
@@ -517,6 +519,7 @@ fn a_truncated_read_is_indeterminate_even_with_no_violations() {
         kernel_rows: &rows,
         ots_trajectory: None,
         rows_truncated: true,
+        spec_resolution: SpecResolution::Pinned,
     });
 
     assert!(report.violations.is_empty());
@@ -525,6 +528,7 @@ fn a_truncated_read_is_indeterminate_even_with_no_violations() {
         Verdict::Indeterminate,
         "the unread tail of the session could hold anything"
     );
+    assert!(!report.evidence_complete);
     assert!(!report.passed);
     assert!(
         report
@@ -548,6 +552,7 @@ fn a_violation_in_a_truncated_prefix_still_fails() {
         kernel_rows: &rows,
         ots_trajectory: None,
         rows_truncated: true,
+        spec_resolution: SpecResolution::Pinned,
     });
 
     assert_eq!(
@@ -705,6 +710,192 @@ fn a_thinking_decision_is_not_reported_as_an_action() {
     );
     assert_eq!(report.stats.ots_decisions_checked, 0);
     assert_eq!(report.stats.ots_decisions_skipped_as_thinking, 1);
+}
+
+/// The row the capture path writes when it fails to store an entry for a
+/// session (`crate::trajectory_outbox::capture_loss_marker`).
+fn capture_loss_marker_row() -> TursoTrajectoryRow {
+    TursoTrajectoryRow {
+        entity_type: CAPTURE_LOSS_ENTITY_TYPE.to_string(),
+        entity_id: "session-1".to_string(),
+        success: false,
+        to_status: None,
+        from_status: None,
+        source: Some("Platform".to_string()),
+        spec_governed: Some(false),
+        error: Some("trajectory capture lost at least one entry for this session".to_string()),
+        ..row(CAPTURE_LOSS_ACTION, None, None)
+    }
+}
+
+#[test]
+fn a_run_missing_captured_rows_cannot_pass() {
+    // Every row the checker can see agrees with the spec. The marker says the
+    // ones it cannot see were never stored, so the run is unproven rather than
+    // conforming.
+    let rows = vec![
+        row("AddItem", Some("Draft"), Some("Draft")),
+        capture_loss_marker_row(),
+        row("SubmitOrder", Some("Draft"), Some("Submitted")),
+    ];
+
+    let report = check(&order_automaton(), &rows, None);
+
+    assert!(report.violations.is_empty());
+    assert_eq!(report.stats.capture_loss_markers, 1);
+    assert_eq!(
+        report.stats.actor_rows, 2,
+        "the marker is not an action and must not be judged as one"
+    );
+    assert_eq!(report.verdict, Verdict::Indeterminate);
+    assert!(
+        !report.passed,
+        "a run whose record is known to have holes in it cannot pass"
+    );
+    assert!(!report.evidence_complete);
+    assert!(
+        report
+            .evidence_gaps
+            .iter()
+            .any(|gap| gap.contains("loss marker")),
+        "{:?}",
+        report.evidence_gaps
+    );
+}
+
+#[test]
+fn a_capture_loss_marker_is_not_read_as_another_entity_s_row() {
+    // The marker carries the capture path's own entity type. Classified by the
+    // entity comparison alone it would be counted as another actor's row and
+    // the evidence gap would vanish.
+    let rows = vec![capture_loss_marker_row()];
+
+    let report = check(&order_automaton(), &rows, None);
+
+    assert_eq!(report.stats.capture_loss_markers, 1);
+    assert_eq!(report.stats.other_entity_rows_skipped, 0);
+}
+
+#[test]
+fn a_run_whose_governing_spec_is_unresolved_cannot_pass() {
+    let rows = vec![row("AddItem", Some("Draft"), Some("Draft"))];
+
+    let report = check_conformance(ConformanceInput {
+        automaton: &order_automaton(),
+        kernel_rows: &rows,
+        ots_trajectory: None,
+        rows_truncated: false,
+        spec_resolution: SpecResolution::Unresolved,
+    });
+
+    assert!(report.violations.is_empty());
+    assert_eq!(report.spec_resolution, SpecResolution::Unresolved);
+    assert_eq!(
+        report.verdict,
+        Verdict::Indeterminate,
+        "agreeing with a spec that may not be the one in force proves nothing"
+    );
+    assert!(!report.passed);
+    assert!(!report.evidence_complete);
+    assert!(
+        report
+            .evidence_gaps
+            .iter()
+            .any(|gap| gap.contains("spec version")),
+        "{:?}",
+        report.evidence_gaps
+    );
+}
+
+#[test]
+fn a_resolved_spec_and_a_complete_read_report_complete_evidence() {
+    let rows = vec![row("AddItem", Some("Draft"), Some("Draft"))];
+
+    let report = check(&order_automaton(), &rows, None);
+
+    assert_eq!(report.spec_resolution, SpecResolution::Pinned);
+    assert!(report.evidence_complete);
+    assert!(report.passed);
+}
+
+/// One MCP `execute` turn: the decision names the submitted code, and the
+/// governed actions the code called are recorded inside it
+/// (`temper_mcp::runtime::record_execute_turn`).
+fn mcp_execute_trajectory(code: &str, nested_actions: &[&str]) -> OTSTrajectory {
+    let now = "2026-01-01T00:00:00Z"
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .expect("timestamp parses");
+    let mut choice = OTSChoice::new(format!("execute: {code}"));
+    if !nested_actions.is_empty() {
+        choice = choice.with_arguments(serde_json::json!({
+            "trajectory_actions": nested_actions
+                .iter()
+                .map(|action| serde_json::json!({ "action": action, "params": {} }))
+                .collect::<Vec<_>>(),
+        }));
+    }
+    OTSTrajectory::new(OTSMetadata::new(
+        "task",
+        "agent-1",
+        OutcomeType::Success,
+        now,
+    ))
+    .with_turn(OTSTurn::new(1, now).with_decision(OTSDecision::new(
+        DecisionType::ToolSelection,
+        choice,
+        OTSConsequence::success(),
+    )))
+}
+
+#[test]
+fn an_mcp_execute_decision_is_not_reported_as_an_action() {
+    // Every MCP-produced decision would otherwise surface as one
+    // `unknown_action` violation naming a hundred characters of Python.
+    let rows = vec![row("AddItem", Some("Draft"), Some("Draft"))];
+    let ots = mcp_execute_trajectory("print('hello')", &[]);
+
+    let report = check(&order_automaton(), &rows, Some(&ots));
+
+    assert!(
+        report.passed,
+        "an execute envelope names the harness's tool, not this actor: {:?}",
+        report.violations
+    );
+    assert_eq!(report.stats.ots_decisions_checked, 0);
+    assert_eq!(report.stats.ots_decisions_skipped_as_harness_tool, 1);
+}
+
+#[test]
+fn the_governed_actions_inside_an_execute_decision_are_checked() {
+    // The envelope is not an action; the actions the code called are, and the
+    // kernel recorded a row for neither.
+    let rows = vec![row("AddItem", Some("Draft"), Some("Draft"))];
+    let ots = mcp_execute_trajectory(
+        "temper.action('default', 'Order', 'Frobnicate', {})",
+        &["Frobnicate"],
+    );
+
+    let report = check(&order_automaton(), &rows, Some(&ots));
+
+    let violation = only_violation(&report);
+    assert_eq!(violation.kind, ViolationKind::UnknownAction);
+    assert_eq!(violation.action, "Frobnicate");
+    assert_eq!(report.stats.ots_decisions_checked, 1);
+    assert_eq!(report.stats.ots_decisions_skipped_as_harness_tool, 0);
+}
+
+#[test]
+fn a_governed_action_inside_an_execute_decision_that_reached_the_kernel_is_not_double_counted() {
+    let rows = vec![row("AddItem", Some("Draft"), Some("Draft"))];
+    let ots = mcp_execute_trajectory(
+        "temper.action('default', 'Order', 'AddItem', {})",
+        &["AddItem"],
+    );
+
+    let report = check(&order_automaton(), &rows, Some(&ots));
+
+    assert!(report.passed, "{:?}", report.violations);
+    assert_eq!(report.stats.ots_decisions_checked, 0);
 }
 
 #[test]

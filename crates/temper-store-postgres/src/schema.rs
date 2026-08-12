@@ -413,9 +413,15 @@ CREATE INDEX IF NOT EXISTS idx_evolution_records_derived_from
     ON evolution_records (derived_from);";
 
 /// Full OTS trajectory storage for agent execution traces.
+///
+/// Keyed by `(tenant, trajectory_id)`. One database holds every tenant's rows
+/// and the id is chosen by the uploading harness, so a global key lets one
+/// tenant's upload land on an id another tenant already used — and the upsert
+/// would rewrite that row's tenant along with its data. Migration 0015 rekeys
+/// databases created before this.
 pub const CREATE_OTS_TRAJECTORIES_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS ots_trajectories (
-    trajectory_id TEXT         PRIMARY KEY,
+    trajectory_id TEXT         NOT NULL,
     tenant        TEXT         NOT NULL,
     agent_id      TEXT         NOT NULL,
     session_id    TEXT,
@@ -427,7 +433,8 @@ CREATE TABLE IF NOT EXISTS ots_trajectories (
     persist_attempts BIGINT    NOT NULL DEFAULT 0,
     last_error    TEXT,
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now()
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    CONSTRAINT ots_trajectories_tenant_identity PRIMARY KEY (tenant, trajectory_id)
 );";
 
 /// Add durable outbox status to existing OTS trajectory tables.

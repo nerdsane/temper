@@ -17,13 +17,15 @@
 //! - **The OTS trajectory** (optional) — the agent-side record of the same
 //!   run. It contributes the decisions the kernel never recorded a row for:
 //!   actions the agent attempted that never reached the governed path.
+//! - **The spec resolution** — whether the run named the spec version it
+//!   executed under. See [`SpecResolution`].
 //!
 //! # The row stream and violation indices
 //!
 //! [`Violation::index`] is the position in the ordered stream the checker
 //! walked. Positions `0..kernel_rows.len()` are kernel rows and index directly
-//! into the slice that was passed in. Positions after that are OTS decisions,
-//! appended in trajectory order.
+//! into the slice that was passed in. Positions after that are the actions
+//! named by OTS decisions, appended in trajectory order.
 //!
 //! # What is checked, and what is skipped
 //!
@@ -38,14 +40,18 @@
 //! - Rows marked `spec_governed = false` are caller-supplied audit records
 //!   rather than governed dispatches. They are counted in
 //!   [`ConformanceStats::non_governed_rows_skipped`].
+//! - Capture-loss markers ([`CAPTURE_LOSS_ENTITY_TYPE`]) are not actions at
+//!   all. They are the capture path saying it failed to store a row for this
+//!   session, and they are counted in
+//!   [`ConformanceStats::capture_loss_markers`].
 //!
-//! An OTS decision is checked only when it names an invocation
-//! ([`temper_ots::models::DecisionType::is_invocation`]) and no kernel row **for this actor**
-//! carries that action name. A decision the kernel did record is already
-//! covered by its row, and checking both would report the same fault twice —
-//! but a row belonging to another entity proves nothing about this one, so it
-//! does not suppress the decision either. Decisions carry no observed state,
-//! so only the action-set checks apply to them.
+//! An OTS decision is checked only when it names a governed action (see
+//! [`decisions`]) and no kernel row **for this actor** carries that action
+//! name. A decision the kernel did record is already covered by its row, and
+//! checking both would report the same fault twice — but a row belonging to
+//! another entity proves nothing about this one, so it does not suppress the
+//! decision either. Decisions carry no observed state, so only the action-set
+//! checks apply to them.
 //!
 //! # Verdict, and why `passed` is not just "no violations"
 //!
@@ -55,8 +61,10 @@
 //! [`Verdict::Fail`] when the run disagreed with the spec, [`Verdict::Pass`]
 //! when a complete run agreed with it, and [`Verdict::Indeterminate`] when the
 //! evidence could not settle the question. [`ConformanceReport::evidence_gaps`]
-//! names every reason. `passed` is true only for [`Verdict::Pass`], so a
-//! consumer that gates on it cannot accept an unchecked run.
+//! names every reason and [`ConformanceReport::evidence_complete`] is the
+//! one-field form of the same answer. `passed` is true only for
+//! [`Verdict::Pass`], so a consumer that gates on it cannot accept an unchecked
+//! run.
 //!
 //! # Violation kinds
 //!
@@ -99,18 +107,25 @@
 //! because a terminal source state is illegal for every action and reporting
 //! it twice says nothing new.
 
+mod decisions;
+mod report;
 mod spec_view;
 mod walk;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use serde::{Deserialize, Serialize};
 use temper_ots::models::OTSTrajectory;
 use temper_spec::automaton::Automaton;
 use temper_store_turso::TursoTrajectoryRow;
 
+use decisions::{DecisionActions, decision_actions};
+use report::evidence_gaps;
 use spec_view::SpecView;
 use walk::{RowDisposition, Walk, check_row, row_disposition, undeclared_detail};
+
+pub use report::{
+    ConformanceReport, ConformanceStats, SpecResolution, Verdict, Violation, ViolationKind,
+};
 
 /// Action names the kernel itself writes into the trajectory stream.
 ///
@@ -135,122 +150,21 @@ pub const KERNEL_PLATFORM_ACTIONS: &[&str] = &[
     "submit_specs",
 ];
 
-/// The kind of disagreement between a recorded run and its spec.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ViolationKind {
-    /// The action's source state is not legal for that action.
-    IllegalTransition,
-    /// The action's source state is not where the previous row left the entity.
-    StateDiscontinuity,
-    /// A successful action landed somewhere the spec does not send it.
-    UnexpectedTargetState,
-    /// The action is defined by the platform but not by this actor's spec.
-    ForbiddenAction,
-    /// The action followed a terminal state.
-    PostTerminal,
-    /// The action was retried after a denial with nothing changed in between.
-    DeniedThenRetried,
-    /// No spec defines the action name.
-    UnknownAction,
-}
+/// Entity type of the row the capture path writes when it loses a trajectory
+/// entry for a session.
+///
+/// The trajectory outbox is bounded and its writes can fail. Either way an
+/// action the kernel captured never reaches storage, and a session read that
+/// silently returns the rows that survived would let a run with holes in it
+/// pass a conformance check. The capture path writes one marker per session it
+/// loses a row for (`crate::trajectory_outbox`); this checker reads the marker
+/// as an evidence gap.
+///
+/// Not an actor's entity type and not an action: markers are never judged.
+pub const CAPTURE_LOSS_ENTITY_TYPE: &str = "TrajectoryCapture";
 
-impl ViolationKind {
-    /// Stable snake_case name, used as the key in
-    /// [`ConformanceStats::violations_by_kind`].
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::IllegalTransition => "illegal_transition",
-            Self::StateDiscontinuity => "state_discontinuity",
-            Self::UnexpectedTargetState => "unexpected_target_state",
-            Self::ForbiddenAction => "forbidden_action",
-            Self::PostTerminal => "post_terminal",
-            Self::DeniedThenRetried => "denied_then_retried",
-            Self::UnknownAction => "unknown_action",
-        }
-    }
-}
-
-/// What the checker was able to conclude.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Verdict {
-    /// A complete run, and it agreed with its spec.
-    Pass,
-    /// The run disagreed with its spec.
-    Fail,
-    /// The evidence could not settle the question.
-    Indeterminate,
-}
-
-/// One place where the run disagreed with the spec.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Violation {
-    /// Position in the ordered row stream the checker walked.
-    pub index: usize,
-    /// What kind of disagreement this is.
-    pub kind: ViolationKind,
-    /// The action that raised it.
-    pub action: String,
-    /// The entity type the action was taken on.
-    pub entity_type: String,
-    /// Why it is a violation, naming the states or indices involved.
-    pub detail: String,
-}
-
-/// What the checker looked at.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConformanceStats {
-    /// Rows and decisions in the ordered stream.
-    pub stream_length: usize,
-    /// Kernel rows attributed to this actor and judged.
-    pub actor_rows: usize,
-    /// Kernel rows skipped as kernel bookkeeping (`source = Platform`).
-    pub platform_rows_skipped: usize,
-    /// Kernel rows skipped as belonging to another actor's spec.
-    pub other_entity_rows_skipped: usize,
-    /// Kernel rows skipped as caller-supplied audit records
-    /// (`spec_governed = false`) rather than governed dispatches.
-    pub non_governed_rows_skipped: usize,
-    /// Judged rows whose source state could not be checked — `from_status`
-    /// was absent, or the spec declares no source set to check it against. A
-    /// high count means the capture path, not the run, is the thing to look
-    /// at.
-    pub transitions_unchecked: usize,
-    /// Judged rows whose target state could not be checked, because the row
-    /// reported no end state.
-    pub targets_unchecked: usize,
-    /// OTS decisions judged because no kernel row for this actor carried their
-    /// action.
-    pub ots_decisions_checked: usize,
-    /// OTS decisions passed over because their type names a thought rather
-    /// than a callable (see
-    /// [`temper_ots::models::DecisionType::is_invocation`]).
-    pub ots_decisions_skipped_as_thinking: usize,
-    /// Entities observed reaching a terminal state.
-    pub terminal_entities: usize,
-    /// Violation count per kind, keyed by [`ViolationKind::as_str`].
-    pub violations_by_kind: BTreeMap<String, usize>,
-}
-
-/// The result of checking one run against one spec.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConformanceReport {
-    /// What the checker concluded.
-    pub verdict: Verdict,
-    /// True only for [`Verdict::Pass`]: a complete run that agreed with its
-    /// spec. False for a failure and false for evidence that could not settle
-    /// the question, so a consumer gating on this field cannot accept an
-    /// unchecked run.
-    pub passed: bool,
-    /// Every disagreement, in stream order.
-    pub violations: Vec<Violation>,
-    /// Every reason the evidence was incomplete, in the order found. Empty
-    /// when the checker saw the whole run.
-    pub evidence_gaps: Vec<String>,
-    /// What the checker looked at to get there.
-    pub stats: ConformanceStats,
-}
+/// Action name on a capture-loss marker row.
+pub const CAPTURE_LOSS_ACTION: &str = "CaptureLost";
 
 /// One run, and everything the checker needs to judge it.
 pub struct ConformanceInput<'a> {
@@ -264,6 +178,8 @@ pub struct ConformanceInput<'a> {
     /// session. A checked prefix is not a checked run, so this makes the
     /// verdict indeterminate rather than passing.
     pub rows_truncated: bool,
+    /// Whether `automaton` is provably the spec that governed the run.
+    pub spec_resolution: SpecResolution,
 }
 
 /// Check one recorded run against the spec that governed it.
@@ -276,6 +192,7 @@ pub fn check_conformance(input: ConformanceInput<'_>) -> ConformanceReport {
         kernel_rows,
         ots_trajectory,
         rows_truncated,
+        spec_resolution,
     } = input;
     let spec = SpecView::new(automaton);
     let mut walk = Walk::default();
@@ -288,25 +205,57 @@ pub fn check_conformance(input: ConformanceInput<'_>) -> ConformanceReport {
     let mut stats = walk.into_stats(kernel_rows.len());
 
     if let Some(trajectory) = ots_trajectory {
-        // Only this actor's rows can account for a decision. A `PayInvoice`
-        // row on `Invoice` says nothing about whether the agent's `PayInvoice`
-        // decision against `Order` ever reached the governed path, so it must
-        // not suppress it.
-        let recorded_actions: BTreeSet<&str> = kernel_rows
-            .iter()
-            .filter(|row| row_disposition(&spec, row) == RowDisposition::ActorExecution)
-            .map(|row| row.action.as_str())
-            .collect();
-        let mut index = kernel_rows.len();
-        for decision in trajectory.turns.iter().flat_map(|turn| &turn.decisions) {
+        check_decisions(&spec, trajectory, kernel_rows, &mut stats, &mut violations);
+    }
+
+    for violation in &violations {
+        *stats
+            .violations_by_kind
+            .entry(violation.kind.as_str().to_string())
+            .or_insert(0) += 1;
+    }
+
+    let gaps = evidence_gaps(&stats, kernel_rows.len(), rows_truncated, spec_resolution);
+    ConformanceReport::new(violations, gaps, spec_resolution, stats)
+}
+
+/// Judge the actions the agent decided on that no kernel row accounts for.
+fn check_decisions(
+    spec: &SpecView<'_>,
+    trajectory: &OTSTrajectory,
+    kernel_rows: &[TursoTrajectoryRow],
+    stats: &mut ConformanceStats,
+    violations: &mut Vec<Violation>,
+) {
+    // Only this actor's rows can account for a decision. A `PayInvoice` row on
+    // `Invoice` says nothing about whether the agent's `PayInvoice` decision
+    // against `Order` ever reached the governed path, so it must not suppress
+    // it.
+    let recorded_actions: BTreeSet<&str> = kernel_rows
+        .iter()
+        .filter(|row| row_disposition(spec, row) == RowDisposition::ActorExecution)
+        .map(|row| row.action.as_str())
+        .collect();
+    let mut index = kernel_rows.len();
+    for decision in trajectory.turns.iter().flat_map(|turn| &turn.decisions) {
+        let actions = match decision_actions(decision) {
             // A reasoning step or a response formulation names a thought, not
             // a callable; reporting it as an action invents an attempt the
             // agent never made.
-            if !decision.decision_type.is_invocation() {
+            DecisionActions::Thinking => {
                 stats.ots_decisions_skipped_as_thinking += 1;
                 continue;
             }
-            let action = decision.choice.action.as_str();
+            // The agent invoked its harness, not this actor. The governed
+            // actions it reached through that call, if any, are recorded
+            // alongside it and are judged as `Actions` instead.
+            DecisionActions::HarnessTool => {
+                stats.ots_decisions_skipped_as_harness_tool += 1;
+                continue;
+            }
+            DecisionActions::Actions(actions) => actions,
+        };
+        for action in actions {
             if recorded_actions.contains(action) {
                 continue;
             }
@@ -327,67 +276,8 @@ pub fn check_conformance(input: ConformanceInput<'_>) -> ConformanceReport {
             }
             index += 1;
         }
-        stats.stream_length = index;
     }
-
-    for violation in &violations {
-        *stats
-            .violations_by_kind
-            .entry(violation.kind.as_str().to_string())
-            .or_insert(0) += 1;
-    }
-
-    let evidence_gaps = evidence_gaps(&stats, kernel_rows.len(), rows_truncated);
-    let verdict = if !violations.is_empty() {
-        // A disagreement found in a prefix is still a disagreement.
-        Verdict::Fail
-    } else if evidence_gaps.is_empty() {
-        Verdict::Pass
-    } else {
-        Verdict::Indeterminate
-    };
-
-    ConformanceReport {
-        verdict,
-        passed: verdict == Verdict::Pass,
-        violations,
-        evidence_gaps,
-        stats,
-    }
-}
-
-/// Every reason this report is not evidence of a conforming run.
-fn evidence_gaps(
-    stats: &ConformanceStats,
-    kernel_rows_read: usize,
-    rows_truncated: bool,
-) -> Vec<String> {
-    let mut gaps = Vec::new();
-    if rows_truncated {
-        gaps.push(format!(
-            "the read stopped at its row cap after {kernel_rows_read} rows, so the rest of the \
-             session was never checked"
-        ));
-    }
-    if stats.actor_rows == 0 && stats.ots_decisions_checked == 0 {
-        gaps.push(
-            "no rows and no decisions were judged, so nothing about this run was checked"
-                .to_string(),
-        );
-    }
-    if stats.transitions_unchecked > 0 {
-        gaps.push(format!(
-            "{} row(s) carried no source state the spec could be checked against",
-            stats.transitions_unchecked
-        ));
-    }
-    if stats.targets_unchecked > 0 {
-        gaps.push(format!(
-            "{} successful row(s) reported no end state, so where they landed is unknown",
-            stats.targets_unchecked
-        ));
-    }
-    gaps
+    stats.stream_length = index;
 }
 
 #[cfg(test)]
