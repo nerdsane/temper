@@ -311,3 +311,23 @@ fn test_builder_empty_trajectory() {
     assert!(trajectory.turns.is_empty());
     assert_eq!(trajectory.version, "0.1.0");
 }
+
+#[test]
+#[should_panic(expected = "Cannot snapshot trajectory")]
+fn test_builder_snapshot_rejects_a_turn_whose_signals_do_not_align() {
+    // A mid-turn flush is the one path that carries an unsealed turn into a
+    // document. The mask here has nothing to index into, which the setters
+    // cannot see and the upload endpoint refuses.
+    let now = sim_now();
+    let metadata = OTSMetadata::new(
+        "Snapshot misaligned",
+        "agent-snap-2",
+        OutcomeType::Success,
+        now,
+    );
+    let mut builder = TrajectoryBuilder::new(metadata, OTSContext::new());
+
+    builder.start_turn(now);
+    builder.set_turn_response_mask(vec![1, 0]);
+    let _ = builder.snapshot();
+}

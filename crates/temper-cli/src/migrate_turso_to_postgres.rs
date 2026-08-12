@@ -707,8 +707,8 @@ async fn migrate_trajectories(
         sqlx::query(
             "INSERT INTO trajectories \
              (tenant, entity_type, entity_id, action, success, from_status, to_status, error, agent_id, session_id, \
-              authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids) \
-             SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19 \
+              authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids, capture_seq) \
+             SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20 \
              WHERE NOT EXISTS ( \
                SELECT 1 FROM trajectories \
                WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 AND action = $4 \
@@ -735,6 +735,10 @@ async fn migrate_trajectories(
         .bind(request_body)
         .bind(row.intent)
         .bind(matched_policy_ids)
+        // Carried, not regenerated: capture order is what the session read
+        // replays, and dropping it would leave migrated rows ordered by the
+        // order the migration happened to insert them.
+        .bind(row.capture_seq)
         .execute(pool)
         .await?;
     }
@@ -1478,7 +1482,7 @@ async fn target_installed_apps(pool: &PgPool, tenant: &str) -> Result<Vec<Value>
 async fn target_trajectories(pool: &PgPool, tenant: &str) -> Result<Vec<Value>> {
     let rows = sqlx::query(
         "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, agent_id, session_id, \
-                authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids \
+                authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids, capture_seq \
          FROM trajectories WHERE tenant = $1 ORDER BY created_at, entity_type, entity_id, action",
     )
     .bind(tenant)
@@ -1847,6 +1851,7 @@ fn trajectory_value(row: &temper_store_turso::TursoTrajectoryRow) -> Result<Valu
         "request_body": row.request_body.as_deref().map(json_or_string).transpose()?,
         "intent": row.intent,
         "matched_policy_ids": row.matched_policy_ids,
+        "capture_seq": row.capture_seq,
     }))
 }
 
@@ -1871,6 +1876,7 @@ fn trajectory_pg_value(row: sqlx::postgres::PgRow) -> Value {
         "request_body": row.get::<Option<Value>, _>("request_body"),
         "intent": row.get::<Option<String>, _>("intent"),
         "matched_policy_ids": row.get::<Option<Value>, _>("matched_policy_ids"),
+        "capture_seq": row.get::<Option<i64>, _>("capture_seq"),
     })
 }
 

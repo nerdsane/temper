@@ -166,15 +166,18 @@ impl TrajectoryBuilder {
         self.current_turn = Some(turn.with_logprobs(logprobs));
     }
 
-    /// Build the final trajectory, consuming the builder.
-    ///
-    /// If a turn is still in progress, it is automatically ended using
-    /// `sim_now()` as the end time.
-    ///
     /// Build a snapshot of the current trajectory without consuming the builder.
     ///
     /// Useful for mid-session uploads where the session should continue
     /// recording new turns after the upload.
+    ///
+    /// The in-progress turn goes through the same token-signal check
+    /// [`Self::end_turn`] applies. A mid-turn flush is the one path that
+    /// carries an unsealed turn into a document, and a turn whose
+    /// completion-side signals do not yet agree is a malformed training
+    /// sample: the upload endpoint refuses the whole document, so producing
+    /// one here would lose the snapshot at the far end for a fault that is
+    /// visible right here.
     pub fn snapshot(&self) -> OTSTrajectory {
         let mut metadata = self.metadata.clone();
         let now = sim_now(); // determinism-ok: sim_now is DST-safe
@@ -183,6 +186,9 @@ impl TrajectoryBuilder {
 
         let mut turns = self.turns.clone();
         if let Some(ref current) = self.current_turn {
+            if let Err(error) = current.validate_token_signals() {
+                panic!("Cannot snapshot trajectory: {error}");
+            }
             turns.push(current.clone());
         }
 

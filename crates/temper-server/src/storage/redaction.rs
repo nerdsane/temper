@@ -39,34 +39,30 @@ use serde_json::{Map, Value};
 /// Value written in place of a redacted field.
 pub(crate) const REDACTED_PLACEHOLDER: &str = "[redacted]";
 
-/// Normalized key names whose value is always a secret.
+/// Normalized key names whose value is a secret only as the whole name.
+///
+/// These are short or common enough that matching them as an ending would
+/// catch ordinary words: `auth` would take `oauth_provider_name`, `pin` would
+/// take `spin`. Names that are safe to match as endings live in
+/// [`SECRET_KEY_SUFFIXES`] instead and are not repeated here.
 pub(crate) const SECRET_KEY_NAMES: &[&str] = &[
-    "accesskey",
     "accountnumber",
     "auth",
     "authorization",
-    "cardnumber",
-    "credential",
-    "credentials",
     "cvc",
     "cvv",
     "iban",
-    "passphrase",
-    "passwd",
-    "password",
     "pin",
-    "privatekey",
     "pwd",
     "routingnumber",
-    "secret",
-    "secretkey",
     "securitycode",
-    "sessionkey",
     "ssn",
-    "token",
 ];
 
 /// Normalized key endings whose value is always a secret.
+///
+/// Matching the ending is what catches the qualified forms every codebase
+/// grows — `client_secret`, `stripe_api_key`, `user_password`.
 pub(crate) const SECRET_KEY_SUFFIXES: &[&str] = &[
     "accesskey",
     "apikey",
@@ -178,6 +174,25 @@ mod tests {
             redacted["credentials"], REDACTED_PLACEHOLDER,
             "a secret-named object leaks through its own fields if only its children are redacted"
         );
+    }
+
+    #[test]
+    fn whole_name_only_entries_do_not_match_as_endings() {
+        // `auth` and `pin` are whole names; matching them as endings would
+        // take ordinary words with them.
+        let body = serde_json::json!({
+            "auth": "Bearer abc",
+            "pin": "1234",
+            "oauth": "provider",
+            "spin": 3,
+            "checkin": "10:00",
+        });
+        let redacted = redact_secrets(body);
+        assert_eq!(redacted["auth"], REDACTED_PLACEHOLDER);
+        assert_eq!(redacted["pin"], REDACTED_PLACEHOLDER);
+        assert_eq!(redacted["oauth"], "provider");
+        assert_eq!(redacted["spin"], serde_json::json!(3));
+        assert_eq!(redacted["checkin"], "10:00");
     }
 
     #[test]
