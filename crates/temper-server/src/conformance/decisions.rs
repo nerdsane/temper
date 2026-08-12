@@ -85,6 +85,11 @@ const TRAJECTORY_ACTIONS_KEY: &str = "trajectory_actions";
 /// Field naming the action inside one entry of that list.
 const NESTED_ACTION_KEY: &str = "action";
 
+/// `source` on a row the kernel wrote while dispatching an action on an entity
+/// (`TrajectorySource::Entity`). The serialized form, because that is what
+/// reaches the checker on a stored row.
+const ENTITY_DISPATCH_SOURCE: &str = "Entity";
+
 /// What a decision names.
 pub(super) enum DecisionActions<'a> {
     /// A thought rather than a callable: nothing was invoked.
@@ -111,12 +116,29 @@ pub(super) enum DecisionActions<'a> {
 ///   spec does not declare it that is a
 ///   [`ForbiddenAction`](super::ViolationKind::ForbiddenAction) — the more
 ///   consequential of the two undeclared kinds, and it stays reported;
-/// - every action name the kernel dispatched in this session, on any entity. A
-///   name the kernel wrote a governed row for is a real action name in this
-///   deployment whoever it belonged to, so a decision naming it is claiming a
-///   governed action. Rows on other entities widen the vocabulary but never
-///   excuse a decision: [`check_decisions`](super::check_decisions) still
-///   reports a name this actor's spec does not declare.
+/// - every action name the kernel dispatched on an entity in this session, on
+///   any entity type (see [`names_a_kernel_dispatch`], which is narrower than
+///   "appears on a row"). A name the kernel dispatched is a real action name in
+///   this deployment whoever it belonged to, so a decision naming it is
+///   claiming a governed action. Rows on other entities widen the vocabulary
+///   but never excuse a decision:
+///   [`check_decisions`](super::check_decisions) still reports a name this
+///   actor's spec does not declare.
+///
+/// # The collision this resolves against the harness
+///
+/// A harness tool whose name is also a platform verb — a filesystem tool called
+/// `Delete`, an HTTP tool called `Put` or `Patch` — is placeable, so it is
+/// judged, and against an actor that does not declare it that is a
+/// `forbidden_action`. Nothing in the record separates the two readings, so one
+/// of them has to be chosen, and this is the deliberate choice: the platform's
+/// own write verbs are the most consequential names an agent can claim, and a
+/// false report on one of them is preferable to silence on an agent reaching
+/// for `Delete` or `SubmitSpec`. The tie-break runs the other way everywhere
+/// else — an unplaceable name is counted, not condemned. Pinned by
+/// `a_harness_tool_named_after_a_platform_verb_is_reported`.
+///
+/// # The agent's own account is not a source
 ///
 /// The trajectory's own tool inventory (`context.entities` of type `tool`) is
 /// deliberately not a source. A transcript converter builds it from the same
@@ -146,18 +168,36 @@ impl<'a> ActionVocabulary<'a> {
     }
 }
 
-/// Whether this row's action name was chosen by the kernel rather than by a
-/// caller.
+/// Whether this row records the kernel dispatching an action, which is the only
+/// thing that proves a name is an action at all.
 ///
-/// Only kernel-chosen names may widen the vocabulary. `POST /api/audit` and
-/// `POST /api/evolution/trajectories/unmet` write rows with a caller-supplied
-/// session, entity type and action name, and mark them `spec_governed = false`;
-/// a capture-loss marker's action is the capture path's own. Reading either
-/// would let a caller decide what counts as a governed action in somebody
-/// else's session — one audit record named `Bash` would turn every `Bash`
-/// decision in that session into a violation.
+/// Written as an allowlist of one source, because the question is whether the
+/// KERNEL chose this name, and only the entity dispatch path
+/// ([`TrajectorySource::Entity`](crate::state::TrajectorySource)) answers yes.
+/// The other two both carry names a caller can choose:
+///
+/// - `Authz` rows come from `authz::helpers::record_authz_denial`, which
+///   `POST /api/authorize` reaches with a caller-supplied action name, resource
+///   type and `X-Temper-Ctx-SessionId`. They are written with `spec_governed`
+///   unset, so testing that flag alone lets them through.
+/// - `Platform` rows are kernel bookkeeping. Their names are the kernel's, but
+///   they are already in [`KERNEL_PLATFORM_ACTIONS`], so admitting them adds
+///   nothing — and it is what would let a capture-loss marker's `CaptureLost`
+///   into the vocabulary.
+///
+/// `spec_governed = false` is then checked on top: `POST /api/audit` and
+/// `POST /api/evolution/trajectories/unmet` write caller-named rows and mark
+/// them, and nothing says such a row cannot claim `Entity` as its source.
+///
+/// The failure this shuts out: one `POST /api/authorize` naming action `Bash`
+/// against somebody else's session id puts `Bash` in that session's vocabulary,
+/// and every `Bash` in their run then reports as a violation of a spec they
+/// followed. A row that cannot be placed here simply does not widen the
+/// vocabulary, which is the safe direction — it can only cause a decision to be
+/// counted rather than judged.
 fn names_a_kernel_dispatch(row: &TursoTrajectoryRow) -> bool {
-    row.spec_governed != Some(false)
+    row.source.as_deref() == Some(ENTITY_DISPATCH_SOURCE)
+        && row.spec_governed != Some(false)
         && !(row.entity_type == CAPTURE_LOSS_ENTITY_TYPE && row.action == CAPTURE_LOSS_ACTION)
 }
 

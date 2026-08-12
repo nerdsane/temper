@@ -1134,6 +1134,83 @@ fn a_caller_supplied_audit_row_cannot_make_a_harness_tool_look_governed() {
 }
 
 #[test]
+fn an_authorization_denial_row_cannot_widen_the_vocabulary() {
+    // `POST /api/authorize` reaches `record_authz_denial` with a caller-chosen
+    // action name, resource type and `X-Temper-Ctx-SessionId`, and the row it
+    // writes leaves `spec_governed` unset — so a filter that only rejects
+    // `spec_governed = false` lets it through.
+    //
+    // The attack it would open: one unauthenticated call naming action `Bash`
+    // against somebody else's session puts `Bash` in that session's vocabulary,
+    // and every `Bash` in their clean run reports as a violation of a spec they
+    // followed. A verdict anyone can flip is not a verdict.
+    let rows = vec![
+        row("AddItem", Some("Draft"), Some("Draft")),
+        TursoTrajectoryRow {
+            entity_type: "Widget".to_string(),
+            source: Some("Authz".to_string()),
+            spec_governed: None,
+            success: false,
+            authz_denied: Some(true),
+            to_status: None,
+            ..row("Bash", None, None)
+        },
+    ];
+    let ots = ots_with_decisions(&["Bash"]);
+
+    let report = check(&order_automaton(), &rows, Some(&ots));
+
+    assert!(
+        report.passed,
+        "an authorization denial names what a caller asked about, not what the \
+         kernel dispatched: {:?}",
+        report.violations
+    );
+    assert_eq!(report.stats.ots_decisions_skipped_as_unrecognized_name, 1);
+}
+
+#[test]
+fn a_platform_bookkeeping_row_does_not_widen_the_vocabulary() {
+    // Kernel-written, so the names are not a caller's — but they are already in
+    // KERNEL_PLATFORM_ACTIONS, so admitting the source adds nothing and would
+    // reopen the marker case. Narrow on purpose.
+    let rows = vec![
+        row("AddItem", Some("Draft"), Some("Draft")),
+        TursoTrajectoryRow {
+            source: Some("Platform".to_string()),
+            ..row("Bash", Some("Draft"), Some("Draft"))
+        },
+    ];
+    let ots = ots_with_decisions(&["Bash"]);
+
+    let report = check(&order_automaton(), &rows, Some(&ots));
+
+    assert!(report.passed, "{:?}", report.violations);
+    assert_eq!(report.stats.ots_decisions_skipped_as_unrecognized_name, 1);
+    assert_eq!(report.stats.platform_rows_skipped, 1);
+}
+
+#[test]
+fn a_harness_tool_named_after_a_platform_verb_is_reported() {
+    // The one place the tie-break runs toward reporting, pinned so it stays a
+    // decision rather than a surprise. A harness tool called `Delete` is
+    // indistinguishable from an agent reaching for the platform's `Delete`, and
+    // the checker reports it — the module doc says why.
+    let rows = vec![row("AddItem", Some("Draft"), Some("Draft"))];
+    let ots = ots_with_decisions(&["Delete"]);
+
+    let report = check(&order_automaton(), &rows, Some(&ots));
+
+    let violation = only_violation(&report);
+    assert_eq!(violation.kind, ViolationKind::ForbiddenAction);
+    assert_eq!(violation.action, "Delete");
+    assert_eq!(
+        report.stats.ots_decisions_skipped_as_unrecognized_name, 0,
+        "a platform verb is placeable, so it is judged rather than counted"
+    );
+}
+
+#[test]
 fn a_capture_loss_marker_does_not_widen_the_vocabulary() {
     // The marker's action name is the capture path's own. Reading it as an
     // action would make a decision named `CaptureLost` judgeable, and the
