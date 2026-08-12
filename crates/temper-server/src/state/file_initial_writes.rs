@@ -96,6 +96,8 @@ impl ServerState {
             timestamp: sim_now(),
             params: serde_json::json!({}),
             idempotency_key: None,
+            scheduled_actions: Vec::new(),
+            spawn_requests: Vec::new(),
         };
         push_synthetic_event(&mut state, &mut events, created);
 

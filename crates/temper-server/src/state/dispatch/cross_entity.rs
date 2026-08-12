@@ -10,6 +10,16 @@ use tracing::Instrument;
 /// carries the IOA `required` attribute (ARN-92 #2).
 type CrossGuardSpec = (String, String, Vec<String>, Vec<String>, bool);
 
+pub(super) struct SpawnDispatchBatch<'a> {
+    pub tenant: &'a TenantId,
+    pub parent_type: &'a str,
+    pub parent_id: &'a str,
+    pub spawn_requests: &'a [crate::entity_actor::effects::SpawnRequest],
+    pub action_params: &'a serde_json::Value,
+    pub agent_ctx: &'a AgentContext,
+    pub source_sequence: u64,
+}
+
 impl crate::state::ServerState {
     /// Pre-resolve cross-entity state guards for an action.
     ///
@@ -211,16 +221,17 @@ impl crate::state::ServerState {
     /// This is a **sync** method (like `dispatch_scheduled_actions`) so that
     /// `tokio::spawn` inside it does not cause async recursion.
     /// Creates child entities and optionally dispatches initial actions.
-    pub(super) fn dispatch_spawn_requests(
-        &self,
-        tenant: &TenantId,
-        parent_type: &str,
-        parent_id: &str,
-        spawn_requests: &[crate::entity_actor::effects::SpawnRequest],
-        action_params: &serde_json::Value,
-        agent_ctx: &AgentContext,
-    ) {
+    pub(super) fn dispatch_spawn_requests(&self, batch: SpawnDispatchBatch<'_>) {
         use crate::entity_actor::effects::MAX_SPAWNS_PER_TRANSITION;
+        let SpawnDispatchBatch {
+            tenant,
+            parent_type,
+            parent_id,
+            spawn_requests,
+            action_params,
+            agent_ctx,
+            source_sequence,
+        } = batch;
 
         for (spawn_count, req) in spawn_requests.iter().enumerate() {
             if spawn_count >= MAX_SPAWNS_PER_TRANSITION {
@@ -241,7 +252,10 @@ impl crate::state::ServerState {
             let child_id = req.entity_id.clone();
             let initial_action = req.initial_action.clone();
             let parent_params = action_params.clone();
-            let agent = agent_ctx.clone();
+            let mut agent = agent_ctx.clone();
+            agent.idempotency_key = Some(format!(
+                "deferred:spawn:{t}:{parent_t}:{parent_i}:{source_sequence}:{spawn_count}:{child_type}:{child_id}"
+            ));
             let copied_fields = req.copied_field_values.clone();
             let workflow_root_entity_type = agent
                 .workflow_root_entity_type

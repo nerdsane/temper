@@ -494,6 +494,8 @@ impl crate::state::ServerState {
                 timestamp: sim_now(),
                 params: serde_json::json!({}),
                 idempotency_key: None,
+                scheduled_actions: Vec::new(),
+                spawn_requests: Vec::new(),
             };
             events.push(composite_envelope(&persistence_id, &bootstrap)?);
             state.sequence_nr = state.sequence_nr.saturating_add(1);
