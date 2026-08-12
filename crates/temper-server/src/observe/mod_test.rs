@@ -937,6 +937,46 @@ fn action_param_detail_serializes_typed_params_under_type_key() {
 }
 
 #[tokio::test]
+async fn spec_detail_reports_the_registered_content_hash() {
+    // The reason the field exists: a producer that recomputes the digest from
+    // a spec file gets a different one the moment any deploy path rewrites
+    // that file, and every conformance check for the run is then refused. This
+    // is the digest the kernel actually holds.
+    let app = build_test_app();
+    let response = app
+        .oneshot(system_get("/observe/specs/Order"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        raw["spec_version"],
+        serde_json::json!(temper_store_turso::spec_content_hash(ORDER_IOA)),
+        "the reported digest must be the one a conformance check compares against"
+    );
+
+    let detail: SpecDetail = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        detail.spec_version.len(),
+        64,
+        "a sha256 digest is 64 hex characters: {}",
+        detail.spec_version
+    );
+    assert!(
+        detail
+            .spec_version
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "the digest is reported bare and lowercase, not algorithm-qualified: {}",
+        detail.spec_version
+    );
+}
+
+#[tokio::test]
 async fn test_get_spec_detail_not_found() {
     let app = build_test_app();
     let response = app

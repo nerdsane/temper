@@ -32,6 +32,12 @@ export interface StateVariable {
 
 export interface SpecDetail {
   entity_type: string;
+  /**
+   * Content hash of the spec's IOA source as the kernel registered it — the
+   * digest a conformance check compares a run's recorded spec version
+   * against. Optional: a server older than the field omits it.
+   */
+  spec_version?: string;
   states: string[];
   initial_state: string;
   actions: SpecAction[];

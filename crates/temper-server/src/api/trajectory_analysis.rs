@@ -33,6 +33,8 @@ use crate::authz::{observe_tenant_scope, require_trajectory_content_auth};
 use crate::conformance::{ConformanceInput, SpecResolution, check_conformance};
 use crate::state::ServerState;
 
+use super::spec_pin::{MIN_PIN_DIGEST_HEX, PinMatch, classify_pin, declare_same_spec};
+
 /// Largest session the conformance checker will read in one request.
 ///
 /// The checker holds the whole session in memory and the state-machine walk is
@@ -316,6 +318,9 @@ fn registered_spec(
 /// **Nothing names a version.** The check runs against the registered spec and
 /// says so: the resolution is [`SpecResolution::Unresolved`], which the report
 /// carries as an evidence gap, so the run cannot come back `passed`.
+///
+/// Which spellings of a version name which spec is [`spec_pin`]'s to decide;
+/// this function decides what to do about the answer.
 fn resolve_governing_spec(
     spec: &RegisteredSpec,
     pinned_spec_version: Option<&str>,
@@ -323,7 +328,9 @@ fn resolve_governing_spec(
     entity_type: &str,
 ) -> Result<SpecResolution, (StatusCode, String)> {
     let governing = match (pinned_spec_version, requested_spec_version) {
-        (Some(pinned), Some(requested)) if !names_same_spec(pinned, requested) => {
+        (Some(pinned), Some(requested))
+            if !declare_same_spec(pinned, requested, entity_type, &spec.version) =>
+        {
             return Err((
                 StatusCode::CONFLICT,
                 format!(
@@ -338,30 +345,38 @@ fn resolve_governing_spec(
         (None, Some(requested)) => requested,
         (None, None) => return Ok(SpecResolution::Unresolved),
     };
-    if names_same_spec(governing, &spec.version) {
-        return Ok(SpecResolution::Pinned);
+    match classify_pin(governing, entity_type, &spec.version) {
+        PinMatch::Registered => Ok(SpecResolution::Pinned),
+        // Under-specified rather than wrong: the caller is told what to send,
+        // not that its run executed under a spec that is gone.
+        PinMatch::DigestTooShort => Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "spec version `{governing}` truncates the digest below {MIN_PIN_DIGEST_HEX} \
+                 characters, which is short enough to name more than one spec; send at least \
+                 {MIN_PIN_DIGEST_HEX} hex characters, or the whole hash, which \
+                 `GET /observe/specs/{entity_type}` reports as `spec_version`"
+            ),
+        )),
+        PinMatch::WrongEntity => Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "spec version `{governing}` pins a spec for a different entity than \
+                 `{entity_type}`; a run is checked against its own actor's spec, so the pin and \
+                 the entity being checked have to name the same one"
+            ),
+        )),
+        PinMatch::OtherVersion => Err((
+            StatusCode::CONFLICT,
+            format!(
+                "the run executed under spec version `{governing}` for `{entity_type}`, but the \
+                 registered spec is `{}`; Temper stores one version per entity type, so the \
+                 governing spec is not available to check against and a report against the \
+                 current one would judge the run by rules it never ran under",
+                spec.version
+            ),
+        )),
     }
-    Err((
-        StatusCode::CONFLICT,
-        format!(
-            "the run executed under spec version `{governing}` for `{entity_type}`, but the \
-             registered spec is `{}`; Temper stores one version per entity type, so the governing \
-             spec is not available to check against and a report against the current one would \
-             judge the run by rules it never ran under",
-            spec.version
-        ),
-    ))
-}
-
-/// Whether two recorded spec versions name the same spec.
-///
-/// A harness may record the content hash bare or `sha256:`-prefixed; both name
-/// the same spec, and a string comparison alone would read them as a conflict.
-fn names_same_spec(left: &str, right: &str) -> bool {
-    fn bare(version: &str) -> &str {
-        version.strip_prefix("sha256:").unwrap_or(version)
-    }
-    bare(left) == bare(right)
 }
 
 /// Load and parse a stored OTS trajectory, returning its session id with it.

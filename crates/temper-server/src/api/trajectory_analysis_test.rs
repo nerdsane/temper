@@ -150,6 +150,13 @@ async fn json_body(response: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&body).expect("body is JSON")
 }
 
+async fn response_text(response: axum::response::Response) -> String {
+    let body = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("read body");
+    String::from_utf8(body.to_vec()).expect("body is text")
+}
+
 /// The content hash of the spec [`build_app`] registers.
 ///
 /// A check that names no version cannot come back `passed` — the governing
@@ -1121,13 +1128,7 @@ async fn a_request_cannot_override_the_spec_version_the_trajectory_pins() {
         StatusCode::CONFLICT,
         "the recorded version is the run's provenance and a request cannot replace it"
     );
-    let detail = String::from_utf8(
-        axum::body::to_bytes(response.into_body(), 64 * 1024)
-            .await
-            .expect("read body")
-            .to_vec(),
-    )
-    .expect("body is text");
+    let detail = response_text(response).await;
     assert!(
         detail.contains("v1-long-gone"),
         "the refusal must name the version the run actually executed under: {detail}"
@@ -1180,6 +1181,191 @@ async fn a_request_agreeing_with_the_pinned_spec_version_is_checked() {
 
     let body = json_body(response).await;
     assert_eq!(body["report"]["spec_resolution"], "pinned");
+}
+
+/// Seed one legal row and store a trajectory pinning `spec_version`.
+async fn app_with_pinned_trajectory(
+    trajectory_id: &str,
+    spec_version: &str,
+) -> (Router, TursoEventStore) {
+    let (app, store) = test_app().await;
+    seed_row(
+        &store,
+        "AddItem",
+        Some("Draft"),
+        Some("Draft"),
+        "2026-01-01T00:00:00Z",
+    )
+    .await;
+    let mut data = ots_upload(trajectory_id);
+    data["metadata"]["spec_version"] = serde_json::json!(spec_version);
+    store
+        .persist_ots_trajectory(&OtsTrajectoryParams {
+            trajectory_id,
+            tenant: "default",
+            agent_id: "agent-1",
+            session_id: "session-1",
+            outcome: "success",
+            turn_count: 1,
+            data: &data.to_string(),
+        })
+        .await
+        .expect("persist OTS trajectory");
+    (app, store)
+}
+
+/// The kernel-vocabulary pin katagami stamps: the entity, then a truncated
+/// digest.
+fn entity_qualified_pin(digest_len: usize) -> String {
+    let registered = registered_spec_version();
+    format!("Order@sha256:{}", &registered[..digest_len])
+}
+
+#[tokio::test]
+async fn a_run_pinned_by_entity_and_short_digest_is_checked() {
+    // The point of the form: a spec identified by name plus a truncated
+    // digest resolves to the same registered spec as the full hash would.
+    let (app, _store) =
+        app_with_pinned_trajectory("traj-short-pin", &entity_qualified_pin(12)).await;
+
+    let response = app
+        .oneshot(admin_post(
+            "/api/conformance/check",
+            serde_json::json!({
+                "entity_type": "Order",
+                "session_id": "session-1",
+                "trajectory_id": "traj-short-pin",
+            }),
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await;
+    assert_eq!(body["report"]["spec_resolution"], "pinned");
+    assert_eq!(
+        body["spec_version"],
+        registered_spec_version(),
+        "the report still names the full digest it was produced against"
+    );
+}
+
+#[tokio::test]
+async fn a_short_pin_and_the_full_hash_are_not_read_as_a_conflict() {
+    // The trajectory pins by prefix, the request names the whole hash. Both
+    // resolve to the registered spec, so neither contradicts the other.
+    let (app, _store) =
+        app_with_pinned_trajectory("traj-mixed-forms", &entity_qualified_pin(16)).await;
+
+    let response = app
+        .oneshot(admin_post(
+            "/api/conformance/check",
+            serde_json::json!({
+                "entity_type": "Order",
+                "session_id": "session-1",
+                "trajectory_id": "traj-mixed-forms",
+                "spec_version": registered_spec_version(),
+            }),
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        json_body(response).await["report"]["spec_resolution"],
+        "pinned"
+    );
+}
+
+#[tokio::test]
+async fn a_digest_truncated_below_the_floor_is_refused_as_under_specified() {
+    // Eleven characters names a family of specs rather than one, so it is
+    // refused with what to send instead — not silently resolved, and not
+    // reported as the run having executed under a spec that is gone.
+    let (app, _store) =
+        app_with_pinned_trajectory("traj-too-short", &entity_qualified_pin(11)).await;
+
+    let response = app
+        .oneshot(admin_post(
+            "/api/conformance/check",
+            serde_json::json!({
+                "entity_type": "Order",
+                "session_id": "session-1",
+                "trajectory_id": "traj-too-short",
+            }),
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "an under-specified pin is a bad request, not a version conflict"
+    );
+    let detail = response_text(response).await;
+    assert!(
+        detail.contains("12") && detail.contains("/observe/specs/Order"),
+        "the refusal must say how long a digest to send and where to read it: {detail}"
+    );
+}
+
+#[tokio::test]
+async fn a_pin_naming_another_entity_is_refused() {
+    let (app, _store) = app_with_pinned_trajectory(
+        "traj-wrong-entity",
+        &format!("Invoice@sha256:{}", registered_spec_version()),
+    )
+    .await;
+
+    let response = app
+        .oneshot(admin_post(
+            "/api/conformance/check",
+            serde_json::json!({
+                "entity_type": "Order",
+                "session_id": "session-1",
+                "trajectory_id": "traj-wrong-entity",
+            }),
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let detail = response_text(response).await;
+    assert!(
+        detail.contains("different entity"),
+        "the refusal must say the pin belongs to another actor: {detail}"
+    );
+}
+
+#[tokio::test]
+async fn a_short_pin_for_a_spec_that_is_gone_is_still_refused() {
+    // Prefix matching widens which spellings name the registered spec. It must
+    // not widen which runs are accepted: a prefix of some other digest still
+    // has no spec to check against.
+    let (app, _store) =
+        app_with_pinned_trajectory("traj-gone-prefix", "Order@sha256:0123456789abcdef0123").await;
+
+    let response = app
+        .oneshot(admin_post(
+            "/api/conformance/check",
+            serde_json::json!({
+                "entity_type": "Order",
+                "session_id": "session-1",
+                "trajectory_id": "traj-gone-prefix",
+            }),
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "a prefix that names no registered spec is still a version conflict"
+    );
 }
 
 #[tokio::test]

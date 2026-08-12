@@ -12,6 +12,7 @@ mod files;
 mod policies;
 mod repl;
 mod secrets;
+mod spec_pin;
 mod trajectory_analysis;
 
 use axum::Router;
