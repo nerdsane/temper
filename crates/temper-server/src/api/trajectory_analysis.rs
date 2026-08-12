@@ -186,7 +186,7 @@ pub(crate) async fn handle_conformance_check(
     // Asked of this server's own capture path: a loss it could not attribute
     // to any session means the rows just read may be missing some, with no
     // marker in them to say so.
-    let capture_degraded = state.capture_health.unrecorded_losses() > 0;
+    let capture_degraded = state.capture_health.is_degraded();
     let report = check_conformance(ConformanceInput {
         automaton: &spec.automaton,
         kernel_rows: &rows,

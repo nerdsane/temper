@@ -28,7 +28,7 @@ use capture_loss::record_capture_loss;
 #[cfg(test)]
 use capture_loss::{
     MAX_MARKED_SESSIONS, MarkerClaim, claim_capture_loss_marker, claim_in,
-    persist_capture_loss_marker, release_capture_loss_marker,
+    persist_capture_loss_marker, queued_marker_for_test, release_capture_loss_marker,
 };
 
 const DEFAULT_CAPACITY: usize = 8_192;

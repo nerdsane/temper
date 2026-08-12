@@ -78,7 +78,7 @@ fn a_full_dedupe_set_still_marks_the_session() {
     // marker exists to prevent.
     // On a set of its own, so filling it cannot make every other capture path
     // in the process look full.
-    let mut marked = std::collections::HashSet::new();
+    let mut marked = std::collections::BTreeSet::new();
     for index in 0..MAX_MARKED_SESSIONS {
         assert_eq!(
             claim_in(&mut marked, "tenant", &format!("session-{index}")),
@@ -100,29 +100,49 @@ fn a_full_dedupe_set_still_marks_the_session() {
 }
 
 #[tokio::test]
-async fn a_marker_that_never_lands_is_counted_as_an_unrecorded_loss() {
-    // The retry runs on its own rather than waiting for the next loss — for a
-    // finished run there is no next loss — and when it is exhausted the loss
-    // is counted, because nothing durable will tell a reader this session has
-    // a hole in it.
+async fn a_loss_interrupted_before_its_marker_lands_leaves_the_server_degraded() {
+    // The process-death edge. The loss is counted before the write is even
+    // queued, so every way the write can fail to happen — killed process,
+    // cancelled runtime, ended simulation, worker that never ran — leaves the
+    // count standing and the next conformance check degraded.
+    let health = CaptureHealth::default();
+    assert!(!health.is_degraded());
+
+    health.record_unconfirmed_loss();
+
+    assert!(
+        health.is_degraded(),
+        "a loss counted but not yet written must read as degraded, not clean"
+    );
+    assert_eq!(health.unconfirmed_losses(), 1);
+    // Dropping everything here is the cancellation: nothing else runs.
+}
+
+#[tokio::test]
+async fn a_marker_that_never_lands_leaves_the_loss_unconfirmed() {
+    // Retries run on the worker rather than waiting for the next loss — for a
+    // finished run there is no next loss — and when they are exhausted the
+    // count simply stays up, because nothing durable will tell a reader this
+    // session has a hole in it.
     release_capture_loss_marker("tenant", "doomed-session");
     let health = CaptureHealth::default();
-    assert_eq!(health.unrecorded_losses(), 0);
+    health.record_unconfirmed_loss();
 
     persist_capture_loss_marker(
-        Arc::new(FailingSink),
-        "tenant".to_string(),
-        "doomed-session".to_string(),
-        "persist_failed",
-        health.clone(),
+        queued_marker_for_test(
+            Arc::new(FailingSink),
+            "tenant",
+            "doomed-session",
+            health.clone(),
+        ),
         Duration::ZERO,
     )
     .await;
 
     assert_eq!(
-        health.unrecorded_losses(),
+        health.unconfirmed_losses(),
         1,
-        "an unmarkable loss has to be visible somewhere, and storage is not available"
+        "an unmarkable loss has to stay visible, and storage is not available"
     );
     assert_eq!(
         claim_capture_loss_marker("tenant", "doomed-session"),
@@ -133,28 +153,25 @@ async fn a_marker_that_never_lands_is_counted_as_an_unrecorded_loss() {
 }
 
 #[tokio::test]
-async fn a_marker_that_lands_leaves_the_capture_healthy() {
+async fn only_a_confirmed_write_clears_the_loss() {
     let dir = tempfile::tempdir().expect("create temp dir");
     let db_url = format!("file:{}", dir.path().join("marker-ok.db").display());
     let store = temper_store_turso::TursoEventStore::new(&db_url, None)
         .await
         .expect("create local turso store");
     let health = CaptureHealth::default();
+    health.record_unconfirmed_loss();
+    assert!(health.is_degraded());
 
     persist_capture_loss_marker(
-        Arc::new(store),
-        "tenant".to_string(),
-        "healthy-session".to_string(),
-        "outbox_full",
-        health.clone(),
+        queued_marker_for_test(Arc::new(store), "tenant", "healthy-session", health.clone()),
         Duration::ZERO,
     )
     .await;
 
-    assert_eq!(
-        health.unrecorded_losses(),
-        0,
-        "a marker that stored is the loss being recorded, not an unrecorded one"
+    assert!(
+        !health.is_degraded(),
+        "the marker is stored, so the loss it records is accounted for"
     );
 }
 
@@ -238,11 +255,12 @@ async fn a_lost_entry_leaves_a_marker_the_checker_reads_as_missing_evidence() {
     .expect("persist the entry that survived");
 
     persist_capture_loss_marker(
-        Arc::new(store.clone()),
-        "tenant".to_string(),
-        session.to_string(),
-        "outbox_full",
-        CaptureHealth::default(),
+        queued_marker_for_test(
+            Arc::new(store.clone()),
+            "tenant",
+            session,
+            CaptureHealth::default(),
+        ),
         Duration::ZERO,
     )
     .await;
