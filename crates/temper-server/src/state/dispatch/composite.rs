@@ -903,18 +903,8 @@ impl crate::state::ServerState {
         tenant: &TenantId,
         entity_type: &str,
     ) -> Result<Arc<TransitionTable>, DispatchError> {
-        if let Some(table) = self
-            .registry
-            .read()
-            .map_err(|e| DispatchError::Internal(format!("registry lock poisoned: {e}")))?
-            .get_table(tenant, entity_type)
-        {
-            return Ok(table);
-        }
-
-        self.transition_tables
-            .get(entity_type)
-            .cloned()
+        self.transition_table_for_entity(tenant, entity_type)
+            .map_err(DispatchError::Internal)?
             .ok_or_else(|| DispatchError::Ungoverned(entity_type.to_string()))
     }
 

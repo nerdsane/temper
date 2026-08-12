@@ -5,7 +5,7 @@
 //!
 //! Guard conditions and their evaluation live in [`super::guard`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -65,6 +65,15 @@ pub struct TransitionTable {
     /// Composite-action metadata keyed by action name (ADR-0040).
     #[serde(default)]
     pub composite_actions: BTreeMap<String, CompositeActionMetadata>,
+    /// Declared parameter names per action (ADR-0156, ARN-247), keyed by action
+    /// name. This is the set the verification cascade models an action as being
+    /// able to write; the runtime restricts caller-supplied params to it so a
+    /// proven invariant is an enforced one. An action present with an empty set
+    /// declares no params. A rule-backed action absent from this map is invalid
+    /// metadata and must fail closed at dispatch — see
+    /// [`TransitionTable::declared_params`].
+    #[serde(default)]
+    pub action_params: BTreeMap<String, BTreeSet<String>>,
     /// Pre-built index: action name → indices into `rules`.
     ///
     /// Eliminates the O(N) linear scan + Vec allocation in [`evaluate_ctx()`].
@@ -160,6 +169,8 @@ impl<'de> Deserialize<'de> for TransitionTable {
             #[serde(default)]
             composite_actions: BTreeMap<String, CompositeActionMetadata>,
             #[serde(default)]
+            action_params: BTreeMap<String, BTreeSet<String>>,
+            #[serde(default)]
             keys: Vec<DeclaredKey>,
             #[serde(default)]
             vectors: Vec<DeclaredVector>,
@@ -175,6 +186,7 @@ impl<'de> Deserialize<'de> for TransitionTable {
             vectors: raw.vectors,
             state_var_metadata: raw.state_var_metadata,
             composite_actions: raw.composite_actions,
+            action_params: raw.action_params,
             rule_index: BTreeMap::new(),
         };
         table.rebuild_index();
@@ -259,6 +271,22 @@ pub struct TransitionResult {
 }
 
 impl TransitionTable {
+    /// Declared parameter names for `action`, or `None` when the table carries
+    /// no declaration for it (ARN-247).
+    ///
+    /// `Some(set)` means the action may accept exactly `set` (possibly empty).
+    /// `None` is only valid when the table has no such action. If
+    /// [`TransitionTable::has_action`] is true while this returns `None`, the
+    /// table is missing security-relevant metadata and dispatch must fail closed.
+    pub fn declared_params(&self, action: &str) -> Option<&BTreeSet<String>> {
+        self.action_params.get(action)
+    }
+
+    /// Whether this table contains at least one transition rule for `action`.
+    pub fn has_action(&self, action: &str) -> bool {
+        self.rule_index.contains_key(action)
+    }
+
     /// Rebuild the rule index from the current rules vec.
     ///
     /// Called automatically during construction. Must be called explicitly
@@ -313,6 +341,7 @@ mod tests {
             ],
             state_var_metadata: BTreeMap::new(),
             composite_actions: BTreeMap::new(),
+            action_params: BTreeMap::new(),
             rule_index: BTreeMap::new(),
         };
         table.rebuild_index();
@@ -320,5 +349,50 @@ mod tests {
         assert_eq!(table.rule_index.len(), 2);
         assert_eq!(table.rule_index["Submit"], vec![0, 1]);
         assert_eq!(table.rule_index["Cancel"], vec![2]);
+    }
+
+    #[test]
+    fn declared_params_are_recorded_per_action() {
+        // ARN-247: `from_automaton` records each action's declared param names so
+        // the runtime can restrict caller params to the verified set. An action
+        // with no params gets an empty set (declared, not unknown); an action not
+        // in the spec is unknown (`None`).
+        let spec = r#"
+[automaton]
+name = "WorkSummary"
+states = ["Open", "Done"]
+initial = "Open"
+
+[[action]]
+name = "RecordSummary"
+kind = "input"
+from = ["Open"]
+to = "Done"
+params = ["kr_delta", "outcome"]
+
+[[action]]
+name = "Reopen"
+kind = "input"
+from = ["Done"]
+to = "Open"
+"#;
+        let table = TransitionTable::from_ioa_source(spec);
+
+        let record = table
+            .declared_params("RecordSummary")
+            .expect("declared action is known");
+        assert!(record.contains("kr_delta"));
+        assert!(record.contains("outcome"));
+        assert_eq!(record.len(), 2);
+
+        let reopen = table
+            .declared_params("Reopen")
+            .expect("param-less action is still known");
+        assert!(reopen.is_empty(), "no declared params -> empty set");
+
+        assert!(
+            table.declared_params("NotAnAction").is_none(),
+            "unknown action -> None (runtime must not restrict)",
+        );
     }
 }

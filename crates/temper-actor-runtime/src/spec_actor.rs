@@ -279,19 +279,41 @@ impl Actor for SpecDrivenActor {
             }
         }
 
-        if let Some(fields) = spec_msg
+        // ARN-247: restrict incoming params to the action's declared set before
+        // they can touch fields, so the pg-actor runtime enforces the same
+        // declared-parameter boundary as the in-process runtime. A contract
+        // violation (undeclared param on a known action, missing metadata, or an
+        // ambiguous alias) fails closed: no field mutation and no state persisted.
+        if let Some(raw_params) = spec_msg
             .as_ref()
             .filter(|m| !m.params.is_empty())
             .and_then(|m| serde_json::from_slice::<serde_json::Value>(&m.params).ok())
-            .filter(|p| !p.as_object().is_some_and(|o| o.is_empty()))
         {
-            match (actor_state.fields.as_object_mut(), fields.as_object()) {
-                (Some(existing), Some(new_fields)) => {
-                    for (k, v) in new_fields {
-                        existing.insert(k.clone(), v.clone());
-                    }
+            let filtered = match temper_jit::params::restrict_to_declared_params(
+                &self.table,
+                &action,
+                &raw_params,
+            ) {
+                Ok(filtered) => filtered,
+                Err(error) => {
+                    tracing::warn!(
+                        actor = %self.name,
+                        action = %action,
+                        %error,
+                        "rejected undeclared action params; no state change",
+                    );
+                    return Ok(());
                 }
-                _ => actor_state.fields = fields,
+            };
+            if let Some(new_fields) = filtered.as_object().filter(|o| !o.is_empty()) {
+                match actor_state.fields.as_object_mut() {
+                    Some(existing) => {
+                        for (k, v) in new_fields {
+                            existing.insert(k.clone(), v.clone());
+                        }
+                    }
+                    None => actor_state.fields = filtered.clone().into_owned(),
+                }
             }
         }
 
@@ -322,27 +344,30 @@ impl Actor for SpecDrivenActor {
                     new_state = %actor_state.status,
                     "transition"
                 );
+
+                // 5. Persist ONLY on a successful transition. ARN-247: a rejected
+                // or unknown action must not persist the merged params (otherwise
+                // an invalid action name is a smuggling primitive for undeclared
+                // fields).
+                *state = serde_json::to_vec(&actor_state)
+                    .map_err(|e| ActorError::HandlerFailed(format!("state ser: {e}")))?;
             }
             Some(_) => {
                 tracing::warn!(
                     actor = %self.name,
                     action = %action,
                     status = %actor_state.status,
-                    "action not valid from current state"
+                    "action not valid from current state; no state change"
                 );
             }
             None => {
                 tracing::warn!(
                     actor = %self.name,
                     action = %action,
-                    "unknown action"
+                    "unknown action; no state change"
                 );
             }
         }
-
-        // 5. Serialize state back.
-        *state = serde_json::to_vec(&actor_state)
-            .map_err(|e| ActorError::HandlerFailed(format!("state ser: {e}")))?;
 
         Ok(())
     }
@@ -421,61 +446,5 @@ impl SpecDrivenActor {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const SIMPLE_SPEC: &str = r#"
-[automaton]
-name = "TestActor"
-states = ["Idle", "Running"]
-initial = "Idle"
-
-[[state]]
-name = "rounds"
-type = "counter"
-initial = "0"
-
-[[action]]
-name = "Start"
-kind = "input"
-from = ["Idle"]
-to = "Running"
-effect = [{ type = "increment", var = "rounds" }]
-
-[[action]]
-name = "Stop"
-kind = "input"
-from = ["Running"]
-to = "Idle"
-"#;
-
-    #[test]
-    fn test_spec_driven_actor_initial_state() {
-        let actor = SpecDrivenActor::from_ioa(SIMPLE_SPEC, HashMap::new()).unwrap();
-        let state_bytes = actor.initial_state();
-        let state: SpecActorState = serde_json::from_slice(&state_bytes).unwrap();
-        assert_eq!(state.status, "Idle");
-        assert_eq!(state.counters.get("rounds"), Some(&0usize));
-    }
-
-    #[test]
-    fn test_routing_map_builder() {
-        let rules = vec![ReactionRule {
-            name: "a".into(),
-            when: temper_runtime::reaction::ReactionTrigger {
-                entity_type: "Agent".into(),
-                action: Some("PrepareContext".into()),
-                to_state: None,
-            },
-            then: temper_runtime::reaction::ReactionTarget {
-                entity_type: "ContextManager".into(),
-                action: "PrepareContext".into(),
-            },
-            resolve_target: temper_runtime::reaction::TargetResolver::SameId,
-        }];
-
-        let maps = build_routing_maps(&rules);
-        assert_eq!(maps["Agent"]["PrepareContext"].0, "ContextManager");
-        assert_eq!(maps["Agent"]["PrepareContext"].1, "PrepareContext");
-    }
-}
+#[path = "spec_actor_test.rs"]
+mod tests;

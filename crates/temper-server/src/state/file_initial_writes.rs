@@ -377,6 +377,11 @@ fn apply_synthetic_file_action(
     params: serde_json::Value,
     cross_entity_booleans: &std::collections::BTreeMap<String, bool>,
 ) -> Result<EntityEvent, FileStreamContentError> {
+    // ARN-247 BLOCKER 4: kernel-synthesized `StreamUpdated` params
+    // (version_number/previous_version_id/created_by) survive the declared-param
+    // filter via `preserve_kernel_synthesized_file_params` inside
+    // `process_action` — the single chokepoint shared by this atomic path and the
+    // version-update path — so no per-path force-inject is needed here.
     let result = process_action_with_xref(state, table, action, &params, cross_entity_booleans);
     if !result.overflow_blobs.is_empty() {
         return Err(FileStreamContentError::State(format!(
@@ -427,3 +432,7 @@ fn synthetic_envelope(
         },
     })
 }
+
+#[cfg(test)]
+#[path = "file_initial_writes_test.rs"]
+mod tests;

@@ -1,6 +1,7 @@
 //! OData handler modules.
 
 mod account_verification;
+mod action_params;
 mod app_uniqueness;
 pub(crate) mod authz;
 mod bindings;

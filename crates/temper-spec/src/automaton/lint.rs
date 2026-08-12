@@ -91,6 +91,7 @@ pub fn lint_automaton(automaton: &Automaton) -> Vec<LintFinding> {
     }
 
     for action in &automaton.actions {
+        lint_action_param_aliases(action, &mut findings);
         if action.to.is_none() && action.kind != "output" {
             findings.push(LintFinding::warning(
                 "action_missing_to",
@@ -135,6 +136,25 @@ pub fn lint_automaton(automaton: &Automaton) -> Vec<LintFinding> {
     lint_field_invariants(automaton, &mut findings);
 
     findings
+}
+
+fn lint_action_param_aliases(action: &super::Action, findings: &mut Vec<LintFinding>) {
+    let mut owners = BTreeMap::<String, &str>::new();
+    for param in &action.params {
+        let name = param.name();
+        let canonical = crate::naming::to_pascal_case(name);
+        if let Some(first) = owners.insert(canonical.clone(), name)
+            && first != name
+        {
+            findings.push(LintFinding::error(
+                "action_param_alias_collision",
+                format!(
+                    "action '{}' params '{}' and '{}' both map to canonical spelling '{}'",
+                    action.name, first, name, canonical
+                ),
+            ));
+        }
+    }
 }
 
 /// Validate parsed `[[field_invariant]]` entries.
@@ -246,6 +266,9 @@ fn is_valid_field_identifier(s: &str) -> bool {
 /// - target initial action must be enabled from the target initial state
 /// - target initial action params must be available from the spawn action params
 ///   (plus implicit `parent_type`, `parent_id`, and `<parent_type_snake>_id`)
+/// - every explicit `copy_fields` entry must be declared by the target initial
+///   action, so copied values cannot be silently discarded by the runtime input
+///   contract
 pub fn lint_automata_bundle(automata: &BTreeMap<String, Automaton>) -> Vec<BundleLintFinding> {
     let mut findings = Vec::new();
 
@@ -346,6 +369,15 @@ fn lint_spawn_effect(
         target_action,
         findings,
     );
+    lint_spawn_copy_field_contract(
+        entity_name,
+        &action.name,
+        entity_type,
+        initial_action_name,
+        copy_fields.as_deref(),
+        target_action,
+        findings,
+    );
     let available_params = available_spawn_params(action, parent_snake, copy_fields.as_deref());
     lint_spawn_param_mapping(
         entity_name,
@@ -356,6 +388,37 @@ fn lint_spawn_effect(
         target_action,
         findings,
     );
+}
+
+fn lint_spawn_copy_field_contract(
+    entity_name: &str,
+    action_name: &str,
+    entity_type: &str,
+    initial_action_name: &str,
+    copy_fields: Option<&[String]>,
+    target_action: &super::Action,
+    findings: &mut Vec<BundleLintFinding>,
+) {
+    let Some(copy_fields) = copy_fields else {
+        return;
+    };
+    let declared: BTreeSet<&str> = target_action.params.iter().map(|p| p.name()).collect();
+    let missing: Vec<&str> = copy_fields
+        .iter()
+        .map(String::as_str)
+        .filter(|field| !declared.contains(field))
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    findings.push(BundleLintFinding::error(
+        entity_name.to_string(),
+        "spawn_copy_field_not_declared_by_target",
+        format!(
+            "action '{action_name}' copies fields {missing:?} into '{entity_type}' -> \
+             '{initial_action_name}', but the target action does not declare them"
+        ),
+    ));
 }
 
 fn target_action<'a>(automaton: &'a Automaton, action_name: &str) -> Option<&'a super::Action> {

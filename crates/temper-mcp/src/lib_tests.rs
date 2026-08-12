@@ -304,23 +304,23 @@ return fetched['fields']['customer']
 }
 
 #[tokio::test]
-async fn execute_invalid_action_returns_409_cleanly() {
+async fn execute_invalid_transition_returns_409_cleanly() {
     let (port, shutdown) = start_test_temper_server().await;
     let mut ctx = ctx_for_port(port);
 
     let response = rpc(
-            &mut ctx,
-            call_tool_request(
-                4,
-                "execute",
-                r#"
+        &mut ctx,
+        call_tool_request(
+            4,
+            "execute",
+            r#"
 await temper.create('demo', 'Orders', {'id': 'mcp-bad-action-1'})
-await temper.action('demo', 'Orders', 'mcp-bad-action-1', 'ShipOrder', {'Reason': 'invalid from draft'})
+await temper.action('demo', 'Orders', 'mcp-bad-action-1', 'ShipOrder', {})
 return 'unreachable'
 "#,
-            ),
-        )
-        .await;
+        ),
+    )
+    .await;
 
     let _ = shutdown.send(());
 

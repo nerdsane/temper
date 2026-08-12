@@ -13,6 +13,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use axum::Extension;
 
 use super::account_verification::enforce_commons_account_verified_for_write;
+use super::action_params::validate_bound_action_params;
 use super::app_uniqueness::enforce_commons_app_name_unique_for_write;
 use super::authz::{
     CREATE_ACTION, DELETE_ACTION, MutationResource, UPDATE_ACTION, authorize_mutation,
@@ -34,6 +35,75 @@ use crate::request_context::{AgentContext, extract_agent_context, remote_parent_
 use crate::response::{ODataResponse, odata_error};
 use crate::state::ServerState;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
+
+/// ARN-247 BLOCKER 3: request-body keys on a collection create that the entity
+/// type does not declare as a CSDL property or key.
+///
+/// The create path writes the body verbatim into entity fields (`spawn_with_fields`
+/// / `try_create_data_only_tenant_entity` / `get_or_create_tenant_entity`), so an
+/// undeclared key is the same unrestricted-write primitive the action boundary
+/// removes — just at creation. This rejects those keys at the external boundary.
+/// It fails open when the entity type has no CSDL entity (nothing to check
+/// against), and is distinct from PATCH (documented out of scope). `id`/`Id` and
+/// `status`/`Status` are always accepted — the create path consumes them.
+fn undeclared_create_field_keys(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    body: &serde_json::Value,
+) -> Vec<String> {
+    let Some(object) = body.as_object() else {
+        return Vec::new();
+    };
+    if object.is_empty() {
+        return Vec::new();
+    }
+    let Ok(registry) = state.registry.read() else {
+        return Vec::new(); // fail open on a poisoned lock — the action boundary still enforces
+    };
+    let Some(tc) = registry.get_tenant(tenant) else {
+        return Vec::new();
+    };
+    let Some(entity) = tc
+        .csdl
+        .schemas
+        .iter()
+        .flat_map(|schema| &schema.entity_types)
+        .find(|entity| entity.name == entity_type)
+    else {
+        return Vec::new();
+    };
+    let mut allowed: std::collections::BTreeSet<&str> =
+        ["id", "Id", "status", "Status"].into_iter().collect();
+    for property in &entity.properties {
+        allowed.insert(property.name.as_str());
+    }
+    for key in &entity.key_properties {
+        allowed.insert(key.as_str());
+    }
+    // Navigation properties are declared schema too (relationship names), so
+    // accepting them can never be a smuggling vector and avoids rejecting a
+    // create that sets a relationship-shaped field.
+    for nav in &entity.navigation_properties {
+        allowed.insert(nav.name.as_str());
+    }
+    // CSDL properties are the deterministic PascalCase spelling; create bodies
+    // conventionally use snake_case (e.g. POST Projects {"name": …} against a
+    // `Name` property). Accept a key whose PascalCase form matches a declared
+    // property — the same snake_case<->PascalCase tolerance the action boundary
+    // uses — while a genuinely undeclared key still matches nothing.
+    let mut undeclared: Vec<String> = object
+        .keys()
+        .filter(|key| {
+            !key.starts_with('@')
+                && !allowed.contains(key.as_str())
+                && !allowed.contains(temper_spec::naming::to_pascal_case(key).as_str())
+        })
+        .cloned()
+        .collect();
+    undeclared.sort();
+    undeclared
+}
 
 type ODataWriteError = Box<axum::response::Response>;
 
@@ -289,6 +359,23 @@ pub async fn handle_odata_post(
                     let prefix = entity_type_prefix(&entity_type);
                     format!("{prefix}{}", temper_runtime::scheduler::sim_uuid())
                 });
+
+            // ARN-247 BLOCKER 3: reject create fields the entity type does not
+            // declare (CSDL properties/keys) before they are written verbatim into
+            // entity fields.
+            let undeclared_create =
+                undeclared_create_field_keys(&state, &tenant, &entity_type, &body_json);
+            if !undeclared_create.is_empty() {
+                return odata_error(
+                    StatusCode::BAD_REQUEST,
+                    "UndeclaredEntityFields",
+                    &format!(
+                        "entity type '{entity_type}' does not declare field(s): {}. Only declared properties are accepted on create (ARN-247).",
+                        undeclared_create.join(", ")
+                    ),
+                )
+                .into_response();
+            }
 
             let initial_fields = body_json.clone();
             let _commons_guardrail_lock = state.acquire_commons_write_guardrail_lock(&tenant).await;
@@ -630,6 +717,19 @@ pub async fn handle_odata_post(
                 .await
                 {
                     return response;
+                }
+                // ARN-247: the pg-actor bound-action path must enforce the same
+                // declared-parameter boundary as the in-process path — reject an
+                // authorized caller's undeclared params before they reach the
+                // actor (which merges params into fields).
+                if let Err(error) = validate_bound_action_params(
+                    &state,
+                    &tenant,
+                    &entity_type,
+                    action_name,
+                    &body_json,
+                ) {
+                    return odata_error(error.status, error.code, &error.message).into_response();
                 }
                 match actor_sys
                     .tell(

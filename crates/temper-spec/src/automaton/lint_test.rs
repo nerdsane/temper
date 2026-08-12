@@ -254,6 +254,76 @@ params = ["title", "description", "plan_id"]
 }
 
 #[test]
+fn bundle_lint_rejects_copy_field_not_declared_by_target_action() {
+    let parent = parse(
+        r#"
+[automaton]
+name = "CronJob"
+states = ["Active"]
+initial = "Active"
+
+[[state]]
+name = "system_prompt"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Trigger"
+from = ["Active"]
+effect = [{ type = "spawn", entity_type = "Session", entity_id_source = "{uuid}", initial_action = "Configure", copy_fields = "system_prompt" }]
+"#,
+    );
+    let child = parse(
+        r#"
+[automaton]
+name = "Session"
+states = ["Created"]
+initial = "Created"
+
+[[action]]
+name = "Configure"
+from = ["Created"]
+"#,
+    );
+
+    let bundle = BTreeMap::from([
+        ("CronJob".to_string(), parent),
+        ("Session".to_string(), child),
+    ]);
+    let findings = lint_automata_bundle(&bundle);
+    assert!(findings.iter().any(|finding| {
+        finding.code == "spawn_copy_field_not_declared_by_target"
+            && finding.entity == "CronJob"
+            && finding.message.contains("system_prompt")
+    }));
+}
+
+#[test]
+fn lint_rejects_action_params_with_colliding_canonical_aliases() {
+    let automaton = parse(
+        r#"
+[automaton]
+name = "Account"
+states = ["Active"]
+initial = "Active"
+
+[[action]]
+name = "UpdateOwner"
+from = ["Active"]
+to = "Active"
+params = ["user_id", "UserId"]
+"#,
+    );
+
+    let findings = lint_automaton(&automaton);
+    assert!(findings.iter().any(|finding| {
+        finding.code == "action_param_alias_collision"
+            && finding.message.contains("user_id")
+            && finding.message.contains("UserId")
+    }));
+}
+
+#[test]
 fn bundle_lint_accepts_valid_spawn_contract() {
     let parent = parse(
         r#"

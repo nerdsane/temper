@@ -5,6 +5,7 @@
 //! processes action messages by evaluating transitions through the table.
 
 mod actor;
+pub(crate) mod declared_params;
 pub mod effects;
 pub mod sim_handler;
 mod snapshot_queue;

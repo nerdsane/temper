@@ -300,12 +300,16 @@ impl crate::state::ServerState {
                             if let Some(action) = initial_action {
                                 let mut initial_action_params =
                                     parent_params.as_object().cloned().unwrap_or_default();
-                                for (key, value) in parent_fields {
-                                    initial_action_params.insert(key, value);
-                                }
-                                // Merge copied field values (take precedence over parent params)
+                                // Copied field values may override forwarded parent params...
                                 for (key, value) in &copied_fields {
                                     initial_action_params.insert(key.clone(), value.clone());
+                                }
+                                // ...but parent linkage is kernel-authoritative and is inserted LAST
+                                // so it always wins. ARN-247: otherwise a multi-level spawn A→B→C
+                                // whose `copy_fields` copies `parent_id` would record grandparent A as
+                                // C's parent instead of B.
+                                for (key, value) in parent_fields {
+                                    initial_action_params.insert(key, value);
                                 }
                                 if let Err(e) = state
                                     .dispatch_tenant_action(

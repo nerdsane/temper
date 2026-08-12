@@ -89,6 +89,22 @@ impl TransitionTable {
             }
         }
 
+        // ARN-247: declared parameter names per action, keyed by action name.
+        // The runtime restricts caller-supplied request-body params to this set
+        // so it can only write what the verification cascade modeled it writing.
+        // Every declared action gets an entry (empty set = declares no params).
+        let mut action_params = std::collections::BTreeMap::new();
+        for action in &automaton.actions {
+            action_params.insert(
+                action.name.clone(),
+                action
+                    .params
+                    .iter()
+                    .map(|p| p.name().to_string())
+                    .collect::<std::collections::BTreeSet<String>>(),
+            );
+        }
+
         let mut composite_actions = std::collections::BTreeMap::new();
         for action in &automaton.actions {
             if !action.kind.eq_ignore_ascii_case("composite") {
@@ -142,6 +158,7 @@ impl TransitionTable {
                 .collect(),
             state_var_metadata,
             composite_actions,
+            action_params,
             rule_index,
         }
     }
