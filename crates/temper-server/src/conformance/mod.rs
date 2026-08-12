@@ -99,6 +99,7 @@
 //! because a terminal source state is illegal for every action and reporting
 //! it twice says nothing new.
 
+mod spec_view;
 mod walk;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -108,7 +109,8 @@ use temper_ots::models::OTSTrajectory;
 use temper_spec::automaton::Automaton;
 use temper_store_turso::TursoTrajectoryRow;
 
-use walk::{RowDisposition, SpecView, Walk, check_row, row_disposition, undeclared_detail};
+use spec_view::SpecView;
+use walk::{RowDisposition, Walk, check_row, row_disposition, undeclared_detail};
 
 /// Action names the kernel itself writes into the trajectory stream.
 ///
