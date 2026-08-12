@@ -868,12 +868,12 @@ impl crate::state::ServerState {
 
         for row in rows {
             let data = match store
-                .get_ots_trajectory(&row.trajectory_id)
+                .get_ots_trajectory(&row.tenant, &row.trajectory_id)
                 .await
                 .ok()
                 .flatten()
             {
-                Some(d) => d,
+                Some(document) => document.data,
                 None => continue,
             };
             let trajectory = match serde_json::from_str::<Value>(&data) {

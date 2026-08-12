@@ -263,17 +263,25 @@ impl crate::state::ServerState {
             from_status: None,
             to_status: None,
             error: Some(error_str.to_string()),
-            agent_id: None,
-            session_id: None,
+            // The denial belongs to the agent whose dispatch triggered the
+            // WASM call. Dropping that identity left every WASM denial
+            // unattributable in the trajectory stream.
+            agent_id: agent_ctx.agent_id.clone(),
+            session_id: agent_ctx.session_id.clone(),
             authz_denied: Some(true),
             denied_resource: Some(integration_name.to_string()),
             denied_module: Some(module_name.to_string()),
             source: Some(TrajectorySource::Authz),
             spec_governed: None,
-            agent_type: None,
-            request_body: None,
-            intent: None,
+            agent_type: agent_ctx.agent_type.clone(),
+            request_body: Some(serde_json::json!({
+                "integration": integration_name,
+                "module": module_name,
+                "trigger_action": trigger_action,
+            })),
+            intent: agent_ctx.intent.clone(),
             matched_policy_ids: None,
+            capture_seq: None,
         };
         tracing::info!(
             tenant = %traj.tenant,
@@ -286,6 +294,10 @@ impl crate::state::ServerState {
             error = ?traj.error,
             source = ?traj.source,
             authz_denied = ?traj.authz_denied,
+            agent_id = traj.agent_id.as_deref().unwrap_or(""),
+            session_id = traj.session_id.as_deref().unwrap_or(""),
+            agent_type = traj.agent_type.as_deref().unwrap_or(""),
+            intent = traj.intent.as_deref().unwrap_or(""),
             "trajectory.entry"
         );
         if !traj.success {

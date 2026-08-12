@@ -47,6 +47,18 @@ pub struct SpecSummary {
 pub struct SpecDetail {
     /// Entity type name.
     pub entity_type: String,
+    /// Content hash of the IOA source this spec was parsed from.
+    ///
+    /// The authoritative value: it is what the spec store keeps, and what a
+    /// conformance check compares a run's `metadata.spec_version` against.
+    /// Reported here so a harness can record the digest the kernel holds
+    /// rather than computing one from a spec file — a deploy path that
+    /// rewrites line endings or re-emits the TOML hashes to something else
+    /// entirely, and every conformance check for that run is then refused.
+    ///
+    /// Empty when the spec is not one this response could hash.
+    #[serde(default)]
+    pub spec_version: String,
     /// Valid status states.
     pub states: Vec<String>,
     /// Initial state.

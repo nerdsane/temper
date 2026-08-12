@@ -49,10 +49,12 @@ pub(crate) async fn handle_repl(
         .get("x-temper-agent-type")
         .and_then(|v| v.to_str().ok())
         .map(String::from);
-    let session_id = headers
-        .get("x-session-id")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from);
+    // Session and intent come from the canonical observability extractor so
+    // the REPL honours the same header aliases as every other entrypoint
+    // (`X-Temper-Observe-Session-Id`/`X-Session-Id`, `X-Temper-Observe-Intent`/
+    // `X-Intent`) instead of a narrower hand-rolled lookup.
+    let agent_ctx = crate::request_context::extract_agent_context(&headers);
+    let session_id = agent_ctx.session_id.clone();
 
     let tenant = match extract_tenant(&headers, &state) {
         Ok(t) => t.as_str().to_string(),
@@ -60,8 +62,12 @@ pub(crate) async fn handle_repl(
     };
 
     let agent_id = principal_id.clone();
+    let trajectory_agent_type = agent_type.clone();
     let port = state.listen_port.get().copied().unwrap_or(4200);
     let code = body.code;
+    // The submitted code is the request body of a REPL call; a failed run is
+    // unreadable without it. Size is bounded when the entry is enqueued.
+    let submitted_code = code.clone();
     let tenant_for_repl = tenant.clone();
 
     // The Monty sandbox types are !Send, so we run in a dedicated
@@ -114,16 +120,17 @@ pub(crate) async fn handle_repl(
                 to_status: None,
                 error: Some(e.to_string()),
                 agent_id: agent_id.clone(),
-                session_id: None,
+                session_id: agent_ctx.session_id.clone(),
                 authz_denied: None,
                 denied_resource: None,
                 denied_module: None,
                 source: Some(TrajectorySource::Platform),
                 spec_governed: None,
-                agent_type: None,
-                request_body: None,
-                intent: None,
+                agent_type: trajectory_agent_type.clone(),
+                request_body: Some(serde_json::json!({ "code": submitted_code })),
+                intent: agent_ctx.intent.clone(),
                 matched_policy_ids: None,
+                capture_seq: None,
             };
             if !state.enqueue_trajectory_entry(entry) {
                 tracing::warn!("failed to enqueue REPL trajectory entry");

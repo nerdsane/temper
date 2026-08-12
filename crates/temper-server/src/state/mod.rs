@@ -348,6 +348,13 @@ pub struct QueryProjectionReplayParityDrift {
 #[derive(Clone)]
 // ADR-0025 Phase 4: remove record_store field after IOA entity migration complete
 pub struct ServerState {
+    /// Capture losses this server could not record against any session.
+    ///
+    /// Read by conformance checking: a non-zero count means some stored
+    /// session is missing rows and nothing durable says which, so no report
+    /// from this server can claim to have seen a whole run.
+    pub(crate) capture_health: crate::trajectory_outbox::CaptureHealth,
+
     /// The actor system for spawning and managing legacy in-memory entity actors.
     pub actor_system: Arc<ActorSystem>,
     /// Optional PG-backed actor system. When configured and an entity type is in
@@ -663,6 +670,7 @@ impl ServerState {
         let (agent_progress_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
         let (observe_refresh_tx, _) = tokio::sync::broadcast::channel(64); // determinism-ok: broadcast for external observation
         let state = Self {
+            capture_health: crate::trajectory_outbox::CaptureHealth::default(),
             actor_system: Arc::new(system),
             pg_actor_system: None,
             actor_backed_types: BTreeSet::new(),
@@ -908,6 +916,7 @@ impl ServerState {
         let (agent_progress_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
         let (observe_refresh_tx, _) = tokio::sync::broadcast::channel(64); // determinism-ok: broadcast for external observation
         let state = Self {
+            capture_health: crate::trajectory_outbox::CaptureHealth::default(),
             actor_system: Arc::new(system),
             pg_actor_system: None,
             actor_backed_types: BTreeSet::new(),
@@ -1391,6 +1400,7 @@ impl ServerState {
                         request_body: r.request_body.and_then(|s| serde_json::from_str(&s).ok()),
                         intent: r.intent,
                         matched_policy_ids: r.matched_policy_ids,
+                        capture_seq: r.capture_seq,
                     }));
                 }
                 Err(e) => {

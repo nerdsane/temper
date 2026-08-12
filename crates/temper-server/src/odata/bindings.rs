@@ -207,6 +207,7 @@ pub(super) async fn dispatch_bound_action(
                 reason: &reason,
                 module_name: None,
                 from_status: Some(current_state.state.status.clone()),
+                intent: agent_ctx.intent.clone(),
             },
         )
         .await;

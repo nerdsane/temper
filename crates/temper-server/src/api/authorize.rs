@@ -74,6 +74,7 @@ pub(crate) async fn handle_authorize(
                     reason: &reason,
                     module_name: None,
                     from_status: None,
+                    intent: crate::request_context::intent_from_headers(&headers),
                 },
             )
             .await;
@@ -150,6 +151,7 @@ pub(crate) async fn handle_audit(
         request_body: body.request_body,
         intent: body.intent,
         matched_policy_ids: None,
+        capture_seq: None,
     };
 
     if !state.enqueue_trajectory_entry(entry) {

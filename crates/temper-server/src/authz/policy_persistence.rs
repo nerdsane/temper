@@ -88,6 +88,7 @@ pub async fn persist_and_activate_policy(
             request_body: None,
             intent: None,
             matched_policy_ids: None,
+            capture_seq: None,
         };
         if !state.enqueue_trajectory_entry(entry) {
             tracing::warn!(

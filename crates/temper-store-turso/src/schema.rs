@@ -300,11 +300,30 @@ pub const ALTER_TRAJECTORIES_ADD_REQUEST_BODY: &str =
 pub const ALTER_TRAJECTORIES_ADD_INTENT: &str = "ALTER TABLE trajectories ADD COLUMN intent TEXT";
 pub const ALTER_TRAJECTORIES_ADD_MATCHED_POLICY_IDS: &str =
     "ALTER TABLE trajectories ADD COLUMN matched_policy_ids TEXT";
+/// Capture order within the writing process.
+///
+/// Rows are written by independently spawned persistence tasks, so the
+/// autoincrement `id` records the order the writes *landed*, not the order the
+/// kernel *captured* them. The conformance checker replays a session as a
+/// state-machine walk and needs capture order, so the capturing process stamps
+/// a monotonic sequence on the entry before it is queued and the read orders
+/// by it. Null on rows written before this column existed.
+pub const ALTER_TRAJECTORIES_ADD_CAPTURE_SEQ: &str =
+    "ALTER TABLE trajectories ADD COLUMN capture_seq INTEGER";
 
 /// Index on agent_id for agent-scoped trajectory queries.
 pub const CREATE_TRAJECTORIES_AGENT_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_trajectories_agent
     ON trajectories(agent_id);";
+
+/// Index on session_id for session-scoped trajectory replay.
+///
+/// Conformance checking reads one session's rows in capture order, so the
+/// index covers every ordering column and the read is a range scan rather
+/// than a table scan.
+pub const CREATE_TRAJECTORIES_SESSION_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_trajectories_session_capture
+    ON trajectories(session_id, created_at, capture_seq, id);";
 
 /// Feature request records generated from trajectory analysis.
 pub const CREATE_FEATURE_REQUESTS_TABLE: &str = "\
@@ -448,9 +467,15 @@ CREATE INDEX IF NOT EXISTS idx_blobs_expires_at ON blobs(expires_at) WHERE expir
 /// Stores complete agent execution traces (tool calls, decisions, reasoning)
 /// captured by the MCP server during agent sessions. The `data` column holds
 /// the full OTS JSON blob; indexed columns enable efficient filtering.
+///
+/// Keyed by `(tenant, trajectory_id)`. One store holds every tenant's rows and
+/// the id is chosen by the uploading harness, so a global key lets one tenant's
+/// upload land on an id another tenant already used — and the upsert would
+/// rewrite that row's tenant along with its data. Reads are already
+/// tenant-scoped; the identity has to be too.
 pub const CREATE_OTS_TRAJECTORIES_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS ots_trajectories (
-    trajectory_id TEXT PRIMARY KEY,
+    trajectory_id TEXT NOT NULL,
     tenant TEXT NOT NULL,
     agent_id TEXT NOT NULL,
     session_id TEXT,
@@ -462,8 +487,60 @@ CREATE TABLE IF NOT EXISTS ots_trajectories (
     persist_attempts INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY(tenant, trajectory_id)
 );";
+
+/// Whether an existing `ots_trajectories` table is already tenant-scoped.
+///
+/// SQLite cannot alter a primary key, so the migration below rebuilds the
+/// table. This reads the stored DDL to decide whether it has to.
+pub const SELECT_OTS_TRAJECTORIES_DDL: &str = "\
+SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ots_trajectories';";
+
+/// Marker the tenant-scoped DDL contains and the legacy DDL does not.
+pub const OTS_TRAJECTORIES_TENANT_IDENTITY_MARKER: &str = "PRIMARY KEY(tenant, trajectory_id)";
+
+/// Migration step 1: the tenant-scoped table, under a staging name.
+pub const CREATE_OTS_TRAJECTORIES_REBUILD_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS ots_trajectories_rebuild (
+    trajectory_id TEXT NOT NULL,
+    tenant TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    session_id TEXT,
+    outcome TEXT NOT NULL DEFAULT 'unknown',
+    entity_type TEXT,
+    turn_count INTEGER NOT NULL DEFAULT 0,
+    data TEXT NOT NULL,
+    persistence_status TEXT NOT NULL DEFAULT 'persisted',
+    persist_attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY(tenant, trajectory_id)
+);";
+
+/// Migration step 2: carry every stored row across.
+///
+/// The old key was global, so no two rows can collide on the new one; the
+/// column list is explicit so a table with extra legacy columns still copies.
+pub const COPY_OTS_TRAJECTORIES_INTO_REBUILD: &str = "\
+INSERT INTO ots_trajectories_rebuild
+    (trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data,
+     persistence_status, persist_attempts, last_error, created_at, updated_at)
+SELECT trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data,
+       persistence_status, persist_attempts, last_error, created_at, updated_at
+FROM ots_trajectories;";
+
+/// Migration step 3: drop the globally keyed table.
+pub const DROP_OTS_TRAJECTORIES_LEGACY_TABLE: &str = "DROP TABLE ots_trajectories;";
+
+/// Migration step 4: put the rebuilt table in its place.
+///
+/// The indexes are recreated after this by the same bootstrap that runs the
+/// migration, because dropping the old table dropped them with it.
+pub const RENAME_OTS_TRAJECTORIES_REBUILD: &str = "\
+ALTER TABLE ots_trajectories_rebuild RENAME TO ots_trajectories;";
 
 pub const ALTER_OTS_TRAJECTORIES_ADD_PERSISTENCE_STATUS: &str = "\
 ALTER TABLE ots_trajectories ADD COLUMN persistence_status TEXT NOT NULL DEFAULT 'persisted';";

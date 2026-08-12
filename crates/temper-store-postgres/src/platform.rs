@@ -307,6 +307,9 @@ pub struct PostgresTrajectoryRow {
     pub request_body: Option<String>,
     pub intent: Option<String>,
     pub matched_policy_ids: Option<Vec<String>>,
+    /// Monotonic capture order stamped by the process that recorded the row.
+    /// Null on rows written before the column existed.
+    pub capture_seq: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -400,6 +403,18 @@ pub struct PostgresOtsTrajectoryRow {
     pub updated_at: String,
 }
 
+/// A stored OTS trajectory document together with the run identity recorded
+/// alongside it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PostgresOtsTrajectoryDocument {
+    pub trajectory_id: String,
+    pub tenant: String,
+    pub agent_id: String,
+    pub session_id: String,
+    pub outcome: String,
+    pub data: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PostgresQueuedOtsTrajectoryRow {
     pub trajectory_id: String,
@@ -478,6 +493,10 @@ pub struct PostgresTrajectoryInsert<'a> {
     pub request_body: Option<&'a str>,
     pub intent: Option<&'a str>,
     pub matched_policy_ids: Option<&'a str>,
+    /// Monotonic capture order stamped by the recording process, so a session
+    /// reads back in the order the kernel captured it rather than the order
+    /// independent persistence tasks happened to land.
+    pub capture_seq: Option<i64>,
 }
 
 impl PostgresEventStore {
@@ -492,8 +511,8 @@ impl PostgresEventStore {
             "INSERT INTO trajectories \
              (tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
               agent_id, session_id, authz_denied, denied_resource, denied_module, source, \
-              spec_governed, created_at, request_body, intent, matched_policy_ids) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)",
+              spec_governed, created_at, request_body, intent, matched_policy_ids, capture_seq) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
         )
         .bind(entry.tenant)
         .bind(entry.entity_type)
@@ -514,6 +533,7 @@ impl PostgresEventStore {
         .bind(request_body)
         .bind(entry.intent)
         .bind(matched_policy_ids)
+        .bind(entry.capture_seq)
         .execute(self.pool())
         .await
         .map_err(storage_error)?;
@@ -1585,7 +1605,7 @@ impl PostgresEventStore {
         let rows = crate::dbm::postgres_query!(
             "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
                     agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, \
-                    created_at, request_body, intent, matched_policy_ids \
+                    created_at, request_body, intent, matched_policy_ids, capture_seq \
              FROM trajectories \
              ORDER BY created_at DESC \
              LIMIT $1",
@@ -1699,7 +1719,7 @@ impl PostgresEventStore {
         let failed_rows = crate::dbm::postgres_query!(
             "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
                     agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, \
-                    created_at, request_body, intent, matched_policy_ids \
+                    created_at, request_body, intent, matched_policy_ids, capture_seq \
              FROM trajectories \
              WHERE success = false \
              ORDER BY created_at DESC \
@@ -1735,7 +1755,7 @@ impl PostgresEventStore {
         let rows = crate::dbm::postgres_query!(
             "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
                     agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, \
-                    created_at, request_body, intent, matched_policy_ids \
+                    created_at, request_body, intent, matched_policy_ids, capture_seq \
              FROM trajectories \
              WHERE agent_id = $1 \
                AND ($2::text IS NULL OR tenant = $2) \
@@ -1744,6 +1764,48 @@ impl PostgresEventStore {
              LIMIT $4",
         )
         .bind(agent_id)
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.into_iter().map(row_to_trajectory).collect())
+    }
+
+    /// Query one session's trajectory rows in the order the kernel wrote them.
+    ///
+    /// Ordered ascending — oldest first — because the conformance checker
+    /// replays a session as a state-machine run and a newest-first read would
+    /// hand it the run backwards.
+    ///
+    /// Ties inside one `created_at` tick are broken by `capture_seq`, the
+    /// order the capturing process stamped on the entry, and only then by
+    /// `id`. `id` alone is the order the writes landed: rows are persisted by
+    /// independently spawned tasks, so two entries captured in one tick can be
+    /// inserted in either order and a denial/retry pair would be replayed
+    /// backwards. `COALESCE` sorts rows written before the column existed
+    /// first and identically on both backends, rather than leaving it to each
+    /// engine's NULL ordering.
+    pub async fn query_trajectories_by_session(
+        &self,
+        session_id: &str,
+        tenant: Option<&str>,
+        entity_type: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<PostgresTrajectoryRow>, PersistenceError> {
+        let rows = crate::dbm::postgres_query!(
+            "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
+                    agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, \
+                    created_at, request_body, intent, matched_policy_ids, capture_seq \
+             FROM trajectories \
+             WHERE session_id = $1 \
+               AND ($2::text IS NULL OR tenant = $2) \
+               AND ($3::text IS NULL OR entity_type = $3) \
+             ORDER BY created_at ASC, COALESCE(capture_seq, 0) ASC, id ASC \
+             LIMIT $4",
+        )
+        .bind(session_id)
         .bind(tenant)
         .bind(entity_type)
         .bind(limit)
@@ -1977,6 +2039,12 @@ impl PostgresEventStore {
         Ok(rows.into_iter().map(row_to_design_time_event).collect())
     }
 
+    /// Persist a full OTS trajectory JSON blob.
+    ///
+    /// Identity is `(tenant, trajectory_id)`: the id comes from the uploading
+    /// harness and one database holds every tenant's rows, so keying on the id
+    /// alone would let one tenant's upload replace another's row — tenant
+    /// column included.
     pub async fn persist_ots_trajectory(
         &self,
         p: &PostgresOtsTrajectoryParams<'_>,
@@ -1986,8 +2054,8 @@ impl PostgresEventStore {
             "INSERT INTO ots_trajectories \
              (trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data, persistence_status, persist_attempts, last_error, created_at, updated_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, 'persisted', 0, NULL, now(), now()) \
-             ON CONFLICT (trajectory_id) DO UPDATE SET \
-                 tenant = EXCLUDED.tenant, agent_id = EXCLUDED.agent_id, session_id = EXCLUDED.session_id, \
+             ON CONFLICT (tenant, trajectory_id) DO UPDATE SET \
+                 agent_id = EXCLUDED.agent_id, session_id = EXCLUDED.session_id, \
                  outcome = EXCLUDED.outcome, turn_count = EXCLUDED.turn_count, data = EXCLUDED.data, \
                  persistence_status = 'persisted', persist_attempts = 0, last_error = NULL, updated_at = now()",
         )
@@ -2013,8 +2081,8 @@ impl PostgresEventStore {
             "INSERT INTO ots_trajectories \
              (trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data, persistence_status, persist_attempts, last_error, created_at, updated_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', 0, NULL, now(), now()) \
-             ON CONFLICT (trajectory_id) DO UPDATE SET \
-                 tenant = EXCLUDED.tenant, agent_id = EXCLUDED.agent_id, session_id = EXCLUDED.session_id, \
+             ON CONFLICT (tenant, trajectory_id) DO UPDATE SET \
+                 agent_id = EXCLUDED.agent_id, session_id = EXCLUDED.session_id, \
                  outcome = EXCLUDED.outcome, turn_count = EXCLUDED.turn_count, data = EXCLUDED.data, \
                  persistence_status = 'queued', last_error = NULL, updated_at = now()",
         )
@@ -2031,15 +2099,22 @@ impl PostgresEventStore {
         Ok(())
     }
 
+    /// Mark a queued OTS trajectory as persisted.
+    ///
+    /// Addressed by the same `(tenant, trajectory_id)` identity the row is
+    /// keyed by: two tenants may hold the same id, and an unscoped update would
+    /// declare both of them persisted.
     pub async fn mark_ots_trajectory_persisted(
         &self,
+        tenant: &str,
         trajectory_id: &str,
     ) -> Result<(), PersistenceError> {
         crate::dbm::postgres_query!(
             "UPDATE ots_trajectories \
              SET persistence_status = 'persisted', last_error = NULL, updated_at = now() \
-             WHERE trajectory_id = $1",
+             WHERE tenant = $1 AND trajectory_id = $2",
         )
+        .bind(tenant)
         .bind(trajectory_id)
         .execute(self.pool())
         .await
@@ -2047,16 +2122,19 @@ impl PostgresEventStore {
         Ok(())
     }
 
+    /// Mark a queued OTS trajectory as failed after retries exhaust.
     pub async fn mark_ots_trajectory_failed(
         &self,
+        tenant: &str,
         trajectory_id: &str,
         error: &str,
     ) -> Result<(), PersistenceError> {
         crate::dbm::postgres_query!(
             "UPDATE ots_trajectories \
-             SET persistence_status = 'failed', persist_attempts = persist_attempts + 1, last_error = $2, updated_at = now() \
-             WHERE trajectory_id = $1",
+             SET persistence_status = 'failed', persist_attempts = persist_attempts + 1, last_error = $3, updated_at = now() \
+             WHERE tenant = $1 AND trajectory_id = $2",
         )
+        .bind(tenant)
         .bind(trajectory_id)
         .bind(error)
         .execute(self.pool())
@@ -2109,18 +2187,26 @@ impl PostgresEventStore {
         Ok(rows.into_iter().map(row_to_ots_trajectory).collect())
     }
 
+    /// Load full OTS trajectory data by tenant and ID.
+    ///
+    /// The tenant is part of the lookup rather than a post-filter: one store
+    /// holds every tenant's rows, so a caller that takes the trajectory id
+    /// from a request path would otherwise read across tenants.
     pub async fn get_ots_trajectory(
         &self,
+        tenant: &str,
         trajectory_id: &str,
-    ) -> Result<Option<String>, PersistenceError> {
-        let row: Option<serde_json::Value> = crate::dbm::postgres_query_scalar!(
-            "SELECT data FROM ots_trajectories WHERE trajectory_id = $1"
+    ) -> Result<Option<PostgresOtsTrajectoryDocument>, PersistenceError> {
+        let row = crate::dbm::postgres_query!(
+            "SELECT agent_id, COALESCE(session_id, '') AS session_id, outcome, data \
+             FROM ots_trajectories WHERE tenant = $1 AND trajectory_id = $2"
         )
+        .bind(tenant)
         .bind(trajectory_id)
         .fetch_optional(self.pool())
         .await
         .map_err(storage_error)?;
-        Ok(row.map(|value| value.to_string()))
+        Ok(row.map(|row| row_to_ots_document(row, tenant.to_string(), trajectory_id.to_string())))
     }
 
     pub async fn put_blob(&self, key: &str, data: &[u8]) -> Result<(), String> {

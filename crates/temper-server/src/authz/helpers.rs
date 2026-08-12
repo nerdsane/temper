@@ -11,7 +11,7 @@ use temper_authz::SecurityContext;
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
-use crate::request_context::AgentContext;
+use crate::request_context::{AgentContext, intent_from_headers};
 use crate::state::{PendingDecision, TrajectoryEntry, TrajectorySource};
 
 /// Extract `X-Temper-*` headers from an axum `HeaderMap` into `(key, value)` pairs
@@ -76,6 +76,75 @@ pub(crate) fn require_observe_auth(
     ) {
         tracing::warn!(reason = %denial, action, resource_type, "unauthorized observe access");
         return Err(axum::http::StatusCode::FORBIDDEN);
+    }
+    Ok(())
+}
+
+/// Check Cedar authorization for an endpoint that returns recorded agent
+/// content, with no principal-kind bypass.
+///
+/// [`require_observe_auth`] lets an Admin or System principal past Cedar
+/// without a policy, and the principal kind is read straight off the request
+/// headers ([`temper_authz::SecurityContext::from_headers`]) because the
+/// platform has no request authentication in front of it yet. That combination
+/// is survivable for aggregate counters. It is not survivable for a surface
+/// that returns one named run's prompts, tool results, and request bodies, so
+/// these endpoints do not use it: every caller must be permitted by a Cedar
+/// policy in the tenant, whatever kind it declares itself to be.
+///
+/// System is not reachable here — `from_headers` refuses to build a System
+/// principal precisely to stop header-declared escalation — and platform code
+/// paths that legitimately act as System are covered by the built-in
+/// `system-platform` permit rather than by a bypass in this function.
+///
+/// # What this does not fix
+///
+/// The principal itself is still self-declared: [`SecurityContext`] is built
+/// from `X-Temper-*` request headers ([`temper_authz::SecurityContext::from_headers`],
+/// consumed at `crate::state::ServerState::authorize_with_context`), and no
+/// component in front of this one authenticates them. A Cedar permit therefore
+/// binds a claimed principal id, not a verified one. This function is the
+/// strictest gate the platform has today, not a sufficient one.
+///
+/// Closing that gap is ARN-255 — a platform-run authorization server issuing
+/// verified principals — and it is a platform-wide change to how every request
+/// is authenticated, not something these endpoints can do locally. Gating the
+/// pre-existing OTS routes (`POST /api/ots/trajectories`,
+/// `GET /api/ots/trajectories`, which carry no authorization check at all) is
+/// ARN-187, in flight on `claude/arn-187-ots-auth-gate`; duplicating that gate
+/// here would collide with it on merge. Neither is rebuilt on this branch.
+///
+/// `POST /api/audit` belongs to the same set: it writes trajectory rows with a
+/// caller-chosen tenant, entity type, action, and session, unauthenticated for
+/// the same reason the OTS routes are. What keeps it out of a conformance
+/// verdict is not authorization but the row it writes — `spec_governed = false`,
+/// which the checker skips (`crate::conformance::walk::row_disposition`) — so a
+/// caller can add rows to the observe views but not to what a run is judged on.
+/// The authorization half of it is ARN-187's.
+pub(crate) fn require_trajectory_content_auth(
+    state: &crate::state::ServerState,
+    headers: &HeaderMap,
+    action: &str,
+    resource_type: &str,
+    tenant: &str,
+) -> Result<(), StatusCode> {
+    let security_ctx = security_context_from_headers(headers, None, None, None);
+    if let Err(denial) = state.authorize_with_context(
+        &security_ctx,
+        action,
+        resource_type,
+        &BTreeMap::new(),
+        tenant,
+    ) {
+        tracing::warn!(
+            reason = %denial,
+            action,
+            resource_type,
+            tenant,
+            principal_kind = ?security_ctx.principal.kind,
+            "unauthorized trajectory content access"
+        );
+        return Err(StatusCode::FORBIDDEN);
     }
     Ok(())
 }
@@ -145,6 +214,12 @@ pub(crate) struct DenialInput<'a> {
     pub module_name: Option<String>,
     /// Entity status at the time of denial.
     pub from_status: Option<String>,
+    /// Caller-supplied intent (`X-Intent`) for the denied request.
+    ///
+    /// A denial without the intent behind it tells the Evolution Engine what
+    /// was blocked but not what the agent was trying to accomplish, which is
+    /// the half that drives policy proposals.
+    pub intent: Option<String>,
 }
 
 /// Input for a resumable management mutation authorization check.
@@ -220,6 +295,7 @@ pub(crate) async fn require_governed_mutation_auth(
                 reason: &reason,
                 module_name: input.module_name.map(str::to_string),
                 from_status: input.from_status.map(str::to_string),
+                intent: intent_from_headers(headers),
             },
         )
         .await;
@@ -261,6 +337,7 @@ pub(crate) async fn record_authz_denial(
         .agent_id_override
         .unwrap_or(input.security_ctx.principal.id.as_str());
     let denied_module = input.module_name.clone();
+    let denial_request_body = input.resource_attrs.clone();
     let session_id = input
         .security_ctx
         .context_attrs
@@ -360,9 +437,13 @@ pub(crate) async fn record_authz_denial(
         source: Some(TrajectorySource::Authz),
         spec_governed: None,
         agent_type: input.security_ctx.principal.agent_type.clone(),
-        request_body: None,
-        intent: None,
+        // The Cedar-evaluated resource attributes are the request payload for
+        // an authorization decision; without them a denial cannot be replayed
+        // against a revised policy.
+        request_body: Some(denial_request_body),
+        intent: input.intent.clone(),
         matched_policy_ids: None,
+        capture_seq: None,
     };
     if !state.enqueue_trajectory_entry(traj.clone()) {
         tracing::warn!("failed to enqueue authz trajectory");

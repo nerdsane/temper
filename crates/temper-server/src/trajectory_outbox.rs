@@ -1,4 +1,10 @@
 //! Bounded background persistence for observe trajectory entries.
+//!
+//! The queue is bounded and its writes can fail, so this path can lose a
+//! captured entry. A loss that only shows up as a log line lets a run with
+//! holes in it later pass a conformance check, so every loss is counted and —
+//! once per session — written to storage as a marker row the checker reads as
+//! an evidence gap (`crate::conformance::CAPTURE_LOSS_ENTITY_TYPE`).
 
 use std::sync::{
     Arc, OnceLock,
@@ -15,6 +21,16 @@ use tracing::Instrument;
 use crate::state::trajectory::TrajectoryEntry;
 use crate::storage::TrajectorySink;
 
+mod capture_loss;
+
+pub(crate) use capture_loss::CaptureHealth;
+use capture_loss::record_capture_loss;
+#[cfg(test)]
+use capture_loss::{
+    MAX_MARKED_SESSIONS, MarkerClaim, claim_capture_loss_marker, claim_in,
+    persist_capture_loss_marker, queued_marker_for_test, release_capture_loss_marker,
+};
+
 const DEFAULT_CAPACITY: usize = 8_192;
 
 struct TrajectoryOutboxMetrics {
@@ -22,6 +38,7 @@ struct TrajectoryOutboxMetrics {
     outbox_capacity: Gauge<u64>,
     enqueued_total: Counter<u64>,
     dropped_total: Counter<u64>,
+    capture_loss_marker_total: Counter<u64>,
     persist_latency_ms: Histogram<f64>,
 }
 
@@ -44,7 +61,11 @@ fn metrics() -> &'static TrajectoryOutboxMetrics {
                 .build(),
             dropped_total: meter
                 .u64_counter("temper_trajectory_outbox_dropped_total")
-                .with_description("Trajectory entries dropped because the persistence outbox was unavailable or full.")
+                .with_description("Captured trajectory entries that never reached storage, by reason: the outbox was full or unavailable, or the write failed.")
+                .build(),
+            capture_loss_marker_total: meter
+                .u64_counter("temper_trajectory_capture_loss_marker_total")
+                .with_description("Attempts to write the per-session marker that records a capture loss, by result.")
                 .build(),
             persist_latency_ms: meter
                 .f64_histogram("temper_trajectory_outbox_persist_latency_ms")
@@ -122,6 +143,7 @@ struct QueuedTrajectory {
     sink: Option<Arc<dyn TrajectorySink>>,
     backend: &'static str,
     entry: TrajectoryEntry,
+    health: CaptureHealth,
 }
 
 pub(crate) struct TrajectoryOutbox {
@@ -150,8 +172,9 @@ impl TrajectoryOutbox {
         backend: &'static str,
         sink: Arc<dyn TrajectorySink>,
         entry: TrajectoryEntry,
+        health: CaptureHealth,
     ) -> bool {
-        self.try_enqueue(Some(sink), backend, entry)
+        self.try_enqueue(Some(sink), backend, entry, health)
     }
 
     fn try_enqueue(
@@ -159,6 +182,7 @@ impl TrajectoryOutbox {
         sink: Option<Arc<dyn TrajectorySink>>,
         backend: &'static str,
         entry: TrajectoryEntry,
+        health: CaptureHealth,
     ) -> bool {
         let metric_entry = entry.clone();
         // Backpressure: cap the in-flight depth at `capacity`. Drop-newest on
@@ -168,14 +192,7 @@ impl TrajectoryOutbox {
             self.depth.fetch_sub(1, Ordering::Relaxed);
             self.dropped_total.fetch_add(1, Ordering::Relaxed);
             record_depth(self.depth.load(Ordering::Relaxed));
-            record_dropped(&metric_entry, backend, "outbox_full");
-            tracing::warn!(
-                tenant = %metric_entry.tenant,
-                entity_type = %metric_entry.entity_type,
-                entity_id = %metric_entry.entity_id,
-                action = %metric_entry.action,
-                "trajectory outbox full; dropping entry"
-            );
+            record_capture_loss(sink.clone(), backend, &metric_entry, "outbox_full", &health);
             return false;
         }
         record_enqueued(&metric_entry, backend);
@@ -190,6 +207,7 @@ impl TrajectoryOutbox {
             sink,
             backend,
             entry,
+            health,
         };
         // In unit tests built via `for_tests`, skip the spawn so the bounded
         // depth/drop semantics can be exercised without a tokio runtime.
@@ -220,7 +238,7 @@ impl TrajectoryOutbox {
     #[cfg(test)]
     fn try_record_for_test(&self, entry: TrajectoryEntry) -> bool {
         debug_assert!(self.inflight.is_some());
-        self.try_enqueue(None, "test", entry)
+        self.try_enqueue(None, "test", entry, CaptureHealth::default())
     }
 
     #[cfg(test)]
@@ -240,6 +258,7 @@ async fn persist_drained(item: QueuedTrajectory) {
     };
     let backend = item.backend;
     let entry = item.entry;
+    let health = item.health;
     let span = tracing::info_span!(
         "trajectory_outbox.persist",
         tenant = %entry.tenant,
@@ -258,6 +277,16 @@ async fn persist_drained(item: QueuedTrajectory) {
             Err(error) => {
                 record_persist_latency(&entry, backend, "error", started_at.elapsed());
                 tracing::error!(error = %error, "failed to persist trajectory entry from outbox");
+                // A write that failed loses the entry exactly as surely as a
+                // full queue does. Both go through one place, so neither can
+                // be the one that stays silent.
+                record_capture_loss(
+                    Some(Arc::clone(&sink)),
+                    backend,
+                    &entry,
+                    "persist_failed",
+                    &health,
+                );
             }
         }
     }
@@ -274,55 +303,48 @@ pub(crate) fn try_record(
     backend: &'static str,
     sink: Arc<dyn TrajectorySink>,
     entry: TrajectoryEntry,
+    health: CaptureHealth,
 ) -> bool {
-    global().try_record(backend, sink, entry)
+    global().try_record(backend, sink, entry, health)
+}
+
+/// Next position in this process's capture order.
+///
+/// Monotonic and gap-free within the process, which is all the session read
+/// needs: it is a tie-break inside one `created_at` tick, and a restart always
+/// advances the wall clock past the tick it was in.
+fn next_capture_seq() -> i64 {
+    static CAPTURE_SEQ: AtomicU64 = AtomicU64::new(0);
+    // Saturating rather than wrapping: a wrap would sort later rows before
+    // earlier ones, and 2^63 captures in one process is not reachable.
+    CAPTURE_SEQ
+        .fetch_add(1, Ordering::Relaxed)
+        .min(i64::MAX as u64) as i64
 }
 
 impl crate::state::ServerState {
-    pub(crate) fn enqueue_trajectory_entry(&self, entry: TrajectoryEntry) -> bool {
+    pub(crate) fn enqueue_trajectory_entry(&self, mut entry: TrajectoryEntry) -> bool {
         let Some((backend, sink)) = self.trajectory_sink() else {
             return true;
         };
-        try_record(backend, sink, entry)
+        // Stamped here rather than at each capture site: this is the single
+        // point every captured entry passes through, and it is still on the
+        // capturing thread, before the entry is handed to a persistence task
+        // that may land in any order.
+        entry.capture_seq = Some(next_capture_seq());
+        // Single choke point for every capture site: a captured body is
+        // scrubbed of secret-named fields and then bounded, so a new capture
+        // site cannot forget either, a stalled drain cannot accumulate whole
+        // request bodies in memory, and the truncation preview can never carry
+        // a value the full body would have had redacted.
+        if let Some(body) = entry.request_body.take() {
+            let redacted = crate::storage::redact_secrets(body);
+            entry.request_body = Some(crate::storage::bounded_request_body(redacted));
+        }
+        try_record(backend, sink, entry, self.capture_health.clone())
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
-
-    fn entry(id: &str) -> TrajectoryEntry {
-        TrajectoryEntry {
-            timestamp: "2026-04-28T00:00:00Z".to_string(),
-            tenant: "tenant".to_string(),
-            entity_type: "Session".to_string(),
-            entity_id: id.to_string(),
-            action: "ProgressMade".to_string(),
-            success: true,
-            from_status: Some("Running".to_string()),
-            to_status: Some("Running".to_string()),
-            error: None,
-            agent_id: Some("agent".to_string()),
-            session_id: Some("session".to_string()),
-            authz_denied: None,
-            denied_resource: None,
-            denied_module: None,
-            source: Some(TrajectorySource::Entity),
-            spec_governed: Some(true),
-            agent_type: None,
-            request_body: None,
-            intent: None,
-            matched_policy_ids: None,
-        }
-    }
-
-    #[test]
-    fn try_record_reports_drop_when_full() {
-        let outbox = TrajectoryOutbox::for_tests(1);
-        assert!(outbox.try_record_for_test(entry("one")));
-        assert!(!outbox.try_record_for_test(entry("two")));
-        assert_eq!(outbox.dropped_total(), 1);
-        assert_eq!(outbox.depth(), 1);
-    }
-}
+#[path = "trajectory_outbox_test.rs"]
+mod tests;

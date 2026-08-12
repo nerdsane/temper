@@ -74,6 +74,11 @@ pub struct AuthzDecisionInput<'a> {
     pub action: &'a str,
     /// Resource type being authorized.
     pub resource_type: &'a str,
+    /// Identifier of the resource instance being authorized.
+    ///
+    /// Empty when the decision is not scoped to a single instance (for example
+    /// a `list` over a whole entity set).
+    pub entity_id: &'a str,
     /// Kind of principal (user, admin, system).
     pub principal_kind: &'a str,
     /// Decision outcome ("Allow" or "Deny").
@@ -82,9 +87,17 @@ pub struct AuthzDecisionInput<'a> {
     pub duration_ns: u64,
     /// Tenant identifier.
     pub tenant: &'a str,
+    /// Trace ID for correlation with the request that triggered the check.
+    ///
+    /// Empty when no sampled trace context is active.
+    pub trace_id: &'a str,
 }
 
 /// Build a WideEvent from a Cedar authorization decision.
+///
+/// `entity_id` and `trace_id` come from the caller: without them an authz
+/// decision cannot be joined to the request or the entity it governed, which
+/// leaves every denial unattributable in the trace view.
 pub fn from_authz_decision(input: AuthzDecisionInput<'_>) -> WideEvent {
     let span_id = new_span_id();
     let mut tags = BTreeMap::new();
@@ -98,6 +111,9 @@ pub fn from_authz_decision(input: AuthzDecisionInput<'_>) -> WideEvent {
         serde_json::json!(input.principal_kind),
     );
     attributes.insert("tenant".into(), serde_json::json!(input.tenant));
+    // entity_id stays an attribute, never a tag: it is high-cardinality and
+    // would multiply the metric series (the cost decoupling in this module).
+    attributes.insert("entity_id".into(), serde_json::json!(input.entity_id));
 
     let mut measurements = BTreeMap::new();
     measurements.insert("decision_count".into(), 1.0);
@@ -106,14 +122,14 @@ pub fn from_authz_decision(input: AuthzDecisionInput<'_>) -> WideEvent {
     WideEvent {
         event_kind: EventKind::AuthzDecision,
         entity_type: input.resource_type.into(),
-        entity_id: String::new(),
+        entity_id: input.entity_id.into(),
         operation: input.action.into(),
         from_status: String::new(),
         to_status: String::new(),
         success: input.decision == "Allow",
         duration_ns: input.duration_ns,
         timestamp: event_timestamp(),
-        trace_id: String::new(),
+        trace_id: input.trace_id.into(),
         span_id,
         tags,
         attributes,

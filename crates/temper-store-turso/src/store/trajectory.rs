@@ -1,15 +1,14 @@
-//! Trajectory persistence and query methods.
+//! Trajectory persistence.
+//!
+//! The read path lives in the sibling `trajectory_queries` module.
 
 use libsql::params;
 use std::time::Duration;
 use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
+use super::TursoEventStore;
 use super::write_gate::WritePriority;
-use super::{
-    ActionStats, AgentSummary, TrajectoryStats, TursoEventStore, TursoTrajectoryRow,
-    UnmetIntentAggRow,
-};
 use crate::TursoTrajectoryInsert;
 use crate::metrics::TursoQueryTimer;
 use crate::retry::retry_persistence_with_max_attempts;
@@ -49,8 +48,8 @@ impl TursoEventStore {
                         .execute(
                         "INSERT INTO trajectories \
                          (tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
-                          agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                          agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids, capture_seq) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                         params![
                             entry.tenant,
                             entry.entity_type,
@@ -70,7 +69,8 @@ impl TursoEventStore {
                             entry.created_at,
                             entry.request_body,
                             entry.intent,
-                            entry.matched_policy_ids
+                            entry.matched_policy_ids,
+                            entry.capture_seq
                         ],
                     )
                     .await
@@ -125,373 +125,6 @@ impl TursoEventStore {
         );
         Ok(())
     }
-
-    /// Load recent trajectory entries (newest first, up to `limit`).
-    #[instrument(skip_all, fields(otel.name = "turso.load_recent_trajectories", row_count = tracing::field::Empty))]
-    pub async fn load_recent_trajectories(
-        &self,
-        limit: i64,
-    ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError> {
-        let _query_timer = TursoQueryTimer::start("turso.load_recent_trajectories");
-        let conn = self.configured_connection().await?;
-        let mut rows = conn
-            .query(
-                "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
-                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids \
-                 FROM trajectories \
-                 ORDER BY created_at DESC \
-                 LIMIT ?1",
-                params![limit],
-            )
-            .await
-            .map_err(|e| {
-                let error = storage_error(e);
-                tracing::warn!(limit, error = %error, "trajectory.store.read");
-                error
-            })?;
-
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
-            out.push(Self::row_to_trajectory(&row)?);
-        }
-        tracing::Span::current().record("row_count", out.len());
-        tracing::debug!(limit, count = out.len(), "trajectory.store.read");
-        Ok(out)
-    }
-
-    /// Load aggregated unmet-intent failure groups (SQL GROUP BY, ≤100 rows).
-    ///
-    /// Returns one row per (entity_type, error) group with counts and
-    /// timestamps. This replaces the previous pattern of loading up to 10,000
-    /// raw trajectory rows and grouping them in Rust.
-    #[instrument(skip_all, fields(otel.name = "turso.load_unmet_intent_rows", row_count = tracing::field::Empty))]
-    pub async fn load_unmet_intent_rows(&self) -> Result<Vec<UnmetIntentAggRow>, PersistenceError> {
-        let _query_timer = TursoQueryTimer::start("turso.load_unmet_intent_rows");
-        let conn = self.configured_connection().await?;
-        let mut rows = conn
-            .query(
-                "SELECT entity_type, \
-                        MAX(action) AS action, \
-                        error, \
-                        COUNT(*) AS cnt, \
-                        MIN(created_at) AS first_seen, \
-                        MAX(created_at) AS last_seen \
-                 FROM trajectories \
-                 WHERE success = 0 \
-                   AND (authz_denied IS NULL OR authz_denied = 0) \
-                 GROUP BY entity_type, error \
-                 ORDER BY cnt DESC \
-                 LIMIT 100",
-                (),
-            )
-            .await
-            .map_err(|e| {
-                let error = storage_error(e);
-                tracing::warn!(error = %error, "turso.load_unmet_intent_rows");
-                error
-            })?;
-
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
-            out.push(UnmetIntentAggRow {
-                entity_type: row.get::<String>(0).map_err(storage_error)?,
-                action: row.get::<String>(1).map_err(storage_error)?,
-                error: row.get::<Option<String>>(2).map_err(storage_error)?,
-                count: row.get::<i64>(3).map_err(storage_error)? as u64,
-                first_seen: row.get::<String>(4).map_err(storage_error)?,
-                last_seen: row.get::<String>(5).map_err(storage_error)?,
-            });
-        }
-        tracing::Span::current().record("row_count", out.len());
-        tracing::debug!(count = out.len(), "turso.load_unmet_intent_rows");
-        Ok(out)
-    }
-
-    /// Load the latest SubmitSpec success timestamp per entity_type.
-    ///
-    /// Used alongside [`load_unmet_intent_rows`] to determine which unmet-intent
-    /// groups have been resolved by a subsequent spec submission.
-    #[instrument(skip_all, fields(otel.name = "turso.load_submit_spec_timestamps"))]
-    pub async fn load_submit_spec_timestamps(
-        &self,
-    ) -> Result<std::collections::BTreeMap<String, String>, PersistenceError> {
-        let _query_timer = TursoQueryTimer::start("turso.load_submit_spec_timestamps");
-        let conn = self.configured_connection().await?;
-        let mut rows = conn
-            .query(
-                "SELECT entity_type, MAX(created_at) AS latest_at \
-                 FROM trajectories \
-                 WHERE success = 1 AND action = 'SubmitSpec' \
-                 GROUP BY entity_type",
-                (),
-            )
-            .await
-            .map_err(storage_error)?;
-
-        let mut out = std::collections::BTreeMap::new();
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
-            let entity_type = row.get::<String>(0).map_err(storage_error)?;
-            let latest_at = row.get::<String>(1).map_err(storage_error)?;
-            out.insert(entity_type, latest_at);
-        }
-        Ok(out)
-    }
-
-    /// Count trajectory rows per tenant (single aggregate query).
-    ///
-    /// Replaces the previous pattern of loading 100,000 raw rows just to
-    /// produce per-tenant counts.
-    #[instrument(skip_all, fields(otel.name = "turso.count_trajectories_by_tenant"))]
-    pub async fn count_trajectories_by_tenant(
-        &self,
-    ) -> Result<std::collections::BTreeMap<String, u64>, PersistenceError> {
-        let _query_timer = TursoQueryTimer::start("turso.count_trajectories_by_tenant");
-        let conn = self.configured_connection().await?;
-        let mut rows = conn
-            .query(
-                "SELECT tenant, COUNT(*) AS cnt FROM trajectories GROUP BY tenant",
-                (),
-            )
-            .await
-            .map_err(storage_error)?;
-
-        let mut out = std::collections::BTreeMap::new();
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
-            let tenant = row.get::<String>(0).map_err(storage_error)?;
-            let count = row.get::<i64>(1).map_err(storage_error)? as u64;
-            out.insert(tenant, count);
-        }
-        Ok(out)
-    }
-
-    /// Parse a trajectory row from a libsql Row (16 columns).
-    fn row_to_trajectory(row: &libsql::Row) -> Result<TursoTrajectoryRow, PersistenceError> {
-        Ok(TursoTrajectoryRow {
-            tenant: row.get::<String>(0).map_err(storage_error)?,
-            entity_type: row.get::<String>(1).map_err(storage_error)?,
-            entity_id: row.get::<String>(2).map_err(storage_error)?,
-            action: row.get::<String>(3).map_err(storage_error)?,
-            success: row.get::<i64>(4).map_err(storage_error)? != 0,
-            from_status: row.get::<Option<String>>(5).map_err(storage_error)?,
-            to_status: row.get::<Option<String>>(6).map_err(storage_error)?,
-            error: row.get::<Option<String>>(7).map_err(storage_error)?,
-            agent_id: row.get::<Option<String>>(8).map_err(storage_error)?,
-            session_id: row.get::<Option<String>>(9).map_err(storage_error)?,
-            authz_denied: row
-                .get::<Option<i64>>(10)
-                .map_err(storage_error)?
-                .map(|v| v != 0),
-            denied_resource: row.get::<Option<String>>(11).map_err(storage_error)?,
-            denied_module: row.get::<Option<String>>(12).map_err(storage_error)?,
-            source: row.get::<Option<String>>(13).map_err(storage_error)?,
-            spec_governed: row
-                .get::<Option<i64>>(14)
-                .map_err(storage_error)?
-                .map(|v| v != 0),
-            created_at: row.get::<String>(15).map_err(storage_error)?,
-            request_body: row.get::<Option<String>>(16).map_err(storage_error)?,
-            intent: row.get::<Option<String>>(17).map_err(storage_error)?,
-            matched_policy_ids: row
-                .get::<Option<String>>(18)
-                .map_err(storage_error)?
-                .and_then(|s| serde_json::from_str(&s).ok()),
-        })
-    }
-
-    /// Query trajectory statistics with optional filters.
-    #[instrument(skip_all, fields(otel.name = "turso.query_trajectory_stats"))]
-    pub async fn query_trajectory_stats(
-        &self,
-        entity_type: Option<&str>,
-        action: Option<&str>,
-        success_filter: Option<bool>,
-        failed_limit: i64,
-    ) -> Result<TrajectoryStats, PersistenceError> {
-        let _query_timer = TursoQueryTimer::start("turso.query_trajectory_stats");
-        let conn = self.configured_connection().await?;
-
-        // Total + success count.
-        let mut rows = conn
-            .query(
-                "SELECT COUNT(*) AS total, \
-                        COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0) AS success_count \
-                 FROM trajectories \
-                 WHERE (?1 IS NULL OR entity_type = ?1) \
-                   AND (?2 IS NULL OR action = ?2) \
-                   AND (?3 IS NULL OR success = ?3)",
-                params![entity_type, action, success_filter.map(|b| b as i64)],
-            )
-            .await
-            .map_err(storage_error)?;
-
-        let (total, success_count) = match rows.next().await.map_err(storage_error)? {
-            Some(row) => (
-                row.get::<i64>(0).map_err(storage_error)? as u64,
-                row.get::<i64>(1).map_err(storage_error)? as u64,
-            ),
-            None => (0, 0),
-        };
-        drop(rows);
-
-        // Per-action breakdown.
-        let mut rows = conn
-            .query(
-                "SELECT action, COUNT(*) AS total, \
-                        COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0) AS success, \
-                        COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0) AS error \
-                 FROM trajectories \
-                 GROUP BY action",
-                (),
-            )
-            .await
-            .map_err(storage_error)?;
-
-        let mut by_action = std::collections::BTreeMap::new();
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
-            let name = row.get::<String>(0).map_err(storage_error)?;
-            by_action.insert(
-                name,
-                ActionStats {
-                    total: row.get::<i64>(1).map_err(storage_error)? as u64,
-                    success: row.get::<i64>(2).map_err(storage_error)? as u64,
-                    error: row.get::<i64>(3).map_err(storage_error)? as u64,
-                },
-            );
-        }
-        drop(rows);
-
-        // Failed intents (newest first).
-        let mut rows = conn
-            .query(
-                "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
-                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids \
-                 FROM trajectories \
-                 WHERE success = 0 \
-                 ORDER BY created_at DESC \
-                 LIMIT ?1",
-                params![failed_limit],
-            )
-            .await
-            .map_err(storage_error)?;
-
-        let mut failed_intents = Vec::new();
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
-            failed_intents.push(Self::row_to_trajectory(&row)?);
-        }
-
-        let error_count = total.saturating_sub(success_count);
-        tracing::info!(
-            entity_type,
-            action,
-            success_filter,
-            total,
-            success_count,
-            error_count,
-            failed_limit,
-            "trajectory.store.read"
-        );
-        Ok(TrajectoryStats {
-            total,
-            success_count,
-            error_count,
-            success_rate: if total > 0 {
-                success_count as f64 / total as f64
-            } else {
-                0.0
-            },
-            by_action,
-            failed_intents,
-        })
-    }
-
-    /// Query trajectories for a specific agent.
-    #[instrument(skip_all, fields(agent_id, otel.name = "turso.query_trajectories_by_agent"))]
-    pub async fn query_trajectories_by_agent(
-        &self,
-        agent_id: &str,
-        tenant: Option<&str>,
-        entity_type: Option<&str>,
-        limit: i64,
-    ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError> {
-        let _query_timer = TursoQueryTimer::start("turso.query_trajectories_by_agent");
-        let conn = self.configured_connection().await?;
-        let mut rows = conn
-            .query(
-                "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
-                        agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids \
-                 FROM trajectories \
-                 WHERE agent_id = ?1 \
-                   AND (?2 IS NULL OR tenant = ?2) \
-                   AND (?3 IS NULL OR entity_type = ?3) \
-                 ORDER BY created_at DESC \
-                 LIMIT ?4",
-                params![agent_id, tenant, entity_type, limit],
-            )
-            .await
-            .map_err(storage_error)?;
-
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
-            out.push(Self::row_to_trajectory(&row)?);
-        }
-        tracing::info!(
-            agent_id,
-            tenant,
-            entity_type,
-            limit,
-            count = out.len(),
-            "trajectory.store.read"
-        );
-        Ok(out)
-    }
-
-    /// Query agent summaries (grouped by agent_id).
-    #[instrument(skip_all, fields(otel.name = "turso.query_agent_summaries"))]
-    pub async fn query_agent_summaries(
-        &self,
-        tenant: Option<&str>,
-    ) -> Result<Vec<AgentSummary>, PersistenceError> {
-        let _query_timer = TursoQueryTimer::start("turso.query_agent_summaries");
-        let conn = self.configured_connection().await?;
-        let mut rows = conn
-            .query(
-                "SELECT agent_id, \
-                        COUNT(*) AS total_actions, \
-                        COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0) AS success_count, \
-                        COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0) AS error_count, \
-                        COALESCE(SUM(CASE WHEN authz_denied = 1 THEN 1 ELSE 0 END), 0) AS denial_count, \
-                        MAX(created_at) AS last_active_at \
-                 FROM trajectories \
-                 WHERE agent_id IS NOT NULL \
-                   AND (?1 IS NULL OR tenant = ?1) \
-                 GROUP BY agent_id \
-                 ORDER BY last_active_at DESC",
-                params![tenant],
-            )
-            .await
-            .map_err(storage_error)?;
-
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
-            let total = row.get::<i64>(1).map_err(storage_error)? as u64;
-            let success = row.get::<i64>(2).map_err(storage_error)? as u64;
-            out.push(AgentSummary {
-                agent_id: row.get::<String>(0).map_err(storage_error)?,
-                total_actions: total,
-                success_count: success,
-                error_count: row.get::<i64>(3).map_err(storage_error)? as u64,
-                denial_count: row.get::<i64>(4).map_err(storage_error)? as u64,
-                success_rate: if total > 0 {
-                    success as f64 / total as f64
-                } else {
-                    0.0
-                },
-                last_active_at: row.get::<String>(5).map_err(storage_error)?,
-            });
-        }
-        tracing::info!(tenant, count = out.len(), "trajectory.store.read");
-        Ok(out)
-    }
 }
 
 fn trajectory_attempt_timeout() -> Duration {
@@ -514,4 +147,143 @@ fn trajectory_max_attempts() -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(DEFAULT_TRAJECTORY_MAX_ATTEMPTS)
         .max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::TursoTrajectoryInsert;
+
+    async fn test_store() -> (TursoEventStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let db_path = dir.path().join("trajectory-session.db");
+        let db_url = format!("file:{}", db_path.display());
+        let store = TursoEventStore::new(&db_url, None)
+            .await
+            .expect("create local turso store");
+        (store, dir)
+    }
+
+    fn insert<'a>(
+        action: &'a str,
+        session_id: &'a str,
+        created_at: &'a str,
+    ) -> TursoTrajectoryInsert<'a> {
+        TursoTrajectoryInsert {
+            tenant: "tenant",
+            entity_type: "Order",
+            entity_id: "order-1",
+            action,
+            success: true,
+            from_status: None,
+            to_status: None,
+            error: None,
+            agent_id: Some("agent-1"),
+            session_id: Some(session_id),
+            authz_denied: None,
+            denied_resource: None,
+            denied_module: None,
+            source: Some("Entity"),
+            spec_governed: Some(true),
+            created_at,
+            request_body: None,
+            intent: None,
+            matched_policy_ids: None,
+            capture_seq: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn session_query_returns_write_order_and_only_that_session() {
+        let (store, _dir) = test_store().await;
+        // Same `created_at` on the first two rows: the tiebreaker, not the
+        // timestamp, has to keep them in write order.
+        for entry in [
+            insert("AddItem", "session-a", "2026-01-01T00:00:00Z"),
+            insert("SubmitOrder", "session-a", "2026-01-01T00:00:00Z"),
+            insert("ConfirmOrder", "session-a", "2026-01-01T00:00:01Z"),
+            insert("CancelOrder", "session-b", "2026-01-01T00:00:02Z"),
+        ] {
+            store
+                .persist_trajectory(entry)
+                .await
+                .expect("persist trajectory");
+        }
+
+        let rows = store
+            .query_trajectories_by_session("session-a", Some("tenant"), None, 100)
+            .await
+            .expect("query session");
+        let actions: Vec<&str> = rows.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(actions, vec!["AddItem", "SubmitOrder", "ConfirmOrder"]);
+
+        let other_tenant = store
+            .query_trajectories_by_session("session-a", Some("elsewhere"), None, 100)
+            .await
+            .expect("query session for a foreign tenant");
+        assert!(other_tenant.is_empty());
+
+        let filtered = store
+            .query_trajectories_by_session("session-a", Some("tenant"), Some("Invoice"), 100)
+            .await
+            .expect("query session with entity filter");
+        assert!(filtered.is_empty());
+    }
+
+    #[tokio::test]
+    async fn capture_order_outranks_insert_order_inside_one_timestamp() {
+        // Rows are written by independently spawned tasks, so the row that was
+        // captured first can be inserted second. Inside one `created_at` tick
+        // the autoincrement id would then replay the run backwards; the
+        // capture sequence is what puts it right.
+        let (store, _dir) = test_store().await;
+        for (action, capture_seq) in [("SubmitOrder", 2i64), ("AddItem", 1i64)] {
+            store
+                .persist_trajectory(TursoTrajectoryInsert {
+                    capture_seq: Some(capture_seq),
+                    ..insert(action, "session-race", "2026-01-01T00:00:00Z")
+                })
+                .await
+                .expect("persist trajectory");
+        }
+
+        let rows = store
+            .query_trajectories_by_session("session-race", Some("tenant"), None, 100)
+            .await
+            .expect("query session");
+        let actions: Vec<&str> = rows.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            vec!["AddItem", "SubmitOrder"],
+            "the read must follow capture order, not the order the writes landed"
+        );
+        assert_eq!(
+            rows.iter()
+                .filter_map(|r| r.capture_seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[tokio::test]
+    async fn rows_without_a_capture_sequence_still_order_by_write_order() {
+        // Rows written before the column existed carry no sequence; they must
+        // still read back deterministically rather than in engine-defined
+        // NULL order.
+        let (store, _dir) = test_store().await;
+        for action in ["AddItem", "SubmitOrder", "ConfirmOrder"] {
+            store
+                .persist_trajectory(insert(action, "session-legacy", "2026-01-01T00:00:00Z"))
+                .await
+                .expect("persist trajectory");
+        }
+
+        let rows = store
+            .query_trajectories_by_session("session-legacy", Some("tenant"), None, 100)
+            .await
+            .expect("query session");
+        let actions: Vec<&str> = rows.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(actions, vec!["AddItem", "SubmitOrder", "ConfirmOrder"]);
+        assert!(rows.iter().all(|r| r.capture_seq.is_none()));
+    }
 }

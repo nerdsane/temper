@@ -10,11 +10,16 @@
 //! - **Core Models**: Complete type-safe OTS data structures
 //! - **DST Compatible**: All types use deterministic collections and sim-aware constructors
 //! - **Builder**: Incremental trajectory construction via [`TrajectoryBuilder`]
+//! - **ATIF Export**: Harbor ATIF v1.7 interchange output via [`atif::to_atif`]
 
+pub mod atif;
 pub mod builder;
 pub mod models;
 
 // Re-exports for convenience
+pub use atif::{
+    ATIF_SCHEMA_VERSION, AtifExportError, AtifTrajectory, UNKNOWN_AGENT_VERSION, to_atif,
+};
 pub use builder::TrajectoryBuilder;
 pub use models::{
     DecisionType, EvaluatorType, MessageRole, OTSAnnotation, OTSChoice, OTSConsequence, OTSContext,

@@ -87,6 +87,7 @@ pub(crate) async fn handle_load_inline(
                 reason: &reason,
                 module_name: None,
                 from_status: None,
+                intent: crate::request_context::intent_from_headers(&headers),
             },
         )
         .await;
@@ -283,16 +284,17 @@ pub(crate) async fn handle_load_inline(
                 to_status: None,
                 error: None,
                 agent_id: Some(security_ctx.principal.id.clone()),
-                session_id: None,
+                session_id: crate::request_context::session_id_from_headers(&headers),
                 authz_denied: None,
                 denied_resource: None,
                 denied_module: None,
                 source: Some(TrajectorySource::Entity),
                 spec_governed: None,
-                agent_type: None,
+                agent_type: security_ctx.principal.agent_type.clone(),
                 request_body: warning_context.clone(),
-                intent: None,
+                intent: crate::request_context::intent_from_headers(&headers),
                 matched_policy_ids: None,
+                capture_seq: None,
             };
             if !state.enqueue_trajectory_entry(traj) {
                 tracing::warn!("failed to enqueue spec submission trajectory");
