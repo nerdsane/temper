@@ -284,8 +284,12 @@ fn run_composite_verification(
             }
             CompositeOutcome::Incomplete => {
                 any_incomplete = true;
-                let reason = if !result.other_violations.is_empty() && result.states_explored == 0 {
-                    result.other_violations.join("; ")
+                let reason = if !result.other_violations.is_empty() {
+                    format!(
+                        "{} ({} joint states)",
+                        result.other_violations.join("; "),
+                        result.states_explored
+                    )
                 } else {
                     format!(
                         "BFS budget exhausted ({} joint states)",
@@ -296,11 +300,6 @@ fn run_composite_verification(
                     "    [INCOMPLETE] seed={} scope=[{}] — {}; proof is PARTIAL (not a pass)",
                     result.seed, scope, reason,
                 );
-                if result.states_explored > 0 {
-                    for other in &result.other_violations {
-                        println!("           - {other}");
-                    }
-                }
             }
         }
     }
