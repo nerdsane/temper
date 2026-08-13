@@ -1410,32 +1410,16 @@ impl crate::state::ServerState {
         }
     }
 
-    /// Invoke a WASM module directly (not triggered by an entity action).
+    /// In-process `/tdata` host for `$value` / `blob_adapter`.
     ///
-    /// Used by `$value` handlers for blob operations. The WASM module controls
-    /// the entire blob lifecycle (auth, hashing, caching, upload/download) via
-    /// streaming host functions. Bytes never enter WASM memory.
-    #[allow(clippy::too_many_arguments)]
-    /// Build the in-process `/tdata` loopback host for a direct WASM invocation
-    /// (e.g. `blob_adapter`), wrapping `production_host` as the boundary delegate.
-    ///
-    /// The loopback must carry the HTTP invocation's typed `SecurityContext`
-    /// (never System, never a client-supplied header). ADR-0157 §4: System
-    /// would inherit `system-platform:broad-permit` and let a guest mutate any
-    /// entity. With no authority the calls fall through to a real HTTP request
-    /// the hardened ingress edge rejects (401). Centralised here so the
-    /// authority decision has one tested home.
+    /// Uses the HTTP caller. System is dropped so the guest cannot inherit
+    /// `system-platform:broad-permit`.
     pub(crate) fn local_tdata_direct_host(
         &self,
         tenant: &TenantId,
         production_host: Arc<dyn WasmHost>,
         security_ctx: &SecurityContext,
     ) -> Arc<dyn WasmHost> {
-        debug_assert_ne!(
-            security_ctx.principal.kind,
-            PrincipalKind::System,
-            "direct-invocation loopback must carry the caller, not System"
-        );
         let loopback_ctx =
             (security_ctx.principal.kind != PrincipalKind::System).then_some(security_ctx);
         Arc::new(LocalTDataWasmHost::new(
@@ -1446,6 +1430,8 @@ impl crate::state::ServerState {
         ))
     }
 
+    /// Invoke a WASM module directly (not triggered by an entity action).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn invoke_wasm_direct(
         &self,
         tenant: &TenantId,

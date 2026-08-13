@@ -1,20 +1,4 @@
 //! Trajectory analysis endpoints: conformance checking and ATIF export.
-//!
-//! Both return one named run's recorded content — its prompts, its decisions,
-//! its tool results, its request bodies — so both are gated by
-//! [`require_trajectory_content_auth`]: a Cedar permit for `read_trajectories`
-//! on `Trajectory` in the credential's tenant. Every caller must be permitted by
-//! a policy in that tenant; only the built-in `system-platform` permit, which
-//! platform code paths depend on, passes without one.
-//!
-//! The principal is the one resolved from the request's credential and carried
-//! in `AuthenticatedRequestContext` — ADR-0157 strips the `x-temper-*` authority
-//! namespace at the ingress edge, so a Cedar permit here binds a verified
-//! principal rather than a claimed one.
-//!
-//! The tenant is bound to that credential too, not read from `X-Tenant-Id`: a
-//! caller cannot address another tenant's run by naming it. A request with no
-//! credential is answered `401` by the edge before either handler runs.
 
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
@@ -28,7 +12,7 @@ use tracing::instrument;
 
 use crate::authz::{
     AuthenticatedRequestContext, observe_tenant_scope, require_authenticated_context,
-    require_trajectory_content_auth,
+    require_observe_auth,
 };
 use crate::conformance::{ConformanceInput, SpecResolution, check_conformance};
 use crate::state::ServerState;
@@ -83,7 +67,7 @@ pub(crate) async fn handle_conformance_check(
     let authenticated = require_authenticated_context(authenticated.as_deref())
         .map_err(|status| (status, UNAUTHORIZED_DETAIL.to_string()))?;
     let tenant = credential_tenant(authenticated);
-    require_trajectory_content_auth(&state, authenticated, "read_trajectories", "Trajectory")
+    require_observe_auth(&state, authenticated, "read_trajectories", "Trajectory")
         .map_err(|status| (status, UNAUTHORIZED_DETAIL.to_string()))?;
 
     let limit = match request.limit {
@@ -230,7 +214,7 @@ pub(crate) async fn handle_get_ots_trajectory_atif(
     let authenticated = require_authenticated_context(authenticated.as_deref())
         .map_err(|status| (status, UNAUTHORIZED_DETAIL.to_string()))?;
     let tenant = credential_tenant(authenticated);
-    require_trajectory_content_auth(&state, authenticated, "read_trajectories", "Trajectory")
+    require_observe_auth(&state, authenticated, "read_trajectories", "Trajectory")
         .map_err(|status| (status, UNAUTHORIZED_DETAIL.to_string()))?;
 
     let Some(store) = state.metadata_store_for_tenant(tenant.as_str()).await else {

@@ -457,11 +457,8 @@ impl AuthzEngine {
             insert_json_as_cedar(&mut ctx_map, key.clone(), value);
         }
 
-        // Inject resource attributes into context (enables Cedar policies to
-        // reference entity state and cross-entity context via `context.key`).
-        // Authority keys stay exclusively on SecurityContext: a body field
-        // named sessionId / agentType / role must not satisfy those permits,
-        // and must not overwrite a grant-checked value already in ctx_map.
+        // Resource fields may appear as context.key for domain policies.
+        // Authority keys (sessionId, agentType, role, …) stay on SecurityContext.
         for (key, value) in resource_attrs {
             if is_cedar_authority_context_key(key) || ctx_map.contains_key(key) {
                 continue;

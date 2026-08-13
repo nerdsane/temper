@@ -64,14 +64,6 @@ pub async fn bearer_auth_check(
             .resolve(&state.server, &tenant, &token)
             .await
     {
-        // Session and intent ride the `x-temper-observe-*` correlation namespace,
-        // which the ingress edge deliberately preserves (ADR-0157). Both attach
-        // to the request context as telemetry. The session additionally becomes
-        // a Cedar input (`context.sessionId`) ONLY when a server-side record
-        // validates it: an approved decision binding exactly this session to
-        // exactly this principal. Cedar policies minted from a session-scoped
-        // approval condition on that key, so an unvalidated caller header there
-        // would let anyone satisfy the scope that made the approval narrow.
         let session_id = temper_server::request_context::session_id_from_headers(req.headers());
         let intent = temper_server::request_context::intent_from_headers(req.headers());
         let verified_session = match session_id.as_deref() {
@@ -92,9 +84,6 @@ pub async fn bearer_auth_check(
                 .with_intent(intent)
                 .with_session_id(session_id);
 
-        // Retained during the handler migration for non-authority metadata.
-        // Cedar consumers use only `AuthenticatedRequestContext`.
-        req.extensions_mut().insert(identity);
         req.extensions_mut().insert(authenticated);
         if let Some(matched) = matched_endpoint {
             req.extensions_mut()

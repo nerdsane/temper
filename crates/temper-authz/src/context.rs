@@ -36,11 +36,6 @@ pub struct Principal {
 }
 
 /// Cedar context keys that only a resolved `SecurityContext` may populate.
-///
-/// Resource attribute builders and `evaluate_request` treat these as reserved
-/// the same way `id`/`status` are server-derived: a caller body field of the
-/// same name must not become `context.sessionId` (or overwrite a grant-checked
-/// value). Generated session, type, and role permits all condition on these.
 pub fn is_cedar_authority_context_key(name: &str) -> bool {
     matches!(
         name,

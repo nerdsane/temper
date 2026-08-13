@@ -61,71 +61,11 @@ pub(crate) fn require_observe_auth(
         security_ctx,
         action,
         resource_type,
-        &std::collections::BTreeMap::new(),
+        &BTreeMap::new(),
         authenticated.tenant().as_str(),
     ) {
         tracing::warn!(reason = %denial, action, resource_type, "unauthorized observe access");
         return Err(axum::http::StatusCode::FORBIDDEN);
-    }
-    Ok(())
-}
-
-/// Check Cedar authorization for an endpoint that returns recorded agent
-/// content, with no principal-kind bypass.
-///
-/// Behaviourally this matches [`require_observe_auth`]: both evaluate Cedar and
-/// answer `403` on denial, and both inherit the built-in `system-platform`
-/// permit that platform code paths rely on. It exists as a separate helper so
-/// the stricter surface — one named run's prompts, tool results, and request
-/// bodies — keeps its own call site and cannot be loosened by a change aimed at
-/// the aggregate views.
-///
-/// # Provenance of the principal
-///
-/// The principal is the one resolved from the request's credential and carried
-/// in [`AuthenticatedRequestContext`], not one read off `X-Temper-*` headers.
-/// ADR-0157 strips that header namespace at the ingress edge and admits
-/// protected kernel routes only with a typed context, so a Cedar permit here
-/// binds a verified principal rather than a claimed one. (This function
-/// previously derived the principal from headers; that path no longer exists.)
-///
-/// A platform-run authorization server issuing richer verified principals is
-/// still ARN-255. The OTS routes (`POST`/`GET /api/ots/trajectories`) are gated
-/// on this branch by `require_observe_auth` with `write_trajectories` /
-/// `read_trajectories`, and `POST /api/audit` requires the typed context and
-/// rejects a body naming a different agent than the credential's. What keeps a
-/// caller-supplied row out of a conformance verdict is additionally the row
-/// itself — `spec_governed = false`, which the checker skips
-/// (`crate::conformance::walk::row_disposition`) — so a caller can add rows to
-/// the observe views but not to what a run is judged on.
-#[allow(dead_code)] // False positive: used by api/trajectory_analysis.rs under the observe feature
-pub(crate) fn require_trajectory_content_auth(
-    state: &crate::state::ServerState,
-    authenticated: &AuthenticatedRequestContext,
-    action: &str,
-    resource_type: &str,
-) -> Result<(), StatusCode> {
-    // The tenant is always the credential's own — accepting one from the caller
-    // would evaluate Cedar against a tenant the credential is not bound to,
-    // the split-brain ADR-0157 closes.
-    let tenant = authenticated.tenant().as_str();
-    let security_ctx = authenticated.security_context();
-    if let Err(denial) = state.authorize_with_context(
-        security_ctx,
-        action,
-        resource_type,
-        &BTreeMap::new(),
-        tenant,
-    ) {
-        tracing::warn!(
-            reason = %denial,
-            action,
-            resource_type,
-            tenant,
-            principal_kind = ?security_ctx.principal.kind,
-            "unauthorized trajectory content access"
-        );
-        return Err(StatusCode::FORBIDDEN);
     }
     Ok(())
 }
