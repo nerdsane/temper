@@ -164,12 +164,41 @@ struct CompositeScopeConfig {
     seed: String,
 }
 
+fn counter_bound_from_ioa(ioa_toml: &str) -> usize {
+    let Ok(automaton) = temper_spec::automaton::parse_automaton(ioa_toml) else {
+        return 2;
+    };
+    let mut bound = 2usize;
+    for action in &automaton.actions {
+        for guard in &action.guard {
+            match guard {
+                temper_spec::automaton::Guard::MinCount { min, .. } => {
+                    bound = bound.max(*min);
+                }
+                temper_spec::automaton::Guard::MaxCount { max, .. } => {
+                    bound = bound.max(*max);
+                }
+                temper_spec::automaton::Guard::ListLengthMin { min, .. } => {
+                    bound = bound.max(*min);
+                }
+                _ => {}
+            }
+        }
+    }
+    bound
+}
+
 impl VerificationCascade {
     /// Create from I/O Automaton TOML source.
+    ///
+    /// The counter bound is taken from the spec: at least 2, and at least
+    /// every `min_count` / `max_count` the machine writes. A default of 2
+    /// made `CompleteResearch` (min 3 directions) unsatisfiable — a checker
+    /// universe smaller than the story.
     pub fn from_ioa(ioa_toml: &str) -> Self {
         Self {
             ioa_source: ioa_toml.to_string(),
-            max_counter: 2,
+            max_counter: counter_bound_from_ioa(ioa_toml),
             sim_seeds: 10,
             sim_ticks: 200,
             prop_test_cases: 1000,
@@ -623,6 +652,45 @@ mod tests {
     use super::*;
 
     const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
+
+    #[test]
+    fn from_ioa_uses_spec_min_count_as_counter_bound() {
+        let spec = r#"
+[automaton]
+name = "FanOut"
+states = ["A", "B"]
+initial = "A"
+
+[[state]]
+name = "n"
+type = "counter"
+initial = 0
+
+[[action]]
+name = "Tick"
+kind = "input"
+from = ["A"]
+to = "A"
+guard = [{ type = "max_count", var = "n", max = 5 }]
+effect = [{ type = "increment", var = "n" }]
+
+[[action]]
+name = "Finish"
+kind = "input"
+from = ["A"]
+to = "B"
+guard = [{ type = "min_count", var = "n", min = 3 }]
+"#;
+        let cascade = VerificationCascade::from_ioa(spec);
+        assert_eq!(cascade.max_counter, 5);
+        let result = cascade.with_sim_seeds(3).with_prop_test_cases(20).run();
+        let l0 = result
+            .level_result(CascadeLevel::SymbolicVerification)
+            .unwrap();
+        assert!(l0.passed, "L0: {}", l0.summary);
+        let l1 = result.level_result(CascadeLevel::ModelCheck).unwrap();
+        assert!(l1.passed, "L1: {}", l1.summary);
+    }
 
     #[test]
     fn test_full_cascade_passes_ioa() {
