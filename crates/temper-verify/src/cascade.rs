@@ -714,9 +714,11 @@ guard = [{ type = "min_count", var = "n", min = 3 }]
 
         let result = cascade.run();
 
-        assert!(result
-            .level_result(CascadeLevel::SymbolicVerification)
-            .is_some());
+        assert!(
+            result
+                .level_result(CascadeLevel::SymbolicVerification)
+                .is_some()
+        );
         assert!(result.level_result(CascadeLevel::ModelCheck).is_some());
         assert!(result.level_result(CascadeLevel::Simulation).is_some());
         assert!(result.level_result(CascadeLevel::PropertyTest).is_some());

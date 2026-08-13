@@ -8,7 +8,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use temper_spec::automaton::{lint_automata_bundle, lint_automaton, LintSeverity};
+use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton};
 use temper_spec::csdl::parse_csdl;
 use temper_spec::model::build_spec_model;
 
@@ -232,7 +232,7 @@ fn run_composite_verification(
     parsed_automata: &std::collections::BTreeMap<String, temper_spec::automaton::Automaton>,
     composite_budget: usize,
 ) -> Result<()> {
-    use temper_verify::composite::{verify_all_with_budget, CompositeOutcome};
+    use temper_verify::composite::{CompositeOutcome, verify_all_with_budget};
 
     let automaton_refs: Vec<&temper_spec::automaton::Automaton> =
         parsed_automata.values().collect();
