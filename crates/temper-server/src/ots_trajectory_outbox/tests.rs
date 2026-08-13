@@ -11,7 +11,10 @@ struct FakeOtsStore {
     enqueue_attempts: AtomicU64,
     mark_persisted_attempts: AtomicU64,
     mark_failed_attempts: AtomicU64,
-    status: Mutex<BTreeMap<String, String>>,
+    /// Row status, keyed the way the real stores key the table: the
+    /// trajectory id comes from the uploading harness, so it is only unique
+    /// within a tenant.
+    status: Mutex<BTreeMap<(String, String), String>>,
     persist_started: Notify,
     allow_persist: Notify,
     block_first_persist: AtomicBool,
@@ -45,12 +48,16 @@ impl OtsStore for FakeOtsStore {
         self.status
             .lock()
             .expect("fake status mutex poisoned")
-            .insert(params.trajectory_id.to_string(), "queued".to_string());
+            .insert(
+                (params.tenant.to_string(), params.trajectory_id.to_string()),
+                "queued".to_string(),
+            );
         Ok(())
     }
 
     async fn mark_ots_trajectory_persisted(
         &self,
+        tenant: &str,
         trajectory_id: &str,
     ) -> Result<(), PersistenceError> {
         self.attempts.fetch_add(1, Ordering::Relaxed);
@@ -68,12 +75,16 @@ impl OtsStore for FakeOtsStore {
         self.status
             .lock()
             .expect("fake status mutex poisoned")
-            .insert(trajectory_id.to_string(), "persisted".to_string());
+            .insert(
+                (tenant.to_string(), trajectory_id.to_string()),
+                "persisted".to_string(),
+            );
         Ok(())
     }
 
     async fn mark_ots_trajectory_failed(
         &self,
+        tenant: &str,
         trajectory_id: &str,
         _error: &str,
     ) -> Result<(), PersistenceError> {
@@ -81,7 +92,10 @@ impl OtsStore for FakeOtsStore {
         self.status
             .lock()
             .expect("fake status mutex poisoned")
-            .insert(trajectory_id.to_string(), "failed".to_string());
+            .insert(
+                (tenant.to_string(), trajectory_id.to_string()),
+                "failed".to_string(),
+            );
         Ok(())
     }
 
@@ -104,25 +118,34 @@ impl OtsStore for FakeOtsStore {
 
     async fn get_ots_trajectory(
         &self,
+        _tenant: &str,
         _trajectory_id: &str,
-    ) -> Result<Option<String>, PersistenceError> {
+    ) -> Result<Option<temper_store_turso::OtsTrajectoryDocument>, PersistenceError> {
         Ok(None)
     }
 }
 
 fn status(store: &FakeOtsStore, id: &str) -> Option<String> {
+    tenant_status(store, "tenant", id)
+}
+
+fn tenant_status(store: &FakeOtsStore, tenant: &str, id: &str) -> Option<String> {
     store
         .status
         .lock()
         .expect("fake status mutex poisoned")
-        .get(id)
+        .get(&(tenant.to_string(), id.to_string()))
         .cloned()
 }
 
 fn item(id: &str) -> OtsTrajectoryWrite {
+    tenant_item("tenant", id)
+}
+
+fn tenant_item(tenant: &str, id: &str) -> OtsTrajectoryWrite {
     OtsTrajectoryWrite {
         trajectory_id: id.to_string(),
-        tenant: "tenant".to_string(),
+        tenant: tenant.to_string(),
         agent_id: "agent".to_string(),
         session_id: "session".to_string(),
         outcome: "success".to_string(),
@@ -232,6 +255,40 @@ async fn exhausted_retries_are_visible() {
     assert_eq!(outbox.failed_total(), 1);
     assert_eq!(store.mark_failed_attempts.load(Ordering::Relaxed), 1);
     assert_eq!(status(&store, "traj-fail").as_deref(), Some("failed"));
+}
+
+#[tokio::test]
+async fn a_status_update_is_addressed_to_the_uploading_tenant() {
+    // Two tenants can upload under the same harness-chosen id. The drainer has
+    // to carry the tenant with the item, or one tenant's exhausted retries mark
+    // the other tenant's row failed.
+    let store = Arc::new(FakeOtsStore {
+        fail_attempts: AtomicU64::new(3),
+        ..FakeOtsStore::default()
+    });
+    let outbox = OtsTrajectoryOutbox::start_for_tests(2, 1, 2, Duration::from_millis(1));
+
+    outbox
+        .try_enqueue_for_tests(store.clone(), tenant_item("beta", "traj-shared"))
+        .expect("beta's upload is admitted");
+    tokio::time::timeout(Duration::from_millis(200), async {
+        while outbox.depth() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("beta's terminal failure should release queue depth");
+
+    assert_eq!(
+        tenant_status(&store, "beta", "traj-shared").as_deref(),
+        Some("failed"),
+        "the failing tenant's row is the one marked"
+    );
+    assert_eq!(
+        tenant_status(&store, "alpha", "traj-shared"),
+        None,
+        "another tenant holding the same id must be untouched"
+    );
 }
 
 #[tokio::test]

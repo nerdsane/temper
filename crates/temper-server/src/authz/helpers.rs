@@ -70,6 +70,66 @@ pub(crate) fn require_observe_auth(
     Ok(())
 }
 
+/// Check Cedar authorization for an endpoint that returns recorded agent
+/// content, with no principal-kind bypass.
+///
+/// Behaviourally this matches [`require_observe_auth`]: both evaluate Cedar and
+/// answer `403` on denial, and both inherit the built-in `system-platform`
+/// permit that platform code paths rely on. It exists as a separate helper so
+/// the stricter surface — one named run's prompts, tool results, and request
+/// bodies — keeps its own call site and cannot be loosened by a change aimed at
+/// the aggregate views.
+///
+/// # Provenance of the principal
+///
+/// The principal is the one resolved from the request's credential and carried
+/// in [`AuthenticatedRequestContext`], not one read off `X-Temper-*` headers.
+/// ADR-0157 strips that header namespace at the ingress edge and admits
+/// protected kernel routes only with a typed context, so a Cedar permit here
+/// binds a verified principal rather than a claimed one. (This function
+/// previously derived the principal from headers; that path no longer exists.)
+///
+/// A platform-run authorization server issuing richer verified principals is
+/// still ARN-255. The OTS routes (`POST`/`GET /api/ots/trajectories`) are gated
+/// on this branch by `require_observe_auth` with `write_trajectories` /
+/// `read_trajectories`, and `POST /api/audit` requires the typed context and
+/// rejects a body naming a different agent than the credential's. What keeps a
+/// caller-supplied row out of a conformance verdict is additionally the row
+/// itself — `spec_governed = false`, which the checker skips
+/// (`crate::conformance::walk::row_disposition`) — so a caller can add rows to
+/// the observe views but not to what a run is judged on.
+#[allow(dead_code)] // False positive: used by api/trajectory_analysis.rs under the observe feature
+pub(crate) fn require_trajectory_content_auth(
+    state: &crate::state::ServerState,
+    authenticated: &AuthenticatedRequestContext,
+    action: &str,
+    resource_type: &str,
+) -> Result<(), StatusCode> {
+    // The tenant is always the credential's own — accepting one from the caller
+    // would evaluate Cedar against a tenant the credential is not bound to,
+    // the split-brain ADR-0157 closes.
+    let tenant = authenticated.tenant().as_str();
+    let security_ctx = authenticated.security_context();
+    if let Err(denial) = state.authorize_with_context(
+        security_ctx,
+        action,
+        resource_type,
+        &BTreeMap::new(),
+        tenant,
+    ) {
+        tracing::warn!(
+            reason = %denial,
+            action,
+            resource_type,
+            tenant,
+            principal_kind = ?security_ctx.principal.kind,
+            "unauthorized trajectory content access"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(())
+}
+
 /// Resolve the tenant scope for an observe endpoint.
 ///
 /// Every credential is tenant-bound, including operator credentials. Observe
@@ -148,6 +208,29 @@ pub(crate) struct DenialInput<'a> {
     pub module_name: Option<String>,
     /// Entity status at the time of denial.
     pub from_status: Option<String>,
+    /// Caller-supplied intent (`X-Intent`) for the denied request.
+    ///
+    /// A denial without the intent behind it tells the Evolution Engine what
+    /// was blocked but not what the agent was trying to accomplish, which is
+    /// the half that drives policy proposals.
+    pub intent: Option<String>,
+    /// Whether the denied operation was a spec-governed dispatch.
+    ///
+    /// `Some(false)` marks rows the conformance checker must never judge:
+    /// pre-flight probes and management-plane denials, whose entity type,
+    /// action, and session can be caller-chosen. Left `None` only by the OData
+    /// entity-dispatch guards, where the row describes a genuine attempted
+    /// dispatch of a registered action (`crate::conformance::walk::row_disposition`
+    /// walks `None` as actor execution, so `None` is an assertion that the row
+    /// belongs in a run's verdict).
+    pub spec_governed: Option<bool>,
+    /// Session the gate resolved for this request, when it had one.
+    ///
+    /// Passed in rather than recomputed: the caller-declared session rides the
+    /// request context now (it must never reach Cedar), so recomputing it from
+    /// `context_attrs` would leave exactly the session-scoped denials the gate
+    /// admitted with no session on their record.
+    pub session_id: Option<String>,
 }
 
 /// Input for a resumable management mutation authorization check.
@@ -198,10 +281,16 @@ pub(crate) async fn require_governed_mutation_auth(
     };
 
     let reason = denial.to_string();
-    let session_id = security_ctx
-        .context_attrs
-        .get("sessionId")
-        .and_then(|v| v.as_str());
+    // Either source is valid here, and neither is an authorization input: the
+    // request context carries the caller's declared session (telemetry only),
+    // while `context_attrs` carries one a server-side path minted itself — the
+    // WASM/agent dispatch contexts do this, and their session is not a header.
+    let session_id = authenticated.session_id().or_else(|| {
+        security_ctx
+            .context_attrs
+            .get("sessionId")
+            .and_then(|value| value.as_str())
+    });
     if matches!(
         security_ctx.principal.kind,
         temper_authz::PrincipalKind::Agent
@@ -222,6 +311,10 @@ pub(crate) async fn require_governed_mutation_auth(
                 reason: &reason,
                 module_name: input.module_name.map(str::to_string),
                 from_status: input.from_status.map(str::to_string),
+                intent: authenticated.intent().map(str::to_string),
+                session_id: session_id.map(str::to_string),
+                // Management-plane denial, not a spec-governed dispatch.
+                spec_governed: Some(false),
             },
         )
         .await;
@@ -263,12 +356,15 @@ pub(crate) async fn record_authz_denial(
         .agent_id_override
         .unwrap_or(input.security_ctx.principal.id.as_str());
     let denied_module = input.module_name.clone();
-    let session_id = input
-        .security_ctx
-        .context_attrs
-        .get("sessionId")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let denial_request_body = input.resource_attrs.clone();
+    let session_id = input.session_id.clone().or_else(|| {
+        input
+            .security_ctx
+            .context_attrs
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    });
 
     let mut pd = PendingDecision::from_denial(
         input.tenant,
@@ -360,11 +456,15 @@ pub(crate) async fn record_authz_denial(
         denied_resource: Some(format!("{}:{}", input.resource_type, input.resource_id)),
         denied_module,
         source: Some(TrajectorySource::Authz),
-        spec_governed: None,
+        spec_governed: input.spec_governed,
         agent_type: input.security_ctx.principal.agent_type.clone(),
-        request_body: None,
-        intent: None,
+        // The Cedar-evaluated resource attributes are the request payload for
+        // an authorization decision; without them a denial cannot be replayed
+        // against a revised policy.
+        request_body: Some(denial_request_body),
+        intent: input.intent.clone(),
         matched_policy_ids: None,
+        capture_seq: None,
     };
     if !state.enqueue_trajectory_entry(traj.clone()) {
         tracing::warn!("failed to enqueue authz trajectory");

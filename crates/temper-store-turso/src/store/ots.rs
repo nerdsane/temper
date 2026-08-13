@@ -23,6 +23,22 @@ pub struct OtsTrajectoryRow {
     pub updated_at: String,
 }
 
+/// A stored OTS trajectory document together with the run identity recorded
+/// alongside it.
+///
+/// The document itself carries no session or tenant — those live on the row —
+/// so any consumer that needs the run identity would otherwise have to list
+/// the table to find what it already asked for by id.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OtsTrajectoryDocument {
+    pub trajectory_id: String,
+    pub tenant: String,
+    pub agent_id: String,
+    pub session_id: String,
+    pub outcome: String,
+    pub data: String,
+}
+
 /// Durable queued OTS trajectory row ready for outbox replay.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OtsQueuedTrajectoryRow {
@@ -49,6 +65,11 @@ pub struct OtsTrajectoryParams<'a> {
 
 impl TursoEventStore {
     /// Persist a full OTS trajectory JSON blob.
+    ///
+    /// Identity is `(tenant, trajectory_id)`: the id comes from the uploading
+    /// harness and one store holds every tenant's rows, so keying on the id
+    /// alone would let one tenant's upload replace another's row — tenant
+    /// column included.
     #[instrument(skip_all, fields(
         otel.name = "turso.persist_ots_trajectory",
         trajectory_id = %p.trajectory_id,
@@ -61,9 +82,14 @@ impl TursoEventStore {
         let _timer = TursoQueryTimer::start("turso.persist_ots_trajectory");
         let conn = self.connection()?;
         conn.execute(
-            "INSERT OR REPLACE INTO ots_trajectories \
+            "INSERT INTO ots_trajectories \
              (trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data, persistence_status, persist_attempts, last_error, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'persisted', 0, NULL, datetime('now'), datetime('now'))",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'persisted', 0, NULL, datetime('now'), datetime('now')) \
+             ON CONFLICT(tenant, trajectory_id) DO UPDATE SET \
+                agent_id = excluded.agent_id, session_id = excluded.session_id, \
+                outcome = excluded.outcome, turn_count = excluded.turn_count, data = excluded.data, \
+                persistence_status = 'persisted', persist_attempts = 0, last_error = NULL, \
+                updated_at = datetime('now')",
             params![
                 p.trajectory_id.to_string(),
                 p.tenant.to_string(),
@@ -95,8 +121,8 @@ impl TursoEventStore {
             "INSERT INTO ots_trajectories \
              (trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data, persistence_status, persist_attempts, last_error, created_at, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', 0, NULL, datetime('now'), datetime('now')) \
-             ON CONFLICT(trajectory_id) DO UPDATE SET \
-                tenant = excluded.tenant, agent_id = excluded.agent_id, session_id = excluded.session_id, \
+             ON CONFLICT(tenant, trajectory_id) DO UPDATE SET \
+                agent_id = excluded.agent_id, session_id = excluded.session_id, \
                 outcome = excluded.outcome, turn_count = excluded.turn_count, data = excluded.data, \
                 persistence_status = 'queued', last_error = NULL, updated_at = datetime('now')",
             params![
@@ -115,8 +141,13 @@ impl TursoEventStore {
     }
 
     /// Mark a queued OTS trajectory as persisted.
+    ///
+    /// Addressed by the same `(tenant, trajectory_id)` identity the row is
+    /// keyed by: two tenants may hold the same id, and an unscoped update would
+    /// declare both of them persisted.
     pub async fn mark_ots_trajectory_persisted(
         &self,
+        tenant: &str,
         trajectory_id: &str,
     ) -> Result<(), PersistenceError> {
         let _timer = TursoQueryTimer::start("turso.mark_ots_trajectory_persisted");
@@ -124,8 +155,8 @@ impl TursoEventStore {
         conn.execute(
             "UPDATE ots_trajectories \
              SET persistence_status = 'persisted', last_error = NULL, updated_at = datetime('now') \
-             WHERE trajectory_id = ?1",
-            params![trajectory_id.to_string()],
+             WHERE tenant = ?1 AND trajectory_id = ?2",
+            params![tenant.to_string(), trajectory_id.to_string()],
         )
         .await
         .map_err(storage_error)?;
@@ -135,6 +166,7 @@ impl TursoEventStore {
     /// Mark a queued OTS trajectory as failed after retries exhaust.
     pub async fn mark_ots_trajectory_failed(
         &self,
+        tenant: &str,
         trajectory_id: &str,
         error: &str,
     ) -> Result<(), PersistenceError> {
@@ -142,9 +174,13 @@ impl TursoEventStore {
         let conn = self.connection()?;
         conn.execute(
             "UPDATE ots_trajectories \
-             SET persistence_status = 'failed', persist_attempts = persist_attempts + 1, last_error = ?2, updated_at = datetime('now') \
-             WHERE trajectory_id = ?1",
-            params![trajectory_id.to_string(), error.to_string()],
+             SET persistence_status = 'failed', persist_attempts = persist_attempts + 1, last_error = ?3, updated_at = datetime('now') \
+             WHERE tenant = ?1 AND trajectory_id = ?2",
+            params![
+                tenant.to_string(),
+                trajectory_id.to_string(),
+                error.to_string()
+            ],
         )
         .await
         .map_err(storage_error)?;
@@ -245,25 +281,37 @@ impl TursoEventStore {
         Ok(result)
     }
 
-    /// Load full OTS trajectory data by ID.
+    /// Load full OTS trajectory data by tenant and ID.
+    ///
+    /// The tenant is part of the lookup rather than a post-filter: one store
+    /// can hold every tenant's rows, so a caller that takes the trajectory id
+    /// from a request path would otherwise read across tenants.
     #[instrument(skip_all, fields(otel.name = "turso.get_ots_trajectory"))]
     pub async fn get_ots_trajectory(
         &self,
+        tenant: &str,
         trajectory_id: &str,
-    ) -> Result<Option<String>, PersistenceError> {
+    ) -> Result<Option<OtsTrajectoryDocument>, PersistenceError> {
         let _timer = TursoQueryTimer::start("turso.get_ots_trajectory");
         let conn = self.connection()?;
         let mut rows = conn
             .query(
-                "SELECT data FROM ots_trajectories WHERE trajectory_id = ?1",
-                params![trajectory_id.to_string()],
+                "SELECT agent_id, COALESCE(session_id, ''), outcome, data \
+                 FROM ots_trajectories WHERE tenant = ?1 AND trajectory_id = ?2",
+                params![tenant.to_string(), trajectory_id.to_string()],
             )
             .await
             .map_err(storage_error)?;
 
         if let Some(row) = rows.next().await.map_err(storage_error)? {
-            let data: String = row.get(0).unwrap_or_default();
-            Ok(Some(data))
+            Ok(Some(OtsTrajectoryDocument {
+                trajectory_id: trajectory_id.to_string(),
+                tenant: tenant.to_string(),
+                agent_id: row.get(0).unwrap_or_default(),
+                session_id: row.get(1).unwrap_or_default(),
+                outcome: row.get(2).unwrap_or_default(),
+                data: row.get(3).unwrap_or_default(),
+            }))
         } else {
             Ok(None)
         }
@@ -271,81 +319,5 @@ impl TursoEventStore {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    async fn test_store() -> (TursoEventStore, tempfile::TempDir) {
-        let dir = tempfile::tempdir().expect("create temp dir");
-        let db_path = dir.path().join("ots-outbox.db");
-        let db_url = format!("file:{}", db_path.display());
-        let store = TursoEventStore::new(&db_url, None)
-            .await
-            .expect("create local turso store");
-        (store, dir)
-    }
-
-    fn params<'a>(trajectory_id: &'a str, data: &'a str) -> OtsTrajectoryParams<'a> {
-        OtsTrajectoryParams {
-            trajectory_id,
-            tenant: "tenant",
-            agent_id: "agent",
-            session_id: "session",
-            outcome: "success",
-            turn_count: 2,
-            data,
-        }
-    }
-
-    #[tokio::test]
-    async fn ots_outbox_status_lifecycle_is_durable() {
-        let (store, _dir) = test_store().await;
-        let data = r#"{"trajectory_id":"traj-durable","turns":[]}"#;
-
-        store
-            .enqueue_ots_trajectory(&params("traj-durable", data))
-            .await
-            .expect("enqueue trajectory");
-
-        let rows = store
-            .list_ots_trajectories("tenant", None, None, 10)
-            .await
-            .expect("list trajectories");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].persistence_status, "queued");
-
-        let queued = store
-            .list_queued_ots_trajectories(10)
-            .await
-            .expect("list queued trajectories");
-        assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].trajectory_id, "traj-durable");
-        assert_eq!(queued[0].data, data);
-
-        store
-            .mark_ots_trajectory_persisted("traj-durable")
-            .await
-            .expect("mark persisted");
-        let rows = store
-            .list_ots_trajectories("tenant", None, None, 10)
-            .await
-            .expect("list persisted trajectory");
-        assert_eq!(rows[0].persistence_status, "persisted");
-        assert!(rows[0].last_error.is_none());
-
-        store
-            .enqueue_ots_trajectory(&params("traj-durable", data))
-            .await
-            .expect("requeue trajectory");
-        store
-            .mark_ots_trajectory_failed("traj-durable", "transient")
-            .await
-            .expect("mark failed");
-        let rows = store
-            .list_ots_trajectories("tenant", None, None, 10)
-            .await
-            .expect("list failed trajectory");
-        assert_eq!(rows[0].persistence_status, "failed");
-        assert_eq!(rows[0].persist_attempts, 1);
-        assert_eq!(rows[0].last_error.as_deref(), Some("transient"));
-    }
-}
+#[path = "ots_test.rs"]
+mod tests;

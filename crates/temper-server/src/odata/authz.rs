@@ -194,6 +194,11 @@ pub(super) async fn authorize_mutation(
                 .get("status")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
+            intent: agent_ctx.intent.clone(),
+            session_id: agent_ctx.session_id.clone(),
+            // A genuine attempted dispatch of a registered action: walked by
+            // conformance, matching both parents' behavior.
+            spec_governed: None,
         },
     )
     .await;

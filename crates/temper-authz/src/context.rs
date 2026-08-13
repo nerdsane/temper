@@ -59,6 +59,28 @@ pub struct SecurityContext {
 pub struct AuthenticatedRequestContext {
     tenant: TenantId,
     security_context: SecurityContext,
+    /// Caller-declared intent for this request, for telemetry only.
+    ///
+    /// Deliberately NOT part of `security_context.context_attrs`: those are
+    /// Cedar inputs, and this value is caller-supplied. A denial record without
+    /// the intent behind it says what was blocked but not what the caller was
+    /// trying to do — the half that drives policy proposals — so it is carried
+    /// here, where authorization cannot read it.
+    intent: Option<String>,
+    /// Caller-declared session id for this request, for telemetry only.
+    ///
+    /// Held here for the same reason as `intent`, and the reason is sharper:
+    /// Cedar policies condition on `context.sessionId` (session-scoped permits
+    /// generated from an approved decision). Routing a caller-supplied header
+    /// into `context_attrs` would let any caller satisfy the session scope that
+    /// made such an approval narrow, replaying it indefinitely.
+    ///
+    /// The asserted header becomes a Cedar input only through the validated
+    /// path: the bearer edge checks it against the server-side grant record (an
+    /// approved decision binding that session to this principal) and only then
+    /// passes it into the resolved `SecurityContext`. This field always carries
+    /// the raw assertion for telemetry, validated or not.
+    session_id: Option<String>,
 }
 
 impl AuthenticatedRequestContext {
@@ -67,7 +89,33 @@ impl AuthenticatedRequestContext {
         Self {
             tenant,
             security_context,
+            intent: None,
+            session_id: None,
         }
+    }
+
+    /// Attach the caller-declared intent from the correlation headers.
+    #[must_use]
+    pub fn with_intent(mut self, intent: Option<String>) -> Self {
+        self.intent = intent;
+        self
+    }
+
+    /// Caller-declared intent, for denial telemetry. Never an authorization input.
+    pub fn intent(&self) -> Option<&str> {
+        self.intent.as_deref()
+    }
+
+    /// Attach the caller-declared session id from the correlation headers.
+    #[must_use]
+    pub fn with_session_id(mut self, session_id: Option<String>) -> Self {
+        self.session_id = session_id;
+        self
+    }
+
+    /// Caller-declared session id, for telemetry. Never an authorization input.
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
     }
 
     /// Tenant selected during credential resolution.
@@ -82,13 +130,31 @@ impl AuthenticatedRequestContext {
 }
 
 impl SecurityContext {
-    /// Create a security context from HTTP request headers.
+    /// The anonymous principal used for routes declared public.
     ///
-    /// This legacy compatibility constructor never derives `Admin` or `System`
-    /// authority from headers. In fact, all caller-supplied principal, role,
-    /// scope, ABAC, provenance, and context attributes are ignored: the result
-    /// is always an anonymous Customer. Protected HTTP handlers must consume an
-    /// [`AuthenticatedRequestContext`] produced by credential resolution.
+    /// Explicitly constructed rather than "derived from no headers", so no
+    /// production path expresses identity as a function of request headers.
+    pub fn anonymous() -> Self {
+        SecurityContext {
+            principal: Principal {
+                id: "anonymous".to_string(),
+                kind: PrincipalKind::Customer,
+                role: None,
+                acting_for: None,
+                agent_type: None,
+                attributes: HashMap::new(),
+            },
+            context_attrs: HashMap::new(),
+            correlation_id: uuid::Uuid::now_v7().to_string(),
+        }
+    }
+
+    /// Build a context from request headers.
+    ///
+    /// Test-only since ADR-0157: identity comes from a resolved credential, and
+    /// keeping this out of the production build makes header-derived identity
+    /// impossible to reintroduce by accident rather than merely unused.
+    #[cfg(test)]
     pub fn from_headers(headers: &[(String, String)]) -> Self {
         let mut correlation_id = uuid::Uuid::now_v7().to_string();
 
@@ -330,6 +396,34 @@ mod tests {
         let ctx = SecurityContext::from_headers(&headers);
         assert_eq!(ctx.principal.kind, PrincipalKind::Customer);
         assert_eq!(ctx.principal.id, "anonymous");
+    }
+
+    #[test]
+    fn caller_declared_correlation_never_becomes_a_cedar_input() {
+        // Cedar's context is built from `SecurityContext::context_attrs`. Session
+        // id and intent are caller-supplied headers, and policies condition on
+        // `context.sessionId` (session-scoped permits minted from an approved
+        // decision), so putting either in `context_attrs` would let any caller
+        // satisfy the scope that made such an approval narrow.
+        let authenticated = AuthenticatedRequestContext::new(
+            TenantId::default(),
+            SecurityContext::from_resolved_identity("agent-1", "operator", None),
+        )
+        .with_session_id(Some("sess-approved".to_string()))
+        .with_intent(Some("delete everything".to_string()));
+
+        assert_eq!(authenticated.session_id(), Some("sess-approved"));
+        assert_eq!(authenticated.intent(), Some("delete everything"));
+
+        let attrs = &authenticated.security_context().context_attrs;
+        assert!(
+            attrs.get("sessionId").is_none(),
+            "a caller-supplied session id must not reach the Cedar context"
+        );
+        assert!(
+            attrs.get("intent").is_none(),
+            "caller-supplied intent must not reach the Cedar context"
+        );
     }
 
     #[test]

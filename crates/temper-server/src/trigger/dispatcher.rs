@@ -398,7 +398,7 @@ fn effective_trigger_security_context(agent_ctx: &AgentContext) -> SecurityConte
         return security_ctx.clone();
     }
 
-    let mut security_ctx = SecurityContext::from_headers(&[]).with_agent_context(
+    let mut security_ctx = SecurityContext::anonymous().with_agent_context(
         agent_ctx.agent_id.as_deref(),
         agent_ctx.session_id.as_deref(),
         agent_ctx.agent_type.as_deref(),

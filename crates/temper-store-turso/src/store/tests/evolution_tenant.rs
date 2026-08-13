@@ -154,6 +154,7 @@ async fn trajectory_tenant_predicate_is_applied_before_limit() {
                 request_body: None,
                 intent: None,
                 matched_policy_ids: None,
+                capture_seq: None,
             })
             .await
             .unwrap();

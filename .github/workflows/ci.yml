@@ -265,6 +265,16 @@ jobs:
       - name: cargo test --workspace -- --skip dst_
         run: cargo test --workspace -- --skip dst_
 
+      # spec_validate_endpoint declares required-features = ["observe"]. The
+      # workspace run above usually still covers it via feature unification
+      # (temper-cli/temper-mcp enable temper-server's observe feature), but
+      # that coverage is incidental — it evaporates if those edges change.
+      # Run the observe-gated tests explicitly so coverage is guaranteed.
+      - name: cargo test observe-gated tests
+        run: |
+          cargo test -p temper-server --features observe --test spec_validate_endpoint
+          cargo test -p temper-server --features observe --lib observe::
+
   # ─────────────────────────────────────────────────────
   # Gate 3b: DST/platform coverage (matrixed)
   # ─────────────────────────────────────────────────────

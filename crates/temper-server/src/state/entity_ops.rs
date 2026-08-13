@@ -944,13 +944,27 @@ impl ServerState {
             AuthzDecision::Allow { .. } => "Allow",
             AuthzDecision::Deny(_) => "Deny",
         };
+        // Correlate the decision with the resource it governed and the request
+        // that triggered it. `resource_attrs["id"]` is the Cedar resource id
+        // every caller populates (see `resource_attrs_from_body`); the trace id
+        // comes from the active span, which is the same request span the HTTP
+        // handler and the dispatch both run under.
+        let entity_id = resource_attrs
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let trace_id = crate::request_context::current_span_trace_context_ids()
+            .map(|(trace_id, _span_id)| trace_id)
+            .unwrap_or_default();
         let wide = wide_event::from_authz_decision(wide_event::AuthzDecisionInput {
             action,
             resource_type,
+            entity_id,
             principal_kind: &format!("{:?}", security_ctx.principal.kind),
             decision: decision_str,
             duration_ns,
             tenant,
+            trace_id: &trace_id,
         });
         wide_event::emit_span(&wide);
         wide_event::emit_metrics(&wide);

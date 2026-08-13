@@ -182,6 +182,7 @@ fn resolve_entity_type_or_record_404(
             request_body,
             intent,
             matched_policy_ids: None,
+            capture_seq: None,
         };
         if !state.enqueue_trajectory_entry(entry) {
             tracing::warn!(

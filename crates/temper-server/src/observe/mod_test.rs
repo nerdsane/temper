@@ -961,6 +961,106 @@ async fn test_get_spec_detail_found() {
     assert_eq!(detail.entity_type, "Order");
     assert!(!detail.states.is_empty());
     assert!(!detail.actions.is_empty());
+
+    // The params/hint contract (consumed by generated typed clients):
+    // AddItem declares two bare-named params (default "string" type, spec
+    // order preserved) and a hint; RemoveItem declares no hint (empty, not
+    // null).
+    let add_item = detail
+        .actions
+        .iter()
+        .find(|a| a.name == "AddItem")
+        .expect("Order fixture declares AddItem");
+    let param_pairs: Vec<(&str, &str)> = add_item
+        .params
+        .iter()
+        .map(|p| (p.name.as_str(), p.param_type.as_str()))
+        .collect();
+    assert_eq!(
+        param_pairs,
+        vec![("ProductId", "string"), ("Quantity", "string")]
+    );
+    assert!(add_item.hint.starts_with("Add a product"));
+    let remove_item = detail
+        .actions
+        .iter()
+        .find(|a| a.name == "RemoveItem")
+        .expect("Order fixture declares RemoveItem");
+    assert_eq!(remove_item.params.len(), 1);
+    assert_eq!(remove_item.params[0].name, "ItemId");
+    assert_eq!(remove_item.hint, "");
+
+    // Wire-level contract: the type field serializes under the key "type",
+    // and params are objects, not bare strings.
+    let raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let raw_add_item = raw["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "AddItem")
+        .unwrap();
+    assert_eq!(raw_add_item["params"][0]["name"], "ProductId");
+    assert_eq!(raw_add_item["params"][0]["type"], "string");
+    assert_eq!(raw_add_item["hint"], add_item.hint);
+}
+
+#[test]
+fn action_param_detail_serializes_typed_params_under_type_key() {
+    // Typed params (e.g. `{ name = "sleep_seconds", type = "uint64" }` in a
+    // spec) reach ActionParamDetail through ActionParam::name()/param_type();
+    // this locks the wire shape those values serialize into.
+    let detail = ActionParamDetail {
+        name: "sleep_seconds".to_string(),
+        param_type: "uint64".to_string(),
+    };
+    let json = serde_json::to_value(&detail).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"name": "sleep_seconds", "type": "uint64"})
+    );
+    let back: ActionParamDetail = serde_json::from_value(json).unwrap();
+    assert_eq!(back.name, "sleep_seconds");
+    assert_eq!(back.param_type, "uint64");
+}
+
+#[tokio::test]
+async fn spec_detail_reports_the_registered_content_hash() {
+    // The reason the field exists: a producer that recomputes the digest from
+    // a spec file gets a different one the moment any deploy path rewrites
+    // that file, and every conformance check for the run is then refused. This
+    // is the digest the kernel actually holds.
+    let app = build_test_app();
+    let response = app
+        .oneshot(system_get("/observe/specs/Order"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        raw["spec_version"],
+        serde_json::json!(temper_store_turso::spec_content_hash(ORDER_IOA)),
+        "the reported digest must be the one a conformance check compares against"
+    );
+
+    let detail: SpecDetail = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        detail.spec_version.len(),
+        64,
+        "a sha256 digest is 64 hex characters: {}",
+        detail.spec_version
+    );
+    assert!(
+        detail
+            .spec_version
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "the digest is reported bare and lowercase, not algorithm-qualified: {}",
+        detail.spec_version
+    );
 }
 
 #[tokio::test]
@@ -1721,6 +1821,7 @@ async fn test_intent_evidence_returns_richer_intent_candidates() {
             request_body: Some(serde_json::json!({"customer_id":"c-1"})),
             intent: Some(intent.to_string()),
             matched_policy_ids: None,
+            capture_seq: None,
         })
         .await
         .unwrap();
@@ -1746,6 +1847,7 @@ async fn test_intent_evidence_returns_richer_intent_candidates() {
             request_body: Some(serde_json::json!({"customer_id":"c-1"})),
             intent: Some(intent.to_string()),
             matched_policy_ids: None,
+            capture_seq: None,
         })
         .await
         .unwrap();

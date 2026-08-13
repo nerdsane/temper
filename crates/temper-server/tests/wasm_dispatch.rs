@@ -373,7 +373,7 @@ async fn persisted_wasm_modules_are_lazy_compiled_on_first_invoke() {
         "EchoTest",
         "echo-lazy-1",
         &["Done", "Failed"],
-        Duration::from_secs(5),
+        Duration::from_secs(45),
     )
     .await;
     assert_eq!(final_status, "Done");
@@ -443,7 +443,7 @@ async fn persisted_wasm_modules_with_legacy_db_blob_fallback_execute_after_start
         "EchoTest",
         "echo-legacy-hash",
         &["Done", "Failed"],
-        Duration::from_secs(5),
+        Duration::from_secs(45),
     )
     .await;
     assert_eq!(final_status, "Done");

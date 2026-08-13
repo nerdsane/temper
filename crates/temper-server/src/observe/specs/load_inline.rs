@@ -98,6 +98,10 @@ pub(crate) async fn handle_load_inline(
                 reason: &reason,
                 module_name: None,
                 from_status: None,
+                intent: authenticated.intent().map(str::to_string),
+                session_id: authenticated.session_id().map(str::to_string),
+                // Management-plane denial, not a spec-governed dispatch.
+                spec_governed: Some(false),
             },
         )
         .await;
@@ -259,16 +263,24 @@ pub(crate) async fn handle_load_inline(
                 to_status: None,
                 error: None,
                 agent_id: Some(security_ctx.principal.id.clone()),
-                session_id: None,
+                // Caller-declared session, carried beside the credential rather
+                // than inside it: `context_attrs` is the Cedar context.
+                session_id: authenticated.session_id().map(str::to_string),
                 authz_denied: None,
                 denied_resource: None,
                 denied_module: None,
                 source: Some(TrajectorySource::Entity),
-                spec_governed: None,
-                agent_type: None,
+                // Not a governed dispatch: the kernel never ran an action here,
+                // and the row's session and entity type are caller-chosen. Left
+                // ungoverned it is walked as an ActorExecution, so a caller could
+                // post `SubmitSpec` into another run's session and flip that
+                // run's conformance verdict on an undeclared action.
+                spec_governed: Some(false),
+                agent_type: security_ctx.principal.agent_type.clone(),
                 request_body: warning_context.clone(),
                 intent: None,
                 matched_policy_ids: None,
+                capture_seq: None,
             };
             if !state.enqueue_trajectory_entry(trajectory) {
                 tracing::warn!("failed to enqueue spec submission trajectory");

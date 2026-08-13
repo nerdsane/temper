@@ -134,6 +134,37 @@ impl TursoEventStore {
         Ok(out)
     }
 
+    /// Load approved decisions whose scope names `session_id`, for one tenant.
+    ///
+    /// Backs session-grant validation (ADR-0157): a caller-asserted session id
+    /// becomes a Cedar input only when an approved decision binds that session,
+    /// so the lookup filters on the approved scope's session, not the denial's.
+    #[instrument(skip_all, fields(tenant, otel.name = "turso.load_approved_session_decisions"))]
+    pub async fn load_approved_session_decisions(
+        &self,
+        tenant: &str,
+        session_id: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.load_approved_session_decisions");
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT data FROM pending_decisions \
+                 WHERE tenant = ?1 \
+                   AND status = 'approved' \
+                   AND json_extract(data, '$.approved_scope.session_id') = ?2",
+                params![tenant, session_id],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(row.get::<String>(0).map_err(storage_error)?);
+        }
+        Ok(out)
+    }
+
     /// Upsert Cedar policy text for a tenant.
     #[instrument(skip_all, fields(tenant, otel.name = "turso.upsert_tenant_policy"))]
     pub async fn upsert_tenant_policy(

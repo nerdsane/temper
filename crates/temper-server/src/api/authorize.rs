@@ -101,6 +101,11 @@ pub(crate) async fn handle_authorize(
                     reason: &reason,
                     module_name: None,
                     from_status: None,
+                    intent: authenticated.intent().map(str::to_string),
+                    session_id: authenticated.session_id().map(str::to_string),
+                    // Pre-flight probe: action, resource type, and session are
+                    // caller-chosen, so this row must never enter a conformance verdict.
+                    spec_governed: Some(false),
                 },
             )
             .await;
@@ -188,6 +193,7 @@ pub(crate) async fn handle_audit(
         request_body: body.request_body,
         intent: body.intent,
         matched_policy_ids: None,
+        capture_seq: None,
     };
 
     if !state.enqueue_trajectory_entry(entry) {

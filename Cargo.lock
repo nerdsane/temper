@@ -6700,6 +6700,7 @@ dependencies = [
  "temper-jit",
  "temper-observe",
  "temper-odata",
+ "temper-ots",
  "temper-platform",
  "temper-runtime",
  "temper-sandbox",

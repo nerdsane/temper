@@ -13,6 +13,21 @@ async fn ok_handler() -> &'static str {
     "ok"
 }
 
+/// Reports where the request's session landed: the Cedar-visible
+/// `context_attrs["sessionId"]` vs the telemetry-only request context.
+async fn session_probe(Extension(context): Extension<AuthenticatedRequestContext>) -> String {
+    format!(
+        "cedar={:?} telemetry={:?} principal={}",
+        context
+            .security_context()
+            .context_attrs
+            .get("sessionId")
+            .and_then(|v| v.as_str()),
+        context.session_id(),
+        context.security_context().principal.id,
+    )
+}
+
 async fn whoami(
     Extension(context): Extension<AuthenticatedRequestContext>,
     headers: axum::http::HeaderMap,
@@ -56,6 +71,7 @@ fn app(state: PlatformState) -> Router {
         )
         .route("/healthz", get(ok_handler))
         .route("/api/identity/resolve", post(ok_handler))
+        .route("/session-probe", get(session_probe))
         .route("/api/specs", get(ok_handler))
         .route("/whoami", get(whoami))
         .route("/repo.git/{*path}", get(whoami).post(whoami))
@@ -427,5 +443,101 @@ async fn internal_capability_on_public_route_is_still_consumed_once() {
     assert_eq!(
         app.oneshot(request()).await.unwrap().status(),
         StatusCode::UNAUTHORIZED
+    );
+}
+
+/// A caller-asserted session header becomes `context.sessionId` — a Cedar
+/// input — only when an approved decision binds that exact session to the
+/// asserting principal (ADR-0157). Unvalidated assertions stay telemetry-only,
+/// so session-scoped permits cannot be satisfied by replaying a header.
+#[tokio::test]
+async fn session_header_reaches_cedar_only_through_an_approved_grant() {
+    let mut state = PlatformState::new(None);
+    let dir = std::env::temp_dir().join(format!(
+        "temper-session-edge-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let turso = temper_store_turso::TursoEventStore::new(
+        &format!("file:{}", dir.join("grants.db").display()),
+        None,
+    )
+    .await
+    .expect("create local turso db");
+    state
+        .server
+        .set_storage_stack(temper_server::storage::StorageStack::from_turso(turso));
+    crate::bootstrap::bootstrap_agent_specs(&state, "default", false, &BTreeMap::new());
+    crate::bootstrap::bootstrap_operator_credential(&state, "tenant-key", "default").await;
+    let server_state = state.server.clone();
+    let router = app(state);
+
+    let probe = |session: Option<&'static str>| {
+        let router = router.clone();
+        async move {
+            let mut request = HttpRequest::get("/session-probe")
+                .header("authorization", "Bearer tenant-key")
+                .header("x-tenant-id", "default");
+            if let Some(session) = session {
+                request = request.header("x-session-id", session);
+            }
+            let response = router
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            String::from_utf8(body.to_vec()).unwrap()
+        }
+    };
+
+    // Before any grant: the asserted header is telemetry, never Cedar input.
+    let unvalidated = probe(Some("sess-approved")).await;
+    assert!(
+        unvalidated.starts_with("cedar=None telemetry=Some(\"sess-approved\")"),
+        "an unvalidated session assertion must stay out of the Cedar context: {unvalidated}"
+    );
+    let agent_id = unvalidated
+        .rsplit("principal=")
+        .next()
+        .expect("probe reports the principal")
+        .to_string();
+
+    // A human approves a session-scoped decision for exactly this principal.
+    let mut scope = temper_authz::PolicyScopeMatrix::default_for(Some("operator"));
+    scope.duration = temper_authz::DurationScope::Session;
+    scope.session_id = Some("sess-approved".to_string());
+    let mut decision = temper_server::state::PendingDecision::from_denial(
+        "default",
+        &agent_id,
+        "Delete",
+        "Order",
+        "order-1",
+        serde_json::json!({}),
+        "denied by policy",
+        None,
+    );
+    decision.status = temper_server::state::DecisionStatus::Approved;
+    decision.approved_scope = Some(scope);
+    server_state
+        .persist_pending_decision(&decision)
+        .await
+        .expect("persist approved session grant");
+
+    // The approved (principal, session) pair now reaches Cedar.
+    let validated = probe(Some("sess-approved")).await;
+    assert!(
+        validated.starts_with("cedar=Some(\"sess-approved\") telemetry=Some(\"sess-approved\")"),
+        "the granted session must reach the Cedar context: {validated}"
+    );
+
+    // A different asserted session still does not.
+    let other = probe(Some("sess-other")).await;
+    assert!(
+        other.starts_with("cedar=None telemetry=Some(\"sess-other\")"),
+        "a session outside the grant must stay out of the Cedar context: {other}"
     );
 }

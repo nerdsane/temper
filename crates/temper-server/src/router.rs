@@ -167,7 +167,7 @@ pub fn build_router(state: ServerState) -> Router {
 }
 
 /// Fallback handler for paths not served by any built-in route.
-/// Resolves the tenant from `X-Tenant-Id`, consults the tenant's
+/// Resolves the tenant from the request's credential, consults that tenant's
 /// `HttpEndpointTable`, and (in slice 2) returns 501 on match, 404
 /// otherwise. Slice 3 of K-1 Phase 2 replaces the 501 with a real
 /// streaming dispatch into the bound WASM integration.

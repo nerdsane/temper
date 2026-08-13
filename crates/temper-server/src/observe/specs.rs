@@ -9,7 +9,9 @@ use crate::authz::{observe_tenant_scope, require_authenticated_context, require_
 use crate::registry::VerificationStatus;
 use crate::state::ServerState;
 
-use super::{ActionDetail, InvariantDetail, SpecDetail, SpecSummary, StateVarDetail};
+use super::{
+    ActionDetail, ActionParamDetail, InvariantDetail, SpecDetail, SpecSummary, StateVarDetail,
+};
 
 mod load_dir;
 mod load_inline;
@@ -84,6 +86,12 @@ pub(crate) async fn handle_list_specs(
 /// GET /observe/specs/{entity} -- full spec detail for a named entity type.
 ///
 /// Searches only the credential-bound tenant.
+///
+/// Carries `spec_version`, the content hash of the returned spec's IOA source.
+/// That is the digest a conformance check compares a run's recorded
+/// `metadata.spec_version` against, so a harness that reads it here records a
+/// version the kernel will recognise, rather than one it computed from a file
+/// some deploy path may have rewritten.
 pub(crate) async fn handle_get_spec_detail(
     State(state): State<ServerState>,
     authenticated: Option<Extension<AuthenticatedRequestContext>>,
@@ -102,6 +110,7 @@ pub(crate) async fn handle_get_spec_detail(
             let automaton = &entity_spec.automaton;
             let detail = SpecDetail {
                 entity_type: entity.clone(),
+                spec_version: temper_store_turso::spec_content_hash(&entity_spec.ioa_source),
                 states: automaton.automaton.states.clone(),
                 initial_state: automaton.automaton.initial.clone(),
                 actions: automaton
@@ -114,6 +123,15 @@ pub(crate) async fn handle_get_spec_detail(
                         to: a.to.clone(),
                         guards: a.guard.iter().map(|g| format!("{g:?}")).collect(),
                         effects: a.effect.iter().map(|e| format!("{e:?}")).collect(),
+                        params: a
+                            .params
+                            .iter()
+                            .map(|p| ActionParamDetail {
+                                name: p.name().to_string(),
+                                param_type: p.param_type().to_string(),
+                            })
+                            .collect(),
+                        hint: a.hint.clone().unwrap_or_default(),
                     })
                     .collect(),
                 invariants: automaton

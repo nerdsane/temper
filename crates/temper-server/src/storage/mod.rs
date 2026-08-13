@@ -26,9 +26,9 @@ use temper_store_postgres::{
 };
 use temper_store_turso::{
     ActionStats, AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow,
-    OtsQueuedTrajectoryRow, OtsTrajectoryParams, OtsTrajectoryRow, PolicyDenialPatternRow,
-    PolicyRow as TursoPolicyRow, TenantStoreRouter, TenantUserRow, TursoEventStore,
-    TursoEvolutionRecordInsert, TursoPolicyApprovalCommit, TursoTrajectoryInsert,
+    OtsQueuedTrajectoryRow, OtsTrajectoryDocument, OtsTrajectoryParams, OtsTrajectoryRow,
+    PolicyDenialPatternRow, PolicyRow as TursoPolicyRow, TenantStoreRouter, TenantUserRow,
+    TursoEventStore, TursoEvolutionRecordInsert, TursoPolicyApprovalCommit, TursoTrajectoryInsert,
     TursoTrajectoryRow, TursoWasmInvocationInsert, TursoWasmInvocationRow,
     TursoWasmModuleMetadataRow, UnmetIntentAggRow, store::TrajectoryStats,
 };
@@ -36,12 +36,15 @@ use temper_store_turso::{
 use crate::platform_store::PlatformStore;
 #[cfg(feature = "sim")]
 use crate::platform_store::SimPlatformStore;
-use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
+use crate::state::trajectory::TrajectoryEntry;
 
 mod metadata_impls;
+mod observe_read;
 mod published_artifacts;
 mod query_plane_impls;
 mod query_plane_read;
+mod redaction;
+mod trajectory_row;
 pub use published_artifacts::{
     PublishedArtifactStore, PublishedArtifactStoreRow, PublishedArtifactStoreUpsert,
 };
@@ -851,6 +854,7 @@ pub trait ObserveReadStore: Send + Sync {
 
     async fn query_trajectory_stats(
         &self,
+        tenant: &str,
         entity_type: Option<&str>,
         action: Option<&str>,
         success_filter: Option<bool>,
@@ -860,6 +864,18 @@ pub trait ObserveReadStore: Send + Sync {
     async fn query_trajectories_by_agent(
         &self,
         agent_id: &str,
+        tenant: Option<&str>,
+        entity_type: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError>;
+
+    /// One session's rows, oldest first, in the order the kernel wrote them.
+    ///
+    /// Conformance replays a session as a state-machine run, so the ordering
+    /// is part of the contract, not an implementation detail.
+    async fn query_trajectories_by_session(
+        &self,
+        session_id: &str,
         tenant: Option<&str>,
         entity_type: Option<&str>,
         limit: i64,
@@ -979,13 +995,21 @@ pub trait OtsStore: Send + Sync {
         params: &OtsTrajectoryParams<'_>,
     ) -> Result<(), PersistenceError>;
 
+    /// Mark a queued trajectory as persisted.
+    ///
+    /// Addressed by `(tenant, trajectory_id)`, the identity the row is keyed
+    /// by: the id comes from the uploading harness, so two tenants can hold
+    /// the same one.
     async fn mark_ots_trajectory_persisted(
         &self,
+        tenant: &str,
         trajectory_id: &str,
     ) -> Result<(), PersistenceError>;
 
+    /// Mark a queued trajectory as failed, addressed the same way.
     async fn mark_ots_trajectory_failed(
         &self,
+        tenant: &str,
         trajectory_id: &str,
         error: &str,
     ) -> Result<(), PersistenceError>;
@@ -1003,10 +1027,15 @@ pub trait OtsStore: Send + Sync {
         limit: i64,
     ) -> Result<Vec<OtsTrajectoryRow>, PersistenceError>;
 
+    /// Load a full OTS trajectory by tenant and ID.
+    ///
+    /// Tenant is part of the lookup so a trajectory id taken from a request
+    /// path cannot read another tenant's trace out of a shared store.
     async fn get_ots_trajectory(
         &self,
+        tenant: &str,
         trajectory_id: &str,
-    ) -> Result<Option<String>, PersistenceError>;
+    ) -> Result<Option<OtsTrajectoryDocument>, PersistenceError>;
 }
 
 /// Legacy database-backed blob capability.
@@ -1910,17 +1939,21 @@ impl OtsStore for PostgresEventStore {
 
     async fn mark_ots_trajectory_persisted(
         &self,
+        tenant: &str,
         trajectory_id: &str,
     ) -> Result<(), PersistenceError> {
-        self.mark_ots_trajectory_persisted(trajectory_id).await
+        self.mark_ots_trajectory_persisted(tenant, trajectory_id)
+            .await
     }
 
     async fn mark_ots_trajectory_failed(
         &self,
+        tenant: &str,
         trajectory_id: &str,
         error: &str,
     ) -> Result<(), PersistenceError> {
-        self.mark_ots_trajectory_failed(trajectory_id, error).await
+        self.mark_ots_trajectory_failed(tenant, trajectory_id, error)
+            .await
     }
 
     async fn list_queued_ots_trajectories(
@@ -1946,9 +1979,12 @@ impl OtsStore for PostgresEventStore {
 
     async fn get_ots_trajectory(
         &self,
+        tenant: &str,
         trajectory_id: &str,
-    ) -> Result<Option<String>, PersistenceError> {
-        self.get_ots_trajectory(trajectory_id).await
+    ) -> Result<Option<OtsTrajectoryDocument>, PersistenceError> {
+        self.get_ots_trajectory(tenant, trajectory_id)
+            .await
+            .map(|document| document.map(pg_ots_document_to_turso))
     }
 }
 
@@ -1970,17 +2006,21 @@ impl OtsStore for TursoEventStore {
 
     async fn mark_ots_trajectory_persisted(
         &self,
+        tenant: &str,
         trajectory_id: &str,
     ) -> Result<(), PersistenceError> {
-        self.mark_ots_trajectory_persisted(trajectory_id).await
+        self.mark_ots_trajectory_persisted(tenant, trajectory_id)
+            .await
     }
 
     async fn mark_ots_trajectory_failed(
         &self,
+        tenant: &str,
         trajectory_id: &str,
         error: &str,
     ) -> Result<(), PersistenceError> {
-        self.mark_ots_trajectory_failed(trajectory_id, error).await
+        self.mark_ots_trajectory_failed(tenant, trajectory_id, error)
+            .await
     }
 
     async fn list_queued_ots_trajectories(
@@ -2003,9 +2043,10 @@ impl OtsStore for TursoEventStore {
 
     async fn get_ots_trajectory(
         &self,
+        tenant: &str,
         trajectory_id: &str,
-    ) -> Result<Option<String>, PersistenceError> {
-        self.get_ots_trajectory(trajectory_id).await
+    ) -> Result<Option<OtsTrajectoryDocument>, PersistenceError> {
+        self.get_ots_trajectory(tenant, trajectory_id).await
     }
 }
 
@@ -2344,6 +2385,7 @@ fn pg_trajectory_to_turso(row: temper_store_postgres::PostgresTrajectoryRow) -> 
         request_body: row.request_body,
         intent: row.intent,
         matched_policy_ids: row.matched_policy_ids,
+        capture_seq: row.capture_seq,
     }
 }
 
@@ -2478,6 +2520,19 @@ fn pg_queued_ots_to_turso(
     }
 }
 
+fn pg_ots_document_to_turso(
+    document: temper_store_postgres::PostgresOtsTrajectoryDocument,
+) -> OtsTrajectoryDocument {
+    OtsTrajectoryDocument {
+        trajectory_id: document.trajectory_id,
+        tenant: document.tenant,
+        agent_id: document.agent_id,
+        session_id: document.session_id,
+        outcome: document.outcome,
+        data: document.data,
+    }
+}
+
 fn pg_denial_pattern_to_turso(
     row: temper_store_postgres::PostgresPolicyDenialPatternRow,
 ) -> PolicyDenialPatternRow {
@@ -2541,35 +2596,11 @@ impl DataOnlyCreateStore for PostgresEventStore {
     }
 }
 
-fn trajectory_source_label(source: &TrajectorySource) -> &'static str {
-    match source {
-        TrajectorySource::Entity => "Entity",
-        TrajectorySource::Platform => "Platform",
-        TrajectorySource::Authz => "Authz",
-    }
-}
-
-fn trajectory_request_body_json(entry: &TrajectoryEntry) -> Option<String> {
-    entry.request_body.as_ref().and_then(|value| {
-        let serialized = serde_json::to_string(value).ok()?;
-        Some(if serialized.len() > 4096 {
-            let mut end = 4096;
-            while !serialized.is_char_boundary(end) {
-                end -= 1;
-            }
-            serialized[..end].to_string()
-        } else {
-            serialized
-        })
-    })
-}
-
-fn trajectory_matched_policy_ids_json(entry: &TrajectoryEntry) -> Option<String> {
-    entry
-        .matched_policy_ids
-        .as_ref()
-        .and_then(|ids| serde_json::to_string(ids).ok())
-}
+pub(crate) use redaction::redact_secrets;
+pub(crate) use trajectory_row::bounded_request_body;
+use trajectory_row::{
+    trajectory_matched_policy_ids_json, trajectory_request_body_json, trajectory_source_label,
+};
 
 #[async_trait::async_trait]
 impl TrajectorySink for PostgresEventStore {
@@ -2598,6 +2629,7 @@ impl TrajectorySink for PostgresEventStore {
             request_body: request_body_json.as_deref(),
             intent: entry.intent.as_deref(),
             matched_policy_ids: matched_policy_ids_json.as_deref(),
+            capture_seq: entry.capture_seq,
         })
         .await
         .map_err(|e| {
@@ -2636,6 +2668,7 @@ impl TrajectorySink for TursoEventStore {
             request_body: request_body_json.as_deref(),
             intent: entry.intent.as_deref(),
             matched_policy_ids: matched_policy_ids_json.as_deref(),
+            capture_seq: entry.capture_seq,
         })
         .await
         .map_err(|e| {
@@ -2681,6 +2714,7 @@ impl TrajectorySink for TenantStoreRouter {
                 request_body: request_body_json.as_deref(),
                 intent: entry.intent.as_deref(),
                 matched_policy_ids: matched_policy_ids_json.as_deref(),
+                capture_seq: entry.capture_seq,
             })
             .await
             .map_err(|e| {

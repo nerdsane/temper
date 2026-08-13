@@ -148,6 +148,11 @@ pub(super) async fn dispatch_bound_action(
                 reason: &reason,
                 module_name: None,
                 from_status: Some(current_state.state.status.clone()),
+                intent: agent_ctx.intent.clone(),
+                session_id: agent_ctx.session_id.clone(),
+                // A genuine attempted dispatch of a registered action: walked by
+                // conformance, matching both parents' behavior.
+                spec_governed: None,
             },
         )
         .await;

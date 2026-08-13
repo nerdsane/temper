@@ -146,7 +146,7 @@ impl crate::state::ServerState {
             agent_ctx
                 .security_ctx
                 .clone()
-                .unwrap_or_else(|| SecurityContext::from_headers(&[]))
+                .unwrap_or_else(SecurityContext::anonymous)
                 .with_action_context(composite_action_context),
         );
 

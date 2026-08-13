@@ -68,13 +68,15 @@ pub(crate) async fn handle_repl(
     if let Err(status) = require_repl_authorization(&state, authenticated) {
         return status.into_response();
     }
-    let session_id = headers
-        .get("x-session-id")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from);
+    // Session and intent come from the canonical observability extractor so the
+    // REPL honours the same header aliases as every other entrypoint
+    // (`X-Temper-Observe-Session-Id`/`X-Session-Id`,
+    // `X-Temper-Observe-Intent`/`X-Intent`). These are correlation-only and
+    // carry no authority; identity comes from the credential above.
+    let agent_ctx = crate::request_context::extract_agent_context(&headers);
+    let session_id = agent_ctx.session_id.clone();
 
     let tenant = authenticated.tenant().to_string();
-    let agent_id = Some(authenticated.security_context().principal.id.clone());
     let agent_type = authenticated
         .security_context()
         .principal
@@ -96,8 +98,14 @@ pub(crate) async fn handle_repl(
                 capability.tenant().to_string(),
             )
         });
+
+    let agent_id = authenticated.security_context().principal.id.clone();
+    let trajectory_agent_type = agent_type.clone();
     let port = state.listen_port.get().copied().unwrap_or(4200);
     let code = body.code;
+    // The submitted code is the request body of a REPL call; a failed run is
+    // unreadable without it. Size is bounded when the entry is enqueued.
+    let submitted_code = code.clone();
     let tenant_for_repl = tenant.clone();
     let agent_id_for_repl = agent_id.clone();
 
@@ -112,7 +120,7 @@ pub(crate) async fn handle_repl(
             let config = temper_sandbox::repl::ReplConfig {
                 server_port: port,
                 tenant: tenant_for_repl,
-                agent_id: agent_id_for_repl,
+                agent_id: Some(agent_id_for_repl),
                 session_id,
                 internal_credential_issuer,
             };
@@ -147,17 +155,18 @@ pub(crate) async fn handle_repl(
                 from_status: None,
                 to_status: None,
                 error: Some(e.to_string()),
-                agent_id: agent_id.clone(),
-                session_id: None,
+                agent_id: Some(agent_id.clone()),
+                session_id: agent_ctx.session_id.clone(),
                 authz_denied: None,
                 denied_resource: None,
                 denied_module: None,
                 source: Some(TrajectorySource::Platform),
                 spec_governed: None,
-                agent_type,
-                request_body: None,
-                intent: None,
+                agent_type: trajectory_agent_type.clone(),
+                request_body: Some(serde_json::json!({ "code": submitted_code })),
+                intent: agent_ctx.intent.clone(),
                 matched_policy_ids: None,
+                capture_seq: None,
             };
             if !state.enqueue_trajectory_entry(entry) {
                 tracing::warn!("failed to enqueue REPL trajectory entry");

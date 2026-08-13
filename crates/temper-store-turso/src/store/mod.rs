@@ -2,7 +2,7 @@
 //!
 //! Split into domain-focused sub-modules for cohesion:
 //! - [`specs`]: Spec CRUD (upsert, verification, load)
-//! - [`trajectory`]: Trajectory persistence and queries
+//! - [`trajectory`] / [`trajectory_queries`]: Trajectory writes and reads
 //! - [`evolution`]: Feature requests, evolution records, design-time events
 //! - [`authz`]: Authorization decisions and Cedar policies
 //! - [`wasm`]: WASM module storage and invocation logs
@@ -38,6 +38,7 @@ mod specs;
 #[cfg(test)]
 mod tests;
 mod trajectory;
+mod trajectory_queries;
 mod wasm;
 mod write_gate;
 
@@ -312,10 +313,14 @@ impl TursoEventStore {
             schema::ALTER_TRAJECTORIES_ADD_REQUEST_BODY,
             schema::ALTER_TRAJECTORIES_ADD_INTENT,
             schema::ALTER_TRAJECTORIES_ADD_MATCHED_POLICY_IDS,
+            schema::ALTER_TRAJECTORIES_ADD_CAPTURE_SEQ,
         ] {
             let _ = conn.execute(stmt, ()).await; // ignore "duplicate column" errors
         }
         conn.execute(schema::CREATE_TRAJECTORIES_AGENT_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_TRAJECTORIES_SESSION_INDEX, ())
             .await
             .map_err(storage_error)?;
 
@@ -331,6 +336,10 @@ impl TursoEventStore {
         ] {
             let _ = conn.execute(stmt, ()).await;
         }
+        // Runs after the column migrations, so the rebuild copies a table that
+        // already has every column, and before the indexes, which the rebuild
+        // drops along with the old table.
+        Self::rebuild_ots_trajectories_for_tenant_identity(&conn).await?;
         conn.execute(schema::CREATE_OTS_TRAJECTORIES_AGENT_INDEX, ())
             .await
             .map_err(storage_error)?;
@@ -417,6 +426,69 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
 
+        Ok(())
+    }
+
+    /// Rekey an existing `ots_trajectories` table from `trajectory_id` alone to
+    /// `(tenant, trajectory_id)`.
+    ///
+    /// SQLite has no `ALTER TABLE ... PRIMARY KEY`, so the only way to change a
+    /// key is to rebuild the table. The rebuild runs once: it reads the stored
+    /// DDL first and returns immediately on a table that is already scoped, so
+    /// it costs one `sqlite_master` read per startup after that.
+    ///
+    /// All four steps run in one transaction. Run as separate statements, a
+    /// process that died between the `DROP` and the `RENAME` would leave no
+    /// `ots_trajectories` at all: the next boot's `CREATE TABLE IF NOT EXISTS`
+    /// would make an empty one, already carrying the tenant-scoped marker, so
+    /// this function would skip the rebuild and every stored trajectory would
+    /// stay stranded in `ots_trajectories_rebuild`. SQLite's DDL is
+    /// transactional, so the whole rekey either lands or does not.
+    async fn rebuild_ots_trajectories_for_tenant_identity(
+        conn: &InstrumentedConnection,
+    ) -> Result<(), PersistenceError> {
+        // Scoped so the cursor is closed before the rebuild runs: an open read
+        // on `sqlite_master` holds a lock that `DROP TABLE` cannot take.
+        let ddl = {
+            let mut rows = conn
+                .query(schema::SELECT_OTS_TRAJECTORIES_DDL, ())
+                .await
+                .map_err(storage_error)?;
+            match rows.next().await.map_err(storage_error)? {
+                Some(row) => row.get::<String>(0).unwrap_or_default(),
+                // No table at all: the CREATE above did not run, so there is
+                // nothing to rebuild and nothing to check.
+                None => return Ok(()),
+            }
+        };
+        if ddl.contains(schema::OTS_TRAJECTORIES_TENANT_IDENTITY_MARKER) {
+            return Ok(());
+        }
+
+        tracing::info!("rekeying ots_trajectories by (tenant, trajectory_id)");
+        conn.execute("BEGIN IMMEDIATE", ())
+            .await
+            .map_err(storage_error)?;
+        for stmt in [
+            schema::CREATE_OTS_TRAJECTORIES_REBUILD_TABLE,
+            schema::COPY_OTS_TRAJECTORIES_INTO_REBUILD,
+            schema::DROP_OTS_TRAJECTORIES_LEGACY_TABLE,
+            schema::RENAME_OTS_TRAJECTORIES_REBUILD,
+        ] {
+            if let Err(error) = conn.execute(stmt, ()).await {
+                // Leaving the transaction open would hold a write lock for the
+                // life of the connection, so the rollback runs before the
+                // error is returned and its own failure is reported alongside.
+                if let Err(rollback) = conn.execute("ROLLBACK", ()).await {
+                    tracing::error!(
+                        error = %rollback,
+                        "failed to roll back the ots_trajectories rekey"
+                    );
+                }
+                return Err(storage_error(error));
+            }
+        }
+        conn.execute("COMMIT", ()).await.map_err(storage_error)?;
         Ok(())
     }
 
@@ -592,6 +664,11 @@ pub struct TursoTrajectoryRow {
     pub intent: Option<String>,
     /// Cedar policy IDs that contributed to the authorization decision (JSON array).
     pub matched_policy_ids: Option<Vec<String>>,
+    /// Monotonic capture order stamped by the process that recorded the row.
+    ///
+    /// Null on rows written before the column existed; see
+    /// [`crate::schema::ALTER_TRAJECTORIES_ADD_CAPTURE_SEQ`].
+    pub capture_seq: Option<i64>,
 }
 
 /// Aggregated trajectory statistics.

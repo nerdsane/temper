@@ -59,6 +59,7 @@ pub(crate) async fn handle_trajectories(
         for store in &stores {
             match store
                 .query_trajectory_stats(
+                    tenant_scope.as_str(),
                     params.entity_type.as_deref(),
                     params.action.as_deref(),
                     success_filter,
@@ -125,6 +126,15 @@ pub(crate) async fn handle_trajectories(
 ///
 /// Called by the production chat proxy when a user asks for something
 /// that doesn't map to any available action. This feeds the Evolution Engine.
+///
+/// The row's tenant, agent id, and agent type come from the credential; the
+/// descriptive fields — entity type, action name, session — come from the request
+/// body, so the row is a caller's account of something that never reached a
+/// governed dispatch. It is written `spec_governed = false` for
+/// that reason: the conformance checker judges governed dispatches, and a row
+/// any caller can post under any session and entity type would otherwise let
+/// one caller inject violations into another run's report
+/// (`crate::conformance::walk::row_disposition`).
 #[instrument(skip_all, fields(otel.name = "POST /api/evolution/trajectories/unmet"))]
 pub(crate) async fn handle_unmet_intent(
     State(state): State<ServerState>,
@@ -136,6 +146,21 @@ pub(crate) async fn handle_unmet_intent(
     require_observe_auth(&state, authenticated, "write_trajectories", "Trajectory")
         .map_err(|sc| (sc, "unauthorized".to_string()))?;
 
+    if !state.enqueue_trajectory_entry(unmet_intent_entry(authenticated, &body)?) {
+        tracing::warn!("failed to enqueue unmet-intent trajectory");
+    }
+
+    Ok(StatusCode::CREATED)
+}
+
+/// Build the row an unmet-intent report becomes.
+///
+/// The row's tenant comes from the credential, never from the body: authorizing
+/// against one tenant and writing into another is the split-brain ADR-0157 closes.
+fn unmet_intent_entry(
+    authenticated: &AuthenticatedRequestContext,
+    body: &serde_json::Value,
+) -> Result<TrajectoryEntry, (StatusCode, String)> {
     let intent = body
         .get("action")
         .or_else(|| body.get("intent"))
@@ -152,7 +177,7 @@ pub(crate) async fn handle_unmet_intent(
         .unwrap_or("");
     let error_msg = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
 
-    let entry = TrajectoryEntry {
+    Ok(TrajectoryEntry {
         timestamp: sim_now().to_rfc3339(),
         tenant: tenant.to_string(),
         entity_type: entity_type.to_string(),
@@ -183,7 +208,12 @@ pub(crate) async fn handle_unmet_intent(
         } else {
             error_msg.to_string()
         }),
-        spec_governed: None,
+        // An unmet intent is by definition an action the kernel never
+        // dispatched, and the row body is caller-supplied. Both make it a
+        // report about the run rather than a record of it, so it stays out of
+        // conformance verdicts.
+        spec_governed: Some(false),
+        // Provenance comes from the authenticated credential, not the body.
         agent_type: authenticated
             .security_context()
             .principal
@@ -196,12 +226,8 @@ pub(crate) async fn handle_unmet_intent(
             .map(str::to_string)
             .or_else(|| Some(intent.to_string())),
         matched_policy_ids: None,
-    };
-    if !state.enqueue_trajectory_entry(entry) {
-        tracing::warn!("failed to enqueue unmet-intent trajectory");
-    }
-
-    Ok(StatusCode::CREATED)
+        capture_seq: None,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +243,19 @@ pub(crate) struct OtsTrajectoryQueryParams {
 }
 
 /// POST /api/ots/trajectories — receive a full OTS trajectory from an MCP session.
+///
+/// The body is parsed as an [`OTSTrajectory`], not as free JSON. Two things
+/// depend on that:
+///
+/// - **Identity.** The run's id is the document's top-level `trajectory_id`.
+///   It is what the uploader holds and what
+///   `GET /api/ots/trajectories/{id}/atif` and a conformance check address the
+///   row by, so storing anything else makes a successfully uploaded run
+///   unreachable.
+/// - **The token-signal contract.** `OTSTurn` refuses to deserialize a turn
+///   whose completion-side signals disagree, so a misaligned training sample
+///   is rejected at the door instead of persisted and later exported as valid
+///   RL data.
 #[instrument(skip_all, fields(otel.name = "POST /api/ots/trajectories"))]
 pub(crate) async fn handle_post_ots_trajectory(
     State(state): State<ServerState>,
@@ -228,16 +267,27 @@ pub(crate) async fn handle_post_ots_trajectory(
         .map_err(|status| (status, "unauthorized".to_string()))?;
     require_observe_auth(&state, authenticated, "write_trajectories", "OtsTrajectory")
         .map_err(|status| (status, "unauthorized".to_string()))?;
-    // Parse the OTS trajectory JSON to extract indexed fields.
-    let trajectory: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")))?;
+    let trajectory: temper_ots::models::OTSTrajectory =
+        serde_json::from_str(&body).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("not a valid OTS trajectory: {e}"),
+            )
+        })?;
 
-    let trajectory_id = trajectory
-        .get("metadata")
-        .and_then(|m| m.get("trajectory_id"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| sim_uuid().to_string());
+    let trajectory_id = if trajectory.trajectory_id.is_empty() {
+        // Uploads have carried an id since the format existed; generating one
+        // keeps a legacy producer working, at the cost of an id it cannot
+        // address the row by.
+        let generated = sim_uuid().to_string();
+        tracing::warn!(
+            generated_trajectory_id = %generated,
+            "OTS upload carried no trajectory_id; storing under a generated id"
+        );
+        generated
+    } else {
+        trajectory.trajectory_id.clone()
+    };
 
     let agent_id = authenticated.security_context().principal.id.as_str();
 
@@ -246,17 +296,13 @@ pub(crate) async fn handle_post_ots_trajectory(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let outcome = trajectory
-        .get("metadata")
-        .and_then(|m| m.get("outcome"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+    let outcome = match trajectory.metadata.outcome {
+        temper_ots::models::OutcomeType::Success => "success",
+        temper_ots::models::OutcomeType::PartialSuccess => "partial_success",
+        temper_ots::models::OutcomeType::Failure => "failure",
+    };
 
-    let turn_count = trajectory
-        .get("turns")
-        .and_then(|t| t.as_array())
-        .map(|a| a.len() as i64)
-        .unwrap_or(0);
+    let turn_count = trajectory.turns.len() as i64;
 
     let tenant = authenticated.tenant().as_str();
 
@@ -358,5 +404,97 @@ pub(crate) async fn handle_get_ots_trajectories(
                 "total": 0,
             })))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conformance::{ConformanceInput, SpecResolution, check_conformance};
+    use temper_spec::automaton::parse_automaton;
+
+    const ORDER_IOA: &str = include_str!("../../../../../test-fixtures/specs/order.ioa.toml");
+
+    #[test]
+    fn an_unmet_intent_row_is_never_a_governed_dispatch() {
+        // Even when the caller declares an entity source, a governed session,
+        // and a real actor's entity type.
+        let authenticated = AuthenticatedRequestContext::new(
+            temper_runtime::tenant::TenantId::default(),
+            temper_authz::SecurityContext::system(),
+        );
+        let entry = unmet_intent_entry(
+            &authenticated,
+            &serde_json::json!({
+                "tenant": "default",
+                "entity_type": "Order",
+                "action": "ShipOrder",
+                "session_id": "session-1",
+                "source": "entity",
+            }),
+        )
+        .expect("the system context is bound to the default tenant");
+
+        assert_eq!(
+            entry.spec_governed,
+            Some(false),
+            "the kernel never dispatched this action; the row is a report about the run"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unmet_intent_row_cannot_inject_a_violation_into_a_session() {
+        // The whole row is caller-chosen, so without the exclusion any caller
+        // could post an illegal transition into another run's report. Written
+        // and read back through a real store, because what the checker sees is
+        // the stored row, not the entry.
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let db_url = format!("file:{}", dir.path().join("unmet.db").display());
+        let store = temper_store_turso::TursoEventStore::new(&db_url, None)
+            .await
+            .expect("create local turso store");
+
+        let authenticated = AuthenticatedRequestContext::new(
+            temper_runtime::tenant::TenantId::default(),
+            temper_authz::SecurityContext::system(),
+        );
+        let entry = unmet_intent_entry(
+            &authenticated,
+            &serde_json::json!({
+                "tenant": "default",
+                "entity_type": "Order",
+                "action": "ShipOrder",
+                "session_id": "session-1",
+                "source": "entity",
+            }),
+        )
+        .expect("the system context is bound to the default tenant");
+        crate::storage::TrajectorySink::persist_trajectory_entry(&store, &entry)
+            .await
+            .expect("persist unmet intent");
+
+        let rows = store
+            .query_trajectories_by_session("session-1", Some("default"), None, 10)
+            .await
+            .expect("read the session back");
+        assert_eq!(rows.len(), 1, "the row is stored and readable");
+
+        let automaton = parse_automaton(ORDER_IOA).expect("order fixture parses");
+        let report = check_conformance(ConformanceInput {
+            automaton: &automaton,
+            kernel_rows: &rows,
+            ots_trajectory: None,
+            rows_truncated: false,
+            spec_resolution: SpecResolution::Pinned,
+            capture_degraded: false,
+        });
+
+        assert!(
+            report.violations.is_empty(),
+            "a caller-supplied unmet intent is not this actor executing its spec: {:?}",
+            report.violations
+        );
+        assert_eq!(report.stats.non_governed_rows_skipped, 1);
+        assert_eq!(report.stats.actor_rows, 0);
     }
 }

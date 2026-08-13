@@ -300,11 +300,30 @@ pub const ALTER_TRAJECTORIES_ADD_REQUEST_BODY: &str =
 pub const ALTER_TRAJECTORIES_ADD_INTENT: &str = "ALTER TABLE trajectories ADD COLUMN intent TEXT";
 pub const ALTER_TRAJECTORIES_ADD_MATCHED_POLICY_IDS: &str =
     "ALTER TABLE trajectories ADD COLUMN matched_policy_ids TEXT";
+/// Capture order within the writing process.
+///
+/// Rows are written by independently spawned persistence tasks, so the
+/// autoincrement `id` records the order the writes *landed*, not the order the
+/// kernel *captured* them. The conformance checker replays a session as a
+/// state-machine walk and needs capture order, so the capturing process stamps
+/// a monotonic sequence on the entry before it is queued and the read orders
+/// by it. Null on rows written before this column existed.
+pub const ALTER_TRAJECTORIES_ADD_CAPTURE_SEQ: &str =
+    "ALTER TABLE trajectories ADD COLUMN capture_seq INTEGER";
 
 /// Index on agent_id for agent-scoped trajectory queries.
 pub const CREATE_TRAJECTORIES_AGENT_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_trajectories_agent
     ON trajectories(agent_id);";
+
+/// Index on session_id for session-scoped trajectory replay.
+///
+/// Conformance checking reads one session's rows in capture order, so the
+/// index covers every ordering column and the read is a range scan rather
+/// than a table scan.
+pub const CREATE_TRAJECTORIES_SESSION_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_trajectories_session_capture
+    ON trajectories(session_id, created_at, capture_seq, id);";
 
 /// Feature request records generated from trajectory analysis.
 pub const CREATE_FEATURE_REQUESTS_TABLE: &str = "\

@@ -14,7 +14,7 @@ pub use temper_authz::AuthenticatedRequestContext;
 pub(crate) use helpers::{
     DenialInput, GovernedMutationAuth, observe_tenant_scope, record_authz_denial,
     require_authenticated_context, require_governed_mutation_auth, require_observe_auth,
-    require_tenant_match,
+    require_tenant_match, require_trajectory_content_auth,
 };
 #[cfg(feature = "observe")]
 pub(crate) use helpers::{ResourceAuthorization, require_resource_authorization};

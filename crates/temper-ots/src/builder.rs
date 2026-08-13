@@ -84,15 +84,23 @@ impl TrajectoryBuilder {
         turn.decisions.push(decision);
     }
 
-    /// End the current turn, recording its duration. Panics if no turn is in progress.
+    /// End the current turn, recording its duration.
     ///
     /// Duration is computed as the difference between `end_time` and the
     /// turn's start timestamp.
+    ///
+    /// Panics if no turn is in progress, or if the turn's completion-side
+    /// token signals do not line up — a misaligned turn is a malformed
+    /// training sample, and sealing it here is the last point at which the
+    /// producer can still be told which turn was wrong.
     pub fn end_turn(&mut self, end_time: DateTime<Utc>) {
         let mut turn = self
             .current_turn
             .take()
             .expect("Cannot end turn: no turn in progress");
+        if let Err(error) = turn.validate_token_signals() {
+            panic!("Cannot end turn: {error}");
+        }
         let duration_ms = (end_time - turn.timestamp).num_milliseconds() as f64;
         turn.duration_ms = Some(duration_ms);
         self.turns.push(turn);
@@ -103,15 +111,73 @@ impl TrajectoryBuilder {
         self.system_message = Some(system_message);
     }
 
-    /// Build the final trajectory, consuming the builder.
+    /// Record the actor spec version (hash or version) this run executed under.
+    pub fn set_spec_version(&mut self, spec_version: impl Into<String>) {
+        self.metadata.spec_version = Some(spec_version.into());
+    }
+
+    /// Record the harness that is driving this run (e.g. "temperpaw").
+    pub fn set_harness(&mut self, harness: impl Into<String>) {
+        self.metadata.harness = Some(harness.into());
+    }
+
+    /// Attach serving-stack token IDs to the current turn.
     ///
-    /// If a turn is still in progress, it is automatically ended using
-    /// `sim_now()` as the end time.
+    /// Panics if no turn is in progress, or if a completion-aligned signal is
+    /// already set at a different length — see [`OTSTurn::response_mask`].
+    pub fn set_turn_token_ids(
+        &mut self,
+        prompt_token_ids: Vec<u32>,
+        completion_token_ids: Vec<u32>,
+    ) {
+        let turn = self
+            .current_turn
+            .take()
+            .expect("Cannot set token ids: no turn in progress");
+        self.current_turn = Some(
+            turn.with_prompt_token_ids(prompt_token_ids)
+                .with_completion_token_ids(completion_token_ids),
+        );
+    }
+
+    /// Attach the per-token response mask to the current turn.
     ///
+    /// `1` marks a model-generated token, `0` a tool or otherwise injected
+    /// token, one entry per completion token. Panics if no turn is in
+    /// progress, if an entry is outside `{0, 1}`, or if a completion-aligned
+    /// signal is already set at a different length.
+    pub fn set_turn_response_mask(&mut self, response_mask: Vec<u8>) {
+        let turn = self
+            .current_turn
+            .take()
+            .expect("Cannot set response mask: no turn in progress");
+        self.current_turn = Some(turn.with_response_mask(response_mask));
+    }
+
+    /// Attach per-token log probabilities to the current turn.
+    ///
+    /// One entry per completion token. Panics if no turn is in progress, or
+    /// if a completion-aligned signal is already set at a different length.
+    pub fn set_turn_logprobs(&mut self, logprobs: Vec<f64>) {
+        let turn = self
+            .current_turn
+            .take()
+            .expect("Cannot set logprobs: no turn in progress");
+        self.current_turn = Some(turn.with_logprobs(logprobs));
+    }
+
     /// Build a snapshot of the current trajectory without consuming the builder.
     ///
     /// Useful for mid-session uploads where the session should continue
     /// recording new turns after the upload.
+    ///
+    /// The in-progress turn goes through the same token-signal check
+    /// [`Self::end_turn`] applies. A mid-turn flush is the one path that
+    /// carries an unsealed turn into a document, and a turn whose
+    /// completion-side signals do not yet agree is a malformed training
+    /// sample: the upload endpoint refuses the whole document, so producing
+    /// one here would lose the snapshot at the far end for a fault that is
+    /// visible right here.
     pub fn snapshot(&self) -> OTSTrajectory {
         let mut metadata = self.metadata.clone();
         let now = sim_now(); // determinism-ok: sim_now is DST-safe
@@ -120,6 +186,9 @@ impl TrajectoryBuilder {
 
         let mut turns = self.turns.clone();
         if let Some(ref current) = self.current_turn {
+            if let Err(error) = current.validate_token_signals() {
+                panic!("Cannot snapshot trajectory: {error}");
+            }
             turns.push(current.clone());
         }
 
@@ -158,200 +227,5 @@ impl TrajectoryBuilder {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::models::{
-        DecisionType, MessageRole, OTSChoice, OTSConsequence, OTSMessageContent, OutcomeType,
-    };
-    use temper_runtime::scheduler::sim_now;
-
-    #[test]
-    fn test_builder_basic_flow() {
-        let now = sim_now();
-        let metadata = OTSMetadata::new("Test task", "agent_1", OutcomeType::Success, now);
-        let context = OTSContext::new();
-        let mut builder = TrajectoryBuilder::new(metadata, context);
-
-        builder.start_turn(now);
-        builder.add_message(OTSMessage::new(
-            MessageRole::User,
-            OTSMessageContent::text("Hello"),
-            now,
-        ));
-        builder.add_message(OTSMessage::new(
-            MessageRole::Assistant,
-            OTSMessageContent::text("Hi there"),
-            now,
-        ));
-        builder.end_turn(now);
-
-        let trajectory = builder.build();
-        assert_eq!(trajectory.turns.len(), 1);
-        assert_eq!(trajectory.turns[0].messages.len(), 2);
-        assert_eq!(trajectory.turns[0].turn_id, 1);
-    }
-
-    #[test]
-    fn test_builder_multiple_turns() {
-        let now = sim_now();
-        let metadata = OTSMetadata::new("Multi-turn", "agent_2", OutcomeType::Success, now);
-        let mut builder = TrajectoryBuilder::new(metadata, OTSContext::new());
-
-        builder.start_turn(now);
-        builder.add_message(OTSMessage::new(
-            MessageRole::User,
-            OTSMessageContent::text("Turn 1"),
-            now,
-        ));
-        builder.end_turn(now);
-
-        builder.start_turn(now);
-        builder.add_message(OTSMessage::new(
-            MessageRole::User,
-            OTSMessageContent::text("Turn 2"),
-            now,
-        ));
-        builder.end_turn(now);
-
-        let trajectory = builder.build();
-        assert_eq!(trajectory.turns.len(), 2);
-        assert_eq!(trajectory.turns[0].turn_id, 1);
-        assert_eq!(trajectory.turns[1].turn_id, 2);
-    }
-
-    #[test]
-    fn test_builder_with_decisions() {
-        let now = sim_now();
-        let metadata = OTSMetadata::new("Decision task", "agent_3", OutcomeType::Success, now);
-        let mut builder = TrajectoryBuilder::new(metadata, OTSContext::new());
-
-        builder.start_turn(now);
-        let decision = OTSDecision::new(
-            DecisionType::ToolSelection,
-            OTSChoice::new("search"),
-            OTSConsequence::success(),
-        );
-        builder.add_decision(decision);
-        builder.end_turn(now);
-
-        let trajectory = builder.build();
-        assert_eq!(trajectory.turns[0].decisions.len(), 1);
-    }
-
-    #[test]
-    fn test_builder_with_system_message() {
-        let now = sim_now();
-        let metadata = OTSMetadata::new("Sys msg task", "agent_4", OutcomeType::Success, now);
-        let mut builder = TrajectoryBuilder::new(metadata, OTSContext::new());
-
-        builder.set_system_message(OTSSystemMessage::new("You are helpful", now));
-
-        let trajectory = builder.build();
-        assert!(trajectory.system_message.is_some());
-        assert_eq!(
-            trajectory.system_message.unwrap().content,
-            "You are helpful"
-        );
-    }
-
-    #[test]
-    fn test_builder_auto_closes_turn() {
-        let now = sim_now();
-        let metadata = OTSMetadata::new("Auto-close", "agent_5", OutcomeType::Success, now);
-        let mut builder = TrajectoryBuilder::new(metadata, OTSContext::new());
-
-        builder.start_turn(now);
-        builder.add_message(OTSMessage::new(
-            MessageRole::User,
-            OTSMessageContent::text("Unclosed turn"),
-            now,
-        ));
-
-        // Build should auto-close the turn
-        let trajectory = builder.build();
-        assert_eq!(trajectory.turns.len(), 1);
-    }
-
-    #[test]
-    fn test_builder_sets_end_timestamp() {
-        let now = sim_now();
-        let metadata = OTSMetadata::new("End time", "agent_6", OutcomeType::Success, now);
-        let builder = TrajectoryBuilder::new(metadata, OTSContext::new());
-
-        let trajectory = builder.build();
-        assert!(trajectory.metadata.timestamp_end.is_some());
-        assert!(trajectory.metadata.duration_ms.is_some());
-    }
-
-    #[test]
-    fn test_snapshot_does_not_consume_builder() {
-        let now = sim_now();
-        let metadata = OTSMetadata::new("Snapshot", "agent-snap", OutcomeType::Success, now);
-        let mut builder = TrajectoryBuilder::new(metadata, OTSContext::new());
-
-        builder.start_turn(now);
-        builder.add_message(OTSMessage::new(
-            MessageRole::User,
-            OTSMessageContent::text("in-progress"),
-            now,
-        ));
-
-        let snapshot = builder.snapshot();
-        assert_eq!(
-            snapshot.turns.len(),
-            1,
-            "snapshot should include in-progress turn"
-        );
-
-        // Builder should remain usable after snapshot.
-        builder.end_turn(now);
-        let final_trajectory = builder.build();
-        assert_eq!(final_trajectory.turns.len(), 1);
-    }
-
-    #[test]
-    #[should_panic(expected = "Cannot start a new turn while one is in progress")]
-    fn test_builder_double_start_panics() {
-        let now = sim_now();
-        let metadata = OTSMetadata::new("Double start", "agent_7", OutcomeType::Success, now);
-        let mut builder = TrajectoryBuilder::new(metadata, OTSContext::new());
-
-        builder.start_turn(now);
-        builder.start_turn(now); // Should panic
-    }
-
-    #[test]
-    #[should_panic(expected = "Cannot end turn: no turn in progress")]
-    fn test_builder_end_without_start_panics() {
-        let now = sim_now();
-        let metadata = OTSMetadata::new("No start", "agent_8", OutcomeType::Success, now);
-        let mut builder = TrajectoryBuilder::new(metadata, OTSContext::new());
-
-        builder.end_turn(now); // Should panic
-    }
-
-    #[test]
-    #[should_panic(expected = "Cannot add message: no turn in progress")]
-    fn test_builder_message_without_turn_panics() {
-        let now = sim_now();
-        let metadata = OTSMetadata::new("No turn", "agent_9", OutcomeType::Success, now);
-        let mut builder = TrajectoryBuilder::new(metadata, OTSContext::new());
-
-        builder.add_message(OTSMessage::new(
-            MessageRole::User,
-            OTSMessageContent::text("Orphan"),
-            now,
-        ));
-    }
-
-    #[test]
-    fn test_builder_empty_trajectory() {
-        let now = sim_now();
-        let metadata = OTSMetadata::new("Empty", "agent_10", OutcomeType::Failure, now);
-        let builder = TrajectoryBuilder::new(metadata, OTSContext::new());
-
-        let trajectory = builder.build();
-        assert!(trajectory.turns.is_empty());
-        assert_eq!(trajectory.version, "0.1.0");
-    }
-}
+#[path = "builder_test.rs"]
+mod builder_test;
