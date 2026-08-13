@@ -84,7 +84,10 @@ impl<'a> GovernedApplicationDataService<'a> {
     }
 
     /// Execute one bounded query-plane page for either external adapter.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the query-plane boundary preserves its storage contract explicitly"
+    )]
     pub(crate) async fn query_index_page(
         &self,
         tenant: &TenantId,

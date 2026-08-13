@@ -15,6 +15,49 @@ use temper_wasm::{
 const ECHO_WASM: &[u8] = include_bytes!("fixtures/echo_integration.wasm");
 /// Pre-built SDK-backed module that exercises `temper_wasm_sdk::Context::from_host`.
 const SDK_CONTEXT_READER_WASM: &[u8] = include_bytes!("fixtures/sdk_context_reader.wasm");
+const WAT_DATA_RESPONSE_LIFECYCLE: &str = r#"
+    (module
+      (import "env" "host_temper_data_call" (func $call (param i32 i32) (result i64)))
+      (import "env" "host_temper_data_response_len" (func $len (param i32) (result i32)))
+      (import "env" "host_temper_data_response_read" (func $read (param i32 i32 i32 i32) (result i32)))
+      (import "env" "host_temper_data_response_close" (func $close (param i32) (result i32)))
+      (import "env" "host_set_result" (func $result (param i32 i32)))
+      (memory (export "memory") 1)
+      (data (i32.const 1024) "x")
+      (func (export "run") (param i32 i32) (result i32)
+        (local $handle i32) (local $length i32)
+        i32.const 1024 i32.const 1 call $call i32.wrap_i64 local.set $handle
+        local.get $handle call $len local.set $length
+        local.get $handle i32.const 0 i32.const 4096 local.get $length call $read drop
+        local.get $handle call $close drop
+        i32.const 4096 local.get $length call $result
+        i32.const 0))
+"#;
+
+#[tokio::test]
+async fn data_response_handle_read_and_close_lifecycle() {
+    let engine = WasmEngine::new().unwrap();
+    let hash = engine
+        .compile_and_cache(WAT_DATA_RESPONSE_LIFECYCLE.as_bytes())
+        .unwrap();
+    let response =
+        br#"{"action":"DataCompleted","params":{"via":"direct_abi"},"success":true}"#.to_vec();
+    let host = Arc::new(SimWasmHost::new().with_data_response(response));
+    let streams = Arc::new(RwLock::new(StreamRegistry::default()));
+    let result = engine
+        .invoke(
+            &hash,
+            &build_context(),
+            host,
+            &WasmResourceLimits::default(),
+            streams,
+        )
+        .await
+        .unwrap();
+    assert!(result.success);
+    assert_eq!(result.callback_action, "DataCompleted");
+    assert_eq!(result.callback_params["via"], "direct_abi");
+}
 
 fn build_context() -> WasmInvocationContext {
     WasmInvocationContext {
