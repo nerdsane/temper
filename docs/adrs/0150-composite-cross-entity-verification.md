@@ -131,10 +131,10 @@ compatible (existing specs omit it and get `false`). It is threaded into
 The product state space can be large. The composite BFS is bounded with a target
 state-count budget (mirroring the per-entity checker, which already inspects
 `is_done()` after a bounded `spawn_bfs`). If the checker stops before exhausting
-the space (`!is_done()`), the result is marked **INCOMPLETE**: the command emits
-a warning, does not claim a pass, and surfaces that the proof is partial. An
-incomplete run never silently passes — it is honestly reported as not fully
-explored. Discovered violations from a partial run are still real and still gate.
+the space (`!is_done()`), the result is marked **INCOMPLETE**: the command
+fails (non-zero exit). An incomplete run is not a pass. Discovered violations
+from a partial run are still real and still gate. Raise `--composite-budget`
+or narrow the spec to finish the proof.
 
 ### Sub-Decision 6: `required` cross-entity ref — empty ref fails, not vacuous (ARN-92 #2)
 
@@ -166,7 +166,15 @@ resolution concern.
 - Authors gain a precise vocabulary for intentional best-effort drops (`drop_ok`)
   and a verifier that holds them to it everywhere else.
 - The budget keeps verification bounded and honest: large products report
-  INCOMPLETE rather than passing vacuously or hanging.
+  INCOMPLETE rather than passing vacuously or hanging. The CLI treats
+  INCOMPLETE as a failed command (non-zero exit). A partial BFS is not a
+  pass. Raise `--composite-budget` or narrow the spec.
+- Seed cover and plan scope close over `cross_entity_state` guards as well
+  as trigger edges. A guard that only *reads* another entity is a joint
+  coupling: the target automaton is in the model, and the guard is
+  evaluated against that slice instead of left as a free boolean.
+- `temper verify` accepts repeated `--specs-dir` so two apps (e.g.
+  katagami-curation + katagami-commons) compose into one joint proof.
 
 ## Alternatives Considered
 

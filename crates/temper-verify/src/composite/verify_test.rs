@@ -70,6 +70,53 @@ fn seed_cover_groups_connected_entities_into_one_seed() {
 }
 
 #[test]
+fn seed_cover_joins_entities_coupled_only_by_a_guard() {
+    let file = parse_automaton(
+        r#"
+[automaton]
+name = "File"
+states = ["Draft", "Ready"]
+initial = "Draft"
+allow_indefinite_states = ["Draft", "Ready"]
+
+[[action]]
+name = "Submit"
+from = ["Draft"]
+to = "Ready"
+guard = [{ type = "cross_entity_state", entity_type = "Workspace", entity_id_source = "workspace_id", required_status = ["Active"] }]
+"#,
+    )
+    .unwrap();
+    let workspace = parse_automaton(
+        r#"
+[automaton]
+name = "Workspace"
+states = ["Active", "Frozen"]
+initial = "Active"
+allow_indefinite_states = ["Active", "Frozen"]
+
+[[action]]
+name = "Freeze"
+from = ["Active"]
+to = "Frozen"
+"#,
+    )
+    .unwrap();
+    let seeds = seed_cover(&[&file, &workspace]);
+    assert_eq!(
+        seeds,
+        vec!["File".to_string()],
+        "a status guard is a joint coupling even with no trigger"
+    );
+    let result = verify_composite(&[&file, &workspace], "File").unwrap();
+    assert!(
+        result.scope.contains(&"Workspace".to_string()),
+        "scope must include the entity the guard reads: {:?}",
+        result.scope
+    );
+}
+
+#[test]
 fn seed_cover_includes_isolated_entities() {
     let order = parse_automaton(order_ioa()).unwrap();
     let payment = parse_automaton(payment_ioa()).unwrap();

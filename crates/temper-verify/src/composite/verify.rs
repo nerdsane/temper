@@ -130,6 +130,15 @@ pub fn seed_cover(automatons: &[&Automaton]) -> Vec<String> {
             }
         }
     }
+    // A cross-entity *guard* is a joint coupling even when no trigger fires.
+    // Without this, CuratorAgent × ReviewAgent compose (submit creates a
+    // review) while DesignLanguage stays out of scope and the "must be
+    // UnderReview" guard stays a free boolean.
+    for (from, to) in temper_spec::automaton::guard_couplings(automatons) {
+        if parent.contains_key(&from) && parent.contains_key(&to) {
+            union(&mut parent, &from, &to);
+        }
+    }
 
     // Collect the canonical root of each component.
     let mut roots: BTreeSet<String> = BTreeSet::new();
@@ -216,10 +225,18 @@ pub fn verify_composite_with_budget(
 /// fails; any [`CompositeOutcome::Incomplete`] is surfaced as a warning by
 /// the caller (the proof is partial, not a pass).
 pub fn verify_all(automatons: &[&Automaton]) -> Vec<CompositeVerifyResult> {
+    verify_all_with_budget(automatons, DEFAULT_COMPOSITE_STATE_BUDGET)
+}
+
+/// Same as [`verify_all`], with an explicit joint-state BFS budget.
+pub fn verify_all_with_budget(
+    automatons: &[&Automaton],
+    state_budget: usize,
+) -> Vec<CompositeVerifyResult> {
     let seeds = seed_cover(automatons);
     let mut results = Vec::with_capacity(seeds.len());
     for seed in seeds {
-        match verify_composite(automatons, &seed) {
+        match verify_composite_with_budget(automatons, &seed, state_budget) {
             Ok(result) => results.push(result),
             Err(_) => {
                 // A seed that cannot build a plan (e.g. a trigger to an
