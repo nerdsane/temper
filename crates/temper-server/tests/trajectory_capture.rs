@@ -12,6 +12,7 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use temper_authz::{AuthenticatedRequestContext, SecurityContext};
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
 use temper_server::build_router;
@@ -64,6 +65,18 @@ fn build_turso_state(system_name: &str, store: TursoEventStore) -> ServerState {
     }
 
     let mut state = state;
+    // ARN-170 hardened `from_registry`'s default engine to default-deny
+    // (`AuthzEngine::empty()`); these capture/telemetry tests exercise the write
+    // path itself, not authorization, so install a permissive tenant policy —
+    // the effective posture they were written against. Tests that need a denial
+    // (e.g. cedar_denied_action) reload a restrictive policy over this.
+    state
+        .authz
+        .reload_tenant_policies(
+            TenantId::default().as_str(),
+            r#"permit(principal, action, resource);"#,
+        )
+        .expect("install permissive test policy");
     state.set_storage_stack(StorageStack::from_turso(store));
     state
 }
@@ -77,6 +90,21 @@ async fn temp_store(label: &str) -> (TursoEventStore, std::path::PathBuf) {
     (store, db_path)
 }
 
+/// Attach the credential context the ingress edge installs in production
+/// (ADR-0157). These fixtures carry no principal headers, so the anonymous
+/// Customer is exactly what the pre-edge header path produced; the
+/// `X-Session-Id`/`X-Intent` correlation headers still travel on the request
+/// and are read by the odata dispatch path.
+fn with_test_auth(mut request: Request<Body>) -> Request<Body> {
+    request
+        .extensions_mut()
+        .insert(AuthenticatedRequestContext::new(
+            TenantId::default(),
+            SecurityContext::anonymous(),
+        ));
+    request
+}
+
 /// POST with the observability headers under test.
 async fn post_observed(
     state: &ServerState,
@@ -84,12 +112,14 @@ async fn post_observed(
     body: serde_json::Value,
 ) -> (StatusCode, serde_json::Value) {
     let router = build_router(state.clone());
-    let req = Request::post(path)
-        .header("Content-Type", "application/json")
-        .header("X-Session-Id", SESSION_ID)
-        .header("X-Intent", INTENT)
-        .body(Body::from(body.to_string()))
-        .unwrap();
+    let req = with_test_auth(
+        Request::post(path)
+            .header("Content-Type", "application/json")
+            .header("X-Session-Id", SESSION_ID)
+            .header("X-Intent", INTENT)
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    );
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
@@ -232,21 +262,21 @@ async fn observe_prefixed_headers_are_honoured_as_session_and_intent() {
 
     let router = build_router(state.clone());
     let resp = router
-        .oneshot(
+        .oneshot(with_test_auth(
             Request::post("/tdata/Orders")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     serde_json::json!({"id": "ord-jcs-3", "Currency": "USD"}).to_string(),
                 ))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
 
     let router = build_router(state.clone());
     let resp = router
-        .oneshot(
+        .oneshot(with_test_auth(
             Request::post("/tdata/Orders('ord-jcs-3')/Temper.AddItem")
                 .header("Content-Type", "application/json")
                 .header("X-Temper-Observe-Session-Id", "sess-observe-prefixed")
@@ -255,7 +285,7 @@ async fn observe_prefixed_headers_are_honoured_as_session_and_intent() {
                     serde_json::json!({"ProductId": "prod-3", "Quantity": 1}).to_string(),
                 ))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
