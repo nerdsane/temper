@@ -50,7 +50,10 @@ pub(crate) async fn handle_authorize(
     }
     let mut resource_attrs = match body.context {
         serde_json::Value::Null => std::collections::BTreeMap::new(),
-        serde_json::Value::Object(context) => context.into_iter().collect(),
+        serde_json::Value::Object(context) => context
+            .into_iter()
+            .filter(|(key, _)| !temper_authz::is_cedar_authority_context_key(key))
+            .collect(),
         _ => {
             return (
                 StatusCode::BAD_REQUEST,

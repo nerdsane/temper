@@ -1401,7 +1401,13 @@ async fn handle_stream_get(
     };
 
     let wasm_result = match state
-        .invoke_wasm_direct(tenant, "blob_adapter", inv_ctx, streams.clone())
+        .invoke_wasm_direct(
+            tenant,
+            "blob_adapter",
+            inv_ctx,
+            streams.clone(),
+            security_ctx,
+        )
         .await
     {
         Ok(r) => r,

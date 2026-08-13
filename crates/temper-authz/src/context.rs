@@ -35,6 +35,19 @@ pub struct Principal {
     pub attributes: HashMap<String, serde_json::Value>,
 }
 
+/// Cedar context keys that only a resolved `SecurityContext` may populate.
+///
+/// Resource attribute builders and `evaluate_request` treat these as reserved
+/// the same way `id`/`status` are server-derived: a caller body field of the
+/// same name must not become `context.sessionId` (or overwrite a grant-checked
+/// value). Generated session, type, and role permits all condition on these.
+pub fn is_cedar_authority_context_key(name: &str) -> bool {
+    matches!(
+        name,
+        "sessionId" | "agentId" | "agentType" | "agentTypeVerified" | "role" | "actingFor"
+    )
+}
+
 /// Security context carried with every actor message dispatch.
 ///
 /// Protected HTTP requests receive this from credential resolution. The legacy
@@ -515,6 +528,15 @@ mod tests {
             ctx.context_attrs.get("agentId"),
             Some(&serde_json::Value::String("agent-1".to_string()))
         );
+    }
+
+    #[test]
+    fn cedar_authority_context_keys_are_reserved() {
+        assert!(is_cedar_authority_context_key("sessionId"));
+        assert!(is_cedar_authority_context_key("agentTypeVerified"));
+        assert!(is_cedar_authority_context_key("role"));
+        assert!(!is_cedar_authority_context_key("status"));
+        assert!(!is_cedar_authority_context_key("Customer"));
     }
 
     #[test]

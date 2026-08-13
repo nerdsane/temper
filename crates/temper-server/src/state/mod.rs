@@ -1301,8 +1301,17 @@ impl ServerState {
             http_request: None,
         };
 
+        let security_ctx = agent_ctx.security_ctx.as_ref().ok_or_else(|| {
+            "blob_adapter requires the caller's authenticated security context".to_string()
+        })?;
         let wasm_result = self
-            .invoke_wasm_direct(tenant, "blob_adapter", inv_ctx, streams.clone())
+            .invoke_wasm_direct(
+                tenant,
+                "blob_adapter",
+                inv_ctx,
+                streams.clone(),
+                security_ctx,
+            )
             .await
             .map_err(|e| format!("blob_adapter download failed: {e}"))?;
 

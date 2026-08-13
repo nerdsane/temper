@@ -171,6 +171,20 @@ fn test_state() -> ServerState {
         .expect("test state should build")
 }
 
+fn permit_agents(state: &ServerState) {
+    state
+        .authz
+        .reload_tenant_policies(
+            TenantId::default().as_str(),
+            "permit(principal is Agent, action, resource);",
+        )
+        .expect("agent-only policy should parse");
+}
+
+fn test_agent() -> SecurityContext {
+    SecurityContext::from_resolved_identity("agent-1", "operator", None)
+}
+
 fn customer_security_context(id: &str) -> SecurityContext {
     SecurityContext {
         principal: temper_authz::Principal {
@@ -258,10 +272,13 @@ fn local_tdata_headers_discard_guest_authority_and_tenant() {
 
 #[tokio::test]
 async fn local_tdata_calls_use_odata_handlers() {
+    let state = test_state();
+    permit_agents(&state);
+    let agent = test_agent();
     let host = LocalTDataWasmHost::new(
-        test_state(),
+        state,
         temper_runtime::tenant::TenantId::default(),
-        Some(&SecurityContext::system()),
+        Some(&agent),
         Arc::new(FailingHost),
     );
     let headers = vec![
@@ -315,14 +332,21 @@ async fn local_tdata_calls_use_odata_handlers() {
 /// This drives the real production helper `ServerState::local_tdata_direct_host`
 /// that `invoke_wasm_direct` uses, so it guards the actual authority decision (not
 /// just the `LocalTDataWasmHost` contract): the helper must build the loopback
-/// WITH server-minted authority. The delegate is `FailingHost`, so if the helper
-/// regresses to no authority the `/tdata` call falls through to it and the test
-/// fails — exactly the silent-401 blob regression ARN-170 introduced and this
-/// fix closes.
+/// WITH the caller's typed authority. The delegate is `FailingHost`, so if the
+/// helper regresses to no authority the `/tdata` call falls through to it and
+/// the test fails — the silent-401 blob regression ARN-170 introduced.
 #[tokio::test]
-async fn direct_invocation_loopback_dispatches_in_process_with_system_authority() {
+async fn direct_invocation_loopback_dispatches_in_process_with_caller_authority() {
     let state = test_state();
-    let host = state.local_tdata_direct_host(&TenantId::default(), Arc::new(FailingHost));
+    state
+        .authz
+        .reload_tenant_policies(
+            TenantId::default().as_str(),
+            "permit(principal is Agent, action, resource);",
+        )
+        .expect("agent-only policy should parse");
+    let caller = SecurityContext::from_resolved_identity("agent-1", "operator", None);
+    let host = state.local_tdata_direct_host(&TenantId::default(), Arc::new(FailingHost), &caller);
     let headers = vec![
         ("x-tenant-id".to_string(), "default".to_string()),
         ("accept".to_string(), "application/json".to_string()),
@@ -333,6 +357,37 @@ async fn direct_invocation_loopback_dispatches_in_process_with_system_authority(
         .await
         .expect("direct-invocation loopback must dispatch in-process, not delegate");
     assert_eq!(status, StatusCode::OK.as_u16());
+}
+
+/// A customer with no permit must not create via the blob_adapter loopback.
+///
+/// `test_state()` installs `system-platform:broad-permit`, so a System
+/// loopback would return 201. The helper must carry the caller instead.
+#[tokio::test]
+async fn direct_invocation_loopback_does_not_run_as_system() {
+    let state = test_state();
+    let caller = customer_security_context("customer-1");
+    let host = state.local_tdata_direct_host(&TenantId::default(), Arc::new(FailingHost), &caller);
+    let headers = vec![
+        ("content-type".to_string(), "application/json".to_string()),
+        ("accept".to_string(), "application/json".to_string()),
+    ];
+
+    let (status, body) = host
+        .http_call(
+            "POST",
+            "http://127.0.0.1:8787/tdata/Orders",
+            &headers,
+            r#"{"id":"system-elevated-order","Customer":"Eve"}"#,
+        )
+        .await
+        .expect("loopback must stay in-process under the caller principal");
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN.as_u16(),
+        "customer loopback must not inherit System, got {status}: {body}"
+    );
+    assert!(!state.entity_exists(&TenantId::default(), "Order", "system-elevated-order"));
 }
 
 #[tokio::test]
@@ -417,10 +472,12 @@ async fn local_tdata_uses_exact_agent_and_ignores_guest_tenant() {
 async fn local_tdata_uses_invocation_tenant_without_a_tenant_header() {
     let mut state = test_state();
     state.single_tenant_mode = false;
+    permit_agents(&state);
+    let agent = test_agent();
     let host = LocalTDataWasmHost::new(
         state,
         temper_runtime::tenant::TenantId::default(),
-        Some(&SecurityContext::system()),
+        Some(&agent),
         Arc::new(FailingHost),
     );
     let headers = vec![
@@ -457,10 +514,12 @@ async fn local_tdata_uses_invocation_tenant_without_a_tenant_header() {
 async fn allowlisted_public_tdata_calls_use_odata_handlers() {
     let mut state = test_state();
     state.local_tdata_hosts = Arc::new(BTreeSet::from(["temper.example".to_string()]));
+    permit_agents(&state);
+    let agent = test_agent();
     let host = LocalTDataWasmHost::new(
         state,
         temper_runtime::tenant::TenantId::default(),
-        Some(&SecurityContext::system()),
+        Some(&agent),
         Arc::new(FailingHost),
     );
     let headers = vec![

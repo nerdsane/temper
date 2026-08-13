@@ -1419,22 +1419,29 @@ impl crate::state::ServerState {
     /// Build the in-process `/tdata` loopback host for a direct WASM invocation
     /// (e.g. `blob_adapter`), wrapping `production_host` as the boundary delegate.
     ///
-    /// The loopback must carry server-minted invocation authority
-    /// (`SecurityContext::system()`, never client-supplied) so its OData calls
-    /// dispatch in-process. ARN-170: with no authority the calls fall through to a
-    /// real HTTP request the hardened ingress edge rejects (401), silently
-    /// breaking blob reads/writes. Centralised here so the authority decision has
-    /// one tested home rather than being inlined at the call site.
+    /// The loopback must carry the HTTP invocation's typed `SecurityContext`
+    /// (never System, never a client-supplied header). ADR-0157 §4: System
+    /// would inherit `system-platform:broad-permit` and let a guest mutate any
+    /// entity. With no authority the calls fall through to a real HTTP request
+    /// the hardened ingress edge rejects (401). Centralised here so the
+    /// authority decision has one tested home.
     pub(crate) fn local_tdata_direct_host(
         &self,
         tenant: &TenantId,
         production_host: Arc<dyn WasmHost>,
+        security_ctx: &SecurityContext,
     ) -> Arc<dyn WasmHost> {
-        let internal_ctx = SecurityContext::system();
+        debug_assert_ne!(
+            security_ctx.principal.kind,
+            PrincipalKind::System,
+            "direct-invocation loopback must carry the caller, not System"
+        );
+        let loopback_ctx =
+            (security_ctx.principal.kind != PrincipalKind::System).then_some(security_ctx);
         Arc::new(LocalTDataWasmHost::new(
             self.clone(),
             tenant.clone(),
-            Some(&internal_ctx),
+            loopback_ctx,
             production_host,
         ))
     }
@@ -1445,6 +1452,7 @@ impl crate::state::ServerState {
         module_name: &str,
         mut context: WasmInvocationContext,
         streams: Arc<std::sync::RwLock<StreamRegistry>>,
+        security_ctx: &SecurityContext,
     ) -> Result<temper_wasm::WasmInvocationResult, String> {
         if context.wasm_module.is_none() {
             context.wasm_module = Some(module_name.to_string());
@@ -1504,7 +1512,7 @@ impl crate::state::ServerState {
             base_host = base_host.with_binary_http_interceptor(interceptor);
         }
         let production_host: Arc<dyn WasmHost> = Arc::new(base_host);
-        let inner = self.local_tdata_direct_host(tenant, production_host);
+        let inner = self.local_tdata_direct_host(tenant, production_host, security_ctx);
         let host: Arc<dyn WasmHost> =
             Arc::new(AuthorizedWasmHost::new(inner, base_gate, authz_ctx));
         let limits = WasmResourceLimits::default();

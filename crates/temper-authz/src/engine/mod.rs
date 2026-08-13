@@ -14,7 +14,7 @@ use cedar_policy::{
     Request, Response as CedarResponse,
 };
 
-use crate::context::{PrincipalKind, SecurityContext};
+use crate::context::{PrincipalKind, SecurityContext, is_cedar_authority_context_key};
 use crate::error::{AuthzDenial, AuthzError};
 use crate::metrics::{CedarDecisionMetric, CedarPhaseOutcome};
 
@@ -459,7 +459,13 @@ impl AuthzEngine {
 
         // Inject resource attributes into context (enables Cedar policies to
         // reference entity state and cross-entity context via `context.key`).
+        // Authority keys stay exclusively on SecurityContext: a body field
+        // named sessionId / agentType / role must not satisfy those permits,
+        // and must not overwrite a grant-checked value already in ctx_map.
         for (key, value) in resource_attrs {
+            if is_cedar_authority_context_key(key) || ctx_map.contains_key(key) {
+                continue;
+            }
             insert_json_as_cedar(&mut ctx_map, key.clone(), value);
         }
         crate::metrics::record_cedar_request_attribute_count("context", ctx_map.len());

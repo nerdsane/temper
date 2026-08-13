@@ -239,7 +239,7 @@ pub(super) async fn handle_stream_put(
     };
 
     let wasm_result = match state
-        .invoke_wasm_direct(tenant, "blob_adapter", inv_ctx, streams)
+        .invoke_wasm_direct(tenant, "blob_adapter", inv_ctx, streams, security_ctx)
         .await
     {
         Ok(r) => r,

@@ -83,13 +83,18 @@ pub(super) fn resource_attrs_from_body(
 
     if let Some(fields) = body.get("fields").and_then(serde_json::Value::as_object) {
         for (key, value) in fields {
-            if !temper_spec::automaton::is_server_derived_field_name(key) {
+            if !temper_spec::automaton::is_server_derived_field_name(key)
+                && !temper_authz::is_cedar_authority_context_key(key)
+            {
                 attrs.insert(key.clone(), value.clone());
             }
         }
     } else if let Some(fields) = body.as_object() {
         for (key, value) in fields {
-            if !key.starts_with('@') && !temper_spec::automaton::is_server_derived_field_name(key) {
+            if !key.starts_with('@')
+                && !temper_spec::automaton::is_server_derived_field_name(key)
+                && !temper_authz::is_cedar_authority_context_key(key)
+            {
                 attrs.insert(key.clone(), value.clone());
             }
         }

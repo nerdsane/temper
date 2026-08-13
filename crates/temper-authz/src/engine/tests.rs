@@ -797,3 +797,124 @@ fn candidate_filter_preserves_named_forbid_policy_ids() {
         "candidate filtering must preserve named policy diagnostics, got: {policy_ids:?}"
     );
 }
+
+/// Resource attributes must not satisfy a session-scoped permit. The only
+/// legitimate `context.sessionId` is the grant-checked value on SecurityContext.
+#[test]
+fn resource_session_id_cannot_satisfy_session_scoped_permit() {
+    let policy = r#"
+        permit(
+            principal is Agent,
+            action == Action::"create",
+            resource is Order
+        ) when { context.sessionId == "approved-session" };
+    "#;
+    let engine = AuthzEngine::new(policy).unwrap();
+    let ctx = SecurityContext::from_resolved_identity("agent-1", "operator", None);
+    let mut attrs = HashMap::new();
+    attrs.insert("id".to_string(), serde_json::json!("order-1"));
+    attrs.insert(
+        "sessionId".to_string(),
+        serde_json::json!("approved-session"),
+    );
+
+    let decision = engine.authorize(&ctx, "create", "Order", &attrs);
+    assert!(
+        !decision.is_allowed(),
+        "caller-supplied resource.sessionId must not satisfy context.sessionId, got: {decision:?}"
+    );
+}
+
+/// The grant-checked session id on SecurityContext still authorizes.
+#[test]
+fn grant_checked_session_id_satisfies_session_scoped_permit() {
+    let policy = r#"
+        permit(
+            principal is Agent,
+            action == Action::"create",
+            resource is Order
+        ) when { context.sessionId == "approved-session" };
+    "#;
+    let engine = AuthzEngine::new(policy).unwrap();
+    let ctx =
+        SecurityContext::from_resolved_identity("agent-1", "operator", Some("approved-session"));
+    let mut attrs = HashMap::new();
+    attrs.insert("id".to_string(), serde_json::json!("order-1"));
+
+    let decision = engine.authorize(&ctx, "create", "Order", &attrs);
+    assert!(
+        decision.is_allowed(),
+        "grant-checked context.sessionId must still match, got: {decision:?}"
+    );
+}
+
+/// A resource body must not overwrite a different grant-checked session id.
+#[test]
+fn resource_session_id_cannot_overwrite_grant_checked_session_id() {
+    let policy = r#"
+        permit(
+            principal is Agent,
+            action == Action::"create",
+            resource is Order
+        ) when { context.sessionId == "forged-session" };
+    "#;
+    let engine = AuthzEngine::new(policy).unwrap();
+    let ctx = SecurityContext::from_resolved_identity("agent-1", "operator", Some("real-session"));
+    let mut attrs = HashMap::new();
+    attrs.insert("id".to_string(), serde_json::json!("order-1"));
+    attrs.insert("sessionId".to_string(), serde_json::json!("forged-session"));
+
+    let decision = engine.authorize(&ctx, "create", "Order", &attrs);
+    assert!(
+        !decision.is_allowed(),
+        "resource.sessionId must not overwrite the grant-checked session, got: {decision:?}"
+    );
+}
+
+/// Resource attrs must not mint `agentType` / `agentTypeVerified` that
+/// `from_resolved_identity` is supposed to be the only source of.
+#[test]
+fn resource_attrs_cannot_forge_agent_type_verified() {
+    let policy = r#"
+        permit(
+            principal is Agent,
+            action == Action::"create",
+            resource is Order
+        ) when { context.agentType == "supervisor" && context.agentTypeVerified == true };
+    "#;
+    let engine = AuthzEngine::new(policy).unwrap();
+    let ctx = SecurityContext::from_resolved_identity("agent-1", "operator", None);
+    let mut attrs = HashMap::new();
+    attrs.insert("id".to_string(), serde_json::json!("order-1"));
+    attrs.insert("agentType".to_string(), serde_json::json!("supervisor"));
+    attrs.insert("agentTypeVerified".to_string(), serde_json::json!(true));
+
+    let decision = engine.authorize(&ctx, "create", "Order", &attrs);
+    assert!(
+        !decision.is_allowed(),
+        "resource agentType/agentTypeVerified must not overwrite Cedar context, got: {decision:?}"
+    );
+}
+
+/// Resource `role` must not become `context.role`.
+#[test]
+fn resource_role_cannot_satisfy_role_scoped_permit() {
+    let policy = r#"
+        permit(
+            principal is Agent,
+            action == Action::"create",
+            resource is Order
+        ) when { context.role == "admin" };
+    "#;
+    let engine = AuthzEngine::new(policy).unwrap();
+    let ctx = SecurityContext::from_resolved_identity("agent-1", "operator", None);
+    let mut attrs = HashMap::new();
+    attrs.insert("id".to_string(), serde_json::json!("order-1"));
+    attrs.insert("role".to_string(), serde_json::json!("admin"));
+
+    let decision = engine.authorize(&ctx, "create", "Order", &attrs);
+    assert!(
+        !decision.is_allowed(),
+        "resource.role must not satisfy context.role, got: {decision:?}"
+    );
+}

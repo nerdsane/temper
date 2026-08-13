@@ -314,7 +314,9 @@ impl ServerState {
         let mut resource_attrs = BTreeMap::new();
         if let serde_json::Value::Object(fields) = fields {
             for (k, v) in fields {
-                if !temper_spec::automaton::is_server_derived_field_name(k) {
+                if !temper_spec::automaton::is_server_derived_field_name(k)
+                    && !temper_authz::is_cedar_authority_context_key(k)
+                {
                     resource_attrs.insert(k.clone(), v.clone());
                 }
             }
