@@ -33,8 +33,8 @@ pub mod verify;
 
 pub use model::{CompositeAction, CompositeState, CompositeTemperModel, DroppedReaction};
 pub use verify::{
-    CompositeOutcome, CompositeVerifyResult, seed_cover, verify_all, verify_composite,
-    verify_composite_with_budget,
+    CompositeOutcome, CompositeVerifyResult, seed_cover, verify_all, verify_all_with_budget,
+    verify_composite, verify_composite_with_budget,
 };
 
 use std::collections::BTreeMap;
@@ -134,7 +134,25 @@ impl CompositeVerificationPlan {
             return Err(CompositePlanError::SeedMissing(seed.to_string()));
         }
 
-        let scope = graph.reachable_from(seed);
+        let mut scope = graph.reachable_from(seed);
+        // Close over cross-entity guards: if A is in scope and A's action
+        // reads B's status, B must be in the joint model or the guard is
+        // still abstract.
+        let couplings = temper_spec::automaton::guard_couplings(automatons);
+        let mut grew = true;
+        while grew {
+            grew = false;
+            for (from, to) in &couplings {
+                if scope.contains(from) && !scope.contains(to) && graph.entities.contains(to) {
+                    scope.insert(to.clone());
+                    grew = true;
+                }
+                if scope.contains(to) && !scope.contains(from) && graph.entities.contains(from) {
+                    scope.insert(from.clone());
+                    grew = true;
+                }
+            }
+        }
         let has_cycle = graph.has_cycle_from(seed);
 
         // Index automatons by entity type name for O(log n) lookup.

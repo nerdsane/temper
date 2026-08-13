@@ -167,6 +167,39 @@ impl TriggerGraph {
     }
 }
 
+/// Undirected (source, target-type) pairs from `cross_entity_state` guards.
+///
+/// A guard that *reads* another entity is not a trigger, but it is a joint
+/// coupling: the composite verifier cannot treat that guard as a free boolean
+/// if the target automaton is in the same spec set. Callers union these with
+/// trigger edges when computing seed cover and reachability.
+pub fn guard_couplings(automatons: &[&Automaton]) -> Vec<(String, String)> {
+    let known: BTreeSet<&str> = automatons
+        .iter()
+        .map(|a| a.automaton.name.as_str())
+        .collect();
+    let mut out: BTreeSet<(String, String)> = BTreeSet::new();
+    for aut in automatons {
+        let from = aut.automaton.name.as_str();
+        for action in &aut.actions {
+            collect_cross_entity_types(&action.guard, &mut |entity_type| {
+                if entity_type != from && known.contains(entity_type.as_str()) {
+                    out.insert((from.to_string(), entity_type));
+                }
+            });
+        }
+    }
+    out.into_iter().collect()
+}
+
+fn collect_cross_entity_types(guards: &[super::types::Guard], sink: &mut dyn FnMut(String)) {
+    for guard in guards {
+        if let super::types::Guard::CrossEntityState { entity_type, .. } = guard {
+            sink(entity_type.clone());
+        }
+    }
+}
+
 fn edge_from_trigger(
     source_entity: &str,
     source_action: &str,

@@ -16,14 +16,40 @@ use crate::util::to_pascal_case;
 
 /// Run the `temper verify` command.
 ///
-/// Loads specs from the given directory, builds the spec model, and reports
-/// validation results. Full Stateright model checking will be integrated
-/// once temper-verify exposes its public API.
-pub fn run(specs_dir: &str) -> Result<()> {
-    let specs_path = Path::new(specs_dir);
+/// Each directory is linted and cascade-checked on its own. Composite
+/// verification then runs once over the *union* of every directory's
+/// automata, so a guard in app A that reads an entity in app B is a
+/// concrete joint proof, not a free boolean. An INCOMPLETE joint BFS
+/// fails the command.
+pub fn run(specs_dirs: &[String], composite_budget: usize) -> Result<()> {
+    if specs_dirs.is_empty() {
+        anyhow::bail!("temper verify requires at least one --specs-dir");
+    }
 
     println!("Running verification cascade...");
-    println!("  Specs directory: {}", specs_path.display());
+    for dir in specs_dirs {
+        println!("  Specs directory: {dir}");
+    }
+
+    let mut all_automata = std::collections::BTreeMap::new();
+    for specs_dir in specs_dirs {
+        verify_one_directory(specs_dir, &mut all_automata)?;
+    }
+
+    if all_automata.len() >= 2 {
+        run_composite_verification(&all_automata, composite_budget)?;
+    }
+
+    Ok(())
+}
+
+fn verify_one_directory(
+    specs_dir: &str,
+    all_automata: &mut std::collections::BTreeMap<String, temper_spec::automaton::Automaton>,
+) -> Result<()> {
+    let specs_path = Path::new(specs_dir);
+
+    println!("\n--- {}", specs_path.display());
 
     // Read the CSDL model file
     let csdl_path = specs_path.join("model.csdl.xml");
@@ -124,14 +150,13 @@ pub fn run(specs_dir: &str) -> Result<()> {
         }
         println!("\nIOA verification cascade: ALL PASSED");
 
-        // ADR-0150: directory verification ALWAYS runs composite cross-entity
-        // verification as a first-class, gating step. It composes every
-        // entity's joint state machine and BFS-checks that no cross-entity
-        // reaction is dropped (target not in its required from-state). This is
-        // only meaningful with two or more entities — a single spec has nothing
-        // to compose (and stdin verification stays per-entity by design).
-        if parsed_automata.len() >= 2 {
-            run_composite_verification(&parsed_automata)?;
+        for (name, automaton) in parsed_automata {
+            if all_automata.contains_key(&name) {
+                anyhow::bail!(
+                    "entity '{name}' appears in more than one --specs-dir; composite needs one automaton per type"
+                );
+            }
+            all_automata.insert(name, automaton);
         }
     }
 
@@ -202,18 +227,20 @@ pub fn run(specs_dir: &str) -> Result<()> {
 /// of the entity trigger graph (so every entity is covered), checks the
 /// `no_dropped_reaction` property, and reports every dropped reaction with
 /// enough detail to name it. A dropped reaction GATES — it fails the command.
-/// An INCOMPLETE run (budget exhausted) is surfaced as a warning and does not
-/// claim a pass.
+/// An INCOMPLETE run (budget exhausted) fails the command. It is not a pass.
 fn run_composite_verification(
     parsed_automata: &std::collections::BTreeMap<String, temper_spec::automaton::Automaton>,
+    composite_budget: usize,
 ) -> Result<()> {
-    use temper_verify::composite::{CompositeOutcome, verify_all};
+    use temper_verify::composite::{CompositeOutcome, verify_all_with_budget};
 
     let automaton_refs: Vec<&temper_spec::automaton::Automaton> =
         parsed_automata.values().collect();
 
-    println!("\nRunning composite cross-entity verification (ADR-0150)...");
-    let results = verify_all(&automaton_refs);
+    println!(
+        "\nRunning composite cross-entity verification (ADR-0150, budget {composite_budget})..."
+    );
+    let results = verify_all_with_budget(&automaton_refs, composite_budget);
 
     let mut any_violation = false;
     let mut any_incomplete = false;
@@ -257,9 +284,21 @@ fn run_composite_verification(
             }
             CompositeOutcome::Incomplete => {
                 any_incomplete = true;
+                let reason = if !result.other_violations.is_empty() {
+                    format!(
+                        "{} ({} joint states)",
+                        result.other_violations.join("; "),
+                        result.states_explored
+                    )
+                } else {
+                    format!(
+                        "BFS budget exhausted ({} joint states)",
+                        result.states_explored
+                    )
+                };
                 println!(
-                    "    [INCOMPLETE] seed={} scope=[{}] — explored {} joint states; BFS budget exhausted, proof is PARTIAL (not a pass)",
-                    result.seed, scope, result.states_explored,
+                    "    [INCOMPLETE] seed={} scope=[{}] — {}; proof is PARTIAL (not a pass)",
+                    result.seed, scope, reason,
                 );
             }
         }
@@ -273,12 +312,11 @@ fn run_composite_verification(
         );
     }
     if any_incomplete {
-        println!(
-            "\nWARNING: composite verification was INCOMPLETE for one or more seeds (budget exhausted). The cross-entity proof is partial — narrow the spec or raise the budget to fully verify."
+        anyhow::bail!(
+            "composite cross-entity verification INCOMPLETE (budget {composite_budget}). Some seeds did not finish a joint proof — a failed plan (missing trigger target) or an exhausted BFS. This is not a pass. Re-run with every --specs-dir the machines join, or raise --composite-budget."
         );
-    } else {
-        println!("\nComposite cross-entity verification: ALL PASSED");
     }
+    println!("\nComposite cross-entity verification: ALL PASSED");
 
     Ok(())
 }
@@ -320,173 +358,4 @@ fn read_ioa_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
 use crate::util::read_tla_sources;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_verify_reference_specs() {
-        let specs_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-fixtures/specs");
-
-        if !Path::new(specs_dir).join("model.csdl.xml").exists() {
-            eprintln!("Skipping verify test: reference specs not found");
-            return;
-        }
-
-        let result = run(specs_dir);
-        result.expect("verify should pass on reference specs");
-    }
-
-    #[test]
-    fn test_verify_fails_on_broken_spawn_contract_with_exact_lint_code() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let specs_dir = tmp.path();
-
-        let csdl = r#"<?xml version="1.0" encoding="utf-8"?>
-<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
-  <edmx:DataServices>
-    <Schema Namespace="Temper.Broken" xmlns="http://docs.oasis-open.org/odata/ns/edm">
-      <EntityType Name="Plan">
-        <Key><PropertyRef Name="Id" /></Key>
-        <Property Name="Id" Type="Edm.Guid" Nullable="false" />
-        <Property Name="status" Type="Edm.String" />
-      </EntityType>
-      <EntityType Name="Task">
-        <Key><PropertyRef Name="Id" /></Key>
-        <Property Name="Id" Type="Edm.Guid" Nullable="false" />
-        <Property Name="status" Type="Edm.String" />
-      </EntityType>
-      <EntityContainer Name="Service">
-        <EntitySet Name="Plans" EntityType="Temper.Broken.Plan" />
-        <EntitySet Name="Tasks" EntityType="Temper.Broken.Task" />
-      </EntityContainer>
-    </Schema>
-  </edmx:DataServices>
-</edmx:Edmx>"#;
-        let plan = r#"
-[automaton]
-name = "Plan"
-states = ["Active"]
-initial = "Active"
-
-[[action]]
-name = "AddTask"
-kind = "input"
-from = ["Active"]
-params = ["title"]
-effect = [{ type = "spawn", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create" }]
-"#;
-        let task = r#"
-[automaton]
-name = "Task"
-states = ["Open"]
-initial = "Open"
-
-[[action]]
-name = "Create"
-kind = "input"
-from = ["Open"]
-params = ["title", "description", "plan_id"]
-"#;
-
-        fs::write(specs_dir.join("model.csdl.xml"), csdl).expect("write csdl");
-        fs::write(specs_dir.join("plan.ioa.toml"), plan).expect("write plan");
-        fs::write(specs_dir.join("task.ioa.toml"), task).expect("write task");
-
-        let result = run(specs_dir.to_str().expect("tmp path utf-8"));
-        let err = result.expect_err("verify should fail on broken spawn contract");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("spawn_initial_action_params_unmapped"),
-            "expected exact lint code in error, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn test_multi_entity_dir_runs_composite_as_gating_step() {
-        // A two-entity directory whose cross-entity reaction can be dropped:
-        // Workspace.Freeze moves Workspace out of Active before File.Touch
-        // fires Workspace.IncrementUsage (enabled only from Active). The
-        // dropped reaction must FAIL the command (composite is gating).
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let specs_dir = tmp.path();
-
-        let csdl = r#"<?xml version="1.0" encoding="utf-8"?>
-<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
-  <edmx:DataServices>
-    <Schema Namespace="Temper.Fs" xmlns="http://docs.oasis-open.org/odata/ns/edm">
-      <EntityType Name="File">
-        <Key><PropertyRef Name="Id" /></Key>
-        <Property Name="Id" Type="Edm.Guid" Nullable="false" />
-        <Property Name="status" Type="Edm.String" />
-        <Property Name="workspace_id" Type="Edm.String" />
-      </EntityType>
-      <EntityType Name="Workspace">
-        <Key><PropertyRef Name="Id" /></Key>
-        <Property Name="Id" Type="Edm.Guid" Nullable="false" />
-        <Property Name="status" Type="Edm.String" />
-      </EntityType>
-      <EntityContainer Name="Service">
-        <EntitySet Name="Files" EntityType="Temper.Fs.File" />
-        <EntitySet Name="Workspaces" EntityType="Temper.Fs.Workspace" />
-      </EntityContainer>
-    </Schema>
-  </edmx:DataServices>
-</edmx:Edmx>"#;
-        let file = r#"
-[automaton]
-name = "File"
-states = ["New", "Updated"]
-initial = "New"
-
-[[action]]
-name = "Touch"
-kind = "input"
-from = ["New"]
-to = "Updated"
-
-[[action.triggers]]
-name = "touch_increments_usage"
-kind = "entity"
-target_entity = "Workspace"
-target_action = "IncrementUsage"
-
-[action.triggers.resolve_target]
-type = "field"
-field = "workspace_id"
-"#;
-        let workspace = r#"
-[automaton]
-name = "Workspace"
-states = ["Active", "Frozen"]
-initial = "Active"
-
-[[action]]
-name = "IncrementUsage"
-kind = "input"
-from = ["Active"]
-to = "Active"
-
-[[action]]
-name = "Freeze"
-kind = "internal"
-from = ["Active"]
-to = "Frozen"
-"#;
-
-        fs::write(specs_dir.join("model.csdl.xml"), csdl).expect("write csdl");
-        fs::write(specs_dir.join("file.ioa.toml"), file).expect("write file");
-        fs::write(specs_dir.join("workspace.ioa.toml"), workspace).expect("write workspace");
-
-        let result = run(specs_dir.to_str().expect("tmp path utf-8"));
-        let err = result.expect_err("composite gating step must fail on a dropped reaction");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("composite cross-entity verification failed"),
-            "expected composite gating failure, got: {msg}"
-        );
-        assert!(
-            msg.contains("IncrementUsage") && msg.contains("Frozen"),
-            "failure should name the dropped reaction + wrong state, got: {msg}"
-        );
-    }
-}
+mod tests;

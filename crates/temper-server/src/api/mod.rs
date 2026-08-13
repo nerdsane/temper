@@ -16,7 +16,7 @@ mod spec_pin;
 mod trajectory_analysis;
 
 use axum::Router;
-use axum::extract::{FromRequestParts, Path, State};
+use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -95,11 +95,14 @@ pub fn build_api_router() -> Router<ServerState> {
             "/files/publish-artifact",
             post(files::handle_publish_artifact),
         )
-        // OTS trajectory endpoints (full agent execution traces for GEPA)
+        // OTS trajectory endpoints (full agent execution traces for GEPA).
+        // Synthesize sessions with screenshots exceed Axum's 2 MiB default
+        // (Keyblock was 8.6 MiB and got 413). Same class as blob ingest.
         .route(
             "/ots/trajectories",
             post(crate::observe::evolution::handle_post_ots_trajectory)
-                .get(crate::observe::evolution::handle_get_ots_trajectories),
+                .get(crate::observe::evolution::handle_get_ots_trajectories)
+                .layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
         )
         .route(
             "/ots/trajectories/{trajectory_id}/atif",

@@ -61,9 +61,15 @@ enum Commands {
     },
     /// Run the verification cascade
     Verify {
-        /// Path to the specs directory
-        #[arg(short, long, default_value = "specs")]
-        specs_dir: String,
+        /// Specs directory. Repeat to compose more than one app
+        /// (e.g. katagami-curation + katagami-commons) into one joint proof.
+        #[arg(short, long = "specs-dir", default_value = "specs")]
+        specs_dir: Vec<String>,
+        /// Joint-state BFS budget for composite (cross-entity) verification.
+        /// Default 250_000. An exhausted budget fails the command — it is
+        /// not a pass. Raise this when a pair of machines reports INCOMPLETE.
+        #[arg(long, default_value_t = 250_000)]
+        composite_budget: usize,
     },
     /// Lint specs locally, then run the verification cascade on a remote Temper server
     VerifyRemote {
@@ -329,7 +335,10 @@ async fn async_main() -> anyhow::Result<()> {
             specs_dir,
             output_dir,
         } => codegen::run(&specs_dir, &output_dir)?,
-        Commands::Verify { specs_dir } => verify::run(&specs_dir)?,
+        Commands::Verify {
+            specs_dir,
+            composite_budget,
+        } => verify::run(&specs_dir, composite_budget)?,
         Commands::VerifyRemote {
             specs_dir,
             url,
@@ -499,7 +508,40 @@ mod tests {
     fn test_cli_parse_verify() {
         let cli = Cli::parse_from(["temper", "verify", "--specs-dir", "custom-specs"]);
         match cli.command {
-            Commands::Verify { specs_dir } => assert_eq!(specs_dir, "custom-specs"),
+            Commands::Verify {
+                specs_dir,
+                composite_budget,
+            } => {
+                assert_eq!(specs_dir, vec!["custom-specs".to_string()]);
+                assert_eq!(composite_budget, 250_000);
+            }
+            _ => panic!("expected Verify command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_verify_multiple_specs_dirs() {
+        let cli = Cli::parse_from([
+            "temper",
+            "verify",
+            "--specs-dir",
+            "curation/specs",
+            "--specs-dir",
+            "commons/specs",
+            "--composite-budget",
+            "1000000",
+        ]);
+        match cli.command {
+            Commands::Verify {
+                specs_dir,
+                composite_budget,
+            } => {
+                assert_eq!(
+                    specs_dir,
+                    vec!["curation/specs".to_string(), "commons/specs".to_string()]
+                );
+                assert_eq!(composite_budget, 1_000_000);
+            }
             _ => panic!("expected Verify command"),
         }
     }

@@ -37,5 +37,5 @@ pub use parser::{
     set_liveness_violation_reporter, to_state_machine,
 };
 pub use translate::{ResolvedAction, ResolvedEffect, ResolvedGuard, translate_actions};
-pub use trigger_graph::{TriggerEdge, TriggerGraph};
+pub use trigger_graph::{TriggerEdge, TriggerGraph, guard_couplings};
 pub use types::*;
