@@ -1054,15 +1054,22 @@ async fn an_uploaded_trajectory_is_addressable_by_the_id_it_was_uploaded_with() 
 
     let upload = app
         .clone()
-        .oneshot(authenticate_as(
-            Request::post("/api/ots/trajectories")
-                .header("X-Session-Id", "session-42")
+        .oneshot({
+            // In production the bearer edge lifts X-Session-Id onto the typed
+            // context; the handler no longer reads raw headers.
+            let mut request = Request::post("/api/ots/trajectories")
                 .header("Content-Type", "application/json")
                 .body(Body::from(ots_upload("traj-roundtrip").to_string()))
-                .unwrap(),
-            "default",
-            temper_authz::SecurityContext::system(),
-        ))
+                .unwrap();
+            request.extensions_mut().insert(
+                temper_authz::AuthenticatedRequestContext::new(
+                    temper_runtime::tenant::TenantId::default(),
+                    temper_authz::SecurityContext::system(),
+                )
+                .with_session_id(Some("session-42".to_string())),
+            );
+            request
+        })
         .await
         .unwrap();
     assert_eq!(upload.status(), StatusCode::ACCEPTED);

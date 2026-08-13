@@ -1,5 +1,5 @@
 use axum::extract::{Extension, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
 use temper_authz::AuthenticatedRequestContext;
@@ -259,7 +259,6 @@ pub(crate) struct OtsTrajectoryQueryParams {
 #[instrument(skip_all, fields(otel.name = "POST /api/ots/trajectories"))]
 pub(crate) async fn handle_post_ots_trajectory(
     State(state): State<ServerState>,
-    headers: HeaderMap,
     authenticated: Option<Extension<AuthenticatedRequestContext>>,
     body: String,
 ) -> Result<StatusCode, (StatusCode, String)> {
@@ -291,10 +290,9 @@ pub(crate) async fn handle_post_ots_trajectory(
 
     let agent_id = authenticated.security_context().principal.id.as_str();
 
-    let session_id = headers
-        .get("X-Session-Id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+    // The uploader's declared session, carried on the request context by the
+    // bearer edge (never a raw header read, and never a Cedar input).
+    let session_id = authenticated.session_id().unwrap_or("");
 
     let outcome = match trajectory.metadata.outcome {
         temper_ots::models::OutcomeType::Success => "success",
@@ -368,11 +366,19 @@ pub(crate) async fn handle_get_ots_trajectories(
     State(state): State<ServerState>,
     authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Query(params): Query<OtsTrajectoryQueryParams>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let authenticated = require_authenticated_context(authenticated.as_deref())?;
-    require_observe_auth(&state, authenticated, "read_trajectories", "OtsTrajectory")?;
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let authenticated = require_authenticated_context(authenticated.as_deref())
+        .map_err(|status| (status, "unauthorized".to_string()))?;
+    require_observe_auth(&state, authenticated, "read_trajectories", "OtsTrajectory")
+        .map_err(|status| (status, "unauthorized".to_string()))?;
     let tenant = authenticated.tenant().as_str();
-    let limit = params.limit.unwrap_or(50).min(500);
+    let limit = params.limit.unwrap_or(50);
+    if !(1..=500).contains(&limit) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("limit must be between 1 and 500, got {limit}"),
+        ));
+    }
 
     let Some(store) = state.metadata_store_for_tenant(tenant).await else {
         return Ok(Json(serde_json::json!({
@@ -406,6 +412,10 @@ pub(crate) async fn handle_get_ots_trajectories(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "trajectories_route_test.rs"]
+mod route_tests;
 
 #[cfg(test)]
 mod tests {
