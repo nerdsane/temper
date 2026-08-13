@@ -539,6 +539,7 @@ impl crate::state::ServerState {
                     params: params_for_retry.clone(),
                     cross_entity_booleans: cross_for_retry.clone(),
                     idempotency_key: idempotency_key.clone(),
+                    expected_sequence: agent_ctx.expected_entity_sequence,
                 },
                 &policy,
             )

@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use tracing::{Instrument, Span, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+use crate::application_data::{ApplicationDataInvocation, ModuleInvocationAuthority};
 use crate::entity_actor::{EntityResponse, EntityState};
 use crate::request_context::AgentContext;
 use crate::secrets::template::resolve_secret_templates;
@@ -14,8 +15,8 @@ use crate::state::sim_now;
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{
     AuthorizedWasmHost, BinaryHttpInterceptorFn, ProductionWasmHost, ProgressEmitterFn,
-    StreamRegistry, TextHttpInterceptorFn, WasmAuthzContext, WasmAuthzGate, WasmHost,
-    WasmInvocationContext, WasmResourceLimits,
+    StreamRegistry, TemperDataCallFn, TemperFileReadFn, TemperFileWriteFn, TextHttpInterceptorFn,
+    WasmAuthzContext, WasmAuthzGate, WasmHost, WasmInvocationContext, WasmResourceLimits,
 };
 
 use super::{
@@ -676,6 +677,48 @@ impl crate::state::ServerState {
                 if let Some(resolver) = secret_resolver.clone() {
                     production_host_builder =
                         production_host_builder.with_secret_resolver(resolver);
+                }
+                let data_binding = self.wasm_module_registry.read().ok().and_then(|registry| {
+                    registry
+                        .data_manifest(ctx.entity_ref.tenant, &module_name, &hash)
+                        .cloned()
+                });
+                if let (Some(binding), Some(security)) =
+                    (data_binding.clone(), ctx.agent_ctx.security_ctx.clone())
+                {
+                    let budgets = binding.grant.budgets.clone();
+                    let authority = ModuleInvocationAuthority::new(
+                        ctx.entity_ref.tenant.clone(),
+                        module_name.clone(),
+                        hash.clone(),
+                        ctx.action.to_string(),
+                        ctx.entity_ref.entity_type.to_string(),
+                        security,
+                        binding,
+                    );
+                    let service = ApplicationDataInvocation::new(self.clone(), authority);
+                    let (data, read, write) = service.callbacks();
+                    production_host_builder = production_host_builder
+                        .with_temper_data_service(data, read, write, &budgets);
+                } else if let Some(binding) = data_binding {
+                    let budgets = binding.grant.budgets.clone();
+                    let data: TemperDataCallFn = Arc::new(|_| {
+                        Box::pin(async {
+                            serde_json::to_vec(&temper_wasm_sdk::data::DataResponseV1::error(
+                                temper_wasm_sdk::data::ModuleDataError::new(
+                                    temper_wasm_sdk::data::ModuleDataErrorKind::AuthorizationDenied,
+                                    "AuthorizationDenied",
+                                    "module invocation has no originating security context",
+                                    temper_wasm_sdk::data::Retryability::Never,
+                                ),
+                            ))
+                            .map_err(|error| error.to_string())
+                        })
+                    });
+                    let read: TemperFileReadFn = Arc::new(|_, _| Err(-3));
+                    let write: TemperFileWriteFn = Arc::new(|_, _| Err(-3));
+                    production_host_builder = production_host_builder
+                        .with_temper_data_service(data, read, write, &budgets);
                 }
                 let production_host: Arc<dyn WasmHost> = Arc::new(production_host_builder);
                 let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(

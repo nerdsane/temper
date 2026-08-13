@@ -168,6 +168,83 @@ async fn dst_entity_starts_in_initial_state() {
 }
 
 #[tokio::test]
+async fn sequence_preconditions_are_checked_atomically_by_actor() {
+    let system = ActorSystem::new("sequence-precondition");
+    let actor = EntityActor::new("Order", "order-seq", order_table(), serde_json::json!({}));
+    let actor_ref = system.spawn(actor, "order-seq");
+
+    let action: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::Action {
+                name: "AddItem".into(),
+                params: serde_json::json!({"ProductId": "prod-1"}),
+                cross_entity_booleans: std::collections::BTreeMap::new(),
+                idempotency_key: None,
+                expected_sequence: Some(99),
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    assert!(!action.success);
+    assert_eq!(action.error.as_deref(), Some("SequenceConflict"));
+    assert!(action.state.events.is_empty());
+
+    let patch: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Name": "must-not-apply"}),
+                replace: false,
+                expected_sequence: Some(99),
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    assert!(!patch.success);
+    assert_eq!(patch.error.as_deref(), Some("SequenceConflict"));
+    assert!(patch.state.fields.get("Name").is_none());
+
+    let sequence = patch.state.sequence_nr;
+    let applied: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Name": "applied"}),
+                replace: false,
+                expected_sequence: Some(sequence),
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    assert!(applied.success);
+    assert_eq!(applied.state.sequence_nr, sequence + 1);
+    assert_eq!(applied.state.total_event_count, 1);
+    assert_eq!(applied.state.events_since_snapshot, 1);
+    assert_eq!(
+        applied
+            .state
+            .events
+            .back()
+            .map(|event| event.action.as_str()),
+        Some(crate::entity_actor::types::FIELD_UPDATE_EVENT_TYPE)
+    );
+    let stale: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Name": "stale"}),
+                replace: false,
+                expected_sequence: Some(sequence),
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    assert!(!stale.success);
+    assert_eq!(stale.error.as_deref(), Some("SequenceConflict"));
+}
+
+#[tokio::test]
 async fn dst_add_item_then_submit() {
     let system = ActorSystem::new("dst");
     let table = order_table();
@@ -182,6 +259,7 @@ async fn dst_add_item_then_submit() {
                 params: serde_json::json!({"ProductId": "prod-1"}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_sequence: None,
             },
             Duration::from_secs(1),
         )
@@ -199,6 +277,7 @@ async fn dst_add_item_then_submit() {
                 params: serde_json::json!({"ShippingAddressId": "addr-1"}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_sequence: None,
             },
             Duration::from_secs(1),
         )
@@ -232,6 +311,7 @@ async fn duplicate_composite_idempotency_reemits_spec_trigger() {
                 params: params.clone(),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: Some("same-pack".into()),
+                expected_sequence: None,
             },
             Duration::from_secs(1),
         )
@@ -246,6 +326,7 @@ async fn duplicate_composite_idempotency_reemits_spec_trigger() {
                 params,
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: Some("same-pack".into()),
+                expected_sequence: None,
             },
             Duration::from_secs(1),
         )
@@ -278,6 +359,7 @@ async fn dst_cannot_submit_without_items() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_sequence: None,
             },
             Duration::from_secs(1),
         )
@@ -321,6 +403,7 @@ async fn dst_full_order_lifecycle() {
                     params,
                     cross_entity_booleans: std::collections::BTreeMap::new(),
                     idempotency_key: None,
+                    expected_sequence: None,
                 },
                 Duration::from_secs(1),
             )
@@ -356,6 +439,7 @@ async fn dst_cancel_from_draft() {
                 params: serde_json::json!({"Reason": "changed mind"}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_sequence: None,
             },
             Duration::from_secs(1),
         )
@@ -387,6 +471,7 @@ async fn dst_cannot_cancel_shipped_order() {
                     params: serde_json::json!({}),
                     cross_entity_booleans: std::collections::BTreeMap::new(),
                     idempotency_key: None,
+                    expected_sequence: None,
                 },
                 Duration::from_secs(1),
             )
@@ -402,6 +487,7 @@ async fn dst_cannot_cancel_shipped_order() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_sequence: None,
             },
             Duration::from_secs(1),
         )
@@ -434,6 +520,7 @@ async fn dst_multiple_actors_independent() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_sequence: None,
             },
             Duration::from_secs(1),
         )
@@ -448,6 +535,7 @@ async fn dst_multiple_actors_independent() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_sequence: None,
             },
             Duration::from_secs(1),
         )

@@ -75,6 +75,19 @@ struct CountingHost {
 
 #[async_trait]
 impl WasmHost for CountingHost {
+    fn temper_data_request_budget(&self) -> usize {
+        4096
+    }
+
+    fn temper_data_response_handle_budget(&self) -> usize {
+        3
+    }
+
+    async fn temper_data_call(&self, request: &[u8]) -> Result<Vec<u8>, String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(request.to_vec())
+    }
+
     async fn http_call(
         &self,
         _method: &str,
@@ -160,6 +173,27 @@ impl WasmHost for CountingHost {
         self.stream_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn local_tdata_wrapper_delegates_application_data_capability() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let delegate = Arc::new(CountingHost {
+        calls: calls.clone(),
+        stream_calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let csdl = parse_csdl(ORDER_CSDL_XML).expect("valid CSDL");
+    let state = ServerState::new(
+        temper_runtime::ActorSystem::new("local-data-wrapper-test"),
+        csdl,
+        ORDER_CSDL_XML.into(),
+    );
+    let host = LocalTDataWasmHost::new(state, TenantId::new("alpha"), None, delegate);
+
+    assert_eq!(host.temper_data_request_budget(), 4096);
+    assert_eq!(host.temper_data_response_handle_budget(), 3);
+    assert_eq!(host.temper_data_call(b"request").await.unwrap(), b"request");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 fn test_state() -> ServerState {

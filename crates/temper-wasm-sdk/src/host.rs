@@ -154,6 +154,40 @@ unsafe extern "C" {
         buf_len: i32,
     ) -> i32;
 
+    // --- ADR-0157 governed application-data ABI ---
+
+    /// Execute one bounded v1 application-data request and return a positive
+    /// response handle, or a negative ABI error code.
+    pub fn host_temper_data_call(request_ptr: i32, request_len: i32) -> i64;
+
+    /// Return the encoded response length, or -1 for an invalid handle.
+    pub fn host_temper_data_response_len(response_handle: i32) -> i32;
+
+    /// Copy encoded response bytes into guest memory.
+    pub fn host_temper_data_response_read(
+        response_handle: i32,
+        offset: i32,
+        buffer_ptr: i32,
+        buffer_capacity: i32,
+    ) -> i32;
+
+    /// Release an application-data response handle.
+    pub fn host_temper_data_response_close(response_handle: i32) -> i32;
+
+    /// Read bytes from an invocation-scoped File stream.
+    pub fn host_temper_file_stream_read(
+        stream_handle: i32,
+        buffer_ptr: i32,
+        buffer_capacity: i32,
+    ) -> i32;
+
+    /// Try to write bytes to an invocation-scoped File stream.
+    pub fn host_temper_file_stream_try_write(
+        stream_handle: i32,
+        data_ptr: i32,
+        data_len: i32,
+    ) -> i32;
+
     // --- ADR-0057 streaming primitive (outbound, Phase 1) ---
 
     /// Open an outbound streaming HTTP exchange. Writes two u32

@@ -25,6 +25,7 @@ chrono = { workspace = true }
 opentelemetry = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 temper-observe = { workspace = true }
+temper-wasm-sdk = { workspace = true }
 uuid = { workspace = true }
 
 [features]

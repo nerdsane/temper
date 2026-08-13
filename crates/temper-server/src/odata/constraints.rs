@@ -217,11 +217,14 @@ pub async fn pre_delete_relation_checks(
         if edge.delete_policy != DeletePolicy::Restrict {
             continue;
         }
-        let source_ids = state.list_entity_ids_lazy(tenant, &edge.from_entity).await;
+        let source_ids = crate::application_data::GovernedApplicationDataService::new(state)
+            .fallback_candidates(tenant, &edge.from_entity)
+            .await;
         for source_id in source_ids {
-            if let Ok(source_state) = state
-                .get_tenant_entity_state(tenant, &edge.from_entity, &source_id)
-                .await
+            if let Ok(source_state) =
+                crate::application_data::GovernedApplicationDataService::new(state)
+                    .get(tenant, &edge.from_entity, &source_id)
+                    .await
             {
                 let source_fields =
                     serde_json::to_value(&source_state.state.fields).unwrap_or_default();
@@ -364,9 +367,11 @@ pub async fn post_write_invariant_checks(
             return Err(violation);
         }
 
-        let target_field_value = match state
-            .get_tenant_entity_state(tenant, &assertion.target_entity, target_id)
-            .await
+        let target_field_value = match crate::application_data::GovernedApplicationDataService::new(
+            state,
+        )
+        .get(tenant, &assertion.target_entity, target_id)
+        .await
         {
             Ok(resp) => {
                 if assertion.field_name == "status" {

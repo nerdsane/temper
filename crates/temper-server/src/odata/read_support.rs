@@ -297,8 +297,8 @@ pub(super) async fn materialize_entity_set_entities(
                     hydrate_blob_refs_for_tenant(&state, &tenant, &mut entity).await;
                     return Some(entity);
                 }
-                match state
-                    .get_tenant_entity_state(&tenant, &entity_type, &id)
+                match crate::application_data::GovernedApplicationDataService::new(&state)
+                    .get(&tenant, &entity_type, &id)
                     .await
                 {
                     Ok(response) => {

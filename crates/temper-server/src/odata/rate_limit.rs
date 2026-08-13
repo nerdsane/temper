@@ -10,7 +10,7 @@ use crate::request_context::AgentContext;
 use crate::response::odata_error;
 use crate::state::ServerState;
 
-pub(super) fn owner_id_from_fields(fields: &Value) -> Option<String> {
+pub(crate) fn owner_id_from_fields(fields: &Value) -> Option<String> {
     first_non_empty_string(
         fields,
         &[
@@ -30,7 +30,7 @@ pub(super) fn owner_id_from_action(fields: &Value, params: &Value) -> Option<Str
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn enforce_commons_write_rate_limit(
+pub(crate) async fn enforce_commons_write_rate_limit(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
@@ -92,7 +92,9 @@ fn request_security_context(
     agent_ctx: &AgentContext,
     resolved_identity: Option<&ResolvedIdentity>,
 ) -> SecurityContext {
-    if let Some(identity) = resolved_identity {
+    if let Some(security) = &agent_ctx.security_ctx {
+        security.clone()
+    } else if let Some(identity) = resolved_identity {
         SecurityContext::from_resolved_identity(
             &identity.agent_instance_id,
             &identity.agent_type_name,

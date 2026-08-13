@@ -238,8 +238,8 @@ async fn load_existing_entity_body(
         return Err(resource_not_found_response(set_name, key));
     }
 
-    let response = state
-        .get_tenant_entity_state(tenant, entity_type, key)
+    let response = crate::application_data::GovernedApplicationDataService::new(state)
+        .get(tenant, entity_type, key)
         .await
         .map_err(|_| resource_not_found_response(set_name, key))?;
     let mut body = serde_json::to_value(&response.state).unwrap_or_default();
@@ -327,16 +327,15 @@ async fn try_resolve_composite_entity_key(
         return Some(entity_id);
     }
 
-    let query_plane = state.query_plane_store()?;
     let filter = composite_key_filter(key_pairs)?;
     let translated = filter_sql::try_translate_candidate_filter(&filter)?;
     let order_by = [QueryFieldIndexOrder {
         field_name: "entity_id".to_string(),
         direction: QueryFieldIndexOrderDirection::Asc,
     }];
-    let page = match query_plane
-        .query_field_index_page(
-            tenant.as_str(),
+    let page = match crate::application_data::GovernedApplicationDataService::new(state)
+        .query_index_page(
+            tenant,
             entity_type,
             &translated.where_clause,
             translated.params,

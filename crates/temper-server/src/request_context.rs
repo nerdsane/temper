@@ -1,8 +1,5 @@
-//! Shared HTTP request context types.
-//!
-//! Canonical home for request-scoped identity and session types extracted
-//! from HTTP headers. These types are used across OData dispatch, authz,
-//! observability, and reaction modules.
+//! Shared request-scoped identity and session types used by HTTP, OData,
+//! authorization, observability, and reaction dispatch.
 
 use std::collections::BTreeMap;
 
@@ -64,6 +61,8 @@ pub struct AgentContext {
     /// `Idempotency-Key` header. Threaded into `EntityMsg::Action` so the
     /// actor can dedupe duplicate asks produced by dispatch-layer retries.
     pub idempotency_key: Option<String>,
+    /// Host-only optimistic concurrency precondition checked by the actor.
+    pub expected_entity_sequence: Option<u64>,
     /// Generic, client-supplied observability metadata.
     ///
     /// Producers should namespace their keys, for example
@@ -91,6 +90,7 @@ impl AgentContext {
             workflow_root_entity_id: None,
             workflow_run_id: None,
             idempotency_key: None,
+            expected_entity_sequence: None,
             observation_metadata: BTreeMap::new(),
         }
     }
@@ -126,6 +126,7 @@ impl AgentContext {
             workflow_root_entity_id: None,
             workflow_run_id: None,
             idempotency_key: None,
+            expected_entity_sequence: None,
             observation_metadata: BTreeMap::new(),
         }
     }
@@ -255,6 +256,7 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
         workflow_root_entity_id,
         workflow_run_id,
         idempotency_key,
+        expected_entity_sequence: None,
         observation_metadata: observation_metadata::extract(headers),
     }
 }
@@ -329,7 +331,6 @@ mod tests {
                 .map(String::as_str),
             Some("wi-123")
         );
-        // Identity fields are never extracted from headers (ADR-0033).
         assert!(ctx.agent_id.is_none());
         assert!(ctx.agent_type.is_none());
     }
@@ -372,7 +373,6 @@ mod tests {
         );
         headers.insert("x-session-id", HeaderValue::from_static("sess-abc"));
         let ctx = extract_agent_context(&headers);
-        // Identity headers are ignored — only credential resolution sets these.
         assert!(ctx.agent_id.is_none());
         assert!(ctx.agent_type.is_none());
         assert_eq!(ctx.session_id.as_deref(), Some("sess-abc"));

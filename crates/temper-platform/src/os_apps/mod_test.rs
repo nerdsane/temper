@@ -31,6 +31,61 @@ fn test_pm_specs_parse() {
 }
 
 #[test]
+fn app_manifest_rejects_duplicate_module_names() {
+    let module = WasmModuleManifest {
+        name: "worker".into(),
+        target: None,
+        criticality: WasmModuleCriticality::Optional,
+        startup_loading: WasmStartupLoading::Lazy,
+        provenance: None,
+        import_class: None,
+        data: None,
+        data_binding: None,
+    };
+    let manifest = AppManifest {
+        name: "demo".into(),
+        description: String::new(),
+        version: "1.0.0".into(),
+        mode: AppDeploymentMode::Operator,
+        startup_install: StartupInstallMode::Manual,
+        dependencies: Vec::new(),
+        wasm_modules: vec![module.clone(), module],
+    };
+    assert_eq!(
+        manifest.validate().unwrap_err(),
+        "duplicate WASM module 'worker'"
+    );
+}
+
+#[test]
+fn app_manifest_rejects_unbound_data_grant() {
+    let manifest = AppManifest {
+        name: "demo".into(),
+        description: String::new(),
+        version: "1.0.0".into(),
+        mode: AppDeploymentMode::Operator,
+        startup_install: StartupInstallMode::Manual,
+        dependencies: Vec::new(),
+        wasm_modules: vec![WasmModuleManifest {
+            name: "worker".into(),
+            target: None,
+            criticality: WasmModuleCriticality::Optional,
+            startup_loading: WasmStartupLoading::Lazy,
+            provenance: None,
+            import_class: None,
+            data: Some(temper_wasm_sdk::data::ModuleDataGrant::default()),
+            data_binding: None,
+        }],
+    };
+    assert!(
+        manifest
+            .validate()
+            .unwrap_err()
+            .contains("requires data_binding")
+    );
+}
+
+#[test]
 fn test_pm_csdl_parses() {
     let bundle = get_os_app("project-management").expect("PM app not found");
     let result = parse_csdl(bundle.csdl.as_ref().expect("PM should have CSDL"));
@@ -1010,6 +1065,8 @@ fn test_find_wasm_modules_discovers_packaged_root_wasm() {
             startup_loading: WasmStartupLoading::default(),
             provenance: None,
             import_class: None,
+            data: None,
+            data_binding: None,
         },
     );
 
@@ -2485,6 +2542,8 @@ fn test_required_wasm_config_without_artifact_is_not_registered_ready() {
             startup_loading: WasmStartupLoading::Lazy,
             provenance: None,
             import_class: None,
+            data: None,
+            data_binding: None,
         },
     );
     let bundle = AppBundle {
@@ -2593,6 +2652,8 @@ fn test_find_wasm_modules_respects_manifest_target() {
             startup_loading: WasmStartupLoading::default(),
             provenance: None,
             import_class: None,
+            data: None,
+            data_binding: None,
         },
     );
 
@@ -2637,6 +2698,8 @@ fn test_find_wasm_modules_prefers_packaged_sibling_over_target_output() {
             startup_loading: WasmStartupLoading::default(),
             provenance: None,
             import_class: None,
+            data: None,
+            data_binding: None,
         },
     );
 
@@ -2673,6 +2736,8 @@ fn test_find_wasm_modules_finds_sibling_artifact() {
             startup_loading: WasmStartupLoading::default(),
             provenance: None,
             import_class: None,
+            data: None,
+            data_binding: None,
         },
     );
 

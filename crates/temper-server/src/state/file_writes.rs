@@ -171,6 +171,14 @@ impl ServerState {
             .unwrap_or_default();
         self.reject_write_if_workspace_not_active(tenant, workspace_id)
             .await?;
+        if agent_ctx
+            .expected_entity_sequence
+            .is_some_and(|expected| expected != file_state.state.sequence_nr)
+        {
+            return Err(FileStreamContentError::ActionRejected(
+                "SequenceConflict".into(),
+            ));
+        }
 
         self.put_content_addressed_blob(tenant, &blob_key, body, None)
             .await

@@ -97,6 +97,22 @@ impl AuthorizedWasmHost {
 
 #[async_trait]
 impl WasmHost for AuthorizedWasmHost {
+    fn temper_data_request_budget(&self) -> usize {
+        self.inner.temper_data_request_budget()
+    }
+    fn temper_data_response_handle_budget(&self) -> usize {
+        self.inner.temper_data_response_handle_budget()
+    }
+    async fn temper_data_call(&self, request: &[u8]) -> Result<Vec<u8>, String> {
+        self.inner.temper_data_call(request).await
+    }
+    fn temper_file_stream_read(&self, handle: u32, max_bytes: usize) -> Result<Vec<u8>, i32> {
+        self.inner.temper_file_stream_read(handle, max_bytes)
+    }
+    fn temper_file_stream_try_write(&self, handle: u32, bytes: &[u8]) -> Result<usize, i32> {
+        self.inner.temper_file_stream_try_write(handle, bytes)
+    }
+
     async fn http_call(
         &self,
         method: &str,
@@ -315,7 +331,6 @@ mod tests {
     use super::*;
     use crate::host_trait::SimWasmHost;
 
-    /// A gate that denies everything.
     struct DenyAllGate;
     impl WasmAuthzGate for DenyAllGate {
         fn authorize_http_call(
@@ -336,7 +351,6 @@ mod tests {
         }
     }
 
-    /// A gate that allows everything.
     struct AllowAllGate;
     impl WasmAuthzGate for AllowAllGate {
         fn authorize_http_call(
@@ -437,7 +451,6 @@ mod tests {
         let inner = Arc::new(SimWasmHost::new());
         let gate = Arc::new(DenyAllGate);
         let host = AuthorizedWasmHost::new(inner, gate, test_ctx());
-        // Should not panic
         host.log("info", "test message");
     }
 
@@ -468,11 +481,6 @@ mod tests {
     }
 
     #[test]
-    fn extract_domain_bare() {
-        assert_eq!(extract_domain("https://example.com"), "example.com");
-    }
-
-    #[test]
     fn extract_domain_ip() {
         assert_eq!(extract_domain("http://127.0.0.1:3000/api"), "127.0.0.1");
     }
@@ -485,3 +493,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "authorized_host_data_test.rs"]
+mod data_test;

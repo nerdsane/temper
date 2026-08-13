@@ -23,6 +23,7 @@ use crate::state::PlatformState;
 mod agent_bootstrap;
 mod app_catalog;
 mod closure_bootstrap;
+mod data_binding;
 mod entity_aliases;
 mod policy_rows;
 mod reconcile;
@@ -57,7 +58,12 @@ pub use types::*;
 fn read_app_manifest(app_dir: &Path) -> Option<AppManifest> {
     let path = app_dir.join("app.toml");
     let content = std::fs::read_to_string(&path).ok()?;
-    toml::from_str(&content).ok()
+    let manifest: AppManifest = toml::from_str(&content).ok()?;
+    if let Err(error) = manifest.validate() {
+        tracing::error!(path = %path.display(), %error, "invalid app manifest");
+        return None;
+    }
+    Some(manifest)
 }
 
 fn cached_or_active_tenant_policy_text(state: &PlatformState, tenant: &str) -> String {
@@ -1126,6 +1132,7 @@ pub(super) async fn install_os_app_with_plan(
     } else {
         UploadedWasmReplacementContext::default()
     };
+    let resolved_dependency_lock = os_app_closure_for_roots(&[app_name.to_string()])?;
 
     if bundle.adrs.is_empty() {
         tracing::warn!(
@@ -1411,6 +1418,48 @@ pub(super) async fn install_os_app_with_plan(
             let module_started = Instant::now();
             let module_config = bundle.wasm_module_configs.get(module_name);
             let hash = temper_wasm::WasmEngine::hash_module(wasm_bytes);
+            if let Some(config) = module_config
+                && let Some(grant) = &config.data
+            {
+                let binding_result = config
+                    .data_binding
+                    .as_ref()
+                    .ok_or_else(|| "module data grant requires a data_binding".to_string())
+                    .and_then(|binding| {
+                        if binding.artifact_digest != hash {
+                            return Err("module data binding artifact digest mismatch".into());
+                        }
+                        let csdl_source = bundle.csdl.as_deref().ok_or_else(|| {
+                            "module data binding requires canonical CSDL".to_string()
+                        })?;
+                        let csdl = parse_csdl(csdl_source).map_err(|error| {
+                            format!("module data binding CSDL is invalid: {error}")
+                        })?;
+                        let regenerated = temper_codegen::generate_module_sdk(
+                            &csdl,
+                            module_name,
+                            &resolved_dependency_lock.id,
+                            &resolved_dependency_lock.id,
+                            &hash,
+                            grant.clone(),
+                        )
+                        .map_err(|error| {
+                            format!("module data binding regeneration failed: {error}")
+                        })?;
+                        data_binding::verify_module_data_binding(
+                            wasm_bytes,
+                            module_name,
+                            grant,
+                            binding,
+                            &regenerated.manifest,
+                        )
+                    });
+                if let Err(error) = binding_result {
+                    wasm_failures.push(module_name.clone());
+                    tracing::error!(tenant, module = %module_name, %error, "rejecting incompatible module data binding");
+                    continue;
+                }
+            }
             let required = module_config.is_some_and(WasmModuleManifest::is_required);
             let replace_uploaded_module =
                 existing_sources.get(module_name).is_some_and(|existing| {
@@ -1469,6 +1518,28 @@ pub(super) async fn install_os_app_with_plan(
             {
                 let mut wasm_reg = state.server.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
                 wasm_reg.register(&tenant_id, module_name, &hash);
+                if let Some(config) = module_config
+                    && let (Some(grant), Some(binding)) = (&config.data, &config.data_binding)
+                    && let Some(csdl_source) = bundle.csdl.as_deref()
+                    && let Ok(csdl) = parse_csdl(csdl_source)
+                    && let Ok(regenerated) = temper_codegen::generate_module_sdk(
+                        &csdl,
+                        module_name,
+                        &resolved_dependency_lock.id,
+                        &resolved_dependency_lock.id,
+                        &hash,
+                        grant.clone(),
+                    )
+                    && let Ok(activated) = data_binding::verify_module_data_binding(
+                        wasm_bytes,
+                        module_name,
+                        grant,
+                        binding,
+                        &regenerated.manifest,
+                    )
+                {
+                    wasm_reg.bind_data_manifest(&tenant_id, module_name, &hash, activated);
+                }
             }
 
             if matches!(

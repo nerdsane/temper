@@ -17,6 +17,8 @@ temper-runtime = { workspace = true }
 temper-authz = { workspace = true }
 temper-optimize = { workspace = true }
 temper-wasm = { workspace = true }
+temper-wasm-sdk = { workspace = true }
+temper-codegen = { workspace = true }
 opentelemetry = { workspace = true }
 reqwest = { workspace = true }
 axum = { workspace = true }
@@ -34,7 +36,6 @@ async-trait = { workspace = true }
 base64 = "0.22"
 
 [dev-dependencies]
-temper-codegen = { workspace = true }
 tokio-test = { workspace = true }
 tower = { workspace = true }
 hyper = { workspace = true }

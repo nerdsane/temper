@@ -1,6 +1,6 @@
 # ADR-0157: Metadata-Generated Typed Module Data SDK
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-24
 - Deciders: Temper core maintainers
 - Supersedes: ADR-0099

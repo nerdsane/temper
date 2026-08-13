@@ -179,9 +179,9 @@ pub(in crate::odata) async fn read_entity_set_page(
     if let Some(plan) = native_plan.clone()
         && should_try_native_before_catalog_coverage(&request, &plan)
     {
-        let indexed_entity_ids = request
-            .state
-            .list_entity_ids(request.tenant, request.entity_type);
+        let indexed_entity_ids =
+            crate::application_data::GovernedApplicationDataService::new(request.state)
+                .indexed_candidates(request.tenant, request.entity_type);
         let can_repair_with_bounded_coverage = !indexed_entity_ids.is_empty()
             && indexed_entity_ids.len() <= request.budget.scan_candidate_budget();
         if can_repair_with_bounded_coverage {
@@ -259,9 +259,8 @@ pub(in crate::odata) async fn read_entity_set_page(
     let all_entity_ids = match keyed {
         Some(ids) => ids,
         None => {
-            request
-                .state
-                .list_entity_ids_lazy(request.tenant, request.entity_type)
+            crate::application_data::GovernedApplicationDataService::new(request.state)
+                .fallback_candidates(request.tenant, request.entity_type)
                 .await
         }
     };

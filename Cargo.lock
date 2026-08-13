@@ -6457,7 +6457,10 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "temper-spec",
+ "temper-wasm-sdk",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 
@@ -6608,6 +6611,7 @@ dependencies = [
  "temper-store-turso",
  "temper-verify",
  "temper-wasm",
+ "temper-wasm-sdk",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -6708,6 +6712,7 @@ dependencies = [
  "temper-store-turso",
  "temper-verify",
  "temper-wasm",
+ "temper-wasm-sdk",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -6846,6 +6851,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "temper-observe",
+ "temper-wasm-sdk",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -6864,6 +6870,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

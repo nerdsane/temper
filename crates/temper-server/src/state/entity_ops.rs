@@ -840,6 +840,36 @@ impl ServerState {
             .unwrap_or_default()
     }
 
+    /// Return at most `budget + 1` complete-index IDs, or `None` when obtaining
+    /// a complete index would first require an unbounded durable-store scan.
+    pub(crate) fn list_entity_ids_bounded(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        budget: usize,
+    ) -> Option<Vec<String>> {
+        let index_key = format!("{tenant}:{entity_type}");
+        let complete = self.event_journal().is_none()
+            || self
+                .entity_index_hydrated
+                .read()
+                .expect("entity index hydrated lock poisoned")
+                .contains(&index_key);
+        if !complete {
+            return None;
+        }
+        let index = self.entity_index.read().unwrap();
+        Some(
+            index
+                .get(&index_key)
+                .into_iter()
+                .flat_map(|ids| ids.iter())
+                .take(budget.saturating_add(1))
+                .cloned()
+                .collect(),
+        )
+    }
+
     /// Check authorization for an action using the Cedar ABAC engine.
     ///
     /// Returns a typed [`AuthzDenial`] on failure, preserving the denial kind
@@ -1345,6 +1375,28 @@ impl ServerState {
         fields: serde_json::Value,
         replace: bool,
     ) -> Result<EntityResponse, String> {
+        self.update_tenant_entity_fields_if_sequence(
+            tenant,
+            entity_type,
+            entity_id,
+            fields,
+            replace,
+            None,
+        )
+        .await
+    }
+
+    /// Update fields only when the actor is still at `expected_sequence`.
+    #[instrument(skip_all, fields(otel.name = "entity.update_tenant_entity_fields_if_sequence", tenant = %tenant, entity_type, entity_id))]
+    pub async fn update_tenant_entity_fields_if_sequence(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        fields: serde_json::Value,
+        replace: bool,
+        expected_sequence: Option<u64>,
+    ) -> Result<EntityResponse, String> {
         let actor_ref = self
             .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
             .ok_or_else(|| {
@@ -1358,6 +1410,7 @@ impl ServerState {
             || EntityMsg::UpdateFields {
                 fields: fields_for_retry.clone(),
                 replace,
+                expected_sequence,
             },
             &policy,
         )

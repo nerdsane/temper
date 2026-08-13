@@ -589,6 +589,22 @@ impl EntityActor {
 
                     match parsed_event {
                         Ok(event) => {
+                            if env.event_type == super::types::FIELD_UPDATE_EVENT_TYPE {
+                                let replace = event
+                                    .params
+                                    .get("replace")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(false);
+                                let fields = event
+                                    .params
+                                    .get("fields")
+                                    .cloned()
+                                    .unwrap_or_else(|| serde_json::json!({}));
+                                super::effects::apply_field_update(state, &fields, replace);
+                                state.push_event_bounded(event);
+                                state.sequence_nr = env.sequence_nr;
+                                continue;
+                            }
                             // A persisted event is a historical fact: its guard
                             // already passed at commit time and its `to_status`
                             // is authoritative. Replay therefore re-derives the
@@ -839,6 +855,7 @@ impl Actor for EntityActor {
                 params,
                 cross_entity_booleans,
                 idempotency_key,
+                expected_sequence,
             } => {
                 // Capture start time for span duration (DST-safe: sim_now()
                 // returns logical clock in simulation, wall clock in production).
@@ -885,6 +902,18 @@ impl Actor for EntityActor {
                         state: response_state,
                         error: None,
                         custom_effects,
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+                if expected_sequence.is_some_and(|expected| expected != state.sequence_nr) {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some("SequenceConflict".into()),
+                        custom_effects: vec![],
                         scheduled_actions: vec![],
                         spawn_requests: vec![],
                         spec_governed: true,
@@ -1019,6 +1048,19 @@ impl Actor for EntityActor {
                                 expected: _,
                                 actual,
                             }) => {
+                                if expected_sequence.is_some() {
+                                    *state = state_before;
+                                    ctx.reply(EntityResponse {
+                                        success: false,
+                                        state: state.clone(),
+                                        error: Some("SequenceConflict".into()),
+                                        custom_effects: vec![],
+                                        scheduled_actions: vec![],
+                                        spawn_requests: vec![],
+                                        spec_governed: true,
+                                    });
+                                    return Ok(());
+                                }
                                 // ADR-0046 Sub-Decision 3: dedicated APM span
                                 // covering the retry cycle. `attempts` and
                                 // `outcome` are recorded at the end so Datadog
@@ -1419,26 +1461,107 @@ impl Actor for EntityActor {
                     .unwrap_or(serde_json::Value::Null);
                 ctx.reply(value);
             }
-            EntityMsg::UpdateFields { fields, replace } => {
-                if replace {
-                    // PUT: replace all fields (preserve Id and Status)
-                    let id = state.entity_id.clone();
-                    let status = state.status.clone();
-                    state.fields = fields;
-                    if let Some(obj) = state.fields.as_object_mut() {
-                        obj.insert("Id".to_string(), serde_json::Value::String(id));
-                        obj.insert("Status".to_string(), serde_json::Value::String(status));
+            EntityMsg::UpdateFields {
+                fields,
+                replace,
+                expected_sequence,
+            } => {
+                if expected_sequence.is_some_and(|expected| expected != state.sequence_nr) {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some("SequenceConflict".into()),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+                if !state.can_accept_event() {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(format!(
+                            "Event budget exhausted ({MAX_EVENTS_SINCE_SNAPSHOT} max since snapshot)"
+                        )),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+                let event = EntityEvent {
+                    action: super::types::FIELD_UPDATE_EVENT_TYPE.into(),
+                    from_status: state.status.clone(),
+                    to_status: state.status.clone(),
+                    timestamp: sim_now(),
+                    params: serde_json::json!({"replace": replace, "fields": fields}),
+                    idempotency_key: None,
+                };
+                let mut prospective = state.clone();
+                super::effects::apply_field_update(
+                    &mut prospective,
+                    event
+                        .params
+                        .get("fields")
+                        .unwrap_or(&serde_json::Value::Null),
+                    replace,
+                );
+                if let (Some(store), Some(backend)) =
+                    (self.event_journal.as_ref(), self.event_backend)
+                {
+                    if let Err(error) = self
+                        .persist_event(
+                            store,
+                            backend,
+                            &self.persistence_id(),
+                            &mut prospective,
+                            &event,
+                        )
+                        .await
+                    {
+                        let error = match error {
+                            PersistenceError::ConcurrencyViolation { .. } => {
+                                "SequenceConflict".to_string()
+                            }
+                            other => format!("FieldUpdatePersistenceFailed: {other}"),
+                        };
+                        ctx.reply(EntityResponse {
+                            success: false,
+                            state: state.clone(),
+                            error: Some(error),
+                            custom_effects: vec![],
+                            scheduled_actions: vec![],
+                            spawn_requests: vec![],
+                            spec_governed: true,
+                        });
+                        return Ok(());
                     }
                 } else {
-                    // PATCH: merge fields into existing
-                    if let (Some(existing), Some(updates)) =
-                        (state.fields.as_object_mut(), fields.as_object())
+                    prospective.sequence_nr = prospective.sequence_nr.saturating_add(1);
+                }
+                prospective.push_event_bounded(event);
+                if let Some(ref store) = self.event_journal {
+                    let persistence_id = self.persistence_id();
+                    if let Err(error) = Self::maybe_save_snapshot(
+                        store,
+                        self.snapshot_queue.as_ref(),
+                        &persistence_id,
+                        &mut prospective,
+                    )
+                    .await
                     {
-                        for (k, v) in updates {
-                            existing.insert(k.clone(), v.clone());
-                        }
+                        tracing::warn!(
+                            entity = %prospective.entity_id,
+                            seq = prospective.sequence_nr,
+                            error = %error,
+                            "failed to persist field-update snapshot"
+                        );
                     }
                 }
+                *state = prospective;
                 ctx.reply(EntityResponse {
                     success: true,
                     state: state.clone(),

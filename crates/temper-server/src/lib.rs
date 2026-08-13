@@ -8,6 +8,7 @@ pub mod adapters;
 mod admin;
 #[cfg(feature = "observe")]
 mod api;
+pub mod application_data;
 pub mod authz;
 mod aws_sigv4;
 pub mod blob_store;
