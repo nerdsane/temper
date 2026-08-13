@@ -134,7 +134,11 @@ pub(super) fn digest_app_bundle(app_name: &str, bundle: &AppBundle) -> OsAppBund
         wasm_parts.push((format!("wasm:{module_name}"), wasm_bytes.clone()));
     }
     for (module_name, config) in &bundle.wasm_module_configs {
-        let config_bytes = serde_json::to_vec(config).unwrap_or_default();
+        // The binding is derived from this digest, so exclude it from the
+        // immutable closure input while retaining the grant declaration.
+        let mut closure_config = config.clone();
+        closure_config.data_binding = None;
+        let config_bytes = serde_json::to_vec(&closure_config).unwrap_or_default();
         wasm_parts.push((format!("wasm-config:{module_name}"), config_bytes));
     }
     wasm_parts.sort_by(|a, b| a.0.cmp(&b.0));

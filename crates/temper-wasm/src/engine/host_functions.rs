@@ -118,7 +118,7 @@ fn read_guest_string(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> 
 /// `tracing::warn!` naming the host function and operand being read, and
 /// returns `Err(())` so the caller can return its ABI error sentinel
 /// instead of acting on uninitialized buffer contents.
-fn read_guest_bytes(
+pub(super) fn read_guest_bytes(
     caller: &Caller<'_, HostState>,
     memory: &wasmtime::Memory,
     ptr: i32,
@@ -2211,6 +2211,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
             ))
         })?;
 
+    super::data_host_functions::link(linker)?;
     Ok(())
 }
 

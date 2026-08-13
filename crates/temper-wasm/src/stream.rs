@@ -82,6 +82,21 @@ impl StreamRegistry {
         self.streams.get(id).map(|v| v.as_slice())
     }
 
+    /// Append a chunk without cloning bytes already stored for the stream.
+    pub fn append_stream_bounded(
+        &mut self,
+        id: &str,
+        bytes: &[u8],
+        max_bytes: usize,
+    ) -> Option<usize> {
+        let stream = self.streams.get_mut(id)?;
+        if stream.len().saturating_add(bytes.len()) > max_bytes {
+            return None;
+        }
+        stream.extend_from_slice(bytes);
+        Some(bytes.len())
+    }
+
     /// Number of active streams.
     pub fn stream_count(&self) -> usize {
         self.streams.len()

@@ -183,8 +183,8 @@ fn spawn_catalog_shadow_check_for_row(
     let catalog = row.clone();
     spawn_catalog_shadow_check(async move {
         let started_at = Instant::now(); // determinism-ok: production-only sampled projection parity metric
-        let result = state
-            .get_tenant_entity_state(&tenant, &entity_type, &catalog.entity_id)
+        let result = crate::application_data::GovernedApplicationDataService::new(&state)
+            .get(&tenant, &entity_type, &catalog.entity_id)
             .await;
         match result {
             Ok(response) => {

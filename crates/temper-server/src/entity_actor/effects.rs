@@ -74,6 +74,24 @@ pub fn build_eval_context(state: &EntityState) -> EvalContext {
     build_eval_context_with_xref(state, &std::collections::BTreeMap::new())
 }
 
+/// Apply the transport-neutral PUT/PATCH field mutation used by production,
+/// replay, and deterministic simulation.
+pub fn apply_field_update(state: &mut EntityState, fields: &serde_json::Value, replace: bool) {
+    if replace {
+        let id = state.entity_id.clone();
+        let status = state.status.clone();
+        state.fields = fields.clone();
+        if let Some(object) = state.fields.as_object_mut() {
+            object.insert("Id".into(), serde_json::Value::String(id));
+            object.insert("Status".into(), serde_json::Value::String(status));
+        }
+    } else if let (Some(existing), Some(updates)) =
+        (state.fields.as_object_mut(), fields.as_object())
+    {
+        existing.extend(updates.clone());
+    }
+}
+
 /// Build an [`EvalContext`] with pre-resolved cross-entity booleans.
 ///
 /// The `cross_entity_booleans` map contains `__xref:{type}:{field} -> bool` entries

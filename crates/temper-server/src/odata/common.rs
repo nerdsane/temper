@@ -162,7 +162,7 @@ pub(super) fn constraint_violation_response(err: ConstraintViolation) -> axum::r
 /// Consolidates the duplicated two-step constraint check pattern used by
 /// create, patch, put, delete, and bound action handlers. The `action` label
 /// is used for the post-write check (e.g. "Create", "Patch", "Put", "Delete").
-pub(super) async fn run_write_prechecks(
+pub(crate) async fn run_write_prechecks(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
@@ -209,8 +209,8 @@ pub(super) async fn load_entity_or_404(
     set_name: &str,
     key: &str,
 ) -> Result<crate::EntityResponse, axum::response::Response> {
-    state
-        .get_tenant_entity_state(tenant, entity_type, key)
+    crate::application_data::GovernedApplicationDataService::new(state)
+        .get(tenant, entity_type, key)
         .await
         .map_err(|e| {
             crate::response::odata_error(

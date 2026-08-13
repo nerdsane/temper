@@ -45,6 +45,27 @@ async fn dispatch_action(
                 params,
                 cross_entity_booleans: BTreeMap::new(),
                 idempotency_key: None,
+                expected_sequence: None,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("actor should respond")
+}
+
+async fn dispatch_action_with_preconditions(
+    actor_ref: &temper_runtime::actor::ActorRef<EntityMsg>,
+    expected_sequence: u64,
+    idempotency_key: &str,
+) -> EntityResponse {
+    actor_ref
+        .ask(
+            EntityMsg::Action {
+                name: "AddItem".into(),
+                params: serde_json::json!({}),
+                cross_entity_booleans: BTreeMap::new(),
+                idempotency_key: Some(idempotency_key.into()),
+                expected_sequence: Some(expected_sequence),
             },
             Duration::from_secs(5),
         )
@@ -131,6 +152,42 @@ async fn dst_retry_succeeds_after_one_violation() {
 
     // Journal: Create (from pre_start) + AddItem (retry succeeded) = 2 events.
     // The first AddItem attempt hit the injection and never touched the journal.
+    assert_eq!(sim.dump_journal(&persistence_id).len(), 2);
+}
+
+#[tokio::test]
+async fn exact_sequence_does_not_retry_after_persistence_conflict() {
+    let seed = 19;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let (store, sim) = sim_store_with_handle(seed);
+    let entity_id = "ord-exact-sequence";
+    let persistence_id = format!("default:Order:{entity_id}");
+    let system = ActorSystem::new("dst-exact-sequence");
+    let actor_ref = spawn_order(&system, order_table(), store, entity_id);
+    wait_ready(&actor_ref).await;
+    sim.inject_concurrency_violations(&persistence_id, 1);
+
+    let response = dispatch_action_with_preconditions(&actor_ref, 1, "exact-1").await;
+    assert!(!response.success);
+    assert_eq!(response.error.as_deref(), Some("SequenceConflict"));
+    assert_eq!(sim.dump_journal(&persistence_id).len(), 1);
+}
+
+#[tokio::test]
+async fn idempotent_retry_precedes_stale_sequence_rejection() {
+    let seed = 23;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let (store, sim) = sim_store_with_handle(seed);
+    let entity_id = "ord-idempotent-sequence";
+    let persistence_id = format!("default:Order:{entity_id}");
+    let system = ActorSystem::new("dst-idempotent-sequence");
+    let actor_ref = spawn_order(&system, order_table(), store, entity_id);
+    wait_ready(&actor_ref).await;
+
+    let first = dispatch_action_with_preconditions(&actor_ref, 1, "same-key").await;
+    assert!(first.success);
+    let retry = dispatch_action_with_preconditions(&actor_ref, 1, "same-key").await;
+    assert!(retry.success);
     assert_eq!(sim.dump_journal(&persistence_id).len(), 2);
 }
 

@@ -97,6 +97,26 @@ impl AuthorizedWasmHost {
 
 #[async_trait]
 impl WasmHost for AuthorizedWasmHost {
+    fn temper_data_request_budget(&self) -> usize {
+        self.inner.temper_data_request_budget()
+    }
+
+    fn temper_data_response_handle_budget(&self) -> usize {
+        self.inner.temper_data_response_handle_budget()
+    }
+
+    async fn temper_data_call(&self, request: &[u8]) -> Result<Vec<u8>, String> {
+        self.inner.temper_data_call(request).await
+    }
+
+    fn temper_file_stream_read(&self, handle: u32, max_bytes: usize) -> Result<Vec<u8>, i32> {
+        self.inner.temper_file_stream_read(handle, max_bytes)
+    }
+
+    fn temper_file_stream_try_write(&self, handle: u32, bytes: &[u8]) -> Result<usize, i32> {
+        self.inner.temper_file_stream_try_write(handle, bytes)
+    }
+
     async fn http_call(
         &self,
         method: &str,
@@ -397,6 +417,24 @@ mod tests {
         assert!(result.is_ok());
         let (status, _body) = result.unwrap();
         assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn application_data_capability_delegates_without_http_authorization() {
+        let inner = Arc::new(
+            SimWasmHost::new()
+                .with_data_budgets(123, 4)
+                .with_data_response(b"bound-response".to_vec()),
+        );
+        let gate = Arc::new(DenyAllGate);
+        let host = AuthorizedWasmHost::new(inner, gate, test_ctx());
+
+        assert_eq!(host.temper_data_request_budget(), 123);
+        assert_eq!(host.temper_data_response_handle_budget(), 4);
+        assert_eq!(
+            host.temper_data_call(b"request").await,
+            Ok(b"bound-response".to_vec())
+        );
     }
 
     #[tokio::test]

@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use temper_runtime::tenant::TenantId;
+use temper_wasm_sdk::data::ModuleSdkManifest;
 
 /// Registry mapping tenant WASM module names to their compiled hashes.
 ///
@@ -16,6 +17,8 @@ pub struct WasmModuleRegistry {
     modules: BTreeMap<(String, String), String>,
     /// Built-in modules available to all tenants (module_name → sha256_hash).
     builtins: BTreeMap<String, String>,
+    /// Host-only data grants bound during verified module activation.
+    data_bindings: BTreeMap<(String, String, String), ModuleSdkManifest>,
 }
 
 impl WasmModuleRegistry {
@@ -26,16 +29,52 @@ impl WasmModuleRegistry {
 
     /// Register a module hash for a tenant.
     pub fn register(&mut self, tenant: &TenantId, module_name: &str, sha256_hash: &str) {
-        self.modules.insert(
-            (tenant.to_string(), module_name.to_string()),
-            sha256_hash.to_string(),
-        );
+        let key = (tenant.to_string(), module_name.to_string());
+        self.modules.insert(key.clone(), sha256_hash.to_string());
+        // Activation is replacement, not a merge. A removed grant must fail
+        // closed instead of inheriting capabilities from an older artifact.
+        self.data_bindings
+            .retain(|(bound_tenant, bound_module, _), _| {
+                bound_tenant != &key.0 || bound_module != &key.1
+            });
     }
 
     /// Register a built-in module available to all tenants.
     pub fn register_builtin(&mut self, module_name: &str, sha256_hash: &str) {
         self.builtins
             .insert(module_name.to_string(), sha256_hash.to_string());
+    }
+
+    /// Bind an exact data grant to a tenant module activation.
+    pub fn bind_data_manifest(
+        &mut self,
+        tenant: &TenantId,
+        module_name: &str,
+        artifact_digest: &str,
+        manifest: ModuleSdkManifest,
+    ) {
+        self.data_bindings.insert(
+            (
+                tenant.to_string(),
+                module_name.to_string(),
+                artifact_digest.to_string(),
+            ),
+            manifest,
+        );
+    }
+
+    /// Return the host-only grant for a tenant module, if activation bound one.
+    pub fn data_manifest(
+        &self,
+        tenant: &TenantId,
+        module_name: &str,
+        artifact_digest: &str,
+    ) -> Option<&ModuleSdkManifest> {
+        self.data_bindings.get(&(
+            tenant.to_string(),
+            module_name.to_string(),
+            artifact_digest.to_string(),
+        ))
     }
 
     /// Look up the hash for a tenant's module, falling back to built-in modules.
@@ -48,6 +87,10 @@ impl WasmModuleRegistry {
 
     /// Remove a module from the registry.
     pub fn remove(&mut self, tenant: &TenantId, module_name: &str) -> bool {
+        self.data_bindings
+            .retain(|(bound_tenant, bound_module, _), _| {
+                bound_tenant != tenant.as_str() || bound_module != module_name
+            });
         self.modules
             .remove(&(tenant.to_string(), module_name.to_string()))
             .is_some()
@@ -93,6 +136,8 @@ impl WasmModuleRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+    use temper_wasm_sdk::data::ModuleDataGrant;
 
     #[test]
     fn register_and_lookup() {
@@ -126,6 +171,50 @@ mod tests {
 
         assert_eq!(registry.get_hash(&alpha, "stripe_charge"), Some("hash-a"));
         assert_eq!(registry.get_hash(&beta, "stripe_charge"), Some("hash-b"));
+    }
+
+    #[test]
+    fn grant_is_bound_to_exact_artifact_and_cleared_on_replacement() {
+        let mut registry = WasmModuleRegistry::new();
+        let tenant = TenantId::new("alpha");
+        registry.register(&tenant, "worker", "hash-a");
+        let binding = ModuleSdkManifest::new(
+            "worker",
+            temper_wasm_sdk::data::ModuleSdkMetadataDigests {
+                closure: "closure".into(),
+                dependency_lock: "closure".into(),
+                schema: "schema".into(),
+            },
+            "hash-a",
+            ModuleDataGrant::default(),
+            Vec::new(),
+            BTreeSet::new(),
+        )
+        .expect("valid binding");
+        registry.bind_data_manifest(&tenant, "worker", "hash-a", binding);
+
+        assert!(
+            registry
+                .data_manifest(&tenant, "worker", "hash-a")
+                .is_some()
+        );
+        assert!(
+            registry
+                .data_manifest(&tenant, "worker", "hash-b")
+                .is_none()
+        );
+
+        registry.register(&tenant, "worker", "hash-b");
+        assert!(
+            registry
+                .data_manifest(&tenant, "worker", "hash-a")
+                .is_none()
+        );
+        assert!(
+            registry
+                .data_manifest(&tenant, "worker", "hash-b")
+                .is_none()
+        );
     }
 
     #[test]

@@ -50,6 +50,31 @@ pub struct HttpBatchResponse {
 
 #[async_trait]
 pub trait WasmHost: Send + Sync {
+    /// Maximum raw request bytes admitted before parsing.
+    fn temper_data_request_budget(&self) -> usize {
+        0
+    }
+
+    /// Maximum simultaneously open application-data responses.
+    fn temper_data_response_handle_budget(&self) -> usize {
+        0
+    }
+
+    /// Execute a canonical Temper application-data request.
+    async fn temper_data_call(&self, _request: &[u8]) -> Result<Vec<u8>, String> {
+        Err("application-data capability is not bound for this invocation".into())
+    }
+
+    /// Read a bounded chunk from an invocation-scoped File stream.
+    fn temper_file_stream_read(&self, _handle: u32, _max_bytes: usize) -> Result<Vec<u8>, i32> {
+        Err(-3)
+    }
+
+    /// Try to write a bounded chunk to an invocation-scoped File stream.
+    fn temper_file_stream_try_write(&self, _handle: u32, _bytes: &[u8]) -> Result<usize, i32> {
+        Err(-3)
+    }
+
     /// Make an HTTP request. Returns (status_code, response_body).
     async fn http_call(
         &self,
@@ -327,6 +352,17 @@ pub type TextHttpInterceptorFn = Arc<
 type TextHttpInterceptorFuture =
     Pin<Box<dyn Future<Output = Option<Result<(u16, String), String>>> + Send>>;
 
+/// Host-only application-data service callback bound to one invocation authority.
+pub type TemperDataCallFn = Arc<
+    dyn Fn(Vec<u8>) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send>> + Send + Sync,
+>;
+
+/// Invocation-scoped File stream read callback.
+pub type TemperFileReadFn = Arc<dyn Fn(u32, usize) -> Result<Vec<u8>, i32> + Send + Sync>;
+
+/// Invocation-scoped File stream write callback.
+pub type TemperFileWriteFn = Arc<dyn Fn(u32, Vec<u8>) -> Result<usize, i32> + Send + Sync>;
+
 /// Production host: real HTTP calls via reqwest, real secrets.
 pub struct ProductionWasmHost {
     /// HTTP client for making real requests.
@@ -349,6 +385,13 @@ pub struct ProductionWasmHost {
     binary_http_interceptor: Option<BinaryHttpInterceptorFn>,
     /// Optional short-circuit for text HTTP calls.
     text_http_interceptor: Option<TextHttpInterceptorFn>,
+    /// Governed application-data service; absent means fail closed.
+    data_call: Option<TemperDataCallFn>,
+    /// Invocation-scoped File stream callbacks.
+    file_read: Option<TemperFileReadFn>,
+    file_write: Option<TemperFileWriteFn>,
+    data_request_budget: usize,
+    data_response_handle_budget: usize,
     /// Invocation context for auto-enriching guest telemetry.
     invocation_context: Option<WasmInvocationContext>,
     /// Registry of active streaming HTTP exchanges (ADR-0057).
@@ -529,6 +572,11 @@ impl ProductionWasmHost {
             trace_id: None,
             binary_http_interceptor: None,
             text_http_interceptor: None,
+            data_call: None,
+            file_read: None,
+            file_write: None,
+            data_request_budget: 0,
+            data_response_handle_budget: 0,
             invocation_context: None,
             http_streams: Arc::new(crate::http_stream::HttpStreamRegistry::new()),
         }
@@ -587,6 +635,22 @@ impl ProductionWasmHost {
     /// Create with a text HTTP interceptor for local fast paths.
     pub fn with_text_http_interceptor(mut self, interceptor: TextHttpInterceptorFn) -> Self {
         self.text_http_interceptor = Some(interceptor);
+        self
+    }
+
+    /// Bind the governed application-data and File stream services.
+    pub fn with_temper_data_service(
+        mut self,
+        data_call: TemperDataCallFn,
+        file_read: TemperFileReadFn,
+        file_write: TemperFileWriteFn,
+        budgets: &temper_wasm_sdk::data::ModuleDataBudgets,
+    ) -> Self {
+        self.data_call = Some(data_call);
+        self.file_read = Some(file_read);
+        self.file_write = Some(file_write);
+        self.data_request_budget = budgets.max_request_bytes as usize;
+        self.data_response_handle_budget = budgets.max_open_responses as usize;
         self
     }
 
@@ -761,6 +825,28 @@ impl ProductionWasmHost {
 
 #[async_trait]
 impl WasmHost for ProductionWasmHost {
+    fn temper_data_request_budget(&self) -> usize {
+        self.data_request_budget
+    }
+
+    fn temper_data_response_handle_budget(&self) -> usize {
+        self.data_response_handle_budget
+    }
+    async fn temper_data_call(&self, request: &[u8]) -> Result<Vec<u8>, String> {
+        let callback = self.data_call.as_ref().ok_or_else(|| {
+            "application-data capability is not bound for this invocation".to_string()
+        })?;
+        callback(request.to_vec()).await
+    }
+
+    fn temper_file_stream_read(&self, handle: u32, max_bytes: usize) -> Result<Vec<u8>, i32> {
+        self.file_read.as_ref().ok_or(-3)?(handle, max_bytes)
+    }
+
+    fn temper_file_stream_try_write(&self, handle: u32, bytes: &[u8]) -> Result<usize, i32> {
+        self.file_write.as_ref().ok_or(-3)?(handle, bytes.to_vec())
+    }
+
     async fn http_call(
         &self,
         method: &str,
@@ -2364,6 +2450,10 @@ pub struct SimWasmHost {
     default_response: (u16, String),
     /// Default binary response for URLs not in the binary map.
     default_binary_response: (u16, Vec<u8>),
+    /// Canned application-data response for deterministic ABI simulation.
+    data_response: Option<Vec<u8>>,
+    data_request_budget: usize,
+    data_response_handle_budget: usize,
 }
 
 impl SimWasmHost {
@@ -2377,6 +2467,9 @@ impl SimWasmHost {
             spec_eval_responses: BTreeMap::new(),
             default_response: (200, r#"{"ok": true}"#.to_string()),
             default_binary_response: (200, Vec::new()),
+            data_response: None,
+            data_request_budget: 1024 * 1024,
+            data_response_handle_budget: 4,
         }
     }
 
@@ -2431,6 +2524,19 @@ impl SimWasmHost {
         );
         self
     }
+
+    /// Return these bytes from the application-data ABI in simulation.
+    pub fn with_data_response(mut self, response: Vec<u8>) -> Self {
+        self.data_response = Some(response);
+        self
+    }
+
+    /// Override deterministic application-data request and response-handle budgets.
+    pub fn with_data_budgets(mut self, request_bytes: usize, response_handles: usize) -> Self {
+        self.data_request_budget = request_bytes;
+        self.data_response_handle_budget = response_handles;
+        self
+    }
 }
 
 impl Default for SimWasmHost {
@@ -2441,6 +2547,20 @@ impl Default for SimWasmHost {
 
 #[async_trait]
 impl WasmHost for SimWasmHost {
+    fn temper_data_request_budget(&self) -> usize {
+        self.data_request_budget
+    }
+
+    fn temper_data_response_handle_budget(&self) -> usize {
+        self.data_response_handle_budget
+    }
+
+    async fn temper_data_call(&self, _request: &[u8]) -> Result<Vec<u8>, String> {
+        self.data_response
+            .clone()
+            .ok_or_else(|| "no simulated application-data response configured".into())
+    }
+
     async fn http_call(
         &self,
         _method: &str,

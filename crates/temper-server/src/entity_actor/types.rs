@@ -11,6 +11,11 @@ use temper_runtime::actor::Message;
 
 /// Maximum unsnapshotted events an actor may replay/hot-hold before refusing new transitions.
 pub const MAX_EVENTS_SINCE_SNAPSHOT: usize = 10_000;
+/// Persistence event type reserved for transport-neutral field mutations.
+///
+/// The `$temper.` prefix is outside the IOA action identifier grammar, so a
+/// domain action cannot collide with this synthetic event during replay.
+pub(crate) const FIELD_UPDATE_EVENT_TYPE: &str = "$temper.fields.updated.v1";
 /// Backward-compatible alias for older callers; budget enforcement is tail-based.
 pub const MAX_EVENTS_PER_ENTITY: usize = MAX_EVENTS_SINCE_SNAPSHOT;
 /// Default number of recent events retained in memory per entity.
@@ -48,6 +53,8 @@ pub enum EntityMsg {
         /// Covers the race where a dispatch-layer retry produces a second
         /// in-flight ask after the first one already processed.
         idempotency_key: Option<String>,
+        /// Optional sequence precondition checked atomically by this actor.
+        expected_sequence: Option<u64>,
     },
     /// Get the current entity state.
     GetState,
@@ -57,6 +64,8 @@ pub enum EntityMsg {
     UpdateFields {
         fields: serde_json::Value,
         replace: bool,
+        /// Optional sequence precondition checked before mutation.
+        expected_sequence: Option<u64>,
     },
     /// Delete this entity.
     Delete,

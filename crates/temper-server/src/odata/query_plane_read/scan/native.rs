@@ -112,12 +112,9 @@ async fn try_query_native_page(
     top: usize,
     include_count: bool,
 ) -> Result<Option<QueryFieldIndexPage>, ()> {
-    let Some(query_plane) = request.state.query_plane_store() else {
-        return Ok(None);
-    };
-    query_plane
-        .query_field_index_page(
-            request.tenant.as_str(),
+    crate::application_data::GovernedApplicationDataService::new(request.state)
+        .query_index_page(
+            request.tenant,
             request.entity_type,
             &plan.where_clause,
             plan.params.clone(),

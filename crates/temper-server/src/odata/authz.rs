@@ -108,8 +108,8 @@ pub(crate) fn authorize_read(
     body: &serde_json::Value,
 ) -> Result<(), Box<Response>> {
     let attrs = resource_attrs_from_body(state, tenant, entity_type, entity_id, body);
-    state
-        .authorize_with_context(security_ctx, action, entity_type, &attrs, tenant.as_str())
+    crate::application_data::GovernedApplicationDataService::new(state)
+        .authorize(tenant, security_ctx, action, entity_type, &attrs)
         .map_err(|denial| {
             Box::new(
                 odata_error(
@@ -141,8 +141,8 @@ pub(super) async fn authorize_mutation(
         entity_id,
         attrs,
     } = resource;
-    let Err(denial) =
-        state.authorize_with_context(security_ctx, action, entity_type, attrs, tenant.as_str())
+    let Err(denial) = crate::application_data::GovernedApplicationDataService::new(state)
+        .authorize(tenant, security_ctx, action, entity_type, attrs)
     else {
         return Ok(());
     };

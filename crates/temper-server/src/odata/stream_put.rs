@@ -183,8 +183,8 @@ pub(super) async fn handle_stream_put(
         };
     }
 
-    let entity_state = match state
-        .get_tenant_entity_state(tenant, &entity_type, &key)
+    let entity_state = match crate::application_data::GovernedApplicationDataService::new(state)
+        .get(tenant, &entity_type, &key)
         .await
     {
         Ok(resp) => {

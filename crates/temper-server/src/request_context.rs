@@ -64,6 +64,8 @@ pub struct AgentContext {
     /// `Idempotency-Key` header. Threaded into `EntityMsg::Action` so the
     /// actor can dedupe duplicate asks produced by dispatch-layer retries.
     pub idempotency_key: Option<String>,
+    /// Host-only optimistic concurrency precondition checked by the entity actor.
+    pub expected_entity_sequence: Option<u64>,
     /// Generic, client-supplied observability metadata.
     ///
     /// Producers should namespace their keys, for example
@@ -91,6 +93,7 @@ impl AgentContext {
             workflow_root_entity_id: None,
             workflow_run_id: None,
             idempotency_key: None,
+            expected_entity_sequence: None,
             observation_metadata: BTreeMap::new(),
         }
     }
@@ -126,6 +129,7 @@ impl AgentContext {
             workflow_root_entity_id: None,
             workflow_run_id: None,
             idempotency_key: None,
+            expected_entity_sequence: None,
             observation_metadata: BTreeMap::new(),
         }
     }
@@ -255,6 +259,7 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
         workflow_root_entity_id,
         workflow_run_id,
         idempotency_key,
+        expected_entity_sequence: None,
         observation_metadata: observation_metadata::extract(headers),
     }
 }

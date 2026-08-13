@@ -19,7 +19,7 @@ use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::identity::ResolvedIdentity;
 use crate::request_context::AgentContext;
 use crate::response::{ODataResponse, odata_error};
-use crate::state::{BoundActionHookContext, DispatchError, DispatchExtOptions, ServerState};
+use crate::state::{BoundActionHookContext, DispatchError, ServerState};
 
 fn idempotency_actor_key(tenant: &TenantId, entity_type: &str, entity_id: &str) -> String {
     format!("{tenant}:{entity_type}:{entity_id}")
@@ -185,13 +185,8 @@ pub(super) async fn dispatch_bound_action(
         return resp;
     }
 
-    let authz_result = state.authorize_with_context(
-        &security_ctx,
-        action,
-        entity_type,
-        &resource_attrs,
-        tenant.as_str(),
-    );
+    let authz_result = crate::application_data::GovernedApplicationDataService::new(state)
+        .authorize(tenant, &security_ctx, action, entity_type, &resource_attrs);
     if let Err(denial) = authz_result {
         let reason = denial.to_string();
         let pd = record_authz_denial(
@@ -266,18 +261,15 @@ pub(super) async fn dispatch_bound_action(
         .into_response();
     }
 
-    let result = state
-        .dispatch_tenant_action_ext_typed(
+    let result = crate::application_data::GovernedApplicationDataService::new(state)
+        .action_with_options(
             tenant,
             entity_type,
             key_str,
             action,
             body_json.clone(),
-            DispatchExtOptions {
-                agent_ctx: &dispatch_agent_ctx,
-                await_integration,
-                await_reactions: true,
-            },
+            &dispatch_agent_ctx,
+            await_integration,
         )
         .await;
 

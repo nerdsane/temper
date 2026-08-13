@@ -100,6 +100,37 @@ impl EntityActorHandler {
 
         self
     }
+
+    /// Apply the same exact-sequence field mutation used by the live actor.
+    pub fn update_fields(
+        &mut self,
+        fields: serde_json::Value,
+        replace: bool,
+        expected_sequence: Option<u64>,
+    ) -> bool {
+        if expected_sequence.is_some_and(|expected| expected != self.state.sequence_nr) {
+            return false;
+        }
+        if !self.state.can_accept_event() {
+            return false;
+        }
+        let event = super::types::EntityEvent {
+            action: super::types::FIELD_UPDATE_EVENT_TYPE.into(),
+            from_status: self.state.status.clone(),
+            to_status: self.state.status.clone(),
+            timestamp: temper_runtime::scheduler::sim_now(),
+            params: serde_json::json!({"replace": replace, "fields": fields}),
+            idempotency_key: None,
+        };
+        let event_fields = event
+            .params
+            .get("fields")
+            .expect("field-update event always contains fields");
+        super::effects::apply_field_update(&mut self.state, event_fields, replace);
+        self.state.sequence_nr = self.state.sequence_nr.saturating_add(1);
+        self.state.push_event_bounded(event);
+        true
+    }
 }
 
 /// Map a shared [`ParsedAssert`] to the runtime [`SpecAssert`].
@@ -384,5 +415,18 @@ mod tests {
         let handler = EntityActorHandler::new("Order", "o1", order_table());
 
         assert!(handler.spec_invariants().is_empty());
+    }
+
+    #[test]
+    fn field_updates_consume_exact_sequence_in_simulation() {
+        let (_guard, _clock, _id_gen) = install_deterministic_context(42);
+        let mut handler = EntityActorHandler::new("Order", "o1", order_table());
+        handler.init().unwrap();
+
+        assert!(handler.update_fields(serde_json::json!({"Name": "first"}), false, Some(0)));
+        assert_eq!(handler.state.sequence_nr, 1);
+        assert_eq!(handler.state.fields["Name"], "first");
+        assert!(!handler.update_fields(serde_json::json!({"Name": "stale"}), false, Some(0)));
+        assert_eq!(handler.state.fields["Name"], "first");
     }
 }

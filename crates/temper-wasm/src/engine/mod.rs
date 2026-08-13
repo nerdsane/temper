@@ -3,6 +3,7 @@
 //! Modules are compiled once and cached by SHA-256 hash. Each invocation
 //! gets a fresh `Store` with fuel + memory limits (TigerStyle budgets).
 
+mod data_host_functions;
 mod guest_spans;
 mod host_functions;
 mod telemetry;
@@ -193,6 +194,10 @@ pub(crate) struct HostState {
     pub(crate) blob_cache: BTreeMap<String, Vec<u8>>,
     /// Guest-created observability spans scoped to this invocation.
     pub(crate) guest_spans: GuestSpanRegistry,
+    /// Bounded response byte buffers keyed by invocation-local handle.
+    pub(crate) data_responses: BTreeMap<i32, Vec<u8>>,
+    /// Next positive response handle.
+    pub(crate) next_data_response: i32,
 }
 
 impl HostState {
@@ -510,6 +515,8 @@ impl WasmEngine {
                 wasi_ctx,
                 blob_cache,
                 guest_spans: GuestSpanRegistry::for_invocation(context.clone(), needs_wasi),
+                data_responses: BTreeMap::new(),
+                next_data_response: 1,
             };
             (wasi_stderr_pipe, host_state)
         };

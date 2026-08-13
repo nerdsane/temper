@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::Serialize;
+use temper_wasm_sdk::data::{ModuleDataGrant, ModuleSdkManifest};
 
 use super::{AdrEntry, AgentDefinition, AppSkillDefinition, SeedInstance, SystemFileEntry};
 
@@ -105,6 +106,46 @@ pub struct AppManifest {
     pub wasm_modules: Vec<WasmModuleManifest>,
 }
 
+impl AppManifest {
+    /// Validate manifest invariants before any bundle contents are installed.
+    pub fn validate(&self) -> Result<(), String> {
+        let mut module_names = std::collections::BTreeSet::new();
+        for module in &self.wasm_modules {
+            if module.name.trim().is_empty() {
+                return Err("WASM module name must not be empty".into());
+            }
+            if !module_names.insert(module.name.as_str()) {
+                return Err(format!("duplicate WASM module '{}'", module.name));
+            }
+            if let Some(data) = &module.data {
+                data.validate()
+                    .map_err(|error| format!("WASM module '{}': {error}", module.name))?;
+                let binding = module.data_binding.as_ref().ok_or_else(|| {
+                    format!(
+                        "WASM module '{}' data grant requires data_binding",
+                        module.name
+                    )
+                })?;
+                binding
+                    .verify_binding()
+                    .map_err(|error| format!("WASM module '{}': {error}", module.name))?;
+                if binding.module_name != module.name {
+                    return Err(format!(
+                        "WASM module '{}' data binding does not match its declaration",
+                        module.name
+                    ));
+                }
+            } else if module.data_binding.is_some() {
+                return Err(format!(
+                    "WASM module '{}' data_binding requires a data grant",
+                    module.name
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn default_version() -> String {
     "0.1.0".to_string()
 }
@@ -172,6 +213,12 @@ pub struct WasmModuleManifest {
     pub provenance: Option<String>,
     #[serde(default)]
     pub import_class: Option<String>,
+    /// Least-authority application-data capabilities granted to this module.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<ModuleDataGrant>,
+    /// Host-readable SDK binding covered by the compiled artifact identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_binding: Option<ModuleSdkManifest>,
 }
 
 impl WasmModuleManifest {
