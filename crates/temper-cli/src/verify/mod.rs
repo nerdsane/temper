@@ -8,7 +8,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton};
+use temper_spec::automaton::{lint_automata_bundle, lint_automaton, LintSeverity};
 use temper_spec::csdl::parse_csdl;
 use temper_spec::model::build_spec_model;
 
@@ -232,7 +232,7 @@ fn run_composite_verification(
     parsed_automata: &std::collections::BTreeMap<String, temper_spec::automaton::Automaton>,
     composite_budget: usize,
 ) -> Result<()> {
-    use temper_verify::composite::{CompositeOutcome, verify_all_with_budget};
+    use temper_verify::composite::{verify_all_with_budget, CompositeOutcome};
 
     let automaton_refs: Vec<&temper_spec::automaton::Automaton> =
         parsed_automata.values().collect();
@@ -284,10 +284,23 @@ fn run_composite_verification(
             }
             CompositeOutcome::Incomplete => {
                 any_incomplete = true;
+                let reason = if !result.other_violations.is_empty() && result.states_explored == 0 {
+                    result.other_violations.join("; ")
+                } else {
+                    format!(
+                        "BFS budget exhausted ({} joint states)",
+                        result.states_explored
+                    )
+                };
                 println!(
-                    "    [INCOMPLETE] seed={} scope=[{}] — explored {} joint states; BFS budget exhausted, proof is PARTIAL (not a pass)",
-                    result.seed, scope, result.states_explored,
+                    "    [INCOMPLETE] seed={} scope=[{}] — {}; proof is PARTIAL (not a pass)",
+                    result.seed, scope, reason,
                 );
+                if result.states_explored > 0 {
+                    for other in &result.other_violations {
+                        println!("           - {other}");
+                    }
+                }
             }
         }
     }
@@ -301,7 +314,7 @@ fn run_composite_verification(
     }
     if any_incomplete {
         anyhow::bail!(
-            "composite cross-entity verification INCOMPLETE (budget {composite_budget} exhausted). The joint proof did not finish — raise --composite-budget or narrow the spec. This is not a pass."
+            "composite cross-entity verification INCOMPLETE (budget {composite_budget}). Some seeds did not finish a joint proof — a failed plan (missing trigger target) or an exhausted BFS. This is not a pass. Re-run with every --specs-dir the machines join, or raise --composite-budget."
         );
     }
     println!("\nComposite cross-entity verification: ALL PASSED");
