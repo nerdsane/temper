@@ -428,6 +428,10 @@ impl RuntimeContext {
                             binary_path: None,
                             api_key: api_key.as_deref(),
                             internal_credential_issuer: None,
+                            // Local stdio MCP: the host process is the
+                            // developer's own machine, so upload_wasm/compile_wasm
+                            // are legitimate developer ops (ARN-166).
+                            allow_host_ops: true,
                         };
                         temper_sandbox::dispatch::dispatch_temper_method(
                             &ctx,

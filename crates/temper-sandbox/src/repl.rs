@@ -23,6 +23,12 @@ pub struct ReplConfig {
     pub session_id: Option<String>,
     /// Per-request credential issuer for authenticated loopback calls.
     pub internal_credential_issuer: crate::http::InternalRequestCredentialIssuer,
+    /// Whether host-process ops (`upload_wasm`/`compile_wasm`) are permitted.
+    ///
+    /// The server-hosted REPL sets this false: those ops would read the server's
+    /// filesystem and spawn `cargo` as the server user (ARN-166). The local
+    /// stdio MCP runner — the developer's own machine — sets it true.
+    pub allow_host_ops: bool,
 }
 
 /// Run Python code in the Temper Monty sandbox via the REPL endpoint.
@@ -38,6 +44,7 @@ pub async fn run_repl(config: &ReplConfig, code: &str) -> Result<String> {
     let agent_id = config.agent_id.clone();
     let session_id = config.session_id.clone();
     let internal_credential_issuer = config.internal_credential_issuer.clone();
+    let allow_host_ops = config.allow_host_ops;
 
     run_sandbox(
         code,
@@ -67,6 +74,7 @@ pub async fn run_repl(config: &ReplConfig, code: &str) -> Result<String> {
                     binary_path: None,
                     api_key: None,
                     internal_credential_issuer: Some(&internal_credential_issuer),
+                    allow_host_ops,
                 };
                 dispatch_temper_method(&ctx, &function_name, args, &kwargs).await
             }
