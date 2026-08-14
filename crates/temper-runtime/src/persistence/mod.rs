@@ -400,6 +400,40 @@ pub trait EventStore: Send + Sync + 'static {
         from_sequence: u64,
     ) -> impl std::future::Future<Output = Result<Vec<PersistenceEnvelope>, PersistenceError>> + Send;
 
+    /// Read at most `limit` events after `from_sequence`, in sequence order.
+    fn read_events_limited(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        limit: usize,
+    ) -> impl std::future::Future<Output = Result<Vec<PersistenceEnvelope>, PersistenceError>> + Send
+    {
+        async move {
+            let mut events = self.read_events(persistence_id, from_sequence).await?;
+            events.truncate(limit);
+            Ok(events)
+        }
+    }
+
+    /// Read at most the newest `limit` events, returned in ascending sequence order.
+    fn read_latest_events(
+        &self,
+        persistence_id: &str,
+        limit: usize,
+    ) -> impl std::future::Future<Output = Result<Vec<PersistenceEnvelope>, PersistenceError>> + Send
+    {
+        async move {
+            if limit == 0 {
+                return Ok(Vec::new());
+            }
+            let mut events = self.read_events(persistence_id, 0).await?;
+            if events.len() > limit {
+                events.drain(..events.len() - limit);
+            }
+            Ok(events)
+        }
+    }
+
     /// Save a state snapshot.
     fn save_snapshot(
         &self,
@@ -453,6 +487,38 @@ pub trait EventStore: Send + Sync + 'static {
                 self.list_entity_ids(tenant).await?
             };
             entities.sort();
+            entities.truncate(limit);
+            Ok(entities)
+        }
+    }
+
+    /// Page every durable journal identity, including deleted entities.
+    ///
+    /// `after` is an exclusive `(entity_type, entity_id)` cursor. Unlike the
+    /// query-plane entity listings, this storage-maintenance API must retain
+    /// tombstoned journals so durable side work cannot become undiscoverable.
+    fn list_journal_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: Option<&str>,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = Result<Vec<(String, String)>, PersistenceError>> + Send
+    {
+        async move {
+            if limit == 0 {
+                return Ok(Vec::new());
+            }
+            let mut entities = self.list_entity_ids(tenant).await?;
+            if let Some(entity_type) = entity_type {
+                entities.retain(|(found_type, _)| found_type == entity_type);
+            }
+            entities.sort();
+            if let Some((after_type, after_id)) = after {
+                entities.retain(|(entity_type, entity_id)| {
+                    (entity_type.as_str(), entity_id.as_str()) > (after_type, after_id)
+                });
+            }
             entities.truncate(limit);
             Ok(entities)
         }

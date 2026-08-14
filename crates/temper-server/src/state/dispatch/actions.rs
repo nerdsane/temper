@@ -176,6 +176,26 @@ impl crate::state::ServerState {
             if rules.is_empty() {
                 None
             } else {
+                let guard_source = self
+                    .get_tenant_entity_state(tenant, entity_type, entity_id)
+                    .await
+                    .map_err(DispatchError::Internal)?;
+                let expected_source_sequence = guard_source.state.sequence_nr;
+                let mut guard_fields = guard_source.state.fields;
+                if let (Some(fields), Some(action_params)) =
+                    (guard_fields.as_object_mut(), params.as_object())
+                {
+                    for (name, value) in action_params {
+                        fields.insert(name.clone(), value.clone());
+                    }
+                }
+                let resolved_guards = crate::trigger::dispatcher::resolve_rule_guard_inputs(
+                    self,
+                    tenant,
+                    &rules,
+                    &guard_fields,
+                )
+                .await;
                 let authority = serde_json::to_value(
                     crate::trigger::dispatcher::effective_trigger_security_context(agent_ctx),
                 )
@@ -185,6 +205,8 @@ impl crate::state::ServerState {
                     authority,
                     depth: 0,
                     root_delivery_id: None,
+                    expected_source_sequence,
+                    resolved_guards,
                     receipt: None,
                 })
             }
@@ -193,6 +215,11 @@ impl crate::state::ServerState {
         };
 
         let durable_reactions_expected = reaction_context.is_some();
+        if durable_reactions_expected && self.event_journal().is_none() {
+            return Err(DispatchError::Internal(
+                "durable reactions require a configured event journal".to_string(),
+            ));
+        }
         let response = self
             .dispatch_tenant_action_core(
                 tenant,
@@ -207,12 +234,18 @@ impl crate::state::ServerState {
             .await?;
 
         // Dispatch cross-entity reactions (fire-and-forget, depth 0 = top-level)
-        if response.success {
-            if let Some(dispatcher) = dispatcher {
+        if response.success
+            && let Some(dispatcher) = dispatcher
+        {
+            // Keep the durable recovery/cascade future off actor worker stacks.
+            // Its bounded scans and fanout state are materially larger than a
+            // normal action future, especially when WASM callbacks nest a
+            // second dispatch on the same worker.
+            Box::pin(async {
                 let to_state = response.state.status.clone();
                 let fields = serde_json::to_value(&response.state.fields).unwrap_or_default();
                 let committed_intents = if durable_reactions_expected {
-                    self.load_committed_reaction_intents(
+                    self.materialize_committed_reaction_intents(
                         tenant,
                         entity_type,
                         entity_id,
@@ -245,20 +278,22 @@ impl crate::state::ServerState {
                     self.require_terminal_reaction_roots(tenant, &root_delivery_ids)
                         .await?;
                 } else if !committed_intents.is_empty() {
-                    let permit = background_reaction_semaphore()
-                        .acquire_owned()
-                        .await
-                        .map_err(|_| {
-                            DispatchError::Internal("reaction worker semaphore closed".to_string())
-                        })?;
-                    self.spawn_background_reactions(
-                        BackgroundReactionDispatch {
-                            dispatcher: Arc::clone(&dispatcher),
-                            tenant: tenant.clone(),
-                            intents: committed_intents,
-                        },
-                        permit,
-                    );
+                    dispatcher.notify_recovery(tenant);
+                    match background_reaction_semaphore().try_acquire_owned() {
+                        Ok(permit) => self.spawn_background_reactions(
+                            BackgroundReactionDispatch {
+                                dispatcher: Arc::clone(&dispatcher),
+                                tenant: tenant.clone(),
+                                intents: committed_intents,
+                            },
+                            permit,
+                        ),
+                        Err(error) => tracing::debug!(
+                            tenant = %tenant,
+                            %error,
+                            "reaction intent is durable; periodic recovery will claim it"
+                        ),
+                    }
                 } else {
                     dispatcher
                         .dispatch_reactions(
@@ -278,7 +313,9 @@ impl crate::state::ServerState {
                         )
                         .await;
                 }
-            }
+                Ok::<(), DispatchError>(())
+            })
+            .await?;
         }
 
         // Scheduled actions are handled inside run_post_dispatch_effects
@@ -286,16 +323,19 @@ impl crate::state::ServerState {
         Ok(response)
     }
 
-    async fn load_committed_reaction_intents(
+    /// Make every reaction intent on one committed source event durably pending.
+    pub(crate) async fn materialize_committed_reaction_intents(
         &self,
         tenant: &TenantId,
         entity_type: &str,
         entity_id: &str,
         source_sequence: u64,
     ) -> Result<Vec<crate::trigger::delivery::PersistedReactionIntent>, DispatchError> {
-        let Some((store, _)) = self.event_journal() else {
-            return Ok(Vec::new());
-        };
+        let (store, _) = self.event_journal().ok_or_else(|| {
+            DispatchError::Internal(
+                "durable reactions require a configured event journal".to_string(),
+            )
+        })?;
         if source_sequence == 0 {
             return Err(DispatchError::Internal(
                 "successful persisted action returned sequence zero".to_string(),
@@ -303,7 +343,7 @@ impl crate::state::ServerState {
         }
         let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
         let events = store
-            .read_events(&persistence_id, source_sequence - 1)
+            .read_events_limited(&persistence_id, source_sequence - 1, 1)
             .await
             .map_err(|error| DispatchError::Internal(error.to_string()))?;
         let source_event = events
@@ -314,8 +354,14 @@ impl crate::state::ServerState {
                     "committed source event {persistence_id}@{source_sequence} was not readable"
                 ))
             })?;
-        crate::trigger::delivery::extract_intents(&source_event.payload)
-            .map_err(DispatchError::Internal)
+        let intents = crate::trigger::delivery::extract_intents(&source_event.payload)
+            .map_err(DispatchError::Internal)?;
+        for intent in &intents {
+            crate::trigger::delivery::initialize_delivery_record(&store, intent.clone())
+                .await
+                .map_err(|error| DispatchError::Internal(error.to_string()))?;
+        }
+        Ok(intents)
     }
 
     async fn require_terminal_reaction_roots(
@@ -330,9 +376,19 @@ impl crate::state::ServerState {
                 "awaited durable reactions require an event journal".to_string(),
             ));
         };
-        let records = list_delivery_records(&store, tenant.as_str(), 10_000)
-            .await
-            .map_err(|error| DispatchError::Internal(error.to_string()))?;
+        const DELIVERY_INSPECTION_BUDGET: usize = 10_000;
+        let records = list_delivery_records(
+            &store,
+            tenant.as_str(),
+            DELIVERY_INSPECTION_BUDGET.saturating_add(1),
+        )
+        .await
+        .map_err(|error| DispatchError::Internal(error.to_string()))?;
+        if records.len() > DELIVERY_INSPECTION_BUDGET {
+            return Err(DispatchError::Internal(format!(
+                "awaited reaction tree inspection exceeded the {DELIVERY_INSPECTION_BUDGET}-delivery budget"
+            )));
+        }
         for root_delivery_id in root_delivery_ids {
             let tree: Vec<_> = records
                 .iter()
@@ -391,29 +447,13 @@ impl crate::state::ServerState {
 
         let reaction_task = async move {
             let _permit = permit;
-            let mut result_count = 0usize;
             for intent in intents {
                 match dispatcher.dispatch_committed_intent(&state, intent).await {
-                    Ok(results) => result_count = result_count.saturating_add(results.len()),
+                    Ok(_) => {}
                     Err(error) => tracing::error!(tenant = %tenant, %error, "durable reaction delivery failed"),
                 }
             }
-            if let Err(error) = dispatcher
-                .drain_tenant_deliveries(
-                    &state,
-                    &tenant,
-                    1_024,
-                    std::time::Duration::from_secs(60),
-                )
-                .await
-            {
-                tracing::error!(tenant = %tenant, %error, "reaction recovery scan failed");
-            }
-            tracing::info!(
-                tenant = %tenant,
-                reaction.result_count = result_count,
-                "background reactions completed"
-            );
+            tracing::info!(tenant = %tenant, "background reaction intents dispatched");
         }
         .instrument(span);
         tokio::spawn(reaction_task); // determinism-ok: production-only post-commit reaction side effects
@@ -628,6 +668,9 @@ impl crate::state::ServerState {
         let params_for_retry = params;
         let cross_for_retry = cross_entity_booleans;
         let reactions_for_retry = reaction_context;
+        let reaction_expected_sequence = reactions_for_retry
+            .as_ref()
+            .map(|context| context.expected_source_sequence);
         let idempotency_key = Some(agent_ctx.idempotency_key.clone().unwrap_or_else(|| {
             format!(
                 "dispatch:{tenant}:{entity_type}:{entity_id}:{action}:{}",
@@ -651,8 +694,10 @@ impl crate::state::ServerState {
                     params: params_for_retry.clone(),
                     cross_entity_booleans: cross_for_retry.clone(),
                     idempotency_key: idempotency_key.clone(),
-                    expected_sequence: agent_ctx.expected_entity_sequence,
-                    reaction_context: reactions_for_retry.clone(),
+                    expected_sequence: agent_ctx
+                        .expected_entity_sequence
+                        .or(reaction_expected_sequence),
+                    reaction_context: reactions_for_retry.clone().map(Box::new),
                 },
                 &policy,
             )

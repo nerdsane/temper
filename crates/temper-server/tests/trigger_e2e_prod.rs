@@ -13,7 +13,9 @@ use temper_server::ServerState;
 use temper_server::registry::SpecRegistry;
 use temper_server::request_context::AgentContext;
 use temper_server::state::DispatchExtOptions;
+use temper_server::storage::StorageStack;
 use temper_spec::csdl::parse_csdl;
+use temper_store_sim::SimEventStore;
 
 const CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
@@ -196,12 +198,13 @@ fn build_state(tenant: &str, tenant_policy: &str) -> ServerState {
         .expect("tenant registration should succeed with inline triggers");
 
     let system = ActorSystem::new("trigger-e2e-prod");
-    let state = ServerState::from_registry(system, registry);
+    let mut state = ServerState::from_registry(system, registry);
     state
         .authz
         .reload_tenant_policies(tenant, tenant_policy)
         .expect("tenant policy should load");
     state.rebuild_reaction_dispatcher();
+    state.set_storage_stack(StorageStack::from_sim(SimEventStore::no_faults(421), None));
     state
 }
 
@@ -219,12 +222,13 @@ fn build_file_workspace_state(tenant: &str, tenant_policy: &str) -> ServerState 
         .expect("tenant registration should succeed with inline triggers");
 
     let system = ActorSystem::new("trigger-e2e-fs");
-    let state = ServerState::from_registry(system, registry);
+    let mut state = ServerState::from_registry(system, registry);
     state
         .authz
         .reload_tenant_policies(tenant, tenant_policy)
         .expect("tenant policy should load");
     state.rebuild_reaction_dispatcher();
+    state.set_storage_stack(StorageStack::from_sim(SimEventStore::no_faults(422), None));
     state
 }
 
@@ -348,20 +352,31 @@ async fn inline_action_triggers_respect_tenant_cedar_denials() {
     )
     .await;
 
-    let resp = dispatch(
-        &state,
-        &tenant,
-        "Order",
-        order_id,
-        "ConfirmOrder",
-        serde_json::json!({}),
-    )
-    .await;
+    let error = state
+        .dispatch_tenant_action(
+            &tenant,
+            "Order",
+            order_id,
+            "ConfirmOrder",
+            serde_json::json!({}),
+            &AgentContext::system(),
+        )
+        .await
+        .expect_err("awaited denied reaction must be reported");
     assert!(
-        resp.success,
-        "source action should still commit on trigger deny"
+        error.contains("terminal status Rejected"),
+        "denial must surface its durable terminal outcome: {error}"
     );
-    assert_eq!(resp.state.status, "Confirmed");
+    assert_eq!(
+        state
+            .get_tenant_entity_state(&tenant, "Order", order_id)
+            .await
+            .expect("source remains readable")
+            .state
+            .status,
+        "Confirmed",
+        "target denial must not roll back the committed source"
+    );
 
     tokio::task::yield_now().await;
 

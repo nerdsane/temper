@@ -71,6 +71,31 @@ errors become `DeadLettered`.
 The maximum trigger depth remains eight. Depth and causation lineage are stored
 on each intent, so restart cannot reset the budget.
 
+Recovery discovers intents by keyset-paging durable source journals and reading
+events under an explicit work budget. Lifecycle journals materialize the
+inferred `Pending` state before a successful source response is returned, which
+makes non-awaited work immediately observable without waiting for target
+execution. Each tenant has one serialized recovery cursor, and a completed scan
+retains the earliest logical retry or lease-expiry wakeup it observed. Redis
+maintains its journal keyset as a sorted index in the same append script rather
+than materializing the tenant's complete entity set in a worker.
+
+A production recovery supervisor maintains an independent due time per tenant
+and processes one bounded batch for each due tenant. Tenant-scoped notifications
+wake newly durable non-awaited work, active keyset scans are briefly paced,
+storage errors back off, and idle tenants poll slowly without inheriting another
+tenant's scan cadence. A weak server-lifetime sentinel and generation fencing
+retire workers without allowing the worker's own state clone or OData-only
+bound-action hooks to retain the server indefinitely. Supervisor membership
+comes from configured tenants rather than current reaction rules, because an
+intent's persisted rule must remain deliverable after the live rule is removed.
+
+When a delivered target event commits descendant intents, the delivering worker
+materializes their lifecycle journals before marking the parent delivery
+successful and wakes that tenant's recovery supervisor. Receipt reconciliation
+repeats this materialization from the already committed target event, closing
+the crash window between target commit and descendant lifecycle creation.
+
 ### 3. Couple the target effect to a durable receipt
 
 Target dispatch uses the delivery ID as its idempotency identity. The target
@@ -79,6 +104,11 @@ ambiguous `Dispatching` delivery, the worker reconciles the receipt. A matching
 receipt marks the delivery `Succeeded`; absence permits another fenced attempt.
 This prevents duplicate target effects across crashes at either side of the
 target commit acknowledgement.
+
+Receipt reconciliation reads the newest bounded target-event window. Its budget
+equals the actor's durable idempotency-key retention budget, so the receipt and
+the fallback idempotency proof have the same lifetime and neither path requires
+an unbounded journal replay.
 
 Component stores must implement the same semantic contract for Postgres, Turso,
 Redis-backed deployments, and deterministic Sim storage. Redis may coordinate
@@ -104,7 +134,9 @@ intents are durable. It does not wait for target execution.
 for the complete descendant delivery tree to reach terminal states. Descendants
 are linked by a root delivery ID. Target failure never rolls back the already
 committed source transition. The response reports incomplete or failed delivery
-truthfully when the deadline or a terminal failure is reached.
+truthfully when the deadline or a terminal failure is reached. If bounded tree
+inspection cannot prove that every descendant was examined, the await fails
+conservatively instead of treating a truncated tenant listing as completion.
 
 ### 6. Make outcomes queryable and retries governed
 
@@ -164,8 +196,8 @@ parameters, principal claims, and other high-cardinality or sensitive values.
 ### Negative
 
 - Every source action with entity triggers adds durable write amplification.
-- Stores gain a cross-record atomicity contract, claim indexes, and retention
-  responsibilities.
+- Stores gain bounded journal paging and recent-event-read contracts plus
+  retention responsibilities.
 - Awaited calls may observe a terminal target failure after the source transition
   is already committed; clients must not interpret that as source rollback.
 

@@ -231,6 +231,29 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: temper
+          POSTGRES_PASSWORD: temper
+          POSTGRES_DB: temper_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U temper -d temper_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
         with:
@@ -264,6 +287,13 @@ jobs:
 
       - name: cargo test --workspace -- --skip dst_
         run: cargo test --workspace -- --skip dst_
+
+      - name: Verify durable reaction backend parity
+        env:
+          DATABASE_URL: postgres://temper:temper@localhost:5432/temper_test
+          REDIS_URL: redis://localhost:6379/0
+          TEMPER_REQUIRE_BACKEND_PARITY: "1"
+        run: cargo test -p temper-server --test reaction_backend_parity
 
   # ─────────────────────────────────────────────────────
   # Gate 3b: DST/platform coverage (matrixed)

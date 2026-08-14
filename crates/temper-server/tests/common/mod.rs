@@ -96,6 +96,7 @@ pub fn build_two_tenant_state(
 
 pub mod platform_harness;
 pub mod platform_invariants;
+pub mod reaction_fixture;
 pub mod workload_gen;
 
 // ── Dispatch helpers ────────────────────────────────────────────────────

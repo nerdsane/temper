@@ -5,11 +5,12 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use serde::{Deserialize, Serialize};
 
+use crate::authz::require_observe_auth;
 use crate::odata::extract_tenant;
 use crate::state::ServerState;
 use crate::trigger::delivery::{
     ReactionDeliveryRecord, ReactionDeliveryStatus, delivery_journal_id, find_delivery_record,
-    list_delivery_records,
+    list_delivery_records_page,
 };
 
 const DEFAULT_LIST_LIMIT: usize = 100;
@@ -19,6 +20,7 @@ const MAX_LIST_LIMIT: usize = 1_000;
 pub(crate) struct ReactionListQuery {
     limit: Option<usize>,
     status: Option<ReactionDeliveryStatus>,
+    after: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -93,6 +95,7 @@ pub(crate) async fn handle_list_reactions(
     headers: HeaderMap,
     Query(query): Query<ReactionListQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_observe_auth(&state, &headers, "read_reactions", "ReactionDelivery")?;
     let tenant = extract_tenant(&headers, &state).map_err(|(status, _)| status)?;
     let (store, _) = state
         .event_journal()
@@ -101,19 +104,33 @@ pub(crate) async fn handle_list_reactions(
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)
         .clamp(1, MAX_LIST_LIMIT);
-    let records = list_delivery_records(&store, tenant.as_str(), MAX_LIST_LIMIT)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let value = records
-        .iter()
-        .map(|(record, _)| record)
-        .filter(|record| query.status.is_none_or(|status| record.status == status))
-        .take(limit)
-        .map(ReactionDeliveryView::from)
-        .collect::<Vec<_>>();
+    let records = list_delivery_records_page(
+        &store,
+        tenant.as_str(),
+        query.after.as_deref(),
+        MAX_LIST_LIMIT,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut value = Vec::new();
+    let mut last_inspected = None;
+    for (record, _) in &records {
+        last_inspected = Some(record.intent.delivery_id.clone());
+        if query.status.is_none_or(|status| record.status == status) {
+            value.push(ReactionDeliveryView::from(record));
+            if value.len() == limit {
+                break;
+            }
+        }
+    }
+    let next = (last_inspected.is_some()
+        && (value.len() == limit || records.len() == MAX_LIST_LIMIT))
+        .then_some(last_inspected)
+        .flatten();
     Ok(Json(serde_json::json!({
         "total": value.len(),
         "value": value,
+        "next": next,
     })))
 }
 
@@ -123,6 +140,7 @@ pub(crate) async fn handle_get_reaction(
     headers: HeaderMap,
     Path(delivery_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_observe_auth(&state, &headers, "read_reactions", "ReactionDelivery")?;
     let tenant = extract_tenant(&headers, &state).map_err(|(status, _)| status)?;
     let (store, _) = state
         .event_journal()

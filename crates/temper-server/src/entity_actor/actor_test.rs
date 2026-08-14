@@ -181,6 +181,7 @@ async fn sequence_preconditions_are_checked_atomically_by_actor() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: Some(99),
+                reaction_context: None,
             },
             Duration::from_secs(1),
         )

@@ -3247,7 +3247,14 @@ to = "Authorized"
 
     add_os_apps_dir(app_root.clone());
 
-    let state = PlatformState::new(None);
+    let db_path = format!("/tmp/temper-inline-reaction-{}.db", uuid::Uuid::new_v4());
+    let turso = temper_store_turso::TursoEventStore::new(&format!("file:{db_path}"), None)
+        .await
+        .expect("create durable reaction test store");
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
     add_os_apps_dir(app_root.clone());
     install_os_app(&state, "test-inline-trigger", "inline-trigger-app")
         .await
@@ -3301,6 +3308,9 @@ to = "Authorized"
     assert_eq!(payment.state.status, "Authorized");
 
     let _ = fs::remove_dir_all(&app_root);
+    let _ = fs::remove_file(&db_path);
+    let _ = fs::remove_file(format!("{db_path}-wal"));
+    let _ = fs::remove_file(format!("{db_path}-shm"));
 }
 
 #[tokio::test]

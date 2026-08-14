@@ -56,7 +56,7 @@ pub enum EntityMsg {
         /// Optional sequence precondition checked atomically by this actor.
         expected_sequence: Option<u64>,
         /// ADR-0158 rule and authority snapshot to co-commit with the event.
-        reaction_context: Option<crate::trigger::delivery::ReactionCommitContext>,
+        reaction_context: Option<Box<crate::trigger::delivery::ReactionCommitContext>>,
     },
     /// Get the current entity state.
     GetState,

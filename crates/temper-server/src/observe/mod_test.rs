@@ -89,6 +89,7 @@ async fn seed_reaction_delivery(
         source_sequence: 1,
         source_to_state: "Submitted".to_string(),
         source_fields: serde_json::json!({"private_value": "must-not-leak"}),
+        guard_passed: true,
         target_entity_id: Some(format!("target-{delivery_id}")),
         trigger_name: "seeded-reaction".to_string(),
         trigger_index: 0,
@@ -287,7 +288,33 @@ async fn reaction_observe_routes_are_bounded_tenant_scoped_and_redacted() {
         false,
     )
     .await;
+    state
+        .authz
+        .reload_tenant_policies(
+            "default",
+            r#"permit(principal, action == Action::"read", resource is ReactionDelivery);"#,
+        )
+        .expect("install policy that denies read_reactions");
     let app = build_app_with_state(state);
+
+    for uri in [
+        "/observe/reactions?limit=1",
+        "/observe/reactions/reaction-v1-observe-a",
+    ] {
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::get(uri)
+                    .header("X-Tenant-Id", "default")
+                    .header("X-Temper-Principal-Id", "customer-1")
+                    .header("X-Temper-Principal-Kind", "customer")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    }
 
     let response = app
         .clone()
@@ -301,9 +328,27 @@ async fn reaction_observe_routes_are_bounded_tenant_scoped_and_redacted() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["total"], 1);
     assert_eq!(json["value"].as_array().unwrap().len(), 1);
+    assert_eq!(json["next"], "reaction-v1-observe-a");
     let rendered = String::from_utf8(body.to_vec()).unwrap();
     assert!(!rendered.contains("must-not-leak"));
     assert!(rendered.contains("operator-source"));
+
+    let filtered_page = app
+        .clone()
+        .oneshot(system_get(
+            "/observe/reactions?limit=1&status=succeeded&after=reaction-v1-observe-a",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(filtered_page.status(), StatusCode::OK);
+    let filtered_body = axum::body::to_bytes(filtered_page.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let filtered_json: serde_json::Value = serde_json::from_slice(&filtered_body).unwrap();
+    assert_eq!(
+        filtered_json["value"][0]["delivery_id"],
+        "reaction-v1-observe-b"
+    );
 
     let detail = app
         .oneshot(system_get("/observe/reactions/reaction-v1-observe-a"))

@@ -124,11 +124,6 @@ impl ReactionRegistry {
     pub fn has_rules(&self, tenant: &TenantId) -> bool {
         self.tenants.get(tenant).is_some_and(|idx| !idx.is_empty())
     }
-
-    /// Tenants with registered reaction rules, in deterministic order.
-    pub fn tenant_ids(&self) -> Vec<TenantId> {
-        self.tenants.keys().cloned().collect()
-    }
 }
 
 /// Check if a rule's `to_state` filter matches the actual state.

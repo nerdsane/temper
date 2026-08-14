@@ -425,6 +425,10 @@ pub struct ServerState {
     ///
     /// Wrapped in `RwLock` so hot-loaded specs can refresh reaction rules at runtime.
     pub reaction_dispatcher: Arc<RwLock<Option<Arc<ReactionDispatcher>>>>,
+    /// Generation used to retire recovery workers after a dispatcher rebuild.
+    reaction_recovery_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Lifetime sentinel held by server-owned state clones, but not recovery workers.
+    reaction_recovery_owner: Arc<()>,
     /// Optional webhook dispatcher for external system notifications.
     pub webhook_dispatcher: Option<Arc<WebhookDispatcher>>,
     /// Native adapter integration registry (`type = "adapter"` dispatch path).
@@ -590,6 +594,14 @@ impl ServerState {
             }
         }
         self.storage_stack = Some(stack);
+        let dispatcher = self
+            .reaction_dispatcher
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(dispatcher) = dispatcher {
+            self.spawn_reaction_recovery(dispatcher);
+        }
     }
 
     /// Return the durable query-plane capability for projection reads/writes.
@@ -691,6 +703,8 @@ impl ServerState {
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,
             reaction_dispatcher: Arc::new(RwLock::new(None)),
+            reaction_recovery_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            reaction_recovery_owner: Arc::new(()),
             webhook_dispatcher: None,
             adapter_registry: Arc::new(AdapterRegistry::with_builtins()),
             wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
@@ -939,6 +953,8 @@ impl ServerState {
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,
             reaction_dispatcher: Arc::new(RwLock::new(None)),
+            reaction_recovery_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            reaction_recovery_owner: Arc::new(()),
             webhook_dispatcher: None,
             adapter_registry: Arc::new(AdapterRegistry::with_builtins()),
             wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
@@ -1008,26 +1024,106 @@ impl ServerState {
         if self.event_journal().is_none() || tokio::runtime::Handle::try_current().is_err() {
             return;
         }
-        let tenants = dispatcher.tenant_ids();
+        // Recovery follows configured tenants, not current reaction rules:
+        // committed intents carry their immutable rule and must remain
+        // deliverable after the final live rule is removed.
+        let tenants = self
+            .registry
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .tenant_ids()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
         if tenants.is_empty() {
             return;
         }
-        let state = self.clone();
+        let generation = self
+            .reaction_recovery_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+        let recovery_owner = Arc::downgrade(&self.reaction_recovery_owner);
+        let mut state = self.clone();
+        // The worker must not keep its own lifetime sentinel alive. All other
+        // state is retained only until the next bounded owner check.
+        state.reaction_recovery_owner = Arc::new(());
+        // Bound-action hooks run only from the OData binding layer, never from
+        // core reaction dispatch. Platform hooks may retain a PlatformState
+        // (and therefore the original sentinel), so the worker clone must not
+        // carry this unused ownership edge.
+        state.bound_action_hook = None;
         tokio::spawn(async move {
             // determinism-ok: production startup recovery uses the durable
             // event-store contract; deterministic tests invoke the same scan
             // directly under their simulated scheduler.
-            for tenant in tenants {
-                if let Err(error) = dispatcher
-                    .drain_tenant_deliveries(
-                        &state,
-                        &tenant,
-                        1_024,
+            let now = tokio::time::Instant::now(); // determinism-ok: production supervisor cadence only
+            let mut tenant_due = tenants
+                .into_iter()
+                .map(|tenant| (tenant, now))
+                .collect::<BTreeMap<_, _>>();
+            loop {
+                if recovery_owner.upgrade().is_none()
+                    || state
+                        .reaction_recovery_generation
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        != generation
+                {
+                    return;
+                }
+                let now = tokio::time::Instant::now(); // determinism-ok: production supervisor cadence only
+                for tenant in dispatcher.take_recovery_wake_tenants() {
+                    tenant_due.insert(tenant, now);
+                }
+                let due_tenants = tenant_due
+                    .iter()
+                    .filter(|(_, due)| **due <= now)
+                    .map(|(tenant, _)| tenant.clone())
+                    .collect::<Vec<_>>();
+                if due_tenants.is_empty() {
+                    let next_due = tenant_due.values().min().copied().unwrap_or(now);
+                    tokio::select! { // determinism-ok: production recovery cadence; eligibility uses sim_now
+                        () = tokio::time::sleep_until(next_due) => {}
+                        () = dispatcher.wait_for_recovery_signal() => {}
+                    }
+                    continue;
+                }
+                for tenant in due_tenants {
+                    if recovery_owner.upgrade().is_none()
+                        || state
+                            .reaction_recovery_generation
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                            != generation
+                    {
+                        return;
+                    }
+                    match tokio::time::timeout(
                         std::time::Duration::from_secs(60),
+                        dispatcher.recover_tenant_deliveries(&state, &tenant, 1_024),
                     )
                     .await
-                {
-                    tracing::error!(tenant = %tenant, %error, "startup reaction recovery failed");
+                    {
+                        Ok(Ok(_)) => {
+                            tenant_due.insert(
+                                tenant.clone(),
+                                tokio::time::Instant::now() // determinism-ok: production supervisor cadence only
+                                    + dispatcher.recovery_supervisor_delay(&tenant),
+                            );
+                        }
+                        Ok(Err(error)) => {
+                            tracing::error!(tenant = %tenant, %error, "reaction recovery cycle failed");
+                            tenant_due.insert(
+                                tenant.clone(),
+                                tokio::time::Instant::now() + std::time::Duration::from_secs(1), // determinism-ok: production error backoff only
+                            );
+                        }
+                        Err(_) => {
+                            tracing::warn!(tenant = %tenant, "reaction recovery cycle exhausted its wall-time budget");
+                            tenant_due.insert(
+                                tenant.clone(),
+                                tokio::time::Instant::now() + std::time::Duration::from_secs(1), // determinism-ok: production timeout backoff only
+                            );
+                        }
+                    }
                 }
             }
         });

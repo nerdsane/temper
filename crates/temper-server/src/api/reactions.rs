@@ -99,8 +99,8 @@ pub(crate) async fn handle_retry_reaction(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     if let Some(dispatcher) = dispatcher {
+        dispatcher.notify_recovery(&tenant);
         let state_for_retry = state.clone();
-        let tenant_for_retry = tenant.clone();
         let intent = record.intent.clone();
         tokio::spawn(async move {
             // determinism-ok: governed API schedules durable work; the worker uses persisted scheduler time
@@ -109,18 +109,6 @@ pub(crate) async fn handle_retry_reaction(
                 .await
             {
                 tracing::error!(%error, "manual reaction retry dispatch failed");
-                return;
-            }
-            if let Err(error) = dispatcher
-                .drain_tenant_deliveries(
-                    &state_for_retry,
-                    &tenant_for_retry,
-                    1_024,
-                    std::time::Duration::from_secs(60),
-                )
-                .await
-            {
-                tracing::error!(%error, "manual reaction retry drain failed");
             }
         });
     }

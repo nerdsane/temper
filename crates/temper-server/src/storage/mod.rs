@@ -20,13 +20,13 @@ use sqlx::PgPool;
 use temper_runtime::persistence::{
     EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
 };
-use temper_store_postgres::{PostgresEventStore, PostgresPolicyRow, PostgresTrajectoryInsert};
+use temper_store_postgres::{PostgresEventStore, PostgresTrajectoryInsert};
 use temper_store_turso::{
     ActionStats, AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow,
     OtsQueuedTrajectoryRow, OtsTrajectoryParams, OtsTrajectoryRow, PolicyDenialPatternRow,
-    PolicyRow as TursoPolicyRow, TenantStoreRouter, TenantUserRow, TursoEventStore,
-    TursoTrajectoryInsert, TursoTrajectoryRow, TursoWasmInvocationInsert, TursoWasmInvocationRow,
-    TursoWasmModuleMetadataRow, UnmetIntentAggRow, store::TrajectoryStats,
+    TenantStoreRouter, TenantUserRow, TursoEventStore, TursoTrajectoryInsert, TursoTrajectoryRow,
+    TursoWasmInvocationInsert, TursoWasmInvocationRow, TursoWasmModuleMetadataRow,
+    UnmetIntentAggRow, store::TrajectoryStats,
 };
 
 use crate::platform_store::PlatformStore;
@@ -34,7 +34,9 @@ use crate::platform_store::PlatformStore;
 use crate::platform_store::SimPlatformStore;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 
+mod backend_label;
 mod published_artifacts;
+pub use backend_label::{BackendLabel, DataOnlyCreateRecord, DataOnlyCreateStore, PolicyStoreRow};
 mod query_plane_impls;
 mod query_plane_read;
 pub use published_artifacts::{
@@ -69,6 +71,19 @@ pub trait DynEventStore: Send + Sync {
         &'a self,
         persistence_id: &'a str,
         from_sequence: u64,
+    ) -> EventStoreFuture<'a, Result<Vec<PersistenceEnvelope>, PersistenceError>>;
+
+    fn read_events_limited<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        from_sequence: u64,
+        limit: usize,
+    ) -> EventStoreFuture<'a, Result<Vec<PersistenceEnvelope>, PersistenceError>>;
+
+    fn read_latest_events<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        limit: usize,
     ) -> EventStoreFuture<'a, Result<Vec<PersistenceEnvelope>, PersistenceError>>;
 
     fn append_with_keys<'a>(
@@ -190,6 +205,14 @@ pub trait DynEventStore: Send + Sync {
         entity_type: Option<&'a str>,
         limit: usize,
     ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>>;
+
+    fn list_journal_ids_page<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: Option<&'a str>,
+        after: Option<(&'a str, &'a str)>,
+        limit: usize,
+    ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>>;
 }
 
 impl<T> DynEventStore for T
@@ -223,6 +246,28 @@ where
         from_sequence: u64,
     ) -> EventStoreFuture<'a, Result<Vec<PersistenceEnvelope>, PersistenceError>> {
         Box::pin(EventStore::read_events(self, persistence_id, from_sequence))
+    }
+
+    fn read_events_limited<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        from_sequence: u64,
+        limit: usize,
+    ) -> EventStoreFuture<'a, Result<Vec<PersistenceEnvelope>, PersistenceError>> {
+        Box::pin(EventStore::read_events_limited(
+            self,
+            persistence_id,
+            from_sequence,
+            limit,
+        ))
+    }
+
+    fn read_latest_events<'a>(
+        &'a self,
+        persistence_id: &'a str,
+        limit: usize,
+    ) -> EventStoreFuture<'a, Result<Vec<PersistenceEnvelope>, PersistenceError>> {
+        Box::pin(EventStore::read_latest_events(self, persistence_id, limit))
     }
 
     fn append_with_keys<'a>(
@@ -449,6 +494,22 @@ where
             limit,
         ))
     }
+
+    fn list_journal_ids_page<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: Option<&'a str>,
+        after: Option<(&'a str, &'a str)>,
+        limit: usize,
+    ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>> {
+        Box::pin(EventStore::list_journal_ids_page(
+            self,
+            tenant,
+            entity_type,
+            after,
+            limit,
+        ))
+    }
 }
 
 /// Cloneable boxed event store handle.
@@ -498,6 +559,25 @@ impl BoxedEventStore {
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
         self.0.read_events(persistence_id, from_sequence).await
+    }
+
+    pub async fn read_events_limited(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        self.0
+            .read_events_limited(persistence_id, from_sequence, limit)
+            .await
+    }
+
+    pub async fn read_latest_events(
+        &self,
+        persistence_id: &str,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        self.0.read_latest_events(persistence_id, limit).await
     }
 
     pub async fn append_with_keys(
@@ -679,103 +759,18 @@ impl BoxedEventStore {
             .list_entity_ids_limited(tenant, entity_type, limit)
             .await
     }
-}
 
-/// Backend label used for metrics and operator-facing diagnostics only.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BackendLabel {
-    Postgres,
-    Turso,
-    Redis,
-    TursoRouted,
-    Sim,
-}
-
-impl BackendLabel {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Postgres => "postgres",
-            Self::Turso => "turso",
-            Self::Redis => "redis",
-            Self::TursoRouted => "turso-routed",
-            Self::Sim => "sim",
-        }
-    }
-}
-
-/// Backend-neutral row for one granular Cedar policy entry.
-#[derive(Clone, Debug)]
-pub struct PolicyStoreRow {
-    pub tenant: String,
-    pub policy_id: String,
-    pub cedar_text: String,
-    pub policy_hash: String,
-    pub created_at: String,
-    pub created_by: String,
-    pub enabled: bool,
-}
-
-impl From<TursoPolicyRow> for PolicyStoreRow {
-    fn from(row: TursoPolicyRow) -> Self {
-        Self {
-            tenant: row.tenant,
-            policy_id: row.policy_id,
-            cedar_text: row.cedar_text,
-            policy_hash: row.policy_hash,
-            created_at: row.created_at,
-            created_by: row.created_by,
-            enabled: row.enabled,
-        }
-    }
-}
-
-impl From<PostgresPolicyRow> for PolicyStoreRow {
-    fn from(row: PostgresPolicyRow) -> Self {
-        Self {
-            tenant: row.tenant,
-            policy_id: row.policy_id,
-            cedar_text: row.cedar_text,
-            policy_hash: row.policy_hash,
-            created_at: row.created_at,
-            created_by: row.created_by,
-            enabled: row.enabled,
-        }
-    }
-}
-
-/// Inputs for a native brand-new data-only entity create.
-///
-/// This capability is only valid for entities whose first durable event and
-/// first query projection row can be inserted atomically by a storage backend.
-pub struct DataOnlyCreateRecord<'a> {
-    /// Tenant that owns the entity.
-    pub tenant: &'a str,
-    /// Entity type being created.
-    pub entity_type: &'a str,
-    /// Entity id being created.
-    pub entity_id: &'a str,
-    /// Initial entity status.
-    pub status: &'a str,
-    /// Projection fields to store in the query catalog and scalar index.
-    pub fields: &'a serde_json::Value,
-    /// Full response projection to store in the query catalog.
-    pub state: &'a serde_json::Value,
-    /// First event envelope to append at sequence number 1.
-    pub event: &'a PersistenceEnvelope,
-}
-
-/// Optional native storage capability for brand-new data-only creates.
-#[async_trait::async_trait]
-pub trait DataOnlyCreateStore: Send + Sync {
-    /// Persist the first event and initial projection atomically.
-    ///
-    /// Returns the new sequence number on success. Duplicate first events or
-    /// duplicate projection rows should return [`PersistenceError::ConcurrencyViolation`]
-    /// so the caller can decline the fast path and use the generic path.
-    async fn create_data_only_entity(
+    pub async fn list_journal_ids_page(
         &self,
-        record: DataOnlyCreateRecord<'_>,
-    ) -> Result<u64, PersistenceError>;
+        tenant: &str,
+        entity_type: Option<&str>,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        self.0
+            .list_journal_ids_page(tenant, entity_type, after, limit)
+            .await
+    }
 }
 
 /// Durable observe trajectory sink.

@@ -917,6 +917,75 @@ impl EventStore for SimEventStore {
         Ok(events)
     }
 
+    async fn read_events_limited(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        if let Some(remaining) = inner.pending_read_failures.get_mut(persistence_id) {
+            *remaining -= 1;
+            let cleared = *remaining == 0;
+            if cleared {
+                inner.pending_read_failures.remove(persistence_id);
+            }
+            return Err(PersistenceError::Storage(format!(
+                "injected read failure for {persistence_id}"
+            )));
+        }
+        let Some(journal) = inner.journals.get(persistence_id) else {
+            return Ok(Vec::new());
+        };
+        let mut events = journal
+            .iter()
+            .filter(|event| event.sequence_nr > from_sequence)
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        let read_truncation_probability = inner.faults.read_truncation_prob;
+        if !events.is_empty() && inner.rng.chance(read_truncation_probability) {
+            let truncate_at = (inner.rng.next_u64() as usize) % events.len();
+            events.truncate(truncate_at.max(1));
+        }
+        Ok(events)
+    }
+
+    async fn read_latest_events(
+        &self,
+        persistence_id: &str,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        if let Some(remaining) = inner.pending_read_failures.get_mut(persistence_id) {
+            *remaining -= 1;
+            let cleared = *remaining == 0;
+            if cleared {
+                inner.pending_read_failures.remove(persistence_id);
+            }
+            return Err(PersistenceError::Storage(format!(
+                "injected read failure for {persistence_id}"
+            )));
+        }
+        let Some(journal) = inner.journals.get(persistence_id) else {
+            return Ok(Vec::new());
+        };
+        let start = journal.len().saturating_sub(limit);
+        let mut events = journal[start..].to_vec();
+        let read_truncation_probability = inner.faults.read_truncation_prob;
+        if !events.is_empty() && inner.rng.chance(read_truncation_probability) {
+            let truncate_at = (inner.rng.next_u64() as usize) % events.len();
+            events.truncate(truncate_at.max(1));
+        }
+        Ok(events)
+    }
+
     async fn save_snapshot(
         &self,
         persistence_id: &str,
@@ -1035,6 +1104,37 @@ impl EventStore for SimEventStore {
             }
         }
 
+        Ok(result)
+    }
+
+    async fn list_journal_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: Option<&str>,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        let result = inner
+            .journals
+            .keys()
+            .filter_map(|persistence_id| {
+                parse_persistence_id_parts(persistence_id)
+                    .ok()
+                    .filter(|(found_tenant, _, _)| *found_tenant == tenant)
+                    .map(|(_, entity_type, entity_id)| {
+                        (entity_type.to_string(), entity_id.to_string())
+                    })
+            })
+            .filter(|(found_type, _)| entity_type.is_none_or(|wanted| found_type == wanted))
+            .filter(|(entity_type, entity_id)| {
+                after.is_none_or(|cursor| (entity_type.as_str(), entity_id.as_str()) > cursor)
+            })
+            .take(limit)
+            .collect::<Vec<_>>();
         Ok(result)
     }
 }

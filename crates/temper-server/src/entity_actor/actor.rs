@@ -350,6 +350,11 @@ impl EntityActor {
                     &rule.name,
                     trigger_index,
                 );
+                let resolved_guard = context
+                    .resolved_guards
+                    .get(&rule.name)
+                    .cloned()
+                    .unwrap_or_default();
                 intents.push(crate::trigger::delivery::PersistedReactionIntent {
                     root_delivery_id: context
                         .root_delivery_id
@@ -363,6 +368,15 @@ impl EntityActor {
                     source_sequence,
                     source_to_state: event.to_status.clone(),
                     source_fields: state.fields.clone(),
+                    guard_passed: rule.when.guard.as_ref().is_none_or(|guard| {
+                        crate::trigger::guard::evaluate_with_resolved(
+                            guard,
+                            &state.fields,
+                            &event.to_status,
+                            &resolved_guard,
+                            &rule.name,
+                        )
+                    }),
                     target_entity_id: crate::trigger::resolver::resolve_target_id(
                         &rule.resolve_target,
                         &self.entity_id,
@@ -1099,7 +1113,7 @@ impl Actor for EntityActor {
                                 &self.persistence_id(),
                                 state,
                                 &event,
-                                reaction_context.as_ref(),
+                                reaction_context.as_deref(),
                             )
                             .await;
 
@@ -1264,7 +1278,7 @@ impl Actor for EntityActor {
                                             &self.persistence_id(),
                                             state,
                                             &retry_event,
-                                            reaction_context.as_ref(),
+                                            reaction_context.as_deref(),
                                         )
                                         .await
                                     {

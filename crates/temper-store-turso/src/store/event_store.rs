@@ -471,6 +471,98 @@ impl EventStore for TursoEventStore {
         Ok(out)
     }
 
+    async fn read_events_limited(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT sequence_nr, event_type, payload, metadata
+                 FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND sequence_nr > ?4
+                 ORDER BY sequence_nr ASC LIMIT ?5",
+                params![
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    from_sequence.min(i64::MAX as u64) as i64,
+                    limit.min(i64::MAX as usize) as i64
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            let metadata_raw = row
+                .get::<Option<String>>(3)
+                .map_err(storage_error)?
+                .ok_or_else(|| PersistenceError::Serialization("missing event metadata".into()))?;
+            out.push(PersistenceEnvelope {
+                sequence_nr: row.get::<i64>(0).map_err(storage_error)? as u64,
+                event_type: row.get::<String>(1).map_err(storage_error)?,
+                payload: serde_json::from_str(&row.get::<String>(2).map_err(storage_error)?)
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
+                metadata: serde_json::from_str(&metadata_raw)
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn read_latest_events(
+        &self,
+        persistence_id: &str,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT sequence_nr, event_type, payload, metadata FROM (
+                   SELECT sequence_nr, event_type, payload, metadata
+                   FROM events
+                   WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
+                   ORDER BY sequence_nr DESC LIMIT ?4
+                 ) ORDER BY sequence_nr ASC",
+                params![
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    limit.min(i64::MAX as usize) as i64
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            let metadata_raw = row
+                .get::<Option<String>>(3)
+                .map_err(storage_error)?
+                .ok_or_else(|| PersistenceError::Serialization("missing event metadata".into()))?;
+            out.push(PersistenceEnvelope {
+                sequence_nr: row.get::<i64>(0).map_err(storage_error)? as u64,
+                event_type: row.get::<String>(1).map_err(storage_error)?,
+                payload: serde_json::from_str(&row.get::<String>(2).map_err(storage_error)?)
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
+                metadata: serde_json::from_str(&metadata_raw)
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
+            });
+        }
+        Ok(out)
+    }
+
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.save_snapshot"))]
     async fn save_snapshot(
         &self,
@@ -729,6 +821,74 @@ impl EventStore for TursoEventStore {
             .await
             .map_err(storage_error)?;
 
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push((
+                row.get::<String>(0).map_err(storage_error)?,
+                row.get::<String>(1).map_err(storage_error)?,
+            ));
+        }
+        Ok(out)
+    }
+
+    async fn list_journal_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: Option<&str>,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.configured_connection().await?;
+        let limit = limit.min(i64::MAX as usize) as i64;
+        let mut rows = if let (Some(entity_type), Some((after_type, after_id))) =
+            (entity_type, after)
+            && after_type == entity_type
+        {
+            conn.query(
+                "SELECT DISTINCT entity_type, entity_id FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id > ?3
+                 ORDER BY entity_type, entity_id LIMIT ?4",
+                params![tenant, entity_type, after_id, limit],
+            )
+            .await
+            .map_err(storage_error)?
+        } else if let Some(entity_type) = entity_type
+            && after.is_none_or(|(after_type, _)| after_type < entity_type)
+        {
+            conn.query(
+                "SELECT DISTINCT entity_type, entity_id FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2
+                 ORDER BY entity_type, entity_id LIMIT ?3",
+                params![tenant, entity_type, limit],
+            )
+            .await
+            .map_err(storage_error)?
+        } else if entity_type.is_some() {
+            conn.query("SELECT entity_type, entity_id FROM events WHERE 0 = 1", ())
+                .await
+                .map_err(storage_error)?
+        } else if let Some((after_type, after_id)) = after {
+            conn.query(
+                "SELECT DISTINCT entity_type, entity_id FROM events
+                 WHERE tenant = ?1
+                   AND (entity_type > ?2 OR (entity_type = ?2 AND entity_id > ?3))
+                 ORDER BY entity_type, entity_id LIMIT ?4",
+                params![tenant, after_type, after_id, limit],
+            )
+            .await
+            .map_err(storage_error)?
+        } else {
+            conn.query(
+                "SELECT DISTINCT entity_type, entity_id FROM events
+                 WHERE tenant = ?1 ORDER BY entity_type, entity_id LIMIT ?2",
+                params![tenant, limit],
+            )
+            .await
+            .map_err(storage_error)?
+        };
+        let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
             out.push((
                 row.get::<String>(0).map_err(storage_error)?,
