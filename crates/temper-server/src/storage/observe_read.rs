@@ -22,23 +22,28 @@ use super::{
 impl ObserveReadStore for PostgresEventStore {
     async fn load_recent_trajectories(
         &self,
+        tenant: &str,
         limit: i64,
     ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError> {
-        self.load_recent_trajectories(limit)
+        self.load_recent_trajectories(tenant, limit)
             .await
             .map(|rows| rows.into_iter().map(pg_trajectory_to_turso).collect())
     }
 
-    async fn load_unmet_intent_rows(&self) -> Result<Vec<UnmetIntentAggRow>, PersistenceError> {
-        self.load_unmet_intent_rows()
+    async fn load_unmet_intent_rows(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<UnmetIntentAggRow>, PersistenceError> {
+        self.load_unmet_intent_rows(tenant)
             .await
             .map(|rows| rows.into_iter().map(pg_unmet_to_turso).collect())
     }
 
     async fn load_submit_spec_timestamps(
         &self,
+        tenant: &str,
     ) -> Result<BTreeMap<String, String>, PersistenceError> {
-        self.load_submit_spec_timestamps().await
+        self.load_submit_spec_timestamps(tenant).await
     }
 
     async fn count_trajectories_by_tenant(
@@ -49,12 +54,13 @@ impl ObserveReadStore for PostgresEventStore {
 
     async fn query_trajectory_stats(
         &self,
+        tenant: &str,
         entity_type: Option<&str>,
         action: Option<&str>,
         success_filter: Option<bool>,
         failed_limit: i64,
     ) -> Result<TrajectoryStats, PersistenceError> {
-        self.query_trajectory_stats(entity_type, action, success_filter, failed_limit)
+        self.query_trajectory_stats(tenant, entity_type, action, success_filter, failed_limit)
             .await
             .map(pg_stats_to_turso)
     }
@@ -97,19 +103,24 @@ impl ObserveReadStore for PostgresEventStore {
 impl ObserveReadStore for TursoEventStore {
     async fn load_recent_trajectories(
         &self,
+        tenant: &str,
         limit: i64,
     ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError> {
-        self.load_recent_trajectories(limit).await
+        self.load_recent_trajectories(tenant, limit).await
     }
 
-    async fn load_unmet_intent_rows(&self) -> Result<Vec<UnmetIntentAggRow>, PersistenceError> {
-        self.load_unmet_intent_rows().await
+    async fn load_unmet_intent_rows(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<UnmetIntentAggRow>, PersistenceError> {
+        self.load_unmet_intent_rows(tenant).await
     }
 
     async fn load_submit_spec_timestamps(
         &self,
+        tenant: &str,
     ) -> Result<BTreeMap<String, String>, PersistenceError> {
-        self.load_submit_spec_timestamps().await
+        self.load_submit_spec_timestamps(tenant).await
     }
 
     async fn count_trajectories_by_tenant(
@@ -120,12 +131,13 @@ impl ObserveReadStore for TursoEventStore {
 
     async fn query_trajectory_stats(
         &self,
+        tenant: &str,
         entity_type: Option<&str>,
         action: Option<&str>,
         success_filter: Option<bool>,
         failed_limit: i64,
     ) -> Result<TrajectoryStats, PersistenceError> {
-        self.query_trajectory_stats(entity_type, action, success_filter, failed_limit)
+        self.query_trajectory_stats(tenant, entity_type, action, success_filter, failed_limit)
             .await
     }
 

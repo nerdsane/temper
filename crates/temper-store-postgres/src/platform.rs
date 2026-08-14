@@ -14,7 +14,11 @@ use crate::metrics::{
     record_postgres_transaction_begin_duration, record_postgres_transaction_commit_duration,
 };
 
+mod evolution;
+mod inputs;
+mod policy_approval;
 mod rows;
+pub use inputs::{PostgresEvolutionRecordInsert, PostgresPolicyApprovalCommit};
 use rows::*;
 
 const DISTINCT_RESOURCE_IDS_BUDGET: usize = 100;
@@ -353,6 +357,7 @@ pub struct PostgresUnmetIntentAggRow {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PostgresFeatureRequestRow {
     pub id: String,
+    pub tenant: String,
     pub category: String,
     pub description: String,
     pub frequency: i64,
@@ -366,6 +371,7 @@ pub struct PostgresFeatureRequestRow {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PostgresEvolutionRecordRow {
     pub id: String,
+    pub tenant: String,
     pub record_type: String,
     pub status: String,
     pub created_by: String,
@@ -1488,11 +1494,12 @@ impl PostgresEventStore {
         data: &str,
     ) -> Result<(), PersistenceError> {
         let data = parse_json(data)?;
-        crate::dbm::postgres_query!(
+        let result = crate::dbm::postgres_query!(
             "INSERT INTO pending_decisions (id, tenant, status, data, created_at, updated_at) \
              VALUES ($1, $2, $3, $4, now(), now()) \
-             ON CONFLICT (id) DO UPDATE SET tenant = EXCLUDED.tenant, status = EXCLUDED.status, \
-                 data = EXCLUDED.data, updated_at = now()",
+             ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, \
+                 data = EXCLUDED.data, updated_at = now() \
+             WHERE pending_decisions.tenant = EXCLUDED.tenant",
         )
         .bind(id)
         .bind(tenant)
@@ -1501,6 +1508,11 @@ impl PostgresEventStore {
         .execute(self.pool())
         .await
         .map_err(storage_error)?;
+        if result.rows_affected() != 1 {
+            return Err(PersistenceError::Storage(format!(
+                "pending decision '{id}' is owned by another tenant"
+            )));
+        }
         Ok(())
     }
 
@@ -1512,6 +1524,30 @@ impl PostgresEventStore {
             "SELECT data FROM pending_decisions ORDER BY updated_at DESC LIMIT $1",
         )
         .bind(limit)
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.into_iter().map(|v| v.to_string()).collect())
+    }
+
+    /// Load approved decisions whose scope names `session_id`, for one tenant.
+    ///
+    /// Backs session-grant validation (ADR-0157): a caller-asserted session id
+    /// becomes a Cedar input only when an approved decision binds that session,
+    /// so the lookup filters on the approved scope's session, not the denial's.
+    pub async fn load_approved_session_decisions(
+        &self,
+        tenant: &str,
+        session_id: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let rows: Vec<serde_json::Value> = crate::dbm::postgres_query_scalar!(
+            "SELECT data FROM pending_decisions \
+             WHERE tenant = $1 \
+               AND status = 'approved' \
+               AND data->'approved_scope'->>'session_id' = $2",
+        )
+        .bind(tenant)
+        .bind(session_id)
         .fetch_all(self.pool())
         .await
         .map_err(storage_error)?;
@@ -1600,6 +1636,7 @@ impl PostgresEventStore {
 impl PostgresEventStore {
     pub async fn load_recent_trajectories(
         &self,
+        tenant: &str,
         limit: i64,
     ) -> Result<Vec<PostgresTrajectoryRow>, PersistenceError> {
         let rows = crate::dbm::postgres_query!(
@@ -1607,9 +1644,11 @@ impl PostgresEventStore {
                     agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, \
                     created_at, request_body, intent, matched_policy_ids, capture_seq \
              FROM trajectories \
+             WHERE tenant = $1 \
              ORDER BY created_at DESC \
-             LIMIT $1",
+             LIMIT $2",
         )
+        .bind(tenant)
         .bind(limit)
         .fetch_all(self.pool())
         .await
@@ -1619,16 +1658,19 @@ impl PostgresEventStore {
 
     pub async fn load_unmet_intent_rows(
         &self,
+        tenant: &str,
     ) -> Result<Vec<PostgresUnmetIntentAggRow>, PersistenceError> {
         let rows = crate::dbm::postgres_query!(
             "SELECT entity_type, MAX(action) AS action, error, COUNT(*)::bigint AS cnt, \
                     MIN(created_at) AS first_seen, MAX(created_at) AS last_seen \
              FROM trajectories \
-             WHERE success = false AND (authz_denied IS NULL OR authz_denied = false) \
+             WHERE tenant = $1 \
+               AND success = false AND (authz_denied IS NULL OR authz_denied = false) \
              GROUP BY entity_type, error \
              ORDER BY cnt DESC \
              LIMIT 100",
         )
+        .bind(tenant)
         .fetch_all(self.pool())
         .await
         .map_err(storage_error)?;
@@ -1637,13 +1679,15 @@ impl PostgresEventStore {
 
     pub async fn load_submit_spec_timestamps(
         &self,
+        tenant: &str,
     ) -> Result<BTreeMap<String, String>, PersistenceError> {
         let rows: Vec<(String, chrono::DateTime<chrono::Utc>)> = crate::dbm::postgres_query_as!(
             "SELECT entity_type, MAX(created_at) AS latest_at \
              FROM trajectories \
-             WHERE success = true AND action = 'SubmitSpec' \
+             WHERE tenant = $1 AND success = true AND action = 'SubmitSpec' \
              GROUP BY entity_type",
         )
+        .bind(tenant)
         .fetch_all(self.pool())
         .await
         .map_err(storage_error)?;
@@ -1668,8 +1712,14 @@ impl PostgresEventStore {
             .collect())
     }
 
+    /// Trajectory statistics for one tenant.
+    ///
+    /// Scoped to `tenant` in SQL: the failed-intent list returns whole rows —
+    /// error strings, entity ids — so an unscoped read would hand one tenant
+    /// another's operational detail (ADR-0157).
     pub async fn query_trajectory_stats(
         &self,
+        tenant: &str,
         entity_type: Option<&str>,
         action: Option<&str>,
         success_filter: Option<bool>,
@@ -1679,10 +1729,12 @@ impl PostgresEventStore {
             "SELECT COUNT(*)::bigint AS total, \
                     COALESCE(SUM(CASE WHEN success = true THEN 1 ELSE 0 END), 0)::bigint AS success_count \
              FROM trajectories \
-             WHERE ($1::text IS NULL OR entity_type = $1) \
-               AND ($2::text IS NULL OR action = $2) \
-               AND ($3::boolean IS NULL OR success = $3)",
+             WHERE tenant = $1 \
+               AND ($2::text IS NULL OR entity_type = $2) \
+               AND ($3::text IS NULL OR action = $3) \
+               AND ($4::boolean IS NULL OR success = $4)",
         )
+        .bind(tenant)
         .bind(entity_type)
         .bind(action)
         .bind(success_filter)
@@ -1697,8 +1749,10 @@ impl PostgresEventStore {
                     COALESCE(SUM(CASE WHEN success = true THEN 1 ELSE 0 END), 0)::bigint AS success, \
                     COALESCE(SUM(CASE WHEN success = false THEN 1 ELSE 0 END), 0)::bigint AS error \
              FROM trajectories \
+             WHERE tenant = $1 \
              GROUP BY action",
         )
+        .bind(tenant)
         .fetch_all(self.pool())
         .await
         .map_err(storage_error)?;
@@ -1721,10 +1775,12 @@ impl PostgresEventStore {
                     agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, \
                     created_at, request_body, intent, matched_policy_ids, capture_seq \
              FROM trajectories \
-             WHERE success = false \
+             WHERE tenant = $1 \
+               AND success = false \
              ORDER BY created_at DESC \
-             LIMIT $1",
+             LIMIT $2",
         )
+        .bind(tenant)
         .bind(failed_limit)
         .fetch_all(self.pool())
         .await
@@ -1835,157 +1891,6 @@ impl PostgresEventStore {
         .await
         .map_err(storage_error)?;
         Ok(rows.into_iter().map(row_to_agent_summary).collect())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn upsert_feature_request(
-        &self,
-        id: &str,
-        category: &str,
-        description: &str,
-        frequency: i64,
-        trajectory_refs_json: &str,
-        disposition: &str,
-        developer_notes: Option<&str>,
-    ) -> Result<(), PersistenceError> {
-        let trajectory_refs = parse_json(trajectory_refs_json)?;
-        crate::dbm::postgres_query!(
-            "INSERT INTO feature_requests \
-             (id, category, description, frequency, trajectory_refs, disposition, developer_notes, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, now()) \
-             ON CONFLICT (id) DO UPDATE SET \
-                 category = EXCLUDED.category, description = EXCLUDED.description, frequency = EXCLUDED.frequency, \
-                 trajectory_refs = EXCLUDED.trajectory_refs, disposition = EXCLUDED.disposition, \
-                 developer_notes = EXCLUDED.developer_notes, updated_at = now()",
-        )
-        .bind(id)
-        .bind(category)
-        .bind(description)
-        .bind(frequency)
-        .bind(trajectory_refs)
-        .bind(disposition)
-        .bind(developer_notes)
-        .execute(self.pool())
-        .await
-        .map_err(storage_error)?;
-        Ok(())
-    }
-
-    pub async fn list_feature_requests(
-        &self,
-        disposition: Option<&str>,
-    ) -> Result<Vec<PostgresFeatureRequestRow>, PersistenceError> {
-        let rows = crate::dbm::postgres_query!(
-            "SELECT id, category, description, frequency, trajectory_refs, disposition, developer_notes, created_at, updated_at \
-             FROM feature_requests \
-             WHERE ($1::text IS NULL OR disposition = $1) \
-             ORDER BY frequency DESC, created_at DESC",
-        )
-        .bind(disposition)
-        .fetch_all(self.pool())
-        .await
-        .map_err(storage_error)?;
-        Ok(rows.into_iter().map(row_to_feature_request).collect())
-    }
-
-    pub async fn update_feature_request(
-        &self,
-        id: &str,
-        disposition: &str,
-        developer_notes: Option<&str>,
-    ) -> Result<bool, PersistenceError> {
-        let result = crate::dbm::postgres_query!(
-            "UPDATE feature_requests SET disposition = $2, developer_notes = $3, updated_at = now() \
-             WHERE id = $1",
-        )
-        .bind(id)
-        .bind(disposition)
-        .bind(developer_notes)
-        .execute(self.pool())
-        .await
-        .map_err(storage_error)?;
-        Ok(result.rows_affected() > 0)
-    }
-
-    pub async fn insert_evolution_record(
-        &self,
-        id: &str,
-        record_type: &str,
-        status: &str,
-        created_by: &str,
-        derived_from: Option<&str>,
-        data_json: &str,
-    ) -> Result<(), PersistenceError> {
-        let payload = parse_json(data_json)?;
-        crate::dbm::postgres_query!(
-            "INSERT INTO evolution_records (id, record_type, status, created_by, derived_from, payload, timestamp) \
-             VALUES ($1, $2, $3, $4, $5, $6, now())",
-        )
-        .bind(id)
-        .bind(record_type)
-        .bind(status)
-        .bind(created_by)
-        .bind(derived_from)
-        .bind(payload)
-        .execute(self.pool())
-        .await
-        .map_err(storage_error)?;
-        Ok(())
-    }
-
-    pub async fn get_evolution_record(
-        &self,
-        id: &str,
-    ) -> Result<Option<PostgresEvolutionRecordRow>, PersistenceError> {
-        let row = crate::dbm::postgres_query!(
-            "SELECT id, record_type, status, created_by, derived_from, payload, timestamp \
-             FROM evolution_records WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(storage_error)?;
-        Ok(row.map(row_to_evolution_record))
-    }
-
-    pub async fn list_evolution_records(
-        &self,
-        record_type: Option<&str>,
-        status: Option<&str>,
-    ) -> Result<Vec<PostgresEvolutionRecordRow>, PersistenceError> {
-        let rows = crate::dbm::postgres_query!(
-            "SELECT id, record_type, status, created_by, derived_from, payload, timestamp \
-             FROM evolution_records \
-             WHERE ($1::text IS NULL OR record_type = $1) \
-               AND ($2::text IS NULL OR status = $2) \
-             ORDER BY timestamp DESC",
-        )
-        .bind(record_type)
-        .bind(status)
-        .fetch_all(self.pool())
-        .await
-        .map_err(storage_error)?;
-        Ok(rows.into_iter().map(row_to_evolution_record).collect())
-    }
-
-    pub async fn list_ranked_insights(
-        &self,
-    ) -> Result<Vec<PostgresEvolutionRecordRow>, PersistenceError> {
-        let mut rows = self.list_evolution_records(Some("Insight"), None).await?;
-        rows.sort_by(|a, b| {
-            let score_a = serde_json::from_str::<serde_json::Value>(&a.data)
-                .ok()
-                .and_then(|v| v.get("priority_score").and_then(|s| s.as_f64()))
-                .unwrap_or(0.0);
-            let score_b = serde_json::from_str::<serde_json::Value>(&b.data)
-                .ok()
-                .and_then(|v| v.get("priority_score").and_then(|s| s.as_f64()))
-                .unwrap_or(0.0);
-            score_b
-                .partial_cmp(&score_a)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        Ok(rows)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2259,6 +2164,25 @@ impl PostgresEventStore {
             .map_err(|e| format!("blob get failed: {e}"))
     }
 
+    /// Retrieve a blob only when its durable size metadata is within the
+    /// caller's allocation budget. `None` means missing or over budget.
+    pub async fn get_blob_if_size_at_most(
+        &self,
+        key: &str,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let max_bytes = i64::try_from(max_bytes)
+            .map_err(|_| "legacy blob read budget exceeds i64".to_string())?;
+        crate::dbm::postgres_query_scalar!(
+            "SELECT data FROM blobs WHERE blob_key = $1 AND octet_length(data) <= $2"
+        )
+        .bind(key)
+        .bind(max_bytes)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| format!("bounded blob get failed: {e}"))
+    }
+
     #[tracing::instrument(skip_all, fields(
         otel.name = "postgres.upsert_published_artifact",
         tenant = %artifact.tenant,
@@ -2516,13 +2440,19 @@ impl PostgresEventStore {
         Ok(rows.into_iter().map(|value| value.to_string()).collect())
     }
 
-    pub async fn get_pending_decision(&self, id: &str) -> Result<Option<String>, PersistenceError> {
-        let row: Option<serde_json::Value> =
-            crate::dbm::postgres_query_scalar!("SELECT data FROM pending_decisions WHERE id = $1")
-                .bind(id)
-                .fetch_optional(self.pool())
-                .await
-                .map_err(storage_error)?;
+    pub async fn get_pending_decision(
+        &self,
+        tenant: &str,
+        id: &str,
+    ) -> Result<Option<String>, PersistenceError> {
+        let row: Option<serde_json::Value> = crate::dbm::postgres_query_scalar!(
+            "SELECT data FROM pending_decisions WHERE tenant = $1 AND id = $2"
+        )
+        .bind(tenant)
+        .bind(id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(storage_error)?;
         Ok(row.map(|value| value.to_string()))
     }
 

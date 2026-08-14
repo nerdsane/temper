@@ -6,12 +6,15 @@
 
 mod actor;
 pub mod effects;
+mod replay_validation;
 pub mod sim_handler;
 mod snapshot_queue;
 pub mod types;
 
 pub use actor::EntityActor;
-pub(crate) use actor::recover_entity_state_from_store;
+pub(crate) use actor::{
+    recover_authoritative_entity_state_from_store, recover_entity_state_from_store,
+};
 pub use effects::{
     ProcessResult, ScheduledAction, apply_effects, apply_new_state_fallback, build_eval_context,
     process_action, process_action_with_xref, sync_fields,

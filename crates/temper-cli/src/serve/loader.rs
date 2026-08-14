@@ -436,13 +436,10 @@ effect = "set phantom true"
         assert!(combined.contains("resource is Issue"));
 
         let engine = temper_authz::AuthzEngine::new(&combined).expect("policy parses");
-        let customer_ctx = temper_authz::SecurityContext::from_headers(&[
-            ("x-temper-principal-id".to_string(), "cust-1".to_string()),
-            (
-                "x-temper-principal-kind".to_string(),
-                "customer".to_string(),
-            ),
-        ]);
+        // A Customer principal. The principal headers this used to pass are
+        // stripped at the edge (ADR-0157) and no longer influence the context,
+        // so the anonymous Customer is what that construction actually produced.
+        let customer_ctx = temper_authz::SecurityContext::anonymous();
 
         let issue = engine.authorize(
             &customer_ctx,

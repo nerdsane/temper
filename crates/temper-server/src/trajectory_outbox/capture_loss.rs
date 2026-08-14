@@ -88,11 +88,13 @@ pub(crate) struct CaptureHealth {
 
 impl CaptureHealth {
     /// Losses whose marker this server has not seen stored.
+    #[allow(dead_code)] // False positive: read by api/trajectory_analysis.rs under the observe feature
     pub(crate) fn unconfirmed_losses(&self) -> u64 {
         self.unconfirmed_losses.load(Ordering::Relaxed)
     }
 
     /// Whether any loss is still unaccounted for.
+    #[allow(dead_code)] // False positive: read by api/trajectory_analysis.rs under the observe feature
     pub(crate) fn is_degraded(&self) -> bool {
         self.unconfirmed_losses() > 0
     }

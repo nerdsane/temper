@@ -16,6 +16,21 @@ use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoSpecVerificationUpdate;
 use temper_verify::cascade::VerificationCascade;
 
+fn test_admin_security_context(principal_id: &str) -> SecurityContext {
+    SecurityContext {
+        principal: temper_authz::Principal {
+            id: principal_id.to_string(),
+            kind: temper_authz::PrincipalKind::Admin,
+            role: None,
+            acting_for: None,
+            agent_type: None,
+            attributes: HashMap::new(),
+        },
+        context_attrs: HashMap::new(),
+        correlation_id: "test-admin-context".to_string(),
+    }
+}
+
 #[test]
 fn test_pm_specs_parse() {
     let bundle = get_os_app("project-management").expect("PM app not found");
@@ -329,10 +344,7 @@ async fn test_reconcile_os_app_repairs_missing_active_policies_for_unchanged_bun
         .reload_tenant_policies(tenant, "")
         .expect("empty tenant policy should load");
 
-    let admin_ctx = SecurityContext::from_headers(&[
-        ("X-Temper-Principal-Id".to_string(), "admin-1".to_string()),
-        ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
-    ]);
+    let admin_ctx = test_admin_security_context("admin-1");
     let mut issue_attrs = HashMap::new();
     issue_attrs.insert("id".to_string(), serde_json::json!("issue-1"));
 
@@ -418,10 +430,7 @@ async fn test_reconcile_os_app_repairs_missing_authz_engine_policies_despite_tex
         );
     }
 
-    let admin_ctx = SecurityContext::from_headers(&[
-        ("X-Temper-Principal-Id".to_string(), "admin-1".to_string()),
-        ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
-    ]);
+    let admin_ctx = test_admin_security_context("admin-1");
     let mut issue_attrs = HashMap::new();
     issue_attrs.insert("id".to_string(), serde_json::json!("issue-1"));
 
@@ -1310,10 +1319,7 @@ async fn test_install_os_app_activates_tenant_cedar_policies() {
         .await
         .expect("install project-management");
 
-    let admin_ctx = SecurityContext::from_headers(&[
-        ("X-Temper-Principal-Id".to_string(), "admin-1".to_string()),
-        ("X-Temper-Principal-Kind".to_string(), "admin".to_string()),
-    ]);
+    let admin_ctx = test_admin_security_context("admin-1");
     let mut issue_attrs = HashMap::new();
     issue_attrs.insert("id".to_string(), serde_json::json!("issue-1"));
 

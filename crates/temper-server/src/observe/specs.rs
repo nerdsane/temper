@@ -1,10 +1,11 @@
 //! Spec management endpoints: list, load, and inspect IOA specifications.
 
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, Path, State};
+use axum::http::StatusCode;
 use axum::response::Json;
+use temper_authz::AuthenticatedRequestContext;
 
-use crate::authz::{observe_tenant_scope, require_observe_auth};
+use crate::authz::{observe_tenant_scope, require_authenticated_context, require_observe_auth};
 use crate::registry::VerificationStatus;
 use crate::state::ServerState;
 
@@ -22,20 +23,19 @@ pub(crate) use load_dir::handle_load_dir;
 pub(crate) use load_inline::handle_load_inline;
 pub(crate) use validate_ioa::handle_validate_ioa;
 
-/// GET /observe/specs -- list all loaded specs across all tenants.
+/// GET /observe/specs -- list loaded specs in the credential-bound tenant.
 pub(crate) async fn handle_list_specs(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_specs", "Spec")?;
-    let tenant_scope = observe_tenant_scope(&state, &headers)?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_specs", "Spec")?;
+    let tenant_scope = observe_tenant_scope(authenticated);
     let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
     let mut specs = Vec::new();
 
     for tenant_id in registry.tenant_ids() {
-        if let Some(ref scope) = tenant_scope
-            && tenant_id != scope
-        {
+        if tenant_id != tenant_scope {
             continue;
         }
         for entity_type in registry.entity_types(tenant_id) {
@@ -85,7 +85,7 @@ pub(crate) async fn handle_list_specs(
 
 /// GET /observe/specs/{entity} -- full spec detail for a named entity type.
 ///
-/// Searches across all tenants and returns the first match.
+/// Searches only the credential-bound tenant.
 ///
 /// Carries `spec_version`, the content hash of the returned spec's IOA source.
 /// That is the digest a conformance check compares a run's recorded
@@ -94,17 +94,16 @@ pub(crate) async fn handle_list_specs(
 /// some deploy path may have rewritten.
 pub(crate) async fn handle_get_spec_detail(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path(entity): Path<String>,
 ) -> Result<Json<SpecDetail>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_specs", "Spec")?;
-    let tenant_scope = observe_tenant_scope(&state, &headers)?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_specs", "Spec")?;
+    let tenant_scope = observe_tenant_scope(authenticated);
     let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
 
     for tenant_id in registry.tenant_ids() {
-        if let Some(ref scope) = tenant_scope
-            && tenant_id != scope
-        {
+        if tenant_id != tenant_scope {
             continue;
         }
         if let Some(entity_spec) = registry.get_spec(tenant_id, &entity) {

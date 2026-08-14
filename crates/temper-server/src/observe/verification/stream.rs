@@ -2,14 +2,15 @@
 
 use std::convert::Infallible;
 
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, State};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use temper_authz::AuthenticatedRequestContext;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::instrument;
 
-use crate::authz::{observe_tenant_scope, require_observe_auth};
+use crate::authz::{observe_tenant_scope, require_authenticated_context, require_observe_auth};
 use crate::state::ServerState;
 
 /// GET /observe/design-time/stream -- SSE stream of design-time events.
@@ -19,19 +20,17 @@ use crate::state::ServerState;
 #[instrument(skip_all, fields(otel.name = "GET /observe/design-time/stream"))]
 pub(crate) async fn handle_design_time_stream(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_events", "Event")?;
-    let tenant_scope = observe_tenant_scope(&state, &headers)?;
-    let filter_tenant = tenant_scope.map(|t| t.as_str().to_string());
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_events", "Event")?;
+    let filter_tenant = observe_tenant_scope(authenticated).as_str().to_string();
     let rx = state.design_time_tx.subscribe();
 
     let stream = BroadcastStream::new(rx).filter_map(move |result| {
         match result {
             Ok(event) => {
-                if let Some(ref tenant) = filter_tenant
-                    && event.tenant != *tenant
-                {
+                if event.tenant != filter_tenant {
                     return None;
                 }
                 let data = serde_json::to_string(&event).unwrap_or_default();

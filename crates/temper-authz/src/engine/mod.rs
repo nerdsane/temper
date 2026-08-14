@@ -14,7 +14,7 @@ use cedar_policy::{
     Request, Response as CedarResponse,
 };
 
-use crate::context::{PrincipalKind, SecurityContext};
+use crate::context::{PrincipalKind, SecurityContext, is_cedar_authority_context_key};
 use crate::error::{AuthzDenial, AuthzError};
 use crate::metrics::{CedarDecisionMetric, CedarPhaseOutcome};
 
@@ -88,6 +88,10 @@ pub struct AuthzEngine {
     /// Fallback global policy set for callers that don't specify a tenant.
     /// Deprecated: callers should migrate to `authorize_for_tenant`.
     fallback_policy_set: RwLock<CompiledPolicies>,
+    /// Immutable platform policy used when a tenant has no app policy set.
+    /// Only System principals are evaluated against this set; all externally
+    /// resolvable principal kinds still fail closed for an unloaded tenant.
+    platform_policy_set: CompiledPolicies,
     authorizer: Authorizer,
 }
 
@@ -106,6 +110,7 @@ impl AuthzEngine {
         Ok(Self {
             tenant_policies: RwLock::new(BTreeMap::new()),
             fallback_policy_set: RwLock::new(CompiledPolicies::new(policy_set)),
+            platform_policy_set: compiled_system_platform_policies(),
             authorizer: Authorizer::new(),
         })
     }
@@ -123,6 +128,7 @@ impl AuthzEngine {
         Self {
             tenant_policies: RwLock::new(BTreeMap::new()),
             fallback_policy_set: RwLock::new(CompiledPolicies::new(policy_set)),
+            platform_policy_set: compiled_system_platform_policies(),
             authorizer: Authorizer::new(),
         }
     }
@@ -138,8 +144,17 @@ impl AuthzEngine {
         Self {
             tenant_policies: RwLock::new(BTreeMap::new()),
             fallback_policy_set: RwLock::new(CompiledPolicies::new(policy_set)),
+            platform_policy_set: compiled_system_platform_policies(),
             authorizer: Authorizer::new(),
         }
+    }
+
+    /// Parse and validate policy text without changing the active policy set.
+    pub fn validate_tenant_policies(&self, policy_text: &str) -> Result<(), AuthzError> {
+        policy_text
+            .parse::<PolicySet>()
+            .map(|_| ())
+            .map_err(|error| AuthzError::PolicyParse(error.to_string()))
     }
 
     /// Hot-reload Cedar policies for a specific tenant. Parses and validates
@@ -318,8 +333,12 @@ impl AuthzEngine {
 
     /// Evaluate an authorization request against a specific tenant's policy set.
     ///
-    /// If the tenant has no policies loaded, falls back to Cedar default-deny
-    /// (returns `NoMatchingPermit`).
+    /// If the tenant has no app policy set loaded, externally resolvable
+    /// principals fail closed. Kernel System authority is evaluated only
+    /// against the immutable built-in platform policy, never the process-wide
+    /// compatibility policy. This preserves internal bootstrap/recovery while
+    /// preventing a missing tenant policy from inheriting another scope
+    /// (ARN-230).
     pub fn authorize_for_tenant(
         &self,
         tenant: &str,
@@ -338,18 +357,26 @@ impl AuthzEngine {
         };
 
         if let Some(tp) = tenants.get(tenant) {
-            self.evaluate_request(
+            return self.evaluate_request(
                 security_ctx,
                 action,
                 resource_type,
                 resource_attrs,
                 &tp.policies,
-            )
-        } else {
-            // No per-tenant policies loaded — fall back to global.
-            drop(tenants);
-            self.authorize(security_ctx, action, resource_type, resource_attrs)
+            );
         }
+
+        if Self::is_system(security_ctx) {
+            return self.evaluate_request(
+                security_ctx,
+                action,
+                resource_type,
+                resource_attrs,
+                &self.platform_policy_set,
+            );
+        }
+
+        AuthzDecision::Deny(AuthzDenial::NoMatchingPermit)
     }
 
     /// Core Cedar evaluation logic shared by both `authorize` and
@@ -430,9 +457,12 @@ impl AuthzEngine {
             insert_json_as_cedar(&mut ctx_map, key.clone(), value);
         }
 
-        // Inject resource attributes into context (enables Cedar policies to
-        // reference entity state and cross-entity context via `context.key`).
+        // Resource fields may appear as context.key for domain policies.
+        // Authority keys (sessionId, agentType, role, …) stay on SecurityContext.
         for (key, value) in resource_attrs {
+            if is_cedar_authority_context_key(key) || ctx_map.contains_key(key) {
+                continue;
+            }
             insert_json_as_cedar(&mut ctx_map, key.clone(), value);
         }
         crate::metrics::record_cedar_request_attribute_count("context", ctx_map.len());
@@ -704,6 +734,12 @@ fn merge_system_platform_policy(combined: &mut PolicySet) {
         )));
         let _ = combined.add(named);
     }
+}
+
+fn compiled_system_platform_policies() -> CompiledPolicies {
+    let mut policy_set = PolicySet::new();
+    merge_system_platform_policy(&mut policy_set);
+    CompiledPolicies::new(policy_set)
 }
 
 /// Count user-authored policies in a [`PolicySet`], excluding the built-in

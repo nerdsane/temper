@@ -1,26 +1,7 @@
 //! Trajectory analysis endpoints: conformance checking and ATIF export.
-//!
-//! Both return one named run's recorded content — its prompts, its decisions,
-//! its tool results, its request bodies — so both are gated by
-//! [`require_trajectory_content_auth`]: a Cedar permit for `read_trajectories`
-//! on `Trajectory` in the addressed tenant, with no principal-kind bypass. The
-//! aggregate `/observe/trajectories` view lets an Admin principal past Cedar
-//! without a policy, and the principal kind is a request header the platform
-//! does not yet authenticate; these two endpoints do not inherit that.
-//!
-//! Unlike that aggregate view, these two address one tenant's data by
-//! identifier — a session id, a trajectory id — so a cross-tenant admin view
-//! has nothing to resolve against. Both require an explicit `X-Tenant-Id` and
-//! answer `400` without one.
-//!
-//! That gate is the strictest one the platform currently has, and it is not a
-//! sufficient one: the principal it evaluates is read off unauthenticated
-//! request headers. See [`require_trajectory_content_auth`] for what remains
-//! open, ARN-255 for the platform-wide fix, and ARN-187 for the gate over the
-//! pre-existing OTS upload and list routes.
 
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, Path, State};
+use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
 use temper_ots::AtifTrajectory;
@@ -29,7 +10,10 @@ use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::Automaton;
 use tracing::instrument;
 
-use crate::authz::{observe_tenant_scope, require_trajectory_content_auth};
+use crate::authz::{
+    AuthenticatedRequestContext, observe_tenant_scope, require_authenticated_context,
+    require_observe_auth,
+};
 use crate::conformance::{ConformanceInput, SpecResolution, check_conformance};
 use crate::state::ServerState;
 
@@ -77,18 +61,14 @@ pub(crate) struct ConformanceCheckRequest {
 #[instrument(skip_all, fields(otel.name = "POST /api/conformance/check"))]
 pub(crate) async fn handle_conformance_check(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Json(request): Json<ConformanceCheckRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let tenant = required_tenant(&state, &headers)?;
-    require_trajectory_content_auth(
-        &state,
-        &headers,
-        "read_trajectories",
-        "Trajectory",
-        tenant.as_str(),
-    )
-    .map_err(|status| (status, UNAUTHORIZED_DETAIL.to_string()))?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())
+        .map_err(|status| (status, UNAUTHORIZED_DETAIL.to_string()))?;
+    let tenant = credential_tenant(authenticated);
+    require_observe_auth(&state, authenticated, "read_trajectories", "Trajectory")
+        .map_err(|status| (status, UNAUTHORIZED_DETAIL.to_string()))?;
 
     let limit = match request.limit {
         Some(limit) if !(1..=MAX_CONFORMANCE_ROWS).contains(&limit) => {
@@ -228,18 +208,14 @@ pub(crate) async fn handle_conformance_check(
 #[instrument(skip_all, fields(otel.name = "GET /api/ots/trajectories/{id}/atif"))]
 pub(crate) async fn handle_get_ots_trajectory_atif(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path(trajectory_id): Path<String>,
 ) -> Result<Json<AtifTrajectory>, (StatusCode, String)> {
-    let tenant = required_tenant(&state, &headers)?;
-    require_trajectory_content_auth(
-        &state,
-        &headers,
-        "read_trajectories",
-        "Trajectory",
-        tenant.as_str(),
-    )
-    .map_err(|status| (status, UNAUTHORIZED_DETAIL.to_string()))?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())
+        .map_err(|status| (status, UNAUTHORIZED_DETAIL.to_string()))?;
+    let tenant = credential_tenant(authenticated);
+    require_observe_auth(&state, authenticated, "read_trajectories", "Trajectory")
+        .map_err(|status| (status, UNAUTHORIZED_DETAIL.to_string()))?;
 
     let Some(store) = state.metadata_store_for_tenant(tenant.as_str()).await else {
         return Err((
@@ -264,21 +240,9 @@ pub(crate) async fn handle_get_ots_trajectory_atif(
     Ok(Json(atif))
 }
 
-/// Resolve the tenant, requiring an explicit one.
-fn required_tenant(
-    state: &ServerState,
-    headers: &HeaderMap,
-) -> Result<TenantId, (StatusCode, String)> {
-    let scope = observe_tenant_scope(state, headers).map_err(|status| {
-        (
-            status,
-            "unauthorized: no tenant scope could be resolved for this request".to_string(),
-        )
-    })?;
-    scope.ok_or((
-        StatusCode::BAD_REQUEST,
-        "X-Tenant-Id is required: this endpoint addresses one tenant's trajectories".to_string(),
-    ))
+/// The tenant this request operates in: always the credential's own.
+fn credential_tenant(authenticated: &AuthenticatedRequestContext) -> TenantId {
+    observe_tenant_scope(authenticated).clone()
 }
 
 /// A registered spec and the identity of the source it was parsed from.

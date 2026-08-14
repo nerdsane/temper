@@ -1,8 +1,8 @@
 //! Identity resolution HTTP endpoint.
 //!
 //! `POST /api/identity/resolve` — resolves a bearer token to a verified
-//! agent identity. Used by the MCP server at startup to resolve its
-//! credential once and cache the result for the session lifetime.
+//! agent identity. The MCP server uses the result as session metadata, while
+//! each protected request still presents and revalidates the credential.
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -63,12 +63,21 @@ pub async fn handle_identity_resolve(
     let tenant_str = headers
         .get("x-tenant-id")
         .and_then(|v| v.to_str().ok())
-        .map(String::from)
-        .unwrap_or(body.tenant);
-    let tenant = TenantId::new(&tenant_str);
+        .unwrap_or(&body.tenant)
+        .trim();
+    let tenant = match TenantId::try_new(tenant_str) {
+        Ok(tenant) => tenant,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({ "error": error })),
+            )
+                .into_response();
+        }
+    };
 
-    // Use the server-level identity resolver (no cache layer here — the
-    // MCP server caches the result for the session lifetime).
+    // Resolve authoritatively. Callers may retain the returned fields as
+    // metadata, but they do not replace per-request bearer authentication.
     let resolver = super::IdentityResolver::new();
     match resolver.resolve(&state, &tenant, &body.bearer_token).await {
         Some(identity) => {

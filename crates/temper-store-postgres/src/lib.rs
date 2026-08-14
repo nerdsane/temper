@@ -27,11 +27,12 @@ pub mod store;
 pub use metrics::init_metrics;
 pub use platform::{
     PostgresActionStats, PostgresAgentSummary, PostgresDesignTimeEventRow,
-    PostgresEvolutionRecordRow, PostgresFeatureRequestRow, PostgresInstalledAppRow,
-    PostgresOtsTrajectoryDocument, PostgresOtsTrajectoryParams, PostgresOtsTrajectoryRow,
-    PostgresPolicyDenialPatternRow, PostgresPolicyRow, PostgresProjectedEntityFieldsRow,
-    PostgresPublishedArtifactRow, PostgresPublishedArtifactUpsert, PostgresQueuedOtsTrajectoryRow,
-    PostgresSecretRow, PostgresSpecRow, PostgresSpecVerificationUpdate, PostgresTrajectoryInsert,
+    PostgresEvolutionRecordInsert, PostgresEvolutionRecordRow, PostgresFeatureRequestRow,
+    PostgresInstalledAppRow, PostgresOtsTrajectoryDocument, PostgresOtsTrajectoryParams,
+    PostgresOtsTrajectoryRow, PostgresPolicyApprovalCommit, PostgresPolicyDenialPatternRow,
+    PostgresPolicyRow, PostgresProjectedEntityFieldsRow, PostgresPublishedArtifactRow,
+    PostgresPublishedArtifactUpsert, PostgresQueuedOtsTrajectoryRow, PostgresSecretRow,
+    PostgresSpecRow, PostgresSpecVerificationUpdate, PostgresTrajectoryInsert,
     PostgresTrajectoryRow, PostgresTrajectoryStats, PostgresUnmetIntentAggRow,
     PostgresWasmInvocationInsert, PostgresWasmInvocationRow, PostgresWasmModuleMetadataRow,
     PostgresWasmModuleRow,

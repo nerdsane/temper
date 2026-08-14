@@ -11,8 +11,6 @@ use temper_runtime::ActorSystem;
 use temper_server::ServerState;
 use temper_server::registry::SpecRegistry;
 
-use temper_server::identity::IdentityResolver;
-
 use crate::protocol::PlatformEvent;
 use crate::spec_store::SpecStore;
 
@@ -31,12 +29,11 @@ pub struct PlatformState {
     pub broadcast_tx: broadcast::Sender<PlatformEvent>,
     /// Anthropic API key for Claude-powered agents.
     pub api_key: Option<String>,
-    /// Bearer token for API authentication (`TEMPER_API_KEY`).
+    /// Optional bootstrap token registered as a normal tenant credential.
+    /// It has no direct runtime authentication fallback (ADR-0157).
     pub api_token: Option<String>,
     /// In-memory spec storage for pending tenant deployments.
     pub spec_store: Arc<RwLock<SpecStore>>,
-    /// Agent identity resolver — maps bearer tokens to verified identities.
-    pub identity_resolver: Arc<IdentityResolver>,
 }
 
 /// Default broadcast channel capacity.
@@ -46,19 +43,20 @@ const BROADCAST_CAPACITY: usize = 256;
 ///
 /// Platform entities (GovernanceDecision, etc.) live in the temper-system
 /// tenant but have no os-app to ship policies with. This baseline policy
-/// permits admin principals to manage governance decisions — needed so that
-/// WASM modules can register callbacks via HTTP (system principal is blocked
-/// from HTTP headers as a privilege-escalation safeguard).
+/// permits only a credential-verified, tenant-scoped operator Agent to manage
+/// platform entities. The deployment key has no implicit Admin authority.
 const SYSTEM_TENANT_POLICY: &str = r#"
 // Baseline policy for the temper-system tenant.
-// Admin principals get full access to all platform entities (GovernanceDecision,
-// Project, etc.). This matches the global fallback behavior — without it, loading
-// any tenant-specific policy would shadow the global set and deny unlisted actions.
+// Operators are ordinary tenant credentials. Both the registered AgentType and
+// the credential-verification attribute must match.
 permit(
-  principal is Admin,
+  principal is Agent,
   action,
   resource
-);
+) when {
+  principal.agent_type == "operator" &&
+  principal.agentTypeVerified == true
+};
 "#;
 
 impl PlatformState {
@@ -90,7 +88,6 @@ impl PlatformState {
             api_key,
             api_token: None,
             spec_store,
-            identity_resolver: Arc::new(IdentityResolver::new()),
         };
         state.server.bound_action_hook = Some(Arc::new(
             crate::genesis_install::GenesisInstallHook::new(state.clone()),
@@ -126,7 +123,6 @@ impl PlatformState {
             api_key,
             api_token: None,
             spec_store,
-            identity_resolver: Arc::new(IdentityResolver::new()),
         };
         state.server.bound_action_hook = Some(Arc::new(
             crate::genesis_install::GenesisInstallHook::new(state.clone()),

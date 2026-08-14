@@ -168,6 +168,310 @@ async fn dst_entity_starts_in_initial_state() {
 }
 
 #[tokio::test]
+async fn dst_update_fields_preserves_runtime_owned_field_authority() {
+    let system = ActorSystem::new("dst");
+    let actor = EntityActor::new(
+        "Order",
+        "order-owned-fields",
+        order_table(),
+        serde_json::json!({
+            "Id": "forged-initial",
+            "id": "forged-initial",
+            "Status": "Delivered",
+            "status": "Delivered",
+            "has_spec": false,
+            "ctx_owner_status": "Privileged",
+            "Customer": "Alice"
+        }),
+    );
+    let actor_ref = system.spawn(actor, "order-owned-fields");
+
+    for replace in [false, true] {
+        let response: EntityResponse = actor_ref
+            .ask(
+                EntityMsg::UpdateFields {
+                    fields: serde_json::json!({
+                        "Id": "forged-update",
+                        "id": "forged-update",
+                        "Status": "Delivered",
+                        "status": "Delivered",
+                        "has_spec": true,
+                        "HasSpec": true,
+                        "ctx_owner_status": "Privileged",
+                        "Customer": "Bob"
+                    }),
+                    replace,
+                    expected_precondition: None,
+                },
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("field update response");
+
+        assert_eq!(response.state.fields["Id"], "order-owned-fields");
+        assert_eq!(response.state.fields["id"], "order-owned-fields");
+        assert_eq!(response.state.fields["Status"], "Draft");
+        assert_eq!(response.state.fields["status"], "Draft");
+        assert_eq!(response.state.fields["Customer"], "Bob");
+        for reserved in ["has_spec", "HasSpec", "ctx_owner_status"] {
+            assert!(
+                response.state.fields.get(reserved).is_none(),
+                "persisted {reserved} during replace={replace}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn dst_update_fields_rejects_stale_authorization_without_a_journal() {
+    let system = ActorSystem::new("dst");
+    let actor = EntityActor::new(
+        "Order",
+        "order-cas",
+        order_table(),
+        serde_json::json!({"Owner": "alice"}),
+    );
+    let actor_ref = system.spawn(actor, "order-cas");
+
+    let authorized: EntityResponse = actor_ref
+        .ask(EntityMsg::GetState, Duration::from_secs(1))
+        .await
+        .expect("authorized snapshot");
+    let expected =
+        crate::entity_actor::effects::entity_authorization_precondition(&authorized.state);
+    assert_eq!(authorized.state.sequence_nr, 0);
+
+    let concurrent: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Owner": "mallory"}),
+                replace: false,
+                expected_precondition: None,
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("concurrent field update");
+    assert!(concurrent.success);
+    assert_eq!(concurrent.state.sequence_nr, 0);
+
+    let stale: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Secret": "forged"}),
+                replace: false,
+                expected_precondition: Some(expected),
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("stale field update response");
+    assert!(!stale.success);
+    assert_eq!(stale.state.fields["Owner"], "mallory");
+    assert!(stale.state.fields.get("Secret").is_none());
+
+    let fresh_precondition =
+        crate::entity_actor::effects::entity_authorization_precondition(&stale.state);
+    let fresh: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Label": "authorized"}),
+                replace: false,
+                expected_precondition: Some(fresh_precondition),
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("fresh field update response");
+    assert!(fresh.success);
+    assert_eq!(fresh.state.fields["Label"], "authorized");
+
+    let before_status_change =
+        crate::entity_actor::effects::entity_authorization_precondition(&fresh.state);
+    let cancelled: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::Action {
+                name: "CancelOrder".to_string(),
+                params: serde_json::json!({"Reason": "test"}),
+                cross_entity_booleans: BTreeMap::new(),
+                idempotency_key: None,
+                expected_authorization_precondition: None,
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("status-changing action response");
+    assert!(cancelled.success);
+    assert_eq!(cancelled.state.status, "Cancelled");
+    assert_eq!(cancelled.state.sequence_nr, 0);
+
+    let stale_status: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Secret": "still-forged"}),
+                replace: false,
+                expected_precondition: Some(before_status_change),
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("status-stale field update response");
+    assert!(!stale_status.success);
+    assert!(stale_status.state.fields.get("Secret").is_none());
+
+    let deleted: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::Delete {
+                expected_authorization_precondition: None,
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("delete response");
+    assert!(deleted.success);
+    let after_delete: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Secret": "post-delete"}),
+                replace: false,
+                expected_precondition: None,
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("post-delete field update response");
+    assert!(!after_delete.success);
+    assert_eq!(after_delete.state.status, "Deleted");
+    assert!(after_delete.state.fields.get("Secret").is_none());
+}
+
+#[tokio::test]
+async fn dst_action_rejects_stale_authorization_but_allows_idempotent_reply() {
+    let system = ActorSystem::new("dst");
+    let actor = EntityActor::new(
+        "Order",
+        "order-action-cas",
+        order_table(),
+        serde_json::json!({"Owner": "alice"}),
+    );
+    let actor_ref = system.spawn(actor, "order-action-cas");
+    let authorized: EntityResponse = actor_ref
+        .ask(EntityMsg::GetState, Duration::from_secs(1))
+        .await
+        .expect("authorized action snapshot");
+    let stale_precondition =
+        crate::entity_actor::effects::entity_authorization_precondition(&authorized.state);
+
+    let concurrent: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Owner": "mallory"}),
+                replace: false,
+                expected_precondition: None,
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("concurrent owner update");
+    let stale_delete: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::Delete {
+                expected_authorization_precondition: Some(stale_precondition.clone()),
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("stale delete response");
+    assert!(!stale_delete.success);
+    assert_eq!(stale_delete.state.status, "Draft");
+
+    let stale: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::Action {
+                name: "CancelOrder".to_string(),
+                params: serde_json::json!({"Reason": "stale"}),
+                cross_entity_booleans: BTreeMap::new(),
+                idempotency_key: Some("cancel-request".to_string()),
+                expected_authorization_precondition: Some(stale_precondition),
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("stale action response");
+    assert!(!stale.success);
+    assert_eq!(stale.state.status, "Draft");
+
+    let fresh_precondition =
+        crate::entity_actor::effects::entity_authorization_precondition(&concurrent.state);
+    let applied: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::Action {
+                name: "CancelOrder".to_string(),
+                params: serde_json::json!({"Reason": "fresh"}),
+                cross_entity_booleans: BTreeMap::new(),
+                idempotency_key: Some("cancel-request".to_string()),
+                expected_authorization_precondition: Some(fresh_precondition.clone()),
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("fresh action response");
+    assert!(applied.success);
+    assert_eq!(applied.state.status, "Cancelled");
+
+    let retry: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::Action {
+                name: "CancelOrder".to_string(),
+                params: serde_json::json!({"Reason": "fresh"}),
+                cross_entity_booleans: BTreeMap::new(),
+                idempotency_key: Some("cancel-request".to_string()),
+                expected_authorization_precondition: Some(fresh_precondition),
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("idempotent action retry response");
+    assert!(retry.success);
+    assert_eq!(retry.state.status, "Cancelled");
+    assert_eq!(
+        retry.state.total_event_count,
+        applied.state.total_event_count
+    );
+}
+
+#[test]
+fn snapshot_restore_canonicalizes_runtime_owned_fields() {
+    let mut state = EntityActor::build_initial_state(
+        "Order",
+        "order-snapshot",
+        &order_table().read().expect("table lock"),
+        &serde_json::json!({}),
+    );
+    let mut snapshot = state.clone();
+    snapshot.fields = serde_json::json!({
+        "Id": "forged",
+        "id": "forged",
+        "Status": "Delivered",
+        "status": "Delivered",
+        "has_spec": false,
+        "ctx_owner_status": "Privileged",
+        "Customer": "Alice"
+    });
+    let bytes = serde_json::to_vec(&snapshot).expect("snapshot serialization");
+
+    assert!(EntityActor::apply_snapshot_bytes(&mut state, 7, &bytes));
+    assert_eq!(state.fields["Id"], "order-snapshot");
+    assert_eq!(state.fields["id"], "order-snapshot");
+    assert_eq!(state.fields["Status"], "Draft");
+    assert_eq!(state.fields["status"], "Draft");
+    assert_eq!(state.fields["Customer"], "Alice");
+    for reserved in ["has_spec", "ctx_owner_status"] {
+        assert!(state.fields.get(reserved).is_none(), "restored {reserved}");
+    }
+}
+
+#[tokio::test]
 async fn dst_add_item_then_submit() {
     let system = ActorSystem::new("dst");
     let table = order_table();
@@ -182,6 +486,7 @@ async fn dst_add_item_then_submit() {
                 params: serde_json::json!({"ProductId": "prod-1"}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             Duration::from_secs(1),
         )
@@ -199,6 +504,7 @@ async fn dst_add_item_then_submit() {
                 params: serde_json::json!({"ShippingAddressId": "addr-1"}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             Duration::from_secs(1),
         )
@@ -232,6 +538,7 @@ async fn duplicate_composite_idempotency_reemits_spec_trigger() {
                 params: params.clone(),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: Some("same-pack".into()),
+                expected_authorization_precondition: None,
             },
             Duration::from_secs(1),
         )
@@ -246,6 +553,7 @@ async fn duplicate_composite_idempotency_reemits_spec_trigger() {
                 params,
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: Some("same-pack".into()),
+                expected_authorization_precondition: None,
             },
             Duration::from_secs(1),
         )
@@ -278,6 +586,7 @@ async fn dst_cannot_submit_without_items() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             Duration::from_secs(1),
         )
@@ -321,6 +630,7 @@ async fn dst_full_order_lifecycle() {
                     params,
                     cross_entity_booleans: std::collections::BTreeMap::new(),
                     idempotency_key: None,
+                    expected_authorization_precondition: None,
                 },
                 Duration::from_secs(1),
             )
@@ -356,6 +666,7 @@ async fn dst_cancel_from_draft() {
                 params: serde_json::json!({"Reason": "changed mind"}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             Duration::from_secs(1),
         )
@@ -387,6 +698,7 @@ async fn dst_cannot_cancel_shipped_order() {
                     params: serde_json::json!({}),
                     cross_entity_booleans: std::collections::BTreeMap::new(),
                     idempotency_key: None,
+                    expected_authorization_precondition: None,
                 },
                 Duration::from_secs(1),
             )
@@ -402,6 +714,7 @@ async fn dst_cannot_cancel_shipped_order() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             Duration::from_secs(1),
         )
@@ -434,6 +747,7 @@ async fn dst_multiple_actors_independent() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             Duration::from_secs(1),
         )
@@ -448,6 +762,7 @@ async fn dst_multiple_actors_independent() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             Duration::from_secs(1),
         )

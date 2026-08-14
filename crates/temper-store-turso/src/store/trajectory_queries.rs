@@ -16,10 +16,15 @@ use super::{
 use crate::metrics::TursoQueryTimer;
 
 impl TursoEventStore {
-    /// Load recent trajectory entries (newest first, up to `limit`).
+    /// Load recent trajectory entries for one tenant (newest first, up to `limit`).
+    ///
+    /// Scoped to `tenant` in SQL: the caller resolves the tenant from the
+    /// authenticated credential, so an observe read can only return rows that
+    /// credential owns (ADR-0157).
     #[instrument(skip_all, fields(otel.name = "turso.load_recent_trajectories", row_count = tracing::field::Empty))]
     pub async fn load_recent_trajectories(
         &self,
+        tenant: &str,
         limit: i64,
     ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.load_recent_trajectories");
@@ -29,9 +34,10 @@ impl TursoEventStore {
                 "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
                         agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids, capture_seq \
                  FROM trajectories \
+                 WHERE tenant = ?1 \
                  ORDER BY created_at DESC \
-                 LIMIT ?1",
-                params![limit],
+                 LIMIT ?2",
+                params![tenant, limit],
             )
             .await
             .map_err(|e| {
@@ -55,7 +61,10 @@ impl TursoEventStore {
     /// timestamps. This replaces the previous pattern of loading up to 10,000
     /// raw trajectory rows and grouping them in Rust.
     #[instrument(skip_all, fields(otel.name = "turso.load_unmet_intent_rows", row_count = tracing::field::Empty))]
-    pub async fn load_unmet_intent_rows(&self) -> Result<Vec<UnmetIntentAggRow>, PersistenceError> {
+    pub async fn load_unmet_intent_rows(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<UnmetIntentAggRow>, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.load_unmet_intent_rows");
         let conn = self.configured_connection().await?;
         let mut rows = conn
@@ -67,12 +76,13 @@ impl TursoEventStore {
                         MIN(created_at) AS first_seen, \
                         MAX(created_at) AS last_seen \
                  FROM trajectories \
-                 WHERE success = 0 \
+                 WHERE tenant = ?1 \
+                   AND success = 0 \
                    AND (authz_denied IS NULL OR authz_denied = 0) \
                  GROUP BY entity_type, error \
                  ORDER BY cnt DESC \
                  LIMIT 100",
-                (),
+                params![tenant],
             )
             .await
             .map_err(|e| {
@@ -104,6 +114,7 @@ impl TursoEventStore {
     #[instrument(skip_all, fields(otel.name = "turso.load_submit_spec_timestamps"))]
     pub async fn load_submit_spec_timestamps(
         &self,
+        tenant: &str,
     ) -> Result<std::collections::BTreeMap<String, String>, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.load_submit_spec_timestamps");
         let conn = self.configured_connection().await?;
@@ -111,9 +122,9 @@ impl TursoEventStore {
             .query(
                 "SELECT entity_type, MAX(created_at) AS latest_at \
                  FROM trajectories \
-                 WHERE success = 1 AND action = 'SubmitSpec' \
+                 WHERE tenant = ?1 AND success = 1 AND action = 'SubmitSpec' \
                  GROUP BY entity_type",
-                (),
+                params![tenant],
             )
             .await
             .map_err(storage_error)?;
@@ -191,8 +202,14 @@ impl TursoEventStore {
 
     /// Query trajectory statistics with optional filters.
     #[instrument(skip_all, fields(otel.name = "turso.query_trajectory_stats"))]
+    /// Trajectory statistics for one tenant.
+    ///
+    /// Scoped to `tenant` in SQL: the failed-intent list returns whole rows —
+    /// error strings, entity ids — so an unscoped read would hand one tenant
+    /// another's operational detail (ADR-0157).
     pub async fn query_trajectory_stats(
         &self,
+        tenant: &str,
         entity_type: Option<&str>,
         action: Option<&str>,
         success_filter: Option<bool>,
@@ -207,10 +224,16 @@ impl TursoEventStore {
                 "SELECT COUNT(*) AS total, \
                         COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0) AS success_count \
                  FROM trajectories \
-                 WHERE (?1 IS NULL OR entity_type = ?1) \
-                   AND (?2 IS NULL OR action = ?2) \
-                   AND (?3 IS NULL OR success = ?3)",
-                params![entity_type, action, success_filter.map(|b| b as i64)],
+                 WHERE tenant = ?1 \
+                   AND (?2 IS NULL OR entity_type = ?2) \
+                   AND (?3 IS NULL OR action = ?3) \
+                   AND (?4 IS NULL OR success = ?4)",
+                params![
+                    tenant,
+                    entity_type,
+                    action,
+                    success_filter.map(|b| b as i64)
+                ],
             )
             .await
             .map_err(storage_error)?;
@@ -231,8 +254,9 @@ impl TursoEventStore {
                         COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0) AS success, \
                         COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0) AS error \
                  FROM trajectories \
+                 WHERE tenant = ?1 \
                  GROUP BY action",
-                (),
+                params![tenant],
             )
             .await
             .map_err(storage_error)?;
@@ -257,10 +281,11 @@ impl TursoEventStore {
                 "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, \
                         agent_id, session_id, authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids, capture_seq \
                  FROM trajectories \
-                 WHERE success = 0 \
+                 WHERE tenant = ?1 \
+                   AND success = 0 \
                  ORDER BY created_at DESC \
-                 LIMIT ?1",
-                params![failed_limit],
+                 LIMIT ?2",
+                params![tenant, failed_limit],
             )
             .await
             .map_err(storage_error)?;

@@ -100,7 +100,7 @@ enum Commands {
         #[arg(long, default_value = "pinned")]
         follow_policy: String,
     },
-    /// Approve or deny pending governance decisions from the terminal
+    /// Approve or deny pending governance decisions using `TEMPER_API_KEY`
     Decide {
         /// Port where Temper HTTP server is running
         #[arg(short, long, default_value = "3000")]

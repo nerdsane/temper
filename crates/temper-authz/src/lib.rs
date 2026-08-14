@@ -10,7 +10,10 @@ mod error;
 mod metrics;
 mod policy_gen;
 
-pub use context::{Principal, PrincipalKind, SecurityContext};
+pub use context::{
+    AuthenticatedRequestContext, Principal, PrincipalKind, SecurityContext,
+    is_cedar_authority_context_key,
+};
 pub use engine::{AuthzDecision, AuthzEngine};
 pub use error::{AuthzDenial, AuthzError};
 pub use metrics::init_metrics;

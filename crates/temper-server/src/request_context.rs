@@ -107,7 +107,7 @@ impl AgentContext {
     /// `docs/adrs/0046-unified-action-triggers.md`.
     pub fn for_service(service_name: &str) -> Self {
         let service_id = format!("service:{service_name}");
-        let mut security_ctx = SecurityContext::from_headers(&[]).with_agent_context(
+        let mut security_ctx = SecurityContext::anonymous().with_agent_context(
             Some(&service_id),
             None,
             Some(service_name),
@@ -211,7 +211,7 @@ fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
 ///
 /// Accepts `X-Temper-Observe-Session-Id` and the shorter `X-Session-Id` alias.
 /// Single source of truth so every entrypoint honours both spellings.
-pub(crate) fn session_id_from_headers(headers: &HeaderMap) -> Option<String> {
+pub fn session_id_from_headers(headers: &HeaderMap) -> Option<String> {
     header_string(headers, "x-temper-observe-session-id")
         .or_else(|| header_string(headers, "x-session-id"))
 }
@@ -219,7 +219,7 @@ pub(crate) fn session_id_from_headers(headers: &HeaderMap) -> Option<String> {
 /// Extract the caller-supplied intent from observability headers.
 ///
 /// Accepts `X-Temper-Observe-Intent` and the shorter `X-Intent` alias.
-pub(crate) fn intent_from_headers(headers: &HeaderMap) -> Option<String> {
+pub fn intent_from_headers(headers: &HeaderMap) -> Option<String> {
     header_string(headers, "x-temper-observe-intent").or_else(|| header_string(headers, "x-intent"))
 }
 

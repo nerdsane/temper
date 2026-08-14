@@ -4,7 +4,7 @@ use std::sync::Arc;
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{SecretResolverFn, WasmAuthzContext, WasmAuthzDecision, WasmAuthzGate};
 
-const WASM_BOOTSTRAP_SECRET_KEYS: [&str; 3] = ["blob_endpoint", "temper_api_key", "temper_api_url"];
+const WASM_BOOTSTRAP_SECRET_KEYS: [&str; 1] = ["blob_endpoint"];
 
 fn is_wasm_bootstrap_secret(key: &str) -> bool {
     WASM_BOOTSTRAP_SECRET_KEYS.contains(&key) || key.starts_with("ca_cert:")
@@ -54,6 +54,12 @@ impl crate::state::ServerState {
         let tenant_str = tenant.to_string();
 
         Some(Arc::new(move |key: &str| {
+            if key.eq_ignore_ascii_case("temper_api_key") {
+                return Err(
+                    "secret 'temper_api_key' is reserved and unavailable to WASM guests"
+                        .to_string(),
+                );
+            }
             match gate.authorize_secret_access(key, &authz_ctx) {
                 WasmAuthzDecision::Allow => vault
                     .get_secret(&tenant_str, key)
@@ -190,21 +196,16 @@ mod tests {
         let secrets =
             state.get_authorized_wasm_host_bootstrap_secrets(&tenant, &gate, &test_authz_ctx());
 
-        assert_eq!(secrets.len(), 4);
+        assert_eq!(secrets.len(), 2);
         assert!(secrets.contains_key("blob_endpoint"));
-        assert!(secrets.contains_key("temper_api_key"));
-        assert!(secrets.contains_key("temper_api_url"));
+        assert!(!secrets.contains_key("temper_api_key"));
+        assert!(!secrets.contains_key("temper_api_url"));
         assert!(secrets.contains_key("ca_cert:internal"));
         assert!(!secrets.contains_key("provider_api_key"));
         assert!(!secrets.contains_key("unrelated_secret"));
         assert_eq!(
             gate.requested_keys(),
-            vec![
-                "blob_endpoint".to_string(),
-                "ca_cert:internal".to_string(),
-                "temper_api_key".to_string(),
-                "temper_api_url".to_string()
-            ]
+            vec!["blob_endpoint".to_string(), "ca_cert:internal".to_string()]
         );
     }
 
@@ -241,6 +242,30 @@ mod tests {
                 "provider_api_key".to_string(),
                 "blocked_key".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn lazy_secret_resolver_never_exposes_reserved_root_key() {
+        let tenant = TenantId::new("tenant-a");
+        let vault = SecretsVault::new(&[9_u8; 32]);
+        vault
+            .cache_secret(tenant.as_str(), "temper_api_key", "deployment-root".into())
+            .unwrap();
+        let state = state_with_vault(vault);
+        let gate = RecordingSecretGate::allowing(&["temper_api_key"]);
+        let requested = gate.requested.clone();
+        let resolver = state
+            .authorized_wasm_secret_resolver(&tenant, Arc::new(gate), test_authz_ctx())
+            .expect("resolver should exist when vault is configured");
+
+        let error = resolver("temper_api_key").expect_err("root key must stay unavailable");
+        assert!(error.contains("reserved"));
+        assert!(
+            requested
+                .lock()
+                .expect("lock should not be poisoned")
+                .is_empty()
         );
     }
 }

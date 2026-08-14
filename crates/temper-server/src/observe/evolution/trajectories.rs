@@ -1,11 +1,14 @@
-use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, Query, State};
+use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
+use temper_authz::AuthenticatedRequestContext;
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use tracing::instrument;
 
-use crate::authz::{observe_tenant_scope, require_observe_auth};
+use crate::authz::{
+    observe_tenant_scope, require_authenticated_context, require_observe_auth, require_tenant_match,
+};
 use crate::ots_trajectory_outbox::{OtsTrajectoryEnqueueError, OtsTrajectoryWrite};
 use crate::state::{ServerState, TrajectoryEntry, TrajectorySource};
 
@@ -32,22 +35,17 @@ pub(crate) struct TrajectoryQueryParams {
 #[instrument(skip_all, fields(otel.name = "GET /observe/trajectories"))]
 pub(crate) async fn handle_trajectories(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Query(params): Query<TrajectoryQueryParams>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_trajectories", "Trajectory")?;
-    let tenant_scope = observe_tenant_scope(&state, &headers)?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_trajectories", "Trajectory")?;
+    let tenant_scope = observe_tenant_scope(authenticated);
     let failed_limit = params.failed_limit.unwrap_or(50).min(500);
     let success_filter: Option<bool> = params.success.as_deref().map(|s| s == "true");
 
-    let stores = if let Some(ref scope) = tenant_scope {
-        match state.metadata_store_for_tenant(scope.as_str()).await {
-            Some(store) => vec![store],
-            None => Vec::new(),
-        }
-    } else {
-        state.collect_all_metadata_stores().await
-    };
+    let store = state.metadata_store_for_tenant(tenant_scope.as_str()).await;
+    let stores = store.into_iter().collect::<Vec<_>>();
 
     if !stores.is_empty() {
         // Aggregate stats across all queried stores.
@@ -61,6 +59,7 @@ pub(crate) async fn handle_trajectories(
         for store in &stores {
             match store
                 .query_trajectory_stats(
+                    tenant_scope.as_str(),
                     params.entity_type.as_deref(),
                     params.action.as_deref(),
                     success_filter,
@@ -128,9 +127,10 @@ pub(crate) async fn handle_trajectories(
 /// Called by the production chat proxy when a user asks for something
 /// that doesn't map to any available action. This feeds the Evolution Engine.
 ///
-/// Every field of the row comes from the request body — tenant, entity type,
-/// action name, session — so the row is a caller's account of something that
-/// never reached a governed dispatch. It is written `spec_governed = false` for
+/// The row's tenant, agent id, and agent type come from the credential; the
+/// descriptive fields — entity type, action name, session — come from the request
+/// body, so the row is a caller's account of something that never reached a
+/// governed dispatch. It is written `spec_governed = false` for
 /// that reason: the conformance checker judges governed dispatches, and a row
 /// any caller can post under any session and entity type would otherwise let
 /// one caller inject violations into another run's report
@@ -138,13 +138,15 @@ pub(crate) async fn handle_trajectories(
 #[instrument(skip_all, fields(otel.name = "POST /api/evolution/trajectories/unmet"))]
 pub(crate) async fn handle_unmet_intent(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    require_observe_auth(&state, &headers, "write_trajectories", "Trajectory")
+    let authenticated = require_authenticated_context(authenticated.as_deref())
+        .map_err(|status| (status, "unauthorized".to_string()))?;
+    require_observe_auth(&state, authenticated, "write_trajectories", "Trajectory")
         .map_err(|sc| (sc, "unauthorized".to_string()))?;
 
-    if !state.enqueue_trajectory_entry(unmet_intent_entry(&body)) {
+    if !state.enqueue_trajectory_entry(unmet_intent_entry(authenticated, &body)?) {
         tracing::warn!("failed to enqueue unmet-intent trajectory");
     }
 
@@ -152,23 +154,30 @@ pub(crate) async fn handle_unmet_intent(
 }
 
 /// Build the row an unmet-intent report becomes.
-fn unmet_intent_entry(body: &serde_json::Value) -> TrajectoryEntry {
+///
+/// The row's tenant comes from the credential, never from the body: authorizing
+/// against one tenant and writing into another is the split-brain ADR-0157 closes.
+fn unmet_intent_entry(
+    authenticated: &AuthenticatedRequestContext,
+    body: &serde_json::Value,
+) -> Result<TrajectoryEntry, (StatusCode, String)> {
     let intent = body
         .get("action")
         .or_else(|| body.get("intent"))
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
-    let tenant = body
-        .get("tenant")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default");
+    if let Some(requested_tenant) = body.get("tenant").and_then(|value| value.as_str()) {
+        require_tenant_match(authenticated, requested_tenant)
+            .map_err(|status| (status, "tenant mismatch".to_string()))?;
+    }
+    let tenant = authenticated.tenant().as_str();
     let entity_type = body
         .get("entity_type")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let error_msg = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
 
-    TrajectoryEntry {
+    Ok(TrajectoryEntry {
         timestamp: sim_now().to_rfc3339(),
         tenant: tenant.to_string(),
         entity_type: entity_type.to_string(),
@@ -177,10 +186,7 @@ fn unmet_intent_entry(body: &serde_json::Value) -> TrajectoryEntry {
         success: false,
         from_status: None,
         to_status: None,
-        agent_id: body
-            .get("agent_id")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
+        agent_id: Some(authenticated.security_context().principal.id.clone()),
         session_id: body
             .get("session_id")
             .and_then(|v| v.as_str())
@@ -203,10 +209,16 @@ fn unmet_intent_entry(body: &serde_json::Value) -> TrajectoryEntry {
             error_msg.to_string()
         }),
         // An unmet intent is by definition an action the kernel never
-        // dispatched, and the whole row is caller-supplied. Both make it a
-        // report about the run rather than a record of it.
+        // dispatched, and the row body is caller-supplied. Both make it a
+        // report about the run rather than a record of it, so it stays out of
+        // conformance verdicts.
         spec_governed: Some(false),
-        agent_type: None,
+        // Provenance comes from the authenticated credential, not the body.
+        agent_type: authenticated
+            .security_context()
+            .principal
+            .agent_type
+            .clone(),
         request_body: body.get("request_body").cloned(),
         intent: body
             .get("intent")
@@ -215,7 +227,7 @@ fn unmet_intent_entry(body: &serde_json::Value) -> TrajectoryEntry {
             .or_else(|| Some(intent.to_string())),
         matched_policy_ids: None,
         capture_seq: None,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -247,9 +259,13 @@ pub(crate) struct OtsTrajectoryQueryParams {
 #[instrument(skip_all, fields(otel.name = "POST /api/ots/trajectories"))]
 pub(crate) async fn handle_post_ots_trajectory(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     body: String,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let authenticated = require_authenticated_context(authenticated.as_deref())
+        .map_err(|status| (status, "unauthorized".to_string()))?;
+    require_observe_auth(&state, authenticated, "write_trajectories", "OtsTrajectory")
+        .map_err(|status| (status, "unauthorized".to_string()))?;
     let trajectory: temper_ots::models::OTSTrajectory =
         serde_json::from_str(&body).map_err(|e| {
             (
@@ -272,15 +288,11 @@ pub(crate) async fn handle_post_ots_trajectory(
         trajectory.trajectory_id.clone()
     };
 
-    let agent_id = headers
-        .get("X-Agent-Id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or(trajectory.metadata.agent_id.as_str());
+    let agent_id = authenticated.security_context().principal.id.as_str();
 
-    let session_id = headers
-        .get("X-Session-Id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+    // The uploader's declared session, carried on the request context by the
+    // bearer edge (never a raw header read, and never a Cedar input).
+    let session_id = authenticated.session_id().unwrap_or("");
 
     let outcome = match trajectory.metadata.outcome {
         temper_ots::models::OutcomeType::Success => "success",
@@ -290,10 +302,7 @@ pub(crate) async fn handle_post_ots_trajectory(
 
     let turn_count = trajectory.turns.len() as i64;
 
-    let tenant = headers
-        .get("X-Tenant-Id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("default");
+    let tenant = authenticated.tenant().as_str();
 
     let Some(store) = state.metadata_store_for_tenant(tenant).await else {
         tracing::warn!(
@@ -355,14 +364,21 @@ pub(crate) async fn handle_post_ots_trajectory(
 #[instrument(skip_all, fields(otel.name = "GET /api/ots/trajectories"))]
 pub(crate) async fn handle_get_ots_trajectories(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Query(params): Query<OtsTrajectoryQueryParams>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let tenant = headers
-        .get("X-Tenant-Id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("default");
-    let limit = params.limit.unwrap_or(50).min(500);
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let authenticated = require_authenticated_context(authenticated.as_deref())
+        .map_err(|status| (status, "unauthorized".to_string()))?;
+    require_observe_auth(&state, authenticated, "read_trajectories", "OtsTrajectory")
+        .map_err(|status| (status, "unauthorized".to_string()))?;
+    let tenant = authenticated.tenant().as_str();
+    let limit = params.limit.unwrap_or(50);
+    if !(1..=500).contains(&limit) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("limit must be between 1 and 500, got {limit}"),
+        ));
+    }
 
     let Some(store) = state.metadata_store_for_tenant(tenant).await else {
         return Ok(Json(serde_json::json!({
@@ -398,6 +414,10 @@ pub(crate) async fn handle_get_ots_trajectories(
 }
 
 #[cfg(test)]
+#[path = "trajectories_route_test.rs"]
+mod route_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::conformance::{ConformanceInput, SpecResolution, check_conformance};
@@ -409,13 +429,21 @@ mod tests {
     fn an_unmet_intent_row_is_never_a_governed_dispatch() {
         // Even when the caller declares an entity source, a governed session,
         // and a real actor's entity type.
-        let entry = unmet_intent_entry(&serde_json::json!({
-            "tenant": "default",
-            "entity_type": "Order",
-            "action": "ShipOrder",
-            "session_id": "session-1",
-            "source": "entity",
-        }));
+        let authenticated = AuthenticatedRequestContext::new(
+            temper_runtime::tenant::TenantId::default(),
+            temper_authz::SecurityContext::system(),
+        );
+        let entry = unmet_intent_entry(
+            &authenticated,
+            &serde_json::json!({
+                "tenant": "default",
+                "entity_type": "Order",
+                "action": "ShipOrder",
+                "session_id": "session-1",
+                "source": "entity",
+            }),
+        )
+        .expect("the system context is bound to the default tenant");
 
         assert_eq!(
             entry.spec_governed,
@@ -436,13 +464,21 @@ mod tests {
             .await
             .expect("create local turso store");
 
-        let entry = unmet_intent_entry(&serde_json::json!({
-            "tenant": "default",
-            "entity_type": "Order",
-            "action": "ShipOrder",
-            "session_id": "session-1",
-            "source": "entity",
-        }));
+        let authenticated = AuthenticatedRequestContext::new(
+            temper_runtime::tenant::TenantId::default(),
+            temper_authz::SecurityContext::system(),
+        );
+        let entry = unmet_intent_entry(
+            &authenticated,
+            &serde_json::json!({
+                "tenant": "default",
+                "entity_type": "Order",
+                "action": "ShipOrder",
+                "session_id": "session-1",
+                "source": "entity",
+            }),
+        )
+        .expect("the system context is bound to the default tenant");
         crate::storage::TrajectorySink::persist_trajectory_entry(&store, &entry)
             .await
             .expect("persist unmet intent");

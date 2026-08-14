@@ -22,15 +22,18 @@ use super::{ConformanceStats, Violation, ViolationKind};
 ///   this session never reached storage;
 /// - another actor's row, whose spec the checker was not given;
 /// - kernel bookkeeping (`source = Platform`);
-/// - a row explicitly marked `spec_governed = false`, which is a caller-supplied
-///   audit record rather than a governed dispatch. `POST /api/audit` and
-///   `POST /api/evolution/trajectories/unmet` write these with a caller-chosen
-///   session, entity type, and action name, so judging them would let any
-///   caller inject violations into another session's report.
+/// - a row explicitly marked `spec_governed = false`: a report about a run
+///   rather than a record of one. The caller-supplied endpoints (`POST
+///   /api/audit`, `POST /api/evolution/trajectories/unmet`, the load-inline
+///   SubmitSpec note) and the management-plane / pre-flight authorization
+///   denials (`POST /api/authorize`, policy auth, WASM and spec management)
+///   all write these — their session, entity type, or action can be
+///   caller-chosen, so judging them would let any caller inject violations
+///   into another session's report.
 ///
-/// A row with `spec_governed` absent is a governed dispatch: the kernel capture
-/// sites leave the column unset, and only the caller-supplied endpoints set it
-/// false.
+/// A row with `spec_governed` absent is a governed dispatch: the kernel's
+/// entity-dispatch capture sites (including the OData dispatch-guard denials)
+/// leave the column unset, and every caller-influenced writer sets it false.
 pub(super) fn row_disposition(spec: &SpecView<'_>, row: &TursoTrajectoryRow) -> RowDisposition {
     // Checked before the entity comparison: a marker's entity type is the
     // capture path's own, so the `OtherEntity` arm would otherwise swallow it

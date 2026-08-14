@@ -23,23 +23,30 @@ use axum::body::Body;
 use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use sha1::Digest;
-use tokio_stream::StreamExt as _;
+use futures_util::TryStreamExt as _;
+use temper_authz::AuthenticatedRequestContext;
+use temper_runtime::scheduler::sim_now;
 
 use super::account_verification::enforce_commons_account_verified_for_write;
 use super::authz::{
-    CREATE_ACTION, MutationResource, authorize_mutation, request_security_context,
-    resource_attrs_from_body,
+    CREATE_ACTION, MutationResource, apply_authenticated_context, authorize_mutation,
+    require_authenticated_context,
 };
-use super::common::{extract_tenant, run_write_prechecks};
+use super::common::run_write_prechecks;
 use super::response::annotate_entity;
-use super::storage_guardrails::enforce_commons_storage_cap;
-use crate::identity::ResolvedIdentity;
+use super::storage_guardrails::storage_cap_error_response;
+use crate::blob_store::{BlobByteStream, BlobIngestAdmissionError, MAX_RAW_BLOB_BYTES};
+use crate::blobs::{FIELD_OVERFLOW_BLOB_PREFIX, blob_ref_value};
 use crate::request_context::extract_agent_context;
 use crate::response::{ODataResponse, odata_error};
 use crate::state::ServerState;
 
-const MAX_OBJECT_BYTES: usize = 2 * 1024 * 1024 * 1024;
+const EXPECTED_OBJECT_ID_HEADER: &str = "x-expected-object-id";
+
+mod responses;
+use responses::{
+    blob_store_error_response, remove_binary_fields_from_create_response, stage_error_response,
+};
 
 /// `POST /tdata/Blobs/Temper.IngestRaw` — stream raw blob bytes,
 /// hash them, persist a `Blob` row keyed by the SHA-1 of the
@@ -50,43 +57,37 @@ const MAX_OBJECT_BYTES: usize = 2 * 1024 * 1024 * 1024;
 ///     canonical hash prefix and as a defence against open-ended
 ///     streams.
 ///   * `X-Repository-Id` — foreign key back to the parent repo.
+///   * `X-Expected-Object-Id` — lowercase SHA-1 of the canonical object,
+///     required so Cedar and quota admission use the exact resource before
+///     the request body is polled.
 ///
-/// Optional:
-///   * `X-Tenant-Id`, principal headers — same as any OData write.
+/// Authority and tenant are supplied by the authenticated typed request
+/// context, exactly like every protected OData write.
 pub async fn handle_blob_ingest_raw(
     State(state): State<ServerState>,
-    resolved_id: Option<Extension<ResolvedIdentity>>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     headers: HeaderMap,
     body: Body,
 ) -> impl IntoResponse {
-    ingest_raw_inner(
-        state,
-        resolved_id.map(|Extension(identity)| identity),
-        headers,
-        body,
-        "Blob",
-        "blob",
-    )
-    .await
+    let authenticated = match require_authenticated_context(authenticated) {
+        Ok(context) => context,
+        Err(error) => return error.into_response(),
+    };
+    ingest_raw_inner(state, authenticated, headers, body, "Blob", "blob").await
 }
 
 async fn ingest_raw_inner(
     state: ServerState,
-    resolved_identity: Option<ResolvedIdentity>,
+    authenticated: AuthenticatedRequestContext,
     headers: HeaderMap,
     body: Body,
     entity_type: &str,
     kind_tag: &str,
 ) -> axum::response::Response {
-    let tenant = match extract_tenant(&headers, &state) {
-        Ok(t) => t,
-        Err(e) => return e.into_response(),
-    };
+    let tenant = authenticated.tenant().clone();
+    let security_ctx = authenticated.security_context().clone();
     let mut agent_ctx = extract_agent_context(&headers);
-    if let Some(ref identity) = resolved_identity {
-        agent_ctx.agent_id = Some(identity.agent_instance_id.clone());
-        agent_ctx.agent_type = Some(identity.agent_type_name.clone());
-    }
+    apply_authenticated_context(&mut agent_ctx, &security_ctx);
 
     let repository_id = match headers
         .get("x-repository-id")
@@ -105,6 +106,11 @@ async fn ingest_raw_inner(
         }
     };
 
+    let expected_object_id = match expected_object_id(&headers) {
+        Ok(object_id) => object_id,
+        Err(response) => return *response,
+    };
+
     let declared_len = match headers
         .get("content-length")
         .and_then(|v| v.to_str().ok())
@@ -120,117 +126,29 @@ async fn ingest_raw_inner(
             .into_response();
         }
     };
-    if declared_len > MAX_OBJECT_BYTES {
-        return odata_error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "ObjectTooLarge",
-            &format!("declared size {declared_len} exceeds {MAX_OBJECT_BYTES}"),
-        )
-        .into_response();
-    }
-
-    // Hash the canonical bytes incrementally. We need the body
-    // around to write into the row, but the hasher runs in
-    // streaming fashion regardless — Vec<u8> is just the sink.
-    let mut hasher = sha1::Sha1::new();
-    let prefix = format!("{kind_tag} {declared_len}\0");
-    hasher.update(prefix.as_bytes());
-
-    let mut content = Vec::with_capacity(declared_len);
-    let mut stream = body.into_data_stream();
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = match chunk_result {
-            Ok(c) => c,
-            Err(e) => {
-                return odata_error(
-                    StatusCode::BAD_REQUEST,
-                    "BodyStreamError",
-                    &format!("body stream failed: {e}"),
-                )
-                .into_response();
-            }
-        };
-        if content.len() + chunk.len() > declared_len {
-            return odata_error(
-                StatusCode::BAD_REQUEST,
-                "BodyExceedsContentLength",
-                "body bytes exceed declared Content-Length",
-            )
-            .into_response();
-        }
-        hasher.update(&chunk);
-        content.extend_from_slice(&chunk);
-    }
-    if content.len() != declared_len {
-        return odata_error(
-            StatusCode::BAD_REQUEST,
-            "BodyShorterThanContentLength",
-            &format!("expected {declared_len} body bytes, got {}", content.len()),
-        )
-        .into_response();
-    }
-
-    let sha = hex_lower(&hasher.finalize());
-
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD;
-    let canonical_b64 = {
-        let mut buf = Vec::with_capacity(prefix.len() + content.len());
-        buf.extend_from_slice(prefix.as_bytes());
-        buf.extend_from_slice(&content);
-        b64.encode(&buf)
-    };
-    let content_b64 = b64.encode(&content);
-
-    let now = chrono::Utc::now().to_rfc3339();
-    let initial_fields = serde_json::json!({
-        "Id": sha,
+    let now = sim_now().to_rfc3339();
+    let admission_fields = serde_json::json!({
+        "Id": expected_object_id,
         "RepositoryId": repository_id,
         "Size": declared_len as i64,
-        "Content": content_b64,
-        "CanonicalBytes": canonical_b64,
         "Status": "Durable",
         "CreatedAt": now,
     });
-
-    let _commons_guardrail_lock = state.acquire_commons_write_guardrail_lock(&tenant).await;
-
-    if let Err(resp) = run_write_prechecks(
-        &state,
-        &tenant,
-        entity_type,
-        &sha,
-        "Create",
-        "create",
-        &initial_fields,
-    )
-    .await
+    let attrs = match state
+        .build_create_authz_resource_attrs(
+            &tenant,
+            entity_type,
+            &expected_object_id,
+            &admission_fields,
+        )
+        .await
     {
-        return resp;
-    }
-
-    if let Err(resp) =
-        enforce_commons_account_verified_for_write(&state, &tenant, entity_type, &initial_fields)
-            .await
-    {
-        return *resp;
-    }
-
-    if let Err(resp) = enforce_commons_storage_cap(
-        &state,
-        &tenant,
-        entity_type,
-        &sha,
-        "Create",
-        &initial_fields,
-    )
-    .await
-    {
-        return resp;
-    }
-
-    let security_ctx = request_security_context(&headers, &agent_ctx, resolved_identity.as_ref());
-    let attrs = resource_attrs_from_body(&state, &tenant, entity_type, &sha, &initial_fields);
+        Ok(attrs) => attrs,
+        Err(error) => {
+            return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &error)
+                .into_response();
+        }
+    };
     if let Err(response) = authorize_mutation(
         &state,
         &tenant,
@@ -239,7 +157,7 @@ async fn ingest_raw_inner(
         CREATE_ACTION,
         MutationResource {
             entity_type,
-            entity_id: &sha,
+            entity_id: &expected_object_id,
             attrs: &attrs,
         },
     )
@@ -248,19 +166,245 @@ async fn ingest_raw_inner(
         return response;
     }
 
-    match state
-        .get_or_create_tenant_entity(&tenant, entity_type, &sha, initial_fields)
+    // Reserve staging capacity only after Cedar admits the exact expected
+    // object ID/repository/size. Otherwise denied credentials could occupy the
+    // tenant or global upload permits without ever being allowed to poll a body.
+    let mut staging_admission = match state
+        .raw_blob_ingest_budget
+        .try_reserve(&tenant, declared_len)
+    {
+        Ok(permit) => permit,
+        Err(BlobIngestAdmissionError::ObjectTooLarge) => {
+            return odata_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "ObjectTooLarge",
+                &format!(
+                    "declared size {declared_len} exceeds the {} byte object or {} byte staging budget",
+                    MAX_RAW_BLOB_BYTES,
+                    state.raw_blob_ingest_budget.capacity_bytes()
+                ),
+            )
+            .into_response();
+        }
+        Err(BlobIngestAdmissionError::BudgetExhausted) => {
+            return odata_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "BlobIngestBudgetExhausted",
+                "Concurrent raw Blob staging has exhausted its admission budget",
+            )
+            .into_response();
+        }
+        Err(BlobIngestAdmissionError::TenantBusy) => {
+            return odata_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "BlobIngestTenantBusy",
+                "This tenant already has a raw Blob upload in progress",
+            )
+            .into_response();
+        }
+    };
+
+    // Snapshot repository/account/quota admission under the existing commons
+    // mutation lock, then keep only the owner-byte reservation across I/O. A
+    // slow upload must not hold the coarse cross-tenant lock.
+    let admission_guard = state.acquire_commons_write_guardrail_lock(&tenant).await;
+
+    if let Err(response) = run_write_prechecks(
+        &state,
+        &tenant,
+        entity_type,
+        &expected_object_id,
+        "Create",
+        "create",
+        &admission_fields,
+    )
+    .await
+    {
+        return response;
+    }
+    if let Err(response) =
+        enforce_commons_account_verified_for_write(&state, &tenant, entity_type, &admission_fields)
+            .await
+    {
+        return *response;
+    }
+    let mut storage_reservation = match state
+        .reserve_commons_blob_storage(
+            &tenant,
+            &expected_object_id,
+            &repository_id,
+            declared_len as i64,
+        )
         .await
     {
+        Ok(reservation) => reservation,
+        Err(error) => return storage_cap_error_response(error),
+    };
+    drop(admission_guard);
+
+    let blob_store = match state.blob_store_for_tenant(&tenant) {
+        Ok(store) => store,
+        Err(error) => {
+            return odata_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "BlobStoreUnavailable",
+                &error,
+            )
+            .into_response();
+        }
+    };
+    let canonical_prefix = format!("{kind_tag} {declared_len}\0");
+    let stream: BlobByteStream = Box::pin(
+        body.into_data_stream()
+            .map_err(|error| std::io::Error::other(error.to_string())),
+    );
+    let staged = match blob_store
+        .stage_canonical_stream(
+            stream,
+            declared_len,
+            canonical_prefix.as_bytes(),
+            state.raw_blob_ingest_budget.progress_policy(),
+            &mut staging_admission,
+        )
+        .await
+    {
+        Ok(staged) => staged,
+        Err(error) => return stage_error_response(error),
+    };
+    if staged.canonical_sha1() != expected_object_id {
+        return odata_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "ObjectDigestMismatch",
+            &format!(
+                "expected object ID {expected_object_id}, computed {}",
+                staged.canonical_sha1()
+            ),
+        )
+        .into_response();
+    }
+
+    let content_descriptor = match staged.base64_json_descriptor(&[]).await {
+        Ok(descriptor) => descriptor,
+        Err(error) => return blob_store_error_response(&error),
+    };
+    let content_key = format!(
+        "{FIELD_OVERFLOW_BLOB_PREFIX}{}.json",
+        content_descriptor.sha256
+    );
+    if let Err(error) = blob_store
+        .put_staged_base64_json(
+            &content_key,
+            &staged,
+            &[],
+            content_descriptor.serialized_len,
+        )
+        .await
+    {
+        return blob_store_error_response(&error);
+    }
+
+    let canonical_descriptor = match staged
+        .base64_json_descriptor(canonical_prefix.as_bytes())
+        .await
+    {
+        Ok(descriptor) => descriptor,
+        Err(error) => return blob_store_error_response(&error),
+    };
+    let canonical_key = format!(
+        "{FIELD_OVERFLOW_BLOB_PREFIX}{}.json",
+        canonical_descriptor.sha256
+    );
+    if let Err(error) = blob_store
+        .put_staged_base64_json(
+            &canonical_key,
+            &staged,
+            canonical_prefix.as_bytes(),
+            canonical_descriptor.serialized_len,
+        )
+        .await
+    {
+        return blob_store_error_response(&error);
+    }
+
+    let initial_fields = serde_json::json!({
+        "Id": expected_object_id,
+        "RepositoryId": repository_id,
+        "Size": declared_len as i64,
+        "Content": blob_ref_value(&content_key, content_descriptor.serialized_len),
+        "CanonicalBytes": blob_ref_value(&canonical_key, canonical_descriptor.serialized_len),
+        "Status": "Durable",
+        "CreatedAt": now,
+    });
+    let final_guard = state.acquire_commons_write_guardrail_lock(&tenant).await;
+    // Convert the pending reservation back into a final cap check while the
+    // mutation lock prevents another writer from taking the released bytes.
+    drop(storage_reservation.take());
+    if let Err(error) = state
+        .enforce_commons_storage_cap_for_write(
+            &tenant,
+            entity_type,
+            &expected_object_id,
+            "Create",
+            &initial_fields,
+        )
+        .await
+    {
+        drop(final_guard);
+        return storage_cap_error_response(error);
+    }
+    if let Err(response) = run_write_prechecks(
+        &state,
+        &tenant,
+        entity_type,
+        &expected_object_id,
+        "Create",
+        "create",
+        &initial_fields,
+    )
+    .await
+    {
+        drop(final_guard);
+        return response;
+    }
+    if let Err(response) =
+        enforce_commons_account_verified_for_write(&state, &tenant, entity_type, &initial_fields)
+            .await
+    {
+        drop(final_guard);
+        return *response;
+    }
+    if let Err(response) = authorize_mutation(
+        &state,
+        &tenant,
+        &security_ctx,
+        &agent_ctx,
+        CREATE_ACTION,
+        MutationResource {
+            entity_type,
+            entity_id: &expected_object_id,
+            attrs: &attrs,
+        },
+    )
+    .await
+    {
+        drop(final_guard);
+        return response;
+    }
+
+    let create_result = state
+        .get_or_create_tenant_entity(&tenant, entity_type, &expected_object_id, initial_fields)
+        .await;
+    match create_result {
         Ok(response) => {
             let _ = agent_ctx;
             state.clear_commons_storage_projection_cache_for_entity(entity_type);
+            drop(final_guard);
             let mut state_json = serde_json::to_value(&response.state).unwrap_or_default();
-            crate::blobs::hydrate_blob_refs_for_tenant(&state, &tenant, &mut state_json).await;
+            remove_binary_fields_from_create_response(&mut state_json);
             let body = annotate_entity(
                 state_json,
                 format!("$metadata#{entity_type}s/$entity"),
-                Some(format!("{entity_type}s('{sha}')")),
+                Some(format!("{entity_type}s('{expected_object_id}')")),
             );
             ODataResponse {
                 status: StatusCode::CREATED,
@@ -268,21 +412,55 @@ async fn ingest_raw_inner(
             }
             .into_response()
         }
-        Err(e) => odata_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "EntityCreateFailed",
-            &e.to_string(),
-        )
-        .into_response(),
+        Err(error) => {
+            drop(final_guard);
+            odata_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "EntityCreateFailed",
+                &error.to_string(),
+            )
+            .into_response()
+        }
     }
 }
 
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push(HEX[(b >> 4) as usize] as char);
-        s.push(HEX[(b & 0x0f) as usize] as char);
+fn expected_object_id(headers: &HeaderMap) -> Result<String, Box<axum::response::Response>> {
+    let Some(value) = headers.get(EXPECTED_OBJECT_ID_HEADER) else {
+        return Err(Box::new(
+            odata_error(
+                StatusCode::PRECONDITION_REQUIRED,
+                "MissingExpectedObjectId",
+                "X-Expected-Object-Id header required for pre-body authorization",
+            )
+            .into_response(),
+        ));
+    };
+    let object_id = value.to_str().map(str::trim).map_err(|_| {
+        Box::new(
+            odata_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidExpectedObjectId",
+                "X-Expected-Object-Id must be visible ASCII",
+            )
+            .into_response(),
+        )
+    })?;
+    if object_id.len() != 40
+        || !object_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(Box::new(
+            odata_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidExpectedObjectId",
+                "X-Expected-Object-Id must be 40 lowercase hexadecimal characters",
+            )
+            .into_response(),
+        ));
     }
-    s
+    Ok(object_id.to_string())
 }
+
+#[cfg(test)]
+mod tests;

@@ -643,7 +643,7 @@ impl crate::state::ServerState {
                     action_params: ctx.action_params,
                     mode: super::WasmDispatchMode::Inline,
                 };
-                match Box::pin(self.dispatch_wasm_integrations_internal(&req)).await {
+                match super::wasm::dispatch_wasm_integrations_boxed(self, &req).await {
                     Ok(Some(final_response)) => {
                         // Silent-exit regression guard: trigger integration
                         // returned but state didn't advance. Under healthy

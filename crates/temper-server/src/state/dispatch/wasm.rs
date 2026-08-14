@@ -11,11 +11,13 @@ use crate::entity_actor::{EntityResponse, EntityState};
 use crate::request_context::AgentContext;
 use crate::secrets::template::resolve_secret_templates;
 use crate::state::sim_now;
+use temper_authz::{AuthenticatedRequestContext, PrincipalKind, SecurityContext};
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{
-    AuthorizedWasmHost, BinaryHttpInterceptorFn, ProductionWasmHost, ProgressEmitterFn,
-    StreamRegistry, TextHttpInterceptorFn, WasmAuthzContext, WasmAuthzGate, WasmHost,
-    WasmInvocationContext, WasmResourceLimits,
+    AuthorizedWasmHost, BinaryHttpInterceptorFn, InternalHttpCapability,
+    InternalHttpCapabilityIssuerFn, ProductionWasmHost, ProgressEmitterFn, StreamRegistry,
+    TextHttpInterceptorFn, WasmAuthzContext, WasmAuthzGate, WasmHost, WasmInvocationContext,
+    WasmResourceLimits,
 };
 
 use super::{
@@ -24,11 +26,112 @@ use super::{
 };
 use replay_inputs::{extract_trajectory_actions_from_ots, has_replay_trajectory_input};
 
+mod boxed;
 mod invocation_artifacts;
 mod local_tdata_host;
 mod replay_inputs;
 
+pub(super) use boxed::{
+    dispatch_tenant_action_core_boxed, dispatch_wasm_callback_boxed,
+    dispatch_wasm_integrations_boxed,
+};
+use boxed::{handle_wasm_failure_boxed, invoke_and_handle_result_boxed};
 use local_tdata_host::LocalTDataWasmHost;
+
+/// Build a request-bound internal HTTP capability issuer for a non-System caller.
+pub(crate) fn internal_http_capability_issuer(
+    state: &crate::state::ServerState,
+    tenant: &TenantId,
+    security_context: Option<&SecurityContext>,
+) -> Option<InternalHttpCapabilityIssuerFn> {
+    let security_context = security_context?;
+    if security_context.principal.kind == PrincipalKind::System {
+        return None;
+    }
+    let authenticated = AuthenticatedRequestContext::new(tenant.clone(), security_context.clone());
+    let tenant = tenant.clone();
+    let store = state.internal_invocation_credentials.clone();
+    Some(Arc::new(move |method, url| {
+        let bearer = store
+            .issue_for_url(authenticated.clone(), method, url)
+            .map_err(|error| error.to_string())?;
+        InternalHttpCapability::new(bearer, tenant.to_string())
+    }))
+}
+
+/// Build the same Cedar-gated host chain for an inbound `HttpEndpoint` guest
+/// that ordinary action-triggered WASM integrations receive.
+///
+/// The shared HTTP stream registry is the only endpoint-specific transport
+/// detail. Secret access, outbound HTTP, local TData calls, and internal HTTP
+/// re-entry all use the canonical authorization components.
+pub(crate) fn authorized_http_endpoint_host(
+    state: &crate::state::ServerState,
+    tenant: &TenantId,
+    module_name: &str,
+    invocation_context: &WasmInvocationContext,
+    http_streams: Arc<temper_wasm::http_stream::HttpStreamRegistry>,
+    security_context: &SecurityContext,
+) -> Result<Arc<dyn WasmHost>, String> {
+    let gate = state.wasm_authz_gate();
+    let authz_context = WasmAuthzContext {
+        tenant: tenant.to_string(),
+        module_name: module_name.to_string(),
+        agent_id: invocation_context.agent_id.clone(),
+        session_id: invocation_context.session_id.clone(),
+        entity_type: invocation_context.entity_type.clone(),
+        trigger_action: invocation_context.trigger_action.clone(),
+    };
+    let bootstrap_secrets =
+        state.get_authorized_wasm_host_bootstrap_secrets(tenant, &*gate, &authz_context);
+    let gate = crate::authz::wasm_gate::bind_local_blob_endpoint(
+        gate,
+        bootstrap_secrets.get("blob_endpoint").map(String::as_str),
+    );
+    let secret_resolver =
+        state.authorized_wasm_secret_resolver(tenant, Arc::clone(&gate), authz_context.clone());
+    let capability_issuer = internal_http_capability_issuer(state, tenant, Some(security_context))
+        .ok_or_else(|| "HttpEndpoint caller authority cannot be delegated".to_string())?;
+    let internal_api_url = internal_api_base_url(state);
+    let local_blob_interceptor = local_blob_binary_interceptor(
+        state.clone(),
+        tenant.clone(),
+        bootstrap_secrets.get("blob_endpoint").cloned(),
+    );
+    let progress_emitter = progress_emitter_fn(
+        state.clone(),
+        tenant.to_string(),
+        invocation_context.entity_type.clone(),
+        invocation_context.entity_id.clone(),
+        module_name.to_string(),
+    );
+
+    let mut base_host = ProductionWasmHost::with_shared_streams(bootstrap_secrets, http_streams)
+        .with_spec_evaluator(spec_evaluator_fn())
+        .with_progress_emitter(progress_emitter)
+        .with_internal_api_base_url(internal_api_url)
+        .with_internal_capability_issuer(capability_issuer)
+        .with_invocation_context(invocation_context.clone());
+    if let Some(resolver) = secret_resolver {
+        base_host = base_host.with_secret_resolver(resolver);
+    }
+    if let Some(interceptor) = local_blob_interceptor {
+        base_host = base_host.with_binary_http_interceptor(interceptor);
+    }
+
+    let production_host: Arc<dyn WasmHost> = Arc::new(base_host);
+    let local_host: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
+        state.clone(),
+        tenant.clone(),
+        Some(security_context),
+        production_host,
+    ));
+    Ok(Arc::new(AuthorizedWasmHost::new(
+        local_host,
+        gate,
+        authz_context,
+    )))
+}
 
 /// Shared context threaded through the WASM dispatch call chain.
 ///
@@ -188,20 +291,13 @@ fn local_blob_binary_interceptor(
     tenant: TenantId,
     blob_endpoint: Option<String>,
 ) -> Option<BinaryHttpInterceptorFn> {
-    let endpoint = blob_endpoint?;
-    if !crate::blob_store::is_local_internal_blob_endpoint(&endpoint) {
-        return None;
-    }
-
-    let endpoint = endpoint.trim_end_matches('/').to_string();
+    let endpoint = crate::blob_store::LocalInternalBlobEndpoint::parse(&blob_endpoint?)?;
     Some(Arc::new(move |method, url, _headers, body| {
         let state = state.clone();
         let tenant = tenant.clone();
         let endpoint = endpoint.clone();
         Box::pin(async move {
-            let prefix = format!("{endpoint}/");
-            let blob_key = url.strip_prefix(&prefix)?;
-            let blob_key = blob_key.to_string();
+            let blob_key = endpoint.object_key(&url)?;
             crate::runtime_metrics::record_blob_local_fast_path_request(&method);
             tracing::info!(
                 method = %method,
@@ -209,7 +305,7 @@ fn local_blob_binary_interceptor(
                 "handling local blob request without loopback HTTP"
             );
 
-            let result = match method.as_str() {
+            let result = match method.to_ascii_uppercase().as_str() {
                 "PUT" => state
                     .put_blob_object(&tenant, &blob_key, &body, None)
                     .await
@@ -229,7 +325,7 @@ fn local_blob_binary_interceptor(
     }))
 }
 
-fn internal_api_base_url(state: &crate::state::ServerState) -> Option<String> {
+pub(crate) fn internal_api_base_url(state: &crate::state::ServerState) -> Option<String> {
     std::env::var("TEMPER_API_URL") // determinism-ok: production host loopback config
         .ok()
         .map(|value| value.trim_end_matches('/').to_string())
@@ -551,16 +647,17 @@ impl crate::state::ServerState {
         // ADR-0046: inline-hydrate blob refs below the 128KB ceiling; defer
         // oversize refs into a blob_cache the WASM guest can read via
         // host_read_field_stream. No-op on tenants without a Turso store.
+        let blob_hydration_budget = crate::blobs::BlobHydrationBudget::wasm_dispatch();
         let blob_cache = instrument_wasm_dispatch_phase(
             active_parent_span.clone(),
             ctx,
             &module_name,
             WASM_DISPATCH_PHASE_BLOB_REF_HYDRATION,
-            crate::blobs::hydrate_blob_refs_for_tenant_with_ceiling(
+            crate::blobs::hydrate_blob_refs_for_tenant_with_budget(
                 self,
                 ctx.entity_ref.tenant,
                 &mut inv_ctx.entity_state,
-                crate::entity_actor::effects::DEFAULT_FIELD_INLINE_MAX,
+                &blob_hydration_budget,
             ),
         )
         .await;
@@ -582,6 +679,10 @@ impl crate::state::ServerState {
                 )
             },
         );
+        let gate = crate::authz::wasm_gate::bind_local_blob_endpoint(
+            gate,
+            tenant_secrets.get("blob_endpoint").map(String::as_str),
+        );
         let secret_resolver = self.authorized_wasm_secret_resolver(
             ctx.entity_ref.tenant,
             Arc::clone(&gate),
@@ -593,6 +694,7 @@ impl crate::state::ServerState {
             &module_name,
             WASM_DISPATCH_PHASE_HOST_CHAIN_BUILD,
             || {
+                let internal_api_url = internal_api_base_url(self);
                 let local_blob_interceptor = local_blob_binary_interceptor(
                     self.clone(),
                     ctx.entity_ref.tenant.clone(),
@@ -602,7 +704,7 @@ impl crate::state::ServerState {
                     self.clone(),
                     ctx.entity_ref.tenant.clone(),
                     ctx.agent_ctx.clone(),
-                    tenant_secrets.get("temper_api_url").cloned(),
+                    internal_api_url.clone(),
                 );
                 // Use integration config timeout for both WASM execution and HTTP client.
                 //
@@ -652,8 +754,11 @@ impl crate::state::ServerState {
                     module_name.clone(),
                 );
                 let host_invocation_context = inv_ctx.clone();
-                let internal_api_key = std::env::var("TEMPER_API_KEY").ok(); // determinism-ok: production host loopback config
-                let internal_api_url = internal_api_base_url(self);
+                let internal_capability_issuer = internal_http_capability_issuer(
+                    self,
+                    ctx.entity_ref.tenant,
+                    ctx.agent_ctx.security_ctx.as_ref(),
+                );
                 let mut production_host_builder =
                     ProductionWasmHost::with_timeout(tenant_secrets, http_timeout)
                         .with_binary_http_interceptor(
@@ -663,7 +768,6 @@ impl crate::state::ServerState {
                         .with_spec_evaluator(spec_evaluator_fn())
                         .with_progress_emitter(progress_emitter)
                         .with_internal_api_base_url(internal_api_url)
-                        .with_internal_api_key(internal_api_key)
                         .with_invocation_context(host_invocation_context)
                         .with_text_http_interceptor(
                             local_file_interceptor
@@ -673,6 +777,10 @@ impl crate::state::ServerState {
                             current_otel_trace_id(active_span)
                                 .or_else(|| ctx.agent_ctx.trace_id.clone()),
                         );
+                if let Some(issuer) = internal_capability_issuer {
+                    production_host_builder =
+                        production_host_builder.with_internal_capability_issuer(issuer);
+                }
                 if let Some(resolver) = secret_resolver.clone() {
                     production_host_builder =
                         production_host_builder.with_secret_resolver(resolver);
@@ -753,7 +861,8 @@ impl crate::state::ServerState {
             ctx,
             &module_name,
             WASM_DISPATCH_PHASE_ENGINE_INVOKE_AND_HANDLE,
-            self.invoke_and_handle_result(
+            invoke_and_handle_result_boxed(
+                self,
                 ctx,
                 integration,
                 &module_name,
@@ -1067,16 +1176,16 @@ impl crate::state::ServerState {
                 if let Some(reason) = denial_tracker.take_denial() {
                     let error_str = http_call_authz_denied_error(&reason);
                     record_wasm_error_on_current_span(&error_str);
-                    return self
-                        .handle_wasm_failure(
-                            ctx,
-                            &integration.name,
-                            module_name,
-                            &integration.on_failure,
-                            error_str,
-                            result.duration_ms,
-                        )
-                        .await;
+                    return handle_wasm_failure_boxed(
+                        self,
+                        ctx,
+                        &integration.name,
+                        module_name,
+                        &integration.on_failure,
+                        error_str,
+                        result.duration_ms,
+                    )
+                    .await;
                 }
 
                 if integration.llm {
@@ -1235,7 +1344,8 @@ impl crate::state::ServerState {
                 // `on_failure` recovery or — when none is declared — returns
                 // `Err` so the failure is never silently treated as success
                 // (ADR-0152).
-                self.handle_wasm_failure(
+                handle_wasm_failure_boxed(
+                    self,
                     ctx,
                     &integration.name,
                     module_name,
@@ -1286,7 +1396,8 @@ impl crate::state::ServerState {
                 // exhaustion, or panic also leaves the integration's effect
                 // unrealized. `handle_wasm_failure` records it and propagates
                 // `Err` when no `on_failure` is declared (ADR-0152).
-                self.handle_wasm_failure(
+                handle_wasm_failure_boxed(
+                    self,
                     ctx,
                     &integration.name,
                     module_name,
@@ -1299,11 +1410,27 @@ impl crate::state::ServerState {
         }
     }
 
-    /// Invoke a WASM module directly (not triggered by an entity action).
+    /// In-process `/tdata` host for `$value` / `blob_adapter`.
     ///
-    /// Used by `$value` handlers for blob operations. The WASM module controls
-    /// the entire blob lifecycle (auth, hashing, caching, upload/download) via
-    /// streaming host functions. Bytes never enter WASM memory.
+    /// Uses the HTTP caller. System is dropped so the guest cannot inherit
+    /// `system-platform:broad-permit`.
+    pub(crate) fn local_tdata_direct_host(
+        &self,
+        tenant: &TenantId,
+        production_host: Arc<dyn WasmHost>,
+        security_ctx: &SecurityContext,
+    ) -> Arc<dyn WasmHost> {
+        let loopback_ctx =
+            (security_ctx.principal.kind != PrincipalKind::System).then_some(security_ctx);
+        Arc::new(LocalTDataWasmHost::new(
+            self.clone(),
+            tenant.clone(),
+            loopback_ctx,
+            production_host,
+        ))
+    }
+
+    /// Invoke a WASM module directly (not triggered by an entity action).
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn invoke_wasm_direct(
         &self,
@@ -1311,6 +1438,7 @@ impl crate::state::ServerState {
         module_name: &str,
         mut context: WasmInvocationContext,
         streams: Arc<std::sync::RwLock<StreamRegistry>>,
+        security_ctx: &SecurityContext,
     ) -> Result<temper_wasm::WasmInvocationResult, String> {
         if context.wasm_module.is_none() {
             context.wasm_module = Some(module_name.to_string());
@@ -1340,6 +1468,10 @@ impl crate::state::ServerState {
         };
         let tenant_secrets =
             self.get_authorized_wasm_host_bootstrap_secrets(tenant, &*base_gate, &authz_ctx);
+        let base_gate = crate::authz::wasm_gate::bind_local_blob_endpoint(
+            base_gate,
+            tenant_secrets.get("blob_endpoint").map(String::as_str),
+        );
         let secret_resolver =
             self.authorized_wasm_secret_resolver(tenant, Arc::clone(&base_gate), authz_ctx.clone());
         let local_blob_interceptor = local_blob_binary_interceptor(
@@ -1358,7 +1490,6 @@ impl crate::state::ServerState {
             .with_spec_evaluator(spec_evaluator_fn())
             .with_progress_emitter(progress_emitter)
             .with_internal_api_base_url(internal_api_base_url(self))
-            .with_internal_api_key(std::env::var("TEMPER_API_KEY").ok()) // determinism-ok: production host loopback config
             .with_invocation_context(context.clone());
         if let Some(resolver) = secret_resolver {
             base_host = base_host.with_secret_resolver(resolver);
@@ -1367,12 +1498,7 @@ impl crate::state::ServerState {
             base_host = base_host.with_binary_http_interceptor(interceptor);
         }
         let production_host: Arc<dyn WasmHost> = Arc::new(base_host);
-        let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
-            self.clone(),
-            tenant.clone(),
-            None,
-            production_host,
-        ));
+        let inner = self.local_tdata_direct_host(tenant, production_host, security_ctx);
         let host: Arc<dyn WasmHost> =
             Arc::new(AuthorizedWasmHost::new(inner, base_gate, authz_ctx));
         let limits = WasmResourceLimits::default();
@@ -2036,6 +2162,22 @@ fn progress_emitter_fn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_http_issuer_refuses_system_and_accepts_resolved_agents() {
+        let state = crate::state::ServerState::from_registry(
+            temper_runtime::ActorSystem::new("internal-capability-issuer-test"),
+            crate::registry::SpecRegistry::new(),
+        );
+        let tenant = TenantId::new("tenant-a");
+
+        assert!(
+            internal_http_capability_issuer(&state, &tenant, Some(&SecurityContext::system()))
+                .is_none()
+        );
+        let agent = SecurityContext::from_resolved_identity("agent-1", "worker", None);
+        assert!(internal_http_capability_issuer(&state, &tenant, Some(&agent)).is_some());
+    }
 
     #[test]
     fn composite_wasm_result_inherits_generated_dispatch_idempotency() {

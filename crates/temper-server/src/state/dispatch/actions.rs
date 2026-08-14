@@ -167,9 +167,35 @@ impl crate::state::ServerState {
         .await
     }
 
+    /// Dispatch an externally authorized action only if the target actor still
+    /// matches the exact local state used for the Cedar decision.
+    #[instrument(skip_all, fields(
+        otel.name = %format_args!("{}.{}", cmd.entity_type, cmd.action),
+        tenant = %cmd.tenant,
+        entity_type = cmd.entity_type,
+        entity_id = cmd.entity_id,
+        action_name = cmd.action,
+    ))]
+    pub(crate) async fn dispatch_tenant_action_ext_typed_if_current(
+        &self,
+        cmd: DispatchCommand<'_>,
+        expected_authorization_precondition: String,
+    ) -> Result<EntityResponse, DispatchError> {
+        self.dispatch_typed_checked(cmd, Some(expected_authorization_precondition))
+            .await
+    }
+
     async fn dispatch_typed(
         &self,
         cmd: DispatchCommand<'_>,
+    ) -> Result<EntityResponse, DispatchError> {
+        self.dispatch_typed_checked(cmd, None).await
+    }
+
+    async fn dispatch_typed_checked(
+        &self,
+        cmd: DispatchCommand<'_>,
+        expected_authorization_precondition: Option<String>,
     ) -> Result<EntityResponse, DispatchError> {
         let DispatchCommand {
             tenant,
@@ -198,6 +224,7 @@ impl crate::state::ServerState {
                 params,
                 agent_ctx,
                 await_integration,
+                expected_authorization_precondition,
             )
             .await?;
 
@@ -357,6 +384,7 @@ impl crate::state::ServerState {
         params: serde_json::Value,
         agent_ctx: &AgentContext,
         await_integration: bool,
+        expected_authorization_precondition: Option<String>,
     ) -> Result<EntityResponse, DispatchError> {
         let explicit_workflow_context = agent_ctx.workflow_run_id.is_some()
             || agent_ctx.workflow_root_entity_type.is_some()
@@ -535,6 +563,7 @@ impl crate::state::ServerState {
         let action_name = action.to_string();
         let params_for_retry = params;
         let cross_for_retry = cross_entity_booleans;
+        let authorization_precondition_for_retry = expected_authorization_precondition;
         let idempotency_key = Some(agent_ctx.idempotency_key.clone().unwrap_or_else(|| {
             format!(
                 "dispatch:{tenant}:{entity_type}:{entity_id}:{action}:{}",
@@ -558,6 +587,8 @@ impl crate::state::ServerState {
                     params: params_for_retry.clone(),
                     cross_entity_booleans: cross_for_retry.clone(),
                     idempotency_key: idempotency_key.clone(),
+                    expected_authorization_precondition: authorization_precondition_for_retry
+                        .clone(),
                 },
                 &policy,
             )

@@ -3,7 +3,17 @@ use std::sync::{Arc, RwLock};
 use sha2::{Digest, Sha256};
 use temper_wasm::{StreamRegistry, WasmInvocationContext};
 
-use super::{DispatchExtOptions, ServerState};
+use super::{DispatchCommand, DispatchExtOptions, ServerState};
+
+struct FileStreamAction<'a> {
+    tenant: &'a temper_runtime::tenant::TenantId,
+    file_id: &'a str,
+    action: &'a str,
+    params: serde_json::Value,
+    agent_ctx: &'a crate::request_context::AgentContext,
+    await_reactions: bool,
+    expected_authorization_precondition: Option<String>,
+}
 
 /// Error returned by the native/File `$value` content upload path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,7 +94,7 @@ impl ServerState {
         mime_type: &str,
         agent_ctx: &crate::request_context::AgentContext,
     ) -> Result<crate::entity_actor::EntityResponse, String> {
-        self.put_file_stream_content_checked(tenant, file_id, body, mime_type, agent_ctx)
+        self.put_file_stream_content_checked(tenant, file_id, body, mime_type, agent_ctx, None)
             .await
             .map_err(|error| error.to_string())
     }
@@ -104,13 +114,21 @@ impl ServerState {
         body: &[u8],
         mime_type: &str,
         agent_ctx: &crate::request_context::AgentContext,
+        expected_authorization_precondition: Option<String>,
     ) -> Result<crate::entity_actor::EntityResponse, FileStreamContentError> {
         let blob_endpoint = self
             .secrets_vault
             .as_ref()
             .and_then(|vault| vault.get_secret(&tenant.to_string(), "blob_endpoint"));
         let native_result = self
-            .put_file_stream_content_native(tenant, file_id, body, mime_type, agent_ctx)
+            .put_file_stream_content_native(
+                tenant,
+                file_id,
+                body,
+                mime_type,
+                agent_ctx,
+                expected_authorization_precondition.clone(),
+            )
             .await;
         match native_result {
             Ok(response) => return Ok(response),
@@ -129,8 +147,15 @@ impl ServerState {
             Err(error) => return Err(error),
         }
 
-        self.put_file_stream_content_via_wasm(tenant, file_id, body, mime_type, agent_ctx)
-            .await
+        self.put_file_stream_content_via_wasm(
+            tenant,
+            file_id,
+            body,
+            mime_type,
+            agent_ctx,
+            expected_authorization_precondition,
+        )
+        .await
     }
 
     #[tracing::instrument(skip_all, fields(
@@ -146,6 +171,7 @@ impl ServerState {
         body: &[u8],
         mime_type: &str,
         agent_ctx: &crate::request_context::AgentContext,
+        expected_authorization_precondition: Option<String>,
     ) -> Result<crate::entity_actor::EntityResponse, FileStreamContentError> {
         let (content_hash, blob_key) = content_hash_and_native_blob_key(body);
 
@@ -194,12 +220,11 @@ impl ServerState {
             .and_then(|value| value.as_str())
             .unwrap_or_default();
         let created_by = agent_ctx.agent_id.clone().unwrap_or_default();
-        self.dispatch_tenant_action_ext_typed(
+        self.dispatch_file_stream_action(FileStreamAction {
             tenant,
-            "File",
             file_id,
-            "StreamUpdated",
-            serde_json::json!({
+            action: "StreamUpdated",
+            params: serde_json::json!({
                 "content_hash": content_hash,
                 "size_bytes": body.len() as i64,
                 "mime_type": mime_type,
@@ -207,12 +232,10 @@ impl ServerState {
                 "previous_version_id": previous_version_id,
                 "created_by": created_by,
             }),
-            DispatchExtOptions {
-                agent_ctx,
-                await_integration: false,
-                await_reactions: false,
-            },
-        )
+            agent_ctx,
+            await_reactions: false,
+            expected_authorization_precondition,
+        })
         .await
         .map_err(|error| FileStreamContentError::ActionRejected(error.to_string()))
     }
@@ -230,6 +253,7 @@ impl ServerState {
         body: &[u8],
         mime_type: &str,
         agent_ctx: &crate::request_context::AgentContext,
+        expected_authorization_precondition: Option<String>,
     ) -> Result<crate::entity_actor::EntityResponse, FileStreamContentError> {
         let mut entity_state = serde_json::to_value(
             &self
@@ -283,8 +307,13 @@ impl ServerState {
             http_request: None,
         };
 
+        let security_ctx = agent_ctx.security_ctx.as_ref().ok_or_else(|| {
+            FileStreamContentError::Wasm(
+                "blob_adapter requires the caller's authenticated security context".to_string(),
+            )
+        })?;
         let wasm_result = self
-            .invoke_wasm_direct(tenant, "blob_adapter", inv_ctx, streams)
+            .invoke_wasm_direct(tenant, "blob_adapter", inv_ctx, streams, security_ctx)
             .await
             .map_err(|e| FileStreamContentError::Wasm(format!("blob_adapter failed: {e}")))?;
 
@@ -307,16 +336,57 @@ impl ServerState {
                 });
         }
 
-        self.dispatch_tenant_action(
+        self.dispatch_file_stream_action(FileStreamAction {
             tenant,
-            "File",
             file_id,
-            &wasm_result.callback_action,
-            wasm_result.callback_params,
+            action: &wasm_result.callback_action,
+            params: wasm_result.callback_params,
             agent_ctx,
-        )
+            await_reactions: true,
+            expected_authorization_precondition,
+        })
         .await
         .map_err(FileStreamContentError::ActionRejected)
+    }
+
+    async fn dispatch_file_stream_action(
+        &self,
+        request: FileStreamAction<'_>,
+    ) -> Result<crate::entity_actor::EntityResponse, String> {
+        let options = DispatchExtOptions {
+            agent_ctx: request.agent_ctx,
+            await_integration: false,
+            await_reactions: request.await_reactions,
+        };
+        match request.expected_authorization_precondition {
+            Some(expected) => self
+                .dispatch_tenant_action_ext_typed_if_current(
+                    DispatchCommand {
+                        tenant: request.tenant,
+                        entity_type: "File",
+                        entity_id: request.file_id,
+                        action: request.action,
+                        params: request.params,
+                        agent_ctx: options.agent_ctx,
+                        await_integration: options.await_integration,
+                        await_reactions: options.await_reactions,
+                    },
+                    expected,
+                )
+                .await
+                .map_err(|error| error.to_string()),
+            None => self
+                .dispatch_tenant_action_ext_typed(
+                    request.tenant,
+                    "File",
+                    request.file_id,
+                    request.action,
+                    request.params,
+                    options,
+                )
+                .await
+                .map_err(|error| error.to_string()),
+        }
     }
 }
 

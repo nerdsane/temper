@@ -9,6 +9,9 @@ use temper_runtime::persistence::{
 use super::{PublishedArtifactUpsert, QueryProjectionUpsert, TursoEventStore};
 use crate::TursoSpecVerificationUpdate;
 
+mod evolution_tenant;
+mod policy_approval;
+
 fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
     PersistenceEnvelope {
         sequence_nr: 0,
@@ -37,6 +40,82 @@ async fn make_store(test_name: &str) -> TursoEventStore {
     TursoEventStore::new(&sqlite_test_url(test_name), None)
         .await
         .expect("create store")
+}
+
+#[tokio::test]
+async fn trajectory_stats_never_cross_tenants() {
+    // Each of the three statistics queries reads the shared `trajectories`
+    // table, and the failed-intent list returns whole rows — error strings and
+    // entity ids. One unfiltered query hands a tenant another tenant's
+    // operational detail, so all three are asserted here (ADR-0157).
+    let store = make_store("trajectory-stats-tenant").await;
+
+    let row =
+        |tenant: &'static str, action: &'static str, success: bool, error: Option<&'static str>| {
+            crate::TursoTrajectoryInsert {
+                tenant,
+                entity_type: "Order",
+                entity_id: "order-1",
+                action,
+                success,
+                from_status: None,
+                to_status: None,
+                error,
+                agent_id: Some("agent-1"),
+                session_id: Some("session-1"),
+                authz_denied: None,
+                denied_resource: None,
+                denied_module: None,
+                source: Some("Entity"),
+                spec_governed: Some(true),
+                created_at: "2026-01-01T00:00:00Z",
+                request_body: None,
+                intent: None,
+                matched_policy_ids: None,
+                capture_seq: None,
+            }
+        };
+
+    store
+        .persist_trajectory(row("mine", "MyAction", true, None))
+        .await
+        .expect("mine ok");
+    store
+        .persist_trajectory(row(
+            "theirs",
+            "TheirAction",
+            false,
+            Some("their-secret-error"),
+        ))
+        .await
+        .expect("theirs err");
+
+    let stats = store
+        .query_trajectory_stats("mine", None, None, None, 10)
+        .await
+        .expect("stats");
+
+    assert_eq!(stats.total, 1, "totals must count only the caller's tenant");
+    assert!(
+        stats.by_action.contains_key("MyAction"),
+        "the caller's own action is missing: {:?}",
+        stats.by_action.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !stats.by_action.contains_key("TheirAction"),
+        "another tenant's action names leaked into by_action"
+    );
+    assert!(
+        stats.failed_intents.iter().all(|r| r.tenant == "mine"),
+        "another tenant's failed rows leaked into failed_intents"
+    );
+    assert!(
+        !stats
+            .failed_intents
+            .iter()
+            .any(|r| r.error.as_deref() == Some("their-secret-error")),
+        "another tenant's error string leaked"
+    );
 }
 
 #[tokio::test]

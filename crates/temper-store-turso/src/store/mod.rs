@@ -27,8 +27,10 @@ mod event_store;
 mod evolution;
 pub mod field_index;
 mod instrumentation;
+mod migration_support;
 pub mod ots;
 mod policy;
+mod policy_approval;
 mod published_artifacts;
 mod query_page;
 mod secrets;
@@ -265,6 +267,19 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_EVOLUTION_RECORDS_TABLE, ())
             .await
             .map_err(storage_error)?;
+        migration_support::add_column_if_missing(&conn, schema::ALTER_FEATURE_REQUESTS_ADD_TENANT)
+            .await?;
+        migration_support::add_column_if_missing(&conn, schema::ALTER_EVOLUTION_RECORDS_ADD_TENANT)
+            .await?;
+        conn.execute(schema::CREATE_FEATURE_REQUESTS_TENANT_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_EVOLUTION_RECORDS_TENANT_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_EVOLUTION_RECORDS_TENANT_PARENT_INDEX, ())
+            .await
+            .map_err(storage_error)?;
         conn.execute(schema::CREATE_EVOLUTION_RECORDS_TYPE_INDEX, ())
             .await
             .map_err(storage_error)?;
@@ -277,10 +292,6 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_DESIGN_TIME_EVENTS_TENANT_INDEX, ())
             .await
             .map_err(storage_error)?;
-        conn.execute(schema::CREATE_TENANT_SECRETS_TABLE, ())
-            .await
-            .map_err(storage_error)?;
-
         conn.execute(schema::CREATE_TENANT_SECRETS_TABLE, ())
             .await
             .map_err(storage_error)?;
@@ -732,6 +743,8 @@ pub struct UnmetIntentAggRow {
 pub struct FeatureRequestRow {
     /// Feature request ID.
     pub id: String,
+    /// Tenant that owns the feature request.
+    pub tenant: String,
     /// Category label.
     pub category: String,
     /// Description of the feature request.
@@ -755,6 +768,8 @@ pub struct FeatureRequestRow {
 pub struct EvolutionRecordRow {
     /// Record ID.
     pub id: String,
+    /// Tenant that owns the record chain.
+    pub tenant: String,
     /// Record type: Observation, Problem, Analysis, Decision, Insight.
     pub record_type: String,
     /// Status: Open, Resolved, Superseded, Rejected.

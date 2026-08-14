@@ -5,19 +5,19 @@
 use std::collections::BTreeMap;
 
 use axum::extract::Path;
-use axum::extract::{Query, State};
+use axum::extract::{Extension, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use temper_authz::AuthenticatedRequestContext;
 
 use tracing::instrument;
 
 use crate::authz::{
-    GovernedMutationAuth, observe_tenant_scope, require_governed_mutation_auth,
-    require_observe_auth,
+    GovernedMutationAuth, observe_tenant_scope, require_authenticated_context,
+    require_governed_mutation_auth, require_observe_auth,
 };
-use crate::odata::extract_tenant;
 use crate::state::ServerState;
 
 #[derive(Deserialize)]
@@ -90,15 +90,18 @@ pub struct WasmInvocationResponse {
 
 /// POST /api/wasm/modules/{module_name} — upload a WASM binary.
 ///
-/// Admin principals bypass Cedar; other principals require "manage_wasm" on "WasmModule".
+/// Requires `manage_wasm` on the exact `WasmModule` resource.
 #[instrument(skip_all, fields(module_name, otel.name = "POST /api/wasm/modules/{module_name}"))]
 pub async fn handle_upload_wasm_module(
     State(state): State<ServerState>,
     headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path(module_name): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<Json<WasmModuleUploadResponse>, (StatusCode, String)> {
-    let tenant = extract_tenant(&headers, &state)?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())
+        .map_err(|status| (status, "authentication required".to_string()))?;
+    let tenant = authenticated.tenant().clone();
     let mut resource_attrs = BTreeMap::new();
     resource_attrs.insert(
         "id".to_string(),
@@ -110,7 +113,7 @@ pub async fn handle_upload_wasm_module(
     );
     if let Some(resp) = require_governed_mutation_auth(
         &state,
-        &headers,
+        authenticated,
         GovernedMutationAuth {
             tenant: tenant.as_str(),
             action: "manage_wasm",
@@ -233,10 +236,12 @@ fn decode_wasm_upload_body(
 #[instrument(skip_all, fields(module_name, otel.name = "GET /observe/wasm/modules/{module_name}"))]
 pub async fn handle_get_wasm_module_info(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path(module_name): Path<String>,
 ) -> Result<Json<WasmModuleInfoResponse>, StatusCode> {
-    let tenant = extract_tenant(&headers, &state).map_err(|(s, _)| s)?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_wasm", "WasmModule")?;
+    let tenant = authenticated.tenant().clone();
 
     let hash = {
         let wasm_reg = state.wasm_module_registry.read().unwrap();
@@ -261,14 +266,16 @@ pub async fn handle_get_wasm_module_info(
 
 /// DELETE /api/wasm/modules/{module_name} — remove a module.
 ///
-/// Admin principals bypass Cedar; other principals require "manage_wasm" on "WasmModule".
+/// Requires `manage_wasm` on the exact `WasmModule` resource.
 #[instrument(skip_all, fields(module_name, otel.name = "DELETE /api/wasm/modules/{module_name}"))]
 pub async fn handle_delete_wasm_module(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path(module_name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let tenant = extract_tenant(&headers, &state)?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())
+        .map_err(|status| (status, "authentication required".to_string()))?;
+    let tenant = authenticated.tenant().clone();
     let mut resource_attrs = BTreeMap::new();
     resource_attrs.insert(
         "id".to_string(),
@@ -280,7 +287,7 @@ pub async fn handle_delete_wasm_module(
     );
     if let Some(resp) = require_governed_mutation_auth(
         &state,
-        &headers,
+        authenticated,
         GovernedMutationAuth {
             tenant: tenant.as_str(),
             action: "manage_wasm",
@@ -348,23 +355,24 @@ pub async fn handle_delete_wasm_module(
     })))
 }
 
-/// GET /observe/wasm/modules — list all modules (with stats).
-///
-/// Admin/System principals see all tenants; others are scoped to `X-Tenant-Id`.
+/// GET /observe/wasm/modules — list modules in the credential-bound tenant.
 #[instrument(skip_all, fields(otel.name = "GET /observe/wasm/modules"))]
 pub async fn handle_list_wasm_modules(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_wasm", "WasmModule")?;
-    let tenant_scope = observe_tenant_scope(&state, &headers)?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_wasm", "WasmModule")?;
+    let tenant_scope = observe_tenant_scope(authenticated);
 
     // Collect invocation stats via fan-out across all tenant stores.
     let invocation_stats: std::collections::BTreeMap<String, (usize, usize, Option<String>)> = {
         let mut stats: std::collections::BTreeMap<String, (usize, usize, Option<String>)> =
             std::collections::BTreeMap::new();
-        let stores = state.collect_all_metadata_stores().await;
-        for store in &stores {
+        let store = state
+            .metadata_store_for_tenant(authenticated.tenant().as_str())
+            .await;
+        for store in store.iter() {
             if let Ok(rows) = store.load_recent_wasm_invocations(10_000).await {
                 for row in rows {
                     let module = row.module_name.clone();
@@ -411,11 +419,7 @@ pub async fn handle_list_wasm_modules(
         let mut entries: Vec<WasmModuleListEntry> = wasm_reg
             .all_modules()
             .into_iter()
-            .filter(|(tenant, _, _)| {
-                tenant_scope
-                    .as_ref()
-                    .is_none_or(|scope| scope.as_str() == *tenant)
-            })
+            .filter(|(tenant, _, _)| tenant_scope.as_str() == *tenant)
             .map(|(tenant, name, hash)| make_entry(tenant, name, hash))
             .collect();
 
@@ -438,15 +442,18 @@ pub async fn handle_list_wasm_modules(
 #[instrument(skip_all, fields(otel.name = "GET /observe/wasm/invocations"))]
 pub async fn handle_list_wasm_invocations(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Query(params): Query<InvocationQueryParams>,
 ) -> Result<Json<WasmInvocationResponse>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_wasm", "WasmModule")?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_wasm", "WasmModule")?;
     let limit = params.limit.unwrap_or(100).min(10_000);
 
-    let stores = state.collect_all_metadata_stores().await;
     let mut all_filtered: Vec<serde_json::Value> = Vec::new();
-    for store in &stores {
+    let store = state
+        .metadata_store_for_tenant(authenticated.tenant().as_str())
+        .await;
+    for store in store.iter() {
         match store.load_recent_wasm_invocations(limit as i64).await {
             Ok(rows) => {
                 let filtered: Vec<serde_json::Value> = rows

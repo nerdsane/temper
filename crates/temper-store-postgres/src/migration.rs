@@ -37,6 +37,10 @@ mod tests {
             include_str!("../migrations/0006_segmented_event_history.sql"),
             include_str!("../migrations/0007_installed_app_follow_policy.sql"),
             include_str!("../migrations/0008_ots_trajectory_outbox_status.sql"),
+            include_str!("../migrations/0009_entity_key_index.sql"),
+            include_str!("../migrations/0010_key_index_backfill_watermark.sql"),
+            include_str!("../migrations/0011_key_index_watermark_key_set.sql"),
+            include_str!("../migrations/0012_evolution_tenant_ownership.sql"),
         ]
         .join("\n")
         .to_lowercase();

@@ -130,9 +130,15 @@ impl crate::state::ServerState {
                 params["decision_id"] = serde_json::json!(did);
                 params["authz_denied"] = serde_json::json!(true);
             }
-            return self
-                .dispatch_wasm_callback(ctx.entity_ref, cb, params, ctx.agent_ctx, ctx.mode)
-                .await;
+            return super::dispatch_wasm_callback_boxed(
+                self,
+                ctx.entity_ref,
+                cb,
+                params,
+                ctx.agent_ctx,
+                ctx.mode,
+            )
+            .await;
         }
 
         // No declared recovery: propagate the failure instead of swallowing it
@@ -158,18 +164,19 @@ impl crate::state::ServerState {
                 // its own WASM trigger; returning before that nested trigger
                 // commits lets concurrent requests observe stale detailed
                 // fields while counters advance.
-                let resp = self
-                    .dispatch_tenant_action_core(
-                        entity_ref.tenant,
-                        entity_ref.entity_type,
-                        entity_ref.entity_id,
-                        callback_action,
-                        callback_params,
-                        agent_ctx,
-                        true,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?;
+                let resp = super::dispatch_tenant_action_core_boxed(
+                    self,
+                    entity_ref.tenant,
+                    entity_ref.entity_type,
+                    entity_ref.entity_id,
+                    callback_action,
+                    callback_params,
+                    agent_ctx,
+                    true,
+                    None,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
                 Ok(Some(resp))
             }
             WasmDispatchMode::Background => {

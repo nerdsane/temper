@@ -24,10 +24,12 @@ async fn test_app() -> (Router, TursoEventStore) {
 }
 
 /// An app whose Cedar engine carries no permits beyond the built-in
-/// system-platform policy, so every principal hits default-deny.
+/// system-platform policy: System passes by that built-in permit, and every
+/// other principal hits default-deny.
 ///
-/// `ServerState::from_registry` installs a permissive engine, and a gate proven
-/// only against that proves nothing.
+/// The gate tests use THIS app and authenticate as an ordinary agent — a System
+/// principal would pass by the built-in permit whether or not the gate ran, so
+/// only a non-System principal can prove the gate is on the path.
 async fn strict_authz_app() -> Router {
     build_app(AuthzMode::Strict).await.0
 }
@@ -125,22 +127,55 @@ async fn seed_row(
         .expect("persist trajectory row");
 }
 
+/// Attach the credential the ingress edge would have installed (ADR-0157).
+///
+/// These fixtures previously declared `X-Temper-Principal-Kind: admin` — the
+/// header-minted authority the auth edge now strips. The tenant rides the
+/// credential too, so a request can no longer name a tenant it is not bound to.
+fn authenticate(mut request: Request<Body>, tenant: Option<&str>) -> Request<Body> {
+    let tenant = tenant
+        .map(temper_runtime::tenant::TenantId::new)
+        .unwrap_or_default();
+    request
+        .extensions_mut()
+        .insert(temper_authz::AuthenticatedRequestContext::new(
+            tenant,
+            temper_authz::SecurityContext::system(),
+        ));
+    request
+}
+
+/// Attach a credential for a specific principal (for the authorization tests).
+fn authenticate_as(
+    mut request: Request<Body>,
+    tenant: &str,
+    security_ctx: temper_authz::SecurityContext,
+) -> Request<Body> {
+    request
+        .extensions_mut()
+        .insert(temper_authz::AuthenticatedRequestContext::new(
+            temper_runtime::tenant::TenantId::new(tenant),
+            security_ctx,
+        ));
+    request
+}
+
+/// An ordinary resolved agent — no built-in permit, so Cedar decides.
+fn agent_context() -> temper_authz::SecurityContext {
+    temper_authz::SecurityContext::from_resolved_identity("agent-1", "operator", None)
+}
+
 fn admin_post(uri: &str, body: serde_json::Value, tenant: Option<&str>) -> Request<Body> {
-    let mut request = Request::post(uri)
-        .header("X-Temper-Principal-Kind", "admin")
-        .header("Content-Type", "application/json");
-    if let Some(tenant) = tenant {
-        request = request.header("X-Tenant-Id", tenant);
-    }
-    request.body(Body::from(body.to_string())).unwrap()
+    let request = Request::post(uri)
+        .header("Content-Type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    authenticate(request, tenant)
 }
 
 fn admin_get(uri: &str, tenant: Option<&str>) -> Request<Body> {
-    let mut request = Request::get(uri).header("X-Temper-Principal-Kind", "admin");
-    if let Some(tenant) = tenant {
-        request = request.header("X-Tenant-Id", tenant);
-    }
-    request.body(Body::empty()).unwrap()
+    let request = Request::get(uri).body(Body::empty()).unwrap();
+    authenticate(request, tenant)
 }
 
 async fn json_body(response: axum::response::Response) -> serde_json::Value {
@@ -253,19 +288,26 @@ async fn conformance_check_reports_an_illegal_transition_at_its_index() {
 }
 
 #[tokio::test]
-async fn conformance_check_requires_an_explicit_tenant() {
+async fn conformance_check_requires_a_credential() {
+    // The tenant is no longer a caller-supplied field to omit — it is bound to
+    // the credential (ADR-0157), so the failure this endpoint owes a caller is
+    // "you presented no identity", not "you forgot a header".
     let (app, _store) = test_app().await;
 
     let response = app
-        .oneshot(admin_post(
-            "/api/conformance/check",
-            serde_json::json!({"entity_type": "Order", "session_id": "session-1"}),
-            None,
-        ))
+        .oneshot(
+            Request::post("/api/conformance/check")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"entity_type": "Order", "session_id": "session-1"})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -583,6 +625,102 @@ async fn atif_export_is_scoped_to_the_requesting_tenant() {
 }
 
 #[tokio::test]
+async fn a_conformance_check_never_walks_another_tenants_rows() {
+    // The check resolves a session's rows by id. Session ids are caller-chosen
+    // and not globally unique, so the store lookup has to be tenant-bound: drop
+    // that bind and this session's rows from `other-tenant` — request bodies and
+    // intents included — would be walked as if they were the caller's own.
+    let (app, store) = test_app().await;
+    store
+        .persist_trajectory(TursoTrajectoryInsert {
+            tenant: "other-tenant",
+            entity_type: "Order",
+            entity_id: "order-1",
+            action: "ShipOrder",
+            success: true,
+            from_status: Some("Draft"),
+            to_status: Some("Shipped"),
+            error: None,
+            agent_id: Some("agent-1"),
+            session_id: Some("session-1"),
+            authz_denied: None,
+            denied_resource: None,
+            denied_module: None,
+            source: Some("Entity"),
+            spec_governed: Some(true),
+            created_at: "2026-01-01T00:00:00Z",
+            request_body: None,
+            intent: None,
+            matched_policy_ids: None,
+            capture_seq: None,
+        })
+        .await
+        .expect("persist foreign-tenant row");
+
+    let response = app
+        .oneshot(admin_post(
+            "/api/conformance/check",
+            serde_json::json!({"entity_type": "Order", "session_id": "session-1"}),
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await;
+
+    // The caller's tenant holds no rows for this session, so the walk must come
+    // back indeterminate. If the store lookup lost its tenant bind it would walk
+    // the `other-tenant` ShipOrder row instead and return a real verdict.
+    assert_eq!(
+        body["report"]["verdict"], "indeterminate",
+        "a credential for `default` must not walk `other-tenant` rows: {body}"
+    );
+    assert_eq!(body["report"]["passed"], serde_json::json!(false));
+}
+
+#[tokio::test]
+async fn an_x_tenant_id_header_cannot_redirect_a_credential_to_another_tenant() {
+    // The central claim of ADR-0157: the tenant is bound to the credential, so
+    // naming a different one in `X-Tenant-Id` buys nothing. Without this the
+    // property holds only by construction, and a future handler that reads the
+    // header back would pass every other test in this file.
+    let (app, store) = test_app().await;
+    let data = r#"{"trajectory_id":"traj-victim","version":"0.1.0","metadata":{"task_description":"t","timestamp_start":"2026-01-01T00:00:00Z","agent_id":"a","outcome":"success","human_reviewed":false},"context":{}}"#;
+    store
+        .persist_ots_trajectory(&OtsTrajectoryParams {
+            trajectory_id: "traj-victim",
+            tenant: "victim-tenant",
+            agent_id: "agent-1",
+            session_id: "session-1",
+            outcome: "success",
+            turn_count: 0,
+            data,
+        })
+        .await
+        .expect("persist OTS trajectory");
+
+    // Credential is bound to `default`; the header asks for `victim-tenant`.
+    let response = app
+        .oneshot(authenticate_as(
+            Request::get("/api/ots/trajectories/traj-victim/atif")
+                .header("X-Tenant-Id", "victim-tenant")
+                .body(Body::empty())
+                .unwrap(),
+            "default",
+            temper_authz::SecurityContext::system(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "the credential's tenant wins; a header must not redirect the lookup"
+    );
+}
+
+#[tokio::test]
 async fn atif_export_reports_a_missing_trajectory_as_not_found() {
     let (app, _store) = test_app().await;
 
@@ -598,15 +736,22 @@ async fn atif_export_reports_a_missing_trajectory_as_not_found() {
 }
 
 #[tokio::test]
-async fn atif_export_requires_an_explicit_tenant() {
+async fn atif_export_requires_a_credential() {
+    // Same contract change as the conformance check: the export's tenant comes
+    // from the credential, so an unidentified caller is refused at the edge
+    // rather than told which header it forgot.
     let (app, _store) = test_app().await;
 
     let response = app
-        .oneshot(admin_get("/api/ots/trajectories/traj-atif/atif", None))
+        .oneshot(
+            Request::get("/api/ots/trajectories/traj-atif/atif")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -615,30 +760,30 @@ async fn both_endpoints_reject_an_unauthorized_principal() {
 
     let check = app
         .clone()
-        .oneshot(
+        .oneshot(authenticate_as(
             Request::post("/api/conformance/check")
-                .header("X-Temper-Principal-Kind", "agent")
-                .header("X-Tenant-Id", "default")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     serde_json::json!({"entity_type": "Order", "session_id": "session-1"})
                         .to_string(),
                 ))
                 .unwrap(),
-        )
+            "default",
+            agent_context(),
+        ))
         .await
         .unwrap();
     assert_eq!(check.status(), StatusCode::FORBIDDEN);
 
     let export = app
         .clone()
-        .oneshot(
+        .oneshot(authenticate_as(
             Request::get("/api/ots/trajectories/traj-atif/atif")
-                .header("X-Temper-Principal-Kind", "agent")
-                .header("X-Tenant-Id", "default")
                 .body(Body::empty())
                 .unwrap(),
-        )
+            "default",
+            agent_context(),
+        ))
         .await
         .unwrap();
     assert_eq!(export.status(), StatusCode::FORBIDDEN);
@@ -651,12 +796,44 @@ async fn a_self_declared_admin_header_does_not_open_either_endpoint() {
     // named run's prompts, decisions, and request bodies.
     let app = strict_authz_app().await;
 
+    // Header only, no credential: the ingress edge strips the claim and admits
+    // nothing, so the request never reaches Cedar (ADR-0157).
+    let forged = app
+        .clone()
+        .oneshot(
+            Request::post("/api/conformance/check")
+                .header("X-Temper-Principal-Kind", "admin")
+                .header("X-Tenant-Id", "default")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"entity_type": "Order", "session_id": "session-1"})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        forged.status(),
+        StatusCode::UNAUTHORIZED,
+        "a self-declared admin header is not an identity"
+    );
+
+    // And with a real credential, the forged header still buys nothing: the
+    // principal is the resolved agent, which this engine does not permit.
     let check = app
         .clone()
-        .oneshot(admin_post(
-            "/api/conformance/check",
-            serde_json::json!({"entity_type": "Order", "session_id": "session-1"}),
-            Some("default"),
+        .oneshot(authenticate_as(
+            Request::post("/api/conformance/check")
+                .header("X-Temper-Principal-Kind", "admin")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"entity_type": "Order", "session_id": "session-1"})
+                        .to_string(),
+                ))
+                .unwrap(),
+            "default",
+            agent_context(),
         ))
         .await
         .unwrap();
@@ -667,9 +844,13 @@ async fn a_self_declared_admin_header_does_not_open_either_endpoint() {
     );
 
     let export = app
-        .oneshot(admin_get(
-            "/api/ots/trajectories/traj-atif/atif",
-            Some("default"),
+        .oneshot(authenticate_as(
+            Request::get("/api/ots/trajectories/traj-atif/atif")
+                .header("X-Temper-Principal-Kind", "admin")
+                .body(Body::empty())
+                .unwrap(),
+            "default",
+            agent_context(),
         ))
         .await
         .unwrap();
@@ -693,29 +874,29 @@ async fn a_cedar_permitted_caller_is_let_through() {
 
     let check = app
         .clone()
-        .oneshot(
+        .oneshot(authenticate_as(
             Request::post("/api/conformance/check")
-                .header("X-Temper-Principal-Kind", "agent")
-                .header("X-Tenant-Id", "default")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     serde_json::json!({"entity_type": "Order", "session_id": "session-1"})
                         .to_string(),
                 ))
                 .unwrap(),
-        )
+            "default",
+            agent_context(),
+        ))
         .await
         .unwrap();
     assert_eq!(check.status(), StatusCode::OK);
 
     let export = app
-        .oneshot(
+        .oneshot(authenticate_as(
             Request::get("/api/ots/trajectories/traj-atif/atif")
-                .header("X-Temper-Principal-Kind", "agent")
-                .header("X-Tenant-Id", "default")
                 .body(Body::empty())
                 .unwrap(),
-        )
+            "default",
+            agent_context(),
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -873,15 +1054,22 @@ async fn an_uploaded_trajectory_is_addressable_by_the_id_it_was_uploaded_with() 
 
     let upload = app
         .clone()
-        .oneshot(
-            Request::post("/api/ots/trajectories")
-                .header("X-Temper-Principal-Kind", "admin")
-                .header("X-Tenant-Id", "default")
-                .header("X-Session-Id", "session-42")
+        .oneshot({
+            // In production the bearer edge lifts X-Session-Id onto the typed
+            // context; the handler no longer reads raw headers.
+            let mut request = Request::post("/api/ots/trajectories")
                 .header("Content-Type", "application/json")
                 .body(Body::from(ots_upload("traj-roundtrip").to_string()))
-                .unwrap(),
-        )
+                .unwrap();
+            request.extensions_mut().insert(
+                temper_authz::AuthenticatedRequestContext::new(
+                    temper_runtime::tenant::TenantId::default(),
+                    temper_authz::SecurityContext::system(),
+                )
+                .with_session_id(Some("session-42".to_string())),
+            );
+            request
+        })
         .await
         .unwrap();
     assert_eq!(upload.status(), StatusCode::ACCEPTED);
@@ -896,7 +1084,7 @@ async fn an_uploaded_trajectory_is_addressable_by_the_id_it_was_uploaded_with() 
     assert_eq!(
         export.status(),
         StatusCode::OK,
-        "the uploader holds `traj-roundtrip` and must be able to read it back"
+        "the uploaded id must resolve to the stored run (read runs as System under the permissive engine; ownership is not what this test proves)"
     );
     let body = json_body(export).await;
     assert_eq!(body["trajectory_id"], "traj-roundtrip");
@@ -907,19 +1095,22 @@ async fn an_uploaded_trajectory_is_addressable_by_the_id_it_was_uploaded_with() 
 async fn an_upload_with_misaligned_token_signals_is_rejected() {
     let (app, _store) = test_app().await;
     let mut upload = ots_upload("traj-misaligned");
+    // In-domain mask (0/1) with a length that disagrees with the completion:
+    // an out-of-domain value would be rejected by the earlier domain check and
+    // the alignment loop under test would never run.
     upload["turns"][0]["completion_token_ids"] = serde_json::json!([4, 5]);
-    upload["turns"][0]["response_mask"] = serde_json::json!([7]);
+    upload["turns"][0]["response_mask"] = serde_json::json!([1]);
     upload["turns"][0]["logprobs"] = serde_json::json!([-0.1, -0.2, -0.3]);
 
     let response = app
-        .oneshot(
+        .oneshot(authenticate_as(
             Request::post("/api/ots/trajectories")
-                .header("X-Temper-Principal-Kind", "admin")
-                .header("X-Tenant-Id", "default")
                 .header("Content-Type", "application/json")
                 .body(Body::from(upload.to_string()))
                 .unwrap(),
-        )
+            "default",
+            temper_authz::SecurityContext::system(),
+        ))
         .await
         .unwrap();
 
@@ -927,6 +1118,15 @@ async fn an_upload_with_misaligned_token_signals_is_rejected() {
         response.status(),
         StatusCode::BAD_REQUEST,
         "positionally inconsistent RL data must not be persisted"
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read rejection body");
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        body.contains("completion_token_ids") && body.contains("aligned position for position"),
+        "the rejection must come from the length-alignment check, not the \
+         mask-domain check: {body}"
     );
 }
 
@@ -1508,5 +1708,106 @@ async fn a_trajectory_with_no_steps_is_not_exported_as_stepless_atif() {
         response.status(),
         StatusCode::UNPROCESSABLE_ENTITY,
         "ATIF v1.7 requires at least one step; a stepless document is not valid ATIF"
+    );
+}
+
+/// A denied `POST /api/authorize` pre-flight must never poison another run's
+/// conformance verdict. The probe's action, resource type, and session are all
+/// caller-chosen, so its denial row is written `spec_governed = false` and the
+/// walk skips it — otherwise any agent could flip a victim session's verdict
+/// by probing garbage actions under that session id.
+#[tokio::test]
+async fn a_denied_preflight_probe_cannot_poison_a_sessions_verdict() {
+    let (app, store) = policy_permitted_app().await;
+
+    // A genuine governed dispatch in the victim session: verdict passes.
+    seed_row(
+        &store,
+        "AddItem",
+        Some("Draft"),
+        Some("Draft"),
+        "2026-01-01T00:00:00Z",
+    )
+    .await;
+
+    // The attacker's pre-flight: an agent credential carrying the victim's
+    // session (in production the session rides the correlation header), probing
+    // an undeclared action against the victim's entity type. The engine only
+    // permits read_trajectories, so Cedar denies the probe.
+    let mut probe = Request::post("/api/authorize")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "agent_id": "agent-1",
+                "action": "GarbageAction",
+                "resource_type": "Order",
+                "resource_id": "order-1",
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    probe.extensions_mut().insert(
+        temper_authz::AuthenticatedRequestContext::new(
+            temper_runtime::tenant::TenantId::default(),
+            agent_context(),
+        )
+        .with_session_id(Some("session-1".to_string())),
+    );
+    // The oracle answers 200 with the decision; denial is in the body.
+    let denied = app.clone().oneshot(probe).await.unwrap();
+    assert_eq!(denied.status(), StatusCode::OK);
+    let decision = json_body(denied).await;
+    assert_eq!(
+        decision["allowed"],
+        serde_json::json!(false),
+        "the probe must be denied: {decision}"
+    );
+
+    // Wait for the denial row to drain into the store, then pin the call site:
+    // it must arrive marked ungoverned.
+    let mut denial_row = None;
+    for _ in 0..200 {
+        let rows = store
+            .query_trajectories_by_session("session-1", Some("default"), None, 50)
+            .await
+            .expect("query session rows");
+        if let Some(row) = rows.iter().find(|r| r.action == "GarbageAction") {
+            denial_row = Some(row.clone());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let denial_row = denial_row.expect("the denied probe's trajectory row must be persisted");
+    assert_eq!(
+        denial_row.spec_governed,
+        Some(false),
+        "a pre-flight denial row must be explicitly ungoverned"
+    );
+
+    // And end to end: the victim session's verdict is untouched by the probe.
+    let check = app
+        .oneshot(admin_post(
+            "/api/conformance/check",
+            serde_json::json!({
+                "entity_type": "Order",
+                "session_id": "session-1",
+                "spec_version": registered_spec_version(),
+            }),
+            Some("default"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(check.status(), StatusCode::OK);
+    let body = json_body(check).await;
+    assert_eq!(
+        body["report"]["passed"],
+        serde_json::json!(true),
+        "a denied pre-flight probe must not add violations: {body}"
+    );
+    assert_eq!(body["report"]["violations"], serde_json::json!([]));
+    assert_eq!(
+        body["report"]["stats"]["non_governed_rows_skipped"],
+        serde_json::json!(1),
+        "the probe's row must be present and skipped, not absent: {body}"
     );
 }
