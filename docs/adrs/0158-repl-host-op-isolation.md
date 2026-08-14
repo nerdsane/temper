@@ -46,6 +46,12 @@ same two methods proceed normally — verified by a test that exercises both arm
 - The RCE/file-read vector on the server-hosted REPL is closed at the dispatch
   boundary, independent of authorization. Even a fully authorized `execute_repl`
   caller cannot drive host ops in the server process.
+- The denial is surfaced to the operator channel: the gate emits a
+  `tracing::warn!` (`target: temper.repl.host_op`, with method/tenant/agent) before
+  returning the error. The Monty runtime collapses a dispatch error into a `null`
+  program result, so the HTTP caller sees no error field — a broader observability
+  gap tracked separately — but the refusal is now visible in logs/Datadog rather
+  than indistinguishable from a no-op.
 - All other `temper.*` methods (entity CRUD, specs, governance, evolution,
   non-host WASM registry reads) remain available in the server REPL — the fix
   removes only the two host-process sinks, not the REPL's usefulness.

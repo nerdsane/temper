@@ -95,12 +95,26 @@ pub async fn dispatch_temper_method(
         // server-hosted REPL is not: running these in the server process is a
         // host-compromise vector (ARN-166: arbitrary file read + RCE as the
         // server user).
-        "upload_wasm" | "compile_wasm" if !ctx.allow_host_ops => Err(format!(
-            "temper.{method}() is not available in this context. Host operations \
-             (local file read, cargo build) run only on the developer's own \
-             machine via the local MCP server, never inside the Temper server \
-             process."
-        )),
+        "upload_wasm" | "compile_wasm" if !ctx.allow_host_ops => {
+            // Surface the denial to the operator channel. The Monty runtime
+            // collapses a dispatch error into a `null` program result, so the
+            // HTTP caller sees no error field (a separate observability gap);
+            // this warn makes the refusal visible in logs/Datadog so a denied
+            // host op is not indistinguishable from a no-op (ARN-166).
+            tracing::warn!(
+                target: "temper.repl.host_op",
+                method = method,
+                tenant = ctx.tenant,
+                agent_id = ctx.agent_id.unwrap_or("-"),
+                "denied host operation in a non-host-trusted REPL context"
+            );
+            Err(format!(
+                "temper.{method}() is not available in this context. Host operations \
+                 (local file read, cargo build) run only on the developer's own \
+                 machine via the local MCP server, never inside the Temper server \
+                 process."
+            ))
+        }
         "upload_wasm" | "compile_wasm" => dispatch_wasm(ctx, method, args).await,
         // --- Evolution / Observe ---
         "get_trajectories" | "get_insights" | "get_evolution_records" | "check_sentinel" => {
@@ -812,6 +826,13 @@ mod host_op_gate_tests {
             err.contains("not available in this context"),
             "expected host-op rejection, got: {err}"
         );
+        // Prove the gate fires before any host side-effect: none of the
+        // downstream errors (rustup spawn, build-dir write) may appear, so a
+        // "spawn-then-deny" implementation could not pass this test.
+        assert!(
+            !err.contains("failed to run rustup") && !err.contains("failed to create build dir"),
+            "gate must fire before rustup spawn or build-dir write, got: {err}"
+        );
     }
 
     /// With host ops allowed (the local stdio MCP context), the gate does not
@@ -832,6 +853,36 @@ mod host_op_gate_tests {
         assert!(
             !err.contains("not available in this context"),
             "host-trusted context must not reject host ops, got: {err}"
+        );
+    }
+
+    /// Symmetric positive case for `compile_wasm`. `upload_wasm` and
+    /// `compile_wasm` share a single guarded match arm, so this proves the same
+    /// arm lets `compile_wasm` through when host ops are permitted — the gate is
+    /// the capability flag, not a hardcoded block on either method.
+    ///
+    /// This must not trigger a real `cargo build` (minutes long). The `ctx`
+    /// helper leaves `binary_path: None`, so `compile_wasm` fails at
+    /// `resolve_sdk_path`: the test binary's cwd is the package root
+    /// (`crates/temper-sandbox`, per Cargo), which has no
+    /// `crates/temper-wasm-sdk`. That check runs after the rustup probe and the
+    /// `/tmp` build-dir creation but *before* the crate files are written or
+    /// `cargo` is spawned, so no build happens. (Without the wasm32 target it
+    /// fails even earlier, at the rustup probe.) Either way the error is a
+    /// downstream environment failure, never the gate rejection, so the gate is
+    /// proven open for `compile_wasm` without a build. A real build would need
+    /// the test binary's cwd at the workspace root *and* wasm32 installed —
+    /// which is not how `cargo test [--workspace]` runs.
+    #[tokio::test]
+    async fn compile_wasm_allowed_with_host_ops_passes_the_gate() {
+        let client = reqwest::Client::new();
+        let args = str_args(&["mod", "pub fn main() {}"]);
+        let err = dispatch_temper_method(&ctx(&client, true), "compile_wasm", &args, &[])
+            .await
+            .expect_err("compile_wasm must fail downstream (no SDK/toolchain), not at the gate");
+        assert!(
+            !err.contains("not available in this context"),
+            "host-trusted context must not reject compile_wasm, got: {err}"
         );
     }
 }

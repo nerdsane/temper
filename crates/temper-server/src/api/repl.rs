@@ -47,14 +47,6 @@ pub(crate) struct ReplRequest {
     code: String,
 }
 
-/// POST /api/repl — execute Python code in the Temper Monty sandbox.
-///
-/// The sandbox provides `temper.*` methods (create, action, submit_specs, etc.)
-/// that loop back to this server via single-use, request-bound credentials.
-///
-/// Security: 180s timeout, 64MB memory, method allowlisting, no filesystem or
-/// network access. External APIs go through `[[integration]]` in IOA specs.
-#[instrument(skip_all, fields(otel.name = "POST /api/repl"))]
 /// Build the `ReplConfig` for the server-hosted REPL.
 ///
 /// `allow_host_ops` is hardcoded false here and only here: the server-hosted
@@ -80,6 +72,16 @@ fn server_repl_config(
     }
 }
 
+/// POST /api/repl — execute Python code in the Temper Monty sandbox.
+///
+/// The sandbox provides `temper.*` methods (create, action, submit_specs, etc.)
+/// that loop back to this server via single-use, request-bound credentials.
+///
+/// Security: 180s timeout, 64MB memory, method allowlisting, no filesystem or
+/// network access. Host ops (`upload_wasm`/`compile_wasm`) are gated off via
+/// `server_repl_config` (ARN-166). External APIs go through `[[integration]]`
+/// in IOA specs.
+#[instrument(skip_all, fields(otel.name = "POST /api/repl"))]
 pub(crate) async fn handle_repl(
     State(state): State<ServerState>,
     headers: HeaderMap,
