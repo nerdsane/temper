@@ -178,9 +178,7 @@ guard = [
                 required_status,
                 ..
             } => entity_type == entity && required_status.iter().any(|s| s == status),
-            ModelGuard::And(gs) => gs
-                .iter()
-                .any(|g| guard_has_cross_entity(g, entity, status)),
+            ModelGuard::And(gs) => gs.iter().any(|g| guard_has_cross_entity(g, entity, status)),
             _ => false,
         }
     }
