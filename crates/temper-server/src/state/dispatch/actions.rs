@@ -1,6 +1,7 @@
+use std::collections::BTreeSet;
 use std::sync::{Arc, OnceLock};
 
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{Instrument, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -15,17 +16,12 @@ use super::retry;
 use super::{DispatchCommand, DispatchError, DispatchExtOptions, record_workflow_span_attrs};
 use crate::state::admission::AdmissionOutcome;
 
-const DEFAULT_BACKGROUND_REACTION_MAX_CONCURRENCY: usize = 64;
+const DEFAULT_BACKGROUND_REACTION_MAX_CONCURRENCY: usize = 10;
 
 struct BackgroundReactionDispatch {
     dispatcher: Arc<crate::trigger::ReactionDispatcher>,
     tenant: TenantId,
-    entity_type: String,
-    entity_id: String,
-    action: String,
-    to_state: String,
-    fields: serde_json::Value,
-    agent_ctx: AgentContext,
+    intents: Vec<crate::trigger::delivery::PersistedReactionIntent>,
 }
 
 fn background_reaction_semaphore() -> Arc<Semaphore> {
@@ -170,6 +166,60 @@ impl crate::state::ServerState {
             self.reject_action_supplied_sub_writes(entity_type, action, &params)?;
         }
 
+        let dispatcher = self
+            .reaction_dispatcher
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let reaction_context = if let Some(dispatcher) = dispatcher.as_ref() {
+            let rules = dispatcher.candidate_rules(tenant, entity_type, action);
+            if rules.is_empty() {
+                None
+            } else {
+                let guard_source = self
+                    .get_tenant_entity_state(tenant, entity_type, entity_id)
+                    .await
+                    .map_err(DispatchError::Internal)?;
+                let expected_source_sequence = guard_source.state.sequence_nr;
+                let mut guard_fields = guard_source.state.fields;
+                if let (Some(fields), Some(action_params)) =
+                    (guard_fields.as_object_mut(), params.as_object())
+                {
+                    for (name, value) in action_params {
+                        fields.insert(name.clone(), value.clone());
+                    }
+                }
+                let resolved_guards = crate::trigger::dispatcher::resolve_rule_guard_inputs(
+                    self,
+                    tenant,
+                    &rules,
+                    &guard_fields,
+                )
+                .await;
+                let authority = serde_json::to_value(
+                    crate::trigger::dispatcher::effective_trigger_security_context(agent_ctx),
+                )
+                .map_err(|error| DispatchError::Internal(error.to_string()))?;
+                Some(crate::trigger::delivery::ReactionCommitContext {
+                    rules,
+                    authority,
+                    depth: 0,
+                    root_delivery_id: None,
+                    expected_source_sequence,
+                    resolved_guards,
+                    receipt: None,
+                })
+            }
+        } else {
+            None
+        };
+
+        let durable_reactions_expected = reaction_context.is_some();
+        if durable_reactions_expected && self.event_journal().is_none() {
+            return Err(DispatchError::Internal(
+                "durable reactions require a configured event journal".to_string(),
+            ));
+        }
         let response = self
             .dispatch_tenant_action_core(
                 tenant,
@@ -179,22 +229,72 @@ impl crate::state::ServerState {
                 params,
                 agent_ctx,
                 await_integration,
+                reaction_context,
             )
             .await?;
 
         // Dispatch cross-entity reactions (fire-and-forget, depth 0 = top-level)
-        if response.success {
-            // A poisoned lock must not silently disable reactions: the slot
-            // only holds an Arc, so the data can't be torn — recover it.
-            let dispatcher = self
-                .reaction_dispatcher
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if let Some(dispatcher) = dispatcher {
+        if response.success
+            && let Some(dispatcher) = dispatcher
+        {
+            // Keep the durable recovery/cascade future off actor worker stacks.
+            // Its bounded scans and fanout state are materially larger than a
+            // normal action future, especially when WASM callbacks nest a
+            // second dispatch on the same worker.
+            Box::pin(async {
                 let to_state = response.state.status.clone();
                 let fields = serde_json::to_value(&response.state.fields).unwrap_or_default();
-                if await_reactions {
+                let committed_intents = if durable_reactions_expected {
+                    self.materialize_committed_reaction_intents(
+                        tenant,
+                        entity_type,
+                        entity_id,
+                        response.state.sequence_nr,
+                    )
+                    .await?
+                } else {
+                    Vec::new()
+                };
+                if !committed_intents.is_empty() && await_reactions {
+                    let root_delivery_ids: BTreeSet<_> = committed_intents
+                        .iter()
+                        .map(|intent| intent.root_delivery_id.clone())
+                        .collect();
+                    for intent in committed_intents {
+                        dispatcher
+                            .dispatch_committed_intent(self, intent)
+                            .await
+                            .map_err(DispatchError::Internal)?;
+                    }
+                    dispatcher
+                        .drain_tenant_deliveries(
+                            self,
+                            tenant,
+                            1_024,
+                            std::time::Duration::from_secs(5),
+                        )
+                        .await
+                        .map_err(DispatchError::Internal)?;
+                    self.require_terminal_reaction_roots(tenant, &root_delivery_ids)
+                        .await?;
+                } else if !committed_intents.is_empty() {
+                    dispatcher.notify_recovery(tenant);
+                    match background_reaction_semaphore().try_acquire_owned() {
+                        Ok(permit) => self.spawn_background_reactions(
+                            BackgroundReactionDispatch {
+                                dispatcher: Arc::clone(&dispatcher),
+                                tenant: tenant.clone(),
+                                intents: committed_intents,
+                            },
+                            permit,
+                        ),
+                        Err(error) => tracing::debug!(
+                            tenant = %tenant,
+                            %error,
+                            "reaction intent is durable; periodic recovery will claim it"
+                        ),
+                    }
+                } else {
                     dispatcher
                         .dispatch_reactions(
                             self,
@@ -212,40 +312,10 @@ impl crate::state::ServerState {
                             agent_ctx,
                         )
                         .await;
-                } else if let Some(background) =
-                    self.try_spawn_background_reactions(BackgroundReactionDispatch {
-                        dispatcher: Arc::clone(&dispatcher),
-                        tenant: tenant.clone(),
-                        entity_type: entity_type.to_string(),
-                        entity_id: entity_id.to_string(),
-                        action: action.to_string(),
-                        to_state,
-                        fields,
-                        agent_ctx: agent_ctx.clone(),
-                    })
-                {
-                    tracing::warn!(
-                        tenant = %tenant,
-                        entity_type,
-                        entity_id,
-                        action_name = action,
-                        "background reaction budget exhausted; awaiting reactions inline"
-                    );
-                    dispatcher
-                        .dispatch_reactions(
-                            self,
-                            tenant,
-                            entity_type,
-                            entity_id,
-                            action,
-                            &background.to_state,
-                            &background.fields,
-                            0,
-                            agent_ctx,
-                        )
-                        .await;
                 }
-            }
+                Ok::<(), DispatchError>(())
+            })
+            .await?;
         }
 
         // Scheduled actions are handled inside run_post_dispatch_effects
@@ -253,60 +323,140 @@ impl crate::state::ServerState {
         Ok(response)
     }
 
-    fn try_spawn_background_reactions(
+    /// Make every reaction intent on one committed source event durably pending.
+    pub(crate) async fn materialize_committed_reaction_intents(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        source_sequence: u64,
+    ) -> Result<Vec<crate::trigger::delivery::PersistedReactionIntent>, DispatchError> {
+        let (store, _) = self.event_journal().ok_or_else(|| {
+            DispatchError::Internal(
+                "durable reactions require a configured event journal".to_string(),
+            )
+        })?;
+        if source_sequence == 0 {
+            return Err(DispatchError::Internal(
+                "successful persisted action returned sequence zero".to_string(),
+            ));
+        }
+        let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+        let events = store
+            .read_events_limited(&persistence_id, source_sequence - 1, 1)
+            .await
+            .map_err(|error| DispatchError::Internal(error.to_string()))?;
+        let source_event = events
+            .iter()
+            .find(|event| event.sequence_nr == source_sequence)
+            .ok_or_else(|| {
+                DispatchError::Internal(format!(
+                    "committed source event {persistence_id}@{source_sequence} was not readable"
+                ))
+            })?;
+        let intents = crate::trigger::delivery::extract_intents(&source_event.payload)
+            .map_err(DispatchError::Internal)?;
+        for intent in &intents {
+            crate::trigger::delivery::initialize_delivery_record(&store, intent.clone())
+                .await
+                .map_err(|error| DispatchError::Internal(error.to_string()))?;
+        }
+        Ok(intents)
+    }
+
+    async fn require_terminal_reaction_roots(
+        &self,
+        tenant: &TenantId,
+        root_delivery_ids: &BTreeSet<String>,
+    ) -> Result<(), DispatchError> {
+        use crate::trigger::delivery::{ReactionDeliveryStatus, list_delivery_records};
+
+        let Some((store, _)) = self.event_journal() else {
+            return Err(DispatchError::Internal(
+                "awaited durable reactions require an event journal".to_string(),
+            ));
+        };
+        const DELIVERY_INSPECTION_BUDGET: usize = 10_000;
+        let records = list_delivery_records(
+            &store,
+            tenant.as_str(),
+            DELIVERY_INSPECTION_BUDGET.saturating_add(1),
+        )
+        .await
+        .map_err(|error| DispatchError::Internal(error.to_string()))?;
+        if records.len() > DELIVERY_INSPECTION_BUDGET {
+            return Err(DispatchError::Internal(format!(
+                "awaited reaction tree inspection exceeded the {DELIVERY_INSPECTION_BUDGET}-delivery budget"
+            )));
+        }
+        for root_delivery_id in root_delivery_ids {
+            let tree: Vec<_> = records
+                .iter()
+                .map(|(record, _)| record)
+                .filter(|record| record.intent.root_delivery_id == *root_delivery_id)
+                .collect();
+            if tree.is_empty() {
+                return Err(DispatchError::Internal(format!(
+                    "awaited reaction tree {root_delivery_id} was not readable"
+                )));
+            }
+            if let Some(failed) = tree.iter().find(|record| {
+                matches!(
+                    record.status,
+                    ReactionDeliveryStatus::Rejected | ReactionDeliveryStatus::DeadLettered
+                )
+            }) {
+                return Err(DispatchError::Internal(format!(
+                    "reaction delivery {} reached terminal status {:?}",
+                    failed.intent.delivery_id, failed.status
+                )));
+            }
+            if let Some(incomplete) = tree.iter().find(|record| {
+                matches!(
+                    record.status,
+                    ReactionDeliveryStatus::Pending
+                        | ReactionDeliveryStatus::Claimed
+                        | ReactionDeliveryStatus::Dispatching
+                )
+            }) {
+                return Err(DispatchError::Internal(format!(
+                    "reaction delivery {} is incomplete in status {:?}",
+                    incomplete.intent.delivery_id, incomplete.status
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn spawn_background_reactions(
         &self,
         dispatch: BackgroundReactionDispatch,
-    ) -> Option<BackgroundReactionDispatch> {
-        let Ok(permit) = background_reaction_semaphore().try_acquire_owned() else {
-            return Some(dispatch);
-        };
-
+        permit: OwnedSemaphorePermit,
+    ) {
         let state = self.clone();
         let BackgroundReactionDispatch {
             dispatcher,
             tenant,
-            entity_type,
-            entity_id,
-            action,
-            to_state,
-            fields,
-            agent_ctx,
+            intents,
         } = dispatch;
         let span = tracing::info_span!(
             "reaction.dispatch.background",
             tenant = %tenant,
-            entity_type = %entity_type,
-            entity_id = %entity_id,
-            action_name = %action,
+            reaction.intent_count = intents.len(),
         );
 
         let reaction_task = async move {
             let _permit = permit;
-            let results = dispatcher
-                .dispatch_reactions(
-                    &state,
-                    &tenant,
-                    &entity_type,
-                    &entity_id,
-                    &action,
-                    &to_state,
-                    &fields,
-                    0,
-                    &agent_ctx,
-                )
-                .await;
-            tracing::info!(
-                tenant = %tenant,
-                entity_type = %entity_type,
-                entity_id = %entity_id,
-                action_name = %action,
-                reaction.result_count = results.len(),
-                "background reactions completed"
-            );
+            for intent in intents {
+                match dispatcher.dispatch_committed_intent(&state, intent).await {
+                    Ok(_) => {}
+                    Err(error) => tracing::error!(tenant = %tenant, %error, "durable reaction delivery failed"),
+                }
+            }
+            tracing::info!(tenant = %tenant, "background reaction intents dispatched");
         }
         .instrument(span);
         tokio::spawn(reaction_task); // determinism-ok: production-only post-commit reaction side effects
-        None
     }
 
     /// Core dispatch without reaction cascade (used by ReactionDispatcher to
@@ -338,6 +488,7 @@ impl crate::state::ServerState {
         params: serde_json::Value,
         agent_ctx: &AgentContext,
         await_integration: bool,
+        reaction_context: Option<crate::trigger::delivery::ReactionCommitContext>,
     ) -> Result<EntityResponse, DispatchError> {
         let explicit_workflow_context = agent_ctx.workflow_run_id.is_some()
             || agent_ctx.workflow_root_entity_type.is_some()
@@ -516,6 +667,10 @@ impl crate::state::ServerState {
         let action_name = action.to_string();
         let params_for_retry = params;
         let cross_for_retry = cross_entity_booleans;
+        let reactions_for_retry = reaction_context;
+        let reaction_expected_sequence = reactions_for_retry
+            .as_ref()
+            .map(|context| context.expected_source_sequence);
         let idempotency_key = Some(agent_ctx.idempotency_key.clone().unwrap_or_else(|| {
             format!(
                 "dispatch:{tenant}:{entity_type}:{entity_id}:{action}:{}",
@@ -539,7 +694,10 @@ impl crate::state::ServerState {
                     params: params_for_retry.clone(),
                     cross_entity_booleans: cross_for_retry.clone(),
                     idempotency_key: idempotency_key.clone(),
-                    expected_sequence: agent_ctx.expected_entity_sequence,
+                    expected_sequence: agent_ctx
+                        .expected_entity_sequence
+                        .or(reaction_expected_sequence),
+                    reaction_context: reactions_for_retry.clone().map(Box::new),
                 },
                 &policy,
             )

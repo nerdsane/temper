@@ -695,6 +695,31 @@ impl EventStore for TenantStoreRouter {
         store.read_events(persistence_id, from_sequence).await
     }
 
+    async fn read_events_limited(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        let (tenant, _, _) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .read_events_limited(persistence_id, from_sequence, limit)
+            .await
+    }
+
+    async fn read_latest_events(
+        &self,
+        persistence_id: &str,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        let (tenant, _, _) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let store = self.store_for_tenant(tenant).await?;
+        store.read_latest_events(persistence_id, limit).await
+    }
+
     #[instrument(skip_all, fields(persistence_id, otel.name = "router.save_snapshot"))]
     async fn save_snapshot(
         &self,
@@ -738,6 +763,19 @@ impl EventStore for TenantStoreRouter {
     ) -> Result<Vec<String>, PersistenceError> {
         let store = self.store_for_tenant(tenant).await?;
         store.list_entity_ids_by_type(tenant, entity_type).await
+    }
+
+    async fn list_journal_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: Option<&str>,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .list_journal_ids_page(tenant, entity_type, after, limit)
+            .await
     }
 
     // ADR-0155: forward the vector-index surface to the per-tenant store so kNN works

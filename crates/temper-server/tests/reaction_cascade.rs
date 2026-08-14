@@ -70,6 +70,7 @@ fn ecommerce_registry() -> ReactionRegistry {
             },
             resolve_target: TargetResolver::SameId,
             principal: None,
+            drop_ok: false,
         }],
     );
     reg
@@ -206,6 +207,7 @@ fn field_based_target_resolution() {
                 field: "payment_id".to_string(),
             },
             principal: None,
+            drop_ok: false,
         }],
     );
 
@@ -298,6 +300,7 @@ fn multi_step_cascade_with_chained_reactions() {
                 },
                 resolve_target: TargetResolver::SameId,
                 principal: None,
+                drop_ok: false,
             },
             ReactionRule {
                 name: "authorize_triggers_capture".to_string(),
@@ -315,6 +318,7 @@ fn multi_step_cascade_with_chained_reactions() {
                 },
                 resolve_target: TargetResolver::SameId,
                 principal: None,
+                drop_ok: false,
             },
         ],
     );
@@ -375,6 +379,7 @@ fn cascade_with_params_from_fires_even_when_source_fields_missing() {
             },
             resolve_target: TargetResolver::SameId,
             principal: None,
+            drop_ok: false,
         }],
     );
 
@@ -523,6 +528,7 @@ fn guard_passing_rule_fires_guard_failing_rule_skipped() {
                 },
                 resolve_target: TargetResolver::SameId,
                 principal: None,
+                drop_ok: false,
             },
             ReactionRule {
                 name: "skipped_on_cancelled".to_string(),
@@ -542,6 +548,7 @@ fn guard_passing_rule_fires_guard_failing_rule_skipped() {
                 },
                 resolve_target: TargetResolver::SameId,
                 principal: None,
+                drop_ok: false,
             },
         ],
     );
@@ -595,6 +602,7 @@ fn not_guard_skips_rule_when_inner_passes() {
             },
             resolve_target: TargetResolver::SameId,
             principal: None,
+            drop_ok: false,
         }],
     );
 

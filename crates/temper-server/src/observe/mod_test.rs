@@ -5,7 +5,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use temper_runtime::ActorSystem;
-use temper_runtime::scheduler::sim_now;
+use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope};
+use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoEventStore;
@@ -22,6 +23,10 @@ use crate::request_context::AgentContext;
 use crate::secrets::vault::SecretsVault;
 use crate::state::TrajectoryEntry;
 use crate::storage::StorageStack;
+use crate::trigger::delivery::{
+    PersistedReactionIntent, ReactionDeliveryRecord, ReactionDeliveryStatus,
+    append_delivery_record, attach_intents,
+};
 
 const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
 const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
@@ -65,6 +70,71 @@ async fn test_state_with_turso() -> ServerState {
     state.data_dir = data_dir;
     state.set_storage_stack(StorageStack::from_turso(turso));
     state
+}
+
+async fn seed_reaction_delivery(
+    state: &ServerState,
+    delivery_id: &str,
+    status: ReactionDeliveryStatus,
+    transient_failure: bool,
+) {
+    let (store, _) = state.event_journal().expect("event journal");
+    let intent = PersistedReactionIntent {
+        delivery_id: delivery_id.to_string(),
+        root_delivery_id: delivery_id.to_string(),
+        tenant: "default".to_string(),
+        source_entity_type: "Order".to_string(),
+        source_entity_id: format!("source-{delivery_id}"),
+        source_action: "SubmitOrder".to_string(),
+        source_sequence: 1,
+        source_to_state: "Submitted".to_string(),
+        source_fields: serde_json::json!({"private_value": "must-not-leak"}),
+        guard_passed: true,
+        target_entity_id: Some(format!("target-{delivery_id}")),
+        trigger_name: "seeded-reaction".to_string(),
+        trigger_index: 0,
+        depth: 0,
+        rule: serde_json::json!({"private_rule": "must-not-leak"}),
+        authority: serde_json::json!({
+            "principal": {
+                "id": "operator-source",
+                "kind": "Customer",
+                "attributes": {"secret_claim": "must-not-leak"}
+            },
+            "context_attrs": {"private_context": "must-not-leak"},
+            "correlation_id": "private-correlation"
+        }),
+        created_at: sim_now(),
+    };
+    let mut payload = serde_json::json!({"action": "SubmitOrder"});
+    attach_intents(&mut payload, std::slice::from_ref(&intent)).expect("attach intent");
+    let persistence_id = format!("default:Order:source-{delivery_id}");
+    store
+        .append(
+            &persistence_id,
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 1,
+                event_type: "SubmitOrder".to_string(),
+                payload,
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: persistence_id.clone(),
+                },
+            }],
+        )
+        .await
+        .expect("persist source intent");
+    let mut record = ReactionDeliveryRecord::pending(intent);
+    record.status = status;
+    record.transient_failure = transient_failure;
+    record.last_error = Some("private provider path must-not-leak".to_string());
+    append_delivery_record(&store, 0, &record)
+        .await
+        .expect("persist delivery record");
 }
 
 fn build_test_app() -> Router {
@@ -201,12 +271,161 @@ async fn projection_replay_parity_endpoint_reports_projection_drift() {
     assert_eq!(json["report"]["drift_examples"][0]["drift_kind"], "fields");
 }
 
+#[tokio::test]
+async fn reaction_observe_routes_are_bounded_tenant_scoped_and_redacted() {
+    let state = test_state_with_turso().await;
+    seed_reaction_delivery(
+        &state,
+        "reaction-v1-observe-a",
+        ReactionDeliveryStatus::DeadLettered,
+        true,
+    )
+    .await;
+    seed_reaction_delivery(
+        &state,
+        "reaction-v1-observe-b",
+        ReactionDeliveryStatus::Succeeded,
+        false,
+    )
+    .await;
+    state
+        .authz
+        .reload_tenant_policies(
+            "default",
+            r#"permit(principal, action == Action::"read", resource is ReactionDelivery);"#,
+        )
+        .expect("install policy that denies read_reactions");
+    let app = build_app_with_state(state);
+
+    for uri in [
+        "/observe/reactions?limit=1",
+        "/observe/reactions/reaction-v1-observe-a",
+    ] {
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::get(uri)
+                    .header("X-Tenant-Id", "default")
+                    .header("X-Temper-Principal-Id", "customer-1")
+                    .header("X-Temper-Principal-Kind", "customer")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    }
+
+    let response = app
+        .clone()
+        .oneshot(system_get("/observe/reactions?limit=1"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["total"], 1);
+    assert_eq!(json["value"].as_array().unwrap().len(), 1);
+    assert_eq!(json["next"], "reaction-v1-observe-a");
+    let rendered = String::from_utf8(body.to_vec()).unwrap();
+    assert!(!rendered.contains("must-not-leak"));
+    assert!(rendered.contains("operator-source"));
+
+    let filtered_page = app
+        .clone()
+        .oneshot(system_get(
+            "/observe/reactions?limit=1&status=succeeded&after=reaction-v1-observe-a",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(filtered_page.status(), StatusCode::OK);
+    let filtered_body = axum::body::to_bytes(filtered_page.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let filtered_json: serde_json::Value = serde_json::from_slice(&filtered_body).unwrap();
+    assert_eq!(
+        filtered_json["value"][0]["delivery_id"],
+        "reaction-v1-observe-b"
+    );
+
+    let detail = app
+        .oneshot(system_get("/observe/reactions/reaction-v1-observe-a"))
+        .await
+        .unwrap();
+    assert_eq!(detail.status(), StatusCode::OK);
+    let detail_body = axum::body::to_bytes(detail.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let detail_rendered = String::from_utf8(detail_body.to_vec()).unwrap();
+    assert!(!detail_rendered.contains("must-not-leak"));
+    assert!(detail_rendered.contains("dead_lettered"));
+}
+
+#[tokio::test]
+async fn reaction_retry_requires_human_and_only_accepts_transient_dead_letter() {
+    let state = test_state_with_turso().await;
+    seed_reaction_delivery(
+        &state,
+        "reaction-v1-retry-transient",
+        ReactionDeliveryStatus::DeadLettered,
+        true,
+    )
+    .await;
+    seed_reaction_delivery(
+        &state,
+        "reaction-v1-retry-permanent",
+        ReactionDeliveryStatus::Rejected,
+        false,
+    )
+    .await;
+    let app = build_app_with_state(state);
+
+    let agent_response = app
+        .clone()
+        .oneshot(agent_post(
+            "/api/reactions/reaction-v1-retry-transient/retry",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(agent_response.status(), StatusCode::FORBIDDEN);
+
+    let permanent_response = app
+        .clone()
+        .oneshot(human_admin_post(
+            "/api/reactions/reaction-v1-retry-permanent/retry",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(permanent_response.status(), StatusCode::CONFLICT);
+
+    let accepted = app
+        .oneshot(human_admin_post(
+            "/api/reactions/reaction-v1-retry-transient/retry",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+}
+
 /// Build a POST request with admin auth headers for observe endpoints.
 fn system_post(uri: &str, body: &str) -> Request<Body> {
     Request::post(uri)
         .header("Content-Type", "application/json")
         .header("X-Temper-Principal-Kind", "admin")
         .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn human_admin_post(uri: &str) -> Request<Body> {
+    Request::post(uri)
+        .header("Content-Type", "application/json")
+        .header("X-Tenant-Id", "default")
+        .header("X-Temper-Principal-Id", "human-operator-1")
+        .header("X-Temper-Principal-Kind", "admin")
+        .body(Body::empty())
         .unwrap()
 }
 

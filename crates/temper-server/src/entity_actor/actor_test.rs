@@ -181,6 +181,7 @@ async fn sequence_preconditions_are_checked_atomically_by_actor() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: Some(99),
+                reaction_context: None,
             },
             Duration::from_secs(1),
         )
@@ -260,6 +261,7 @@ async fn dst_add_item_then_submit() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             Duration::from_secs(1),
         )
@@ -278,6 +280,7 @@ async fn dst_add_item_then_submit() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             Duration::from_secs(1),
         )
@@ -312,6 +315,7 @@ async fn duplicate_composite_idempotency_reemits_spec_trigger() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: Some("same-pack".into()),
                 expected_sequence: None,
+                reaction_context: None,
             },
             Duration::from_secs(1),
         )
@@ -327,6 +331,7 @@ async fn duplicate_composite_idempotency_reemits_spec_trigger() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: Some("same-pack".into()),
                 expected_sequence: None,
+                reaction_context: None,
             },
             Duration::from_secs(1),
         )
@@ -360,6 +365,7 @@ async fn dst_cannot_submit_without_items() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             Duration::from_secs(1),
         )
@@ -404,6 +410,7 @@ async fn dst_full_order_lifecycle() {
                     cross_entity_booleans: std::collections::BTreeMap::new(),
                     idempotency_key: None,
                     expected_sequence: None,
+                    reaction_context: None,
                 },
                 Duration::from_secs(1),
             )
@@ -440,6 +447,7 @@ async fn dst_cancel_from_draft() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             Duration::from_secs(1),
         )
@@ -472,6 +480,7 @@ async fn dst_cannot_cancel_shipped_order() {
                     cross_entity_booleans: std::collections::BTreeMap::new(),
                     idempotency_key: None,
                     expected_sequence: None,
+                    reaction_context: None,
                 },
                 Duration::from_secs(1),
             )
@@ -488,6 +497,7 @@ async fn dst_cannot_cancel_shipped_order() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             Duration::from_secs(1),
         )
@@ -521,6 +531,7 @@ async fn dst_multiple_actors_independent() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             Duration::from_secs(1),
         )
@@ -536,6 +547,7 @@ async fn dst_multiple_actors_independent() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             Duration::from_secs(1),
         )

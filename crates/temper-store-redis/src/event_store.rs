@@ -21,33 +21,38 @@ use temper_runtime::persistence::{
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
-/// Lua script for atomic append: check expected sequence, RPUSH events, SET new seq, SADD entity ref.
+/// Lua script for atomic append: check expected sequence, append events, and index the journal.
 ///
-/// KEYS[1] = seq_key, KEYS[2] = events_key, KEYS[3] = entities_key
+/// KEYS[1] = seq_key, KEYS[2] = events_key, KEYS[3] = entities_key,
+/// KEYS[4] = journals_key
 /// ARGV[1] = expected_seq (string-encoded integer)
 /// ARGV[2] = entity_ref_json (for SADD into entities set)
-/// ARGV[3..N] = serialized event JSONs
+/// ARGV[3] = journal_member (order-preserving encoded type and id)
+/// ARGV[4..N] = serialized event JSONs
 ///
 /// Returns: `{1, new_seq}` on success, `{0, current_seq}` on conflict.
 const APPEND_LUA: &str = r#"
 local seq_key = KEYS[1]
 local events_key = KEYS[2]
 local entities_key = KEYS[3]
+local journals_key = KEYS[4]
 local expected = tonumber(ARGV[1])
 local entity_ref = ARGV[2]
+local journal_member = ARGV[3]
 
 local current = tonumber(redis.call('GET', seq_key) or '0')
 if current ~= expected then
     return {0, current}
 end
 
-for i = 3, #ARGV do
+for i = 4, #ARGV do
     redis.call('RPUSH', events_key, ARGV[i])
 end
 
-local new_seq = expected + (#ARGV - 2)
+local new_seq = expected + (#ARGV - 3)
 redis.call('SET', seq_key, tostring(new_seq))
 redis.call('SADD', entities_key, entity_ref)
+redis.call('ZADD', journals_key, 0, journal_member)
 
 return {1, new_seq}
 "#;
@@ -159,6 +164,28 @@ impl RedisEventStore {
         format!("{}:entities:{tenant}", crate::keys::PREFIX)
     }
 
+    fn tenant_journals_key(tenant: &str) -> String {
+        format!("{}:journals:{tenant}", crate::keys::PREFIX)
+    }
+
+    fn journal_member(entity_type: &str, entity_id: &str) -> String {
+        format!(
+            "{}!{}",
+            encode_lex_component(entity_type),
+            encode_lex_component(entity_id)
+        )
+    }
+
+    fn parse_journal_member(member: &str) -> Result<(String, String), PersistenceError> {
+        let (entity_type, entity_id) = member.split_once('!').ok_or_else(|| {
+            PersistenceError::Serialization("invalid Redis journal index member".to_string())
+        })?;
+        Ok((
+            decode_lex_component(entity_type)?,
+            decode_lex_component(entity_id)?,
+        ))
+    }
+
     fn trajectory_key(tenant: &str) -> String {
         format!("{}:trajectories:{tenant}", crate::keys::PREFIX)
     }
@@ -215,9 +242,10 @@ impl EventStore for RedisEventStore {
         let seq_key = Self::seq_key(tenant, entity_type, entity_id);
         let events_key = Self::events_key(tenant, entity_type, entity_id);
         let entities_key = Self::tenant_entities_key(tenant);
+        let journals_key = Self::tenant_journals_key(tenant);
 
         // Pre-serialize events with provisional sequence numbers.
-        let mut args: Vec<String> = Vec::with_capacity(events.len() + 2);
+        let mut args: Vec<String> = Vec::with_capacity(events.len() + 3);
         args.push(expected_sequence.to_string());
 
         let entity_ref = EntityRef {
@@ -227,6 +255,7 @@ impl EventStore for RedisEventStore {
         let entity_ref_json = serde_json::to_string(&entity_ref)
             .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
         args.push(entity_ref_json);
+        args.push(Self::journal_member(entity_type, entity_id));
 
         let mut seq = expected_sequence;
         for event in events {
@@ -238,7 +267,7 @@ impl EventStore for RedisEventStore {
             args.push(encoded);
         }
 
-        let keys = vec![seq_key, events_key, entities_key];
+        let keys = vec![seq_key, events_key, entities_key, journals_key];
         let result: Vec<i64> = self
             .append_script
             .evalsha_with_reload(&self.client, keys, args)
@@ -358,6 +387,62 @@ impl EventStore for RedisEventStore {
         }
         out.sort_by_key(|e| e.sequence_nr);
         Ok(out)
+    }
+
+    async fn read_events_limited(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let events_key = Self::events_key(tenant, entity_type, entity_id);
+        let end = from_sequence
+            .saturating_add(limit as u64)
+            .saturating_sub(1)
+            .min(i64::MAX as u64) as i64;
+        let encoded_events: Vec<String> = self
+            .client
+            .lrange(&events_key, from_sequence.min(i64::MAX as u64) as i64, end)
+            .await
+            .map_err(storage_error)?;
+        encoded_events
+            .into_iter()
+            .map(|encoded| {
+                serde_json::from_str(&encoded)
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))
+            })
+            .collect()
+    }
+
+    async fn read_latest_events(
+        &self,
+        persistence_id: &str,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let events_key = Self::events_key(tenant, entity_type, entity_id);
+        let start = -(limit.min(i64::MAX as usize) as i64);
+        let encoded_events: Vec<String> = self
+            .client
+            .lrange(&events_key, start, -1)
+            .await
+            .map_err(storage_error)?;
+        encoded_events
+            .into_iter()
+            .map(|encoded| {
+                serde_json::from_str(&encoded)
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))
+            })
+            .collect()
     }
 
     async fn save_snapshot(
@@ -520,6 +605,88 @@ impl EventStore for RedisEventStore {
         out.sort();
         out.dedup();
         Ok(out)
+    }
+
+    async fn list_journal_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: Option<&str>,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let key = Self::tenant_journals_key(tenant);
+        let (min, max) = match entity_type {
+            Some(wanted) => {
+                if after.is_some_and(|(after_type, _)| after_type > wanted) {
+                    return Ok(Vec::new());
+                }
+                let prefix = format!("{}!", encode_lex_component(wanted));
+                let min = match after {
+                    Some((after_type, after_id)) if after_type == wanted => {
+                        format!("({}", Self::journal_member(after_type, after_id))
+                    }
+                    _ => format!("[{prefix}"),
+                };
+                (min, format!("[{prefix}~"))
+            }
+            None => (
+                after.map_or_else(
+                    || "-".to_string(),
+                    |(after_type, after_id)| {
+                        format!("({}", Self::journal_member(after_type, after_id))
+                    },
+                ),
+                "+".to_string(),
+            ),
+        };
+        let count = limit.min(i64::MAX as usize) as i64;
+        let members: Vec<String> = self
+            .client
+            .zrangebylex(&key, min, max, Some((0, count)))
+            .await
+            .map_err(storage_error)?;
+        members
+            .into_iter()
+            .map(|member| Self::parse_journal_member(&member))
+            .collect()
+    }
+}
+
+fn encode_lex_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(value.len().saturating_mul(2));
+    for byte in value.as_bytes() {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn decode_lex_component(value: &str) -> Result<String, PersistenceError> {
+    if !value.len().is_multiple_of(2) {
+        return Err(PersistenceError::Serialization(
+            "invalid Redis journal index component".to_string(),
+        ));
+    }
+    let mut decoded = Vec::with_capacity(value.len() / 2);
+    for pair in value.as_bytes().chunks_exact(2) {
+        let high = decode_hex_digit(pair[0])?;
+        let low = decode_hex_digit(pair[1])?;
+        decoded.push((high << 4) | low);
+    }
+    String::from_utf8(decoded).map_err(|error| PersistenceError::Serialization(error.to_string()))
+}
+
+fn decode_hex_digit(digit: u8) -> Result<u8, PersistenceError> {
+    match digit {
+        b'0'..=b'9' => Ok(digit - b'0'),
+        b'a'..=b'f' => Ok(digit - b'a' + 10),
+        _ => Err(PersistenceError::Serialization(
+            "invalid Redis journal index component".to_string(),
+        )),
     }
 }
 

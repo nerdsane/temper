@@ -52,6 +52,7 @@ async fn actor_project_full_lifecycle() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -69,6 +70,7 @@ async fn actor_project_full_lifecycle() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -86,6 +88,7 @@ async fn actor_project_full_lifecycle() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -111,6 +114,7 @@ async fn actor_project_verify_requires_building_state() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -142,6 +146,7 @@ async fn actor_tenant_full_lifecycle() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -159,6 +164,7 @@ async fn actor_tenant_full_lifecycle() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -176,6 +182,7 @@ async fn actor_tenant_full_lifecycle() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -193,6 +200,7 @@ async fn actor_tenant_full_lifecycle() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -217,6 +225,7 @@ async fn actor_tenant_cannot_deploy_archived() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -230,6 +239,7 @@ async fn actor_tenant_cannot_deploy_archived() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -245,6 +255,7 @@ async fn actor_tenant_cannot_deploy_archived() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -281,6 +292,7 @@ async fn actor_catalog_publish_and_fork() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -298,6 +310,7 @@ async fn actor_catalog_publish_and_fork() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -315,6 +328,7 @@ async fn actor_catalog_publish_and_fork() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -350,6 +364,7 @@ async fn actor_collaborator_invite_accept_remove() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -367,6 +382,7 @@ async fn actor_collaborator_invite_accept_remove() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -383,6 +399,7 @@ async fn actor_collaborator_invite_accept_remove() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -413,6 +430,7 @@ async fn actor_version_lifecycle() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -429,6 +447,7 @@ async fn actor_version_lifecycle() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -483,6 +502,7 @@ async fn actor_multiple_system_entities_independent() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -496,6 +516,7 @@ async fn actor_multiple_system_entities_independent() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )
@@ -509,6 +530,7 @@ async fn actor_multiple_system_entities_independent() {
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             TIMEOUT,
         )

@@ -47,6 +47,13 @@ struct RuntimeMetrics {
     integration_silent_exit_total: Counter<u64>,
     // ADR-0152: background integration failure that could not be compensated.
     integration_failure_dropped_total: Counter<u64>,
+    // --- ADR-0158: durable entity-reaction delivery ----------------------
+    reaction_delivery_outcome_total: Counter<u64>,
+    reaction_delivery_attempts: Histogram<u64>,
+    reaction_delivery_lease_recovered_total: Counter<u64>,
+    #[cfg(feature = "observe")]
+    reaction_delivery_manual_retry_total: Counter<u64>,
+    reaction_delivery_queue_age_ms: Histogram<f64>,
     // --- ADR-0050: liveness coverage enforcement --------------------------
     spec_liveness_violations_total: Counter<u64>,
     spec_allow_indefinite_states: Gauge<u64>,
@@ -236,6 +243,28 @@ fn metrics() -> &'static RuntimeMetrics {
                      critical-severity.",
                 )
                 .build(),
+            reaction_delivery_outcome_total: meter
+                .u64_counter("temper_reaction_delivery_outcome_total")
+                .with_description("ADR-0158: durable reaction delivery outcomes.")
+                .build(),
+            reaction_delivery_attempts: meter
+                .u64_histogram("temper_reaction_delivery_attempts")
+                .with_description("ADR-0158: automatic attempts consumed by a durable reaction delivery.")
+                .build(),
+            reaction_delivery_lease_recovered_total: meter
+                .u64_counter("temper_reaction_delivery_lease_recovered_total")
+                .with_description("ADR-0158: expired durable reaction leases recovered after interruption.")
+                .build(),
+            #[cfg(feature = "observe")]
+            reaction_delivery_manual_retry_total: meter
+                .u64_counter("temper_reaction_delivery_manual_retry_total")
+                .with_description("ADR-0158: operator retry requests, classified by outcome.")
+                .build(),
+            reaction_delivery_queue_age_ms: meter
+                .f64_histogram("temper_reaction_delivery_queue_age_ms")
+                .with_unit("ms")
+                .with_description("ADR-0158: age of a durable reaction delivery at terminal outcome.")
+                .build(),
             spec_liveness_violations_total: meter
                 .u64_counter("temper_spec_liveness_violations_total")
                 .with_description(
@@ -418,6 +447,44 @@ fn metrics() -> &'static RuntimeMetrics {
                 .build(),
         }
     })
+}
+
+/// Record a terminal durable-reaction outcome without high-cardinality IDs.
+pub(crate) fn record_reaction_delivery_outcome(
+    outcome: &'static str,
+    attempts: u32,
+    queue_age: Duration,
+) {
+    let attrs = [KeyValue::new("outcome", outcome)];
+    metrics().reaction_delivery_outcome_total.add(1, &attrs);
+    metrics()
+        .reaction_delivery_attempts
+        .record(u64::from(attempts), &attrs);
+    metrics()
+        .reaction_delivery_queue_age_ms
+        .record(queue_age.as_secs_f64() * 1000.0, &attrs);
+}
+
+/// Record a low-cardinality durable-reaction lifecycle event.
+pub(crate) fn record_reaction_delivery_event(event: &'static str) {
+    metrics()
+        .reaction_delivery_outcome_total
+        .add(1, &[KeyValue::new("outcome", event)]);
+}
+
+/// Record recovery of an expired fenced delivery lease.
+pub(crate) fn record_reaction_delivery_lease_recovered() {
+    metrics()
+        .reaction_delivery_lease_recovered_total
+        .add(1, &[]);
+}
+
+/// Record an operator retry decision without identifying the delivery.
+#[cfg(feature = "observe")]
+pub(crate) fn record_reaction_delivery_manual_retry(outcome: &'static str) {
+    metrics()
+        .reaction_delivery_manual_retry_total
+        .add(1, &[KeyValue::new("outcome", outcome)]);
 }
 
 /// Record actor and entity counts from the current server state snapshot.

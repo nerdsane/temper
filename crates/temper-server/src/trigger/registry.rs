@@ -94,6 +94,32 @@ impl ReactionRegistry {
         results
     }
 
+    /// Return every rule that can be selected by a source action, before the
+    /// post-transition state exists.
+    ///
+    /// The entity actor persists this bounded candidate set with the source
+    /// event. Delivery evaluates each rule's state and guard against the exact
+    /// committed source snapshot, so a restart never consults a newer registry
+    /// version or guesses the post-state before commit.
+    pub fn candidates(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        action: &str,
+    ) -> Vec<&ReactionRule> {
+        let Some(index) = self.tenants.get(tenant) else {
+            return Vec::new();
+        };
+        let exact_key = format!("{entity_type}:{action}");
+        let wildcard_key = format!("{entity_type}:*");
+        index
+            .get(&exact_key)
+            .into_iter()
+            .flatten()
+            .chain(index.get(&wildcard_key).into_iter().flatten())
+            .collect()
+    }
+
     /// Check if a tenant has any registered rules.
     pub fn has_rules(&self, tenant: &TenantId) -> bool {
         self.tenants.get(tenant).is_some_and(|idx| !idx.is_empty())
@@ -122,6 +148,8 @@ struct ReactionToml {
     when: TriggerToml,
     then: TargetToml,
     resolve_target: ResolverToml,
+    #[serde(default)]
+    drop_ok: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -264,6 +292,7 @@ pub fn parse_reactions(toml_str: &str) -> Result<Vec<ReactionRule>, String> {
             // they dispatch with inherited invoking context under the new
             // dispatcher semantics (elevation requires [[action.triggers]]).
             principal: None,
+            drop_ok: r.drop_ok,
         });
     }
 
@@ -298,6 +327,7 @@ mod tests {
             },
             resolve_target: TargetResolver::SameId,
             principal: None,
+            drop_ok: false,
         }
     }
 
@@ -357,6 +387,34 @@ mod tests {
         // Wrong to_state
         let results = reg.lookup(&tenant, "Order", "ConfirmOrder", "Cancelled");
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn candidate_lookup_preserves_post_state_rules_until_commit() {
+        let mut reg = ReactionRegistry::new();
+        reg.register_tenant_rules(
+            "t1",
+            vec![
+                sample_rule(
+                    "confirmed",
+                    "Order",
+                    Some("ConfirmOrder"),
+                    Some("Confirmed"),
+                    "Payment",
+                    "Authorize",
+                ),
+                sample_rule("wildcard", "Order", None, None, "AuditLog", "Record"),
+            ],
+        );
+
+        let candidates = reg.candidates(&TenantId::new("t1"), "Order", "ConfirmOrder");
+        assert_eq!(
+            candidates
+                .into_iter()
+                .map(|rule| rule.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["confirmed", "wildcard"]
+        );
     }
 
     #[test]

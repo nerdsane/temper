@@ -830,6 +830,81 @@ impl EventStore for PostgresEventStore {
             .collect()
     }
 
+    async fn read_events_limited(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let rows: Vec<(i64, String, serde_json::Value, serde_json::Value)> =
+            crate::dbm::postgres_query_as!(
+                "SELECT sequence_nr, event_type, payload, metadata FROM events \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 AND sequence_nr > $4 \
+                 ORDER BY sequence_nr ASC LIMIT $5",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .bind(from_sequence.min(i64::MAX as u64) as i64)
+            .bind(limit.min(i64::MAX as usize) as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+        rows.into_iter()
+            .map(|(sequence_nr, event_type, payload, metadata)| {
+                Ok(PersistenceEnvelope {
+                    sequence_nr: sequence_nr as u64,
+                    event_type,
+                    payload,
+                    metadata: serde_json::from_value(metadata)
+                        .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
+                })
+            })
+            .collect()
+    }
+
+    async fn read_latest_events(
+        &self,
+        persistence_id: &str,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let mut rows: Vec<(i64, String, serde_json::Value, serde_json::Value)> =
+            crate::dbm::postgres_query_as!(
+                "SELECT sequence_nr, event_type, payload, metadata FROM events \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+                 ORDER BY sequence_nr DESC LIMIT $4",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .bind(limit.min(i64::MAX as usize) as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+        rows.reverse();
+        rows.into_iter()
+            .map(|(sequence_nr, event_type, payload, metadata)| {
+                Ok(PersistenceEnvelope {
+                    sequence_nr: sequence_nr as u64,
+                    event_type,
+                    payload,
+                    metadata: serde_json::from_value(metadata)
+                        .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
+                })
+            })
+            .collect()
+    }
+
     /// Save (upsert) a snapshot for the given entity.
     ///
     /// Uses `ON CONFLICT … DO UPDATE` so that only the latest snapshot is
@@ -1032,6 +1107,76 @@ impl EventStore for PostgresEventStore {
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
 
         Ok(rows)
+    }
+
+    async fn list_journal_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: Option<&str>,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(i64::MAX as usize) as i64;
+        if let (Some(entity_type), Some((after_type, after_id))) = (entity_type, after)
+            && after_type == entity_type
+        {
+            return crate::dbm::postgres_query_as!(
+                "SELECT DISTINCT entity_type, entity_id FROM events \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id > $3 \
+                 ORDER BY entity_type, entity_id LIMIT $4",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(after_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| PersistenceError::Storage(error.to_string()));
+        }
+        if let Some(entity_type) = entity_type
+            && after.is_none_or(|(after_type, _)| after_type < entity_type)
+        {
+            return crate::dbm::postgres_query_as!(
+                "SELECT DISTINCT entity_type, entity_id FROM events \
+                 WHERE tenant = $1 AND entity_type = $2 \
+                 ORDER BY entity_type, entity_id LIMIT $3",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| PersistenceError::Storage(error.to_string()));
+        }
+        if entity_type.is_some() {
+            return Ok(Vec::new());
+        }
+        if let Some((after_type, after_id)) = after {
+            return crate::dbm::postgres_query_as!(
+                "SELECT DISTINCT entity_type, entity_id FROM events \
+                 WHERE tenant = $1 AND (entity_type > $2 OR (entity_type = $2 AND entity_id > $3)) \
+                 ORDER BY entity_type, entity_id LIMIT $4",
+            )
+            .bind(tenant)
+            .bind(after_type)
+            .bind(after_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| PersistenceError::Storage(error.to_string()));
+        }
+        crate::dbm::postgres_query_as!(
+            "SELECT DISTINCT entity_type, entity_id FROM events \
+             WHERE tenant = $1 ORDER BY entity_type, entity_id LIMIT $2",
+        )
+        .bind(tenant)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| PersistenceError::Storage(error.to_string()))
     }
 }
 

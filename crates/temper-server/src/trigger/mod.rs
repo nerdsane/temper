@@ -8,6 +8,7 @@
 //! verifiable) while enabling multi-entity workflows like e-commerce order
 //! fulfilment cascades.
 
+pub mod delivery;
 pub mod dispatcher;
 pub(crate) mod guard;
 pub(crate) mod params;

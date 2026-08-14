@@ -46,6 +46,7 @@ async fn dispatch_action(
                 cross_entity_booleans: BTreeMap::new(),
                 idempotency_key: None,
                 expected_sequence: None,
+                reaction_context: None,
             },
             Duration::from_secs(5),
         )
@@ -66,6 +67,7 @@ async fn dispatch_action_with_preconditions(
                 cross_entity_booleans: BTreeMap::new(),
                 idempotency_key: Some(idempotency_key.into()),
                 expected_sequence: Some(expected_sequence),
+                reaction_context: None,
             },
             Duration::from_secs(5),
         )
