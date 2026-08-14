@@ -65,10 +65,10 @@ enum Commands {
         /// (e.g. katagami-curation + katagami-commons) into one joint proof.
         #[arg(short, long = "specs-dir", default_value = "specs")]
         specs_dir: Vec<String>,
-        /// Joint-state BFS budget for composite (cross-entity) verification.
-        /// Default 250_000. An exhausted budget fails the command — it is
-        /// not a pass. Raise this when a pair of machines reports INCOMPLETE.
-        #[arg(long, default_value_t = 250_000)]
+        /// Unique joint-state budget for composite (cross-entity) verification.
+        /// Each entity is projected to the join vector (status). Default 1_000_000.
+        /// An exhausted budget fails the command — it is not a pass.
+        #[arg(long, default_value_t = 1_000_000)]
         composite_budget: usize,
     },
     /// Lint specs locally, then run the verification cascade on a remote Temper server
@@ -513,7 +513,7 @@ mod tests {
                 composite_budget,
             } => {
                 assert_eq!(specs_dir, vec!["custom-specs".to_string()]);
-                assert_eq!(composite_budget, 250_000);
+                assert_eq!(composite_budget, 1_000_000);
             }
             _ => panic!("expected Verify command"),
         }

@@ -238,7 +238,7 @@ fn run_composite_verification(
         parsed_automata.values().collect();
 
     println!(
-        "\nRunning composite cross-entity verification (ADR-0150, budget {composite_budget})..."
+        "\nRunning composite cross-entity verification (ADR-0150, status join vector, unique budget {composite_budget})..."
     );
     let results = verify_all_with_budget(&automaton_refs, composite_budget);
 

@@ -19,20 +19,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use stateright::{Checker, Model};
 use temper_spec::automaton::{Automaton, TriggerGraph};
 
 use super::model::{CompositeTemperModel, DroppedReaction};
 use super::{CompositePlanError, CompositeVerificationPlan};
 
-/// Default joint-state BFS budget (target unique-state count). The checker
-/// may slightly exceed it for performance, but stops near it; if the space
-/// is larger, the run is reported [`CompositeOutcome::Incomplete`].
-///
-/// Sized to comfortably cover small app compositions (a handful of entities,
-/// each with a few states + bounded counters) while bounding pathological
-/// products. Tune via [`verify_composite_with_budget`] when needed.
-pub const DEFAULT_COMPOSITE_STATE_BUDGET: usize = 250_000;
+/// Default joint-state BFS budget (unique joint states after join-vector
+/// projection). If the unique space is larger, the run is reported
+/// [`CompositeOutcome::Incomplete`]. Tune via [`verify_composite_with_budget`].
+pub const DEFAULT_COMPOSITE_STATE_BUDGET: usize = 1_000_000;
 
 /// Outcome of a bounded composite BFS run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,8 +153,8 @@ pub fn verify_composite(
     verify_composite_with_budget(automatons, seed, DEFAULT_COMPOSITE_STATE_BUDGET)
 }
 
-/// Verify the composite rooted at `seed`, bounding the BFS to roughly
-/// `state_budget` unique states. See [`CompositeOutcome::Incomplete`].
+/// Verify the composite rooted at `seed`, bounding the unique-state BFS
+/// to `state_budget`. See [`CompositeOutcome::Incomplete`].
 pub fn verify_composite_with_budget(
     automatons: &[&Automaton],
     seed: &str,
@@ -169,42 +164,21 @@ pub fn verify_composite_with_budget(
     let scope: Vec<String> = plan.models.keys().cloned().collect();
     let model = CompositeTemperModel::from_plan(plan);
 
-    let checker = model
-        .checker()
-        .target_state_count(state_budget)
-        .spawn_bfs()
-        .join();
+    // Unique-state BFS is the source of truth. Stateright's
+    // `target_state_count` counts generated edges, which over-counts
+    // machines with many status self-loops and reports Incomplete on a
+    // join that has already been fully seen.
+    let walk = model.explore_unique(state_budget);
 
-    let states_explored = checker.unique_state_count();
-    // The run is genuinely complete only when the checker exhausted the space
-    // WITHOUT the budget ever gating it. `is_done()` alone is unreliable here:
-    // a worker that stops on the state-count budget still drops its job-broker
-    // handle, which can flip `is_done()` true even though jobs remained. So we
-    // additionally require that exploration stayed strictly under the budget —
-    // if it reached the ceiling, the budget may have cut it short and we must
-    // report INCOMPLETE rather than claim a pass.
-    let property_complete = checker.is_done() && states_explored < state_budget;
-
-    // Collect every non-`no_dropped_reaction` property violation (e.g. a joint
-    // local invariant) from the Stateright run.
     let mut other_violations = Vec::new();
-    for (property_name, _path) in checker.discoveries() {
-        if property_name != "no_dropped_reaction" {
-            other_violations.push(property_name.to_string());
-        }
+    if walk.invariant_failed {
+        other_violations.push("joint_local_invariants".to_string());
     }
 
-    // Enumerate EVERY distinct dropped reaction, not just the single
-    // counterexample Stateright surfaces — authors want to see all of them in
-    // one run. `enumerate_drops` walks the reachable joint space directly.
-    let model = checker.model();
-    let (dropped_reactions, drops_complete) = model.enumerate_drops(state_budget);
-
-    let is_complete = property_complete && drops_complete;
-    let has_violation = !dropped_reactions.is_empty() || !other_violations.is_empty();
+    let has_violation = !walk.dropped_reactions.is_empty() || !other_violations.is_empty();
     let outcome = if has_violation {
         CompositeOutcome::Violated
-    } else if is_complete {
+    } else if walk.complete {
         CompositeOutcome::Verified
     } else {
         CompositeOutcome::Incomplete
@@ -214,8 +188,8 @@ pub fn verify_composite_with_budget(
         seed: seed.to_string(),
         scope,
         outcome,
-        states_explored,
-        dropped_reactions,
+        states_explored: walk.unique_states,
+        dropped_reactions: walk.dropped_reactions,
         other_violations,
     })
 }

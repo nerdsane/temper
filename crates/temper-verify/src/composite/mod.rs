@@ -29,6 +29,7 @@
 
 pub mod invariant_eval;
 pub mod model;
+pub mod project;
 pub mod verify;
 
 pub use model::{CompositeAction, CompositeState, CompositeTemperModel, DroppedReaction};
@@ -189,7 +190,8 @@ impl CompositeVerificationPlan {
             let aut = by_name
                 .get(entity.as_str())
                 .expect("scope member is in input set");
-            let model = build_model_from_automaton(aut, DEFAULT_COMPOSITE_MAX_COUNTER);
+            let mut model = build_model_from_automaton(aut, DEFAULT_COMPOSITE_MAX_COUNTER);
+            project::project_model_to_join_vector(&mut model);
             models.insert(entity.clone(), model);
         }
 

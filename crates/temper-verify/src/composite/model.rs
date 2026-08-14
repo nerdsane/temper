@@ -335,6 +335,18 @@ impl CompositeTemperModel {
     /// Distinctness is by the full [`DroppedReaction`] tuple, so the same
     /// logical drop reached via different paths is reported once.
     pub fn enumerate_drops(&self, state_budget: usize) -> (Vec<DroppedReaction>, bool) {
+        let walk = self.explore_unique(state_budget);
+        (walk.dropped_reactions, walk.complete)
+    }
+
+    /// Unique-state BFS over the join. Budget is unique joint states, not
+    /// generated edges (Stateright's `target_state_count` counts the latter
+    /// and will stop early on machines with many status self-loops).
+    ///
+    /// `complete` is true only when the queue emptied with strictly fewer
+    /// than `state_budget` unique states. Hitting the ceiling is
+    /// Incomplete, never a pass.
+    pub fn explore_unique(&self, state_budget: usize) -> UniqueExplore {
         use std::collections::BTreeSet;
         use std::collections::VecDeque;
 
@@ -345,8 +357,12 @@ impl CompositeTemperModel {
         // collapse to one key.
         let mut visited: BTreeSet<String> = BTreeSet::new();
         let mut queue: VecDeque<CompositeState> = VecDeque::new();
+        let mut invariant_failed = false;
 
         for init in self.init_states() {
+            if !joint_invariants_hold(self, &init) {
+                invariant_failed = true;
+            }
             if visited.insert(state_key(&init)) {
                 queue.push_back(init);
             }
@@ -367,14 +383,47 @@ impl CompositeTemperModel {
                 if let Some(drop) = &next.dropped {
                     drops.insert(drop.clone());
                 }
+                if !joint_invariants_hold(self, &next) {
+                    invariant_failed = true;
+                }
                 if visited.insert(state_key(&next)) {
                     queue.push_back(next);
                 }
             }
         }
 
-        (drops.into_iter().collect(), complete)
+        UniqueExplore {
+            unique_states: visited.len(),
+            complete: complete && visited.len() < state_budget,
+            dropped_reactions: drops.into_iter().collect(),
+            invariant_failed,
+        }
     }
+}
+
+/// Result of a unique-state composite BFS.
+#[derive(Debug, Clone)]
+pub struct UniqueExplore {
+    /// Distinct joint states visited (drop marker excluded from identity).
+    pub unique_states: usize,
+    /// `true` only when the space was exhausted under the unique budget.
+    pub complete: bool,
+    /// Distinct dropped reactions witnessed.
+    pub dropped_reactions: Vec<DroppedReaction>,
+    /// A local (status-level) invariant failed on some visited state.
+    pub invariant_failed: bool,
+}
+
+fn joint_invariants_hold(model: &CompositeTemperModel, state: &CompositeState) -> bool {
+    for (entity_type, entity_state) in &state.entities {
+        let Some(entity_model) = model.models.get(entity_type) else {
+            continue;
+        };
+        if !super::invariant_eval::all_local_invariants_hold(entity_model, entity_state) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Visited-set key for a joint state: the per-entity rendering, with the

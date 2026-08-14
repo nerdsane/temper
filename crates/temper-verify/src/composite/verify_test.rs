@@ -415,49 +415,43 @@ field = "workspace_id"
     assert!(result.dropped_reactions.is_empty());
 }
 
-#[test]
-fn incomplete_when_budget_exhausted() {
-    // Six counter entities (each ranging 0..=3 under the per-entity
-    // ceiling) give a joint space of 4^6 = 4096 states, well above
-    // Stateright's 1500-state work-block granularity. Counter0 fans out a
-    // trigger to every other counter so all six land in one scope; the
-    // targets are always enabled (no guard, single state) so nothing
-    // drops — the run is clean but too large for the budget. A budget of
-    // 100 forces the BFS to stop early, yielding an honest INCOMPLETE
-    // (never a silent pass).
-    // Counter0 declares an unreachable `Idle` state and gates every
-    // fan-out trigger on `to_state = "Idle"`. Inc goes to "Counting", so
-    // the triggers never actually fire: the edges exist only to pull all
-    // six counters into one scope, keeping them independent (4^6 states).
+/// Six independent 4-status chains. Hub fans out a never-firing trigger
+/// (gated on unreachable `Idle`) so all six land in one scope. Product is
+/// 4^6 = 4096 unique joint statuses. Budget 100 must report INCOMPLETE.
+fn independent_status_product(n: usize) -> Vec<Automaton> {
     let mut hub = String::from(
         r#"
 [automaton]
-name = "Counter0"
-states = ["Counting", "Idle"]
-initial = "Counting"
-allow_indefinite_states = ["Counting", "Idle"]
-
-[[state]]
-name = "n"
-type = "counter"
-initial = "0"
+name = "Chain0"
+states = ["S0", "S1", "S2", "S3", "Idle"]
+initial = "S0"
+allow_indefinite_states = ["S0", "S1", "S2", "S3", "Idle"]
 
 [[action]]
-name = "Inc"
-from = ["Counting"]
-to = "Counting"
-effect = "increment n"
+name = "Step0"
+from = ["S0"]
+to = "S1"
+
+[[action]]
+name = "Step1"
+from = ["S1"]
+to = "S2"
+
+[[action]]
+name = "Step2"
+from = ["S2"]
+to = "S3"
 "#,
     );
-    for i in 1..6 {
+    for i in 1..n {
         hub.push_str(&format!(
             r#"
 [[action.triggers]]
 name = "fanout_{i}"
 kind = "entity"
 to_state = "Idle"
-target_entity = "Counter{i}"
-target_action = "Inc"
+target_entity = "Chain{i}"
+target_action = "Step0"
 drop_ok = true
 
 [action.triggers.resolve_target]
@@ -466,35 +460,305 @@ type = "same_id"
         ));
     }
     let mut specs = vec![hub];
-    for i in 1..6 {
+    for i in 1..n {
         specs.push(format!(
             r#"
 [automaton]
-name = "Counter{i}"
-states = ["Counting"]
-initial = "Counting"
-allow_indefinite_states = ["Counting"]
-
-[[state]]
-name = "n"
-type = "counter"
-initial = "0"
+name = "Chain{i}"
+states = ["S0", "S1", "S2", "S3"]
+initial = "S0"
+allow_indefinite_states = ["S0", "S1", "S2", "S3"]
 
 [[action]]
-name = "Inc"
-from = ["Counting"]
-to = "Counting"
-effect = "increment n"
+name = "Step0"
+from = ["S0"]
+to = "S1"
+
+[[action]]
+name = "Step1"
+from = ["S1"]
+to = "S2"
+
+[[action]]
+name = "Step2"
+from = ["S2"]
+to = "S3"
 "#
         ));
     }
-    let parsed: Vec<_> = specs.iter().map(|s| parse_automaton(s).unwrap()).collect();
+    specs.iter().map(|s| parse_automaton(s).unwrap()).collect()
+}
+
+#[test]
+fn incomplete_when_budget_exhausted() {
+    let parsed = independent_status_product(6);
     let refs: Vec<&Automaton> = parsed.iter().collect();
-    let result = verify_composite_with_budget(&refs, "Counter0", 100).unwrap();
+    let result = verify_composite_with_budget(&refs, "Chain0", 100).unwrap();
     assert_eq!(
         result.outcome,
         CompositeOutcome::Incomplete,
         "exhausted budget must report INCOMPLETE: {result:?}"
     );
     assert!(!result.passed(), "incomplete is never a pass");
+}
+
+#[test]
+fn status_product_of_eight_chains_completes_under_million() {
+    // 4^8 = 65_536 unique statuses. After join-vector projection this is
+    // the shape of a multi-app compose; it must finish under the default
+    // unique budget rather than report Incomplete.
+    let parsed = independent_status_product(8);
+    let refs: Vec<&Automaton> = parsed.iter().collect();
+    let result = verify_composite_with_budget(&refs, "Chain0", 100_000).unwrap();
+    assert_eq!(result.outcome, CompositeOutcome::Verified, "{result:?}");
+    assert!(
+        result.states_explored > 60_000 && result.states_explored < 70_000,
+        "expected ~4^8 unique statuses, got {}",
+        result.states_explored
+    );
+}
+
+#[test]
+fn fat_catalog_bools_do_not_multiply_joint_states() {
+    // A catalog type with 8 independent flags has 2^8 local combinations.
+    // Composite only reads `status` (the actor's cross-entity guard), so
+    // those flags must not appear in the joint vector. Expected unique
+    // states: Language {{Draft, Published}} × Actor {{Idle, Done}} = 4.
+    let language = r#"
+[automaton]
+name = "Language"
+states = ["Draft", "Published"]
+initial = "Draft"
+allow_indefinite_states = ["Draft", "Published"]
+
+[[state]]
+name = "flag0"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "flag1"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "flag2"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "flag3"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "flag4"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "flag5"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "flag6"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "flag7"
+type = "bool"
+initial = "false"
+
+[[action]]
+name = "SetFlag0"
+from = ["Draft"]
+to = "Draft"
+effect = "set flag0 true"
+
+[[action]]
+name = "SetFlag1"
+from = ["Draft"]
+to = "Draft"
+effect = "set flag1 true"
+
+[[action]]
+name = "SetFlag2"
+from = ["Draft"]
+to = "Draft"
+effect = "set flag2 true"
+
+[[action]]
+name = "SetFlag3"
+from = ["Draft"]
+to = "Draft"
+effect = "set flag3 true"
+
+[[action]]
+name = "SetFlag4"
+from = ["Draft"]
+to = "Draft"
+effect = "set flag4 true"
+
+[[action]]
+name = "SetFlag5"
+from = ["Draft"]
+to = "Draft"
+effect = "set flag5 true"
+
+[[action]]
+name = "SetFlag6"
+from = ["Draft"]
+to = "Draft"
+effect = "set flag6 true"
+
+[[action]]
+name = "SetFlag7"
+from = ["Draft"]
+to = "Draft"
+effect = "set flag7 true"
+
+[[action]]
+name = "Publish"
+from = ["Draft"]
+to = "Published"
+"#;
+    let actor = r#"
+[automaton]
+name = "Actor"
+states = ["Idle", "Done"]
+initial = "Idle"
+allow_indefinite_states = ["Idle", "Done"]
+
+[[action]]
+name = "Finish"
+from = ["Idle"]
+to = "Done"
+guard = [
+  { type = "cross_entity_state", entity_type = "Language", entity_id_source = "language_id", required_status = ["Published"] },
+]
+"#;
+    let language = parse_automaton(language).unwrap();
+    let actor = parse_automaton(actor).unwrap();
+    let result = verify_composite(&[&language, &actor], "Actor").unwrap();
+    assert_eq!(result.outcome, CompositeOutcome::Verified, "{result:?}");
+    assert!(
+        result.states_explored < 20,
+        "join vector is status-only; 8 catalog flags must not multiply unique joint states, got {}",
+        result.states_explored
+    );
+}
+
+#[test]
+fn unique_budget_counts_states_not_generated_edges() {
+    // Three statuses × 20 self-loops produce many generated edges per
+    // unique state. Coupled to a 3-status peer via a never-firing
+    // trigger. Unique space is 3×3 = 9. A unique budget of 50 must
+    // exhaust that space (VERIFIED), not stop on generated-edge count.
+    let mut hub = String::from(
+        r#"
+[automaton]
+name = "Busy0"
+states = ["A", "B", "C", "Idle"]
+initial = "A"
+allow_indefinite_states = ["A", "B", "C", "Idle"]
+
+[[action]]
+name = "ToB"
+from = ["A"]
+to = "B"
+
+[[action]]
+name = "ToC"
+from = ["B"]
+to = "C"
+"#,
+    );
+    for i in 0..20 {
+        hub.push_str(&format!(
+            r#"
+[[action]]
+name = "StayA{i}"
+from = ["A"]
+to = "A"
+
+[[action]]
+name = "StayB{i}"
+from = ["B"]
+to = "B"
+
+[[action]]
+name = "StayC{i}"
+from = ["C"]
+to = "C"
+"#
+        ));
+    }
+    hub.push_str(
+        r#"
+[[action.triggers]]
+name = "fanout"
+kind = "entity"
+to_state = "Idle"
+target_entity = "Busy1"
+target_action = "ToB"
+drop_ok = true
+
+[action.triggers.resolve_target]
+type = "same_id"
+"#,
+    );
+    let mut peer = String::from(
+        r#"
+[automaton]
+name = "Busy1"
+states = ["A", "B", "C"]
+initial = "A"
+allow_indefinite_states = ["A", "B", "C"]
+
+[[action]]
+name = "ToB"
+from = ["A"]
+to = "B"
+
+[[action]]
+name = "ToC"
+from = ["B"]
+to = "C"
+"#,
+    );
+    for i in 0..20 {
+        peer.push_str(&format!(
+            r#"
+[[action]]
+name = "StayA{i}"
+from = ["A"]
+to = "A"
+
+[[action]]
+name = "StayB{i}"
+from = ["B"]
+to = "B"
+
+[[action]]
+name = "StayC{i}"
+from = ["C"]
+to = "C"
+"#
+        ));
+    }
+    let busy0 = parse_automaton(&hub).unwrap();
+    let busy1 = parse_automaton(&peer).unwrap();
+    let result = verify_composite_with_budget(&[&busy0, &busy1], "Busy0", 50).unwrap();
+    assert_eq!(
+        result.outcome,
+        CompositeOutcome::Verified,
+        "unique space is 9; budget 50 must complete, not stop on generated edges: {result:?}"
+    );
+    assert!(
+        result.states_explored < 20,
+        "unique joint states should be the 3×3 status product, got {}",
+        result.states_explored
+    );
 }
