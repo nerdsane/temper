@@ -305,10 +305,24 @@ fn run_composite_verification(
     }
 
     if any_violation {
+        let mut parts = Vec::new();
+        if !dropped_lines.is_empty() {
+            parts.push(format!(
+                "{} dropped reaction(s):\n  - {}",
+                dropped_lines.len(),
+                dropped_lines.join("\n  - ")
+            ));
+        }
+        let others: Vec<String> = results
+            .iter()
+            .flat_map(|r| r.other_violations.iter().cloned())
+            .collect();
+        if !others.is_empty() {
+            parts.push(format!("violated properties: {}", others.join(", ")));
+        }
         anyhow::bail!(
-            "composite cross-entity verification failed: {} dropped reaction(s):\n  - {}",
-            dropped_lines.len(),
-            dropped_lines.join("\n  - "),
+            "composite cross-entity verification failed: {}",
+            parts.join("; ")
         );
     }
     if any_incomplete {
