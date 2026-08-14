@@ -202,6 +202,69 @@ to = "Frozen"
 }
 
 #[test]
+fn katagami_shaped_submit_cannot_record_verdict() {
+    // The live Katagami join: Language.SubmitForReview must not fire
+    // Reviewer.RecordVerdict. RecordVerdict is only enabled from Reviewing;
+    // the reviewer is still SubmissionReceived at submit time. If this
+    // ever reports Verified, the composite checker is vacuous.
+    let language = parse_automaton(
+        r#"
+[automaton]
+name = "DesignLanguage"
+states = ["Draft", "UnderReview"]
+initial = "Draft"
+allow_indefinite_states = ["Draft", "UnderReview"]
+
+[[action]]
+name = "SubmitForReview"
+from = ["Draft"]
+to = "UnderReview"
+
+[[action.triggers]]
+name = "submit_records_verdict_too_soon"
+kind = "entity"
+target_entity = "ReviewAgent"
+target_action = "RecordVerdict"
+
+[action.triggers.resolve_target]
+type = "same_id"
+"#,
+    )
+    .unwrap();
+    let reviewer = parse_automaton(
+        r#"
+[automaton]
+name = "ReviewAgent"
+states = ["SubmissionReceived", "Reviewing", "VerdictRecorded"]
+initial = "SubmissionReceived"
+allow_indefinite_states = ["VerdictRecorded"]
+
+[[action]]
+name = "BeginReview"
+from = ["SubmissionReceived"]
+to = "Reviewing"
+
+[[action]]
+name = "RecordVerdict"
+from = ["Reviewing"]
+to = "VerdictRecorded"
+"#,
+    )
+    .unwrap();
+    let result = verify_composite(&[&language, &reviewer], "DesignLanguage").unwrap();
+    assert_eq!(result.outcome, CompositeOutcome::Violated, "{result:?}");
+    let drop = result
+        .dropped_reactions
+        .iter()
+        .find(|d| d.target_action == "RecordVerdict")
+        .expect("RecordVerdict drop must be reported");
+    assert_eq!(drop.source_entity, "DesignLanguage");
+    assert_eq!(drop.source_action, "SubmitForReview");
+    assert_eq!(drop.target_entity, "ReviewAgent");
+    assert_eq!(drop.target_state, "SubmissionReceived");
+}
+
+#[test]
 fn no_dropped_reaction_catches_from_state_mismatch() {
     let file = parse_automaton(file_touch_increments_workspace()).unwrap();
     let workspace = parse_automaton(freezable_workspace()).unwrap();
