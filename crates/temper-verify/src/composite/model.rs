@@ -358,12 +358,16 @@ impl CompositeTemperModel {
         let mut visited: BTreeSet<String> = BTreeSet::new();
         let mut queue: VecDeque<CompositeState> = VecDeque::new();
         let mut invariant_failed = false;
+        let mut adj: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut status_by_entity: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
         for init in self.init_states() {
             if !joint_invariants_hold(self, &init) {
                 invariant_failed = true;
             }
-            if visited.insert(state_key(&init)) {
+            let key = state_key(&init);
+            status_by_entity.insert(key.clone(), entity_statuses(&init));
+            if visited.insert(key) {
                 queue.push_back(init);
             }
         }
@@ -374,6 +378,7 @@ impl CompositeTemperModel {
                 complete = false;
                 break;
             }
+            let from = state_key(&state);
             let mut actions = Vec::new();
             self.actions(&state, &mut actions);
             for action in actions {
@@ -386,17 +391,29 @@ impl CompositeTemperModel {
                 if !joint_invariants_hold(self, &next) {
                     invariant_failed = true;
                 }
-                if visited.insert(state_key(&next)) {
+                let to = state_key(&next);
+                adj.entry(from.clone()).or_default().insert(to.clone());
+                status_by_entity
+                    .entry(to.clone())
+                    .or_insert_with(|| entity_statuses(&next));
+                if visited.insert(to) {
                     queue.push_back(next);
                 }
             }
         }
+
+        let liveness_failed = if complete && visited.len() < state_budget {
+            crate::liveness::unreachable_leads_to_joint(&self.models, &status_by_entity, &adj)
+        } else {
+            Vec::new()
+        };
 
         UniqueExplore {
             unique_states: visited.len(),
             complete: complete && visited.len() < state_budget,
             dropped_reactions: drops.into_iter().collect(),
             invariant_failed,
+            liveness_failed,
         }
     }
 }
@@ -412,6 +429,16 @@ pub struct UniqueExplore {
     pub dropped_reactions: Vec<DroppedReaction>,
     /// A local (status-level) invariant failed on some visited state.
     pub invariant_failed: bool,
+    /// `from ~> reaches` properties that fail on the joint graph.
+    pub liveness_failed: Vec<String>,
+}
+
+fn entity_statuses(state: &CompositeState) -> BTreeMap<String, String> {
+    state
+        .entities
+        .iter()
+        .map(|(k, v)| (k.clone(), v.status.clone()))
+        .collect()
 }
 
 fn joint_invariants_hold(model: &CompositeTemperModel, state: &CompositeState) -> bool {

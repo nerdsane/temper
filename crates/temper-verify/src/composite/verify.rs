@@ -174,6 +174,7 @@ pub fn verify_composite_with_budget(
     if walk.invariant_failed {
         other_violations.push("joint_local_invariants".to_string());
     }
+    other_violations.extend(walk.liveness_failed);
 
     let has_violation = !walk.dropped_reactions.is_empty() || !other_violations.is_empty();
     let outcome = if has_violation {

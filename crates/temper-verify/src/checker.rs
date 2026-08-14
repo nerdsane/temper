@@ -60,6 +60,13 @@ pub fn check_model(model: &TemperModel) -> VerificationResult {
         });
     }
 
+    for name in crate::liveness::unreachable_leads_to(model) {
+        counterexamples.push(Counterexample {
+            property: name,
+            trace: Vec::new(),
+        });
+    }
+
     let dead_transitions = find_dead_transitions(model);
     let all_properties_hold = counterexamples.is_empty() && dead_transitions.is_empty();
 

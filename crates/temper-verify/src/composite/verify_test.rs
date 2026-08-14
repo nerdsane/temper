@@ -202,6 +202,99 @@ to = "Frozen"
 }
 
 #[test]
+fn reachable_never_state_is_violated() {
+    // Publish is enabled, so Published is reachable, but never(Published).
+    let language = parse_automaton(
+        r#"
+[automaton]
+name = "DesignLanguage"
+states = ["Draft", "Published"]
+initial = "Draft"
+allow_indefinite_states = ["Draft", "Published"]
+
+[[action]]
+name = "Publish"
+from = ["Draft"]
+to = "Published"
+
+[[invariant]]
+name = "NeverPublished"
+assert = "never(Published)"
+"#,
+    )
+    .unwrap();
+    let reviewer = parse_automaton(
+        r#"
+[automaton]
+name = "ReviewAgent"
+states = ["SubmissionReceived"]
+initial = "SubmissionReceived"
+allow_indefinite_states = ["SubmissionReceived"]
+"#,
+    )
+    .unwrap();
+    let result = verify_composite(&[&language, &reviewer], "DesignLanguage").unwrap();
+    assert_eq!(result.outcome, CompositeOutcome::Violated, "{result:?}");
+    assert!(
+        result
+            .other_violations
+            .iter()
+            .any(|v| v.contains("joint_local_invariants") || v.contains("NeverPublished")),
+        "never(Published) must surface: {result:?}"
+    );
+}
+
+#[test]
+fn reading_query_trap_violates_leads_to_idle() {
+    // TakeQuery enters ReadingQuery. Nothing leaves. Liveness says
+    // ReadingQuery eventually reaches Idle. If this is Verified, `from`
+    // is being ignored because init is already Idle.
+    let curator = parse_automaton(
+        r#"
+[automaton]
+name = "CuratorAgent"
+states = ["Idle", "ReadingQuery"]
+initial = "Idle"
+allow_indefinite_states = ["Idle", "ReadingQuery"]
+
+[[action]]
+name = "TakeQuery"
+from = ["Idle"]
+to = "ReadingQuery"
+
+[[liveness]]
+name = "QueryEventuallyResolves"
+from = ["ReadingQuery"]
+reaches = ["Idle"]
+"#,
+    )
+    .unwrap();
+    let query = parse_automaton(
+        r#"
+[automaton]
+name = "CurationQuery"
+states = ["Submitted"]
+initial = "Submitted"
+allow_indefinite_states = ["Submitted"]
+"#,
+    )
+    .unwrap();
+    let result = verify_composite(&[&curator, &query], "CuratorAgent").unwrap();
+    assert_eq!(
+        result.outcome,
+        CompositeOutcome::Violated,
+        "ReadingQuery has no path to Idle: {result:?}"
+    );
+    assert!(
+        result
+            .other_violations
+            .iter()
+            .any(|v| v.contains("QueryEventuallyResolves") || v.contains("leads_to")),
+        "leads-to violation must be named: {result:?}"
+    );
+}
+
+#[test]
 fn katagami_shaped_submit_cannot_record_verdict() {
     // The live Katagami join: Language.SubmitForReview must not fire
     // Reviewer.RecordVerdict. RecordVerdict is only enabled from Reviewing;

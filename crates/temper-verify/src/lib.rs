@@ -9,6 +9,7 @@
 pub mod cascade;
 pub mod checker;
 pub mod composite;
+pub mod liveness;
 pub mod model;
 pub mod paths;
 pub mod proptest_gen;

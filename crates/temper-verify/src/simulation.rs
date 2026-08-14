@@ -292,10 +292,17 @@ fn check_liveness_post_simulation(
                     if targets.is_empty() {
                         continue;
                     }
-                    // If the actor started from a "from" state, it should have
-                    // reached a target state by the end of simulation.
-                    let started_from = from.is_empty() || from.contains(&model.initial_status);
-                    if started_from && !targets.contains(&final_state.status) {
+                    // Honor `from`: a run that ends in a `from` status that
+                    // is not a target has failed to leave. Also keep the
+                    // older "started in from" reading when `from` is empty
+                    // (must reach a target from the initial state).
+                    let ended_stuck_in_from = !from.is_empty()
+                        && from.contains(&final_state.status)
+                        && !targets.contains(&final_state.status);
+                    let started_from = from.is_empty();
+                    if ended_stuck_in_from
+                        || (started_from && !targets.contains(&final_state.status))
+                    {
                         violations.push(LivenessViolation {
                             actor_id: actor_id.clone(),
                             property: live.name.clone(),
