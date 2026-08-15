@@ -6,12 +6,11 @@
 
 use stateright::{Model, Property};
 
-use super::semantics::{apply_effects, evaluate_guard, guard_may_hold};
+use super::reference_contract::apply_effects as apply_reference_effects;
+use super::semantics::{apply_effects, evaluate_guard};
 use temper_spec::automaton::AssertCompareOp;
 
-use super::types::{
-    InvariantKind, LivenessKind, ModelEffect, TemperModel, TemperModelAction, TemperModelState,
-};
+use super::types::{InvariantKind, LivenessKind, TemperModel, TemperModelAction, TemperModelState};
 
 // -- Property condition functions (bare fn pointers) -------------------------
 
@@ -272,65 +271,25 @@ impl Model for TemperModel {
     type Action = TemperModelAction;
 
     fn init_states(&self) -> Vec<Self::State> {
-        vec![TemperModelState {
-            status: self.initial_status.clone(),
-            counters: self.initial_counters.clone(),
-            booleans: self.initial_booleans.clone(),
-            lists: self.initial_lists.clone(),
-        }]
+        let variants = if self.initial_counter_variants.is_empty() {
+            vec![self.initial_counters.clone()]
+        } else {
+            self.initial_counter_variants.clone()
+        };
+        variants
+            .into_iter()
+            .map(|counters| TemperModelState {
+                status: self.initial_status.clone(),
+                counters,
+                booleans: self.initial_booleans.clone(),
+                lists: self.initial_lists.clone(),
+            })
+            .collect()
     }
 
     fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
-        for t in &self.transitions {
-            // Check status precondition
-            let status_ok =
-                t.from_states.is_empty() || t.from_states.iter().any(|s| s == &state.status);
-            if !status_ok {
-                continue;
-            }
-
-            // Check guard for *fireability*. A cross-entity guard is a free
-            // (nondeterministic) boolean: `guard_may_hold` returns true for it,
-            // so the gated edge is offered (guard-true branch). The guard-false
-            // branch is covered by BFS exploring states where it is not taken.
-            if !guard_may_hold(&t.guard, state) {
-                continue;
-            }
-
-            // Check counter bounds: increment effects must not exceed bounds
-            let mut within_bounds = true;
-            for effect in &t.effects {
-                if let ModelEffect::IncrementCounter(var) = effect {
-                    let current = state.counters.get(var).copied().unwrap_or(0);
-                    let bound = self
-                        .counter_bounds
-                        .get(var)
-                        .copied()
-                        .unwrap_or(self.default_max_counter);
-                    if current >= bound {
-                        within_bounds = false;
-                        break;
-                    }
-                }
-                if let ModelEffect::ListAppend(var) = effect {
-                    let current_len = state.lists.get(var).map_or(0, Vec::len);
-                    if current_len >= self.default_max_counter {
-                        within_bounds = false;
-                        break;
-                    }
-                }
-            }
-            if !within_bounds {
-                continue;
-            }
-
-            actions.push(TemperModelAction {
-                name: t.name.clone(),
-                target_state: t.to_state.clone(),
-            });
-        }
+        super::action_enumeration::enumerate_actions(self, state, None, actions);
     }
-
     fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
         let resolved = self.transitions.iter().find(|t| t.name == action.name)?;
 
@@ -338,6 +297,9 @@ impl Model for TemperModel {
         let mut next = state.clone();
         next.status = new_status;
         apply_effects(&resolved.effects, &mut next, &action.name);
+        if !apply_reference_effects(&resolved.effects, &mut next, &action.reference_params) {
+            return None;
+        }
         Some(next)
     }
 

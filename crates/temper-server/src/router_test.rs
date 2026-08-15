@@ -39,6 +39,62 @@ fn test_state_with_order_and_payment_ioa() -> ServerState {
     ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap()
 }
 
+fn test_state_with_typed_references() -> ServerState {
+    let csdl_xml = r#"<?xml version="1.0"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+ <edmx:DataServices><Schema Namespace="Test" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+  <EntityType Name="Workspace"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/><Property Name="Status" Type="Edm.String"/></EntityType>
+  <EntityType Name="Document"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/><Property Name="workspace_id" Type="Edm.String"/><Property Name="Status" Type="Edm.String"/></EntityType>
+  <EntityContainer Name="Svc"><EntitySet Name="Workspaces" EntityType="Test.Workspace"/><EntitySet Name="Documents" EntityType="Test.Document"/></EntityContainer>
+ </Schema></edmx:DataServices>
+</edmx:Edmx>"#;
+    let workspace = r#"
+[automaton]
+name = "Workspace"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+"#;
+    let document = r#"
+[automaton]
+name = "Document"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+[[state]]
+name = "workspace_id"
+type = "ref"
+entity_type = "Workspace"
+initial = ""
+[[key]]
+name = "workspace"
+properties = ["workspace_id"]
+entity_id = true
+"#;
+    let csdl = parse_csdl(csdl_xml).unwrap();
+    let specs = std::collections::BTreeMap::from([
+        ("Workspace".to_string(), workspace.to_string()),
+        ("Document".to_string(), document.to_string()),
+    ]);
+    ServerState::with_specs(
+        ActorSystem::new("typed-reference-e2e"),
+        csdl,
+        csdl_xml.into(),
+        specs,
+    )
+    .unwrap()
+}
+
+#[test]
+fn contracted_types_use_the_canonical_actor_path() {
+    let mut state = test_state_with_typed_references();
+    state.actor_backed_types.insert("Document".into());
+    state.actor_backed_types.insert("Workspace".into());
+    let tenant = TenantId::default();
+    assert!(!state.is_pg_actor_backed(&tenant, "Document"));
+    assert!(state.is_pg_actor_backed(&tenant, "Workspace"));
+}
+
 fn test_state_with_customer_and_order_ioa() -> ServerState {
     let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
     let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml");
@@ -579,6 +635,75 @@ async fn test_entity_by_key_found() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["@odata.context"], "$metadata#Orders/$entity");
+}
+
+#[tokio::test]
+async fn typed_reference_create_derives_id_and_rejects_rebind() {
+    let app = build_router(test_state_with_typed_references());
+    let missing_target = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Documents")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"workspace_id":"ws-missing"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_target.status(), StatusCode::CONFLICT);
+
+    let workspace = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Workspaces")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"id":"ws-1"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(workspace.status(), StatusCode::CREATED);
+
+    let create = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Documents")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"workspace_id":"ws-1"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let expected_id = crate::key_index::canonical_key_hash(
+        "workspace",
+        &["workspace_id".to_string()],
+        serde_json::json!({"workspace_id":"ws-1"})
+            .as_object()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(json["entity_id"], expected_id);
+
+    let rebind = app
+        .oneshot(
+            Request::patch(format!("/tdata/Documents('{expected_id}')"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"workspace_id":"ws-2"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rebind.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(rebind.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["code"], "ConstraintViolation");
 }
 
 #[tokio::test]

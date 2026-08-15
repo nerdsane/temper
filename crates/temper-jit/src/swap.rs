@@ -96,6 +96,7 @@ mod tests {
                 effects: vec![],
             }],
             state_var_metadata: Default::default(),
+            action_params: Default::default(),
             composite_actions: Default::default(),
             rule_index: Default::default(),
         };

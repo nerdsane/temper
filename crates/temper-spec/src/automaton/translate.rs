@@ -46,6 +46,8 @@ pub enum ResolvedGuard {
         /// guard rather than passing vacuously (ARN-92 #2).
         required: bool,
     },
+    /// An incoming typed reference must equal a stored typed reference.
+    ReferenceEquals { reference: String, param: String },
     /// All inner guards must pass.
     And(Vec<ResolvedGuard>),
 }
@@ -226,6 +228,10 @@ fn translate_single_guard(guard: &Guard) -> ResolvedGuard {
             required_status: required_status.clone(),
             forbidden_status: forbidden_status.clone(),
             required: *required,
+        },
+        Guard::ReferenceEquals { reference, param } => ResolvedGuard::ReferenceEquals {
+            reference: reference.clone(),
+            param: param.clone(),
         },
     }
 }

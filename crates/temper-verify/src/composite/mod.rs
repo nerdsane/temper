@@ -5,8 +5,7 @@
 //! unit. Given a seed entity and the tenant's parsed automatons, this
 //! module:
 //!
-//! 1. Walks the trigger graph from the seed to determine the participating
-//!    entity set (reachability closure).
+//! 1. Finds the seed's complete weakly-connected trigger component.
 //! 2. Builds a [`TemperModel`] for each participating entity.
 //! 3. Materialises a [`CompositeVerificationPlan`] describing what the
 //!    joint state-machine verifier would check.
@@ -27,6 +26,7 @@
 //! // Model is Stateright-checkable from here.
 //! ```
 
+mod cascade;
 pub mod invariant_eval;
 pub mod model;
 pub mod verify;
@@ -37,7 +37,7 @@ pub use verify::{
     verify_composite_with_budget,
 };
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use temper_spec::automaton::{Automaton, TriggerEdge, TriggerGraph};
@@ -134,7 +134,25 @@ impl CompositeVerificationPlan {
             return Err(CompositePlanError::SeedMissing(seed.to_string()));
         }
 
-        let scope = graph.reachable_from(seed);
+        // The seed is the canonical representative of a weak component. A
+        // directed reachability walk is insufficient when the smallest member
+        // has only incoming edges (Z -> A): include both endpoints of every
+        // incident edge until the component reaches a fixed point.
+        let mut scope = BTreeSet::from([seed.to_string()]);
+        loop {
+            let before = scope.len();
+            for edges in graph.outgoing.values() {
+                for edge in edges {
+                    if scope.contains(&edge.from) || scope.contains(&edge.to) {
+                        scope.insert(edge.from.clone());
+                        scope.insert(edge.to.clone());
+                    }
+                }
+            }
+            if scope.len() == before {
+                break;
+            }
+        }
         let has_cycle = graph.has_cycle_from(seed);
 
         // Index automatons by entity type name for O(log n) lookup.

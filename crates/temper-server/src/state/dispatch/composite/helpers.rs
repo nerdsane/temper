@@ -1,5 +1,15 @@
 use super::*;
 
+#[derive(Debug, Clone)]
+pub(super) struct CompositeCreateAuthDefaults {
+    pub(super) initial_state: String,
+    pub(super) has_spec: bool,
+}
+
+pub(super) fn empty_params() -> Value {
+    Value::Object(Default::default())
+}
+
 pub(super) fn synthetic_initial_state(
     entity_type: &str,
     entity_id: &str,

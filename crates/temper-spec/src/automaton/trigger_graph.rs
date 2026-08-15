@@ -49,6 +49,10 @@ pub struct TriggerEdge {
     /// reaction can never be dropped, so the composite verifier's
     /// `no_dropped_reaction` property exempts it.
     pub creates_target: bool,
+    /// Static target parameters carried by this reaction.
+    pub params: serde_json::Value,
+    /// Target parameter to source-field projections carried by this reaction.
+    pub params_from: BTreeMap<String, String>,
     /// Whether the spec marked this reaction as an intentional best-effort
     /// drop (`drop_ok = true`, ADR-0150). When `true`, the composite
     /// verifier suppresses the `no_dropped_reaction` violation for this edge.
@@ -187,6 +191,8 @@ fn edge_from_trigger(
         to_state: trigger.to_state.clone(),
         liveness_required: matches!(trigger.liveness, super::types::TriggerLiveness::Required),
         creates_target,
+        params: trigger.params.clone(),
+        params_from: trigger.params_from.clone(),
         drop_ok: trigger.drop_ok,
     })
 }

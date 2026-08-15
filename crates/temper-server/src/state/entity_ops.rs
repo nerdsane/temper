@@ -690,6 +690,23 @@ impl ServerState {
         entity_id: &str,
         initial_fields: serde_json::Value,
     ) -> Option<ActorRef<EntityMsg>> {
+        self.get_or_spawn_tenant_actor_with_fields_and_reference_evidence(
+            tenant,
+            entity_type,
+            entity_id,
+            initial_fields,
+            BTreeMap::new(),
+        )
+    }
+
+    fn get_or_spawn_tenant_actor_with_fields_and_reference_evidence(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        initial_fields: serde_json::Value,
+        initial_reference_evidence: BTreeMap<String, bool>,
+    ) -> Option<ActorRef<EntityMsg>> {
         let key = format!("{tenant}:{entity_type}:{entity_id}");
 
         // Fast-path: check actor registry under read lock.
@@ -735,11 +752,13 @@ impl ServerState {
                 backend,
             )
             .with_tenant(tenant.as_str())
+            .with_initial_reference_evidence(initial_reference_evidence.clone())
             .with_snapshot_queue(snapshot_queue)
             .with_idempotency_cache(self.idempotency_cache.clone())
             .with_blob_store(tenant_blob_store.clone()),
             None => EntityActor::new(entity_type, entity_id, table, initial_fields)
                 .with_tenant(tenant.as_str())
+                .with_initial_reference_evidence(initial_reference_evidence)
                 .with_idempotency_cache(self.idempotency_cache.clone())
                 .with_blob_store(tenant_blob_store),
         };
@@ -985,8 +1004,32 @@ impl ServerState {
         entity_id: &str,
         initial_fields: serde_json::Value,
     ) -> Result<EntityResponse, String> {
+        let creating = !self
+            .ensure_entity_loaded(tenant, entity_type, entity_id)
+            .await;
+        let initial_reference_evidence = if creating {
+            let prepared_id = self
+                .prepare_reference_contract_create(
+                    tenant,
+                    entity_type,
+                    Some(entity_id),
+                    &initial_fields,
+                )
+                .await?;
+            debug_assert_eq!(prepared_id.as_deref(), Some(entity_id));
+            self.resolve_reference_evidence(tenant, entity_type, entity_id, None, &initial_fields)
+                .await
+        } else {
+            BTreeMap::new()
+        };
         let actor_ref = self
-            .get_or_spawn_tenant_actor_with_fields(tenant, entity_type, entity_id, initial_fields)
+            .get_or_spawn_tenant_actor_with_fields_and_reference_evidence(
+                tenant,
+                entity_type,
+                entity_id,
+                initial_fields,
+                initial_reference_evidence,
+            )
             .ok_or_else(|| {
                 format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
             })?;
@@ -1103,6 +1146,21 @@ impl ServerState {
         }
         if self.is_pg_actor_backed(tenant, entity_type) {
             return Ok(None);
+        }
+
+        if !self
+            .ensure_entity_loaded(tenant, entity_type, entity_id)
+            .await
+        {
+            let prepared_id = self
+                .prepare_reference_contract_create(
+                    tenant,
+                    entity_type,
+                    Some(entity_id),
+                    &initial_fields,
+                )
+                .await?;
+            debug_assert_eq!(prepared_id.as_deref(), Some(entity_id));
         }
 
         let table = {
@@ -1397,6 +1455,9 @@ impl ServerState {
         replace: bool,
         expected_sequence: Option<u64>,
     ) -> Result<EntityResponse, String> {
+        let reference_evidence = self
+            .resolve_reference_evidence(tenant, entity_type, entity_id, None, &fields)
+            .await;
         let actor_ref = self
             .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
             .ok_or_else(|| {
@@ -1410,6 +1471,7 @@ impl ServerState {
             || EntityMsg::UpdateFields {
                 fields: fields_for_retry.clone(),
                 replace,
+                reference_evidence: reference_evidence.clone(),
                 expected_sequence,
             },
             &policy,

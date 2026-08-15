@@ -19,6 +19,26 @@ use temper_server::{EntityActor, EntityMsg, EntityResponse};
 use temper_store_sim::SimEventStore;
 
 const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
+const TYPED_REFERENCE_IOA: &str = r#"
+[automaton]
+name = "Document"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[state]]
+name = "workspace_id"
+type = "ref"
+entity_type = "Workspace"
+initial = ""
+
+[[action]]
+name = "AssignWorkspace"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = [{ name = "workspace_id", type = "ref", entity_type = "Workspace" }]
+"#;
 const NUM_SEEDS: u64 = 100;
 
 fn order_table() -> Arc<RwLock<TransitionTable>> {
@@ -58,6 +78,96 @@ async fn get_state(actor_ref: &temper_runtime::actor::ActorRef<EntityMsg>) -> En
 }
 
 #[tokio::test]
+async fn dst_typed_reference_is_set_once_and_replays() {
+    for seed in 0..10 {
+        let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+        let store = sim_store(seed);
+        let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(
+            TYPED_REFERENCE_IOA,
+        )));
+        let entity_id = format!("typed-reference-{seed}");
+        let system = ActorSystem::new("dst-typed-reference");
+        let actor_ref = system.spawn(
+            EntityActor::with_persistence(
+                "Document",
+                &entity_id,
+                table.clone(),
+                serde_json::json!({}),
+                store.clone(),
+                BackendLabel::Sim,
+            )
+            .with_tenant("default"),
+            &entity_id,
+        );
+        let evidence = BTreeMap::from([(
+            temper_server::entity_actor::reference_contract::target_evidence_key(
+                "Workspace",
+                "workspace-a",
+            ),
+            true,
+        )]);
+        let assigned: EntityResponse = actor_ref
+            .ask(
+                EntityMsg::Action {
+                    name: "AssignWorkspace".into(),
+                    params: serde_json::json!({"workspace_id": "workspace-a"}),
+                    cross_entity_booleans: evidence,
+                    idempotency_key: None,
+                    expected_sequence: None,
+                    reaction_context: None,
+                },
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("assignment reply");
+        assert!(assigned.success, "seed {seed}: {:?}", assigned.error);
+        let committed_sequence = assigned.state.sequence_nr;
+
+        let rebind_evidence = BTreeMap::from([(
+            temper_server::entity_actor::reference_contract::target_evidence_key(
+                "Workspace",
+                "workspace-b",
+            ),
+            true,
+        )]);
+        let rejected: EntityResponse = actor_ref
+            .ask(
+                EntityMsg::Action {
+                    name: "AssignWorkspace".into(),
+                    params: serde_json::json!({"workspace_id": "workspace-b"}),
+                    cross_entity_booleans: rebind_evidence,
+                    idempotency_key: None,
+                    expected_sequence: None,
+                    reaction_context: None,
+                },
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("rebind reply");
+        assert!(!rejected.success);
+        assert_eq!(rejected.state.sequence_nr, committed_sequence);
+        drop(system);
+
+        let replay_system = ActorSystem::new("dst-typed-reference-replay");
+        let replayed = replay_system.spawn(
+            EntityActor::with_persistence(
+                "Document",
+                &entity_id,
+                table,
+                serde_json::json!({}),
+                store,
+                BackendLabel::Sim,
+            )
+            .with_tenant("default"),
+            format!("{entity_id}-replayed"),
+        );
+        let state = get_state(&replayed).await.state;
+        assert_eq!(state.fields["workspace_id"], "workspace-a");
+        assert_eq!(state.sequence_nr, committed_sequence);
+    }
+}
+
+#[tokio::test]
 async fn dst_field_update_consumes_sequence_and_replays() {
     for seed in 0..10 {
         let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
@@ -81,6 +191,7 @@ async fn dst_field_update_consumes_sequence_and_replays() {
                 EntityMsg::UpdateFields {
                     fields: serde_json::json!({"Name": "durable"}),
                     replace: false,
+                    reference_evidence: std::collections::BTreeMap::new(),
                     expected_sequence: Some(before),
                 },
                 Duration::from_secs(5),

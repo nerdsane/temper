@@ -18,6 +18,8 @@ mod initial;
 mod lint;
 pub mod metadata;
 pub mod parser;
+mod reference_contract;
+mod reference_contract_lint;
 mod toml_parser;
 pub mod translate;
 pub mod trigger_graph;
@@ -36,6 +38,8 @@ pub use parser::{
     LivenessEnforcement, LivenessViolationReporter, parse_automaton, parse_automaton_with_liveness,
     set_liveness_violation_reporter, to_state_machine,
 };
+pub use reference_contract::MAX_REFERENCE_TARGETS_PER_WRITE;
+pub use reference_contract_lint::lint_csdl_reference_contracts;
 pub use translate::{ResolvedAction, ResolvedEffect, ResolvedGuard, translate_actions};
 pub use trigger_graph::{TriggerEdge, TriggerGraph};
 pub use types::*;

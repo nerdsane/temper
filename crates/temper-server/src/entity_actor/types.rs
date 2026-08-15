@@ -66,6 +66,8 @@ pub enum EntityMsg {
     UpdateFields {
         fields: serde_json::Value,
         replace: bool,
+        /// Durable same-tenant target-existence evidence resolved before ask.
+        reference_evidence: BTreeMap<String, bool>,
         /// Optional sequence precondition checked before mutation.
         expected_sequence: Option<u64>,
     },

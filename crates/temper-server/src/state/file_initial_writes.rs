@@ -64,6 +64,14 @@ impl ServerState {
             ));
         };
         let table = self.file_transition_table(tenant)?;
+        let prepared_id = self
+            .prepare_reference_contract_create(tenant, "File", Some(file_id), &create_params)
+            .await
+            .map_err(FileStreamContentError::ActionRejected)?;
+        debug_assert_eq!(prepared_id.as_deref(), Some(file_id));
+        let reference_evidence = self
+            .resolve_reference_evidence(tenant, "File", file_id, Some("Create"), &create_params)
+            .await;
 
         // Reject a brand-new File whose target Workspace is not Active BEFORE
         // persisting any bytes. `workspace_id` arrives in the create params on
@@ -99,13 +107,17 @@ impl ServerState {
         };
         push_synthetic_event(&mut state, &mut events, created);
 
-        let no_xref = std::collections::BTreeMap::new();
         if create_params
             .as_object()
             .is_some_and(|params| !params.is_empty())
         {
-            let create_event =
-                apply_synthetic_file_action(&mut state, &table, "Create", create_params, &no_xref)?;
+            let create_event = apply_synthetic_file_action(
+                &mut state,
+                &table,
+                "Create",
+                create_params,
+                &reference_evidence,
+            )?;
             push_synthetic_event(&mut state, &mut events, create_event);
         }
 
@@ -133,6 +145,7 @@ impl ServerState {
         // holds — pass `true`.
         let mut stream_xref = std::collections::BTreeMap::new();
         stream_xref.insert("__xref:Workspace:workspace_id".to_string(), true);
+        stream_xref.extend(reference_evidence);
         let stream_event = apply_synthetic_file_action(
             &mut state,
             &table,

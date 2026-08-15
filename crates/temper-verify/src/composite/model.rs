@@ -23,14 +23,14 @@ use std::fmt;
 use stateright::{Model, Property};
 use temper_spec::automaton::TriggerEdge;
 
-use crate::model::{ModelGuard, TemperModel, TemperModelAction, TemperModelState};
+use crate::model::{TemperModel, TemperModelAction, TemperModelState};
 
 use super::CompositeVerificationPlan;
 
 /// Maximum cascade depth per `next_state` call. Matches the runtime
 /// `MAX_REACTION_DEPTH` (temper-server) so the verifier bounds exactly
 /// what production also bounds.
-const MAX_TRIGGER_DEPTH: u32 = 8;
+pub(super) const MAX_TRIGGER_DEPTH: u32 = 8;
 
 /// A cross-entity reaction that was dropped because its target action was
 /// not enabled from the target entity's state at dispatch time (ADR-0150).
@@ -118,11 +118,22 @@ pub struct CompositeAction {
     pub entity: String,
     /// The underlying action on that entity's IOA.
     pub action: TemperModelAction,
+    /// Deterministic branch through the finite reaction-parameter product.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cascade_branch: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 impl fmt::Display for CompositeAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}", self.entity, self.action)
+        write!(f, "{}.{}", self.entity, self.action)?;
+        if self.cascade_branch != 0 {
+            write!(f, "#{}", self.cascade_branch)?;
+        }
+        Ok(())
     }
 }
 
@@ -132,9 +143,9 @@ impl fmt::Display for CompositeAction {
 #[derive(Clone)]
 pub struct CompositeTemperModel {
     /// Per-entity models keyed by entity type name.
-    models: BTreeMap<String, TemperModel>,
+    pub(super) models: BTreeMap<String, TemperModel>,
     /// All entity-kind trigger edges within the composition scope.
-    edges: Vec<TriggerEdge>,
+    pub(super) edges: Vec<TriggerEdge>,
     /// Entity types in the composition (cached for iteration).
     entity_types: Vec<String>,
 }
@@ -150,173 +161,6 @@ impl CompositeTemperModel {
             models: plan.models,
             edges: plan.edges,
             entity_types,
-        }
-    }
-
-    /// Apply trigger cascades starting from a post-commit source action.
-    ///
-    /// Bounded by [`MAX_TRIGGER_DEPTH`]. Cycles are allowed (the runtime
-    /// permits them) but depth caps prevent infinite exploration. Each
-    /// triggered transition applies the target entity's matching action
-    /// by name if enabled in the target's current state.
-    ///
-    /// When a reaction's target action is NOT enabled from the target's
-    /// current state (from-state mismatch or false guard) it is a *dropped
-    /// reaction* (ADR-0150). The first such non-exempt drop is recorded into
-    /// `state.dropped` so the `no_dropped_reaction` property can flag it.
-    /// `create`-resolver reactions and `drop_ok = true` triggers are exempt
-    /// and never recorded.
-    fn cascade(
-        &self,
-        state: &mut CompositeState,
-        source_entity: &str,
-        source_action: &str,
-        source_to_state: &str,
-        depth: u32,
-    ) {
-        if depth >= MAX_TRIGGER_DEPTH {
-            return;
-        }
-        let edges: Vec<&TriggerEdge> = self
-            .edges
-            .iter()
-            .filter(|e| e.from == source_entity && e.source_action == source_action)
-            .collect();
-        for edge in edges {
-            // to_state filter
-            if let Some(expected) = &edge.to_state
-                && expected != source_to_state
-            {
-                continue;
-            }
-            // Find target entity + model
-            let Some(target_model) = self.models.get(&edge.to) else {
-                continue;
-            };
-            let Some(target_state) = state.entities.get(&edge.to) else {
-                continue;
-            };
-
-            // Is the target action enabled on the target's current state?
-            // The per-entity model offers cross-entity-guarded actions
-            // abstractly; resolve any such guard concretely against the joint
-            // state so a guarded target action only counts as enabled when its
-            // own cross-entity precondition holds.
-            let mut enabled = Vec::new();
-            target_model.actions(target_state, &mut enabled);
-            let Some(target_action) = enabled
-                .iter()
-                .find(|a| {
-                    a.name == edge.target_action
-                        && self.cross_entity_guards_satisfied(&edge.to, &a.name, state)
-                })
-                .cloned()
-            else {
-                // Target action not enabled — the reaction is dropped.
-                // `create` resolvers spawn a fresh, always-enabled target, so
-                // they can never drop; `drop_ok` marks an intentional drop.
-                // Anything else is a no_dropped_reaction violation: record the
-                // first one (and keep cascading; later drops don't overwrite
-                // the witnessed counterexample).
-                if !edge.creates_target && !edge.drop_ok && state.dropped.is_none() {
-                    state.dropped = Some(DroppedReaction {
-                        source_entity: source_entity.to_string(),
-                        source_action: source_action.to_string(),
-                        trigger_name: edge.trigger_name.clone(),
-                        target_entity: edge.to.clone(),
-                        target_action: edge.target_action.clone(),
-                        target_state: target_state.status.clone(),
-                    });
-                }
-                continue;
-            };
-
-            // Apply target action
-            let Some(new_target_state) =
-                target_model.next_state(target_state, target_action.clone())
-            else {
-                continue;
-            };
-
-            let new_target_status = new_target_state.status.clone();
-            state.entities.insert(edge.to.clone(), new_target_state);
-
-            // Recurse: the target action itself may trigger further cascades.
-            self.cascade(
-                state,
-                &edge.to,
-                &target_action.name,
-                &new_target_status,
-                depth + 1,
-            );
-        }
-    }
-
-    /// Whether every cross-entity guard on `action_name` (a transition of
-    /// `source_entity`) is satisfied by the current joint state.
-    ///
-    /// In a single-entity [`TemperModel`] a [`ModelGuard::CrossEntityState`]
-    /// is abstract: the local checker treats it as a free boolean (guard-true
-    /// branch always offered). In the joint model the referenced entity is in
-    /// scope, so the guard becomes concrete — the action is enabled only when
-    /// the target entity's slice is in one of the guard's `required_status`
-    /// values. This is what lets a cross-entity guard on the *source* action
-    /// suppress an otherwise-dropped reaction: e.g. `File.StreamUpdated`
-    /// guarded on `Workspace` being `Active` is simply not enabled when the
-    /// Workspace slice is `Frozen`/`Archived`, so it never fires the
-    /// usage-increment reaction into a state where it would drop.
-    ///
-    /// A guard whose target entity is NOT in the composition scope is left
-    /// abstract (returns enabled), preserving the single-entity behaviour for
-    /// references the joint model cannot resolve.
-    fn cross_entity_guards_satisfied(
-        &self,
-        source_entity: &str,
-        action_name: &str,
-        state: &CompositeState,
-    ) -> bool {
-        let Some(source_model) = self.models.get(source_entity) else {
-            return true;
-        };
-        let Some(transition) = source_model
-            .transitions
-            .iter()
-            .find(|t| t.name == action_name)
-        else {
-            return true;
-        };
-        self.guard_cross_entity_ok(&transition.guard, state)
-    }
-
-    /// Recursively evaluate the cross-entity portion of a [`ModelGuard`]
-    /// against the joint state. Non-cross-entity leaves are ignored here
-    /// (the per-entity model already evaluated them against local state).
-    fn guard_cross_entity_ok(&self, guard: &ModelGuard, state: &CompositeState) -> bool {
-        match guard {
-            ModelGuard::CrossEntityState {
-                entity_type,
-                required_status,
-                forbidden_status,
-                ..
-            } => match state.entities.get(entity_type) {
-                // Target in scope: resolve concretely against its slice. The
-                // action is enabled iff the target is allowed by the allowlist
-                // (empty ⇒ unconstrained) AND not in the denylist (empty ⇒
-                // unconstrained). A denylist of e.g. `["Frozen","Archived"]`
-                // disables the action exactly when the container is in one of
-                // those states — identical drop-suppression to an allowlist of
-                // the complementary states, but without enumerating them.
-                Some(target) => {
-                    let allowed = required_status.is_empty()
-                        || required_status.iter().any(|s| s == &target.status);
-                    let not_forbidden = !forbidden_status.iter().any(|s| s == &target.status);
-                    allowed && not_forbidden
-                }
-                // Target outside scope: cannot resolve — leave abstract.
-                None => true,
-            },
-            ModelGuard::And(guards) => guards.iter().all(|g| self.guard_cross_entity_ok(g, state)),
-            _ => true,
         }
     }
 
@@ -379,7 +223,7 @@ impl CompositeTemperModel {
 
 /// Visited-set key for a joint state: the per-entity rendering, with the
 /// per-transition `dropped` marker excluded (it is not part of identity).
-fn state_key(state: &CompositeState) -> String {
+pub(super) fn state_key(state: &CompositeState) -> String {
     let parts: Vec<String> = state
         .entities
         .iter()
@@ -402,21 +246,28 @@ impl Model for CompositeTemperModel {
     type Action = CompositeAction;
 
     fn init_states(&self) -> Vec<Self::State> {
-        // Each entity starts in its single initial state. Cross-product is
-        // therefore a single joint state.
-        let mut entities = BTreeMap::new();
+        let mut products = vec![BTreeMap::new()];
         for (entity_type, model) in &self.models {
-            let init = model
-                .init_states()
-                .into_iter()
-                .next()
-                .expect("TemperModel always produces at least one init state");
-            entities.insert(entity_type.clone(), init);
+            let mut expanded = Vec::new();
+            for product in &products {
+                for initial in model.init_states() {
+                    let mut next = product.clone();
+                    next.insert(entity_type.clone(), initial);
+                    expanded.push(next);
+                }
+            }
+            products = expanded;
         }
-        vec![CompositeState {
-            entities,
-            dropped: None,
-        }]
+        let mut unique = BTreeMap::new();
+        for state in products.into_iter().flat_map(|entities| {
+            self.expand_joint_reference_patterns(CompositeState {
+                entities,
+                dropped: None,
+            })
+        }) {
+            unique.insert(state_key(&state), state);
+        }
+        unique.into_values().collect()
     }
 
     fn actions(&self, state: &Self::State, out: &mut Vec<Self::Action>) {
@@ -431,7 +282,12 @@ impl Model for CompositeTemperModel {
                 continue;
             };
             let mut per_entity = Vec::new();
-            entity_model.actions(entity_state, &mut per_entity);
+            crate::model::action_enumeration::enumerate_actions(
+                entity_model,
+                entity_state,
+                Some(&self.joint_reference_slots()),
+                &mut per_entity,
+            );
             for a in per_entity {
                 // The per-entity model offers cross-entity-guarded actions
                 // unconditionally (the guard is abstract locally). In the
@@ -440,10 +296,30 @@ impl Model for CompositeTemperModel {
                 if !self.cross_entity_guards_satisfied(entity_type, &a.name, state) {
                     continue;
                 }
-                out.push(CompositeAction {
-                    entity: entity_type.clone(),
-                    action: a,
-                });
+                let Some(new_source_state) =
+                    entity_model.next_state_preserving_references(entity_state, a.clone())
+                else {
+                    continue;
+                };
+                let mut post_source = state.clone();
+                post_source
+                    .entities
+                    .insert(entity_type.clone(), new_source_state.clone());
+                let branch_count = self
+                    .post_action_successors(
+                        post_source,
+                        entity_type,
+                        &a.name,
+                        &new_source_state.status,
+                    )
+                    .len();
+                for cascade_branch in 0..branch_count {
+                    out.push(CompositeAction {
+                        entity: entity_type.clone(),
+                        action: a.clone(),
+                        cascade_branch,
+                    });
+                }
             }
         }
     }
@@ -459,7 +335,8 @@ impl Model for CompositeTemperModel {
         }
 
         // Apply the primary (external) action to the actor entity.
-        let new_source_state = source_model.next_state(source_state, action.action.clone())?;
+        let new_source_state =
+            source_model.next_state_preserving_references(source_state, action.action.clone())?;
         let new_source_status = new_source_state.status.clone();
 
         // Commit to joint state. Clear any drop recorded on the predecessor —
@@ -473,15 +350,13 @@ impl Model for CompositeTemperModel {
         // Fire-and-forget cascade: apply triggered transitions
         // transitively, bounded by MAX_TRIGGER_DEPTH. Records the first
         // dropped reaction (if any) into `next.dropped`.
-        self.cascade(
-            &mut next,
+        let successors = self.post_action_successors(
+            next,
             &action.entity,
             &action.action.name,
             &new_source_status,
-            0,
         );
-
-        Some(next)
+        successors.get(action.cascade_branch).cloned()
     }
 
     fn properties(&self) -> Vec<Property<Self>> {

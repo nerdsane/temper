@@ -103,6 +103,8 @@ pub struct EntityActor {
     /// restarting the actor.
     table: Arc<RwLock<TransitionTable>>,
     initial_fields: serde_json::Value,
+    /// Pre-resolved durable target evidence for bootstrap creation.
+    initial_reference_evidence: BTreeMap<String, bool>,
     /// Optional event journal for persistence. None = in-memory only.
     event_journal: Option<BoxedEventStore>,
     /// Optional async snapshot writer. Event appends remain synchronous.
@@ -233,6 +235,7 @@ impl EntityActor {
             entity_id: entity_id.into(),
             table,
             initial_fields,
+            initial_reference_evidence: BTreeMap::new(),
             event_journal: None,
             snapshot_queue: None,
             event_backend: None,
@@ -257,6 +260,7 @@ impl EntityActor {
             entity_id: entity_id.into(),
             table,
             initial_fields,
+            initial_reference_evidence: BTreeMap::new(),
             event_journal: Some(store),
             snapshot_queue: None,
             event_backend: Some(backend),
@@ -269,6 +273,12 @@ impl EntityActor {
     /// Set the tenant for this actor (must be called before spawning).
     pub fn with_tenant(mut self, tenant: impl Into<String>) -> Self {
         self.tenant = tenant.into();
+        self
+    }
+
+    /// Attach durable target-existence evidence for bootstrap validation.
+    pub fn with_initial_reference_evidence(mut self, evidence: BTreeMap<String, bool>) -> Self {
+        self.initial_reference_evidence = evidence;
         self
     }
 
@@ -874,6 +884,23 @@ impl Actor for EntityActor {
                 false, // hydration: keep serving on a transient journal read failure
             )
             .await?;
+        }
+
+        if state.total_event_count == 0 {
+            let empty = Self::build_initial_state(
+                &self.entity_type,
+                &self.entity_id,
+                &table,
+                &serde_json::json!({}),
+            );
+            super::reference_contract::validate_prospective_state(
+                &table,
+                "Create",
+                &empty,
+                &state,
+                &self.initial_reference_evidence,
+            )
+            .map_err(|error| ActorError::custom(error.to_string()))?;
         }
 
         // Persist a bootstrap Created event for first-time entities so initial
@@ -1542,6 +1569,7 @@ impl Actor for EntityActor {
             EntityMsg::UpdateFields {
                 fields,
                 replace,
+                reference_evidence,
                 expected_sequence,
             } => {
                 if expected_sequence.is_some_and(|expected| expected != state.sequence_nr) {
@@ -1587,6 +1615,28 @@ impl Actor for EntityActor {
                         .unwrap_or(&serde_json::Value::Null),
                     replace,
                 );
+                let contract_result = {
+                    let table = self.table.read().expect("table lock poisoned");
+                    super::reference_contract::validate_prospective_state(
+                        &table,
+                        super::types::FIELD_UPDATE_EVENT_TYPE,
+                        state,
+                        &prospective,
+                        &reference_evidence,
+                    )
+                };
+                if let Err(error) = contract_result {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(error.to_string()),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
                 if let (Some(store), Some(backend)) =
                     (self.event_journal.as_ref(), self.event_backend)
                 {

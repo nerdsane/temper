@@ -482,6 +482,9 @@ fn format_guards(guards: &[Guard]) -> String {
                     conjuncts.join(" /\\ ")
                 }
             }
+            Guard::ReferenceEquals { reference, param } => {
+                format!("{reference} = {param}")
+            }
         })
         .collect::<Vec<_>>()
         .join(" /\\ ")
@@ -558,6 +561,8 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
             )));
         }
     }
+
+    super::reference_contract::validate_reference_declarations(automaton)?;
 
     // 3. Validate WASM integrations.
     let action_names: Vec<&str> = automaton.actions.iter().map(|a| a.name.as_str()).collect();
