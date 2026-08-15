@@ -9,6 +9,7 @@
 //! representation, which feeds the verification cascade and runtime.
 
 pub mod automaton;
+pub mod bundle;
 pub mod cross_invariant;
 pub mod csdl;
 pub mod model;
@@ -22,6 +23,11 @@ pub use automaton::{
     Automaton, FieldInvariant, FieldPredicate, LintFinding, LintSeverity, lint_automaton,
     parse_automaton, parse_bool_initial, parse_counter_initial_usize, parse_list_initial,
     parse_var_initial_json, to_state_machine,
+};
+pub use bundle::{
+    BundleError, BundleErrorCode, CanonicalIoaSpec, IoaSourceInput, MigrationArtifactInput,
+    PolicyArtifactInput, ScopedBundleBudgets, ScopedSpecBundle, ScopedSpecBundleInput,
+    WasmArtifactInput,
 };
 pub use cross_invariant::{
     CrossInvariant, CrossInvariantLintFinding, CrossInvariantLintSeverity, CrossInvariantOperator,
