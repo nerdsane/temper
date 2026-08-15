@@ -20,8 +20,23 @@ use super::guard::{Guard, GuardFailure};
 /// The actor hashes these on write to maintain the negative-existence access path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeclaredKey {
+    /// Stable declaration name used by the canonical key hash.
     pub name: String,
+    /// Properties hashed in declaration order.
     pub properties: Vec<String>,
+    /// Whether this key defines deterministic entity identity (ADR-0156).
+    #[serde(default)]
+    pub entity_id: bool,
+}
+
+/// Compiled action-parameter metadata used by reference contracts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionParamMetadata {
+    /// Declared parameter type.
+    pub param_type: String,
+    /// Target entity type for a `ref` parameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_type: Option<String>,
 }
 
 /// A declared vector access path carried on the table (ADR-0155). `name`
@@ -62,6 +77,9 @@ pub struct TransitionTable {
     /// declare any per-field overrides.
     #[serde(default)]
     pub state_var_metadata: BTreeMap<String, StateVarMetadata>,
+    /// Parameter declarations keyed by action then parameter name (ADR-0156).
+    #[serde(default)]
+    pub action_params: BTreeMap<String, BTreeMap<String, ActionParamMetadata>>,
     /// Composite-action metadata keyed by action name (ADR-0040).
     #[serde(default)]
     pub composite_actions: BTreeMap<String, CompositeActionMetadata>,
@@ -84,6 +102,12 @@ pub struct TransitionTable {
 ///   behalf of this field. `None` = permanent (pre-ADR behavior).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StateVarMetadata {
+    /// Declared state-variable type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub var_type: Option<String>,
+    /// Target entity type for a typed reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_type: Option<String>,
     /// Per-field inline byte ceiling for field overflow (ADR-0045).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overflow_inline_max_bytes: Option<usize>,
@@ -158,6 +182,8 @@ impl<'de> Deserialize<'de> for TransitionTable {
             #[serde(default)]
             state_var_metadata: BTreeMap<String, StateVarMetadata>,
             #[serde(default)]
+            action_params: BTreeMap<String, BTreeMap<String, ActionParamMetadata>>,
+            #[serde(default)]
             composite_actions: BTreeMap<String, CompositeActionMetadata>,
             #[serde(default)]
             keys: Vec<DeclaredKey>,
@@ -174,6 +200,7 @@ impl<'de> Deserialize<'de> for TransitionTable {
             keys: raw.keys,
             vectors: raw.vectors,
             state_var_metadata: raw.state_var_metadata,
+            action_params: raw.action_params,
             composite_actions: raw.composite_actions,
             rule_index: BTreeMap::new(),
         };
@@ -312,6 +339,7 @@ mod tests {
                 },
             ],
             state_var_metadata: BTreeMap::new(),
+            action_params: BTreeMap::new(),
             composite_actions: BTreeMap::new(),
             rule_index: BTreeMap::new(),
         };

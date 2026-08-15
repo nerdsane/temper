@@ -1,5 +1,5 @@
 use super::*;
-use crate::automaton::parse_automaton;
+use crate::automaton::{lint_csdl_reference_contracts, parse_automaton};
 use std::collections::BTreeMap;
 
 #[test]
@@ -289,4 +289,48 @@ params = ["title", "description", "plan_id"]
         findings.is_empty(),
         "expected no bundle lint findings, got: {findings:?}"
     );
+}
+
+#[test]
+fn csdl_reference_constraint_must_match_target_key() {
+    let document = parse(
+        r#"
+[automaton]
+name = "Document"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+[[state]]
+name = "workspace_id"
+type = "ref"
+entity_type = "Workspace"
+initial = ""
+"#,
+    );
+    let workspace = parse(
+        r#"
+[automaton]
+name = "Workspace"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+"#,
+    );
+    let csdl = crate::csdl::parse_csdl(
+        r#"<?xml version="1.0"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+ <edmx:DataServices><Schema Namespace="Test" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+  <EntityType Name="Workspace"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/></EntityType>
+  <EntityType Name="Document"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/><Property Name="workspace_id" Type="Edm.String"/><NavigationProperty Name="Workspace" Type="Test.Workspace"><ReferentialConstraint Property="workspace_id" ReferencedProperty="WrongKey"/></NavigationProperty></EntityType>
+ </Schema></edmx:DataServices>
+</edmx:Edmx>"#,
+    )
+    .unwrap();
+    let bundle = BTreeMap::from([
+        ("Document".to_string(), document),
+        ("Workspace".to_string(), workspace),
+    ]);
+    let findings = lint_csdl_reference_contracts(&csdl, &bundle);
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].code, "csdl_reference_contract_mismatch");
 }

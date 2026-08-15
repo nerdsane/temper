@@ -77,16 +77,6 @@ struct AtomicCompositeStream {
     events: Vec<PersistenceEnvelope>,
 }
 
-#[derive(Debug, Clone)]
-struct CompositeCreateAuthDefaults {
-    initial_state: String,
-    has_spec: bool,
-}
-
-fn empty_params() -> Value {
-    Value::Object(Default::default())
-}
-
 impl crate::state::ServerState {
     pub(super) fn composite_metadata_for(
         &self,
@@ -275,6 +265,17 @@ impl crate::state::ServerState {
         let parent_ms = parent_started_at.map(|started| started.elapsed().as_millis() as u64);
 
         let stage_started_at = timing_enabled.then(std::time::Instant::now);
+        let atomic_targets = prepared_sub_writes
+            .iter()
+            .filter(|write| write.action == "Create")
+            .filter(|write| {
+                write
+                    .preflight_target
+                    .as_ref()
+                    .is_some_and(|target| !target.target_existed)
+            })
+            .map(|write| (write.entity_type.clone(), write.entity_id.clone()))
+            .collect::<std::collections::BTreeSet<_>>();
         for write in prepared_sub_writes {
             let persistence_id = format!("{tenant}:{}:{}", write.entity_type, write.entity_id);
             self.ensure_atomic_composite_stream(
@@ -288,7 +289,7 @@ impl crate::state::ServerState {
             .await?;
 
             let table = self.transition_table_for_dispatch(tenant, &write.entity_type)?;
-            let cross_entity_booleans =
+            let mut cross_entity_booleans =
                 if table_has_cross_entity_guards_for_action(&table, &write.action) {
                     self.resolve_cross_entity_guards(
                         tenant,
@@ -300,6 +301,25 @@ impl crate::state::ServerState {
                 } else {
                     BTreeMap::new()
                 };
+            cross_entity_booleans.extend(
+                self.resolve_reference_evidence(
+                    tenant,
+                    &write.entity_type,
+                    &write.entity_id,
+                    Some(&write.action),
+                    &write.params,
+                )
+                .await,
+            );
+            for (target_type, target_id) in &atomic_targets {
+                cross_entity_booleans.insert(
+                    crate::entity_actor::reference_contract::target_evidence_key(
+                        target_type,
+                        target_id,
+                    ),
+                    true,
+                );
+            }
             let stream = streams
                 .get_mut(&persistence_id)
                 .expect("stream inserted before processing sub-write");
@@ -570,9 +590,29 @@ impl crate::state::ServerState {
 
         for (idx, sub_write) in sub_writes.iter().cloned().enumerate() {
             let sub_entity_type = sub_write.entity_type.clone();
-            let sub_entity_id = sub_write.entity_id.clone();
+            let mut sub_entity_id = sub_write.entity_id.clone();
             let sub_action = sub_write.action.clone();
             let sub_params = normalize_sub_write_params(sub_write);
+
+            if sub_action == "Create" {
+                let table = self.transition_table_for_dispatch(tenant, &sub_entity_type)?;
+                let fields = sub_params.as_object().ok_or_else(|| {
+                    DispatchError::Conflict(format!(
+                        "composite {entity_type}.{action} sub-write {idx} create params must be an object"
+                    ))
+                })?;
+                if let Some(derived) =
+                    crate::entity_actor::reference_contract::derive_or_validate_entity_id(
+                        &table,
+                        Some(&sub_entity_id),
+                        fields,
+                        "CompositeCreate",
+                    )
+                    .map_err(|error| DispatchError::Conflict(error.to_string()))?
+                {
+                    sub_entity_id = derived;
+                }
+            }
 
             let governed = match governed_cache.get(&sub_entity_type) {
                 Some(governed) => *governed,

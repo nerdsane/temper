@@ -58,6 +58,8 @@ pub enum Guard {
         #[serde(default)]
         required: bool,
     },
+    /// An incoming typed reference must equal a stored typed reference.
+    ReferenceEquals { reference: String, param: String },
     /// All inner guards must pass.
     And(Vec<Guard>),
 }
@@ -86,6 +88,8 @@ pub enum GuardFailureKind {
     ListLengthMin,
     /// A [`Guard::CrossEntityStateIn`] cross-entity status check failed.
     CrossEntityState,
+    /// A [`Guard::ReferenceEquals`] identity comparison failed.
+    ReferenceEquals,
 }
 
 impl GuardFailureKind {
@@ -105,6 +109,7 @@ impl GuardFailureKind {
             GuardFailureKind::ListContains => "list_contains",
             GuardFailureKind::ListLengthMin => "list_length_min",
             GuardFailureKind::CrossEntityState => "cross_entity_state",
+            GuardFailureKind::ReferenceEquals => "reference_equals",
         }
     }
 }
@@ -145,6 +150,10 @@ pub struct EvalContext {
     pub booleans: BTreeMap<String, bool>,
     /// Named list values (e.g., "tags" -> ["urgent", "review"]).
     pub lists: BTreeMap<String, Vec<String>>,
+    /// Stored scalar string fields.
+    pub strings: BTreeMap<String, String>,
+    /// Normalized incoming scalar string parameters.
+    pub params: BTreeMap<String, String>,
 }
 
 impl Guard {
@@ -181,6 +190,13 @@ impl Guard {
             } => {
                 let key = format!("__xref:{}:{}", entity_type, entity_id_source);
                 ctx.booleans.get(&key).copied().unwrap_or(false)
+            }
+            Guard::ReferenceEquals { reference, param } => {
+                matches!(
+                    (ctx.strings.get(reference), ctx.params.get(param)),
+                    (Some(stored), Some(incoming))
+                        if !stored.is_empty() && !incoming.is_empty() && stored == incoming
+                )
             }
             Guard::And(guards) => guards.iter().all(|g| g.check(current_state, ctx)),
         }
@@ -335,6 +351,26 @@ impl Guard {
                         // The runtime pre-resolves the cross-entity status into a
                         // boolean; the unresolved/missing target reads as false.
                         found: Some("<unsatisfied>".to_string()),
+                    })
+                }
+            }
+            Guard::ReferenceEquals { reference, param } => {
+                let stored = ctx.strings.get(reference).filter(|value| !value.is_empty());
+                let incoming = ctx.params.get(param).filter(|value| !value.is_empty());
+                if stored == incoming && stored.is_some() {
+                    None
+                } else {
+                    Some(GuardFailure {
+                        kind: GuardFailureKind::ReferenceEquals,
+                        var: Some(reference.clone()),
+                        required: Some(format!(
+                            "{reference}={}",
+                            stored.map(String::as_str).unwrap_or("<unset>")
+                        )),
+                        found: Some(format!(
+                            "{param}={}",
+                            incoming.map(String::as_str).unwrap_or("<missing>")
+                        )),
                     })
                 }
             }

@@ -108,6 +108,22 @@ impl EntityActorHandler {
         replace: bool,
         expected_sequence: Option<u64>,
     ) -> bool {
+        self.update_fields_with_reference_evidence(
+            fields,
+            replace,
+            expected_sequence,
+            &std::collections::BTreeMap::new(),
+        )
+    }
+
+    /// Apply a simulated field write with deterministic target-existence evidence.
+    pub fn update_fields_with_reference_evidence(
+        &mut self,
+        fields: serde_json::Value,
+        replace: bool,
+        expected_sequence: Option<u64>,
+        reference_evidence: &std::collections::BTreeMap<String, bool>,
+    ) -> bool {
         if expected_sequence.is_some_and(|expected| expected != self.state.sequence_nr) {
             return false;
         }
@@ -126,10 +142,44 @@ impl EntityActorHandler {
             .params
             .get("fields")
             .expect("field-update event always contains fields");
-        super::effects::apply_field_update(&mut self.state, event_fields, replace);
+        let mut prospective = self.state.clone();
+        super::effects::apply_field_update(&mut prospective, event_fields, replace);
+        if super::reference_contract::validate_prospective_state(
+            &self.table,
+            super::types::FIELD_UPDATE_EVENT_TYPE,
+            &self.state,
+            &prospective,
+            reference_evidence,
+        )
+        .is_err()
+        {
+            return false;
+        }
+        self.state = prospective;
         self.state.sequence_nr = self.state.sequence_nr.saturating_add(1);
         self.state.push_event_bounded(event);
         true
+    }
+
+    /// Execute the production action path with deterministic reference evidence.
+    pub fn handle_action_with_reference_evidence(
+        &mut self,
+        action: &str,
+        params: serde_json::Value,
+        reference_evidence: &std::collections::BTreeMap<String, bool>,
+    ) -> bool {
+        let result = super::effects::process_action_with_xref(
+            &mut self.state,
+            &self.table,
+            action,
+            &params,
+            reference_evidence,
+        );
+        if let Some(event) = result.event {
+            self.state.sequence_nr = self.state.sequence_nr.saturating_add(1);
+            self.state.push_event_bounded(event);
+        }
+        result.success
     }
 }
 

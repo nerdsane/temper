@@ -336,13 +336,17 @@ pub(super) async fn dispatch_bound_action(
                 .into_response()
             } else {
                 http_span.set_status(Status::error(response.error.clone().unwrap_or_default()));
-                http_span.set_attribute(OtelKeyValue::new("http.status_code", 409i64));
-                odata_error(
-                    StatusCode::CONFLICT,
-                    "ActionFailed",
-                    &response.error.unwrap_or_else(|| "Action failed".into()),
-                )
-                .into_response()
+                let error = response.error.unwrap_or_else(|| "Action failed".into());
+                if let Some(response) = super::write::reference_contract_response(&error) {
+                    http_span.set_attribute(OtelKeyValue::new(
+                        "http.status_code",
+                        response.status().as_u16() as i64,
+                    ));
+                    response
+                } else {
+                    http_span.set_attribute(OtelKeyValue::new("http.status_code", 409i64));
+                    odata_error(StatusCode::CONFLICT, "ActionFailed", &error).into_response()
+                }
             }
         }
         Err(DispatchError::Ungoverned(entity)) => {

@@ -1,6 +1,6 @@
 # ADR-0156: Immutable typed cross-entity reference contracts
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-24
 - Deciders: Temper core maintainers
 - Related:

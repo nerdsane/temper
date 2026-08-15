@@ -1,5 +1,7 @@
 use axum::http::StatusCode;
-use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton};
+use temper_spec::automaton::{
+    LintSeverity, lint_automata_bundle, lint_automaton, lint_csdl_reference_contracts,
+};
 use temper_spec::cross_invariant::{CrossInvariantLintFinding, CrossInvariantLintSeverity};
 
 pub(super) use temper_spec::naming::to_pascal_case;
@@ -63,6 +65,14 @@ pub(super) fn lint_loaded_specs(
     }
 
     for finding in lint_automata_bundle(&parsed_automata) {
+        findings.push(EntityLintFinding {
+            entity: finding.entity,
+            code: finding.code,
+            severity: finding.severity,
+            message: finding.message,
+        });
+    }
+    for finding in lint_csdl_reference_contracts(csdl, &parsed_automata) {
         findings.push(EntityLintFinding {
             entity: finding.entity,
             code: finding.code,

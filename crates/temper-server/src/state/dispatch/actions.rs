@@ -594,9 +594,13 @@ impl crate::state::ServerState {
         };
 
         // Pre-resolve cross-entity state gates (Gap 1: Agent OS).
-        let cross_entity_booleans = self
+        let mut cross_entity_booleans = self
             .resolve_cross_entity_guards(tenant, entity_type, entity_id, action)
             .await;
+        cross_entity_booleans.extend(
+            self.resolve_reference_evidence(tenant, entity_type, entity_id, Some(action), &params)
+                .await,
+        );
 
         let action_params = params.clone();
         // ADR-0051: acquire an admission permit before spending retry budget.

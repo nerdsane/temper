@@ -7,9 +7,7 @@ use std::collections::{HashSet, VecDeque};
 
 use stateright::{Checker, Model};
 
-use crate::model::semantics::{apply_effects, guard_may_hold};
-use crate::model::{ModelEffect, ResolvedTransition};
-use crate::model::{TemperModel, TemperModelAction, TemperModelState};
+use crate::model::{ResolvedTransition, TemperModel, TemperModelAction, TemperModelState};
 
 /// A counterexample discovered during model checking.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -84,13 +82,20 @@ fn find_dead_transitions(model: &TemperModel) -> Vec<String> {
     let mut covered = vec![false; model.transitions.len()];
 
     while let Some(state) = queue.pop_front() {
-        for (index, transition) in model.transitions.iter().enumerate() {
-            if !is_transition_enabled(model, transition, &state) {
+        let mut actions = Vec::new();
+        model.actions(&state, &mut actions);
+        for action in actions {
+            let Some(index) = model
+                .transitions
+                .iter()
+                .position(|transition| transition.name == action.name)
+            else {
                 continue;
-            }
+            };
+            let Some(next) = model.next_state(&state, action) else {
+                continue;
+            };
             covered[index] = true;
-
-            let next = apply_transition(&state, transition);
             if visited_states.insert(next.clone()) {
                 queue.push_back(next);
             }
@@ -109,58 +114,6 @@ fn find_dead_transitions(model: &TemperModel) -> Vec<String> {
             }
         })
         .collect()
-}
-
-fn is_transition_enabled(
-    model: &TemperModel,
-    transition: &ResolvedTransition,
-    state: &TemperModelState,
-) -> bool {
-    let status_ok = transition.from_states.is_empty()
-        || transition
-            .from_states
-            .iter()
-            .any(|from| from == &state.status);
-    // Use `guard_may_hold` (not `evaluate_guard`) so cross-entity gated edges
-    // are walked during reachability BFS: a cross-entity guard is a free
-    // boolean, so the gated target state is genuinely reachable in the model.
-    if !status_ok || !guard_may_hold(&transition.guard, state) {
-        return false;
-    }
-
-    for effect in &transition.effects {
-        match effect {
-            ModelEffect::IncrementCounter(var) => {
-                let current = state.counters.get(var).copied().unwrap_or(0);
-                let bound = model
-                    .counter_bounds
-                    .get(var)
-                    .copied()
-                    .unwrap_or(model.default_max_counter);
-                if current >= bound {
-                    return false;
-                }
-            }
-            ModelEffect::ListAppend(var) => {
-                let current_len = state.lists.get(var).map_or(0, Vec::len);
-                if current_len >= model.default_max_counter {
-                    return false;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    true
-}
-
-fn apply_transition(state: &TemperModelState, transition: &ResolvedTransition) -> TemperModelState {
-    let mut next = state.clone();
-    if let Some(to_state) = &transition.to_state {
-        next.status = to_state.clone();
-    }
-    apply_effects(&transition.effects, &mut next, &transition.name);
-    next
 }
 
 fn render_transition_label(transition: &ResolvedTransition) -> String {
@@ -296,12 +249,12 @@ assert = "no_further_transitions"
             if state.status == status {
                 return true;
             }
-            for transition in &model.transitions {
-                if !is_transition_enabled(model, transition, &state) {
-                    continue;
-                }
-                let next = apply_transition(&state, transition);
-                if visited.insert(next.clone()) {
+            let mut actions = Vec::new();
+            model.actions(&state, &mut actions);
+            for action in actions {
+                if let Some(next) = model.next_state(&state, action)
+                    && visited.insert(next.clone())
+                {
                     queue.push_back(next);
                 }
             }

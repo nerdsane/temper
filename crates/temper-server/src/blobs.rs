@@ -441,6 +441,8 @@ mod tests {
         metadata.insert(
             "tiny".to_string(),
             StateVarMetadata {
+                var_type: None,
+                entity_type: None,
                 overflow_inline_max_bytes: Some(1024),
                 overflow_ttl_seconds: None,
             },
@@ -486,6 +488,8 @@ mod tests {
         metadata.insert(
             "results".to_string(),
             StateVarMetadata {
+                var_type: None,
+                entity_type: None,
                 overflow_inline_max_bytes: None, // use default 128KB ceiling
                 overflow_ttl_seconds: Some(1),   // 1-second TTL
             },

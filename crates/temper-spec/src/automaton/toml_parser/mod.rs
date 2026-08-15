@@ -190,6 +190,7 @@ impl ParseState {
         match key {
             "name" => state_var.name = value.to_string(),
             "type" => state_var.var_type = value.to_string(),
+            "entity_type" => state_var.entity_type = Some(value.to_string()),
             "initial" => state_var.initial = value.to_string(),
             // ADR-0045 / ADR-0047: per-field overflow knobs.
             "overflow_inline_max_bytes" => {
@@ -329,6 +330,7 @@ impl ParseState {
         self.current_state_var = Some(StateVar {
             name: String::new(),
             var_type: "string".into(),
+            entity_type: None,
             initial: String::new(),
             overflow_inline_max_bytes: None,
             overflow_ttl_seconds: None,

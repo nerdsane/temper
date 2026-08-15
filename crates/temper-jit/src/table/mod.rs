@@ -7,6 +7,8 @@
 mod builder;
 mod evaluate;
 pub mod guard;
+#[cfg(test)]
+mod reference_contract_test;
 pub mod types;
 
 pub use guard::{EvalContext, Guard, GuardFailure, GuardFailureKind};

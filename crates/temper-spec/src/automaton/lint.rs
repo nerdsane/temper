@@ -40,7 +40,7 @@ pub struct BundleLintFinding {
 }
 
 impl BundleLintFinding {
-    fn error(entity: impl Into<String>, code: &str, message: impl Into<String>) -> Self {
+    pub(super) fn error(entity: impl Into<String>, code: &str, message: impl Into<String>) -> Self {
         Self {
             entity: entity.into(),
             code: code.to_string(),
@@ -250,6 +250,12 @@ pub fn lint_automata_bundle(automata: &BTreeMap<String, Automaton>) -> Vec<Bundl
     let mut findings = Vec::new();
 
     for (entity_name, automaton) in automata {
+        super::reference_contract_lint::lint_reference_targets(
+            automata,
+            entity_name,
+            automaton,
+            &mut findings,
+        );
         let parent_snake = to_snake_case(entity_name);
         for action in &automaton.actions {
             for effect in &action.effect {
@@ -320,6 +326,18 @@ fn lint_spawn_effect(
         ));
         return;
     };
+
+    if target_automaton.keys.iter().any(|key| key.entity_id) {
+        findings.push(BundleLintFinding::error(
+            entity_name.to_string(),
+            "spawn_deterministic_identity_requires_composite",
+            format!(
+                "action '{}' asynchronously spawns '{}' whose entity ID is deterministic; use an atomic composite create",
+                action.name, entity_type
+            ),
+        ));
+        return;
+    }
 
     let Some(initial_action_name) = initial_action.as_deref() else {
         return;
@@ -477,6 +495,7 @@ fn is_supported_state_var_type(var_type: &str) -> bool {
             | "integer"
             | "float"
             | "number"
+            | "ref"
     )
 }
 
@@ -490,6 +509,7 @@ fn guard_var(guard: &Guard) -> Option<&str> {
         Guard::ListContains { var, .. } => Some(var.as_str()),
         Guard::ListLengthMin { var, .. } => Some(var.as_str()),
         Guard::CrossEntityState { .. } => None,
+        Guard::ReferenceEquals { reference, .. } => Some(reference.as_str()),
     }
 }
 
@@ -540,6 +560,9 @@ fn render_guard(guard: &Guard) -> String {
                     "cross_entity_state {entity_type}.{entity_id_source} in {required_status:?} not in {forbidden_status:?}"
                 )
             }
+        }
+        Guard::ReferenceEquals { reference, param } => {
+            format!("reference_equals {reference} {param}")
         }
     }
 }

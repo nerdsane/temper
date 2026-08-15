@@ -42,6 +42,7 @@ pub fn evaluate_guard(guard: &ModelGuard, state: &TemperModelState) -> bool {
             .is_some_and(|vals| vals.iter().any(|v| v == value)),
         ModelGuard::ListLengthMin { var, min } => state.lists.get(var).map_or(0, Vec::len) >= *min,
         ModelGuard::CrossEntityState { .. } => false,
+        ModelGuard::ReferenceEquals { .. } => false,
         ModelGuard::And(guards) => guards.iter().all(|g| evaluate_guard(g, state)),
     }
 }
@@ -64,24 +65,20 @@ pub fn evaluate_guard(guard: &ModelGuard, state: &TemperModelState) -> bool {
 /// This is deliberately *not* used by local-enablement safety checks (see
 /// [`evaluate_guard`]): treating the gate as always-true there would mask real
 /// deadlock / terminal-state violations.
+#[cfg(test)]
 pub fn guard_may_hold(guard: &ModelGuard, state: &TemperModelState) -> bool {
     match guard {
-        // Free boolean: the environment may satisfy a cross-entity gate.
         ModelGuard::CrossEntityState { .. } => true,
-        // Compound guards: a conjunction may hold iff every conjunct may hold.
-        // Locally resolvable conjuncts are still resolved concretely, so a
-        // cross-entity gate combined with an unsatisfiable local condition stays
-        // unsatisfiable — the free boolean does not whitewash the whole guard.
-        ModelGuard::And(guards) => guards.iter().all(|g| guard_may_hold(g, state)),
-        // Everything else is locally resolvable and identical to evaluate_guard.
-        ModelGuard::Always
-        | ModelGuard::StateIn(_)
-        | ModelGuard::CounterMin { .. }
-        | ModelGuard::CounterMax { .. }
-        | ModelGuard::BoolTrue(_)
-        | ModelGuard::BoolFalse(_)
-        | ModelGuard::ListContains { .. }
-        | ModelGuard::ListLengthMin { .. } => evaluate_guard(guard, state),
+        ModelGuard::ReferenceEquals { reference, .. } => {
+            state
+                .counters
+                .get(&format!("__ref:{reference}"))
+                .copied()
+                .unwrap_or(0)
+                != 0
+        }
+        ModelGuard::And(guards) => guards.iter().all(|guard| guard_may_hold(guard, state)),
+        _ => evaluate_guard(guard, state),
     }
 }
 
@@ -91,6 +88,13 @@ pub fn guard_may_hold(guard: &ModelGuard, state: &TemperModelState) -> bool {
 pub fn apply_effects(effects: &[ModelEffect], state: &mut TemperModelState, action_name: &str) {
     for effect in effects {
         match effect {
+            ModelEffect::ExploreReferenceParam { .. }
+            | ModelEffect::SetReferenceFromParam { .. }
+            | ModelEffect::EnforceIdentity(_)
+            | ModelEffect::ReserveFreshReferences { .. }
+            | ModelEffect::CanonicalizeReferences(_) => {
+                // Applied by the Stateright transition with concrete parameters.
+            }
             ModelEffect::IncrementCounter(var) => {
                 let entry = state.counters.entry(var.clone()).or_insert(0);
                 *entry += 1;
@@ -130,6 +134,7 @@ pub fn collect_list_contains_pairs(guard: &ModelGuard, pairs: &mut BTreeSet<(Str
             }
         }
         ModelGuard::CrossEntityState { .. } => {}
+        ModelGuard::ReferenceEquals { .. } => {}
         _ => {}
     }
 }

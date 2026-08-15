@@ -37,6 +37,18 @@ use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 
 type ODataWriteError = Box<axum::response::Response>;
 
+pub(super) fn reference_contract_response(error: &str) -> Option<axum::response::Response> {
+    if !crate::entity_actor::reference_contract::is_reference_contract_error(error) {
+        return None;
+    }
+    let status = if error.contains("InvalidReferenceValue") {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::CONFLICT
+    };
+    Some(odata_error(status, "ConstraintViolation", error).into_response())
+}
+
 fn parse_odata_path_or_400(path: &str) -> Result<ODataPath, ODataWriteError> {
     parse_path(&format!("/{path}")).map_err(|e| {
         Box::new(
@@ -279,15 +291,34 @@ pub async fn handle_odata_post(
                 Err(resp) => return *resp,
             };
 
-            let entity_id = body_json
+            let supplied_entity_id = body_json
                 .get("id")
                 .or_else(|| body_json.get("Id"))
                 .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| {
+                .map(String::from);
+            let entity_id = match state
+                .prepare_reference_contract_create(
+                    &tenant,
+                    &entity_type,
+                    supplied_entity_id.as_deref(),
+                    &body_json,
+                )
+                .await
+            {
+                Ok(Some(entity_id)) => entity_id,
+                Ok(None) => {
                     let prefix = entity_type_prefix(&entity_type);
                     format!("{prefix}{}", temper_runtime::scheduler::sim_uuid())
-                });
+                }
+                Err(error) => {
+                    let status = if error.contains("InvalidReferenceValue") {
+                        StatusCode::BAD_REQUEST
+                    } else {
+                        StatusCode::CONFLICT
+                    };
+                    return odata_error(status, "ConstraintViolation", &error).into_response();
+                }
+            };
 
             let initial_fields = body_json.clone();
             let _commons_guardrail_lock = state.acquire_commons_write_guardrail_lock(&tenant).await;
@@ -494,6 +525,12 @@ pub async fn handle_odata_post(
                 .await
             {
                 Ok(response) => {
+                    if !response.success {
+                        let error = response.error.as_deref().unwrap_or("Update failed");
+                        return reference_contract_response(error).unwrap_or_else(|| {
+                            odata_error(StatusCode::CONFLICT, "UpdateFailed", error).into_response()
+                        });
+                    }
                     if entity_type == "RateLimit" {
                         state.clear_commons_rate_limit_cache();
                     }
@@ -813,6 +850,12 @@ pub async fn handle_odata_patch(
                 .await
             {
                 Ok(response) => {
+                    if !response.success {
+                        let error = response.error.as_deref().unwrap_or("Update failed");
+                        return reference_contract_response(error).unwrap_or_else(|| {
+                            odata_error(StatusCode::CONFLICT, "UpdateFailed", error).into_response()
+                        });
+                    }
                     if entity_type == "RateLimit" {
                         state.clear_commons_rate_limit_cache();
                     }
@@ -962,6 +1005,12 @@ pub async fn handle_odata_put(
                 .await
             {
                 Ok(response) => {
+                    if !response.success {
+                        let error = response.error.as_deref().unwrap_or("Update failed");
+                        return reference_contract_response(error).unwrap_or_else(|| {
+                            odata_error(StatusCode::CONFLICT, "UpdateFailed", error).into_response()
+                        });
+                    }
                     if entity_type == "RateLimit" {
                         state.clear_commons_rate_limit_cache();
                     }

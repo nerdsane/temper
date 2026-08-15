@@ -1187,6 +1187,7 @@ fn declared_key_set_signature_is_sorted_and_joined() {
     let key = |name: &str| DeclaredKey {
         name: name.to_string(),
         properties: vec!["WorkspaceId".to_string(), "Path".to_string()],
+        entity_id: false,
     };
     // Order-independent, comma-joined, sorted by name.
     assert_eq!(
