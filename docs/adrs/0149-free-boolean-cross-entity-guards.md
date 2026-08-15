@@ -1,6 +1,6 @@
 # ADR-0149: Free-boolean cross-entity guards in the L1 model check
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-06-22
 - Deciders: Temper core maintainers
 - Related:
