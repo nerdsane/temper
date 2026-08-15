@@ -12,6 +12,8 @@ use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton}
 use temper_spec::csdl::parse_csdl;
 use temper_spec::model::build_spec_model;
 
+mod reference_contract;
+
 use crate::util::to_pascal_case;
 
 /// Run the `temper verify` command.
@@ -99,6 +101,8 @@ pub fn run(specs_dir: &str) -> Result<()> {
                 }
             }
         }
+        lint_error_count +=
+            reference_contract::report_csdl_lints(&csdl, &parsed_automata, &mut lint_error_lines);
 
         if lint_error_count > 0 {
             anyhow::bail!(

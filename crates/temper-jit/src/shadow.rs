@@ -107,6 +107,8 @@ mod tests {
             counters,
             booleans: BTreeMap::new(),
             lists: BTreeMap::new(),
+            strings: BTreeMap::new(),
+            params: BTreeMap::new(),
         }
     }
 
@@ -140,6 +142,7 @@ mod tests {
                 },
             ],
             state_var_metadata: Default::default(),
+            action_params: Default::default(),
             composite_actions: Default::default(),
             rule_index: Default::default(),
         };

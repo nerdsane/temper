@@ -196,6 +196,7 @@ async fn sequence_preconditions_are_checked_atomically_by_actor() {
             EntityMsg::UpdateFields {
                 fields: serde_json::json!({"Name": "must-not-apply"}),
                 replace: false,
+                reference_evidence: std::collections::BTreeMap::new(),
                 expected_sequence: Some(99),
             },
             Duration::from_secs(1),
@@ -212,6 +213,7 @@ async fn sequence_preconditions_are_checked_atomically_by_actor() {
             EntityMsg::UpdateFields {
                 fields: serde_json::json!({"Name": "applied"}),
                 replace: false,
+                reference_evidence: std::collections::BTreeMap::new(),
                 expected_sequence: Some(sequence),
             },
             Duration::from_secs(1),
@@ -235,6 +237,7 @@ async fn sequence_preconditions_are_checked_atomically_by_actor() {
             EntityMsg::UpdateFields {
                 fields: serde_json::json!({"Name": "stale"}),
                 replace: false,
+                reference_evidence: std::collections::BTreeMap::new(),
                 expected_sequence: Some(sequence),
             },
             Duration::from_secs(1),

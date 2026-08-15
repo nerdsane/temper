@@ -69,6 +69,10 @@ fn parse_guard_fields(
                 .map(|s| s.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
         },
+        "reference_equals" => Guard::ReferenceEquals {
+            reference: fields.get("reference").cloned().unwrap_or_default(),
+            param: fields.get("param").cloned().unwrap_or_default(),
+        },
         "state_in" => Guard::StateIn {
             values: fields
                 .get("values")

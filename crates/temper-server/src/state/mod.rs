@@ -20,6 +20,7 @@ mod projection_backfill;
 mod published_artifacts;
 mod query_projection_queue;
 pub(crate) mod rate_limit;
+mod reference_contract;
 mod runtime_metrics;
 pub(crate) mod storage_caps;
 pub mod trajectory;
@@ -1211,10 +1212,32 @@ impl ServerState {
     /// Return true when OData for this tenant/entity should dispatch through
     /// the Postgres actor runtime.
     pub fn is_pg_actor_backed(&self, tenant: &TenantId, entity_type: &str) -> bool {
-        self.actor_backed_types.contains(entity_type)
+        let configured = self.actor_backed_types.contains(entity_type)
             || self
                 .actor_backed_types
-                .contains(&format!("{}:{entity_type}", tenant.as_str()))
+                .contains(&format!("{}:{entity_type}", tenant.as_str()));
+        if !configured {
+            return false;
+        }
+        // The generic PG actor runtime does not carry pre-resolved target
+        // evidence. Contracted entities therefore use the canonical entity
+        // actor, whose staged pre-commit validator covers every write origin.
+        let registry = self
+            .registry
+            .read()
+            .expect("spec registry lock should not be poisoned");
+        let contracted = registry
+            .get_spec(tenant, entity_type)
+            .map(|spec| spec.table().clone())
+            .or_else(|| self.transition_tables.get(entity_type).map(Arc::clone))
+            .is_some_and(|table| {
+                table
+                    .state_var_metadata
+                    .values()
+                    .any(|metadata| metadata.var_type.as_deref() == Some("ref"))
+                    || table.keys.iter().any(|key| key.entity_id)
+            });
+        !contracted
     }
 
     /// Attach an encrypted secrets vault.

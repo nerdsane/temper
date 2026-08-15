@@ -282,6 +282,7 @@ mod tests {
         let decl = vec![DeclaredKey {
             name: "name_parent".to_string(),
             properties: key.clone(),
+            entity_id: false,
         }];
         let read_pairs = vec![
             ("Name".to_string(), json!("/")),
@@ -299,6 +300,7 @@ mod tests {
         vec![DeclaredKey {
             name: "path".to_string(),
             properties: vec!["WorkspaceId".to_string(), "Path".to_string()],
+            entity_id: false,
         }]
     }
 
@@ -345,6 +347,7 @@ mod tests {
         let decl = vec![DeclaredKey {
             name: "ws_path".to_string(),
             properties: key.clone(),
+            entity_id: false,
         }];
         let (_, read_hash) = resolve_query_to_key(&decl, &read_pairs).expect("read resolves");
         assert_eq!(
@@ -401,6 +404,7 @@ mod tests {
         let decl = vec![DeclaredKey {
             name: "name_parent".to_string(),
             properties: key.clone(),
+            entity_id: false,
         }];
         let read_pairs = vec![
             ("Name".to_string(), json!("/")),

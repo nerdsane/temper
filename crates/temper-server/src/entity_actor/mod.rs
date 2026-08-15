@@ -6,6 +6,7 @@
 
 mod actor;
 pub mod effects;
+pub mod reference_contract;
 pub mod sim_handler;
 mod snapshot_queue;
 pub mod types;

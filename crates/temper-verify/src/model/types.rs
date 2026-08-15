@@ -64,14 +64,39 @@ pub struct TemperModelAction {
     pub name: String,
     /// The target status after taking this action (if deterministic).
     pub target_state: Option<String>,
+    /// Finite typed-reference parameter identity classes for this branch.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub reference_params: BTreeMap<String, u8>,
+    /// Declaration-ordered identity classes reserved for atomic creates.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fresh_references: BTreeMap<String, Vec<u8>>,
 }
 
 impl fmt::Display for TemperModelAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.target_state {
-            Some(target) => write!(f, "{} -> {}", self.name, target),
-            None => write!(f, "{}", self.name),
+        write!(f, "{}", self.name)?;
+        if !self.reference_params.is_empty() {
+            let params = self
+                .reference_params
+                .iter()
+                .map(|(name, symbol)| format!("{name}={symbol}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            write!(f, "[ref:{params}]")?;
         }
+        if !self.fresh_references.is_empty() {
+            let fresh = self
+                .fresh_references
+                .iter()
+                .map(|(target, symbols)| format!("{target}={symbols:?}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            write!(f, "[fresh:{fresh}]")?;
+        }
+        if let Some(target) = &self.target_state {
+            write!(f, " -> {target}")?;
+        }
+        Ok(())
     }
 }
 
@@ -114,6 +139,9 @@ pub enum ModelGuard {
         required_status: Vec<String>,
         forbidden_status: Vec<String>,
     },
+    /// An incoming typed reference must equal a stored typed reference.
+    /// Parameter identities are explored symbolically by verification backends.
+    ReferenceEquals { reference: String, param: String },
     /// All sub-guards must hold.
     And(Vec<ModelGuard>),
 }
@@ -132,6 +160,16 @@ impl ModelGuard {
 /// A state effect applied when a transition fires.
 #[derive(Clone, Debug)]
 pub enum ModelEffect {
+    /// Explore the finite identity classes for an incoming typed parameter.
+    ExploreReferenceParam { param: String, entity_type: String },
+    /// Project a typed reference parameter into an immutable reference field.
+    SetReferenceFromParam { reference: String, param: String },
+    /// Bind or validate the deterministic identity tuple after projection.
+    EnforceIdentity(Vec<String>),
+    /// Reserve fresh identity classes created by atomic composite sub-writes.
+    ReserveFreshReferences { entity_type: String, count: usize },
+    /// Canonicalize stored reference symbols in declaration order.
+    CanonicalizeReferences(BTreeMap<String, Vec<String>>),
     /// Increment a counter variable by 1.
     IncrementCounter(String),
     /// Decrement a counter variable by 1 (saturating).
@@ -252,6 +290,12 @@ pub struct TemperModel {
     pub(crate) initial_status: String,
     /// Initial counter values from [[state]] declarations.
     pub(crate) initial_counters: BTreeMap<String, usize>,
+    /// Canonical identity-equivalence variants for already-created entities.
+    pub(crate) initial_counter_variants: Vec<BTreeMap<String, usize>>,
+    /// Typed reference properties grouped by target entity type.
+    pub(crate) reference_properties_by_type: BTreeMap<String, Vec<String>>,
+    /// Declaration-ordered deterministic identity properties, when configured.
+    pub(crate) identity_properties: Vec<String>,
     /// Initial boolean values from [[state]] declarations.
     pub(crate) initial_booleans: BTreeMap<String, bool>,
     /// Initial list values from [[state]] declarations.
@@ -337,6 +381,8 @@ mod tests {
         let a = TemperModelAction {
             name: "Submit".into(),
             target_state: Some("Active".into()),
+            reference_params: BTreeMap::new(),
+            fresh_references: BTreeMap::new(),
         };
         assert_eq!(a.to_string(), "Submit -> Active");
     }
@@ -346,6 +392,8 @@ mod tests {
         let a = TemperModelAction {
             name: "AddItem".into(),
             target_state: None,
+            reference_params: BTreeMap::new(),
+            fresh_references: BTreeMap::new(),
         };
         assert_eq!(a.to_string(), "AddItem");
     }
@@ -368,6 +416,8 @@ mod tests {
         let a = TemperModelAction {
             name: "Submit".into(),
             target_state: Some("Active".into()),
+            reference_params: BTreeMap::new(),
+            fresh_references: BTreeMap::new(),
         };
         let json = serde_json::to_string(&a).unwrap();
         let back: TemperModelAction = serde_json::from_str(&json).unwrap();

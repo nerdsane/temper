@@ -78,16 +78,43 @@ impl TransitionTable {
         // ADR-0045 / ADR-0047: collect per-state-variable overflow metadata.
         let mut state_var_metadata = std::collections::BTreeMap::new();
         for sv in &automaton.state {
-            if sv.overflow_inline_max_bytes.is_some() || sv.overflow_ttl_seconds.is_some() {
+            if sv.overflow_inline_max_bytes.is_some()
+                || sv.overflow_ttl_seconds.is_some()
+                || sv.var_type == "ref"
+            {
                 state_var_metadata.insert(
                     sv.name.clone(),
                     super::types::StateVarMetadata {
+                        var_type: Some(sv.var_type.clone()),
+                        entity_type: sv.entity_type.clone(),
                         overflow_inline_max_bytes: sv.overflow_inline_max_bytes,
                         overflow_ttl_seconds: sv.overflow_ttl_seconds,
                     },
                 );
             }
         }
+
+        let action_params = automaton
+            .actions
+            .iter()
+            .filter(|action| !action.params.is_empty())
+            .map(|action| {
+                let params = action
+                    .params
+                    .iter()
+                    .map(|param| {
+                        (
+                            param.name().to_string(),
+                            super::types::ActionParamMetadata {
+                                param_type: param.param_type().to_string(),
+                                entity_type: param.entity_type().map(str::to_string),
+                            },
+                        )
+                    })
+                    .collect();
+                (action.name.clone(), params)
+            })
+            .collect();
 
         let mut composite_actions = std::collections::BTreeMap::new();
         for action in &automaton.actions {
@@ -127,6 +154,7 @@ impl TransitionTable {
                 .map(|k| super::types::DeclaredKey {
                     name: k.name.clone(),
                     properties: k.properties.clone(),
+                    entity_id: k.entity_id,
                 })
                 .collect(),
             vectors: automaton
@@ -141,6 +169,7 @@ impl TransitionTable {
                 })
                 .collect(),
             state_var_metadata,
+            action_params,
             composite_actions,
             rule_index,
         }
@@ -171,6 +200,9 @@ fn convert_guard(guard: ResolvedGuard) -> Guard {
             forbidden_status,
             required,
         },
+        ResolvedGuard::ReferenceEquals { reference, param } => {
+            Guard::ReferenceEquals { reference, param }
+        }
         ResolvedGuard::And(guards) => Guard::And(guards.into_iter().map(convert_guard).collect()),
     }
 }

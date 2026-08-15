@@ -102,6 +102,27 @@ fn verify_all_covers_every_component() {
     assert!(order_result.scope.contains(&"Payment".to_string()));
 }
 
+#[test]
+fn verify_all_covers_reverse_only_member_of_weak_component() {
+    let source = parse_automaton(
+        order_ioa()
+            .replace("name = \"Order\"", "name = \"ZSource\"")
+            .replace("target_entity = \"Payment\"", "target_entity = \"ATarget\"")
+            .as_str(),
+    )
+    .unwrap();
+    let target = parse_automaton(
+        payment_ioa()
+            .replace("name = \"Payment\"", "name = \"ATarget\"")
+            .as_str(),
+    )
+    .unwrap();
+    let results = verify_all(&[&source, &target]);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].seed, "ATarget");
+    assert!(results[0].scope.contains(&"ZSource".to_string()));
+}
+
 // ─── ADR-0150: no_dropped_reaction property ─────────────────────────────
 
 /// A source that can reach the target only after the target has left its

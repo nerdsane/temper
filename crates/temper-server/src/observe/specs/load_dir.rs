@@ -184,6 +184,15 @@ pub(crate) async fn handle_load_dir(
         return build_ndjson_response(StatusCode::BAD_REQUEST, lines);
     }
 
+    state
+        .audit_reference_contract_activation(
+            &temper_runtime::tenant::TenantId::new(&body.tenant),
+            &ioa_sources,
+            10_000,
+        )
+        .await
+        .map_err(|error| (StatusCode::CONFLICT, error))?;
+
     // Persist loaded specs first when Postgres is configured.
     let csdl_xml_for_db = csdl_xml.clone();
     for (entity_type, ioa_source) in &ioa_sources {
