@@ -10,10 +10,16 @@ use temper_ots::{
     OTSMessageContent, OTSMetadata, OutcomeType, TrajectoryBuilder,
 };
 use temper_runtime::scheduler::sim_now;
-use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{self, AsyncWriteExt, BufReader};
 
 use super::McpConfig;
 use super::protocol::dispatch_json_line;
+use crate::trajectory_bounds::{
+    MAX_STDIO_LINE_BYTES, MAX_TRAJECTORY_TOTAL_BYTES, MAX_TRAJECTORY_TURNS, StdioFrame,
+    TRAJECTORY_TURN_ENVELOPE_BYTES, bounded_trajectory_actions, bump_seen, floor_char_boundary,
+    json_string_cost, json_value_cost, read_stdio_frame, trajectory_storage_tenant,
+    truncate_trajectory_text,
+};
 
 const OTS_UPLOAD_MAX_ATTEMPTS: u32 = 3;
 const OTS_UPLOAD_RETRY_DELAY_MS: u64 = 100;
@@ -56,10 +62,18 @@ pub(crate) struct RuntimeContext {
     sandbox: temper_sandbox::runner::PersistentSandbox,
     /// OTS trajectory builder for capturing agent execution traces.
     pub(crate) trajectory: Option<TrajectoryBuilder>,
-    /// Tenants observed in executed calls during this session.
+    /// Tenants observed in executed calls during this session (observability
+    /// signal only; never used to route trajectory storage).
     tenants_seen: BTreeMap<String, usize>,
-    /// Entity types observed in executed calls during this session.
-    entity_types_seen: BTreeMap<String, usize>,
+    /// Number of turns recorded into the current trajectory (bounds its size).
+    turns_recorded: usize,
+    /// Estimated serialized bytes recorded so far. Bounds the whole upload to
+    /// under the server's ingest limit so a within-per-turn-cap session can't
+    /// still produce a trajectory the server rejects (ARN-222).
+    trajectory_bytes: usize,
+    /// Whether the turn/byte cap has already been reported for this trajectory,
+    /// so hitting the cap warns once rather than on every subsequent turn.
+    capped_warned: bool,
 }
 
 impl RuntimeContext {
@@ -89,7 +103,9 @@ impl RuntimeContext {
             sandbox: temper_sandbox::runner::PersistentSandbox::new(&[("temper", "Temper", 1)]),
             trajectory: None,
             tenants_seen: BTreeMap::new(),
-            entity_types_seen: BTreeMap::new(),
+            turns_recorded: 0,
+            trajectory_bytes: 0,
+            capped_warned: false,
         })
     }
 
@@ -158,6 +174,10 @@ impl RuntimeContext {
     }
 
     /// Initialize OTS trajectory capture after the MCP handshake completes.
+    ///
+    /// Resets the per-trajectory budgets so a client that re-sends `initialize`
+    /// gets a fresh trajectory with a fresh turn/byte budget rather than
+    /// inheriting a consumed one.
     pub(crate) fn init_trajectory(&mut self) {
         let now = sim_now(); // determinism-ok: sim_now is DST-safe
         let agent_id = self.agent_id.as_deref().unwrap_or("unknown");
@@ -166,11 +186,73 @@ impl RuntimeContext {
         let context = OTSContext::new();
 
         self.trajectory = Some(TrajectoryBuilder::new(metadata, context));
+        self.turns_recorded = 0;
+        self.trajectory_bytes = 0;
+        self.capped_warned = false;
+    }
+
+    /// Warn once per trajectory that a capture cap was hit, so a long agent loop
+    /// that keeps executing past the cap does not emit an identical warning every
+    /// turn.
+    fn warn_capped_once(&mut self, cap: &str, limit: usize) {
+        if !self.capped_warned {
+            self.capped_warned = true;
+            tracing::warn!(
+                cap,
+                limit,
+                "mcp trajectory cap reached; dropping further turns"
+            );
+        }
     }
 
     /// Record an execute tool call as an OTS turn with a decision.
     pub(crate) fn record_execute_turn(&mut self, code: &str, result: &Result<String>) {
+        if self.trajectory.is_none() {
+            return;
+        }
+        // Bound the trajectory: drop further turns once the cap is reached (ARN-222).
+        if self.turns_recorded >= MAX_TRAJECTORY_TURNS {
+            self.warn_capped_once("turn count", MAX_TRAJECTORY_TURNS);
+            return;
+        }
+
         let extracted_actions = extract_trajectory_actions_from_code(code);
+        // Bound recorded content: a large code blob or result can't grow the
+        // trajectory without limit (ARN-222).
+        let code_text = truncate_trajectory_text(code);
+        let result_text = match result {
+            Ok(text) => truncate_trajectory_text(text),
+            Err(e) => truncate_trajectory_text(&e.to_string()),
+        };
+        let is_failure = result.is_err();
+        let action_arguments = (!extracted_actions.is_empty()).then(|| {
+            serde_json::json!({
+                "trajectory_actions": bounded_trajectory_actions(extracted_actions),
+            })
+        });
+
+        // Total-size budget: meter the turn's *serialized* contribution (escaped
+        // text, the embedded actions, the duplicated error field, and a per-turn
+        // envelope) — not raw string bytes, which undercount the wire size by 2x
+        // or more. Stop recording once the cumulative serialized estimate would
+        // exceed the budget, so the whole upload stays under the server's ingest
+        // limit and is never rejected (and silently dropped) as too large, which
+        // would suppress the audit trail (ARN-222).
+        let turn_bytes = TRAJECTORY_TURN_ENVELOPE_BYTES
+            + json_string_cost(&code_text)
+            + json_string_cost(&result_text)
+            + if is_failure {
+                json_string_cost(&result_text)
+            } else {
+                0
+            }
+            + action_arguments.as_ref().map(json_value_cost).unwrap_or(0);
+        if self.trajectory_bytes + turn_bytes > MAX_TRAJECTORY_TOTAL_BYTES {
+            self.warn_capped_once("serialized byte budget", MAX_TRAJECTORY_TOTAL_BYTES);
+            return;
+        }
+        self.turns_recorded += 1;
+        self.trajectory_bytes += turn_bytes;
 
         let Some(ref mut builder) = self.trajectory else {
             return;
@@ -182,39 +264,39 @@ impl RuntimeContext {
         // User message: the Python code submitted
         builder.add_message(OTSMessage::new(
             MessageRole::User,
-            OTSMessageContent::text(code),
+            OTSMessageContent::text(code_text),
             now,
         ));
 
         // Decision: the execution outcome
         let (outcome_str, consequence) = match result {
-            Ok(text) => {
+            Ok(_) => {
                 // Assistant message: the execution result
                 builder.add_message(OTSMessage::new(
                     MessageRole::Assistant,
-                    OTSMessageContent::text(text),
+                    OTSMessageContent::text(result_text),
                     now,
                 ));
                 ("success", OTSConsequence::success())
             }
-            Err(e) => {
+            Err(_) => {
                 builder.add_message(OTSMessage::new(
                     MessageRole::Assistant,
-                    OTSMessageContent::text(e.to_string()),
+                    OTSMessageContent::text(result_text.clone()),
                     now,
                 ));
+                // Bound the error_type too — it is the same (already truncated) text.
                 (
                     "failure",
-                    OTSConsequence::failure().with_error_type(e.to_string()),
+                    OTSConsequence::failure().with_error_type(result_text),
                 )
             }
         };
 
-        let mut choice = OTSChoice::new(format!("execute: {}", &code[..code.len().min(100)]));
-        if !extracted_actions.is_empty() {
-            choice = choice.with_arguments(serde_json::json!({
-                "trajectory_actions": extracted_actions,
-            }));
+        let label_end = floor_char_boundary(code, 100);
+        let mut choice = OTSChoice::new(format!("execute: {}", &code[..label_end]));
+        if let Some(arguments) = action_arguments {
+            choice = choice.with_arguments(arguments);
         }
 
         let decision = OTSDecision::new(DecisionType::ToolSelection, choice, consequence);
@@ -225,17 +307,30 @@ impl RuntimeContext {
         tracing::debug!(outcome = outcome_str, "ots.trajectory.turn_recorded");
 
         for meta in extract_temper_call_metadata(code) {
+            // Cap the distinct-key growth of these observability maps so a single
+            // large code blob can't insert unbounded unique keys (ARN-222).
             if let Some(tenant) = meta.tenant {
-                self.tenants_seen
-                    .entry(tenant)
-                    .and_modify(|count| *count += 1)
-                    .or_insert(1);
-            }
-            if let Some(entity_type) = meta.entity_type {
-                self.entity_types_seen
-                    .entry(entity_type)
-                    .and_modify(|count| *count += 1)
-                    .or_insert(1);
+                // Emit the cross-tenant signal once per unique foreign tenant, the
+                // turn it is first tracked — never on every turn. `bump_seen`
+                // returns true only when it actually inserts a new key, so once
+                // `tenants_seen` saturates (or the key is oversized) it stops
+                // returning true and the warn does not spam. Storage is unaffected.
+                let foreign = if tenant != self.identity_tenant {
+                    Some(tenant.clone())
+                } else {
+                    None
+                };
+                let newly_tracked = bump_seen(&mut self.tenants_seen, tenant);
+                if let Some(referenced) = foreign
+                    && newly_tracked
+                {
+                    tracing::warn!(
+                        identity_tenant = %self.identity_tenant,
+                        referenced_tenant = %referenced,
+                        "mcp session code referenced a tenant other than its identity; \
+                         trajectory stored under the identity tenant"
+                    );
+                }
             }
         }
     }
@@ -325,11 +420,17 @@ impl RuntimeContext {
             .post(&url)
             .body(json)
             .header("Content-Type", "application/json")
-            .header("X-Tenant-Id", self.primary_tenant());
+            .header(
+                "X-Tenant-Id",
+                trajectory_storage_tenant(&self.identity_tenant),
+            );
 
-        if let Some(primary_entity_type) = self.primary_entity_type() {
-            request = request.header("X-Entity-Type", primary_entity_type);
-        }
+        // No code-derived value is placed in a request header: a `\n` or other
+        // illegal byte in an attacker-controlled entity type would make the HTTP
+        // client reject the whole upload, silently losing the trajectory. The
+        // previous `X-Entity-Type` header was code-derived and had no server-side
+        // reader, so it is dropped entirely (ARN-222). Agent/session ids below are
+        // startup config, not code-derived.
         if let Some(ref agent_id) = self.agent_id {
             request = request.header("X-Agent-Id", agent_id);
         }
@@ -358,23 +459,6 @@ impl RuntimeContext {
                 retryable: true,
             }),
         }
-    }
-
-    /// Most-used tenant for this session, falling back to configured identity tenant.
-    fn primary_tenant(&self) -> &str {
-        self.tenants_seen
-            .iter()
-            .max_by_key(|(_, count)| *count)
-            .map(|(tenant, _)| tenant.as_str())
-            .unwrap_or(self.identity_tenant.as_str())
-    }
-
-    /// Most-used entity type for this session.
-    fn primary_entity_type(&self) -> Option<&str> {
-        self.entity_types_seen
-            .iter()
-            .max_by_key(|(_, count)| *count)
-            .map(|(entity_type, _)| entity_type.as_str())
     }
 
     pub(crate) async fn run_execute(&mut self, code: &str) -> Result<String> {
@@ -506,8 +590,10 @@ fn extract_trajectory_actions_from_code(code: &str) -> Vec<Value> {
 
 #[derive(Debug, Clone, Default)]
 struct TemperCallMetadata {
+    /// Tenant referenced by the call, when the call uses the tenant-first
+    /// signature. Used only as a cross-tenant observability signal — never to
+    /// route trajectory storage (ARN-222).
     tenant: Option<String>,
-    entity_type: Option<String>,
 }
 
 fn extract_temper_call_metadata(code: &str) -> Vec<TemperCallMetadata> {
@@ -519,52 +605,23 @@ fn extract_temper_call_metadata(code: &str) -> Vec<TemperCallMetadata> {
 
 fn extract_temper_action_metadata(code: &str) -> Vec<TemperCallMetadata> {
     extract_call_metadata(code, "temper.action", |args| {
-        // New signature: temper.action(tenant, entity_type, id, action, params)
-        if args.len() >= 5
-            && let (Some(tenant), Some(entity_type), Some(_action)) = (
-                parse_python_string_literal(args[0]),
-                parse_python_string_literal(args[1]),
-                parse_python_string_literal(args[3]),
-            )
-        {
-            return TemperCallMetadata {
-                tenant: Some(tenant),
-                entity_type: Some(entity_type),
-            };
-        }
-
-        // Legacy signature: temper.action(entity_type, id, action, params)
-        TemperCallMetadata {
-            tenant: None,
-            entity_type: args
-                .first()
-                .and_then(|raw| parse_python_string_literal(raw)),
-        }
+        // New signature: temper.action(tenant, entity_type, id, action, params).
+        // Only the tenant is retained; the legacy signature carries no tenant.
+        let tenant = (args.len() >= 5)
+            .then(|| parse_python_string_literal(args[0]))
+            .flatten();
+        TemperCallMetadata { tenant }
     })
 }
 
 fn extract_temper_create_metadata(code: &str) -> Vec<TemperCallMetadata> {
     extract_call_metadata(code, "temper.create", |args| {
-        // New signature: temper.create(tenant, entity_type, fields)
-        if args.len() >= 3
-            && let (Some(tenant), Some(entity_type)) = (
-                parse_python_string_literal(args[0]),
-                parse_python_string_literal(args[1]),
-            )
-        {
-            return TemperCallMetadata {
-                tenant: Some(tenant),
-                entity_type: Some(entity_type),
-            };
-        }
-
-        // Legacy signature: temper.create(entity_type, fields)
-        TemperCallMetadata {
-            tenant: None,
-            entity_type: args
-                .first()
-                .and_then(|raw| parse_python_string_literal(raw)),
-        }
+        // New signature: temper.create(tenant, entity_type, fields). Only the
+        // tenant is retained; the legacy signature carries no tenant.
+        let tenant = (args.len() >= 3)
+            .then(|| parse_python_string_literal(args[0]))
+            .flatten();
+        TemperCallMetadata { tenant }
     })
 }
 
@@ -843,14 +900,34 @@ fn normalize_pythonish_json(input: &str) -> String {
 }
 
 /// Run the MCP server on stdio with JSON-RPC over newline-delimited JSON.
+///
+/// Frames are read through [`read_stdio_frame`], which bounds each frame to
+/// `MAX_STDIO_LINE_BYTES`; oversized frames are dropped and invalid UTF-8 frames
+/// are skipped rather than aborting the session.
 pub async fn run_stdio_server(config: McpConfig) -> Result<()> {
     let mut ctx = RuntimeContext::from_config(&config)?;
-    let stdin = BufReader::new(io::stdin());
-    let mut lines = stdin.lines();
+    let mut stdin = BufReader::new(io::stdin());
     let mut stdout = io::stdout();
 
-    while let Some(line) = lines.next_line().await? {
-        let line = line.trim();
+    loop {
+        let buf = match read_stdio_frame(&mut stdin).await? {
+            StdioFrame::Eof => break,
+            StdioFrame::TooLarge => {
+                tracing::warn!(
+                    limit = MAX_STDIO_LINE_BYTES,
+                    "mcp.stdio.frame_too_large: dropped oversized frame"
+                );
+                continue;
+            }
+            StdioFrame::Line(buf) => buf,
+        };
+        let line = match std::str::from_utf8(&buf) {
+            Ok(text) => text.trim(),
+            Err(_) => {
+                tracing::warn!("mcp.stdio.invalid_utf8: dropped frame");
+                continue;
+            }
+        };
         if line.is_empty() {
             continue;
         }
@@ -870,108 +947,5 @@ pub async fn run_stdio_server(config: McpConfig) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::{Router, extract::State, http::StatusCode, routing::post};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-
-    #[test]
-    fn extract_trajectory_actions_from_temper_action_calls() {
-        let code = r#"
-result = temper.action("Issue", "issue-1", "PromoteToCritical", {"Reason": "prod incident"})
-other = temper.action('Issue', 'issue-1', 'Assign', {'AgentId': 'agent-2'})
-tenant = temper.action("gepa-tenant", "Issues", "11111111-1111-1111-1111-111111111111", "Reassign", {"NewAssigneeId": "agent-3"})
-"#;
-
-        let actions = extract_trajectory_actions_from_code(code);
-        assert_eq!(actions.len(), 3);
-        assert_eq!(
-            actions[0].get("action").and_then(Value::as_str),
-            Some("PromoteToCritical")
-        );
-        assert_eq!(
-            actions[2]
-                .get("params")
-                .and_then(Value::as_object)
-                .and_then(|m| m.get("NewAssigneeId"))
-                .and_then(Value::as_str),
-            Some("agent-3")
-        );
-    }
-
-    #[test]
-    fn normalize_python_literals_to_json() {
-        let value = parse_python_json_value("{'enabled': True, 'reason': None, 'count': 2}")
-            .expect("python dict should parse");
-        assert_eq!(value["enabled"], serde_json::json!(true));
-        assert_eq!(value["reason"], serde_json::Value::Null);
-        assert_eq!(value["count"], serde_json::json!(2));
-    }
-
-    #[test]
-    fn extract_temper_call_metadata_tracks_tenant_and_entity() {
-        let code = r#"
-await temper.action("tenant-a", "Issue", "i-1", "Assign", {"AgentId": "agent-1"})
-await temper.create("tenant-b", "Task", {"Title": "x"})
-"#;
-        let metadata = extract_temper_call_metadata(code);
-        assert!(
-            metadata.iter().any(|m| {
-                m.tenant.as_deref() == Some("tenant-a") && m.entity_type.as_deref() == Some("Issue")
-            }),
-            "expected tenant-a/Issue metadata"
-        );
-        assert!(
-            metadata.iter().any(|m| {
-                m.tenant.as_deref() == Some("tenant-b") && m.entity_type.as_deref() == Some("Task")
-            }),
-            "expected tenant-b/Task metadata"
-        );
-    }
-
-    #[tokio::test]
-    async fn finalize_trajectory_retries_retryable_ots_upload_failure() {
-        async fn handler(State(attempts): State<Arc<AtomicUsize>>) -> StatusCode {
-            let attempt = attempts.fetch_add(1, Ordering::SeqCst);
-            if attempt == 0 {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
-                StatusCode::ACCEPTED
-            }
-        }
-
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let app = Router::new()
-            .route("/api/ots/trajectories", post(handler))
-            .with_state(attempts.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test server");
-        let addr = listener.local_addr().expect("test server addr");
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serve test server");
-        });
-
-        let mut ctx = RuntimeContext {
-            base_url: format!("http://{addr}"),
-            http: reqwest::Client::new(),
-            agent_id: Some("agent".to_string()),
-            agent_type: Some("test-agent".to_string()),
-            session_id: Some("session".to_string()),
-            api_key: None,
-            identity_tenant: "tenant".to_string(),
-            sandbox: temper_sandbox::runner::PersistentSandbox::new(&[("temper", "Temper", 1)]),
-            trajectory: None,
-            tenants_seen: BTreeMap::new(),
-            entity_types_seen: BTreeMap::new(),
-        };
-        ctx.init_trajectory();
-
-        ctx.finalize_trajectory().await;
-
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
-    }
-}
+#[path = "runtime_test.rs"]
+mod tests;
