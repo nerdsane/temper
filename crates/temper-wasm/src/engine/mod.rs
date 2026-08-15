@@ -96,12 +96,47 @@ impl ResourceLimiter for MemoryLimiter {
     fn table_growing(
         &mut self,
         _current: usize,
-        _desired: usize,
+        desired: usize,
         _maximum: Option<usize>,
     ) -> Result<bool, wasmtime::Error> {
-        Ok(true)
+        // Bound table growth too: table elements are host allocations (a funcref/
+        // externref slot each) that the memory limiter does not cover, so an
+        // unbounded `table.grow` is a host-memory exhaustion vector (ARN-169).
+        // Deny past the cap (grow returns -1) rather than trapping.
+        Ok(desired <= MAX_TABLE_ELEMENTS)
+    }
+
+    // The per-table/per-memory element caps above only bound host allocation if
+    // the *number* of tables and memories is also bounded — wasmtime's default
+    // limiter allows 10,000 of each per store, so a guest could otherwise declare
+    // thousands of tables each at the element cap and multiply the budget. Cap the
+    // counts to what a single-module guest actually needs (ARN-169).
+    fn memories(&self) -> usize {
+        MAX_MEMORIES
+    }
+
+    fn tables(&self) -> usize {
+        MAX_TABLES
     }
 }
+
+/// Maximum number of elements any single guest table may hold. Table slots are
+/// host allocations outside the linear-memory budget; this caps the host memory a
+/// guest can force through `table.grow` (ARN-169).
+const MAX_TABLE_ELEMENTS: usize = 1_000_000;
+
+/// Maximum number of linear memories a guest store may create. With
+/// `wasm_multi_memory(false)` a module already declares at most one; this makes
+/// the store-level bound explicit so the per-memory `max_memory` budget cannot be
+/// multiplied (ARN-169).
+const MAX_MEMORIES: usize = 1;
+
+/// Maximum number of tables a guest store may create. Together with
+/// `MAX_TABLE_ELEMENTS` this bounds total table host memory to
+/// `MAX_TABLES * MAX_TABLE_ELEMENTS` slots. Generous enough for ordinary
+/// reference-types modules (typically one funcref table) while preventing the
+/// default 10,000-table multiplier (ARN-169).
+const MAX_TABLES: usize = 8;
 
 /// Compiled module cache entry.
 struct CachedModule {
@@ -229,6 +264,18 @@ impl WasmEngine {
         config.consume_fuel(true);
         config.epoch_interruption(true);
         config.wasm_component_model(true);
+        // Pin the WASM feature surface across the wasmtime 29 -> 36 bump (ARN-169).
+        // wasmtime 30+ turns several proposals on by default; leaving them at the
+        // 36 defaults would silently widen the guest attack surface relative to 29:
+        //   - memory64: rejected at compile on 29, and a prerequisite for the very
+        //     advisory this bump fixes (RUSTSEC-2026-0096) — keep it off;
+        //   - threads/shared memory and multiple memories: each lets a guest hold a
+        //     linear memory the per-memory `max_memory` limiter does not sum, so a
+        //     guest could exceed the intended per-invocation memory budget.
+        // Temper's guests are single-memory wasm32 modules and use none of these.
+        config.wasm_memory64(false);
+        config.wasm_threads(false);
+        config.wasm_multi_memory(false);
         if let Some(strategy) = configured_profiling_strategy() {
             config.profiler(strategy);
         }
@@ -484,7 +531,7 @@ impl WasmEngine {
             );
             let _entered = phase.enter();
             let wasi_stderr_pipe = if needs_wasi {
-                Some(wasmtime_wasi::pipe::MemoryOutputPipe::new(64 * 1024))
+                Some(wasmtime_wasi::p2::pipe::MemoryOutputPipe::new(64 * 1024))
             } else {
                 None
             };
