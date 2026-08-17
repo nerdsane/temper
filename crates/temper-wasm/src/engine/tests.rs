@@ -183,7 +183,7 @@ impl WasmHost for SlowHttpHost {
     fn log(&self, _level: &str, _message: &str) {}
 }
 
-fn make_context() -> WasmInvocationContext {
+pub(super) fn make_context() -> WasmInvocationContext {
     WasmInvocationContext {
         tenant: "test".into(),
         entity_type: "Order".into(),
@@ -203,11 +203,11 @@ fn make_context() -> WasmInvocationContext {
     }
 }
 
-fn make_host() -> Arc<dyn WasmHost> {
+pub(super) fn make_host() -> Arc<dyn WasmHost> {
     Arc::new(SimWasmHost::new())
 }
 
-fn make_streams() -> Arc<RwLock<StreamRegistry>> {
+pub(super) fn make_streams() -> Arc<RwLock<StreamRegistry>> {
     Arc::new(RwLock::new(StreamRegistry::default()))
 }
 
