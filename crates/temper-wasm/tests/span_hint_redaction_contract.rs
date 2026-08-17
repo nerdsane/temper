@@ -129,3 +129,81 @@ fn span_hint_redaction_uses_the_per_tenant_policy_not_a_literal() {
         "expected at least 4 guarded sites, found {policy_calls}"
     );
 }
+
+/// The guest metric channel (`host_emit_metric`) has two sinks that read the
+/// guest's tags — a span event and the OTel meter. Unit tests on the helper
+/// cannot see whether `emit_metric` calls it, nor whether it calls it early
+/// enough; this pins both.
+#[test]
+fn guest_metric_tags_are_redacted_before_either_sink() {
+    let src = &strip_line_comments(HOST_TRAIT_SOURCE);
+    let start = src
+        .find("fn emit_metric(&self, metric_json: &str)")
+        .expect("ProductionWasmHost must implement emit_metric");
+    // Scope to this function: the trait's default impl and SimWasmHost's also
+    // define `emit_metric`, and only the production one carries guest tags.
+    let end = src[start..]
+        .find("\n    fn ")
+        .map_or(src.len(), |rel| start + rel);
+    let body = &src[start..end];
+
+    let redact_at = body
+        .find("redact_guest_string_tags(&mut payload.tags")
+        .expect(
+            "emit_metric must redact guest tags: they are guest-named and \
+             guest-valued strings that reach OTel metrics and a span event (ARN-243)",
+        );
+    for sink in [
+        "record_guest_metric_span_event(",
+        "payload\n            .tags",
+    ] {
+        if let Some(sink_at) = body.find(sink) {
+            assert!(
+                redact_at < sink_at,
+                "guest metric tags must be redacted before `{sink}` reads them; \
+                 redact at {redact_at}, sink at {sink_at}"
+            );
+        }
+    }
+    assert!(
+        body.contains("self.export_llm_content"),
+        "the metric redaction must be driven by the per-tenant policy, not a constant"
+    );
+}
+
+/// `build_guest_wide_event` is the other guest-authored telemetry record. Its
+/// unit tests call the helper directly, so deleting the *call* here left them all
+/// green — this pins the wiring, and that the guest half is judged before any
+/// host-derived field is merged in.
+#[test]
+fn guest_wide_event_fields_are_redacted_at_the_call_site() {
+    let src = &strip_line_comments(HOST_TRAIT_SOURCE);
+    let start = src
+        .find("fn build_guest_wide_event(&self, event_json: &str)")
+        .expect("ProductionWasmHost must build guest wide events");
+    let end = src[start..]
+        .find("\n    fn ")
+        .map_or(src.len(), |rel| start + rel);
+    let body = &src[start..end];
+
+    let redact_at = body
+        .find("redact_guest_wide_event_fields(&mut tags, &mut attributes")
+        .expect(
+            "build_guest_wide_event must redact the guest-supplied tags and \
+             attributes: a wide event carries guest-chosen names and values \
+             straight to the backend (ARN-243)",
+        );
+    assert!(
+        body[redact_at..].contains("self.export_llm_content"),
+        "the wide-event redaction must be driven by the per-tenant policy, not a constant"
+    );
+    // The host merges its own fields (tenant, entity_type, trigger_action) in
+    // after this point; judging them would be wrong, so the redaction has to come
+    // first — which is also what keeps the guest half from being judged twice.
+    if let Some(merge_at) = body.find(".entry(\"tenant\".into())") {
+        assert!(
+            redact_at < merge_at,
+            "guest fields must be redacted before host-derived fields are merged in"
+        );
+    }
+}

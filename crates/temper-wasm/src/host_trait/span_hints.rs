@@ -122,6 +122,17 @@ pub(crate) fn llm_namespace_attr_allowed(key: &str) -> bool {
     is_llm_metadata_attr(&key)
 }
 
+/// Whether a guest-supplied key lands in the `gen_ai.*` namespace, normalized.
+///
+/// Every namespace test goes through this rather than `starts_with` on the raw
+/// key. Normalizing in one place and matching raw in another is how the clamp and
+/// the allowlist end up disagreeing: `GEN_AI.request.model` passes a normalized
+/// allowlist as recognised metadata, then misses a raw-key clamp and carries a
+/// whole prompt.
+pub(crate) fn is_llm_namespace_key(key: &str) -> bool {
+    normalize_llm_attr_key(key).starts_with("gen_ai.")
+}
+
 /// Normalize a guest-supplied attribute key before the namespace test. The
 /// span-hint parser already lowercases and trims, but the guest-span and
 /// wide-event payloads hand keys over verbatim, so ` GEN_AI.prompt ` would
@@ -129,6 +140,27 @@ pub(crate) fn llm_namespace_attr_allowed(key: &str) -> bool {
 /// application telemetry.
 pub(crate) fn normalize_llm_attr_key(key: &str) -> String {
     key.trim().to_ascii_lowercase()
+}
+
+/// Bound a `gen_ai.*` metadata value of any JSON shape.
+///
+/// Strings are clamped. Numbers and booleans pass — they are bounded by their own
+/// type and are what real metadata looks like (token counts, temperature).
+/// Arrays and objects are **dropped**: no metadata key in the allowlist is
+/// structured, and their serialized form is unbounded, so `gen_ai.request.model =
+/// ["<the whole prompt>"]` would otherwise ride straight through a clamp that only
+/// matched strings. Adversarial review found exactly that hole.
+pub(crate) fn clamp_llm_metadata_json(value: &serde_json::Value) -> Option<serde_json::Value> {
+    match value {
+        serde_json::Value::String(text) => Some(
+            clamp_redacted_metadata_value(text)
+                .map_or_else(|| value.clone(), serde_json::Value::String),
+        ),
+        serde_json::Value::Number(_) | serde_json::Value::Bool(_) | serde_json::Value::Null => {
+            Some(value.clone())
+        }
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
+    }
 }
 
 /// Clamp a guest-supplied metadata value to [`MAX_REDACTED_LLM_METADATA_VALUE_BYTES`],
@@ -228,7 +260,7 @@ pub(crate) fn redact_llm_content_hints(hints: &mut SpanHints, export_content: bo
     // Names survive; values still have to be bounded, or the prompt simply
     // travels as `gen_ai.request.model`.
     for (key, value) in hints.attributes.iter_mut() {
-        if key.starts_with("gen_ai.")
+        if is_llm_namespace_key(key)
             && let Some(clamped) = clamp_redacted_metadata_value(value)
         {
             *value = clamped;

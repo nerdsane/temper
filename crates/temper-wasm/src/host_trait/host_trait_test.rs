@@ -633,3 +633,55 @@ fn guest_wide_event_fields_are_untouched_when_opted_in() {
         Some(&json!("COMPLETION"))
     );
 }
+
+/// ARN-243 / ADR-0166. `host_emit_metric` is a fifth guest-authored telemetry
+/// channel: the guest chooses tag names *and* string values, and they reach both
+/// the OTel meter and a span event. Found by adversarial review after the first
+/// four channels were closed.
+#[test]
+fn guest_metric_tags_drop_llm_content_for_non_opted_in_tenant() {
+    use super::redact_guest_string_tags;
+    use std::collections::BTreeMap;
+
+    let mut tags = BTreeMap::new();
+    tags.insert(
+        "gen_ai.completion".to_string(),
+        "SECRET COMPLETION".to_string(),
+    );
+    tags.insert(
+        "gen_ai.response.text".to_string(),
+        "SECRET COMPLETION".to_string(),
+    );
+    tags.insert("GEN_AI.prompt".to_string(), "SECRET PROMPT".to_string());
+    tags.insert("gen_ai.request.model".to_string(), "M".repeat(4096));
+    tags.insert("app.route".to_string(), "checkout".to_string());
+
+    redact_guest_string_tags(&mut tags, false);
+
+    assert_eq!(tags.get("gen_ai.completion"), None);
+    assert_eq!(
+        tags.get("gen_ai.response.text"),
+        None,
+        "an unrecognized gen_ai.* key must not export just because it is unlisted"
+    );
+    assert_eq!(
+        tags.get("GEN_AI.prompt"),
+        None,
+        "the namespace test must normalize the guest-supplied key"
+    );
+    assert!(
+        tags.get("gen_ai.request.model")
+            .is_some_and(|v| v.len() <= 256),
+        "recognized metadata survives, clamped"
+    );
+    assert_eq!(tags.get("app.route"), Some(&"checkout".to_string()));
+
+    // Opted-in tenants are untouched.
+    let mut exported = BTreeMap::new();
+    exported.insert("gen_ai.completion".to_string(), "COMPLETION".to_string());
+    redact_guest_string_tags(&mut exported, true);
+    assert_eq!(
+        exported.get("gen_ai.completion"),
+        Some(&"COMPLETION".to_string())
+    );
+}

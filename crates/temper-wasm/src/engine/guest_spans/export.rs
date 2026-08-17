@@ -9,7 +9,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use crate::types::WasmInvocationContext;
 
-use super::{GuestSpanEndPayload, GuestSpanEntry, allowed_attributes, key_value_from_json};
+use super::{GuestSpanEndPayload, GuestSpanEntry, key_value_from_json};
 
 pub(super) fn manual_parent_context() -> Option<opentelemetry::Context> {
     let context = tracing::Span::current().context();
@@ -33,9 +33,8 @@ pub(super) fn manual_span_attributes(
     context: &WasmInvocationContext,
     span_id: i64,
     attributes: &BTreeMap<String, Value>,
-    export_llm_content: bool,
 ) -> BTreeMap<String, Value> {
-    let mut manual = allowed_attributes(attributes, export_llm_content);
+    let mut manual = attributes.clone();
     manual.insert("tenant".to_string(), Value::String(context.tenant.clone()));
     manual.insert(
         "entity_type".to_string(),

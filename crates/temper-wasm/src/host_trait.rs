@@ -33,9 +33,9 @@ pub use span_hints::{MAX_REDACTED_LLM_METADATA_VALUE_BYTES, clamp_redacted_metad
 #[cfg(test)]
 pub(crate) use span_hints::{MAX_RESPONSE_CAPTURE_BYTES, SpanHints};
 pub(crate) use span_hints::{
-    apply_response_captures, apply_span_hints, datadog_visible_span_hint_field,
-    llm_namespace_attr_allowed, redact_llm_content_hints, span_hint_otel_name,
-    split_span_hint_headers, truncate_for_span_attr,
+    apply_response_captures, apply_span_hints, clamp_llm_metadata_json,
+    datadog_visible_span_hint_field, is_llm_namespace_key, llm_namespace_attr_allowed,
+    redact_llm_content_hints, span_hint_otel_name, split_span_hint_headers, truncate_for_span_attr,
 };
 
 /// Host capabilities provided to WASM modules.
@@ -520,6 +520,23 @@ fn remote_blob_backend<'a>(secrets: &'a BTreeMap<String, String>, url: &str) -> 
     Some(backend)
 }
 
+/// Apply ADR-0166 to a map of guest-supplied string tags. Shared by guest wide
+/// events and guest metrics: both let an untrusted module choose tag names *and*
+/// string values, so both are the same channel as the span APIs.
+fn redact_guest_string_tags(tags: &mut BTreeMap<String, String>, export_llm_content: bool) {
+    if export_llm_content {
+        return;
+    }
+    tags.retain(|key, _| llm_namespace_attr_allowed(key));
+    for (key, value) in tags.iter_mut() {
+        if is_llm_namespace_key(key)
+            && let Some(clamped) = clamp_redacted_metadata_value(value)
+        {
+            *value = clamped;
+        }
+    }
+}
+
 /// Apply ADR-0166 to the guest-supplied half of a wide event. Inside the
 /// `gen_ai.*` namespace a non-opted-in tenant keeps only recognised, bounded
 /// metadata; keys outside it are the module's own application telemetry and are
@@ -532,23 +549,20 @@ fn redact_guest_wide_event_fields(
     if export_llm_content {
         return;
     }
-    tags.retain(|key, _| llm_namespace_attr_allowed(key));
-    for (key, value) in tags.iter_mut() {
-        if key.starts_with("gen_ai.")
-            && let Some(clamped) = clamp_redacted_metadata_value(value)
+    redact_guest_string_tags(tags, export_llm_content);
+    attributes.retain(|key, value| {
+        if !llm_namespace_attr_allowed(key) {
+            return false;
+        }
+        // A structured value under a recognised metadata key is dropped, not
+        // clamped: see `clamp_llm_metadata_json`.
+        !is_llm_namespace_key(key) || clamp_llm_metadata_json(value).is_some()
+    });
+    for (key, value) in attributes.iter_mut() {
+        if is_llm_namespace_key(key)
+            && let Some(clamped) = clamp_llm_metadata_json(value)
         {
             *value = clamped;
-        }
-    }
-    attributes.retain(|key, _| llm_namespace_attr_allowed(key));
-    for (key, value) in attributes.iter_mut() {
-        if !key.starts_with("gen_ai.") {
-            continue;
-        }
-        if let Value::String(text) = value
-            && let Some(clamped) = clamp_redacted_metadata_value(text)
-        {
-            *value = Value::String(clamped);
         }
     }
 }
@@ -1630,8 +1644,12 @@ impl WasmHost for ProductionWasmHost {
     }
 
     fn emit_metric(&self, metric_json: &str) -> Result<(), String> {
-        let payload: GuestMetricInput = serde_json::from_str(metric_json)
+        let mut payload: GuestMetricInput = serde_json::from_str(metric_json)
             .map_err(|e| format!("invalid guest metric payload: {e}"))?;
+        // ADR-0166: guest metric tags are guest-named *and* guest-valued strings,
+        // and they reach two sinks below — the span event and the OTel meter.
+        // Redact before either reads them, so neither can observe the raw tags.
+        redact_guest_string_tags(&mut payload.tags, self.export_llm_content);
         record_guest_metric_span_event(&payload, self.invocation_context.as_ref());
         let meter = opentelemetry::global::meter("temper");
         let mut attrs: Vec<opentelemetry::KeyValue> = payload

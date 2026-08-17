@@ -9,7 +9,9 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use crate::host_trait::span_hints::{clamp_redacted_metadata_value, llm_namespace_attr_allowed};
+use crate::host_trait::span_hints::{
+    clamp_llm_metadata_json, is_llm_namespace_key, llm_namespace_attr_allowed,
+};
 
 /// The single filter every guest-supplied span attribute passes through, on both
 /// the OTel path and the manual-export path.
@@ -27,14 +29,6 @@ pub(super) fn allowed_attributes(
         .collect()
 }
 
-pub(super) fn merge_allowed_attributes(
-    target: &mut BTreeMap<String, Value>,
-    attributes: &BTreeMap<String, Value>,
-    export_llm_content: bool,
-) {
-    target.extend(allowed_attributes(attributes, export_llm_content));
-}
-
 /// Apply ADR-0166 to one guest-supplied span attribute. Returns `None` when the
 /// attribute must not be recorded at all.
 ///
@@ -46,7 +40,7 @@ pub(super) fn merge_allowed_attributes(
 /// namespace are the module's own application telemetry and pass through: they
 /// carry no agreed meaning to redact against, and dropping them would remove
 /// working guest observability. That boundary is stated in ADR-0166.
-pub(super) fn redacted_guest_attribute_value(
+fn redacted_guest_attribute_value(
     key: &str,
     value: &Value,
     export_llm_content: bool,
@@ -57,15 +51,10 @@ pub(super) fn redacted_guest_attribute_value(
     if !llm_namespace_attr_allowed(key) {
         return None;
     }
-    if !key.starts_with("gen_ai.") {
+    if !is_llm_namespace_key(key) {
         return Some(value.clone());
     }
-    match value {
-        Value::String(text) => {
-            Some(clamp_redacted_metadata_value(text).map_or_else(|| value.clone(), Value::String))
-        }
-        other => Some(other.clone()),
-    }
+    clamp_llm_metadata_json(value)
 }
 
 /// Keys a guest may not set, because the host owns them: OTel span identity and

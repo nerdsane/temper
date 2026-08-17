@@ -323,3 +323,30 @@ fn keeps_content_hints_when_opted_in() {
         "opted-in tenant keeps completion"
     );
 }
+
+/// The clamp and the allowlist must agree on what "in the namespace" means.
+/// If the allowlist normalizes the key but the clamp matches the raw one,
+/// `GEN_AI.request.model` passes as recognised metadata and then skips the
+/// clamp — carrying an entire prompt under a metadata name.
+#[test]
+fn namespace_clamp_and_allowlist_agree_on_unnormalized_keys() {
+    let prompt = "P".repeat(4096);
+    let mut hints = SpanHints::default();
+    hints
+        .attributes
+        .push(("GEN_AI.request.model".to_string(), prompt.clone()));
+    hints
+        .attributes
+        .push((" gen_ai.request.model ".to_string(), prompt.clone()));
+
+    redact_llm_content_hints(&mut hints, false);
+
+    for (key, value) in &hints.attributes {
+        assert!(
+            value.len() <= MAX_REDACTED_LLM_METADATA_VALUE_BYTES,
+            "`{key}` escaped the clamp with {} bytes — the allowlist and the clamp \
+             disagree about the gen_ai.* namespace",
+            value.len()
+        );
+    }
+}

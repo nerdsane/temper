@@ -91,8 +91,14 @@ module that sends `X-Temper-Span-Capture-Response-llm.response.text:
 /content/0/text` exports the same completion under a name no denylist carries.
 
 So, for a tenant that has not opted in, one rule applies at every point an
-untrusted guest names telemetry — span hints, guest spans, guest span events, and
-guest wide events:
+untrusted guest names telemetry — span hints, guest spans, guest span events,
+guest wide events, and guest metric tags:
+
+Every namespace test runs on a *normalized* key (`is_llm_namespace_key`:
+trimmed, lowercased). Normalizing in the allowlist but matching raw in the clamp
+is how the two end up disagreeing — `GEN_AI.request.model` passes as recognised
+metadata and then misses the clamp, carrying a whole prompt. Adversarial review
+found exactly that.
 
 - **Attributes inside the `gen_ai.*` namespace** survive only if the key is a
   recognised metadata key (model, provider, token counts, finish reasons,
@@ -107,8 +113,9 @@ guest wide events:
 - **Response captures** are dropped in full. Every capture is by construction a
   value read out of the response body via a guest-supplied pointer, so the
   attribute name says nothing about whether the value is content.
-- **The guest-supplied span name** is clamped to the same 256 bytes, since it is
-  free text on the same channel.
+- **Guest-supplied span names** — both `X-Temper-Span-Name` on the hint path and
+  the name passed to `host_start_span` — are clamped to the same 256 bytes, since
+  they are free text on the same channel.
 
 The decision reaches the guest-facing APIs through `WasmHost::exports_llm_content`
 (default `false`), which the engine reads when it builds the guest span registry.
@@ -139,10 +146,11 @@ prompts while every redaction test stayed green.
 - For a tenant that has not opted in, no LLM content reaches the telemetry
   backend **under the `gen_ai.*` semantic-convention names** — the names LLM
   Observability, the GenAI dashboards, and the wide-event pipeline actually read.
-  That holds across all four channels an untrusted guest can reach: the host HTTP
+  That holds across all five channels an untrusted guest can reach: the host HTTP
   span-hint path, the callback params, the guest manual-span API
-  (`host_start_span` / `host_set_span_attributes` / `host_add_span_event`), and
-  `host_emit_wide_event`.
+  (`host_start_span` / `host_set_span_attributes` / `host_add_span_event`),
+  `host_emit_wide_event`, and `host_emit_metric` — whose tags are guest-named
+  *and* guest-valued strings that reach both the OTel meter and a span event.
 - Redaction is fail-safe: `WasmHost::exports_llm_content` defaults to `false`, so
   a host that never answers redacts, and the builder default matches.
 - Metadata-based dashboards (tokens, latency, model, provider) keep working for

@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
+use crate::host_trait::span_hints::clamp_redacted_metadata_value;
 use crate::host_trait::{datadog_visible_span_hint_field, truncate_for_span_attr};
 use crate::types::WasmInvocationContext;
 
@@ -17,10 +18,7 @@ mod redaction;
 #[path = "guest_spans_test.rs"]
 mod tests;
 
-use redaction::{
-    allowed_attributes, guest_span_attribute_allowed, merge_allowed_attributes,
-    redacted_guest_attribute_value,
-};
+use redaction::{allowed_attributes, guest_span_attribute_allowed};
 
 use export::{
     export_manual_span, manual_parent_context, manual_span_attributes, merge_end_status_attributes,
@@ -107,6 +105,13 @@ impl GuestSpanRegistry {
     #[cfg(test)]
     pub(crate) fn new(context: WasmInvocationContext) -> Self {
         Self::with_manual_export(context, false, false)
+    }
+
+    /// Test-only constructor for an opted-in tenant, so the redaction tests can
+    /// assert both directions rather than only the safe one.
+    #[cfg(test)]
+    pub(crate) fn new_exporting_content(context: WasmInvocationContext) -> Self {
+        Self::with_manual_export(context, false, true)
     }
 
     pub(crate) fn for_invocation(
@@ -210,16 +215,20 @@ impl GuestSpanRegistry {
             error.message = tracing::field::Empty,
             exception.message = tracing::field::Empty,
         );
-        update_span_name(&span, name);
-        apply_attributes(&span, &payload.attributes, self.export_llm_content);
+        // ADR-0166: the span name is guest-supplied free text on the same channel
+        // as the attributes, so it takes the same bound. The hint path clamps
+        // `X-Temper-Span-Name` for the same reason.
+        let name = if self.export_llm_content {
+            name.to_string()
+        } else {
+            clamp_redacted_metadata_value(name).unwrap_or_else(|| name.to_string())
+        };
+        update_span_name(&span, &name);
+        let attributes = allowed_attributes(&payload.attributes, self.export_llm_content);
+        apply_attributes(&span, &attributes);
         enter_thread_local_guest_span(&span);
         let (trace_id, span_id) = tracing_span_ids(&span);
-        let attributes = manual_span_attributes(
-            &self.context,
-            id,
-            &payload.attributes,
-            self.export_llm_content,
-        );
+        let attributes = manual_span_attributes(&self.context, id, &attributes);
 
         self.spans.insert(
             id,
@@ -281,12 +290,9 @@ impl GuestSpanRegistry {
             .map_err(|e| format!("invalid guest span attributes payload: {e}"))?;
         let export_llm_content = self.export_llm_content;
         let entry = self.span_mut(span_id)?;
-        apply_attributes(&entry.span, &payload.attributes, export_llm_content);
-        merge_allowed_attributes(
-            &mut entry.attributes,
-            &payload.attributes,
-            export_llm_content,
-        );
+        let attributes = allowed_attributes(&payload.attributes, export_llm_content);
+        apply_attributes(&entry.span, &attributes);
+        entry.attributes.extend(attributes);
         Ok(())
     }
 
@@ -319,13 +325,10 @@ impl GuestSpanRegistry {
         self.stack.pop();
         let mut entry = entry;
         let export_llm_content = self.export_llm_content;
-        merge_allowed_attributes(
-            &mut entry.attributes,
-            &payload.attributes,
-            export_llm_content,
-        );
+        let attributes = allowed_attributes(&payload.attributes, export_llm_content);
+        entry.attributes.extend(attributes.clone());
         merge_end_status_attributes(&mut entry.attributes, &payload);
-        apply_attributes(&entry.span, &payload.attributes, export_llm_content);
+        apply_attributes(&entry.span, &attributes);
         apply_end_status(&entry.span, &payload);
         exit_thread_local_guest_span();
         end_otel_span(&entry.span);
@@ -400,18 +403,15 @@ fn clear_thread_local_guest_spans() {
     ENTERED_GUEST_SPANS.with(|guards| guards.borrow_mut().clear());
 }
 
-fn apply_attributes(
-    span: &tracing::Span,
-    attributes: &BTreeMap<String, Value>,
-    export_llm_content: bool,
-) {
+/// Record already-filtered attributes onto a span.
+///
+/// This takes the output of [`allowed_attributes`] rather than raw guest input,
+/// deliberately: filtering in two places meant a mutation to either could be
+/// masked by the other, and adversarial review showed that a filter dropped here
+/// left every test green. There is now one place where guest attributes are
+/// judged, and every path reaches the span through it.
+fn apply_attributes(span: &tracing::Span, attributes: &BTreeMap<String, Value>) {
     for (key, value) in attributes {
-        // Filter here as well as at merge time: this is the last point before the
-        // value reaches the OTel span, so it holds even for a future path that
-        // populates the map without going through `merge_allowed_attributes`.
-        let Some(value) = &redacted_guest_attribute_value(key, value, export_llm_content) else {
-            continue;
-        };
         let Some(kv) = key_value_from_json(key, value) else {
             continue;
         };

@@ -80,11 +80,12 @@ fn wasm_dispatch_emits_integration_envelope_phase_spans() {
 /// See ADR-0166.
 #[test]
 fn llm_content_redaction_precedes_every_dispatch_sink() {
-    // Production code only: the file's own `#[cfg(test)]` module calls the helper
-    // and names these sinks, which would otherwise both inflate the call count and
-    // offer false ordering evidence.
+    // Production code only. The unit tests now live in `wasm/wasm_test.rs`, so
+    // today this trims nothing — it is kept because an inlined `#[cfg(test)] mod
+    // tests` would otherwise call the helper and name these sinks, inflating the
+    // call count and offering false ordering evidence.
     let prod = WASM_DISPATCH_SOURCE
-        .split_once("#[cfg(test)]\nmod ")
+        .split_once("#[cfg(test)]\nmod tests")
         .map_or(WASM_DISPATCH_SOURCE, |(prod, _)| prod);
     let src = &strip_line_comments(prod);
 
@@ -138,7 +139,7 @@ fn llm_content_redaction_precedes_every_dispatch_sink() {
 #[test]
 fn dispatch_redaction_and_host_wiring_use_the_per_tenant_policy() {
     let prod = WASM_DISPATCH_SOURCE
-        .split_once("#[cfg(test)]\nmod ")
+        .split_once("#[cfg(test)]\nmod tests")
         .map_or(WASM_DISPATCH_SOURCE, |(prod, _)| prod);
     let src = &strip_line_comments(prod);
 
