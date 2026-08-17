@@ -1,6 +1,6 @@
 # ADR-0036: Channel Transports
 
-- Status: Accepted
+- Status: Superseded — kernel Discord-on-serve removed 2026-08-17. Live Discord is TemperPaw `paw-transport` + `paw-channels`.
 - Date: 2026-03-24
 - Deciders: Temper core maintainers
 - Related:

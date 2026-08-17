@@ -6455,7 +6455,6 @@ dependencies = [
  "temper-store-postgres",
  "temper-store-redis",
  "temper-store-turso",
- "temper-transport",
  "temper-verify",
  "tempfile",
  "termimad",
@@ -6807,21 +6806,6 @@ dependencies = [
  "tracing",
  "uuid",
  "wiremock",
-]
-
-[[package]]
-name = "temper-transport"
-version = "0.1.0"
-dependencies = [
- "axum 0.8.8",
- "futures-util",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tokio-tungstenite",
- "tracing",
 ]
 
 [[package]]

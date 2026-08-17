@@ -38,7 +38,6 @@ members = [
     "crates/temper-sdk",
     "crates/temper-sandbox",
     "crates/temper-ots",
-    "crates/temper-transport",
     "crates/temper-actor-runtime",
     "crates/temper-agents",
     "reference-apps/crucible",
@@ -155,7 +154,6 @@ temper-wasm-sdk = { path = "crates/temper-wasm-sdk" }
 temper-sdk = { path = "crates/temper-sdk" }
 temper-sandbox = { path = "crates/temper-sandbox" }
 temper-ots = { path = "crates/temper-ots" }
-temper-transport = { path = "crates/temper-transport" }
 temper-actor-runtime = { path = "crates/temper-actor-runtime" }
 temper-agents = { path = "crates/temper-agents" }
 

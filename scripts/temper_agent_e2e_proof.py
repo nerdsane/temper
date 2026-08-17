@@ -19,12 +19,6 @@ REPORT_PATH = REPO_ROOT / ".proof" / "temper-agent-e2e-proof.md"
 SERVER = os.environ.get("TEMPER_PROOF_SERVER", "http://127.0.0.1:3463")
 BLOB_ENDPOINT = os.environ.get("TEMPER_PROOF_BLOB", "http://127.0.0.1:9987")
 SANDBOX_URL = os.environ.get("TEMPER_PROOF_SANDBOX", "http://127.0.0.1:9989")
-REPLY_LOG = Path(
-    os.environ.get(
-        "TEMPER_PROOF_REPLY_LOG",
-        str(REPO_ROOT / ".tmp" / "temper-agent-proof" / "reply" / "replies.jsonl"),
-    )
-)
 SANDBOX_WORKDIR = os.environ.get(
     "TEMPER_PROOF_WORKDIR",
     str(REPO_ROOT / ".tmp" / "temper-agent-proof" / "sandbox"),
@@ -42,7 +36,6 @@ SYSTEM_HEADERS = {"x-temper-principal-kind": "system"}
 def ensure_dirs() -> None:
     ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REPLY_LOG.parent.mkdir(parents=True, exist_ok=True)
 
 
 def now_utc() -> str:
@@ -289,39 +282,6 @@ def wait_for_entities(tenant: str, entity_set: str, predicate, timeout_s: float 
         time.sleep(poll_s)
 
 
-def read_reply_lines() -> list[dict]:
-    if not REPLY_LOG.exists():
-        return []
-    raw_reply_lines = [
-        json.loads(line)
-        for line in REPLY_LOG.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    reply_lines = []
-    for line in raw_reply_lines:
-        body = line.get("body")
-        if isinstance(body, str):
-            try:
-                parsed_body = json.loads(body)
-            except json.JSONDecodeError:
-                parsed_body = body
-            if isinstance(parsed_body, dict):
-                merged = dict(line)
-                merged.update(parsed_body)
-                line = merged
-        reply_lines.append(line)
-    return reply_lines
-
-
-def wait_for_reply(predicate, timeout_s: float = 10.0, poll_s: float = 0.25) -> list[dict]:
-    deadline = time.time() + timeout_s
-    while True:
-        reply_lines = read_reply_lines()
-        if any(predicate(line) for line in reply_lines) or time.time() >= deadline:
-            return reply_lines
-        time.sleep(poll_s)
-
-
 def capture_sse(tenant: str, entity_type: str, entity_id_value: str, output_path: Path, since: int = 0, max_time: int = 2):
     cmd = [
         "curl",
@@ -557,7 +517,6 @@ def build_mock_plan(steps: list[dict]) -> str:
 def main() -> int:
     ensure_dirs()
     clean_sandbox()
-    REPLY_LOG.write_text("", encoding="utf-8")
 
     artifact_log = ARTIFACT_ROOT / "proof-log.jsonl"
     artifact_log.unlink(missing_ok=True)
@@ -576,7 +535,6 @@ def main() -> int:
     apps = {
         "temper-fs": install_app(TENANT, "temper-fs"),
         "temper-agent": install_app(TENANT, "temper-agent"),
-        "temper-channels": install_app(TENANT, "temper-channels"),
     }
     write_text(ARTIFACT_ROOT / "installed-apps.json", json.dumps(apps, indent=2))
 
@@ -597,9 +555,6 @@ def main() -> int:
         "cron_scheduler_check": REPO_ROOT / "os-apps" / "temper-agent" / "wasm" / "cron_scheduler_check" / "target" / "wasm32-unknown-unknown" / "release" / "cron_scheduler_check.wasm",
         "cron_scheduler_heartbeat": REPO_ROOT / "os-apps" / "temper-agent" / "wasm" / "cron_scheduler_heartbeat" / "target" / "wasm32-unknown-unknown" / "release" / "cron_scheduler_heartbeat.wasm",
         "workspace_restorer": REPO_ROOT / "os-apps" / "temper-agent" / "wasm" / "workspace_restorer" / "target" / "wasm32-unknown-unknown" / "release" / "workspace_restorer.wasm",
-        "channel_connect": REPO_ROOT / "os-apps" / "temper-channels" / "wasm" / "channel_connect" / "target" / "wasm32-unknown-unknown" / "release" / "channel_connect.wasm",
-        "route_message": REPO_ROOT / "os-apps" / "temper-channels" / "wasm" / "route_message" / "target" / "wasm32-unknown-unknown" / "release" / "route_message.wasm",
-        "send_reply": REPO_ROOT / "os-apps" / "temper-channels" / "wasm" / "send_reply" / "target" / "wasm32-unknown-unknown" / "release" / "send_reply.wasm",
     }
     upload_results = {}
     for name, wasm_path in modules.items():
@@ -703,7 +658,7 @@ Locate relevant files quickly and summarize the signal, not the noise.
             "AgentMemorys",
             {
                 "Key": "project-context",
-                "Content": "Temper Pi rewrite proof must capture SSE, session trees, cron, heartbeat, channels, and MCP.",
+                "Content": "Temper Pi rewrite proof must capture SSE, session trees, cron, heartbeat, and MCP.",
                 "MemoryType": "project",
                 "SoulId": soul_id,
                 "AuthorAgentId": "proof-harness",
@@ -716,67 +671,6 @@ Locate relevant files quickly and summarize the signal, not the noise.
         "memory": [get_entity(TENANT, "AgentMemorys", entity_id(entry)) for entry in seeded_memory],
     }
     write_text(ARTIFACT_ROOT / "setup-assets.json", json.dumps(setup_snapshot, indent=2))
-
-    channel = create_entity(
-        TENANT,
-        "Channels",
-        {
-            "ChannelType": "webhook",
-            "ChannelId": "proof-webhook",
-            "DefaultAgentConfig": json.dumps(
-                {
-                    "provider": "mock",
-                    "model": "mock-proof",
-                    "tools_enabled": "",
-                    "max_turns": "4",
-                    "sandbox_url": SANDBOX_URL,
-                    "workdir": SANDBOX_WORKDIR,
-                    "soul_id": soul_id,
-                },
-                separators=(",", ":"),
-            ),
-            "WebhookUrl": "http://127.0.0.1:9988",
-        },
-    )
-    channel_id = entity_id(channel)
-    action_with_fallback(
-        TENANT,
-        "Channels",
-        channel_id,
-        ["Temper.OpenClaw.Channel.Connect", "Temper.OpenClaw.Connect"],
-        {},
-    )
-    route = create_entity(
-        TENANT,
-        "AgentRoutes",
-        {
-            "BindingTier": "channel",
-            "ChannelId": "proof-webhook",
-            "MatchPattern": ".*",
-            "AgentConfig": json.dumps(
-                {
-                    "provider": "mock",
-                    "model": "mock-proof",
-                    "tools_enabled": "",
-                    "max_turns": "4",
-                    "sandbox_url": SANDBOX_URL,
-                    "workdir": SANDBOX_WORKDIR,
-                },
-                separators=(",", ":"),
-            ),
-            "SoulId": soul_id,
-        },
-    )
-    write_text(
-        ARTIFACT_ROOT / "channel-setup.json",
-        json.dumps(
-            {
-                "channel": get_entity(TENANT, "Channels", channel_id),
-                "route": get_entity(TENANT, "AgentRoutes", entity_id(route)),
-            },
-            indent=2,
-        ),
-    )
 
     direct_plan = build_mock_plan(
         [
@@ -876,55 +770,6 @@ Locate relevant files quickly and summarize the signal, not the noise.
         "A9": step("ContinueWithSteering" in direct_sse, "Steering caused a continue transition", "ContinueWithSteering seen" if "ContinueWithSteering" in direct_sse else "missing"),
         "A10": step(entity_status(direct_wait) == "Completed", "Agent completed successfully", direct_result),
         "A11": step(bool(direct_saved), "save_memory created a new AgentMemory", f"count={len(direct_saved)}"),
-    }
-
-    channel_plan = build_mock_plan([{"final_text": "Channel proof reply"}])
-    receive_result = action_with_fallback(
-        TENANT,
-        "Channels",
-        channel_id,
-        ["Temper.OpenClaw.Channel.ReceiveMessage", "Temper.OpenClaw.ReceiveMessage"],
-        {
-            "message_id": "msg-1",
-            "author_id": "user-1",
-            "thread_id": "thread-1",
-            "content": channel_plan,
-        },
-    )
-    channel_sessions = wait_for_entities(
-        TENANT,
-        "ChannelSessions",
-        lambda entry: entity_field(entry, "ThreadId") == "thread-1",
-    )
-    channel_session = channel_sessions[0]
-    channel_agent_id = entity_field(channel_session, "AgentEntityId")
-    channel_agent = get_entity(TENANT, "TemperAgents", channel_agent_id)
-    channel_wait = wait_entity(TENANT, "TemperAgent", channel_agent_id, ["Completed", "Failed", "Cancelled"], 60000)
-    reply_lines = wait_for_reply(
-        lambda line: line.get("content") == "Channel proof reply"
-        and line.get("thread_id") == "thread-1",
-        timeout_s=10.0,
-        poll_s=0.25,
-    )
-    write_text(
-        ARTIFACT_ROOT / "channel-result.json",
-        json.dumps(
-            {
-                "receive_result": receive_result,
-                "session": channel_session,
-                "agent": channel_agent,
-                "wait": channel_wait,
-                "reply_lines": reply_lines,
-            },
-            indent=2,
-        ),
-    )
-    report["steps"]["B"] = {
-        "B1": step(True, "Channel.ReceiveMessage accepted webhook payload", "ReceiveMessage executed"),
-        "B2": step(bool(channel_sessions), "ChannelSession created for thread", f"session_id={entity_id(channel_session)}"),
-        "B3": step(entity_field(channel_agent, "SoulId") == soul_id, "Channel route spawned agent with route soul_id", f"soul_id={entity_field(channel_agent, 'SoulId')}"),
-        "B4": step(entity_status(channel_wait) == "Completed", "Channel-triggered agent completed", entity_result(channel_wait)),
-        "B5": step(any(line.get("content") == "Channel proof reply" for line in reply_lines), "send_reply delivered the agent result", json.dumps(reply_lines[-1]) if reply_lines else "no reply"),
     }
 
     child_plan = build_mock_plan(
@@ -1311,7 +1156,6 @@ return {{'agent_id': aid}}
 
     specs_summary = {
         "temper-agent": apps["temper-agent"],
-        "temper-channels": apps["temper-channels"],
         "temper-fs": apps["temper-fs"],
     }
 
@@ -1350,13 +1194,9 @@ return {{'agent_id': aid}}
 ## Specs Deployed
 - `temper-fs`: {json.dumps(specs_summary['temper-fs'])}
 - `temper-agent`: {json.dumps(specs_summary['temper-agent'])}
-- `temper-channels`: {json.dumps(specs_summary['temper-channels'])}
 
 ## Trigger Path A: Direct OData API
 {table('A')}
-
-## Trigger Path B: Channel Webhook
-{table('B')}
 
 ## Trigger Path C: WASM Orchestration
 {table('C')}

@@ -40,7 +40,7 @@ Chosen. This keeps the proven Temper dispatch/runtime model while migrating the 
 ## Consequences
 
 - `TemperAgent` conversation persistence changes from flat JSON to JSONL session-tree storage.
-- New entity types are introduced in the `temper-agent` and `temper-channels` OS apps.
+- New entity types are introduced in the `temper-agent` OS app. Channel/session/route entities later moved to TemperPaw (`paw-channels`); the kernel `temper-channels` app was removed.
 - Additional WASM modules are required for compaction, steering, heartbeat scanning, cron triggering, and channel routing.
 - Event streaming becomes part of the agent contract instead of an optional side channel.
 - Capability growth shifts from tool-runner branching to governed entity composition.
