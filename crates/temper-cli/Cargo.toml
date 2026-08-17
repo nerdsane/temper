@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Command-line interface for Temper specification management and code generation"
+description = "Command-line interface for Temper specification management"
 repository = "https://github.com/nerdsane/temper"
 
 [[bin]]
@@ -13,7 +13,6 @@ path = "src/main.rs"
 
 [dependencies]
 temper-spec = { workspace = true }
-temper-codegen = { workspace = true }
 temper-verify = { workspace = true }
 temper-platform = { workspace = true }
 temper-server = { workspace = true, features = ["observe"] }

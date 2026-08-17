@@ -1,14 +1,13 @@
 //! temper-cli: Command-line interface for Temper.
 //!
-//! Provides commands for parsing specifications, generating code,
-//! running model checks, and managing Temper projects.
+//! Provides commands for parsing specifications, running model checks,
+//! and managing Temper projects.
 
 /// Use jemalloc to aggressively return freed pages to the OS via MADV_DONTNEED,
 /// preventing the RSS bloat caused by glibc malloc on Debian bookworm (Railway).
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-mod codegen;
 mod decide;
 mod init;
 mod install;
@@ -50,15 +49,6 @@ struct Cli {
 enum Commands {
     /// Initialize a new Temper project
     Init { name: String },
-    /// Generate Rust code from specifications
-    Codegen {
-        /// Path to the specs directory
-        #[arg(short, long, default_value = "specs")]
-        specs_dir: String,
-        /// Output directory for generated code
-        #[arg(short, long, default_value = "generated")]
-        output_dir: String,
-    },
     /// Run the verification cascade
     Verify {
         /// Path to the specs directory
@@ -325,10 +315,6 @@ async fn async_main() -> anyhow::Result<()> {
             None => install::run()?,
         },
         Commands::Decide { port, tenant } => decide::run(port, &tenant).await?,
-        Commands::Codegen {
-            specs_dir,
-            output_dir,
-        } => codegen::run(&specs_dir, &output_dir)?,
         Commands::Verify { specs_dir } => verify::run(&specs_dir)?,
         Commands::VerifyRemote {
             specs_dir,
@@ -455,43 +441,6 @@ mod tests {
         match cli.command {
             Commands::Init { name } => assert_eq!(name, "my-project"),
             _ => panic!("expected Init command"),
-        }
-    }
-
-    #[test]
-    fn test_cli_parse_codegen_defaults() {
-        let cli = Cli::parse_from(["temper", "codegen"]);
-        match cli.command {
-            Commands::Codegen {
-                specs_dir,
-                output_dir,
-            } => {
-                assert_eq!(specs_dir, "specs");
-                assert_eq!(output_dir, "generated");
-            }
-            _ => panic!("expected Codegen command"),
-        }
-    }
-
-    #[test]
-    fn test_cli_parse_codegen_custom() {
-        let cli = Cli::parse_from([
-            "temper",
-            "codegen",
-            "--specs-dir",
-            "my-specs",
-            "--output-dir",
-            "my-out",
-        ]);
-        match cli.command {
-            Commands::Codegen {
-                specs_dir,
-                output_dir,
-            } => {
-                assert_eq!(specs_dir, "my-specs");
-                assert_eq!(output_dir, "my-out");
-            }
-            _ => panic!("expected Codegen command"),
         }
     }
 

@@ -615,8 +615,8 @@ immutable, linked chain of typed records:
 4. **D-Record (Decision):** A human approval or rejection of a proposed change.
    If approved, the record includes verification cascade results (SMT
    invariant induction, Stateright states explored, simulation pass/fail,
-   proptest cases) and an implementation plan (codegen command, migration
-   required, deployment strategy).
+   proptest cases) and an implementation plan (how to reload the
+   TransitionTable, migration required, deployment strategy).
 
 5. **I-Record (Insight):** Product intelligence derived from trajectory analysis,
    categorized as UnmetIntent, Friction, or Workaround (see Section 7).
@@ -631,7 +631,7 @@ P, P from O) and that no links are broken.
 
 Destructive changes--those that alter state machine invariants, remove entity
 types, or modify Cedar policies--require a human `D-Record` with
-`Decision::Approved` before codegen and deployment proceed.  This is a
+`Decision::Approved` before the TransitionTable is reloaded and deployment proceeds.  This is a
 deliberate design constraint: the system may autonomously observe, formalize
 problems, analyze root causes, and propose solutions, but it may not unilaterally
 implement changes that affect correctness.
@@ -701,23 +701,19 @@ product intelligence report, organized by category.
 
 ### 8.1 Three-Tier Execution Model
 
-State machine transitions are represented at three tiers of abstraction:
+State machine transitions are represented as data, not compiled per-entity
+Rust.  A `TransitionTable` encodes all transition rules for an entity type,
+built directly from the `Automaton` specification.  Each `TransitionRule`
+carries a `Guard` (evaluated at runtime against an `EvalContext` of counters
+and booleans) and a list of `Effect`s (`SetState`, `IncrementCounter`,
+`DecrementCounter`, `SetBool`, `EmitEvent`).  Transitions are evaluated by
+matching the action name, checking `from_states`, evaluating the guard, and
+applying effects.
 
-1. **Compiled (Tier 1):** Rust code generated from the I/O Automaton specification by
-   `temper-codegen`.  Maximum performance, requires recompilation to change.
-
-2. **Interpretable (Tier 2):** A `TransitionTable`--a data structure encoding
-   all transition rules for an entity type, built directly from the `Automaton`
-   specification.  Each `TransitionRule` carries a `Guard` (evaluated at
-   runtime against an `EvalContext` of counters and booleans) and a list of
-   `Effect`s (`SetState`, `IncrementCounter`, `DecrementCounter`, `SetBool`,
-   `EmitEvent`).  Transitions are evaluated by matching the action name,
-   checking `from_states`, evaluating the guard, and applying effects.
-
-3. **Overlay (Tier 3):** A hot-swappable `TransitionTable` managed by
-   `SwapController`.  The controller holds an `Arc<RwLock<TransitionTable>>`
-   with a monotonically increasing version counter.  A new table can be swapped
-   in atomically without restarting the actor or the process:
+A hot-swappable `TransitionTable` is managed by `SwapController`.  The
+controller holds an `Arc<RwLock<TransitionTable>>` with a monotonically
+increasing version counter.  A new table can be swapped in atomically without
+restarting the actor or the process:
 
 ```rust
 let ctrl = SwapController::new(table_v1);

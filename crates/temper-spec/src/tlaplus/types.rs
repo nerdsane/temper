@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Extracted state machine structure from a TLA+ specification.
 /// This is NOT a full TLA+ parser — it extracts the structured elements
-/// that Temper's codegen needs: states, transitions, guards, invariants.
+/// that the legacy TLA+ extractor needs: states, transitions, guards, invariants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateMachine {
     /// Module name from the TLA+ spec.

@@ -63,16 +63,17 @@ Evolution Engine. The developer reviews and approves changes via the Developer C
 
 | Option | How | What the agent produces | Status |
 |--------|-----|------------------------|--------|
-| **Self-host** | `temper codegen` → `cargo build` → deploy binary | Specs + Rust crate with DST tests + infrastructure | Production-ready |
-| **Platform-host** | `temper serve --specs-dir --tenant` | Specs only | Multi-tenant, future: hot-swap transitions |
+| **Self-host** | `temper serve --specs-dir` against a local binary | Specs + DST tests + infrastructure | Production-ready |
+| **Platform-host** | `temper serve --specs-dir --tenant` | Specs only | Multi-tenant, hot-swap TransitionTable |
 
-**Self-host path:** The coding agent produces a Cargo crate with specs, full verification cascade
+**Self-host path:** The coding agent produces specs, the full verification cascade
 (SMT + Stateright + DST + property tests), and infrastructure (Docker Compose). The developer
-builds and deploys the binary. See `reference-apps/ecommerce/` for the canonical example.
+runs the Temper binary against those specs. See `reference-apps/ecommerce/` for the canonical example.
 
 **Platform-host path:** The developer provides specs to `temper serve --specs-dir`, which runs
 the VerificationCascade at startup and rejects invalid specs. Multi-tenant hosting with
-domain-specific servers per tenant.
+domain-specific servers per tenant. Actors interpret a `TransitionTable`; there is no
+generated-Rust step.
 
 **Single-node architecture.** The current runtime is single-process. Actor mailboxes
 use local `tokio::sync::mpsc` channels, not Redis.
@@ -310,26 +311,9 @@ forbid(
 
 ---
 
-## 4. Code Generation
+## 4. How Entity Actors Work at Runtime
 
-Generate Rust actor code from specs:
-
-```bash
-temper codegen --specs-dir specs --output-dir generated
-```
-
-This produces for each entity:
-- **State struct**: `OrderState { id, status, customer_id, total, ... }`
-- **Status enum**: `OrderStatus { Draft, Submitted, Cancelled, ... }`
-- **Message enum**: `OrderMsg { SubmitOrder { ... }, CancelOrder { ... }, GetState }`
-- **Transition table**: `OrderTransitions::can_transition(state, action) -> bool`
-- **Invariant names**: `OrderInvariants::invariant_names()`
-
-**IMPORTANT: Never hand-edit files in `generated/`.** They will be overwritten on next codegen run. If you need to change behavior, modify the specs.
-
-### How Entity Actors Work at Runtime
-
-At runtime, entities are NOT served by the generated Rust code directly. Instead, the server builds a **JIT TransitionTable** from the I/O Automaton specification using `TransitionTable::from_ioa_source()`. Both the verification model and the runtime table derive from the same parsed `Automaton`, ensuring the behavior verified by the four-level cascade is identical to what runs in production. Each entity gets its own actor:
+The server builds a **JIT TransitionTable** from the I/O Automaton specification using `TransitionTable::from_ioa_source()`. Both the verification model and the runtime table derive from the same parsed `Automaton`, ensuring the behavior verified by the four-level cascade is identical to what runs in production. Each entity instance gets its own actor:
 
 ```
 HTTP Request → OData Parse → Actor Registry (get or spawn) → Entity Actor → TransitionTable.evaluate() → Response
@@ -704,7 +688,7 @@ rationale = "Low risk, addresses root cause"
 2. **External LLM agent** reads O-Record + Logfire data → creates P-Record and A-Record
 3. Agent submits as **Git PR** with the record chain + spec diffs
 4. **Human reviews** the PR (problem statement + analysis + verification results)
-5. Human merges → D-Record created → codegen → verify → deploy
+5. Human merges → D-Record created → verify → reload TransitionTable → deploy
 
 ---
 
@@ -756,7 +740,6 @@ Three tiers of execution, from most to least rigid:
 
 | Tier | What Changes | How | Needs Redeploy? |
 |------|-------------|-----|-----------------|
-| **Compiled** | Full Rust actor code | codegen → build → deploy | Yes |
 | **Interpretable** | Transition tables (data) | hot-swap via SwapController | No |
 | **Overlay** | Query plans, cache TTLs, placement | autonomous optimizer actors | No |
 
@@ -884,14 +867,14 @@ The recommended path for coding agents that generate specs:
 3. Write an I/O Automaton spec (`entity.ioa.toml`) with states, actions, invariants
 4. Link via `<Annotation Term="Temper.Vocab.StateMachine.Spec" String="entity.ioa.toml"/>`
 5. Write Cedar policies in `specs/policies/entity.cedar`
-6. Run `temper codegen` then `temper verify`
+6. Run `temper verify`
 
 ### Adding a New Action to an Existing Entity
 
 1. Add `<Action>` to CSDL with parameters and `ValidFromStates` annotation
 2. Add the action to the automaton spec (from/to states + guard)
 3. Update Cedar policies if needed
-4. Run `temper codegen` then `temper verify`
+4. Run `temper verify`
 
 ### Changing a State Machine
 
@@ -899,7 +882,7 @@ The recommended path for coding agents that generate specs:
 2. Update CSDL `StateMachine.States` annotation to match
 3. Update any action `ValidFromStates` annotations
 4. Run `temper verify` — the cascade will catch any invariant violations
-5. Run `temper codegen` to regenerate actors
+5. Reload the TransitionTable (hot-swap) or restart `temper serve`
 
 ### Responding to an Evolution Record
 
@@ -968,7 +951,7 @@ any of these causes silent failures that are hard to diagnose after the fact.
 
 | Anti-Pattern | Why It's Wrong | Do This Instead |
 |-------------|---------------|-----------------|
-| Hand-editing generated code | Will be overwritten on next codegen | Modify the CSDL/automaton specs |
+| Hand-editing runtime actor code | Specs are the source of truth | Modify the CSDL/automaton specs |
 | Using any constructor other than `from_ioa_source()` | TLA+ path fully removed, only IOA is supported | Use `TransitionTable::from_ioa_source()` |
 | Skipping verification | Deploys unverified state machines | Always run `temper verify` |
 | Skipping `temper verify` before `temper serve --specs-dir` | Server now runs cascade at startup, but pre-verifying catches errors earlier | Always run `temper verify` first |
@@ -1259,8 +1242,6 @@ env -u OTEL_EXPORTER_OTLP_TRACES_ENDPOINT \
 
 ```
 temper init <name>              Create a new Temper project
-temper codegen [--specs-dir DIR] [--output-dir DIR]
-                                Generate Rust code from specs
 temper verify [--specs-dir DIR] Run 4-level verification cascade
 temper serve [--port PORT] [--specs-dir DIR] [--tenant NAME]
                                 Start platform server

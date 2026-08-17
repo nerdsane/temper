@@ -95,8 +95,8 @@ pub fn run(name: &str) -> Result<()> {
     println!("\nProject '{}' initialized successfully!", name);
     println!("Next steps:");
     println!("  1. Edit specs/model.csdl.xml to define your entity model");
-    println!("  2. Add TLA+ specs in the specs/ directory");
-    println!("  3. Run `temper codegen` to generate Rust code");
+    println!("  2. Add I/O Automaton specs (`*.ioa.toml`) in the specs/ directory");
+    println!("  3. Run `temper verify` then `temper serve --specs-dir specs`");
 
     Ok(())
 }

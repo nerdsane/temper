@@ -286,13 +286,13 @@ pub struct ContextReady {
 // ... one struct per action
 ```
 
-Library crate `temper-codegen` called from `build.rs`. Standard Rust
+A standalone message generator called from `build.rs`. Standard Rust
 build script approach — generates into `OUT_DIR`, included via `include!`:
 
 ```rust
 // build.rs
 fn main() {
-    temper_codegen::generate_messages(
+    generate_messages(
         &["specs/agent.ioa.toml", "specs/context_manager.ioa.toml"],
     ).unwrap();
 }

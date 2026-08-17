@@ -18,7 +18,6 @@ members = [
     "crates/temper-macros",
     "crates/temper-runtime",
     "crates/temper-spec",
-    "crates/temper-codegen",
     "crates/temper-odata",
     "crates/temper-authz",
     "crates/temper-observe",
@@ -107,7 +106,7 @@ quick-xml = { version = "0.41", features = ["serialize"] }
 # CLI
 clap = { version = "4", features = ["derive"] }
 
-# Proc macro support (for temper-codegen)
+# Proc macro support
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
@@ -136,7 +135,6 @@ futures = "0.3"
 temper-macros = { path = "crates/temper-macros" }
 temper-runtime = { path = "crates/temper-runtime" }
 temper-spec = { path = "crates/temper-spec" }
-temper-codegen = { path = "crates/temper-codegen" }
 temper-odata = { path = "crates/temper-odata" }
 temper-authz = { path = "crates/temper-authz" }
 temper-observe = { path = "crates/temper-observe" }

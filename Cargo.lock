@@ -6443,7 +6443,6 @@ dependencies = [
  "sqlx",
  "temper-actor-runtime",
  "temper-authz",
- "temper-codegen",
  "temper-evolution",
  "temper-jit",
  "temper-mcp",
@@ -6466,16 +6465,6 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
-]
-
-[[package]]
-name = "temper-codegen"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "temper-spec",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -6617,7 +6606,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "temper-authz",
- "temper-codegen",
  "temper-jit",
  "temper-observe",
  "temper-optimize",
