@@ -67,7 +67,11 @@ tempfile = "3"
 # ADR-0055: CPU profile capture. pprof-rs is used because crates.io
 # `datadog-profiling` is currently an empty placeholder (see ADR for
 # details). `flamegraph` feature brings in inferno for SVG rendering.
-pprof = { version = "0.14", features = ["protobuf", "protobuf-codec"] }
+# `prost-codec` rather than `protobuf-codec`: the latter pulls protobuf 2.x,
+# which carries RUSTSEC-2024-0437 with no fix on the 2.x line. Both codecs emit
+# the same pprof protobuf wire format, so the uploaded profile is unchanged
+# (ARN-169).
+pprof = { version = "0.14", features = ["prost-codec"] }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
