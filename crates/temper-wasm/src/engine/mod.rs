@@ -548,6 +548,10 @@ impl WasmEngine {
                 None
             };
 
+            // ADR-0166: the guest-facing span API is fed by an untrusted module, so
+            // it needs the same per-tenant content decision the host HTTP path uses.
+            // Read it from the host itself, whose default is redact.
+            let export_llm_content = host.exports_llm_content();
             let host_state = HostState {
                 context_json: context_json.clone(),
                 result_json: None,
@@ -559,7 +563,11 @@ impl WasmEngine {
                 streams,
                 wasi_ctx,
                 blob_cache,
-                guest_spans: GuestSpanRegistry::for_invocation(context.clone(), needs_wasi),
+                guest_spans: GuestSpanRegistry::for_invocation(
+                    context.clone(),
+                    needs_wasi,
+                    export_llm_content,
+                ),
             };
             (wasi_stderr_pipe, host_state)
         };

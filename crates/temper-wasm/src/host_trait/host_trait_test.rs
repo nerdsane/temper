@@ -8,6 +8,31 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::prelude::*;
 
 #[test]
+fn llm_content_export_defaults_to_redact_and_is_opt_in() {
+    use std::collections::BTreeMap;
+    // Fail-safe: a host built without an explicit opt-in must redact LLM
+    // content, so any construction site that forgets `.with_llm_content_export`
+    // still defaults to safe. See ADR-0166 (ARN-243).
+    let default_host = ProductionWasmHost::new(BTreeMap::new());
+    assert!(
+        !default_host.export_llm_content,
+        "host must default to redacting LLM content"
+    );
+
+    let opted_in = ProductionWasmHost::new(BTreeMap::new()).with_llm_content_export(true);
+    assert!(
+        opted_in.export_llm_content,
+        "with_llm_content_export(true) must opt in"
+    );
+
+    let opted_out = ProductionWasmHost::new(BTreeMap::new()).with_llm_content_export(false);
+    assert!(
+        !opted_out.export_llm_content,
+        "with_llm_content_export(false) must redact"
+    );
+}
+
+#[test]
 fn guest_metric_count_kind_is_counter() {
     assert!(guest_metric_is_counter_kind(Some("count")));
     assert!(guest_metric_is_counter_kind(Some("counter")));
@@ -526,3 +551,137 @@ mod host_boundary_observability;
 mod log_correlation;
 #[path = "tests/span_hint_tests.rs"]
 mod span_hint_tests;
+
+/// ARN-243 / ADR-0166. `host_emit_wide_event` is a second guest-authored
+/// telemetry record with guest-chosen field names — the same untrusted channel as
+/// the span APIs, and it reaches the backend directly.
+#[test]
+fn guest_wide_event_fields_drop_llm_content_for_non_opted_in_tenant() {
+    use super::redact_guest_wide_event_fields;
+    use serde_json::{Value, json};
+    use std::collections::BTreeMap;
+
+    let mut tags = BTreeMap::new();
+    tags.insert("gen_ai.prompt".to_string(), "SECRET PROMPT".to_string());
+    tags.insert(
+        "gen_ai.request.model".to_string(),
+        "claude-opus-4-8".to_string(),
+    );
+    tags.insert("app.route".to_string(), "checkout".to_string());
+
+    let mut attributes = BTreeMap::new();
+    attributes.insert("gen_ai.completion".to_string(), json!("SECRET COMPLETION"));
+    attributes.insert(
+        "gen_ai.response.text".to_string(),
+        json!("SECRET COMPLETION"),
+    );
+    attributes.insert("gen_ai.usage.input_tokens".to_string(), json!(42));
+    attributes.insert("order.id".to_string(), json!("A-17"));
+
+    redact_guest_wide_event_fields(&mut tags, &mut attributes, false);
+
+    assert_eq!(
+        tags.get("gen_ai.prompt"),
+        None,
+        "prompt tag must not export"
+    );
+    assert_eq!(
+        tags.get("gen_ai.request.model"),
+        Some(&"claude-opus-4-8".to_string())
+    );
+    assert_eq!(tags.get("app.route"), Some(&"checkout".to_string()));
+    assert_eq!(attributes.get("gen_ai.completion"), None);
+    assert_eq!(
+        attributes.get("gen_ai.response.text"),
+        None,
+        "an unrecognized gen_ai.* key must not export just because it is unlisted"
+    );
+    assert_eq!(
+        attributes.get("gen_ai.usage.input_tokens"),
+        Some(&json!(42))
+    );
+    assert_eq!(attributes.get("order.id"), Some(&json!("A-17")));
+
+    // Values inside recognized keys are bounded, so the prompt cannot ride along.
+    let mut smuggle = BTreeMap::new();
+    smuggle.insert("gen_ai.request.model".to_string(), json!("M".repeat(4096)));
+    let mut no_tags = BTreeMap::new();
+    redact_guest_wide_event_fields(&mut no_tags, &mut smuggle, false);
+    let Some(Value::String(model)) = smuggle.get("gen_ai.request.model") else {
+        panic!("metadata key should survive, bounded");
+    };
+    assert!(model.len() <= 256, "got {} bytes", model.len());
+}
+
+/// An opted-in tenant is unaffected by the wide-event filter.
+#[test]
+fn guest_wide_event_fields_are_untouched_when_opted_in() {
+    use super::redact_guest_wide_event_fields;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    let mut tags = BTreeMap::new();
+    tags.insert("gen_ai.prompt".to_string(), "PROMPT".to_string());
+    let mut attributes = BTreeMap::new();
+    attributes.insert("gen_ai.completion".to_string(), json!("COMPLETION"));
+
+    redact_guest_wide_event_fields(&mut tags, &mut attributes, true);
+
+    assert_eq!(tags.get("gen_ai.prompt"), Some(&"PROMPT".to_string()));
+    assert_eq!(
+        attributes.get("gen_ai.completion"),
+        Some(&json!("COMPLETION"))
+    );
+}
+
+/// ARN-243 / ADR-0166. `host_emit_metric` is a fifth guest-authored telemetry
+/// channel: the guest chooses tag names *and* string values, and they reach both
+/// the OTel meter and a span event. Found by adversarial review after the first
+/// four channels were closed.
+#[test]
+fn guest_metric_tags_drop_llm_content_for_non_opted_in_tenant() {
+    use super::redact_guest_string_tags;
+    use std::collections::BTreeMap;
+
+    let mut tags = BTreeMap::new();
+    tags.insert(
+        "gen_ai.completion".to_string(),
+        "SECRET COMPLETION".to_string(),
+    );
+    tags.insert(
+        "gen_ai.response.text".to_string(),
+        "SECRET COMPLETION".to_string(),
+    );
+    tags.insert("GEN_AI.prompt".to_string(), "SECRET PROMPT".to_string());
+    tags.insert("gen_ai.request.model".to_string(), "M".repeat(4096));
+    tags.insert("app.route".to_string(), "checkout".to_string());
+
+    redact_guest_string_tags(&mut tags, false);
+
+    assert_eq!(tags.get("gen_ai.completion"), None);
+    assert_eq!(
+        tags.get("gen_ai.response.text"),
+        None,
+        "an unrecognized gen_ai.* key must not export just because it is unlisted"
+    );
+    assert_eq!(
+        tags.get("GEN_AI.prompt"),
+        None,
+        "the namespace test must normalize the guest-supplied key"
+    );
+    assert!(
+        tags.get("gen_ai.request.model")
+            .is_some_and(|v| v.len() <= 256),
+        "recognized metadata survives, clamped"
+    );
+    assert_eq!(tags.get("app.route"), Some(&"checkout".to_string()));
+
+    // Opted-in tenants are untouched.
+    let mut exported = BTreeMap::new();
+    exported.insert("gen_ai.completion".to_string(), "COMPLETION".to_string());
+    redact_guest_string_tags(&mut exported, true);
+    assert_eq!(
+        exported.get("gen_ai.completion"),
+        Some(&"COMPLETION".to_string())
+    );
+}

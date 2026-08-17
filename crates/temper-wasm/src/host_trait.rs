@@ -22,15 +22,20 @@ use temper_observe::wide_event::{self, EventKind, WideEvent};
 
 mod guest_progress;
 mod internal_http;
-mod span_hints;
+pub(crate) mod span_hints;
 
 pub use internal_http::{InternalHttpCapability, InternalHttpCapabilityIssuerFn};
 
+/// Re-exported so every channel that records guest-supplied `gen_ai.*` metadata
+/// bounds it the same way, including the dispatch callback path in
+/// `temper-server`. A second copy of the bound would drift. See ADR-0166.
+pub use span_hints::{MAX_REDACTED_LLM_METADATA_VALUE_BYTES, clamp_redacted_metadata_value};
 #[cfg(test)]
 pub(crate) use span_hints::{MAX_RESPONSE_CAPTURE_BYTES, SpanHints};
 pub(crate) use span_hints::{
-    apply_response_captures, apply_span_hints, datadog_visible_span_hint_field,
-    span_hint_otel_name, split_span_hint_headers, truncate_for_span_attr,
+    apply_response_captures, apply_span_hints, clamp_llm_metadata_json,
+    datadog_visible_span_hint_field, is_llm_namespace_key, llm_namespace_attr_allowed,
+    redact_llm_content_hints, span_hint_otel_name, split_span_hint_headers, truncate_for_span_attr,
 };
 
 /// Host capabilities provided to WASM modules.
@@ -53,6 +58,14 @@ pub struct HttpBatchResponse {
 
 #[async_trait]
 pub trait WasmHost: Send + Sync {
+    /// Whether this invocation's tenant opted into exporting raw LLM content to
+    /// telemetry (ADR-0166). Defaults to `false` so a host that does not answer
+    /// redacts: the guest-facing telemetry APIs read this, and the only safe
+    /// default for a channel fed by an untrusted module is to withhold content.
+    fn exports_llm_content(&self) -> bool {
+        false
+    }
+
     /// Make an HTTP request. Returns (status_code, response_body).
     async fn http_call(
         &self,
@@ -356,6 +369,11 @@ pub struct ProductionWasmHost {
     text_http_interceptor: Option<TextHttpInterceptorFn>,
     /// Invocation context for auto-enriching guest telemetry.
     invocation_context: Option<WasmInvocationContext>,
+    /// Whether this invocation's tenant may export raw LLM content (prompts,
+    /// completions, system instructions, tool arguments/results) captured from
+    /// guest HTTP calls to the telemetry backend. Defaults to `false` (redact);
+    /// the server sets it per tenant. See ADR-0166.
+    export_llm_content: bool,
     /// Registry of active streaming HTTP exchanges (ADR-0057).
     /// One per host instance; handle IDs are unique within the host.
     http_streams: Arc<crate::http_stream::HttpStreamRegistry>,
@@ -502,6 +520,53 @@ fn remote_blob_backend<'a>(secrets: &'a BTreeMap<String, String>, url: &str) -> 
     Some(backend)
 }
 
+/// Apply ADR-0166 to a map of guest-supplied string tags. Shared by guest wide
+/// events and guest metrics: both let an untrusted module choose tag names *and*
+/// string values, so both are the same channel as the span APIs.
+fn redact_guest_string_tags(tags: &mut BTreeMap<String, String>, export_llm_content: bool) {
+    if export_llm_content {
+        return;
+    }
+    tags.retain(|key, _| llm_namespace_attr_allowed(key));
+    for (key, value) in tags.iter_mut() {
+        if is_llm_namespace_key(key)
+            && let Some(clamped) = clamp_redacted_metadata_value(value)
+        {
+            *value = clamped;
+        }
+    }
+}
+
+/// Apply ADR-0166 to the guest-supplied half of a wide event. Inside the
+/// `gen_ai.*` namespace a non-opted-in tenant keeps only recognised, bounded
+/// metadata; keys outside it are the module's own application telemetry and are
+/// left alone, matching the guest-span boundary.
+fn redact_guest_wide_event_fields(
+    tags: &mut BTreeMap<String, String>,
+    attributes: &mut BTreeMap<String, Value>,
+    export_llm_content: bool,
+) {
+    if export_llm_content {
+        return;
+    }
+    redact_guest_string_tags(tags, export_llm_content);
+    attributes.retain(|key, value| {
+        if !llm_namespace_attr_allowed(key) {
+            return false;
+        }
+        // A structured value under a recognised metadata key is dropped, not
+        // clamped: see `clamp_llm_metadata_json`.
+        !is_llm_namespace_key(key) || clamp_llm_metadata_json(value).is_some()
+    });
+    for (key, value) in attributes.iter_mut() {
+        if is_llm_namespace_key(key)
+            && let Some(clamped) = clamp_llm_metadata_json(value)
+        {
+            *value = clamped;
+        }
+    }
+}
+
 impl ProductionWasmHost {
     /// Create with pre-loaded secrets and default HTTP timeout.
     ///
@@ -553,6 +618,7 @@ impl ProductionWasmHost {
             binary_http_interceptor: None,
             text_http_interceptor: None,
             invocation_context: None,
+            export_llm_content: false,
             http_streams: Arc::new(crate::http_stream::HttpStreamRegistry::new()),
         }
     }
@@ -584,6 +650,13 @@ impl ProductionWasmHost {
     /// Attach invocation context for guest telemetry auto-enrichment.
     pub fn with_invocation_context(mut self, context: WasmInvocationContext) -> Self {
         self.invocation_context = Some(context);
+        self
+    }
+
+    /// Set whether this invocation's tenant may export raw LLM content captured
+    /// from guest HTTP calls. Defaults to `false` (redact). See ADR-0166.
+    pub fn with_llm_content_export(mut self, export_content: bool) -> Self {
+        self.export_llm_content = export_content;
         self
     }
 
@@ -674,6 +747,13 @@ impl ProductionWasmHost {
         let mut tags = payload.tags;
         let mut attributes = payload.attributes;
         let measurements = payload.measurements;
+
+        // ADR-0166: a wide event is a guest-authored telemetry record with
+        // guest-chosen tag and attribute names, so it is the same untrusted
+        // channel as the span APIs and takes the same per-tenant decision. Applied
+        // before any host-derived field is merged in below, so only guest input is
+        // judged.
+        redact_guest_wide_event_fields(&mut tags, &mut attributes, self.export_llm_content);
 
         let entity_type = self
             .invocation_context
@@ -767,6 +847,10 @@ impl ProductionWasmHost {
 
 #[async_trait]
 impl WasmHost for ProductionWasmHost {
+    fn exports_llm_content(&self) -> bool {
+        self.export_llm_content
+    }
+
     async fn http_call(
         &self,
         method: &str,
@@ -781,7 +865,9 @@ impl WasmHost for ProductionWasmHost {
         // `X-Temper-Span-Name` / `X-Temper-Span-Attr-*` so the resulting
         // span has a semantically meaningful name (e.g., `tool.llm_call`)
         // and attributes (e.g., `gen_ai.request.model`).
-        let (filtered_headers, span_hints) = split_span_hint_headers(headers);
+        let (filtered_headers, mut span_hints) = split_span_hint_headers(headers);
+        // ARN-243: drop LLM content from span hints unless this tenant opted in.
+        redact_llm_content_hints(&mut span_hints, self.export_llm_content);
         let (is_internal, outbound_headers) = self.outbound_headers(url, &filtered_headers);
         if let Some(interceptor) = &self.text_http_interceptor
             && let Some(result) = interceptor(
@@ -1025,7 +1111,9 @@ impl WasmHost for ProductionWasmHost {
     ) -> Result<(u16, Vec<u8>), String> {
         let started = Instant::now();
         // See http_call for the span-hint-header rationale (ADR-0037).
-        let (filtered_headers, span_hints) = split_span_hint_headers(headers);
+        let (filtered_headers, mut span_hints) = split_span_hint_headers(headers);
+        // ARN-243: drop LLM content from span hints unless this tenant opted in.
+        redact_llm_content_hints(&mut span_hints, self.export_llm_content);
         let (is_internal, outbound_headers) = self.outbound_headers(url, &filtered_headers);
         let span = tracing::info_span!(
             "wasm.host.http_call_binary",
@@ -1224,7 +1312,9 @@ impl WasmHost for ProductionWasmHost {
         body: &str,
     ) -> Result<Vec<String>, String> {
         let started = Instant::now();
-        let (filtered_headers, span_hints) = split_span_hint_headers(headers);
+        let (filtered_headers, mut span_hints) = split_span_hint_headers(headers);
+        // ARN-243: drop LLM content from span hints unless this tenant opted in.
+        redact_llm_content_hints(&mut span_hints, self.export_llm_content);
         let (is_internal, outbound_headers) = self.outbound_headers(url, &filtered_headers);
         let span = tracing::info_span!(
             "wasm.host.connect_call",
@@ -1554,8 +1644,12 @@ impl WasmHost for ProductionWasmHost {
     }
 
     fn emit_metric(&self, metric_json: &str) -> Result<(), String> {
-        let payload: GuestMetricInput = serde_json::from_str(metric_json)
+        let mut payload: GuestMetricInput = serde_json::from_str(metric_json)
             .map_err(|e| format!("invalid guest metric payload: {e}"))?;
+        // ADR-0166: guest metric tags are guest-named *and* guest-valued strings,
+        // and they reach two sinks below — the span event and the OTel meter.
+        // Redact before either reads them, so neither can observe the raw tags.
+        redact_guest_string_tags(&mut payload.tags, self.export_llm_content);
         record_guest_metric_span_event(&payload, self.invocation_context.as_ref());
         let meter = opentelemetry::global::meter("temper");
         let mut attrs: Vec<opentelemetry::KeyValue> = payload
@@ -1623,7 +1717,9 @@ impl WasmHost for ProductionWasmHost {
         let bridge_resp = exchange.bridge_response_body;
         let head_tx = exchange.bridge_head_sender;
         let streams = self.http_streams.clone();
-        let (filtered_headers, span_hints) = split_span_hint_headers(&request.headers);
+        let (filtered_headers, mut span_hints) = split_span_hint_headers(&request.headers);
+        // ARN-243: drop LLM content from span hints unless this tenant opted in.
+        redact_llm_content_hints(&mut span_hints, self.export_llm_content);
         let (is_internal, outbound_headers) =
             self.outbound_headers(&request.url, &filtered_headers);
         let client = if is_internal {
