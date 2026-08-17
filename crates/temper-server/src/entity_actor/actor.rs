@@ -32,7 +32,7 @@ use temper_runtime::persistence::{
     COMPOSITE_EVENT_TYPE, EventMetadata, PersistenceEnvelope, PersistenceError,
 };
 use temper_runtime::scheduler::{sim_now, sim_uuid};
-use tokio::time::sleep as sleep_persistence_retry; // determinism-ok: production persistence retry backoff
+pub(super) use tokio::time::sleep as sleep_persistence_retry; // determinism-ok: production persistence retry backoff
 
 use crate::storage::{BackendLabel, BoxedEventStore};
 
@@ -47,7 +47,7 @@ use super::types::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReplayPolicy {
+pub(super) enum ReplayPolicy {
     LenientSnapshot,
     StrictSnapshot,
     StrictFullJournal,
@@ -67,7 +67,7 @@ impl ReplayPolicy {
     }
 }
 
-fn event_budget_workspace_id(state: &EntityState) -> String {
+pub(super) fn event_budget_workspace_id(state: &EntityState) -> String {
     if state.entity_type == "Workspace" {
         return state.entity_id.clone();
     }
@@ -117,20 +117,20 @@ fn duplicate_idempotency_custom_effects(
 /// Optionally persists events to the configured backend. Wide events are emitted
 /// via the OTEL SDK (no-op when OTEL is not initialised).
 pub struct EntityActor {
-    tenant: String,
-    entity_type: String,
+    pub(super) tenant: String,
+    pub(super) entity_type: String,
     entity_id: String,
     /// Live reference to the transition table. Reads through `RwLock` so that
     /// hot-swapped tables are visible on the next action dispatch without
     /// restarting the actor.
-    table: Arc<RwLock<TransitionTable>>,
-    initial_fields: serde_json::Value,
+    pub(super) table: Arc<RwLock<TransitionTable>>,
+    pub(super) initial_fields: serde_json::Value,
     /// Optional event journal for persistence. None = in-memory only.
-    event_journal: Option<BoxedEventStore>,
+    pub(super) event_journal: Option<BoxedEventStore>,
     /// Optional async snapshot writer. Event appends remain synchronous.
-    snapshot_queue: Option<Arc<SnapshotWriteQueue>>,
+    pub(super) snapshot_queue: Option<Arc<SnapshotWriteQueue>>,
     /// Persistence backend label used for metrics and backend-specific field sync.
-    event_backend: Option<BackendLabel>,
+    pub(super) event_backend: Option<BackendLabel>,
     /// Trace ID for correlating all events from this actor.
     trace_id: String,
     /// Shared idempotency cache (ADR-0048 sub-decision 5). Consulted before
@@ -138,11 +138,11 @@ pub struct EntityActor {
     /// retries that race past the caller's timeout cannot double-execute.
     idempotency_cache: Option<Arc<crate::idempotency::IdempotencyCache>>,
     /// Object store for field-overflow blob bytes. SQL stores only refs.
-    blob_store: Option<crate::blob_store::BlobStore>,
+    pub(super) blob_store: Option<crate::blob_store::BlobStore>,
 }
 
 impl EntityActor {
-    fn build_initial_state(
+    pub(super) fn build_initial_state(
         entity_type: &str,
         entity_id: &str,
         table: &TransitionTable,
@@ -335,7 +335,7 @@ impl EntityActor {
     }
 
     /// Persistence ID for this entity: "tenant:EntityType:EntityId".
-    fn persistence_id(&self) -> String {
+    pub(super) fn persistence_id(&self) -> String {
         format!("{}:{}:{}", self.tenant, self.entity_type, self.entity_id)
     }
 
@@ -353,7 +353,7 @@ impl EntityActor {
     }
 
     /// Persist an event to the configured event store.
-    async fn persist_event(
+    pub(super) async fn persist_event(
         &self,
         store: &BoxedEventStore,
         backend: BackendLabel,
@@ -465,7 +465,7 @@ impl EntityActor {
     }
 
     /// Save a snapshot when the configured interval is reached.
-    async fn maybe_save_snapshot(
+    pub(super) async fn maybe_save_snapshot(
         store: &BoxedEventStore,
         snapshot_queue: Option<&Arc<SnapshotWriteQueue>>,
         persistence_id: &str,
@@ -524,7 +524,7 @@ impl EntityActor {
     /// all state variables (status, counters, booleans). This is option 2 from
     /// the replay design: the TransitionTable is the authoritative source of
     /// effects, so replay produces the same state as the original execution.
-    async fn replay_events(
+    pub(super) async fn replay_events(
         table: &TransitionTable,
         store: &BoxedEventStore,
         backend: BackendLabel,
@@ -680,14 +680,50 @@ impl EntityActor {
                     {
                         match parsed_event {
                             Ok(event) => {
-                                super::effects::apply_field_update(
+                                let applied = super::effects::apply_field_update(
                                     state,
                                     &event.params,
                                     env.event_type == super::effects::FIELDS_REPLACED_EVENT,
                                 );
+                                if !applied {
+                                    // A journaled field update whose payload is not
+                                    // an object — only reachable from a build that
+                                    // predates the live guard. It is as dropped as
+                                    // one that failed to deserialize, so it fails
+                                    // or counts the same way.
+                                    if replay_policy.strict_event_validation() {
+                                        return Err(ActorError::custom(format!(
+                                            "non-object field-update event for {}:{} at sequence {}",
+                                            state.entity_type, state.entity_id, env.sequence_nr
+                                        )));
+                                    }
+                                    crate::event_budget_metrics::record_field_update_replay_skip(
+                                        tenant,
+                                        &state.entity_type,
+                                        &state.entity_id,
+                                    );
+                                }
                                 state.push_event_bounded(event);
                             }
                             Err(e) => {
+                                // Honor the replay policy, like the tombstone and
+                                // generic arms do. Under a strict policy the caller
+                                // is resolving authoritative state — identity and
+                                // authority decisions read from it — so silently
+                                // dropping a field update there can preserve
+                                // exactly the authority a `FieldsReplaced` was
+                                // meant to revoke. Fail instead of skipping.
+                                if replay_policy.strict_event_validation() {
+                                    return Err(ActorError::custom(format!(
+                                        "invalid field-update event for {}:{} at sequence {}: {e}",
+                                        state.entity_type, state.entity_id, env.sequence_nr
+                                    )));
+                                }
+                                crate::event_budget_metrics::record_field_update_replay_skip(
+                                    tenant,
+                                    &state.entity_type,
+                                    &state.entity_id,
+                                );
                                 tracing::warn!(
                                     entity = %state.entity_id,
                                     sequence_nr = env.sequence_nr,
@@ -1012,6 +1048,30 @@ impl Actor for EntityActor {
                 // Separate from `action_start` because metrics emission is
                 // outside the DST boundary; using Instant here is safe.
                 let ask_reply_start = Instant::now(); // determinism-ok: observability only
+
+                // ARN-189: the field-update event names are reserved. Replay
+                // dispatches them to `apply_field_update` before the generic
+                // action path, so a spec action of the same name would be
+                // hijacked on rehydration — its params would be merged into
+                // fields and its transition never replayed. Reserving them "by
+                // convention" is not a guarantee; refuse the collision here,
+                // where a domain action first enters the actor.
+                if name == super::effects::FIELDS_UPDATED_EVENT
+                    || name == super::effects::FIELDS_REPLACED_EVENT
+                {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(format!(
+                            "action name `{name}` is reserved for journaled field updates"
+                        )),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
 
                 // Snapshot the current table for this action dispatch.
                 // On the next action, any hot-swapped table will be picked up.
@@ -1607,146 +1667,28 @@ impl Actor for EntityActor {
                 replace,
                 expected_precondition,
             } => {
-                if let Some(expected_precondition) = expected_precondition
-                    && super::effects::entity_authorization_precondition(state)
-                        != expected_precondition
-                {
-                    ctx.reply(EntityResponse {
-                        success: false,
-                        state: state.clone(),
-                        error: Some(
-                            "field update authorization became stale; retry against current state"
-                                .to_string(),
-                        ),
-                        custom_effects: vec![],
-                        scheduled_actions: vec![],
-                        spawn_requests: vec![],
-                        spec_governed: true,
-                    });
-                    return Ok(());
-                }
-                if state.status == "Deleted" {
-                    ctx.reply(EntityResponse {
-                        success: false,
-                        state: state.clone(),
-                        error: Some("cannot update fields after entity deletion".to_string()),
-                        custom_effects: vec![],
-                        scheduled_actions: vec![],
-                        spawn_requests: vec![],
-                        spec_governed: true,
-                    });
-                    return Ok(());
-                }
-                // TigerStyle: same event budget that gates spec actions.
-                // Field updates append journal events too; ungated they could
-                // grow the snapshot replay tail past MAX_EVENTS_SINCE_SNAPSHOT
-                // while the snapshot path is stalled, after which the entity
-                // can never rehydrate. Reject BEFORE mutating.
-                if state.events_since_snapshot >= MAX_EVENTS_SINCE_SNAPSHOT {
-                    let workspace_id = event_budget_workspace_id(state);
-                    crate::event_budget_metrics::record_exhausted(
-                        &self.tenant,
-                        &state.entity_type,
-                        &state.entity_id,
-                        &workspace_id,
-                    );
-                    tracing::warn!(
-                        tenant = %self.tenant,
-                        entity_type = %state.entity_type,
-                        entity_id = %state.entity_id,
-                        workspace_id = %workspace_id,
-                        status = %state.status,
-                        replace,
-                        events_since_snapshot = state.events_since_snapshot,
-                        total_event_count = state.total_event_count,
-                        max_events_since_snapshot = MAX_EVENTS_SINCE_SNAPSHOT,
-                        "Event budget exhausted (field update rejected)"
-                    );
-                    ctx.reply(EntityResponse {
-                        success: false,
-                        state: state.clone(),
-                        error: Some(format!(
-                            "Event budget exhausted ({MAX_EVENTS_SINCE_SNAPSHOT} max since snapshot)"
-                        )),
-                        custom_effects: vec![],
-                        scheduled_actions: vec![],
-                        spawn_requests: vec![],
-                        spec_governed: true,
-                    });
-                    return Ok(());
-                }
-
-                // Apply the update first so the journal append co-commits
-                // key/vector index rows derived from the NEW fields, then
-                // journal it fail-closed (ARN-189): an update that is not
-                // durable must not be acknowledged, or eviction/restart
-                // silently loses it. Rolled back on append failure.
-                let previous_fields = state.fields.clone();
-                super::effects::apply_field_update(state, &fields, replace);
-
-                let event = EntityEvent {
-                    action: if replace {
-                        super::effects::FIELDS_REPLACED_EVENT
-                    } else {
-                        super::effects::FIELDS_UPDATED_EVENT
-                    }
-                    .to_string(),
-                    from_status: state.status.clone(),
-                    to_status: state.status.clone(),
-                    timestamp: sim_now(),
-                    params: fields,
-                    idempotency_key: None,
-                };
-
-                if let (Some(store), Some(backend)) =
-                    (self.event_journal.as_ref(), self.event_backend)
-                    && let Err(e) = self
-                        .persist_event(store, backend, &self.persistence_id(), state, &event)
-                        .await
-                {
-                    state.fields = previous_fields;
-                    ctx.reply(EntityResponse {
-                        success: false,
-                        state: state.clone(),
-                        error: Some(format!("persistence failed: {e}")),
-                        custom_effects: vec![],
-                        scheduled_actions: vec![],
-                        spawn_requests: vec![],
-                        spec_governed: true,
-                    });
-                    return Ok(());
-                }
-
-                state.push_event_bounded(event);
-
-                let persistence_id = self.persistence_id();
-                if let Some(ref store) = self.event_journal
-                    && let Err(e) = Self::maybe_save_snapshot(
-                        store,
-                        self.snapshot_queue.as_ref(),
-                        &persistence_id,
-                        state,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        entity = %state.entity_id,
-                        seq = state.sequence_nr,
-                        error = %e,
-                        "failed to persist snapshot"
-                    );
-                }
-
+                // The whole durable transaction — validation, budget, journal
+                // append, conflict recovery — lives in `field_updates`. This arm
+                // only turns its outcome into a reply.
+                let outcome = super::field_updates::commit_field_update(
+                    self,
+                    state,
+                    fields,
+                    replace,
+                    expected_precondition,
+                )
+                .await;
                 ctx.reply(EntityResponse {
-                    success: true,
+                    success: outcome.is_ok(),
                     state: state.clone(),
-                    error: None,
+                    error: outcome.err(),
                     custom_effects: vec![],
                     scheduled_actions: vec![],
                     spawn_requests: vec![],
                     spec_governed: true,
                 });
             }
+
             EntityMsg::Delete {
                 expected_authorization_precondition,
             } => {

@@ -79,7 +79,9 @@ criterion = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 wiremock = { workspace = true }
 tracing-subscriber = { workspace = true }
-opentelemetry_sdk = { workspace = true }
+# `testing` gives the in-memory metric exporter used by the ARN-189 replay-skip
+# test. Dev-only: not built into any production artifact.
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 temper-store-sim = { workspace = true }
 temper-server = { path = ".", features = ["sim"] }
 temper-wasm = { workspace = true, features = ["test-helpers"] }

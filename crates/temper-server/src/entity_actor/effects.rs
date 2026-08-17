@@ -35,19 +35,34 @@ pub(crate) const FIELDS_REPLACED_EVENT: &str = "FieldsReplaced";
 ///   the historical live behavior.
 /// - `replace == true` (PUT): replace all fields, preserving `Id` and
 ///   `Status` from the entity itself.
+#[must_use = "a field update that did not apply is a dropped update; count or refuse it"]
 pub(crate) fn apply_field_update(
     state: &mut EntityState,
     fields: &serde_json::Value,
     replace: bool,
-) {
+) -> bool {
+    // One helper for both the live `UpdateFields` arm and journal replay
+    // (ARN-189). Replay must reproduce the live result exactly, so every
+    // transformation belongs here — a sanitize step applied only on the live
+    // path would silently rewrite the entity on the next rehydration.
+    //
+    // `sanitize_action_params` strips runtime-owned fields a caller must not set
+    // (`has_spec`, `ctx_owner_status`, ...), and `canonicalize_entity_fields`
+    // restores the authoritative `Id`/`Status` (and their lowercase aliases)
+    // afterwards.
+    // Guard here, not only at the live arm: replay feeds this the `params` of
+    // whatever is in the journal, including events written by a build that
+    // predates the live guard. A `FieldsReplaced` carrying `[1,2,3]` would set
+    // `fields` to an array, after which `canonicalize_entity_fields` cannot
+    // restore `Id`/`Status` — there is no object to insert into. Refusing in the
+    // shared helper is what makes live and replay agree on every input, not just
+    // the ones the live path screens.
+    if !fields.is_object() {
+        return false;
+    }
+    let fields = sanitize_action_params(fields);
     if replace {
-        let id = state.entity_id.clone();
-        let status = state.status.clone();
-        state.fields = fields.clone();
-        if let Some(obj) = state.fields.as_object_mut() {
-            obj.insert("Id".to_string(), serde_json::Value::String(id));
-            obj.insert("Status".to_string(), serde_json::Value::String(status));
-        }
+        state.fields = fields.into_owned();
     } else if let (Some(existing), Some(updates)) =
         (state.fields.as_object_mut(), fields.as_object())
     {
@@ -55,6 +70,8 @@ pub(crate) fn apply_field_update(
             existing.insert(k.clone(), v.clone());
         }
     }
+    canonicalize_entity_fields(&mut state.fields, &state.entity_id, &state.status);
+    true
 }
 
 /// A scheduled action to fire after a delay.
