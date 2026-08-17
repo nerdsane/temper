@@ -112,6 +112,15 @@ impl LocalTDataWasmHost {
 
 #[async_trait]
 impl WasmHost for LocalTDataWasmHost {
+    /// Forward the delegate's per-tenant LLM content decision (ADR-0166). The
+    /// production stack is `AuthorizedWasmHost(LocalTDataWasmHost(ProductionWasmHost))`,
+    /// and only the innermost host holds the flag, so a wrapper that does not
+    /// forward makes the engine read the trait default and redact even for a
+    /// tenant that opted in.
+    fn exports_llm_content(&self) -> bool {
+        self.delegate.exports_llm_content()
+    }
+
     async fn http_call(
         &self,
         method: &str,

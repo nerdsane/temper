@@ -12,9 +12,15 @@ use crate::host_trait::{datadog_visible_span_hint_field, truncate_for_span_attr}
 use crate::types::WasmInvocationContext;
 
 mod export;
+mod redaction;
 #[cfg(test)]
 #[path = "guest_spans_test.rs"]
 mod tests;
+
+use redaction::{
+    allowed_attributes, guest_span_attribute_allowed, merge_allowed_attributes,
+    redacted_guest_attribute_value,
+};
 
 use export::{
     export_manual_span, manual_parent_context, manual_span_attributes, merge_end_status_attributes,
@@ -86,6 +92,10 @@ struct GuestSpanManualEvent {
 pub(crate) struct GuestSpanRegistry {
     context: WasmInvocationContext,
     manual_export: bool,
+    /// Whether this tenant opted into exporting raw LLM content (ADR-0166).
+    /// `false` means guest-supplied `gen_ai.*` attributes are restricted to
+    /// recognised, length-bounded metadata before they reach any span.
+    export_llm_content: bool,
     next_id: i64,
     total_started: usize,
     max_spans: usize,
@@ -96,18 +106,27 @@ pub(crate) struct GuestSpanRegistry {
 impl GuestSpanRegistry {
     #[cfg(test)]
     pub(crate) fn new(context: WasmInvocationContext) -> Self {
-        Self::with_manual_export(context, false)
+        Self::with_manual_export(context, false, false)
     }
 
-    pub(crate) fn for_invocation(context: WasmInvocationContext, needs_wasi: bool) -> Self {
-        Self::with_manual_export(context, needs_wasi)
+    pub(crate) fn for_invocation(
+        context: WasmInvocationContext,
+        needs_wasi: bool,
+        export_llm_content: bool,
+    ) -> Self {
+        Self::with_manual_export(context, needs_wasi, export_llm_content)
     }
 
-    fn with_manual_export(context: WasmInvocationContext, manual_export: bool) -> Self {
+    fn with_manual_export(
+        context: WasmInvocationContext,
+        manual_export: bool,
+        export_llm_content: bool,
+    ) -> Self {
         clear_thread_local_guest_spans();
         Self {
             context,
             manual_export,
+            export_llm_content,
             next_id: 1,
             total_started: 0,
             max_spans: DEFAULT_MAX_GUEST_SPANS,
@@ -192,10 +211,15 @@ impl GuestSpanRegistry {
             exception.message = tracing::field::Empty,
         );
         update_span_name(&span, name);
-        apply_attributes(&span, &payload.attributes);
+        apply_attributes(&span, &payload.attributes, self.export_llm_content);
         enter_thread_local_guest_span(&span);
         let (trace_id, span_id) = tracing_span_ids(&span);
-        let attributes = manual_span_attributes(&self.context, id, &payload.attributes);
+        let attributes = manual_span_attributes(
+            &self.context,
+            id,
+            &payload.attributes,
+            self.export_llm_content,
+        );
 
         self.spans.insert(
             id,
@@ -226,9 +250,12 @@ impl GuestSpanRegistry {
         if name.is_empty() {
             return Err("guest span event name must not be empty".to_string());
         }
+        let export_llm_content = self.export_llm_content;
         let entry = self.span_mut(span_id)?;
-        let attrs = payload
-            .attributes
+        // Span events are a third way for a guest to attach attributes to a span,
+        // so they pass the same filter as `start_span` / `set_span_attributes`.
+        let event_attributes = allowed_attributes(&payload.attributes, export_llm_content);
+        let attrs = event_attributes
             .iter()
             .filter_map(|(key, value)| key_value_from_json(key, value))
             .collect::<Vec<_>>();
@@ -240,7 +267,7 @@ impl GuestSpanRegistry {
         entry.events.push(GuestSpanManualEvent {
             name: name.to_string(),
             timestamp: SystemTime::now(),
-            attributes: allowed_attributes(&payload.attributes),
+            attributes: event_attributes,
         });
         Ok(())
     }
@@ -252,9 +279,14 @@ impl GuestSpanRegistry {
     ) -> Result<(), String> {
         let payload: GuestSpanAttributesPayload = serde_json::from_str(payload_json)
             .map_err(|e| format!("invalid guest span attributes payload: {e}"))?;
+        let export_llm_content = self.export_llm_content;
         let entry = self.span_mut(span_id)?;
-        apply_attributes(&entry.span, &payload.attributes);
-        merge_allowed_attributes(&mut entry.attributes, &payload.attributes);
+        apply_attributes(&entry.span, &payload.attributes, export_llm_content);
+        merge_allowed_attributes(
+            &mut entry.attributes,
+            &payload.attributes,
+            export_llm_content,
+        );
         Ok(())
     }
 
@@ -286,9 +318,14 @@ impl GuestSpanRegistry {
             .ok_or_else(|| format!("unknown guest span id: {span_id}"))?;
         self.stack.pop();
         let mut entry = entry;
-        merge_allowed_attributes(&mut entry.attributes, &payload.attributes);
+        let export_llm_content = self.export_llm_content;
+        merge_allowed_attributes(
+            &mut entry.attributes,
+            &payload.attributes,
+            export_llm_content,
+        );
         merge_end_status_attributes(&mut entry.attributes, &payload);
-        apply_attributes(&entry.span, &payload.attributes);
+        apply_attributes(&entry.span, &payload.attributes, export_llm_content);
         apply_end_status(&entry.span, &payload);
         exit_thread_local_guest_span();
         end_otel_span(&entry.span);
@@ -342,27 +379,6 @@ impl GuestSpanRegistry {
     }
 }
 
-pub(crate) fn guest_span_attribute_allowed(key: &str) -> bool {
-    let key = key.trim();
-    if key.is_empty() {
-        return false;
-    }
-    !matches!(
-        key,
-        "otel.name"
-            | "otel.kind"
-            | "trace_id"
-            | "span_id"
-            | "parent_span_id"
-            | "dd.trace_id"
-            | "dd.span_id"
-            | "otel.trace_id"
-            | "otel.span_id"
-            | "_otel.parent_trace_id"
-            | "_otel.parent_span_id"
-    ) && !key.starts_with("_otel.")
-}
-
 fn update_span_name(span: &tracing::Span, name: &str) {
     span.record("otel.name", name);
     span.context().span().update_name(name.to_string());
@@ -384,27 +400,18 @@ fn clear_thread_local_guest_spans() {
     ENTERED_GUEST_SPANS.with(|guards| guards.borrow_mut().clear());
 }
 
-fn allowed_attributes(attributes: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
-    attributes
-        .iter()
-        .filter(|(key, _)| guest_span_attribute_allowed(key))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect()
-}
-
-fn merge_allowed_attributes(
-    target: &mut BTreeMap<String, Value>,
+fn apply_attributes(
+    span: &tracing::Span,
     attributes: &BTreeMap<String, Value>,
+    export_llm_content: bool,
 ) {
     for (key, value) in attributes {
-        if guest_span_attribute_allowed(key) {
-            target.insert(key.clone(), value.clone());
-        }
-    }
-}
-
-fn apply_attributes(span: &tracing::Span, attributes: &BTreeMap<String, Value>) {
-    for (key, value) in attributes {
+        // Filter here as well as at merge time: this is the last point before the
+        // value reaches the OTel span, so it holds even for a future path that
+        // populates the map without going through `merge_allowed_attributes`.
+        let Some(value) = &redacted_guest_attribute_value(key, value, export_llm_content) else {
+            continue;
+        };
         let Some(kv) = key_value_from_json(key, value) else {
             continue;
         };

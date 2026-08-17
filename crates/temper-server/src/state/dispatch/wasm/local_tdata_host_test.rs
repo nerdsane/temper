@@ -557,3 +557,56 @@ async fn allowlisted_public_tdata_calls_use_odata_handlers() {
 
 #[path = "local_tdata_host_test/delegation_tests.rs"]
 mod delegation_tests;
+
+/// ARN-243 / ADR-0166. The engine reads the tenant's content decision off the
+/// host it is handed, and production hands it a three-layer stack:
+/// `AuthorizedWasmHost(LocalTDataWasmHost(ProductionWasmHost))`. Only the
+/// innermost host holds the flag, so every wrapper in between has to forward it.
+/// A wrapper that does not silently disables the opt-in for every tenant —
+/// fail-safe, but inert. Asserted on the real composition, because a test that
+/// wraps `ProductionWasmHost` directly builds a stack production never uses and
+/// passes while the real one drops the decision.
+#[tokio::test]
+async fn production_host_stack_forwards_the_llm_content_export_decision() {
+    use temper_wasm::authorized_host::AuthorizedWasmHost;
+    use temper_wasm::host_trait::ProductionWasmHost;
+
+    for opted_in in [true, false] {
+        let inner: Arc<dyn WasmHost> = Arc::new(
+            ProductionWasmHost::new(std::collections::BTreeMap::new())
+                .with_llm_content_export(opted_in),
+        );
+        let state = test_state();
+        let agent = test_agent();
+        let local_tdata: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
+            state,
+            temper_runtime::tenant::TenantId::default(),
+            Some(&agent),
+            inner,
+        ));
+        assert_eq!(
+            local_tdata.exports_llm_content(),
+            opted_in,
+            "LocalTDataWasmHost must forward the decision (opted_in={opted_in})"
+        );
+
+        let full_stack = AuthorizedWasmHost::new(
+            local_tdata,
+            test_state().wasm_authz_gate(),
+            temper_wasm::WasmAuthzContext {
+                tenant: TenantId::default().to_string(),
+                module_name: "llm_caller".to_string(),
+                agent_id: None,
+                session_id: None,
+                entity_type: "Order".to_string(),
+                trigger_action: "SubmitOrder".to_string(),
+            },
+        );
+        assert_eq!(
+            full_stack.exports_llm_content(),
+            opted_in,
+            "the production host stack must carry the tenant's decision to the \
+             engine (opted_in={opted_in})"
+        );
+    }
+}

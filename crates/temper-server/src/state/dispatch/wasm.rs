@@ -13,6 +13,7 @@ use crate::secrets::template::resolve_secret_templates;
 use crate::state::sim_now;
 use temper_authz::{AuthenticatedRequestContext, PrincipalKind, SecurityContext};
 use temper_runtime::tenant::TenantId;
+use temper_wasm::host_trait::clamp_redacted_metadata_value;
 use temper_wasm::{
     AuthorizedWasmHost, BinaryHttpInterceptorFn, InternalHttpCapability,
     InternalHttpCapabilityIssuerFn, ProductionWasmHost, ProgressEmitterFn, StreamRegistry,
@@ -111,7 +112,10 @@ pub(crate) fn authorized_http_endpoint_host(
         .with_progress_emitter(progress_emitter)
         .with_internal_api_base_url(internal_api_url)
         .with_internal_capability_issuer(capability_issuer)
-        .with_invocation_context(invocation_context.clone());
+        .with_invocation_context(invocation_context.clone())
+        // ARN-243: the HttpEndpoint path honours the same per-tenant LLM content
+        // export decision as the integration path above.
+        .with_llm_content_export(state.export_llm_content(tenant.as_str()));
     if let Some(resolver) = secret_resolver {
         base_host = base_host.with_secret_resolver(resolver);
     }
@@ -769,6 +773,9 @@ impl crate::state::ServerState {
                         .with_progress_emitter(progress_emitter)
                         .with_internal_api_base_url(internal_api_url)
                         .with_invocation_context(host_invocation_context)
+                        .with_llm_content_export(
+                            self.export_llm_content(ctx.entity_ref.tenant.as_str()),
+                        )
                         .with_text_http_interceptor(
                             local_file_interceptor
                                 .unwrap_or_else(|| Arc::new(|_, _, _, _| Box::pin(async { None }))),
@@ -1094,6 +1101,17 @@ impl crate::state::ServerState {
                     );
                 }
 
+                // ARN-243: redact LLM content (prompt/completion/system/tool)
+                // from the callback params unless this tenant opted into content
+                // export. Stripping here covers every downstream telemetry sink
+                // — the span record below, `llm_call_wide_event`,
+                // `submit_llmobs_llm_span`, and `submit_llmobs_tool_spans` — all
+                // of which read from these params. Metadata (tokens, model,
+                // provider, finish reason, trace ids) is preserved. See ADR-0166.
+                redact_llm_content_params(
+                    &mut result.callback_params,
+                    self.export_llm_content(ctx.entity_ref.tenant.as_str()),
+                );
                 let callback_params = &result.callback_params;
 
                 if should_record_gen_ai_span_attrs(integration.llm, callback_params) {
@@ -1490,7 +1508,8 @@ impl crate::state::ServerState {
             .with_spec_evaluator(spec_evaluator_fn())
             .with_progress_emitter(progress_emitter)
             .with_internal_api_base_url(internal_api_base_url(self))
-            .with_invocation_context(context.clone());
+            .with_invocation_context(context.clone())
+            .with_llm_content_export(self.export_llm_content(tenant.as_str()));
         if let Some(resolver) = secret_resolver {
             base_host = base_host.with_secret_resolver(resolver);
         }
@@ -2055,6 +2074,54 @@ fn strip_private_observability_params(mut params: Value) -> Value {
     params
 }
 
+/// Callback-param keys that carry LLM *content* (prompt, completion, system
+/// prompt, and tool arguments/results) rather than safe metadata. These are the
+/// keys the telemetry sinks read — the span record, [`llm_call_wide_event`],
+/// [`submit_llmobs_llm_span`], and [`submit_llmobs_tool_spans`] — so stripping
+/// them from `callback_params` redacts content across every sink at once.
+/// Metadata keys (`_gen_ai_provider`, `_gen_ai_model`, `_gen_ai_finish_reason`,
+/// trace/span ids, token counts) are preserved, but clamped — see
+/// [`LLM_METADATA_PARAM_KEYS`]. See ADR-0166.
+const LLM_CONTENT_PARAM_KEYS: [&str; 4] = [
+    "_gen_ai_input_messages",
+    "_gen_ai_output_messages",
+    "_gen_ai_system_instructions",
+    "_dd_llmobs_tool_spans",
+];
+
+/// Callback-param keys the sinks record under `gen_ai.*` semantic-convention
+/// names. Their values come from the guest, so a key name cannot establish that
+/// the value is metadata: a module for a non-opted-in tenant that returns
+/// `{"_gen_ai_model": "<the whole prompt>"}` would otherwise reach LLM
+/// Observability as `gen_ai.request.model`. They are kept, but bounded — the same
+/// rule the other three channels apply. See ADR-0166.
+const LLM_METADATA_PARAM_KEYS: [&str; 3] =
+    ["_gen_ai_provider", "_gen_ai_model", "_gen_ai_finish_reason"];
+
+/// Redact LLM content params from `callback_params` unless the tenant has opted
+/// into LLM content export. Removes only the content keys in
+/// [`LLM_CONTENT_PARAM_KEYS`]; metadata is preserved. No-op when
+/// `export_content` is true. See ADR-0166.
+fn redact_llm_content_params(callback_params: &mut Value, export_content: bool) {
+    if export_content {
+        return;
+    }
+    let Some(object) = callback_params.as_object_mut() else {
+        return;
+    };
+    for key in LLM_CONTENT_PARAM_KEYS {
+        object.remove(key);
+    }
+    for key in LLM_METADATA_PARAM_KEYS {
+        let Some(Value::String(text)) = object.get_mut(key) else {
+            continue;
+        };
+        if let Some(clamped) = clamp_redacted_metadata_value(text) {
+            *text = clamped;
+        }
+    }
+}
+
 fn integration_error_type(error: &str) -> String {
     let normalized = error.to_ascii_lowercase();
     if normalized.contains("rate limit") {
@@ -2240,6 +2307,100 @@ mod tests {
         assert!(stripped.get("_gen_ai_finish_reason").is_none());
         assert!(stripped.get("_gen_ai_llm_parent_span_id").is_none());
         assert!(stripped.get("_dd_llmobs_tool_spans").is_none());
+    }
+
+    /// A key name cannot make an untrusted value into metadata. The sinks record
+    /// `_gen_ai_model` as `gen_ai.request.model`, which LLM Observability reads as
+    /// LLM data — so a module that returns its prompt under that key would export
+    /// content for a non-opted-in tenant under a semantic-convention name. The
+    /// other three channels bound these values; so must this one.
+    #[test]
+    fn clamps_guest_supplied_llm_metadata_values_for_non_opted_in_tenant() {
+        use temper_wasm::host_trait::MAX_REDACTED_LLM_METADATA_VALUE_BYTES;
+        let prompt = "P".repeat(4096);
+        let mut params = json!({
+            "_gen_ai_model": prompt,
+            "_gen_ai_provider": prompt,
+            "_gen_ai_finish_reason": prompt,
+            "input_tokens": 10,
+        });
+
+        redact_llm_content_params(&mut params, false);
+
+        for key in ["_gen_ai_model", "_gen_ai_provider", "_gen_ai_finish_reason"] {
+            let value = params
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("{key} should survive, bounded"));
+            assert!(
+                value.len() <= MAX_REDACTED_LLM_METADATA_VALUE_BYTES,
+                "{key} must be clamped, got {} bytes",
+                value.len()
+            );
+        }
+        assert_eq!(params.get("input_tokens").and_then(Value::as_u64), Some(10));
+
+        // An opted-in tenant is not clamped.
+        let mut exported = json!({ "_gen_ai_model": prompt });
+        redact_llm_content_params(&mut exported, true);
+        assert_eq!(
+            exported.get("_gen_ai_model").and_then(Value::as_str),
+            Some(prompt.as_str())
+        );
+    }
+
+    #[test]
+    fn redacts_llm_content_params_for_non_opted_in_tenant() {
+        let base = json!({
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "_gen_ai_provider": "anthropic",
+            "_gen_ai_model": "claude-sonnet-4-6",
+            "_gen_ai_finish_reason": "end_turn",
+            "_gen_ai_llm_parent_span_id": "parent-span",
+            "_gen_ai_input_messages": "[{\"role\":\"user\",\"content\":\"SECRET PROMPT\"}]",
+            "_gen_ai_output_messages": "[{\"role\":\"assistant\",\"content\":\"SECRET REPLY\"}]",
+            "_gen_ai_system_instructions": "SECRET SYSTEM",
+            "_dd_llmobs_tool_spans": "[{\"arguments\":\"SECRET ARGS\",\"result\":\"SECRET RESULT\"}]",
+        });
+
+        // Non-opted-in tenant: content stripped, metadata preserved.
+        let mut redacted = base.clone();
+        redact_llm_content_params(&mut redacted, false);
+        assert!(
+            redacted.get("_gen_ai_input_messages").is_none(),
+            "prompt must be redacted"
+        );
+        assert!(
+            redacted.get("_gen_ai_output_messages").is_none(),
+            "completion must be redacted"
+        );
+        assert!(
+            redacted.get("_gen_ai_system_instructions").is_none(),
+            "system prompt must be redacted"
+        );
+        assert!(
+            redacted.get("_dd_llmobs_tool_spans").is_none(),
+            "tool content must be redacted"
+        );
+        assert_eq!(redacted["input_tokens"], 10);
+        assert_eq!(redacted["output_tokens"], 20);
+        assert_eq!(redacted["_gen_ai_provider"], "anthropic");
+        assert_eq!(redacted["_gen_ai_model"], "claude-sonnet-4-6");
+        assert_eq!(redacted["_gen_ai_finish_reason"], "end_turn");
+        assert_eq!(redacted["_gen_ai_llm_parent_span_id"], "parent-span");
+
+        // Opted-in tenant: content preserved.
+        let mut exported = base.clone();
+        redact_llm_content_params(&mut exported, true);
+        assert_eq!(
+            exported["_gen_ai_input_messages"],
+            "[{\"role\":\"user\",\"content\":\"SECRET PROMPT\"}]"
+        );
+        assert_eq!(
+            exported["_dd_llmobs_tool_spans"],
+            "[{\"arguments\":\"SECRET ARGS\",\"result\":\"SECRET RESULT\"}]"
+        );
     }
 
     #[test]
