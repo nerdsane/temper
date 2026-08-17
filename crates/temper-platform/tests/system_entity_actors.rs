@@ -15,8 +15,7 @@ use temper_server::{EntityActor, EntityMsg, EntityResponse};
 mod common;
 
 use common::specs::{
-    SYSTEM_MODEL_CSDL_XML, catalog_table_rw, collaborator_table_rw, project_table_rw,
-    tenant_table_rw, version_table_rw,
+    catalog_table_rw, collaborator_table_rw, project_table_rw, tenant_table_rw, version_table_rw,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(2);
