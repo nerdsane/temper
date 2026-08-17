@@ -2256,5 +2256,8 @@ fn progress_emitter_fn(
 }
 
 #[cfg(test)]
+#[path = "wasm/llm_redaction_test.rs"]
+mod llm_redaction_test;
+#[cfg(test)]
 #[path = "wasm/wasm_test.rs"]
 mod tests;
