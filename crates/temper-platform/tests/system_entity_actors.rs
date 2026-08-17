@@ -524,4 +524,3 @@ async fn actor_multiple_system_entities_independent() {
     assert_eq!(rt.state.status, "Active");
     assert_eq!(rc.state.status, "Published");
 }
-
