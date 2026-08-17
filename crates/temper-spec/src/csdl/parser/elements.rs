@@ -164,8 +164,19 @@ pub(super) fn parse_annotation_children(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(quick_xml::events::Event::Start(ref element)) if local_name(element) == "String" => {
-                let text = reader.read_text(element.name()).unwrap_or_default();
-                let text = text.trim().to_string();
+                // quick-xml 0.41 changed `read_text` to return a `BytesText`
+                // instead of an owned `String`; call `.decode()` to get the text.
+                // Behavior is preserved exactly: 0.37's `read_text` also only
+                // charset-decoded and did NOT unescape XML entities (its rustdoc:
+                // "does not unescape read data"), matching the inline-attribute
+                // path (`attr_str`). Proper entity unescaping here (and the
+                // parse->emit double-escape it would fix) is a separate pre-existing
+                // correctness gap, out of scope for a dependency bump.
+                let text = reader
+                    .read_text(element.name())
+                    .ok()
+                    .and_then(|raw| raw.decode().ok().map(|s| s.trim().to_string()))
+                    .unwrap_or_default();
                 if !text.is_empty() {
                     collection_items.push(text);
                 }
