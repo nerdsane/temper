@@ -2117,6 +2117,11 @@ const LLM_METADATA_PARAM_KEYS: [&str; 8] = [
 /// action output. Prefix-based so a param added later is governed by default
 /// instead of silently exempt.
 fn is_private_llm_observability_param(key: &str) -> bool {
+    // Case-insensitive, matching the normalization the other channels apply.
+    // Today's sinks look these up with exact lowercase names, so `_GEN_AI_prompt`
+    // is not exported — but it would sit in the map looking governed, waiting for
+    // the first sink that folds case. Cheaper to normalize than to rely on that.
+    let key = key.to_ascii_lowercase();
     key.starts_with("_gen_ai_") || key.starts_with("_dd_llmobs_")
 }
 
@@ -2133,7 +2138,8 @@ fn redact_llm_content_params(callback_params: &mut Value, export_content: bool) 
     // exactly this reason; this one is now consistent with them: a private
     // observability param survives only if it is recognised metadata.
     object.retain(|key, _| {
-        !is_private_llm_observability_param(key) || LLM_METADATA_PARAM_KEYS.contains(&key.as_str())
+        !is_private_llm_observability_param(key)
+            || LLM_METADATA_PARAM_KEYS.contains(&key.to_ascii_lowercase().as_str())
     });
     for key in LLM_METADATA_PARAM_KEYS {
         let Some(Value::String(text)) = object.get_mut(key) else {
