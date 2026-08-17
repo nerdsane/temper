@@ -2506,3 +2506,117 @@ fn bridge_short_circuit_response_absent_is_none() {
     .expect("missing status still short-circuits");
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
 }
+
+#[test]
+fn credential_headers_are_not_forwarded_to_wasm_guests() {
+    // ARN-208: a WASM guest reads everything in its invocation context's headers.
+    // This asserts the invariant against the shared extraction point
+    // (`guest_visible_headers`) rather than the classifier alone, so deleting the
+    // filter inside that function fails here. It does NOT assert the dispatch call
+    // site: re-inlining the filter_map in `dispatch_matched_route` would still pass.
+    // A true wire-level assertion needs a guest fixture that echoes its invocation
+    // context; that is deferred with the outbound-header work in ARN-346.
+    let mut headers = HeaderMap::new();
+    for (name, value) in [
+        ("authorization", "Bearer caller-token"),
+        ("proxy-authorization", "Basic proxy"),
+        ("cookie", "session=abc"),
+        ("x-api-key", "sk-live-123"),
+        ("x-forwarded-authorization", "Bearer upstream"),
+        ("x-forwarded-access-token", "at-456"),
+        ("x-goog-iap-jwt-assertion", "iap-jwt"),
+        ("cf-access-jwt-assertion", "cf-jwt"),
+        ("x-amzn-oidc-accesstoken", "alb-access"),
+        ("x-amzn-oidc-data", "alb-data"),
+        ("x-amzn-oidc-identity", "alb-identity"),
+        ("x-ms-token-aad-access-token", "aad-access"),
+        ("x-ms-token-aad-id-token", "aad-id"),
+        ("x-ms-token-aad-refresh-token", "aad-refresh"),
+        ("x-auth-request-access-token", "oauth2p-access"),
+        ("x-amz-security-token", "aws-token"),
+        // Ordinary headers the guest legitimately needs.
+        ("content-type", "application/json"),
+        ("accept", "*/*"),
+        ("user-agent", "curl/8"),
+        ("x-request-id", "req-1"),
+    ] {
+        headers.insert(
+            axum::http::HeaderName::from_static(name),
+            axum::http::HeaderValue::from_static(value),
+        );
+    }
+
+    // Forces the next author who grows the const to also plant a header/value here:
+    // the name loop below iterates the const and would otherwise pass trivially for
+    // an unplanted entry.
+    assert_eq!(
+        GUEST_FORBIDDEN_CREDENTIAL_HEADERS.len(),
+        16,
+        "a credential header was added or removed — plant it in this test too"
+    );
+
+    let visible = guest_visible_headers(&headers);
+    let names: Vec<String> = visible
+        .iter()
+        .map(|(k, _)| k.to_ascii_lowercase())
+        .collect();
+
+    for forbidden in GUEST_FORBIDDEN_CREDENTIAL_HEADERS {
+        assert!(
+            !names.iter().any(|n| n == forbidden),
+            "{forbidden} carries a caller credential and must not reach a guest; got {names:?}"
+        );
+    }
+    // No credential VALUE survives either. This catches a renamed-but-same-value
+    // leak, and — unlike the name loop, which iterates the const itself and so
+    // shrinks with it — every planted secret is asserted independently, so removing
+    // any single entry from GUEST_FORBIDDEN_CREDENTIAL_HEADERS fails here.
+    let values: Vec<&str> = visible.iter().map(|(_, v)| v.as_str()).collect();
+    for secret in [
+        "Bearer caller-token",
+        "Basic proxy",
+        "session=abc",
+        "sk-live-123",
+        "Bearer upstream",
+        "at-456",
+        "iap-jwt",
+        "cf-jwt",
+        "alb-access",
+        "alb-data",
+        "alb-identity",
+        "aad-access",
+        "aad-id",
+        "aad-refresh",
+        "oauth2p-access",
+        "aws-token",
+    ] {
+        assert!(
+            !values.contains(&secret),
+            "credential value {secret:?} leaked to the guest: {values:?}"
+        );
+    }
+    // Ordinary request context still reaches the guest.
+    for expected in ["content-type", "accept", "user-agent", "x-request-id"] {
+        assert!(
+            names.iter().any(|n| n == expected),
+            "{expected} is not a credential and must still be forwarded; got {names:?}"
+        );
+    }
+}
+
+#[test]
+fn credential_header_classifier_is_case_insensitive() {
+    for name in [
+        "Authorization",
+        "COOKIE",
+        "X-Api-Key",
+        "Cf-Access-Jwt-Assertion",
+    ] {
+        assert!(
+            is_credential_header(name),
+            "{name} must be classified as a credential"
+        );
+    }
+    assert!(!is_credential_header("x-temper-observe-session-id"));
+    assert!(!is_credential_header("content-type"));
+}
