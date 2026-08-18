@@ -583,7 +583,7 @@ temper_api_url = "{secret:temper_api_url}"
 name = "destroy_sandbox"
 kind = "wasm"
 module = "sandbox_destroyer"
-on_failure = "Log"
+on_failure = "Fail"
 
 [action.triggers.config]
 temper_api_url = "{secret:temper_api_url}"
