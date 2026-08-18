@@ -43,13 +43,17 @@ pub(crate) fn apply_field_update(
 ) -> bool {
     // One helper for both the live `UpdateFields` arm and journal replay
     // (ARN-189). Replay must reproduce the live result exactly, so every
-    // transformation belongs here — a sanitize step applied only on the live
-    // path would silently rewrite the entity on the next rehydration.
+    // transformation belongs here — a step applied only on the live path would
+    // silently rewrite the entity on the next rehydration.
     //
-    // `sanitize_action_params` strips runtime-owned fields a caller must not set
-    // (`has_spec`, `ctx_owner_status`, ...), and `canonicalize_entity_fields`
-    // restores the authoritative `Id`/`Status` (and their lowercase aliases)
-    // afterwards.
+    // `canonicalize_entity_fields` is the single enforcement point for
+    // runtime-owned fields: it both strips the keys a caller must not set
+    // (`has_spec`, `ctx_owner_status`, ...) and restores the authoritative
+    // `Id`/`Status` (and their lowercase aliases). The live arm additionally
+    // sanitizes the *event payload* before journaling (see
+    // `field_updates::commit_field_update`) so the journal never records a forged
+    // key, which canonicalizing `state.fields` alone would not prevent.
+    //
     // Guard here, not only at the live arm: replay feeds this the `params` of
     // whatever is in the journal, including events written by a build that
     // predates the live guard. A `FieldsReplaced` carrying `[1,2,3]` would set
@@ -60,9 +64,8 @@ pub(crate) fn apply_field_update(
     if !fields.is_object() {
         return false;
     }
-    let fields = sanitize_action_params(fields);
     if replace {
-        state.fields = fields.into_owned();
+        state.fields = fields.clone();
     } else if let (Some(existing), Some(updates)) =
         (state.fields.as_object_mut(), fields.as_object())
     {

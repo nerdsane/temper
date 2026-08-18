@@ -913,3 +913,116 @@ async fn field_update_failure_is_reported_to_callers_that_do_not_inspect_success
         result.map(|r| (r.success, r.error))
     );
 }
+
+/// ARN-189 live end-to-end: the exact scenario the bug loses data in, driven
+/// through the real OData HTTP router over a real Turso file, across a full
+/// `ServerState` teardown and rebuild on the same database — a process restart in
+/// all but name (fresh actor system, fresh registry, fresh in-memory state; only
+/// the durable journal survives).
+///
+/// Before the fix, a PATCH mutated actor memory and journaled nothing, so the
+/// second `ServerState` — rehydrating purely from the journal — would not see it.
+#[tokio::test]
+async fn patched_fields_survive_a_server_restart_over_the_http_stack() {
+    let db_path =
+        std::env::temp_dir().join(format!("temper-arn189-live-{}.db", uuid::Uuid::new_v4()));
+    let db_url = format!("file:{}", db_path.display());
+
+    // --- Run 1: create, then PATCH a field over HTTP. ---
+    {
+        let store = TursoEventStore::new(&db_url, None)
+            .await
+            .expect("create turso db");
+        let state = build_turso_state("arn189-live-run1", store);
+
+        let (status, body) = post_json(
+            &state,
+            "/tdata/Orders",
+            serde_json::json!({ "id": "ord-arn189-live", "Currency": "EUR" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "create failed: {body:?}");
+
+        let (status, body) = patch_json(
+            &state,
+            "/tdata/Orders('ord-arn189-live')",
+            serde_json::json!({ "Currency": "USD", "Notes": "patched before restart" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "patch failed: {body:?}");
+
+        // Confirm run 1 sees the patch in memory.
+        let (status, body) = get_json(&state, "/tdata/Orders('ord-arn189-live')").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["fields"]["Currency"].as_str(), Some("USD"));
+        assert_eq!(
+            body["fields"]["Notes"].as_str(),
+            Some("patched before restart")
+        );
+    }
+
+    // --- The journal itself must carry the update. ---
+    //
+    // The read above is served from the durable query projection, which is a
+    // read-model *cache* written alongside the update. The source of truth is the
+    // event journal, and it is what a projection backfill (ARN-216) rebuilds from:
+    // before this fix the backfill dropped patched fields the live projection
+    // still had. So the discriminating assertion is that the append happened —
+    // read the raw journal back and find the field-update event with the new
+    // value. This is what fails if `commit_field_update` stops journaling.
+    {
+        use temper_runtime::persistence::EventStore as _;
+        let store = TursoEventStore::new(&db_url, None)
+            .await
+            .expect("reopen turso db for journal read");
+        let envelopes = store
+            .read_events("default:Order:ord-arn189-live", 0)
+            .await
+            .expect("read journal");
+        let patched = envelopes.iter().any(|env| {
+            let is_field_event =
+                env.event_type == "FieldsUpdated" || env.event_type == "FieldsReplaced";
+            is_field_event
+                && env
+                    .payload
+                    .get("params")
+                    .and_then(|p| p.get("Currency"))
+                    .and_then(|c| c.as_str())
+                    == Some("USD")
+        });
+        assert!(
+            patched,
+            "the PATCH must be durably journaled, not only cached in the projection; \
+             journal held {} events: {:?}",
+            envelopes.len(),
+            envelopes.iter().map(|e| &e.event_type).collect::<Vec<_>>()
+        );
+    }
+
+    // --- Run 2: a brand-new ServerState on the same journal reads it back. ---
+    {
+        let store = TursoEventStore::new(&db_url, None)
+            .await
+            .expect("reopen turso db");
+        let state = build_turso_state("arn189-live-run2", store);
+
+        let (status, body) = get_json(&state, "/tdata/Orders('ord-arn189-live')").await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "entity missing after restart: {body:?}"
+        );
+        assert_eq!(
+            body["fields"]["Currency"].as_str(),
+            Some("USD"),
+            "the PATCHed field must survive a restart: {body:?}"
+        );
+        assert_eq!(
+            body["fields"]["Notes"].as_str(),
+            Some("patched before restart"),
+            "the PATCHed field must survive a restart: {body:?}"
+        );
+    }
+
+    let _ = std::fs::remove_file(db_path);
+}
