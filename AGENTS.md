@@ -64,15 +64,18 @@ Production Chat: end users operate the app
 Two separated contexts: Developer Chat (design-time, can modify specs) and Production Chat (runtime, operates within specs). The developer holds the approval gate for all behavioral changes.
 
 ## Architecture
-- **temper-spec**: I/O Automaton TOML parser + CSDL parser
-- **temper-verify**: Stateright model checking, deterministic simulation, property tests
-- **temper-jit**: TransitionTable builder from IOA specs (no verification deps in production)
-- **temper-runtime**: Actor system, SimScheduler, SimActorSystem, sim_now()/sim_uuid(), TenantId
-- **temper-server**: HTTP server, EntityActor, EntityActorHandler, SpecRegistry (multi-tenant)
-- **temper-observe**: WideEvent telemetry (OTEL spans + metrics), trajectory tracking
-- **temper-evolution**: O-P-A-D-I record chain, Evolution Engine
-- **temper-store-postgres**: Event sourcing persistence (tenant-scoped)
-- **temper-store-redis**: Mailbox and placement cache (tenant-scoped)
+
+Six seams. ★ = replaceable plug. `apply_effect` must stay one function; today it is three.
+
+- **How defined** — `temper-spec` (IOA + CSDL parsers)
+- **What is defined** — `temper-jit` (`TransitionTable`, `Effect`). Apply is *not* here yet.
+- **How verified** — `temper-verify` (L0–L3). Has its own `ModelEffect`.
+- **Control plane** — `temper-odata`, `temper-authz`, `temper-observe`, `temper-evolution`, `temper-ots`, `temper-platform`, `temper-cli`, `temper-mcp`, `temper-sdk`, `temper-sandbox`
+- **Runtime ★** — `temper-runtime` (mailbox, sim, `EventStore` trait). Optional PG adapter: `temper-actor-runtime` (not default serve). WASM host: `temper-wasm` + `temper-wasm-sdk`. `temper-agents` is Gabriele’s PG-path agent chain; not default serve.
+- **Store ★** — `temper-store-turso` (default), `temper-store-sim`, `temper-store-postgres`, `temper-store-redis` (event journal only)
+- **Mix — read last** — `temper-server` (HTTP + EntityActor + `apply_effects` + registry)
+
+Default serve is own-Rust actors. `--actor-runtime postgres` is an adapter, not a second kernel.
 
 ## Architecture Decision Records (ADRs)
 

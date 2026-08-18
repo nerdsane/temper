@@ -1,4 +1,7 @@
-//! JIT transition tables and hot-swap execution for Temper entity state machines.
+//! What is defined: `TransitionTable`, `Effect`, guards, hot-swap, shadow test.
+//!
+//! Apply is not here. Production apply is `temper-server` `entity_actor/effects.rs`.
+//! Postgres actors and verify each have their own interpreter.
 
 pub mod shadow;
 pub mod swap;

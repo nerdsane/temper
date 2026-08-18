@@ -88,6 +88,7 @@ pub fn guard_may_hold(guard: &ModelGuard, state: &TemperModelState) -> bool {
 /// Apply model effects to the provided state.
 ///
 /// `action_name` is used to generate deterministic symbolic list elements.
+/// Third interpreter. Production apply is `temper-server` `entity_actor/effects.rs`.
 pub fn apply_effects(effects: &[ModelEffect], state: &mut TemperModelState, action_name: &str) {
     for effect in effects {
         match effect {
