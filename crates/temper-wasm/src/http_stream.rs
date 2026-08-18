@@ -69,6 +69,11 @@ impl StreamScope {
 /// one-per-request by the kernel and are not counted here.
 pub const MAX_OUTBOUND_STREAMS_PER_SCOPE: usize = 64;
 
+/// How many recently-closed scopes to remember so a late host call cannot reopen
+/// one. A host call cannot outlive this many subsequent requests, so the bounded
+/// ring catches every reachable reopen/register race without unbounded growth.
+const CLOSED_SCOPE_TOMBSTONES: usize = 4096;
+
 /// Head metadata for an outbound streaming request. Body is streamed
 /// separately through a [`StreamHandle`].
 #[derive(Debug, Clone)]
@@ -231,12 +236,19 @@ struct RegistryState {
     /// when both conditions hold (see `release_outbound_exchange` and `close`).
     outbound_open: BTreeMap<StreamScope, BTreeMap<u32, bool>>,
     /// Abort handles for the detached outbound bridge tasks (the reqwest
-    /// round-trips) per scope, so `close_scope` can cancel their sockets promptly
-    /// at request end instead of leaving them to the client timeout (ARN-358).
-    /// Handles accumulate for a scope's lifetime and are aborted+cleared at
-    /// `close_scope`; aborting an already-finished task is a harmless no-op, so
-    /// completed bridges need no per-task removal (which would race their spawn).
-    outbound_bridges: BTreeMap<StreamScope, Vec<AbortHandle>>,
+    /// round-trips), keyed by scope then by the exchange's guest response id, so
+    /// `close_scope` can cancel live sockets at request end (ARN-358). Each bridge
+    /// removes its own handle on completion (`release_outbound_exchange`), so the
+    /// map tracks only *live* bridges — not every call ever made.
+    outbound_bridges: BTreeMap<StreamScope, BTreeMap<u32, AbortHandle>>,
+    /// Scopes that have been `close_scope`d. A scope is terminal once closed:
+    /// `open_outbound_exchange` and `register_outbound_bridge` refuse it, so a
+    /// guest whose host call outlives `close_scope` (block-in-place after abort,
+    /// or a disconnect racing the drain) cannot reopen a dead scope or slip a
+    /// bridge in between spawn and registration (ARN-207 review). Bounded to the
+    /// most recent `CLOSED_SCOPE_TOMBSTONES` — a host call cannot outlive that
+    /// many later requests — so this never grows without bound.
+    closed_scopes: std::collections::VecDeque<StreamScope>,
     /// Outbound: oneshot receivers keyed on response-body handle ID.
     /// Bridge task holds the Sender and fires once the HTTP response
     /// head is received. Guest consumes via `await_response_head`.
@@ -270,6 +282,7 @@ impl HttpStreamRegistry {
                 scope_ids: BTreeMap::new(),
                 outbound_open: BTreeMap::new(),
                 outbound_bridges: BTreeMap::new(),
+                closed_scopes: std::collections::VecDeque::new(),
                 response_head_receivers: BTreeMap::new(),
                 inbound_head_senders: BTreeMap::new(),
                 inbound_head_receivers: BTreeMap::new(),
@@ -535,13 +548,31 @@ impl HttpStreamRegistry {
     /// Record the abort handle of an outbound bridge task so `close_scope` can
     /// cancel its socket at request end (ARN-358). Called by the host right after
     /// it spawns the bridge.
-    pub async fn register_outbound_bridge(&self, scope: StreamScope, handle: AbortHandle) {
+    pub async fn register_outbound_bridge(
+        &self,
+        scope: StreamScope,
+        response_reader: StreamHandle,
+        handle: AbortHandle,
+    ) {
         let mut state = self.inner.lock().await;
+        // If the scope was closed between spawn and this registration — or the
+        // exchange's slot is already gone (a very fast bridge released first) —
+        // the bridge must not be tracked under a dead scope. Abort it now so its
+        // socket does not survive `close_scope` (ARN-207 review).
+        let scope_alive = !state.closed_scopes.contains(&scope)
+            && state
+                .outbound_open
+                .get(&scope)
+                .is_some_and(|open| open.contains_key(&response_reader.0));
+        if !scope_alive {
+            handle.abort();
+            return;
+        }
         state
             .outbound_bridges
             .entry(scope)
             .or_default()
-            .push(handle);
+            .insert(response_reader.0, handle);
     }
 
     /// Release an outbound exchange's concurrency slot and reclaim its handles
@@ -584,6 +615,14 @@ impl HttpStreamRegistry {
         // fully done — bridge complete AND the guest response handle closed. If
         // the guest already closed it (handle gone), free now; otherwise keep the
         // slot so undrained response buffers stay counted against the cap.
+        // The bridge has completed, so drop its abort handle from the live map
+        // (it tracks only live bridges; aborting it now would be a no-op anyway).
+        if let Some(bridges) = state.outbound_bridges.get_mut(&scope) {
+            bridges.remove(&response_reader.0);
+            if bridges.is_empty() {
+                state.outbound_bridges.remove(&scope);
+            }
+        }
         let guest_closed = !state.handles.contains_key(&response_reader.0);
         if let Some(open) = state.outbound_open.get_mut(&scope) {
             if guest_closed {
@@ -595,6 +634,13 @@ impl HttpStreamRegistry {
                 open.insert(response_reader.0, true);
             }
         }
+    }
+
+    /// Test-only: how many live outbound bridge abort handles a scope holds.
+    #[cfg(test)]
+    pub async fn live_outbound_bridge_count(&self, scope: StreamScope) -> usize {
+        let state = self.inner.lock().await;
+        state.outbound_bridges.get(&scope).map_or(0, BTreeMap::len)
     }
 
     pub async fn close_scope(&self, scope: StreamScope) {
@@ -609,11 +655,19 @@ impl HttpStreamRegistry {
         // live bridges without any remaining handle ids. Abort on a finished task
         // is a no-op.
         if let Some(bridges) = state.outbound_bridges.remove(&scope) {
-            for handle in bridges {
+            for (_id, handle) in bridges {
                 handle.abort();
             }
         }
         state.outbound_open.remove(&scope);
+        // Tombstone the scope so a host call that outlives this cleanup cannot
+        // reopen it or register a late bridge under it. Bounded ring.
+        if !state.closed_scopes.contains(&scope) {
+            state.closed_scopes.push_back(scope);
+            while state.closed_scopes.len() > CLOSED_SCOPE_TOMBSTONES {
+                state.closed_scopes.pop_front();
+            }
+        }
         let Some(ids) = state.scope_ids.remove(&scope) else {
             return;
         };
@@ -657,6 +711,11 @@ impl HttpStreamRegistry {
         // two opens racing between a separate check and insert.
         let (req_writer, req_reader, resp_writer, resp_reader) = {
             let mut state = self.inner.lock().await;
+            if state.closed_scopes.contains(&scope) {
+                return Err(StreamError::Aborted(
+                    "stream scope is closed; no new outbound exchanges".to_string(),
+                ));
+            }
             let open = state.outbound_open.get(&scope).map_or(0, BTreeMap::len);
             if open >= MAX_OUTBOUND_STREAMS_PER_SCOPE {
                 return Err(StreamError::Aborted(format!(

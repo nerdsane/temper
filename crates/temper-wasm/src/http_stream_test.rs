@@ -414,28 +414,25 @@ async fn release_reclaims_the_request_channel_and_frees_the_slot_on_close() {
 
 #[tokio::test]
 async fn close_scope_aborts_detached_outbound_bridges() {
-    // ARN-358: close_scope must cancel a scope's detached outbound bridge tasks so
+    // ARN-358: close_scope must cancel a scope's live outbound bridge tasks so
     // their sockets die at request end, not at the reqwest timeout. Modelled with
-    // a task that would run "forever" (a stalled upstream); after close_scope it
-    // must be aborted.
+    // a task that would run "forever" (a stalled upstream), registered against a
+    // real open exchange; after close_scope it must be aborted.
     let reg = Arc::new(HttpStreamRegistry::new());
     let scope = reg.mint_scope().await;
+    let ex = reg.open_outbound_exchange(scope).await.expect("open");
 
     let ran_to_completion = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = ran_to_completion.clone();
     let join = tokio::spawn(async move {
-        // Stand in for an in-flight reqwest round-trip to a stalled endpoint.
         tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
         flag.store(true, std::sync::atomic::Ordering::SeqCst);
     });
-    reg.register_outbound_bridge(scope, join.abort_handle())
+    reg.register_outbound_bridge(scope, ex.guest_response_body, join.abort_handle())
         .await;
 
     reg.close_scope(scope).await;
 
-    // The bridge is cancelled: awaiting it returns promptly with a cancellation.
-    // Bounded so a broken abort fails cleanly here instead of hanging on the
-    // stand-in's hour-long sleep.
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), join)
         .await
         .expect(
@@ -443,10 +440,108 @@ async fn close_scope_aborts_detached_outbound_bridges() {
         );
     assert!(
         outcome.is_err() && outcome.unwrap_err().is_cancelled(),
-        "close_scope must abort the scope's detached bridge tasks"
+        "close_scope must abort the scope's live bridge tasks"
     );
     assert!(
         !ran_to_completion.load(std::sync::atomic::Ordering::SeqCst),
         "the aborted bridge must not have run to completion"
+    );
+}
+
+#[tokio::test]
+async fn register_after_close_scope_aborts_the_bridge_and_does_not_reopen_the_scope() {
+    // ARN-207 review (High): a host call can outlive close_scope (block-in-place
+    // after abort, or a disconnect racing the drain). Registering a bridge after
+    // the scope is closed must abort it immediately, not resurrect the scope.
+    let reg = Arc::new(HttpStreamRegistry::new());
+    let scope = reg.mint_scope().await;
+    let ex = reg.open_outbound_exchange(scope).await.expect("open");
+
+    // Cleanup runs first.
+    reg.close_scope(scope).await;
+
+    let join = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    });
+    // Registration arrives late — the scope is already closed.
+    reg.register_outbound_bridge(scope, ex.guest_response_body, join.abort_handle())
+        .await;
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), join)
+        .await
+        .expect("a bridge registered under a closed scope must be aborted, not left running");
+    assert!(
+        outcome.is_err() && outcome.unwrap_err().is_cancelled(),
+        "registration under a closed scope must abort the bridge"
+    );
+
+    // And the closed scope cannot be reopened.
+    assert!(
+        matches!(
+            reg.open_outbound_exchange(scope).await,
+            Err(StreamError::Aborted(_))
+        ),
+        "a closed scope must not admit new outbound exchanges"
+    );
+}
+
+#[tokio::test]
+async fn completed_bridges_do_not_accumulate_abort_handles() {
+    // ARN-207 review (Medium): the live-bridge map tracks live bridges only, not
+    // every call ever made. Many sequential completed exchanges must not grow it.
+    let reg = Arc::new(HttpStreamRegistry::new());
+    let scope = reg.mint_scope().await;
+
+    for _ in 0..(MAX_OUTBOUND_STREAMS_PER_SCOPE * 3) {
+        let ex = reg.open_outbound_exchange(scope).await.expect("open");
+        // Register a trivially-complete bridge, then release (bridge completion).
+        let join = tokio::spawn(async {});
+        reg.register_outbound_bridge(scope, ex.guest_response_body, join.abort_handle())
+            .await;
+        let _ = join.await;
+        reg.release_outbound_exchange(
+            scope,
+            ex.guest_response_body,
+            ex.guest_request_body,
+            ex.bridge_request_body,
+            ex.bridge_response_body,
+        )
+        .await;
+        reg.close_as_guest(scope, ex.guest_response_body)
+            .await
+            .unwrap();
+    }
+
+    assert!(
+        reg.live_outbound_bridge_count(scope).await <= MAX_OUTBOUND_STREAMS_PER_SCOPE,
+        "completed bridges must be dropped from the live map, not accumulated"
+    );
+}
+
+#[tokio::test]
+async fn closing_the_bridge_response_writer_gives_the_guest_eof() {
+    // ARN-207 review (Medium): the panic path now closes `bridge_resp` (the
+    // response writer) explicitly, because the normal end-of-bridge close is
+    // skipped on panic. Without an EOF signal the guest blocks forever waiting to
+    // drain. This pins the property the panic-path close relies on: closing the
+    // writer makes the guest's read return EOF rather than hang.
+    let reg = HttpStreamRegistry::new();
+    let scope = reg.mint_scope().await;
+    let ex = reg.open_outbound_exchange(scope).await.expect("open");
+
+    // No response was ever written. Close the bridge-side writer (what the panic
+    // path does), then the guest read must see EOF (empty), not hang.
+    reg.close(ex.bridge_response_body).await.unwrap();
+    let chunk = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        reg.read_as_guest(scope, ex.guest_response_body),
+    )
+    .await
+    .expect("guest read must not hang once the bridge writer is closed")
+    .expect("read of a closed-writer response must succeed with EOF");
+    assert!(
+        chunk.is_empty(),
+        "closing the response writer must give the guest EOF, got {} bytes",
+        chunk.len()
     );
 }

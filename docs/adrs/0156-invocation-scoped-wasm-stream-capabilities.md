@@ -140,12 +140,18 @@ Scope of this bound, stated precisely so it is not read as more than it is:
 - The slot bounds *concurrent* live exchanges within a scope, but two edges keep
   it from being an exact "socket lifetime" bound, both tracked rather than closed
   here (adversarial review, ARN-207):
-  - `close_scope` cancels the scope's detached reqwest bridge tasks (their
-    `AbortHandle`s are retained per scope when the bridge is spawned), so their
-    sockets die promptly at request end rather than lingering until the outbound
-    client's timeout (`WasmResourceLimits::max_duration`). Aborting an
-    already-finished bridge is a no-op, so completed bridges need no per-task
-    removal.
+  - `close_scope` cancels the scope's live reqwest bridge tasks (their
+    `AbortHandle`s are retained per scope, keyed by exchange, and dropped on
+    bridge completion so the map tracks only *live* bridges — not every call
+    made), so sockets die promptly at request end rather than lingering until the
+    outbound client's timeout (`WasmResourceLimits::max_duration`).
+  - A closed scope is **terminal**: `open_outbound_exchange` and
+    `register_outbound_bridge` refuse it (a late registration aborts its bridge
+    on the spot). A guest whose host call outlives `close_scope` — block-in-place
+    surviving the invocation abort, or a disconnect racing the response drain —
+    therefore cannot reopen the dead scope or slip a bridge in between spawn and
+    registration. Tombstones are a bounded ring (a host call cannot outlive that
+    many later requests), so this adds no unbounded state.
   - A guest that reads a response to EOF but never calls `close` (the SDK does not
     close on EOF) holds the slot until request end, so such calls are throttled at
     `MAX_OUTBOUND_STREAMS_PER_SCOPE` rather than "never throttled". The honest fix

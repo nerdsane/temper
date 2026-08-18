@@ -1935,6 +1935,10 @@ impl WasmHost for ProductionWasmHost {
                     .is_err()
                 {
                     tracing::error!("outbound stream bridge task panicked; releasing its slot");
+                    // The normal path closes `bridge_resp` at its end; a panic
+                    // skips that, leaving the response writer alive so the guest
+                    // could block waiting for EOF. Close it here (ARN-207 review).
+                    let _ = cleanup_streams.close(bridge_resp).await;
                 }
                 // The bridge has finished (or panicked), so its socket and
                 // buffered request bytes are gone; release the concurrency slot
@@ -1954,7 +1958,11 @@ impl WasmHost for ProductionWasmHost {
         // Record the bridge's abort handle so `close_scope` cancels its socket at
         // request end rather than leaving it to the request timeout (ARN-358).
         self.http_streams
-            .register_outbound_bridge(self.stream_scope, bridge_join.abort_handle())
+            .register_outbound_bridge(
+                self.stream_scope,
+                release_resp_reader,
+                bridge_join.abort_handle(),
+            )
             .await;
 
         Ok(guest)
