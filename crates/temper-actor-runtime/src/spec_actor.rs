@@ -17,7 +17,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use temper_jit::table::{EvalContext, TransitionTable};
+use temper_jit::apply::EffectTarget;
+use temper_jit::table::{Effect, EvalContext, TransitionTable};
 use temper_runtime::reaction::ReactionRule;
 use temper_spec::automaton::Automaton;
 
@@ -85,6 +86,50 @@ impl SpecActorState {
             ctx.lists.insert(k.clone(), v.clone());
         }
         ctx
+    }
+}
+
+impl EffectTarget for SpecActorState {
+    fn set_status(&mut self, status: String) {
+        self.status = status;
+    }
+
+    fn add_counter(&mut self, var: &str, amount: usize) {
+        *self.counters.entry(var.to_string()).or_default() += amount;
+    }
+
+    fn sub_counter(&mut self, var: &str, amount: usize) {
+        let counter = self.counters.entry(var.to_string()).or_default();
+        *counter = counter.saturating_sub(amount);
+    }
+
+    fn set_counter(&mut self, var: &str, value: usize) {
+        self.counters.insert(var.to_string(), value);
+    }
+
+    fn set_bool(&mut self, var: &str, value: bool) {
+        self.booleans.insert(var.to_string(), value);
+    }
+
+    fn list_append(&mut self, var: &str, value: String) {
+        self.lists.entry(var.to_string()).or_default().push(value);
+    }
+
+    fn list_remove_at(&mut self, var: &str, index: usize) {
+        let list = self.lists.entry(var.to_string()).or_default();
+        if index < list.len() {
+            list.remove(index);
+        }
+    }
+
+    fn store_field_string(&mut self, field: &str, value: String) {
+        if let Some(obj) = self.fields.as_object_mut() {
+            obj.insert(field.to_string(), serde_json::Value::String(value));
+        }
+    }
+
+    fn field_value(&self, field: &str) -> Option<serde_json::Value> {
+        self.fields.as_object()?.get(field).cloned()
     }
 }
 
@@ -306,10 +351,25 @@ impl Actor for SpecDrivenActor {
             Some(r) if r.success => {
                 let from_status = actor_state.status.clone();
 
-                // 3. Apply effects — may include SetState.
-                for effect in &r.effects {
-                    self.apply_effect(&mut actor_state, effect, ctx).await?;
+                // 3. Apply effects — portable mutations via jit; emit/custom via tell.
+                if r.effects.iter().any(|effect| {
+                    matches!(
+                        effect,
+                        Effect::ScheduleAction { .. }
+                            | Effect::ScheduleAtAction { .. }
+                            | Effect::SpawnEntity { .. }
+                    )
+                }) {
+                    return Err(ActorError::HandlerFailed(
+                        "postgres actor runtime does not apply schedule/spawn effects; use the default EntityActor path".into(),
+                    ));
                 }
+
+                let params = actor_state.fields.clone();
+                let applied =
+                    temper_jit::apply::apply_effects(&mut actor_state, &r.effects, &params);
+                self.route_emits(ctx, &actor_state, &applied.emit).await;
+                self.route_emits(ctx, &actor_state, &applied.custom).await;
 
                 // 4. Apply state transition fallback (if no SetState effect fired).
                 if actor_state.status == from_status && !r.new_state.is_empty() {
@@ -349,84 +409,31 @@ impl Actor for SpecDrivenActor {
 }
 
 impl SpecDrivenActor {
-    async fn apply_effect(
-        &self,
-        state: &mut SpecActorState,
-        effect: &temper_jit::table::Effect,
-        ctx: &ActorContext,
-    ) -> Result<(), ActorError> {
-        match effect {
-            temper_jit::table::Effect::SetState(s) => {
-                state.status = s.clone();
-            }
-            temper_jit::table::Effect::IncrementItems => {
-                *state.counters.entry("items".into()).or_default() += 1;
-            }
-            temper_jit::table::Effect::IncrementCounter(var) => {
-                *state.counters.entry(var.clone()).or_default() += 1;
-            }
-            temper_jit::table::Effect::DecrementItems => {
-                let c = state.counters.entry("items".into()).or_default();
-                *c = c.saturating_sub(1);
-            }
-            temper_jit::table::Effect::DecrementCounter(var) => {
-                let c = state.counters.entry(var.clone()).or_default();
-                *c = c.saturating_sub(1);
-            }
-            temper_jit::table::Effect::SetBool { var, value } => {
-                state.booleans.insert(var.clone(), *value);
-            }
-            temper_jit::table::Effect::IncrementCounterByParam { .. }
-            | temper_jit::table::Effect::DecrementCounterByParam { .. }
-            | temper_jit::table::Effect::SetCounterFromParam { .. }
-            | temper_jit::table::Effect::ListAppend(_)
-            | temper_jit::table::Effect::ListRemoveAt(_)
-            | temper_jit::table::Effect::ScheduleAction { .. }
-            | temper_jit::table::Effect::ScheduleAtAction { .. }
-            | temper_jit::table::Effect::SpawnEntity { .. } => {
-                return Err(ActorError::HandlerFailed(format!(
-                    "postgres actor runtime does not apply {effect:?}; use the default EntityActor path"
-                )));
-            }
-            temper_jit::table::Effect::EmitEvent(emit_name) => {
-                if let Some((target_type, target_action)) = self.routing.get(emit_name.as_str()) {
-                    tracing::info!(actor=%self.name, emit=%emit_name, target=%target_type, target_action=%target_action, "routing emit");
-                    let target =
-                        ActorHandle::new(ctx.self_handle().namespace.clone(), target_type.clone());
-                    ctx.tell(
-                        &target,
-                        SpecMessage::with_params(target_action.clone(), state.fields.clone()),
-                    )
-                    .await;
-                } else {
-                    tracing::warn!(
-                        actor = %self.name,
-                        emit = %emit_name,
-                        "no routing for emit (no reaction rule)"
-                    );
-                }
-            }
-            temper_jit::table::Effect::Custom(trigger_name) => {
-                if let Some((target_type, target_action)) = self.routing.get(trigger_name.as_str())
-                {
-                    tracing::info!(actor=%self.name, trigger=%trigger_name, target=%target_type, target_action=%target_action, "routing trigger");
-                    let target =
-                        ActorHandle::new(ctx.self_handle().namespace.clone(), target_type.clone());
-                    ctx.tell(
-                        &target,
-                        SpecMessage::with_params(target_action.clone(), state.fields.clone()),
-                    )
-                    .await;
-                } else {
-                    tracing::warn!(
-                        actor = %self.name,
-                        trigger = %trigger_name,
-                        "no routing for trigger"
-                    );
-                }
+    async fn route_emits(&self, ctx: &ActorContext, state: &SpecActorState, names: &[String]) {
+        for name in names {
+            if let Some((target_type, target_action)) = self.routing.get(name.as_str()) {
+                tracing::info!(
+                    actor = %self.name,
+                    emit = %name,
+                    target = %target_type,
+                    target_action = %target_action,
+                    "routing emit"
+                );
+                let target =
+                    ActorHandle::new(ctx.self_handle().namespace.clone(), target_type.clone());
+                ctx.tell(
+                    &target,
+                    SpecMessage::with_params(target_action.clone(), state.fields.clone()),
+                )
+                .await;
+            } else {
+                tracing::warn!(
+                    actor = %self.name,
+                    emit = %name,
+                    "no routing for emit (no reaction rule)"
+                );
             }
         }
-        Ok(())
     }
 }
 
@@ -466,6 +473,25 @@ to = "Idle"
         let state: SpecActorState = serde_json::from_slice(&state_bytes).unwrap();
         assert_eq!(state.status, "Idle");
         assert_eq!(state.counters.get("rounds"), Some(&0usize));
+    }
+
+    #[test]
+    fn spec_actor_state_uses_shared_apply_for_lists() {
+        let mut state = SpecActorState {
+            status: "Idle".into(),
+            ..Default::default()
+        };
+        let applied = temper_jit::apply::apply_effects(
+            &mut state,
+            &[
+                temper_jit::table::Effect::ListAppend("tags".into()),
+                temper_jit::table::Effect::IncrementCounter("rounds".into()),
+            ],
+            &serde_json::json!({ "tags": "urgent" }),
+        );
+        assert!(applied.custom.is_empty());
+        assert_eq!(state.lists.get("tags"), Some(&vec!["urgent".to_string()]));
+        assert_eq!(state.counters.get("rounds"), Some(&1usize));
     }
 
     #[test]

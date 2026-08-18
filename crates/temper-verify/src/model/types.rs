@@ -57,6 +57,47 @@ impl fmt::Display for TemperModelState {
     }
 }
 
+impl temper_jit::apply::EffectTarget for TemperModelState {
+    fn set_status(&mut self, status: String) {
+        self.status = status;
+    }
+
+    fn add_counter(&mut self, var: &str, amount: usize) {
+        *self.counters.entry(var.to_string()).or_insert(0) += amount;
+    }
+
+    fn sub_counter(&mut self, var: &str, amount: usize) {
+        let entry = self.counters.entry(var.to_string()).or_insert(0);
+        *entry = entry.saturating_sub(amount);
+    }
+
+    fn set_counter(&mut self, var: &str, value: usize) {
+        self.counters.insert(var.to_string(), value);
+    }
+
+    fn set_bool(&mut self, var: &str, value: bool) {
+        self.booleans.insert(var.to_string(), value);
+    }
+
+    fn list_append(&mut self, var: &str, value: String) {
+        self.lists.entry(var.to_string()).or_default().push(value);
+    }
+
+    fn list_remove_at(&mut self, var: &str, index: usize) {
+        if let Some(entry) = self.lists.get_mut(var)
+            && index < entry.len()
+        {
+            entry.remove(index);
+        }
+    }
+
+    fn store_field_string(&mut self, _field: &str, _value: String) {}
+
+    fn field_value(&self, _field: &str) -> Option<serde_json::Value> {
+        None
+    }
+}
+
 /// An action that the model can take, corresponding to a specification transition.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TemperModelAction {
@@ -76,8 +117,13 @@ impl fmt::Display for TemperModelAction {
 }
 
 // ---------------------------------------------------------------------------
-// Guards and effects — self-contained in temper-verify (mirror JIT types)
+// Guards stay verify-local (cross-entity / exploration semantics).
+// Effects are the jit [`Effect`] type — one apply (ADR-0166).
 // ---------------------------------------------------------------------------
+
+/// Verifiable effects use the jit [`Effect`] type. Runtime-only variants are
+/// filtered at model-build time; apply is [`temper_jit::apply::apply_effects`].
+pub type ModelEffect = temper_jit::table::Effect;
 
 /// A guard condition for model checking.
 ///
@@ -127,21 +173,6 @@ impl ModelGuard {
             _ => false,
         }
     }
-}
-
-/// A state effect applied when a transition fires.
-#[derive(Clone, Debug)]
-pub enum ModelEffect {
-    /// Increment a counter variable by 1.
-    IncrementCounter(String),
-    /// Decrement a counter variable by 1 (saturating).
-    DecrementCounter(String),
-    /// Set a boolean variable to a value.
-    SetBool { var: String, value: bool },
-    /// Append a value to a list variable.
-    ListAppend(String),
-    /// Remove one value from a list variable.
-    ListRemoveAt(String),
 }
 
 /// A resolved transition used internally by the model, pre-computed from a

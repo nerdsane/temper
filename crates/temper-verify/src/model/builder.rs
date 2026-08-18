@@ -12,8 +12,10 @@ use temper_spec::automaton::{
     parse_counter_initial_usize, parse_list_initial, translate_actions,
 };
 
+use temper_jit::table::Effect;
+
 use super::types::{
-    InvariantKind, LivenessKind, ModelEffect, ModelGuard, ResolvedInvariant, ResolvedLiveness,
+    InvariantKind, LivenessKind, ModelGuard, ResolvedInvariant, ResolvedLiveness,
     ResolvedTransition, TemperModel,
 };
 
@@ -134,17 +136,17 @@ fn convert_guard(guard: ResolvedGuard) -> ModelGuard {
     }
 }
 
-/// Convert a verifiable [`ResolvedEffect`] to the verification [`ModelEffect`].
+/// Convert a verifiable [`ResolvedEffect`] to the jit [`Effect`].
 ///
 /// Only called for effects where `is_verifiable()` is true. Runtime-only
 /// effects are filtered before reaching this function.
-fn convert_effect(effect: ResolvedEffect) -> ModelEffect {
+fn convert_effect(effect: ResolvedEffect) -> Effect {
     match effect {
-        ResolvedEffect::IncrementCounter(var) => ModelEffect::IncrementCounter(var),
-        ResolvedEffect::DecrementCounter(var) => ModelEffect::DecrementCounter(var),
-        ResolvedEffect::SetBool { var, value } => ModelEffect::SetBool { var, value },
-        ResolvedEffect::ListAppend(var) => ModelEffect::ListAppend(var),
-        ResolvedEffect::ListRemoveAt(var) => ModelEffect::ListRemoveAt(var),
+        ResolvedEffect::IncrementCounter(var) => Effect::IncrementCounter(var),
+        ResolvedEffect::DecrementCounter(var) => Effect::DecrementCounter(var),
+        ResolvedEffect::SetBool { var, value } => Effect::SetBool { var, value },
+        ResolvedEffect::ListAppend(var) => Effect::ListAppend(var),
+        ResolvedEffect::ListRemoveAt(var) => Effect::ListRemoveAt(var),
         // Runtime-only effects should have been filtered by is_verifiable()
         ResolvedEffect::Emit(_)
         | ResolvedEffect::SetCounterFromParam { .. }

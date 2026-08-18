@@ -9,6 +9,7 @@ description = "Model checking and property-based testing for Temper specificatio
 [dependencies]
 temper-runtime = { workspace = true }
 temper-spec = { workspace = true }
+temper-jit = { workspace = true }
 stateright = { workspace = true }
 proptest = { workspace = true }
 serde = { workspace = true }

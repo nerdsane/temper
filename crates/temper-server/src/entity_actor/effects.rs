@@ -1,62 +1,19 @@
-//! Shared effect application — the single source of truth.
+//! Entity-actor effect application.
 //!
-//! This module contains the ONE function that mutates [`EntityState`] in response
-//! to transition effects. It is called by:
-//! - Production actor handle (`EntityActor::handle`)
-//! - Production event replay (`EntityActor::replay_events`)
-//! - Deterministic simulation (`EntityActorHandler::handle_message`)
-//!
-//! **FoundationDB DST principle**: The exact same code path must run in both
-//! production and simulation. Having a single `apply_effects()` function
-//! guarantees that simulation tests exercise the real production logic.
+//! Mutation of counters, lists, and status is [`temper_jit::apply::apply_effects`]
+//! (ADR-0166). This module wraps that function for [`EntityState`], then the
+//! actor and dispatch pipeline run the returned schedule/spawn/custom work.
+//! Production handle, replay, and simulation all call [`apply_effects`] here.
 
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use temper_jit::table::{Effect, EvalContext, GuardFailure, TransitionTable};
-use temper_runtime::scheduler::{sim_now, sim_uuid};
+use temper_runtime::scheduler::sim_now;
 
 use crate::blobs::{FIELD_OVERFLOW_BLOB_PREFIX, OverflowBlobWrite, blob_ref_value};
 
 use super::types::{EntityEvent, EntityState, MAX_EVENTS_SINCE_SNAPSHOT};
 
-/// A scheduled action to fire after a delay.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScheduledAction {
-    /// The action name to dispatch.
-    pub action: String,
-    /// Delay in seconds before dispatching the action.
-    pub delay_seconds: u64,
-}
-
-/// A request to spawn a child entity (executed post-transition by dispatch pipeline).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpawnRequest {
-    /// The child entity type.
-    pub entity_type: String,
-    /// The child entity ID.
-    pub entity_id: String,
-    /// Optional action to dispatch on the child after creation.
-    pub initial_action: Option<String>,
-    /// Optional field on the parent to store the child's ID.
-    pub store_id_in: Option<String>,
-    /// Optional list of field names to copy from parent state into child's initial_action params.
-    pub copy_fields: Option<Vec<String>>,
-    /// Field values copied from parent state (populated when copy_fields is Some).
-    #[serde(default)]
-    pub copied_field_values: serde_json::Map<String, serde_json::Value>,
-}
-
-/// A deferred schedule-at request — resolved after `sync_fields`.
-///
-/// Unlike `ScheduledAction` (fixed delay), a `ScheduleAtRequest` reads an absolute
-/// ISO 8601 timestamp from an entity field and computes the delay at resolution time.
-#[derive(Debug, Clone)]
-pub struct ScheduleAtRequest {
-    /// The action name to dispatch.
-    pub action: String,
-    /// The entity field containing the ISO 8601 timestamp.
-    pub field: String,
-}
+pub use temper_jit::apply::{ScheduleAtRequest, ScheduledAction, SpawnRequest};
 
 /// Maximum cross-entity lookups per transition (TigerStyle budget).
 ///
@@ -535,223 +492,58 @@ pub fn apply_effects(
     Vec<SpawnRequest>,
     Vec<ScheduleAtRequest>,
 ) {
-    let mut custom_effects = Vec::new();
-    let mut scheduled_actions = Vec::new();
-    let mut spawn_requests = Vec::new();
-    let mut schedule_at_requests = Vec::new();
+    let applied = temper_jit::apply::apply_effects(state, effects, params);
 
-    for effect in effects {
-        match effect {
-            Effect::SetState(s) => {
-                state.status = s.clone();
-            }
-            Effect::IncrementItems => {
-                state.item_count += 1;
-                *state.counters.entry("items".to_string()).or_default() += 1;
-            }
-            Effect::DecrementItems => {
-                state.item_count = state.item_count.saturating_sub(1);
-                let c = state.counters.entry("items".to_string()).or_default();
-                *c = c.saturating_sub(1);
-            }
-            Effect::IncrementCounter(var) => {
-                *state.counters.entry(var.clone()).or_default() += 1;
-                // Keep legacy item_count in sync.
-                if var == "items" {
-                    state.item_count += 1;
-                }
-            }
-            Effect::IncrementCounterByParam { var, param } => {
-                let delta = counter_delta_from_params(params, param);
-                *state.counters.entry(var.clone()).or_default() += delta;
-                if var == "items" {
-                    state.item_count += delta;
-                }
-            }
-            Effect::DecrementCounter(var) => {
-                let c = state.counters.entry(var.clone()).or_default();
-                *c = c.saturating_sub(1);
-                if var == "items" {
-                    state.item_count = state.item_count.saturating_sub(1);
-                }
-            }
-            Effect::DecrementCounterByParam { var, param } => {
-                let delta = counter_delta_from_params(params, param);
-                let c = state.counters.entry(var.clone()).or_default();
-                *c = c.saturating_sub(delta);
-                if var == "items" {
-                    state.item_count = state.item_count.saturating_sub(delta);
-                }
-            }
-            Effect::SetCounterFromParam { var, param } => {
-                let parsed = params
-                    .get(param)
-                    .and_then(|v| {
-                        v.as_u64()
-                            .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
-                    })
-                    .and_then(|n| usize::try_from(n).ok());
-                match parsed {
-                    Some(value) => {
-                        state.counters.insert(var.clone(), value);
-                        if var == "items" {
-                            state.item_count = value;
-                        }
-                    }
-                    None => tracing::warn!(
-                        entity_type = %state.entity_type,
-                        entity_id = %state.entity_id,
-                        counter = %var,
-                        param = %param,
-                        "set_counter_from_param skipped because param was missing or not a non-negative integer"
-                    ),
-                }
-            }
-            Effect::SetBool { var, value } => {
-                state.booleans.insert(var.clone(), *value);
-            }
-            Effect::ListAppend(var) => {
-                if let Some(val) = params.get(var).and_then(|v| v.as_str()) {
-                    state
-                        .lists
-                        .entry(var.clone())
-                        .or_default()
-                        .push(val.to_string());
-                }
-            }
-            Effect::ListRemoveAt(var) => {
-                let index_key = format!("{var}_index");
-                if let Some(idx) = params.get(&index_key).and_then(|v| v.as_u64()) {
-                    let list = state.lists.entry(var.clone()).or_default();
-                    let idx = idx as usize;
-                    if idx < list.len() {
-                        list.remove(idx);
-                    }
-                }
-            }
-            Effect::EmitEvent(evt) => {
-                tracing::info!(
-                    entity_type = %state.entity_type,
-                    entity_id = %state.entity_id,
-                    event = %evt,
-                    "event emitted"
-                );
-            }
-            Effect::Custom(effect_name) => {
-                custom_effects.push(effect_name.clone());
-                tracing::info!(
-                    entity_type = %state.entity_type,
-                    entity_id = %state.entity_id,
-                    effect = %effect_name,
-                    "custom effect (dispatched by post-transition hook)"
-                );
-            }
-            Effect::ScheduleAction {
-                action,
-                delay_seconds,
-            } => {
-                scheduled_actions.push(ScheduledAction {
-                    action: action.clone(),
-                    delay_seconds: *delay_seconds,
-                });
-                tracing::info!(
-                    entity_type = %state.entity_type,
-                    entity_id = %state.entity_id,
-                    scheduled_action = %action,
-                    delay_seconds,
-                    "scheduled action (timer request)"
-                );
-            }
-            Effect::SpawnEntity {
-                entity_type,
-                entity_id_source,
-                initial_action,
-                store_id_in,
-                copy_fields,
-            } => {
-                // Resolve child entity ID from params or generate UUID
-                let child_id = if entity_id_source == "{uuid}" {
-                    sim_uuid().to_string()
-                } else {
-                    params
-                        .get(entity_id_source)
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| sim_uuid().to_string())
-                };
-
-                // Store child ID in parent's fields if requested
-                if let Some(field_name) = store_id_in
-                    && let Some(obj) = state.fields.as_object_mut()
-                {
-                    obj.insert(
-                        field_name.clone(),
-                        serde_json::Value::String(child_id.clone()),
-                    );
-                }
-
-                // Copy named fields from parent state into spawn request
-                let mut copied_field_values = serde_json::Map::new();
-                if let Some(fields_to_copy) = copy_fields
-                    && let Some(parent_obj) = state.fields.as_object()
-                {
-                    for field_name in fields_to_copy {
-                        if let Some(value) = parent_obj.get(field_name) {
-                            copied_field_values.insert(field_name.clone(), value.clone());
-                        }
-                    }
-                }
-
-                spawn_requests.push(SpawnRequest {
-                    entity_type: entity_type.clone(),
-                    entity_id: child_id.clone(),
-                    initial_action: initial_action.clone(),
-                    store_id_in: store_id_in.clone(),
-                    copy_fields: copy_fields.clone(),
-                    copied_field_values,
-                });
-
-                tracing::info!(
-                    entity_type = %state.entity_type,
-                    entity_id = %state.entity_id,
-                    child_type = %entity_type,
-                    child_id = %child_id,
-                    "spawn entity request"
-                );
-            }
-            Effect::ScheduleAtAction { action, field } => {
-                schedule_at_requests.push(ScheduleAtRequest {
-                    action: action.clone(),
-                    field: field.clone(),
-                });
-                tracing::info!(
-                    entity_type = %state.entity_type,
-                    entity_id = %state.entity_id,
-                    scheduled_action = %action,
-                    field = %field,
-                    "schedule_at request (deferred until field resolution)"
-                );
-            }
-        }
+    for evt in &applied.emit {
+        tracing::info!(
+            entity_type = %state.entity_type,
+            entity_id = %state.entity_id,
+            event = %evt,
+            "event emitted"
+        );
+    }
+    for effect_name in &applied.custom {
+        tracing::info!(
+            entity_type = %state.entity_type,
+            entity_id = %state.entity_id,
+            effect = %effect_name,
+            "custom effect (dispatched by post-transition hook)"
+        );
+    }
+    for scheduled in &applied.scheduled {
+        tracing::info!(
+            entity_type = %state.entity_type,
+            entity_id = %state.entity_id,
+            scheduled_action = %scheduled.action,
+            delay_seconds = scheduled.delay_seconds,
+            "scheduled action (timer request)"
+        );
+    }
+    for spawn in &applied.spawns {
+        tracing::info!(
+            entity_type = %state.entity_type,
+            entity_id = %state.entity_id,
+            child_type = %spawn.entity_type,
+            child_id = %spawn.entity_id,
+            "spawn entity request"
+        );
+    }
+    for request in &applied.schedule_at {
+        tracing::info!(
+            entity_type = %state.entity_type,
+            entity_id = %state.entity_id,
+            scheduled_action = %request.action,
+            field = %request.field,
+            "schedule_at request (deferred until field resolution)"
+        );
     }
 
     (
-        custom_effects,
-        scheduled_actions,
-        spawn_requests,
-        schedule_at_requests,
+        applied.custom,
+        applied.scheduled,
+        applied.spawns,
+        applied.schedule_at,
     )
-}
-
-fn counter_delta_from_params(params: &serde_json::Value, param: &str) -> usize {
-    params
-        .get(param)
-        .and_then(|value| match value {
-            serde_json::Value::Number(number) => number.as_u64().map(|v| v as usize),
-            serde_json::Value::String(text) => text.parse::<usize>().ok(),
-            _ => None,
-        })
-        .unwrap_or(0)
 }
 
 /// Resolve deferred `schedule_at` requests into [`ScheduledAction`]s.

@@ -2,7 +2,9 @@
 
 use std::collections::BTreeSet;
 
-use super::types::{ModelEffect, ModelGuard, TemperModelState};
+use temper_jit::table::Effect;
+
+use super::types::{ModelGuard, TemperModelState};
 
 /// Evaluate a model guard against a concrete model state for **local
 /// enablement**.
@@ -85,36 +87,33 @@ pub fn guard_may_hold(guard: &ModelGuard, state: &TemperModelState) -> bool {
     }
 }
 
-/// Apply model effects to the provided state.
+/// Apply model effects to the provided state via the shared jit apply.
 ///
-/// `action_name` is used to generate deterministic symbolic list elements.
-pub fn apply_effects(effects: &[ModelEffect], state: &mut TemperModelState, action_name: &str) {
+/// `action_name` is used to generate deterministic symbolic list elements
+/// (`AddItem#1`). That is the verification abstraction; mutation is
+/// [`temper_jit::apply::apply_effects`].
+pub fn apply_effects(effects: &[Effect], state: &mut TemperModelState, action_name: &str) {
     for effect in effects {
-        match effect {
-            ModelEffect::IncrementCounter(var) => {
-                let entry = state.counters.entry(var.clone()).or_insert(0);
-                *entry += 1;
-            }
-            ModelEffect::DecrementCounter(var) => {
-                let entry = state.counters.entry(var.clone()).or_insert(0);
-                *entry = entry.saturating_sub(1);
-            }
-            ModelEffect::SetBool { var, value } => {
-                state.booleans.insert(var.clone(), *value);
-            }
-            ModelEffect::ListAppend(var) => {
-                let entry = state.lists.entry(var.clone()).or_default();
-                let next_idx = entry.len() + 1;
-                entry.push(format!("{action_name}#{next_idx}"));
-            }
-            ModelEffect::ListRemoveAt(var) => {
-                if let Some(entry) = state.lists.get_mut(var)
-                    && !entry.is_empty()
-                {
-                    entry.remove(0);
-                }
-            }
+        let params = symbolic_params(state, effect, action_name);
+        temper_jit::apply::apply_effects(state, std::slice::from_ref(effect), &params);
+    }
+}
+
+/// Params that make jit list effects match the model-checking abstraction.
+fn symbolic_params(
+    state: &TemperModelState,
+    effect: &Effect,
+    action_name: &str,
+) -> serde_json::Value {
+    match effect {
+        Effect::ListAppend(var) => {
+            let next_idx = state.lists.get(var).map_or(0, Vec::len) + 1;
+            serde_json::json!({ var: format!("{action_name}#{next_idx}") })
         }
+        Effect::ListRemoveAt(var) => {
+            serde_json::json!({ format!("{var}_index"): 0 })
+        }
+        _ => serde_json::json!({}),
     }
 }
 
@@ -366,19 +365,19 @@ mod tests {
     #[test]
     fn effect_increment_counter() {
         let mut s = state("A");
-        apply_effects(&[ModelEffect::IncrementCounter("x".into())], &mut s, "Act");
+        apply_effects(&[Effect::IncrementCounter("x".into())], &mut s, "Act");
         assert_eq!(s.counters["x"], 1);
-        apply_effects(&[ModelEffect::IncrementCounter("x".into())], &mut s, "Act");
+        apply_effects(&[Effect::IncrementCounter("x".into())], &mut s, "Act");
         assert_eq!(s.counters["x"], 2);
     }
 
     #[test]
     fn effect_decrement_counter_saturates_at_zero() {
         let mut s = state("A");
-        apply_effects(&[ModelEffect::DecrementCounter("x".into())], &mut s, "Act");
+        apply_effects(&[Effect::DecrementCounter("x".into())], &mut s, "Act");
         assert_eq!(s.counters["x"], 0); // saturating sub from 0
         s.counters.insert("x".into(), 3);
-        apply_effects(&[ModelEffect::DecrementCounter("x".into())], &mut s, "Act");
+        apply_effects(&[Effect::DecrementCounter("x".into())], &mut s, "Act");
         assert_eq!(s.counters["x"], 2);
     }
 
@@ -386,7 +385,7 @@ mod tests {
     fn effect_set_bool() {
         let mut s = state("A");
         apply_effects(
-            &[ModelEffect::SetBool {
+            &[Effect::SetBool {
                 var: "done".into(),
                 value: true,
             }],
@@ -395,7 +394,7 @@ mod tests {
         );
         assert!(s.booleans["done"]);
         apply_effects(
-            &[ModelEffect::SetBool {
+            &[Effect::SetBool {
                 var: "done".into(),
                 value: false,
             }],
@@ -408,9 +407,9 @@ mod tests {
     #[test]
     fn effect_list_append() {
         let mut s = state("A");
-        apply_effects(&[ModelEffect::ListAppend("log".into())], &mut s, "AddItem");
+        apply_effects(&[Effect::ListAppend("log".into())], &mut s, "AddItem");
         assert_eq!(s.lists["log"], vec!["AddItem#1"]);
-        apply_effects(&[ModelEffect::ListAppend("log".into())], &mut s, "AddItem");
+        apply_effects(&[Effect::ListAppend("log".into())], &mut s, "AddItem");
         assert_eq!(s.lists["log"], vec!["AddItem#1", "AddItem#2"]);
     }
 
@@ -419,7 +418,7 @@ mod tests {
         let mut s = state("A");
         s.lists
             .insert("log".into(), vec!["a".into(), "b".into(), "c".into()]);
-        apply_effects(&[ModelEffect::ListRemoveAt("log".into())], &mut s, "Act");
+        apply_effects(&[Effect::ListRemoveAt("log".into())], &mut s, "Act");
         assert_eq!(s.lists["log"], vec!["b", "c"]);
     }
 
@@ -427,7 +426,7 @@ mod tests {
     fn effect_list_remove_at_empty_is_noop() {
         let mut s = state("A");
         s.lists.insert("log".into(), vec![]);
-        apply_effects(&[ModelEffect::ListRemoveAt("log".into())], &mut s, "Act");
+        apply_effects(&[Effect::ListRemoveAt("log".into())], &mut s, "Act");
         assert!(s.lists["log"].is_empty());
     }
 

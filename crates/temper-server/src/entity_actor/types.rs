@@ -164,6 +164,69 @@ impl EntityState {
     }
 }
 
+impl temper_jit::apply::EffectTarget for EntityState {
+    fn set_status(&mut self, status: String) {
+        self.status = status;
+    }
+
+    fn add_counter(&mut self, var: &str, amount: usize) {
+        *self.counters.entry(var.to_string()).or_default() += amount;
+        if var == "items" {
+            self.item_count += amount;
+        }
+    }
+
+    fn sub_counter(&mut self, var: &str, amount: usize) {
+        let counter = self.counters.entry(var.to_string()).or_default();
+        *counter = counter.saturating_sub(amount);
+        if var == "items" {
+            self.item_count = self.item_count.saturating_sub(amount);
+        }
+    }
+
+    fn set_counter(&mut self, var: &str, value: usize) {
+        self.counters.insert(var.to_string(), value);
+        if var == "items" {
+            self.item_count = value;
+        }
+    }
+
+    fn set_bool(&mut self, var: &str, value: bool) {
+        self.booleans.insert(var.to_string(), value);
+    }
+
+    fn list_append(&mut self, var: &str, value: String) {
+        self.lists.entry(var.to_string()).or_default().push(value);
+    }
+
+    fn list_remove_at(&mut self, var: &str, index: usize) {
+        let list = self.lists.entry(var.to_string()).or_default();
+        if index < list.len() {
+            list.remove(index);
+        }
+    }
+
+    fn store_field_string(&mut self, field: &str, value: String) {
+        if let Some(obj) = self.fields.as_object_mut() {
+            obj.insert(field.to_string(), serde_json::Value::String(value));
+        }
+    }
+
+    fn field_value(&self, field: &str) -> Option<serde_json::Value> {
+        self.fields.as_object()?.get(field).cloned()
+    }
+
+    fn on_skipped_counter(&self, var: &str, param: &str) {
+        tracing::warn!(
+            entity_type = %self.entity_type,
+            entity_id = %self.entity_id,
+            counter = %var,
+            param = %param,
+            "set_counter_from_param skipped because param was missing or not a non-negative integer"
+        );
+    }
+}
+
 /// A recorded state transition event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityEvent {
