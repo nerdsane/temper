@@ -19,7 +19,7 @@
 
 [automaton]
 name = "TemperAgent"
-states = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Completed", "Failed", "Cancelled"]
+states = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Recovering", "Completed", "Failed", "Cancelled"]
 initial = "Created"
 
 # --- State Variables: Core ---
@@ -367,7 +367,7 @@ name = "HandleToolResults"
 kind = "input"
 from = ["Executing"]
 to = "Thinking"
-params = ["pending_tool_calls", "conversation", "session_leaf_id"]
+params = ["pending_tool_calls", "conversation", "session_leaf_id", "last_tool_batch_id", "workspace_checkpoint"]
 guard = "turn_count < 100"
 hint = "Tool results received. Increment turn, transition to Thinking, and call LLM again. Static safety ceiling at 100 turns; dynamic max_turns enforced by llm_caller at runtime."
 effect = [
@@ -515,7 +515,7 @@ hint = "Agent timed out — no heartbeat within timeout period."
 [[action]]
 name = "Fail"
 kind = "input"
-from = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering"]
+from = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Recovering"]
 to = "Failed"
 params = ["error_message"]
 hint = "Mark agent run as failed."
@@ -523,9 +523,10 @@ hint = "Mark agent run as failed."
 [[action]]
 name = "Cancel"
 kind = "input"
-from = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering"]
+from = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Recovering"]
 to = "Cancelled"
-hint = "Cancel agent execution."
+hint = "Cancel agent execution. Triggers sandbox teardown via destroy_sandbox WASM."
+effect = [{ type = "trigger", name = "destroy_sandbox" }]
 
 [[action]]
 name = "Resume"
@@ -535,6 +536,33 @@ to = "Provisioning"
 params = ["sandbox_url", "sandbox_id", "workspace_id", "conversation_file_id", "file_manifest_id", "session_file_id", "session_leaf_id"]
 hint = "Resume agent from saved state. Transitions to Provisioning for workspace restore."
 effect = [{ type = "trigger", name = "restore_workspace" }]
+
+# --- Actions: Sandbox-Loss Recovery (Milestone 3) ---
+
+[[action]]
+name = "SandboxLost"
+kind = "input"
+from = ["Executing"]
+to = "Recovering"
+params = ["error_message"]
+hint = "Sandbox was lost or became unreachable. Transition to Recovering for restore."
+
+[[action]]
+name = "SandboxRestored"
+kind = "input"
+from = ["Recovering"]
+to = "Thinking"
+params = ["sandbox_url", "sandbox_id", "workspace_id", "conversation_file_id", "file_manifest_id", "session_file_id", "session_leaf_id", "workspace_checkpoint"]
+hint = "Sandbox restored from checkpoint. Resume thinking loop."
+effect = [{ type = "trigger", name = "call_llm" }]
+
+[[action]]
+name = "RestoreFailed"
+kind = "input"
+from = ["Recovering"]
+to = "Failed"
+params = ["error_message"]
+hint = "Sandbox restore failed. Mark run as failed."
 
 # --- Invariants ---
 
@@ -549,6 +577,18 @@ on_failure = "Fail"
 
 [action.triggers.config]
 temper_api_url = "{secret:temper_api_url}"
+
+# ADR-0046: inline trigger — Cancel action sandbox teardown.
+[[action.triggers]]
+name = "destroy_sandbox"
+kind = "wasm"
+module = "sandbox_destroyer"
+on_failure = "Log"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+tensorlake_api_key = "{secret:tensorlake_api_key}"
+tensorlake_api_url = "{secret:tensorlake_api_url}"
 
 
 [[invariant]]
@@ -573,7 +613,7 @@ assert = "no_further_transitions"
 
 [[invariant]]
 name = "TurnCountNonNegative"
-when = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Completed", "Failed", "Cancelled"]
+when = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Recovering", "Completed", "Failed", "Cancelled"]
 assert = "turn_count >= 0"
 
 # --- Integrations ---

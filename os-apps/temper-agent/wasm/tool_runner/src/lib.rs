@@ -22,6 +22,11 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
+        let sandbox_id = fields
+            .get("sandbox_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
         let workdir = fields
             .get("workdir")
             .and_then(|v| v.as_str())
@@ -53,6 +58,30 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
 
         let tool_calls: Vec<Value> = serde_json::from_str(tool_calls_json)
             .map_err(|e| format!("failed to parse pending_tool_calls: {e}"))?;
+
+        // Idempotency check: compute a batch ID from the tool call IDs.
+        // If this matches last_tool_batch_id in entity state, return the
+        // previous result instead of re-executing.
+        let batch_id = compute_batch_id(&tool_calls);
+        let last_batch_id = fields
+            .get("last_tool_batch_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if !batch_id.is_empty() && batch_id == last_batch_id {
+            ctx.log(
+                "info",
+                &format!(
+                    "tool_runner: idempotent retry for batch {batch_id} — returning cached result"
+                ),
+            );
+            // Return the previous conversation/conclusion without re-executing.
+            // The conversation already has the tool results from the previous run.
+            set_success_result("HandleToolResults", &json!({
+                "pending_tool_calls": tool_calls_json,
+            }));
+            return Ok(());
+        }
 
         ctx.log(
             "info",
@@ -266,6 +295,31 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
             }
         }
 
+        // Checkpoint the sandbox workspace (best-effort).
+        // For Tensorlake: POST /v2/sandboxes/:id/snapshots
+        // For local/E2B: fsync to TemperFS is the checkpoint.
+        let is_tensorlake = is_tensorlake_sandbox(sandbox_url);
+        if is_tensorlake && !sandbox_id.is_empty() && sandbox_id != "static-sandbox" {
+            match checkpoint_tensorlake(&ctx, sandbox_id) {
+                Ok(checkpoint_ref) => {
+                    ctx.log(
+                        "info",
+                        &format!(
+                            "tool_runner: checkpoint created: {checkpoint_ref}"
+                        ),
+                    );
+                    params["workspace_checkpoint"] = json!(checkpoint_ref);
+                }
+                Err(e) => ctx.log(
+                    "warn",
+                    &format!("tool_runner: checkpoint failed (non-fatal): {e}"),
+                ),
+            }
+        }
+
+        // Record the batch ID for idempotency on retry.
+        params["last_tool_batch_id"] = json!(batch_id);
+
         set_success_result("HandleToolResults", &params);
 
         Ok(())
@@ -285,6 +339,21 @@ fn is_e2b_sandbox(sandbox_url: &str) -> bool {
 /// Detect whether the sandbox is a Tensorlake MicroVM based on the URL.
 fn is_tensorlake_sandbox(sandbox_url: &str) -> bool {
     sandbox_url.contains("tensorlake.ai")
+}
+
+/// Compute a deterministic batch ID from tool call IDs.
+/// If the same set of tool calls is retried, the batch ID matches and
+/// the tool_runner returns the cached result instead of re-executing.
+fn compute_batch_id(tool_calls: &[Value]) -> String {
+    let mut ids: Vec<&str> = tool_calls
+        .iter()
+        .filter_map(|call| call.get("id").and_then(|v| v.as_str()))
+        .collect();
+    ids.sort();
+    if ids.is_empty() {
+        return String::new();
+    }
+    ids.join(",")
 }
 
 /// Execute a single tool call against the sandbox API.
@@ -847,6 +916,52 @@ fn write_file_e2b(
             resp.status, resp.body
         ))
     }
+}
+
+/// Checkpoint a Tensorlake sandbox via POST /v2/sandboxes/:id/snapshots.
+/// Returns the snapshot ID as the checkpoint reference.
+fn checkpoint_tensorlake(ctx: &Context, sandbox_id: &str) -> Result<String, String> {
+    let api_key = ctx.config.get("tensorlake_api_key").cloned().unwrap_or_default();
+    if api_key.is_empty() || api_key.contains("{secret:") {
+        return Err("tensorlake_api_key not set".to_string());
+    }
+
+    let api_url = ctx
+        .config
+        .get("tensorlake_api_url")
+        .cloned()
+        .unwrap_or_else(|| "https://api.tensorlake.ai".to_string());
+
+    let url = format!("{api_url}/v2/sandboxes/{sandbox_id}/snapshots");
+    let headers = vec![
+        ("Authorization".to_string(), format!("Bearer {api_key}")),
+        ("content-type".to_string(), "application/json".to_string()),
+    ];
+    let body = json!({"checkpoint_type": "filesystem"}).to_string();
+
+    let resp = ctx.http_call("POST", &url, &headers, &body)?;
+    if resp.status < 200 || resp.status >= 300 {
+        return Err(format!(
+            "Tensorlake checkpoint failed (HTTP {}): {}",
+            resp.status,
+            &resp.body[..resp.body.len().min(200)]
+        ));
+    }
+
+    let parsed: Value = serde_json::from_str(&resp.body)
+        .map_err(|e| format!("failed to parse checkpoint response: {e}"))?;
+    let snapshot_id = parsed
+        .get("snapshot_id")
+        .or_else(|| parsed.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if snapshot_id.is_empty() {
+        return Err("checkpoint response missing snapshot_id".to_string());
+    }
+
+    Ok(snapshot_id)
 }
 
 /// Run bash command via E2B envd Connect protocol: POST /process.Process/Start.

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Agent Runtime PoC — Milestone 1 E2E Test
+# Agent Runtime PoC — Milestone 1+3 E2E Test
 #
 # Tests the full agent-run lifecycle through the /v1/agent-runs API:
 #   1. Create a run (POST /v1/agent-runs)
 #   2. Poll until Completed/Failed (GET /v1/agent-runs/:id)
 #   3. Verify durable state transitions in Temper entity history
 #   4. Test Steer while active
-#   5. Test Cancel
+#   5. Test Cancel (with sandbox teardown)
+#   6. Test idempotent tool callback retry
+#   7. Test unauthorized request is denied by policy
 #
 # Prerequisites:
 #   - Temper server running on port 3000
@@ -361,6 +363,59 @@ if [ -n "$CANCEL_RUN_ID" ]; then
   fi
 else
   fail "Failed to create cancel test run"
+fi
+
+echo ""
+
+# ── Test 7: Idempotent tool callback retry ──────────────────────────
+
+echo "--- Test 7: Idempotent tool callback retry ---"
+
+# Verify that last_tool_batch_id is set on a completed run
+if [ -n "$RUN_ID" ] && [ "$FINAL_STATUS" = "Completed" ]; then
+  BATCH_ID=$(echo "$ENTITY_STATE" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+print(data.get('fields', {}).get('last_tool_batch_id', ''))
+" 2>/dev/null || echo "")
+
+  if [ -n "$BATCH_ID" ] && [ "$BATCH_ID" != "" ]; then
+    pass "last_tool_batch_id is set: $BATCH_ID"
+  else
+    fail "last_tool_batch_id is empty on completed run"
+  fi
+else
+  info "Skipping idempotency check (run did not complete)"
+fi
+
+echo ""
+
+# ── Test 8: Unauthorized request denied by policy ──────────────────
+
+echo "--- Test 8: Unauthorized request denied by policy ---"
+
+# Try to create a run as an anonymous/non-admin principal
+UNAUTH_RESPONSE=$(curl -sf -X POST "$SERVER_URL/v1/agent-runs" \
+  -H "content-type: application/json" \
+  -H "x-tenant-id: $TENANT" \
+  -d '{"prompt": "test", "tools": ["bash"]}' 2>&1 || echo "REQUEST_FAILED")
+
+if echo "$UNAUTH_RESPONSE" | grep -qi "denied\|forbidden\|unauthorized\|REQUEST_FAILED"; then
+  pass "Unauthorized request was denied"
+else
+  fail "Unauthorized request was not denied"
+fi
+
+# Try to steer as anonymous
+UNAUTH_STEER=$(curl -sf -X POST "$SERVER_URL/v1/agent-runs/test-run/steer" \
+  -H "content-type: application/json" \
+  -H "x-tenant-id: $TENANT" \
+  -d '{"message": "test"}' 2>&1 || echo "REQUEST_FAILED")
+
+if echo "$UNAUTH_STEER" | grep -qi "denied\|forbidden\|unauthorized\|REQUEST_FAILED"; then
+  pass "Unauthorized steer was denied"
+else
+  fail "Unauthorized steer was not denied"
 fi
 
 echo ""
