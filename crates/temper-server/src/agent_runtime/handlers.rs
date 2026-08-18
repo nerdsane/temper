@@ -34,10 +34,32 @@ pub fn build_agent_runtime_router() -> axum::Router<ServerState> {
         .route("/{id}/cancel", post(cancel_run))
 }
 
-/// Resolve the tenant from the authenticated request context.
-/// Falls back to the `X-Tenant-Id` header or the default tenant.
-fn resolve_tenant(authenticated: &AuthenticatedRequestContext) -> TenantId {
-    authenticated.tenant().clone()
+/// Resolve the tenant and authenticated context from the request.
+/// Falls back to the `X-Tenant-Id` header and an admin security context
+/// when no credential was resolved (local dev without TEMPER_API_KEY).
+fn resolve_auth(
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
+    headers: &axum::http::HeaderMap,
+) -> Result<(TenantId, AuthenticatedRequestContext), Response> {
+    if let Some(Extension(ctx)) = authenticated {
+        return Ok((ctx.tenant().clone(), ctx));
+    }
+
+    // Fallback: resolve tenant from header, create an admin context.
+    let tenant = headers
+        .get("x-tenant-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(|s| TenantId::try_new(s).unwrap_or_default())
+        .unwrap_or_default();
+
+    let security_ctx = temper_authz::SecurityContext::from_resolved_identity(
+        "admin",
+        "admin",
+        None,
+    );
+    let ctx = AuthenticatedRequestContext::new(tenant.clone(), security_ctx);
+    Ok((tenant, ctx))
 }
 
 /// Create a new agent run: create entity → configure → provision.
@@ -52,10 +74,14 @@ fn resolve_tenant(authenticated: &AuthenticatedRequestContext) -> TenantId {
 )]
 async fn create_run(
     State(state): State<ServerState>,
-    Extension(authenticated): Extension<AuthenticatedRequestContext>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<CreateRunRequest>,
 ) -> Response {
-    let tenant = resolve_tenant(&authenticated);
+    let (tenant, _authenticated) = match resolve_auth(authenticated, &headers) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
     let run_id = format!("run_{}", Uuid::new_v4().simple());
 
     tracing::Span::current().record("agent.run_id", &run_id);
@@ -164,10 +190,14 @@ async fn create_run(
 )]
 async fn get_run(
     State(state): State<ServerState>,
-    Extension(authenticated): Extension<AuthenticatedRequestContext>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let tenant = resolve_tenant(&authenticated);
+    let (tenant, _authenticated) = match resolve_auth(authenticated, &headers) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
 
     let entity_state = match state
         .get_tenant_entity_state(&tenant, "TemperAgent", &id)
@@ -251,11 +281,15 @@ async fn get_run(
 )]
 async fn steer_run(
     State(state): State<ServerState>,
-    Extension(authenticated): Extension<AuthenticatedRequestContext>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
     Json(req): Json<SteerRequest>,
 ) -> Response {
-    let tenant = resolve_tenant(&authenticated);
+    let (tenant, _authenticated) = match resolve_auth(authenticated, &headers) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
     let agent_ctx = AgentContext::for_service("agent-runtime-api");
 
     let steering_messages = json!([req.message]);
@@ -296,10 +330,14 @@ async fn steer_run(
 )]
 async fn cancel_run(
     State(state): State<ServerState>,
-    Extension(authenticated): Extension<AuthenticatedRequestContext>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let tenant = resolve_tenant(&authenticated);
+    let (tenant, _authenticated) = match resolve_auth(authenticated, &headers) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
     let agent_ctx = AgentContext::for_service("agent-runtime-api");
 
     let result = state
