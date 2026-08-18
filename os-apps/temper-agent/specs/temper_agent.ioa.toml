@@ -238,6 +238,33 @@ name = "heartbeat_timeout_seconds"
 type = "string"
 initial = "300"
 
+# --- State Variables: Agent Runtime PoC (Milestone 1) ---
+
+[[state]]
+name = "sandbox_provider"
+type = "string"
+initial = "local"
+
+[[state]]
+name = "workspace_checkpoint"
+type = "string"
+initial = ""
+
+[[state]]
+name = "last_tool_batch_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "run_budget"
+type = "string"
+initial = ""
+
+[[state]]
+name = "artifact_ref"
+type = "string"
+initial = ""
+
 # --- Actions: Core Agent Loop ---
 
 [[action]]

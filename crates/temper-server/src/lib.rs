@@ -6,6 +6,7 @@
 
 pub mod adapters;
 mod admin;
+mod agent_runtime;
 #[cfg(feature = "observe")]
 mod api;
 pub mod authz;
