@@ -111,20 +111,26 @@ counted against a per-scope budget (`MAX_OUTBOUND_STREAMS_PER_SCOPE`); once the
 limit is reached, `open_outbound_exchange` returns `StreamError::Aborted` and the
 guest's `http_stream_begin_outbound` surfaces it as an error.
 
-The slot represents the **bridge task's lifetime**, not a guest handle. It is
-released by `release_outbound_exchange`, which the bridge calls when it actually
-completes — success, upstream error, or guest hangup — so the count reflects live
-outbound sockets and their buffered request bytes. Closing the guest's read
-handle does **not** free a slot: adversarial review (ARN-207) showed that keying
-the budget on the guest close let a guest loop `begin_outbound → close(response)`
-and free slots while the bridge, its socket, and a channel of buffered request
-bytes stayed resident. A guest that makes many outbound calls *sequentially* — each
-bridge finishing before the next opens — is never throttled; one that holds many
-bridges live at once is capped at `MAX_OUTBOUND_STREAMS_PER_SCOPE`.
+A slot is occupied from `open_outbound_exchange` until the exchange is **fully
+done**: its bridge task has completed (socket closed, request buffer gone) **and**
+its guest response handle has been closed/drained (response buffer gone). It is
+freed by whichever of those two happens last — the bridge's
+`release_outbound_exchange`, or the guest's `close` of the response handle.
+
+Two adversarial rounds shaped this. Keying the slot on the *guest close* alone let
+a guest loop `begin_outbound → close(response)` and free slots while the bridge,
+its socket, and a channel of buffered request bytes stayed live. Keying it on
+*bridge completion* alone (the first fix) then let a guest open exchanges, let
+their bridges finish, and accumulate undrained response handles and their buffers
+without limit — uncounted, because the slots were freed. Requiring **both**
+conditions bounds both dimensions: at most `MAX_OUTBOUND_STREAMS_PER_SCOPE`
+exchanges are ever live, counting live sockets *and* undrained response buffers.
+A guest that makes many calls *sequentially* — each fully done before the next —
+is never throttled.
 
 Scope of this bound, stated precisely so it is not read as more than it is:
-- It bounds the **number** of concurrent bridges per invocation, hence the number
-  of concurrent sockets and request channels.
+- It bounds the **number** of live exchanges per invocation, hence the number of
+  concurrent sockets, request channels, and undrained response channels.
 - It does **not** bound bytes. Each channel is bounded in *chunks* (64), not
   bytes, so a guest writing large in-bounds chunks can hold far more than the
   nominal 1 MiB per channel. That aggregate per-invocation byte budget is

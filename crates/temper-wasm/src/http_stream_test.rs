@@ -275,6 +275,7 @@ async fn completed_outbound_exchanges_do_not_exhaust_budget() {
             .open_outbound_exchange(scope)
             .await
             .expect("sequential outbound call must be allowed");
+        // Fully done: bridge completes AND the guest drains/closes its response.
         reg.release_outbound_exchange(
             scope,
             ex.guest_response_body,
@@ -283,7 +284,52 @@ async fn completed_outbound_exchanges_do_not_exhaust_budget() {
             ex.bridge_response_body,
         )
         .await;
+        reg.close_as_guest(scope, ex.guest_response_body)
+            .await
+            .unwrap();
     }
+}
+
+#[tokio::test]
+async fn undrained_response_handles_still_count_against_the_cap() {
+    // ARN-207: an exchange occupies a slot until BOTH its bridge completes AND
+    // its guest response handle is closed. A guest that lets bridges finish but
+    // never drains their responses must not accumulate uncounted response
+    // buffers past the cap — closing the socket half is not enough.
+    let reg = HttpStreamRegistry::new();
+    let scope = reg.mint_scope().await;
+
+    let mut exchanges = Vec::new();
+    for _ in 0..MAX_OUTBOUND_STREAMS_PER_SCOPE {
+        let ex = reg.open_outbound_exchange(scope).await.expect("within cap");
+        // Bridge completes, but the guest never closes/drains the response.
+        reg.release_outbound_exchange(
+            scope,
+            ex.guest_response_body,
+            ex.guest_request_body,
+            ex.bridge_request_body,
+            ex.bridge_response_body,
+        )
+        .await;
+        exchanges.push(ex);
+    }
+
+    // Every bridge is done, yet the response buffers are all still resident, so
+    // the cap is full.
+    let over = reg.open_outbound_exchange(scope).await;
+    assert!(
+        matches!(over, Err(StreamError::Aborted(_))),
+        "bridge completion alone must not free a slot while the response is undrained"
+    );
+
+    // Draining one (closing the guest response handle) frees exactly one slot.
+    reg.close_as_guest(scope, exchanges[0].guest_response_body)
+        .await
+        .unwrap();
+    assert!(
+        reg.open_outbound_exchange(scope).await.is_ok(),
+        "closing a drained response must free its slot"
+    );
 }
 
 #[tokio::test]
@@ -300,21 +346,23 @@ async fn closing_the_guest_handle_does_not_release_the_outbound_slot() {
     for _ in 0..MAX_OUTBOUND_STREAMS_PER_SCOPE {
         let ex = reg.open_outbound_exchange(scope).await.expect("within cap");
         // Guest closes its read handle immediately — but the bridge is "still
-        // running", so no slot is freed.
+        // running" (release not called), so the slot is NOT freed.
         reg.close_as_guest(scope, ex.guest_response_body)
             .await
             .unwrap();
         exchanges.push(ex);
     }
 
-    // The cap is now full despite every guest handle being closed.
+    // The cap is full despite every guest handle being closed, because the
+    // sockets are still live.
     let over = reg.open_outbound_exchange(scope).await;
     assert!(
         matches!(over, Err(StreamError::Aborted(_))),
         "closing guest handles must not free slots while bridges are live"
     );
 
-    // Once a bridge completes, its slot frees and a new exchange is allowed.
+    // When a bridge completes and the guest has already closed (both done), its
+    // slot frees and a new exchange is admitted.
     let done = &exchanges[0];
     reg.release_outbound_exchange(
         scope,
@@ -326,6 +374,6 @@ async fn closing_the_guest_handle_does_not_release_the_outbound_slot() {
     .await;
     assert!(
         reg.open_outbound_exchange(scope).await.is_ok(),
-        "a freed slot must admit a new exchange"
+        "a fully-done exchange must free its slot"
     );
 }

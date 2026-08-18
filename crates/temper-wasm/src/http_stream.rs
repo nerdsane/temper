@@ -218,12 +218,17 @@ struct RegistryState {
     /// entire footprint in one call. Ids are never reused, so an id
     /// belongs to exactly one scope for the process lifetime.
     scope_ids: BTreeMap<StreamScope, BTreeSet<u32>>,
-    /// Currently-open outbound exchanges per scope, keyed by their
-    /// guest response-body id, for the per-scope *concurrency* bound
-    /// (ADR-0156 Sub-Decision 4). An entry is removed when the guest
-    /// closes that exchange, so sequential outbound calls never exhaust
-    /// the budget — only genuinely concurrent ones count.
-    outbound_open: BTreeMap<StreamScope, BTreeSet<u32>>,
+    /// Live outbound exchanges per scope, keyed by guest response-body id,
+    /// for the per-scope *concurrency* bound (ADR-0156 Sub-Decision 4).
+    ///
+    /// An exchange occupies a slot until it is fully done — its bridge task has
+    /// completed (socket + request buffer gone) AND its guest response handle has
+    /// been closed/drained (response buffer gone). Keying on only one of those
+    /// leaks the other: releasing on guest-close alone leaves live sockets
+    /// uncounted; releasing on bridge-completion alone leaves undrained response
+    /// buffers uncounted. `true` marks the bridge as done; the entry is removed
+    /// when both conditions hold (see `release_outbound_exchange` and `close`).
+    outbound_open: BTreeMap<StreamScope, BTreeMap<u32, bool>>,
     /// Outbound: oneshot receivers keyed on response-body handle ID.
     /// Bridge task holds the Sender and fires once the HTTP response
     /// head is received. Guest consumes via `await_response_head`.
@@ -419,15 +424,23 @@ impl HttpStreamRegistry {
         let mut state = self.inner.lock().await;
         state.pending_reads.remove(&handle.0);
         match state.handles.remove(&handle.0) {
-            Some(_entry) => {
-                // Closing a guest handle does NOT release an outbound
-                // concurrency slot (ARN-207). The slot represents a live bridge
-                // task — a real outbound socket plus its buffered request bytes —
-                // and a guest closing its read end leaves that bridge running.
-                // The slot is released only by `release_outbound_exchange`, which
-                // the bridge calls when it actually completes. The id is left in
-                // `scope_ids` so `close_scope` can still reclaim any head channel
-                // a guest never consumed.
+            Some(entry) => {
+                // Closing an outbound exchange's response handle frees its slot
+                // only if the bridge has already completed — both ends done. If
+                // the bridge is still live, the slot stays (its socket is real);
+                // the bridge frees it on completion, seeing this handle gone.
+                // Closing here does NOT free a slot on its own (ARN-207): that let
+                // a guest loop `begin_outbound -> close(response)` and free slots
+                // while sockets lingered. The id is left in `scope_ids` so
+                // `close_scope` can still reclaim a head channel never consumed.
+                if let Some(open) = state.outbound_open.get_mut(&entry.scope)
+                    && open.get(&handle.0).copied() == Some(true)
+                {
+                    open.remove(&handle.0);
+                    if open.is_empty() {
+                        state.outbound_open.remove(&entry.scope);
+                    }
+                }
                 Ok(())
             }
             None => Err(StreamError::InvalidHandle),
@@ -530,26 +543,31 @@ impl HttpStreamRegistry {
         response_writer: StreamHandle,
     ) {
         let mut state = self.inner.lock().await;
-        if let Some(open) = state.outbound_open.get_mut(&scope) {
-            open.remove(&response_reader.0);
-            if open.is_empty() {
-                state.outbound_open.remove(&scope);
-            }
-        }
         state.response_head_receivers.remove(&response_reader.0);
         // Reclaim the REQUEST channel — the request has been fully sent (or the
-        // send aborted), so nothing reads it again. Do NOT touch the RESPONSE
-        // handles: the bridge has closed its writer, but the guest may still be
-        // draining buffered response chunks from `response_reader`. Those are
-        // bounded by channel capacity and reclaimed when the guest closes the
-        // handle or at `close_scope` (request end). The freed slot already bounds
-        // what matters here — the live socket — since the bridge has completed by
-        // the time this runs.
+        // send aborted), so nothing reads it again. Do NOT reclaim the RESPONSE
+        // handle: the bridge has closed its writer, but the guest may still be
+        // draining buffered response chunks from `response_reader`.
         for id in [request_writer.0, request_reader.0] {
             state.handles.remove(&id);
             state.pending_reads.remove(&id);
         }
         let _ = response_writer;
+        // Mark the bridge complete. The slot is freed only when the exchange is
+        // fully done — bridge complete AND the guest response handle closed. If
+        // the guest already closed it (handle gone), free now; otherwise keep the
+        // slot so undrained response buffers stay counted against the cap.
+        let guest_closed = !state.handles.contains_key(&response_reader.0);
+        if let Some(open) = state.outbound_open.get_mut(&scope) {
+            if guest_closed {
+                open.remove(&response_reader.0);
+                if open.is_empty() {
+                    state.outbound_open.remove(&scope);
+                }
+            } else {
+                open.insert(response_reader.0, true);
+            }
+        }
     }
 
     pub async fn close_scope(&self, scope: StreamScope) {
@@ -602,7 +620,7 @@ impl HttpStreamRegistry {
         // two opens racing between a separate check and insert.
         let (req_writer, req_reader, resp_writer, resp_reader) = {
             let mut state = self.inner.lock().await;
-            let open = state.outbound_open.get(&scope).map_or(0, BTreeSet::len);
+            let open = state.outbound_open.get(&scope).map_or(0, BTreeMap::len);
             if open >= MAX_OUTBOUND_STREAMS_PER_SCOPE {
                 return Err(StreamError::Aborted(format!(
                     "outbound stream budget exhausted ({MAX_OUTBOUND_STREAMS_PER_SCOPE} concurrent per invocation)"
@@ -614,13 +632,13 @@ impl HttpStreamRegistry {
             let (resp_writer, resp_reader) =
                 Self::create_pair_locked(&mut state, scope, false, true);
             state.response_head_receivers.insert(resp_reader.0, head_rx);
-            // Track this exchange for the per-scope concurrency bound; the
-            // slot is released when the guest closes `resp_reader`.
+            // Occupy a slot for this exchange until it is fully done (bridge
+            // complete AND guest response closed).
             state
                 .outbound_open
                 .entry(scope)
                 .or_default()
-                .insert(resp_reader.0);
+                .insert(resp_reader.0, false);
             (req_writer, req_reader, resp_writer, resp_reader)
         };
         Ok(OutboundExchange {
