@@ -271,7 +271,7 @@ initial = ""
 name = "Configure"
 kind = "input"
 from = ["Created"]
-params = ["system_prompt", "user_message", "model", "provider", "max_turns", "tools_enabled", "workdir", "sandbox_url", "temper_api_url", "soul_id", "parent_agent_id", "agent_depth", "max_follow_ups", "hook_policy", "reserve_tokens", "keep_recent_tokens", "compaction_model", "heartbeat_timeout_seconds"]
+params = ["system_prompt", "user_message", "model", "provider", "max_turns", "tools_enabled", "workdir", "sandbox_url", "sandbox_provider", "sandbox_image", "temper_api_url", "soul_id", "parent_agent_id", "agent_depth", "max_follow_ups", "hook_policy", "reserve_tokens", "keep_recent_tokens", "compaction_model", "heartbeat_timeout_seconds"]
 hint = "Configure agent with system prompt, user message, model, tools, soul, and optional overrides."
 
 [[action]]
@@ -295,6 +295,8 @@ on_failure = "Fail"
 temper_api_url = "{secret:temper_api_url}"
 sandbox_url = "{secret:sandbox_url}"
 e2b_api_key = "{secret:e2b_api_key}"
+tensorlake_api_key = "{secret:tensorlake_api_key}"
+tensorlake_api_url = "{secret:tensorlake_api_url}"
 
 
 [[action]]

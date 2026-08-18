@@ -98,6 +98,7 @@ CREATE_RESPONSE=$(api_call POST "/v1/agent-runs" "{
   \"model\": \"claude-sonnet-4-20250514\",
   \"tools\": [\"read\", \"write\", \"edit\", \"bash\"],
   \"sandbox_url\": \"$SANDBOX_URL\",
+  \"sandbox_provider\": \"local\",
   \"workdir\": \"/workspace\",
   \"max_turns\": \"12\"
 }")

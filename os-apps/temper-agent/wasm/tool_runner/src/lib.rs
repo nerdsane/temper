@@ -241,6 +241,8 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
 
         if !file_manifest_id.is_empty() && !workspace_id.is_empty() && !sandbox_url.is_empty() {
             let e2b = is_e2b_sandbox(sandbox_url);
+            let tensorlake = is_tensorlake_sandbox(sandbox_url);
+            let remote_files = e2b || tensorlake;
             match sync_files_to_temperfs(
                 &ctx,
                 sandbox_url,
@@ -249,7 +251,7 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
                 workspace_id,
                 file_manifest_id,
                 workdir,
-                e2b,
+                remote_files,
                 max_sync_file_bytes,
                 &sync_exclude,
             ) {
@@ -280,9 +282,15 @@ fn is_e2b_sandbox(sandbox_url: &str) -> bool {
     sandbox_url.contains("e2b.app") || sandbox_url.contains("e2b.dev")
 }
 
+/// Detect whether the sandbox is a Tensorlake MicroVM based on the URL.
+fn is_tensorlake_sandbox(sandbox_url: &str) -> bool {
+    sandbox_url.contains("tensorlake.ai")
+}
+
 /// Execute a single tool call against the sandbox API.
-/// Supports both local sandbox API (/v1/fs/file, /v1/processes/run)
-/// and E2B envd API (/files, Connect protocol for processes).
+/// Supports local sandbox API (/v1/fs/file, /v1/processes/run),
+/// E2B envd API (/files, Connect protocol for processes),
+/// and Tensorlake MicroVM API (/files, /processes/run).
 fn execute_tool(
     ctx: &Context,
     sandbox_url: &str,
@@ -291,15 +299,20 @@ fn execute_tool(
     input: &Value,
 ) -> Result<String, String> {
     let e2b = is_e2b_sandbox(sandbox_url);
+    let tensorlake = is_tensorlake_sandbox(sandbox_url);
+    // E2B and Tensorlake both use /files?path=... for file operations.
+    let remote_files = e2b || tensorlake;
+    // E2B uses Connect protocol; Tensorlake and local use plain HTTP /processes/run.
+    let remote_connect = e2b;
     match tool_name {
         "read" => {
             let path = input
                 .get("path")
-                .and_then(|v| v.as_str())
-                .ok_or("read: missing 'path' parameter")?;
+                    .and_then(|v| v.as_str())
+                    .ok_or("read: missing 'path' parameter")?;
 
             let full_path = resolve_path(workdir, path);
-            if e2b {
+            if remote_files {
                 read_file_e2b(ctx, sandbox_url, &full_path)
             } else {
                 read_file_local(ctx, sandbox_url, &full_path)
@@ -308,15 +321,15 @@ fn execute_tool(
         "write" => {
             let path = input
                 .get("path")
-                .and_then(|v| v.as_str())
-                .ok_or("write: missing 'path' parameter")?;
+                    .and_then(|v| v.as_str())
+                    .ok_or("write: missing 'path' parameter")?;
             let content = input
                 .get("content")
-                .and_then(|v| v.as_str())
-                .ok_or("write: missing 'content' parameter")?;
+                    .and_then(|v| v.as_str())
+                    .ok_or("write: missing 'content' parameter")?;
 
             let full_path = resolve_path(workdir, path);
-            if e2b {
+            if remote_files {
                 write_file_e2b(ctx, sandbox_url, &full_path, content)
             } else {
                 write_file_local(ctx, sandbox_url, &full_path, content)
@@ -325,20 +338,20 @@ fn execute_tool(
         "edit" => {
             let path = input
                 .get("path")
-                .and_then(|v| v.as_str())
-                .ok_or("edit: missing 'path' parameter")?;
+                    .and_then(|v| v.as_str())
+                    .ok_or("edit: missing 'path' parameter")?;
             let old_string = input
                 .get("old_string")
-                .and_then(|v| v.as_str())
-                .ok_or("edit: missing 'old_string' parameter")?;
+                    .and_then(|v| v.as_str())
+                    .ok_or("edit: missing 'old_string' parameter")?;
             let new_string = input
                 .get("new_string")
-                .and_then(|v| v.as_str())
-                .ok_or("edit: missing 'new_string' parameter")?;
+                    .and_then(|v| v.as_str())
+                    .ok_or("edit: missing 'new_string' parameter")?;
 
             let full_path = resolve_path(workdir, path);
             // Read current file
-            let current = if e2b {
+            let current = if remote_files {
                 read_file_e2b(ctx, sandbox_url, &full_path)?
             } else {
                 read_file_local(ctx, sandbox_url, &full_path)?
@@ -350,7 +363,7 @@ fn execute_tool(
             let updated = current.replacen(old_string, new_string, 1);
 
             // Write updated file
-            if e2b {
+            if remote_files {
                 write_file_e2b(ctx, sandbox_url, &full_path, &updated)?;
             } else {
                 write_file_local(ctx, sandbox_url, &full_path, &updated)?;
@@ -360,10 +373,10 @@ fn execute_tool(
         "bash" => {
             let command = input
                 .get("command")
-                .and_then(|v| v.as_str())
-                .ok_or("bash: missing 'command' parameter")?;
+                    .and_then(|v| v.as_str())
+                    .ok_or("bash: missing 'command' parameter")?;
 
-            if e2b {
+            if remote_connect {
                 run_bash_e2b(ctx, sandbox_url, command, workdir)
             } else {
                 run_bash_local(ctx, sandbox_url, command, workdir)
@@ -995,7 +1008,7 @@ fn enumerate_sandbox_files(
     sandbox_url: &str,
     workdir: &str,
     exclude: &str,
-    e2b: bool,
+    remote_files: bool,
 ) -> Result<BTreeMap<String, FileEntry>, String> {
     // Build exclude flags from comma-separated patterns
     let mut exclude_flags = String::new();
@@ -1006,8 +1019,9 @@ fn enumerate_sandbox_files(
         }
     }
 
-    // Use stat format appropriate for the OS
-    let stat_fmt = if e2b {
+    // Use stat format appropriate for the OS.
+    // E2B and Tensorlake both run Linux (GNU stat); local may be macOS (BSD stat).
+    let stat_fmt = if remote_files {
         // Linux/GNU stat: %n=name %s=size %Y=mtime
         "-exec stat --format='%n %s %Y' {} +"
     } else {
@@ -1017,7 +1031,9 @@ fn enumerate_sandbox_files(
 
     let command = format!("find {workdir} -type f -not -path '*/.*'{exclude_flags} {stat_fmt}");
 
-    let output = if e2b {
+    // E2B uses Connect protocol; Tensorlake and local use plain HTTP /v1/processes/run.
+    let e2b_connect = is_e2b_sandbox(sandbox_url);
+    let output = if e2b_connect {
         run_bash_e2b(ctx, sandbox_url, &command, workdir)?
     } else {
         run_bash_local(ctx, sandbox_url, &command, workdir)?
@@ -1112,12 +1128,12 @@ fn sync_files_to_temperfs(
     workspace_id: &str,
     manifest_file_id: &str,
     workdir: &str,
-    e2b: bool,
+    remote_files: bool,
     max_file_bytes: u64,
     exclude: &str,
 ) -> Result<usize, String> {
     // 1. Enumerate current sandbox files with stat metadata
-    let current_files = enumerate_sandbox_files(ctx, sandbox_url, workdir, exclude, e2b)?;
+    let current_files = enumerate_sandbox_files(ctx, sandbox_url, workdir, exclude, remote_files)?;;;
     ctx.log(
         "info",
         &format!(
@@ -1158,7 +1174,7 @@ fn sync_files_to_temperfs(
         }
 
         // File is new or modified — read from sandbox
-        let content = if e2b {
+        let content = if remote_files {
             read_file_e2b(ctx, sandbox_url, path)
         } else {
             read_file_local(ctx, sandbox_url, path)

@@ -2,7 +2,8 @@
 //!
 //! Triggered by the `Resume` action's `restore_workspace` integration.
 //! Reads the file manifest from TemperFS, downloads each file, and writes
-//! it to the sandbox at the original path. Then triggers `call_llm` to
+//! it to the sandbox at the original path. Supports local sandbox, E2B envd,
+//! and Tensorlake MicroVM sandboxes. Then triggers `call_llm` to
 //! continue the agent loop.
 //!
 //! Build: `cargo build --target wasm32-unknown-unknown --release`
@@ -77,6 +78,8 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
 
         let tenant = &ctx.tenant;
         let e2b = sandbox_url.contains("e2b.app") || sandbox_url.contains("e2b.dev");
+        let tensorlake = sandbox_url.contains("tensorlake.ai");
+        let remote_files = e2b || tensorlake;
 
         // Read manifest from TemperFS
         let manifest = read_manifest(&ctx, &temper_api_url, tenant, file_manifest_id)?;
@@ -100,7 +103,7 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
             };
 
             // Write file to sandbox
-            let write_result = if e2b {
+            let write_result = if remote_files {
                 write_file_e2b(&ctx, sandbox_url, path, &content)
             } else {
                 write_file_local(&ctx, sandbox_url, path, &content)

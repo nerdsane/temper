@@ -8,7 +8,9 @@ description = "Shared Monty sandbox infrastructure for Temper MCP and agent runt
 
 [dependencies]
 anyhow = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+async-trait = { workspace = true }
 tokio = { workspace = true, features = ["time", "process", "fs"] }
 reqwest = { workspace = true }
 tracing = { workspace = true }

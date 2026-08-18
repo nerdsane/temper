@@ -18,6 +18,10 @@ pub struct CreateRunRequest {
     pub tools: Vec<String>,
     #[serde(default = "default_sandbox_url")]
     pub sandbox_url: String,
+    #[serde(default = "default_sandbox_provider")]
+    pub sandbox_provider: String,
+    #[serde(default)]
+    pub sandbox_image: Option<String>,
     #[serde(default = "default_workdir")]
     pub workdir: String,
     #[serde(default = "default_max_turns")]
@@ -114,6 +118,10 @@ fn default_tools() -> Vec<String> {
 
 fn default_sandbox_url() -> String {
     "http://127.0.0.1:9999".to_string()
+}
+
+fn default_sandbox_provider() -> String {
+    "local".to_string()
 }
 
 fn default_workdir() -> String {

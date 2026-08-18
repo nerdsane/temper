@@ -67,6 +67,8 @@ async fn create_run(
         "provider": req.provider,
         "tools_enabled": tools_str,
         "sandbox_url": req.sandbox_url,
+        "sandbox_provider": req.sandbox_provider,
+        "sandbox_image": req.sandbox_image.unwrap_or_default(),
         "workdir": req.workdir,
         "max_turns": max_turns,
     });

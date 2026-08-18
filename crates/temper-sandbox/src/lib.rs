@@ -9,5 +9,6 @@ pub mod dispatch;
 pub mod governance;
 pub mod helpers;
 pub mod http;
+pub mod provider;
 pub mod repl;
 pub mod runner;

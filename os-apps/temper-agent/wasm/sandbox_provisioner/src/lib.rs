@@ -1,13 +1,14 @@
 //! Sandbox Provisioner — WASM module for provisioning sandboxes.
 //!
-//! Provisions a sandbox (static URL from config, or E2B REST API) and returns
-//! the sandbox connection details. Also creates a TemperFS Workspace and File
-//! for conversation storage (content-addressable, versioned, Cedar-governed).
+//! Provisions a sandbox (static URL from config, E2B REST API, or Tensorlake REST API)
+//! and returns the sandbox connection details. Also creates a TemperFS Workspace and
+//! File for conversation storage (content-addressable, versioned, Cedar-governed).
 //!
 //! Priority order:
-//! 1. sandbox_url from entity state (set via Configure — for local dev)
-//! 2. sandbox_url from integration config (default local sandbox)
-//! 3. E2B REST API (for deployed/Railway — requires e2b_api_key secret)
+//! 1. sandbox_provider == "tensorlake" → Tensorlake REST API (requires tensorlake_api_key secret)
+//! 2. sandbox_url from entity state (set via Configure — for local dev)
+//! 3. sandbox_url from integration config (default local sandbox)
+//! 4. E2B REST API (for deployed/Railway — requires e2b_api_key secret)
 //!
 //! Build: `cargo build --target wasm32-unknown-unknown --release`
 
@@ -122,10 +123,21 @@ fn resolve_temper_api_url(ctx: &Context, fields: &Value) -> String {
 }
 
 /// Provision a sandbox. Priority order:
-/// 1. sandbox_url from entity state (set via Configure action) or integration config
-/// 2. E2B REST API (requires e2b_api_key in integration config)
+/// 1. sandbox_provider == "tensorlake" → Tensorlake REST API (requires tensorlake_api_key)
+/// 2. sandbox_url from entity state (set via Configure action) or integration config
+/// 3. E2B REST API (requires e2b_api_key in integration config)
 fn provision_sandbox(ctx: &Context) -> Result<SandboxResult, String> {
     let fields = ctx.entity_state.get("fields").cloned().unwrap_or(json!({}));
+
+    // Priority 0: Tensorlake REST API (requires tensorlake_api_key secret).
+    let sandbox_provider = fields
+        .get("sandbox_provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if sandbox_provider == "tensorlake" {
+        return provision_tensorlake(ctx, &fields);
+    }
 
     // Priority 1: sandbox_url from entity state (set at Configure time) or config.
     let static_url = fields
@@ -506,4 +518,112 @@ fn create_session_tree(
     }
 
     (session_file_id, session_leaf_id)
+}
+
+/// Provision a sandbox via the Tensorlake REST API.
+///
+/// Requires `tensorlake_api_key` in integration config (stored as a secret).
+/// Creates a sandbox with the given image and resources, then returns the
+/// sandbox URL and ID. The sandbox URL is the ingress endpoint that the
+/// tool_runner will use for file/process operations.
+fn provision_tensorlake(ctx: &Context, fields: &Value) -> Result<SandboxResult, String> {
+    let api_key = ctx.config.get("tensorlake_api_key").cloned().unwrap_or_default();
+
+    if api_key.is_empty() || api_key.contains("{secret:") {
+        return Err(
+            "sandbox_provider is \"tensorlake\" but tensorlake_api_key is not set — \
+             store tensorlake_api_key secret"
+                .to_string(),
+        );
+    }
+
+    ctx.log("info", "sandbox_provisioner: provisioning via Tensorlake API");
+
+    let api_url = ctx
+        .config
+        .get("tensorlake_api_url")
+        .cloned()
+        .unwrap_or_else(|| "https://api.tensorlake.ai".to_string());
+
+    let image = fields
+        .get("sandbox_image")
+        .and_then(|v| v.as_str())
+        .or_else(|| ctx.config.get("tensorlake_image").map(|s| s.as_str()))
+        .unwrap_or("tensorlake/ubuntu");
+
+    let _workdir = fields
+        .get("workdir")
+        .and_then(|v| v.as_str())
+        .unwrap_or("/workspace");
+
+    let entity_id = ctx
+        .entity_state
+        .get("entity_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    let sandbox_name = format!("temper-agent-{entity_id}");
+
+    let create_url = format!("{api_url}/v2/sandboxes");
+    let headers = vec![
+        ("Authorization".to_string(), format!("Bearer {api_key}")),
+        ("content-type".to_string(), "application/json".to_string()),
+    ];
+
+    let body = json!({
+        "name": sandbox_name,
+        "image": image,
+        "cpus": 1.0,
+        "memory_mb": 1024,
+        "timeout_secs": 600,
+        "allow_internet_access": true,
+    });
+
+    let resp = ctx.http_call("POST", &create_url, &headers, &body.to_string())?;
+
+    if resp.status < 200 || resp.status >= 300 {
+        return Err(format!(
+            "Tensorlake sandbox creation failed (HTTP {}): {}",
+            resp.status,
+            &resp.body[..resp.body.len().min(500)]
+        ));
+    }
+
+    let parsed: Value = serde_json::from_str(&resp.body)
+        .map_err(|e| format!("failed to parse Tensorlake response: {e}"))?;
+
+    let sandbox_id = parsed
+        .get("sandbox_id")
+        .or_else(|| parsed.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let sandbox_url = parsed
+        .get("sandbox_url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            let ingress = parsed
+                .get("ingress_endpoint")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !ingress.is_empty() {
+                format!("https://{ingress}")
+            } else {
+                format!("https://{sandbox_id}.sandbox.tensorlake.ai")
+            }
+        });
+
+    ctx.log(
+        "info",
+        &format!(
+            "sandbox_provisioner: Tensorlake sandbox created: id={sandbox_id}, url={sandbox_url}"
+        ),
+    );
+
+    Ok(SandboxResult {
+        sandbox_url,
+        sandbox_id,
+    })
 }
