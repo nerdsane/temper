@@ -110,14 +110,14 @@ pub(crate) fn authorized_http_endpoint_host(
 
     let mut base_host =
         ProductionWasmHost::with_shared_streams(bootstrap_secrets, http_streams, stream_scope)
-        .with_spec_evaluator(spec_evaluator_fn())
-        .with_progress_emitter(progress_emitter)
-        .with_internal_api_base_url(internal_api_url)
-        .with_internal_capability_issuer(capability_issuer)
-        .with_invocation_context(invocation_context.clone())
-        // ARN-243: the HttpEndpoint path honours the same per-tenant LLM content
-        // export decision as the integration path above.
-        .with_llm_content_export(state.export_llm_content(tenant.as_str()));
+            .with_spec_evaluator(spec_evaluator_fn())
+            .with_progress_emitter(progress_emitter)
+            .with_internal_api_base_url(internal_api_url)
+            .with_internal_capability_issuer(capability_issuer)
+            .with_invocation_context(invocation_context.clone())
+            // ARN-243: the HttpEndpoint path honours the same per-tenant LLM content
+            // export decision as the integration path above.
+            .with_llm_content_export(state.export_llm_content(tenant.as_str()));
     if let Some(resolver) = secret_resolver {
         base_host = base_host.with_secret_resolver(resolver);
     }

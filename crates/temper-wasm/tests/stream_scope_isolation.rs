@@ -102,3 +102,79 @@ async fn owner_can_still_operate_its_own_stream() {
         .expect("owner reads its own request body");
     assert_eq!(body, b"legit-body");
 }
+
+/// ARN-207, ported from the rival PR #354 (the only head-op attack test in
+/// either PR). The response *head* — status + headers — is a separate authority
+/// surface from the body. A guest in another invocation must not be able to send
+/// a foreign response's head (injecting status/headers a victim's client would
+/// receive) or await it (observing when the victim's upstream responded).
+#[tokio::test]
+async fn guest_cannot_send_or_await_another_invocations_response_head() {
+    use temper_wasm::http_stream::HttpResponseHead;
+
+    let registry = Arc::new(HttpStreamRegistry::new());
+    let victim_scope = registry.mint_scope().await;
+    let victim = registry.open_inbound_exchange(victim_scope).await;
+
+    let attacker = attacker_host(registry.clone(), registry.mint_scope().await);
+
+    let sent = attacker
+        .http_stream_send_response_head(
+            victim.guest_response_body,
+            HttpResponseHead {
+                status: 200,
+                headers: vec![("x-injected".to_string(), "true".to_string())],
+            },
+        )
+        .await;
+    assert_eq!(
+        sent,
+        Err(StreamError::InvalidHandle),
+        "SECURITY: attacker sent a head onto another invocation's response: {sent:?}"
+    );
+
+    let awaited = attacker
+        .http_stream_response_head(victim.guest_response_body)
+        .await;
+    assert!(
+        awaited.is_err(),
+        "SECURITY: attacker awaited another invocation's response head: {awaited:?}"
+    );
+}
+
+/// ARN-207, ported from #354. The issue explicitly asks for a handle-guessing
+/// test. Under the scope model a guessed integer resolves to nothing without the
+/// owning scope, so this passes trivially — but it pins that contract against
+/// any future regression to a raw-handle lookup. The attacker sweeps a dense
+/// range of low handle values, exactly what a sequential-`u32` registry invites.
+#[tokio::test]
+async fn sequential_handle_enumeration_cannot_steal_a_body() {
+    use temper_wasm::http_stream::StreamHandle;
+
+    let registry = Arc::new(HttpStreamRegistry::new());
+    let victim_scope = registry.mint_scope().await;
+    let victim = registry.open_inbound_exchange(victim_scope).await;
+    registry
+        .write(victim.kernel_request_body, b"victim-tenant-secret".to_vec())
+        .await
+        .unwrap();
+
+    let attacker = attacker_host(registry.clone(), registry.mint_scope().await);
+    for raw in 0u32..=256 {
+        let guessed = StreamHandle(raw);
+        let read = attacker.http_stream_read(guessed).await;
+        assert!(
+            matches!(read, Err(StreamError::InvalidHandle)),
+            "SECURITY: enumerating handle {raw} escaped scope isolation: {read:?}"
+        );
+        let write = attacker
+            .http_stream_try_write(guessed, b"injected".to_vec())
+            .await;
+        assert!(
+            matches!(write, Err(StreamError::InvalidHandle)),
+            "SECURITY: enumerating handle {raw} allowed a write: {write:?}"
+        );
+    }
+    // The victim's own handles are somewhere in that swept range, untouched.
+    let _ = victim;
+}
