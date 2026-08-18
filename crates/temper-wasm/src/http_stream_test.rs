@@ -377,3 +377,37 @@ async fn closing_the_guest_handle_does_not_release_the_outbound_slot() {
         "a fully-done exchange must free its slot"
     );
 }
+
+#[tokio::test]
+async fn release_reclaims_the_request_channel_and_frees_the_slot_on_close() {
+    // ARN-207: release frees the request channel (request done) but spares the
+    // response handle (guest draining). This pins both — the request handles are
+    // gone after release, the response handle survives, and the slot frees when
+    // the guest then closes.
+    let reg = HttpStreamRegistry::new();
+    let scope = reg.mint_scope().await;
+    let ex = reg.open_outbound_exchange(scope).await.expect("open");
+
+    reg.release_outbound_exchange(
+        scope,
+        ex.guest_response_body,
+        ex.guest_request_body,
+        ex.bridge_request_body,
+        ex.bridge_response_body,
+    )
+    .await;
+
+    // Request channel reclaimed: guest write to its request handle is refused.
+    assert_eq!(
+        reg.write(ex.guest_request_body, b"x".to_vec()).await,
+        Err(StreamError::InvalidHandle),
+        "release must reclaim the request write handle"
+    );
+    // Response handle spared: closing it succeeds (Ok), rather than failing
+    // InvalidHandle as it would if release had removed it.
+    assert_eq!(
+        reg.close_as_guest(scope, ex.guest_response_body).await,
+        Ok(()),
+        "release must spare the response handle for the guest to drain"
+    );
+}

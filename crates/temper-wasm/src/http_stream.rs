@@ -543,11 +543,17 @@ impl HttpStreamRegistry {
         response_writer: StreamHandle,
     ) {
         let mut state = self.inner.lock().await;
-        state.response_head_receivers.remove(&response_reader.0);
-        // Reclaim the REQUEST channel — the request has been fully sent (or the
-        // send aborted), so nothing reads it again. Do NOT reclaim the RESPONSE
-        // handle: the bridge has closed its writer, but the guest may still be
-        // draining buffered response chunks from `response_reader`.
+        // Do NOT touch the response-head receiver here. It is response-side state:
+        // the guest consumes it via `await_response_head` (which removes it), or
+        // `close_scope` reclaims it at request end. Removing it on bridge
+        // completion destroys a head the guest has not read yet — a fast internal
+        // call can finish before the guest asks for its status (ARN-207). Same
+        // class as the response-body drain bug an earlier iteration had.
+        //
+        // Reclaim only the REQUEST channel — the request has been fully sent (or
+        // the send aborted), so nothing reads it again. Do NOT reclaim the
+        // RESPONSE handle: the guest may still be draining buffered response
+        // chunks from `response_reader`.
         for id in [request_writer.0, request_reader.0] {
             state.handles.remove(&id);
             state.pending_reads.remove(&id);

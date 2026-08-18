@@ -1744,24 +1744,7 @@ impl WasmHost for ProductionWasmHost {
             return Err(format!("unsupported HTTP method: {method}"));
         }
 
-        let exchange = self
-            .http_streams
-            .open_outbound_exchange(self.stream_scope)
-            .await
-            .map_err(|e| e.to_string())?;
-        let guest = exchange.guest_handles();
-        let bridge_req = exchange.bridge_request_body;
-        let bridge_resp = exchange.bridge_response_body;
-        let head_tx = exchange.bridge_head_sender;
         let streams = self.http_streams.clone();
-        // Captured for the slot release the bridge performs on completion, so the
-        // per-scope concurrency budget tracks live bridges, not guest closes
-        // (ARN-207). `guest.request_body`/`response_body` are the guest ends,
-        // `bridge_req`/`bridge_resp` the kernel ends.
-        let release_scope = self.stream_scope;
-        let release_resp_reader = guest.response_body;
-        let release_req_writer = guest.request_body;
-        let cleanup_streams = self.http_streams.clone();
         let (filtered_headers, mut span_hints) = split_span_hint_headers(&request.headers);
         // ARN-243: drop LLM content from span hints unless this tenant opted in.
         redact_llm_content_hints(&mut span_hints, self.export_llm_content);
@@ -1850,6 +1833,27 @@ impl WasmHost for ProductionWasmHost {
         {
             builder = builder.header("traceparent", traceparent);
         }
+
+        // Reserve the stream exchange only now — after every fallible step above
+        // (method validation, header construction, internal-auth header issuance)
+        // has succeeded. Opening it earlier stranded its slot + handles + head
+        // receiver on a header-build error, until `close_scope` (ARN-207).
+        let exchange = self
+            .http_streams
+            .open_outbound_exchange(self.stream_scope)
+            .await
+            .map_err(|e| e.to_string())?;
+        let guest = exchange.guest_handles();
+        let bridge_req = exchange.bridge_request_body;
+        let bridge_resp = exchange.bridge_response_body;
+        let head_tx = exchange.bridge_head_sender;
+        // Captured for the slot release the bridge performs on completion, so the
+        // per-scope concurrency budget tracks live bridges, not guest closes
+        // (ARN-207).
+        let release_scope = self.stream_scope;
+        let release_resp_reader = guest.response_body;
+        let release_req_writer = guest.request_body;
+        let cleanup_streams = self.http_streams.clone();
 
         tokio::spawn(
             async move {
