@@ -411,3 +411,42 @@ async fn release_reclaims_the_request_channel_and_frees_the_slot_on_close() {
         "release must spare the response handle for the guest to drain"
     );
 }
+
+#[tokio::test]
+async fn close_scope_aborts_detached_outbound_bridges() {
+    // ARN-358: close_scope must cancel a scope's detached outbound bridge tasks so
+    // their sockets die at request end, not at the reqwest timeout. Modelled with
+    // a task that would run "forever" (a stalled upstream); after close_scope it
+    // must be aborted.
+    let reg = Arc::new(HttpStreamRegistry::new());
+    let scope = reg.mint_scope().await;
+
+    let ran_to_completion = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = ran_to_completion.clone();
+    let join = tokio::spawn(async move {
+        // Stand in for an in-flight reqwest round-trip to a stalled endpoint.
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    reg.register_outbound_bridge(scope, join.abort_handle())
+        .await;
+
+    reg.close_scope(scope).await;
+
+    // The bridge is cancelled: awaiting it returns promptly with a cancellation.
+    // Bounded so a broken abort fails cleanly here instead of hanging on the
+    // stand-in's hour-long sleep.
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), join)
+        .await
+        .expect(
+            "close_scope must abort the bridge — awaiting it timed out, so it was not cancelled",
+        );
+    assert!(
+        outcome.is_err() && outcome.unwrap_err().is_cancelled(),
+        "close_scope must abort the scope's detached bridge tasks"
+    );
+    assert!(
+        !ran_to_completion.load(std::sync::atomic::Ordering::SeqCst),
+        "the aborted bridge must not have run to completion"
+    );
+}

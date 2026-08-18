@@ -1855,7 +1855,7 @@ impl WasmHost for ProductionWasmHost {
         let release_req_writer = guest.request_body;
         let cleanup_streams = self.http_streams.clone();
 
-        tokio::spawn(
+        let bridge_join = tokio::spawn(
             async move {
                 // Run the bridge inside an inner future so its early returns
                 // still fall through to the slot release below (ARN-207): the
@@ -1951,6 +1951,11 @@ impl WasmHost for ProductionWasmHost {
             }
             .instrument(span),
         );
+        // Record the bridge's abort handle so `close_scope` cancels its socket at
+        // request end rather than leaving it to the request timeout (ARN-358).
+        self.http_streams
+            .register_outbound_bridge(self.stream_scope, bridge_join.abort_handle())
+            .await;
 
         Ok(guest)
     }

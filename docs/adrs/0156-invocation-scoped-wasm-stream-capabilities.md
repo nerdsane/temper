@@ -140,11 +140,12 @@ Scope of this bound, stated precisely so it is not read as more than it is:
 - The slot bounds *concurrent* live exchanges within a scope, but two edges keep
   it from being an exact "socket lifetime" bound, both tracked rather than closed
   here (adversarial review, ARN-207):
-  - `close_scope` reclaims the registry at request end but does not *cancel* the
-    detached reqwest bridge tasks, so their sockets live until the client's
-    configured request timeout (`WasmResourceLimits::max_duration`, which the
-    outbound client enforces) rather than dying promptly at scope close. Bounded
-    by that timeout, not unbounded, but not immediate — **ARN-358**.
+  - `close_scope` cancels the scope's detached reqwest bridge tasks (their
+    `AbortHandle`s are retained per scope when the bridge is spawned), so their
+    sockets die promptly at request end rather than lingering until the outbound
+    client's timeout (`WasmResourceLimits::max_duration`). Aborting an
+    already-finished bridge is a no-op, so completed bridges need no per-task
+    removal.
   - A guest that reads a response to EOF but never calls `close` (the SDK does not
     close on EOF) holds the slot until request end, so such calls are throttled at
     `MAX_OUTBOUND_STREAMS_PER_SCOPE` rather than "never throttled". The honest fix

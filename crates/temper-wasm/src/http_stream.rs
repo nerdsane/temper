@@ -22,6 +22,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::task::AbortHandle;
 
 /// Chunk size used by SDK adapters when splitting writes. A single
 /// SDK-originated chunk may be smaller (short writes), but never larger.
@@ -229,6 +230,13 @@ struct RegistryState {
     /// buffers uncounted. `true` marks the bridge as done; the entry is removed
     /// when both conditions hold (see `release_outbound_exchange` and `close`).
     outbound_open: BTreeMap<StreamScope, BTreeMap<u32, bool>>,
+    /// Abort handles for the detached outbound bridge tasks (the reqwest
+    /// round-trips) per scope, so `close_scope` can cancel their sockets promptly
+    /// at request end instead of leaving them to the client timeout (ARN-358).
+    /// Handles accumulate for a scope's lifetime and are aborted+cleared at
+    /// `close_scope`; aborting an already-finished task is a harmless no-op, so
+    /// completed bridges need no per-task removal (which would race their spawn).
+    outbound_bridges: BTreeMap<StreamScope, Vec<AbortHandle>>,
     /// Outbound: oneshot receivers keyed on response-body handle ID.
     /// Bridge task holds the Sender and fires once the HTTP response
     /// head is received. Guest consumes via `await_response_head`.
@@ -261,6 +269,7 @@ impl HttpStreamRegistry {
                 handles: BTreeMap::new(),
                 scope_ids: BTreeMap::new(),
                 outbound_open: BTreeMap::new(),
+                outbound_bridges: BTreeMap::new(),
                 response_head_receivers: BTreeMap::new(),
                 inbound_head_senders: BTreeMap::new(),
                 inbound_head_receivers: BTreeMap::new(),
@@ -523,6 +532,18 @@ impl HttpStreamRegistry {
     /// Reclaim every handle, pending read, and head channel owned by
     /// `scope` (ADR-0156 Sub-Decision 3). Dropping the channels signals
     /// EOF/abort to any peer and unblocks pump/bridge tasks. Idempotent.
+    /// Record the abort handle of an outbound bridge task so `close_scope` can
+    /// cancel its socket at request end (ARN-358). Called by the host right after
+    /// it spawns the bridge.
+    pub async fn register_outbound_bridge(&self, scope: StreamScope, handle: AbortHandle) {
+        let mut state = self.inner.lock().await;
+        state
+            .outbound_bridges
+            .entry(scope)
+            .or_default()
+            .push(handle);
+    }
+
     /// Release an outbound exchange's concurrency slot and reclaim its handles
     /// and head receiver.
     ///
@@ -582,6 +603,17 @@ impl HttpStreamRegistry {
     }
 
     fn close_scope_locked(state: &mut RegistryState, scope: StreamScope) {
+        // Cancel this scope's detached outbound bridge tasks first, so their
+        // sockets die now rather than at the reqwest timeout (ARN-358). Done
+        // before the `scope_ids` early-return below, because a scope can hold
+        // live bridges without any remaining handle ids. Abort on a finished task
+        // is a no-op.
+        if let Some(bridges) = state.outbound_bridges.remove(&scope) {
+            for handle in bridges {
+                handle.abort();
+            }
+        }
+        state.outbound_open.remove(&scope);
         let Some(ids) = state.scope_ids.remove(&scope) else {
             return;
         };
@@ -592,7 +624,6 @@ impl HttpStreamRegistry {
             state.inbound_head_senders.remove(&id);
             state.inbound_head_receivers.remove(&id);
         }
-        state.outbound_open.remove(&scope);
     }
 
     /// Try to reclaim `scope` synchronously via a non-blocking lock.
