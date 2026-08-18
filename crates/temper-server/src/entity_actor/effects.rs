@@ -1,14 +1,10 @@
-//! Shared effect application — the single source of truth.
+//! Default-path effect application for [`EntityState`].
 //!
-//! This module contains the ONE function that mutates [`EntityState`] in response
-//! to transition effects. It is called by:
-//! - Production actor handle (`EntityActor::handle`)
-//! - Production event replay (`EntityActor::replay_events`)
-//! - Deterministic simulation (`EntityActorHandler::handle_message`)
-//!
-//! **FoundationDB DST principle**: The exact same code path must run in both
-//! production and simulation. Having a single `apply_effects()` function
-//! guarantees that simulation tests exercise the real production logic.
+//! This is the production/sim apply used by `EntityActor` handle, replay, and
+//! `EntityActorHandler`. It is **not** the only interpreter: `temper-actor-runtime`
+//! has a second `apply_effect` (fail-closed on 8/16 variants) and `temper-verify`
+//! has `ModelEffect`. The portable contract (`Effect` enum) lives in `temper-jit`;
+//! apply does not.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

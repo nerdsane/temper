@@ -256,6 +256,71 @@ impl SecurityContext {
         }
     }
 
+    /// Construct security context from a JWT whose signature was verified
+    /// against a registered trusted issuer.
+    ///
+    /// Like [`from_resolved_identity`](Self::from_resolved_identity), identity
+    /// comes from a platform-verified source, never self-declared headers, and
+    /// `agentTypeVerified` is set. Unlike it, this path carries `acting_for`
+    /// (the owning human behind an agent) and `role`, both taken from verified
+    /// token claims. See RFC-0002.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_verified_jwt(
+        principal_id: &str,
+        kind: PrincipalKind,
+        agent_type: Option<&str>,
+        acting_for: Option<&str>,
+        role: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Self {
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "agentTypeVerified".to_string(),
+            serde_json::Value::Bool(true),
+        );
+
+        let mut context_attrs = HashMap::new();
+        context_attrs.insert(
+            "agentId".to_string(),
+            serde_json::Value::String(principal_id.to_string()),
+        );
+        if let Some(at) = agent_type {
+            context_attrs.insert(
+                "agentType".to_string(),
+                serde_json::Value::String(at.to_string()),
+            );
+        }
+        context_attrs.insert(
+            "agentTypeVerified".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        if let Some(af) = acting_for {
+            context_attrs.insert(
+                "actingFor".to_string(),
+                serde_json::Value::String(af.to_string()),
+            );
+        }
+        if let Some(sid) = session_id {
+            context_attrs.insert(
+                "sessionId".to_string(),
+                serde_json::Value::String(sid.to_string()),
+            );
+        }
+
+        SecurityContext {
+            principal: Principal {
+                id: principal_id.to_string(),
+                kind,
+                role: role.map(|r| r.to_string()),
+                acting_for: acting_for.map(|a| a.to_string()),
+                agent_type: agent_type.map(|a| a.to_string()),
+                attributes,
+            },
+            context_attrs,
+            correlation_id: uuid::Uuid::now_v7().to_string(),
+        }
+    }
+
     /// Enrich an internal context with an explicitly unverified agent identity.
     ///
     /// **Deprecated**: Use `from_resolved_identity()` for credential-based

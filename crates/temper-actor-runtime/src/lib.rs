@@ -1,12 +1,8 @@
-//! PG-backed mailbox actor runtime for Temper.
+//! Optional Postgres runtime adapter (`--actor-runtime postgres`). Not default serve.
 //!
-//! Actors communicate via addressed messages (mailboxes), not pub/sub.
-//! Each actor has a handle `(session_id, actor_type)`, receives messages
-//! one at a time (FIFO), and sends messages to other actors via `tell()`
-//! (buffered, transactional) or `ask()` (immediate, request-response).
-//!
-//! This is Layer 1 — the generic runtime. Layer 2 (IOA specs, TransitionTable)
-//! builds on top of this.
+//! Mailbox + scheduler in PG. `SpecDrivenActor` evaluates `temper-jit` tables
+//! then applies effects here — a second interpreter. Unimplemented `Effect`
+//! variants fail closed. Default path is `temper-server` EntityActor.
 
 pub mod actor;
 pub mod bus;

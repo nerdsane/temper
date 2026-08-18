@@ -439,6 +439,13 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
         temper_platform::persist_system_verification(&turso, &sys_hashes, &sys_cache).await;
     }
 
+    // Every tenant that receives the agent specs also needs the trusted issuer
+    // registered, or issuer-signed JWTs 401 there: bearer resolution looks the
+    // issuer up in the REQUEST's tenant, not in `default`.
+    let mut agent_spec_tenants: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    agent_spec_tenants.insert("default".to_string());
+
     let default_cache = load_verified_cache(state, "default").await;
     let default_hashes =
         temper_platform::bootstrap_agent_specs(state, "default", false, &default_cache);
@@ -453,6 +460,7 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
     }
 
     for (tenant, _dir) in apps {
+        agent_spec_tenants.insert(tenant.clone());
         let cache = load_verified_cache(state, tenant).await;
         // App tenants already have user specs loaded in Phase 2; merge the
         // built-in agent OS entities so we do not replace their entity-set map.
@@ -472,6 +480,7 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
         .and_then(|stack| stack.turso.clone())
     {
         for tenant in provider.connected_tenants().await {
+            agent_spec_tenants.insert(tenant.clone());
             let cache = load_verified_cache(state, &tenant).await;
             let hashes = temper_platform::bootstrap_agent_specs(state, &tenant, true, &cache);
             if let Some(turso) = state.server.turso_store_for_tenant(&tenant).await {
@@ -484,6 +493,14 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
     // tenant. It grants no implicit authority in other tenants (ADR-0157).
     if let Some(ref api_key) = state.api_token {
         temper_platform::bootstrap_operator_credential(state, api_key, "default").await;
+    }
+
+    // Register a trusted JWT issuer from env config, if provided (ARN-255).
+    // This is how a deployment activates the platform-issued-token path without
+    // an authenticated API call. Registered for every tenant that carries the
+    // agent specs, since the issuer is resolved in the request's own tenant.
+    for tenant in &agent_spec_tenants {
+        temper_platform::bootstrap_trusted_issuer_from_env(state, tenant).await;
     }
 }
 

@@ -62,6 +62,8 @@ const TOOL_CALL_IOA: &str = include_str!("specs/tool_call.ioa.toml");
 const SCHEDULE_IOA: &str = include_str!("specs/schedule.ioa.toml");
 const POLICY_IOA: &str = include_str!("specs/policy.ioa.toml");
 const AGENT_CREDENTIAL_IOA: &str = include_str!("specs/agent_credential.ioa.toml");
+const TRUSTED_ISSUER_IOA: &str = include_str!("specs/trusted_issuer.ioa.toml");
+const PRINCIPAL_GENERATION_IOA: &str = include_str!("specs/principal_generation.ioa.toml");
 const AGENT_CSDL: &str = include_str!("specs/agent_model.csdl.xml");
 
 /// Agent entity specs as (entity_type, ioa_source) pairs.
@@ -74,6 +76,8 @@ const AGENT_SPECS: &[(&str, &str)] = &[
     ("Schedule", SCHEDULE_IOA),
     ("Policy", POLICY_IOA),
     ("AgentCredential", AGENT_CREDENTIAL_IOA),
+    ("TrustedIssuer", TRUSTED_ISSUER_IOA),
+    ("PrincipalGeneration", PRINCIPAL_GENERATION_IOA),
 ];
 
 /// Verify, parse, and register a set of IOA specs under a tenant.
@@ -466,6 +470,68 @@ pub async fn bootstrap_operator_credential(state: &PlatformState, api_key: &str,
     );
 }
 
+/// Register a trusted JWT issuer from environment configuration at startup.
+///
+/// Mirrors [`bootstrap_operator_credential`]: a deployment activates the
+/// platform-issued-token path (ARN-255) by setting three env vars — the issuer
+/// URL, its inline JWKS, and the expected audience — instead of making an
+/// authenticated API call. Registration goes through the normal dispatch path
+/// under a service context, so it is not gated on a tenant Cedar policy.
+///
+/// No-op when the env vars are unset. Idempotent: re-registering an existing
+/// issuer is a self-loop on `Active`.
+pub async fn bootstrap_trusted_issuer_from_env(state: &PlatformState, tenant: &str) {
+    let (issuer, jwks_json, audience) = match (
+        std::env::var("TEMPER_TRUSTED_ISSUER_URL")
+            .ok()
+            .filter(|s| !s.is_empty()),
+        std::env::var("TEMPER_TRUSTED_ISSUER_JWKS")
+            .ok()
+            .filter(|s| !s.is_empty()),
+        std::env::var("TEMPER_TRUSTED_ISSUER_AUD")
+            .ok()
+            .filter(|s| !s.is_empty()),
+    ) {
+        (Some(u), Some(j), Some(a)) => (u, j, a),
+        _ => return,
+    };
+
+    let tenant_id = temper_runtime::tenant::TenantId::new(tenant);
+    // Registering a trusted issuer is System-only (system-platform Cedar policy);
+    // the platform seeding itself acts as System.
+    let agent_ctx = temper_server::request_context::AgentContext::system();
+    let algorithms =
+        std::env::var("TEMPER_TRUSTED_ISSUER_ALGS").unwrap_or_else(|_| "ES256".to_string());
+
+    let result = state
+        .server
+        .dispatch_tenant_action(
+            &tenant_id,
+            "TrustedIssuer",
+            &issuer,
+            "RegisterIssuer",
+            serde_json::json!({
+                "issuer": issuer,
+                "jwks_json": jwks_json,
+                "audience": audience,
+                "algorithms": algorithms,
+                "description": "Registered from environment at startup",
+                "created_by": "bootstrap",
+            }),
+            &agent_ctx,
+        )
+        .await;
+
+    match result {
+        Ok(_) => tracing::info!(
+            "Trusted issuer '{issuer}' registered for tenant '{tenant}' from environment"
+        ),
+        Err(e) => tracing::error!(
+            "Failed to register trusted issuer '{issuer}' for tenant '{tenant}': {e}"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -776,6 +842,24 @@ initial = "Created"
 
     #[test]
     fn test_agent_specs_count() {
-        assert_eq!(AGENT_SPECS.len(), 8);
+        assert_eq!(AGENT_SPECS.len(), 10);
+    }
+
+    #[test]
+    fn test_trusted_issuer_spec_is_registered() {
+        assert!(
+            AGENT_SPECS
+                .iter()
+                .any(|(name, source)| *name == "TrustedIssuer" && !source.is_empty())
+        );
+    }
+
+    #[test]
+    fn test_principal_generation_spec_is_registered() {
+        assert!(
+            AGENT_SPECS
+                .iter()
+                .any(|(name, source)| *name == "PrincipalGeneration" && !source.is_empty())
+        );
     }
 }

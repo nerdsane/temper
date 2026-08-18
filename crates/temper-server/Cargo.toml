@@ -56,6 +56,11 @@ cedar-policy = { workspace = true }
 async-trait = { workspace = true }
 tokio-tungstenite = { version = "0.27", features = ["native-tls"] }
 ed25519-dalek = "2.1"
+# ES256 (ECDSA P-256) verification for platform-issued JWTs (ARN-255).
+# RustCrypto (pure Rust, no ring) to match existing sha2/aes-gcm/dalek usage;
+# time validation is done against sim_now(), never the wall clock, so no
+# JWT library's internal clock is involved.
+p256 = { version = "0.13", features = ["ecdsa"] }
 futures-util = "0.3"
 sha1 = "0.10"
 base64 = "0.22"

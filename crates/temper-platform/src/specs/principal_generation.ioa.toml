@@ -1,0 +1,43 @@
+# PrincipalGeneration Entity — I/O Automaton Specification
+#
+# The kernel-side source of truth for "sign out everywhere" (RFC-0002, ARN-255,
+# option A). One entity per principal subject (entity id = the human's `sub`),
+# holding a monotonically increasing `generation` counter.
+#
+# Flow:
+#   - The authorization server reads this counter when it mints a token and
+#     stamps the value into the token's `auth_generation` claim.
+#   - The kernel resolver rejects any token whose `auth_generation` is older
+#     than the current counter.
+#   - "Sign out everywhere" dispatches `BumpGeneration`, which advances the
+#     counter and thereby invalidates every token issued before that moment
+#     (within the resolver's short cache window).
+#
+# The generation lives here, in the kernel, NOT on an app entity like Member —
+# so the kernel can enforce it generically for any app. Bumping it is a
+# governed action, so revocation is a first-class platform capability.
+
+[automaton]
+name = "PrincipalGeneration"
+states = ["Active"]
+initial = "Active"
+
+# --- State Variables ---
+
+# Monotonic token generation. Every `BumpGeneration` advances it by one.
+[[state]]
+name = "generation"
+type = "counter"
+initial = "0"
+
+# --- Actions ---
+
+[[action]]
+name = "BumpGeneration"
+kind = "input"
+from = ["Active"]
+effect = [
+  { type = "increment", var = "generation" },
+  { type = "emit", event = "GenerationBumped" }
+]
+hint = "Sign out everywhere: invalidate every token issued for this principal before now by advancing its generation."

@@ -11,10 +11,13 @@ use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
 use crate::entity_actor::{EntityState, recover_authoritative_entity_state_from_store};
+use crate::identity::jwt;
 use crate::state::ServerState;
 
 /// Maximum opaque credential size accepted by the identity boundary.
 pub const MAX_CREDENTIAL_BYTES: usize = 8 * 1024;
+/// Clock-skew leeway for JWT exp/nbf validation (seconds).
+const JWT_LEEWAY_SECS: i64 = 60;
 
 /// A platform-resolved agent identity.
 ///
@@ -30,6 +33,16 @@ pub struct ResolvedIdentity {
     pub agent_type_name: String,
     /// Whether this identity was verified through the credential registry.
     pub verified: bool,
+    /// JWT path only: the owning human (agent's `acting_for` / token `sub`).
+    pub acting_for: Option<String>,
+    /// True when this identity came from a verified trusted-issuer JWT rather
+    /// than the AgentCredential registry.
+    pub from_jwt: bool,
+    /// True when the principal is the human themselves (token carried only a
+    /// `sub`, no `agent_type`) — a Cedar Customer, not an Agent.
+    pub is_human: bool,
+    /// Verified `role` claim (Cedar), when the issuer stamped one.
+    pub role: Option<String>,
 }
 
 /// Resolves bearer tokens to platform-assigned agent identities.
@@ -66,6 +79,13 @@ impl IdentityResolver {
         if bearer_token.is_empty() || bearer_token.len() > MAX_CREDENTIAL_BYTES {
             return None;
         }
+
+        // JWS-shaped tokens are verified against a registered TrustedIssuer;
+        // opaque tokens are looked up in the AgentCredential registry.
+        if looks_like_jwt(bearer_token) {
+            return self.resolve_jwt(state, tenant, bearer_token).await;
+        }
+
         let key_hash = hash_token(bearer_token);
 
         // Look up AgentCredential entity. We use the key_hash as entity ID
@@ -136,6 +156,10 @@ impl IdentityResolver {
             agent_type_id: agent_type_id.to_string(),
             agent_type_name,
             verified: true,
+            acting_for: None,
+            from_jwt: false,
+            is_human: false,
+            role: None,
         };
 
         // Re-check after the linked AgentType lookup so a short-lived
@@ -145,6 +169,147 @@ impl IdentityResolver {
         }
 
         Some(identity)
+    }
+
+    /// JWT path: verify an ES256 token against its registered `TrustedIssuer`,
+    /// then map verified claims to an identity. No caching — every call
+    /// re-reads authoritative state, matching the credential path.
+    async fn resolve_jwt(
+        &self,
+        state: &ServerState,
+        tenant: &TenantId,
+        token: &str,
+    ) -> Option<ResolvedIdentity> {
+        // Read `iss` from the unverified payload to pick the issuer entity.
+        let unverified = jwt::decode_claims_unverified(token).ok()?;
+        let issuer_id = unverified.iss;
+
+        // `iss` is attacker-chosen and unverified, and entity reads spawn the
+        // entity on demand — so reading it directly would let anyone presenting
+        // a junk token persist an Active TrustedIssuer row with empty fields.
+        // Check existence first and never materialise one from a token.
+        if !state.entity_exists(tenant, "TrustedIssuer", &issuer_id) {
+            return None;
+        }
+
+        let issuer_response = state
+            .get_tenant_entity_state(tenant, "TrustedIssuer", &issuer_id)
+            .await
+            .ok()?;
+        if issuer_response.state.status != "Active" {
+            return None;
+        }
+
+        let fields = &issuer_response.state.fields;
+        let jwks_json = fields.get("jwks_json")?.as_str()?;
+        let audience = fields.get("audience")?.as_str()?;
+        let jwks: jwt::Jwks = serde_json::from_str(jwks_json).ok()?;
+
+        let now_unix = sim_now().timestamp();
+        let claims = jwt::verify(
+            token,
+            &jwks,
+            &issuer_id,
+            audience,
+            now_unix,
+            JWT_LEEWAY_SECS,
+        )
+        .ok()?;
+
+        // Sign-out-everywhere: reject a token whose generation is older than the
+        // principal's current generation (ARN-255 option A), keyed on the human
+        // `sub` so signing a human out also invalidates agents acting for them.
+        // A missing claim is treated as generation 0 — revocation must not be
+        // skippable by an issuer that fails to stamp it.
+        if let Some(sub) = claims.sub.as_deref() {
+            let token_gen = claims.auth_generation.unwrap_or(0);
+            // `?` denies when the read failed — see current_generation.
+            if token_gen < self.current_generation(state, tenant, sub).await? {
+                return None;
+            }
+        }
+
+        // Grant liveness: a revoked agent grant must stop working at the kernel,
+        // not just at the MCP front door. The same counter is keyed by
+        // `grant_id`; any bump (> 0) means revoked, since a grant is never
+        // re-issued under the same id.
+        if let Some(grant_id) = claims.grant_id.as_deref().filter(|g| !g.is_empty())
+            && self.current_generation(state, tenant, grant_id).await? > 0
+        {
+            return None;
+        }
+
+        // A token with an `agent_type` is an agent acting for the human `sub`;
+        // a token with only a `sub` is the human themselves (a Customer).
+        let identity = match claims.agent_type.as_deref().filter(|s| !s.is_empty()) {
+            Some(agent_type) => {
+                let client_id = claims.client_id.clone().unwrap_or_default();
+                if client_id.is_empty() {
+                    return None;
+                }
+                ResolvedIdentity {
+                    agent_instance_id: client_id,
+                    agent_type_id: String::new(),
+                    agent_type_name: agent_type.to_string(),
+                    verified: true,
+                    acting_for: claims.sub.clone(),
+                    from_jwt: true,
+                    is_human: false,
+                    role: claims.role.clone(),
+                }
+            }
+            None => {
+                let sub = claims.sub.clone().unwrap_or_default();
+                if sub.is_empty() {
+                    return None;
+                }
+                ResolvedIdentity {
+                    agent_instance_id: sub,
+                    agent_type_id: String::new(),
+                    agent_type_name: String::new(),
+                    verified: true,
+                    acting_for: None,
+                    from_jwt: true,
+                    is_human: true,
+                    role: claims.role.clone(),
+                }
+            }
+        };
+        Some(identity)
+    }
+
+    /// Current monotonic generation for a principal/grant key. `None` means the
+    /// read failed and the caller must DENY (fail closed); `Some(0)` means the
+    /// counter has never been bumped (never revoked) without materialising a row.
+    async fn current_generation(
+        &self,
+        state: &ServerState,
+        tenant: &TenantId,
+        key: &str,
+    ) -> Option<i64> {
+        if !state.entity_exists(tenant, "PrincipalGeneration", key) {
+            return Some(0);
+        }
+        match state
+            .get_tenant_entity_state(tenant, "PrincipalGeneration", key)
+            .await
+        {
+            Ok(resp) => Some(
+                resp.state
+                    .counters
+                    .get("generation")
+                    .map(|c| *c as i64)
+                    .unwrap_or(0),
+            ),
+            Err(e) => {
+                tracing::warn!(
+                    tenant = %tenant, key, error = %e,
+                    "PrincipalGeneration read failed; denying the token rather than \
+                     treating it as never-revoked"
+                );
+                None
+            }
+        }
     }
 }
 
@@ -295,5 +460,30 @@ mod tests {
             &first,
             &state(3, "Active", serde_json::json!({"agent_type_id": "type-b"}))
         ));
+    }
+}
+
+/// A JWS compact serialization is exactly three non-empty dot-separated parts.
+/// Opaque credential tokens (e.g. `kc_...`) never match, so they take the
+/// registry path.
+fn looks_like_jwt(token: &str) -> bool {
+    let mut parts = token.split('.');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(h), Some(p), Some(s), None) if !h.is_empty() && !p.is_empty() && !s.is_empty()
+    )
+}
+
+#[cfg(test)]
+mod jwt_shape_tests {
+    use super::looks_like_jwt;
+
+    #[test]
+    fn distinguishes_jwt_from_opaque() {
+        assert!(looks_like_jwt("eyJhbGciOiJFUzI1NiJ9.eyJpc3MiOiJ4In0.c2ln"));
+        assert!(!looks_like_jwt("kc_3f2a9b8c7d6e5f4a"));
+        assert!(!looks_like_jwt(""));
+        assert!(!looks_like_jwt("a.b"));
+        assert!(!looks_like_jwt("a.b.c.d"));
     }
 }

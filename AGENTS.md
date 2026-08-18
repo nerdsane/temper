@@ -64,15 +64,18 @@ Production Chat: end users operate the app
 Two separated contexts: Developer Chat (design-time, can modify specs) and Production Chat (runtime, operates within specs). The developer holds the approval gate for all behavioral changes.
 
 ## Architecture
-- **temper-spec**: I/O Automaton TOML parser + CSDL parser
-- **temper-verify**: Stateright model checking, deterministic simulation, property tests
-- **temper-jit**: TransitionTable builder from IOA specs (no verification deps in production)
-- **temper-runtime**: Actor system, SimScheduler, SimActorSystem, sim_now()/sim_uuid(), TenantId
-- **temper-server**: HTTP server, EntityActor, EntityActorHandler, SpecRegistry (multi-tenant)
-- **temper-observe**: WideEvent telemetry (OTEL spans + metrics), trajectory tracking
-- **temper-evolution**: O-P-A-D-I record chain, Evolution Engine
-- **temper-store-postgres**: Event sourcing persistence (tenant-scoped)
-- **temper-store-redis**: Mailbox and placement cache (tenant-scoped)
+
+Six seams. ★ = replaceable plug. `apply_effect` must stay one function; today it is three.
+
+- **How defined** — `temper-spec` (IOA + CSDL parsers)
+- **What is defined** — `temper-jit` (`TransitionTable`, `Effect`). Apply is *not* here yet.
+- **How verified** — `temper-verify` (L0–L3). Has its own `ModelEffect`.
+- **Control plane** — `temper-odata`, `temper-authz`, `temper-observe`, `temper-evolution`, `temper-ots`, `temper-platform`, `temper-cli`, `temper-mcp`, `temper-sdk`, `temper-sandbox`
+- **Runtime ★** — `temper-runtime` (mailbox, sim, `EventStore` trait). Optional PG adapter: `temper-actor-runtime` (not default serve). WASM host: `temper-wasm` + `temper-wasm-sdk`. `temper-agents` is Gabriele’s PG-path agent chain; not default serve.
+- **Store ★** — `temper-store-turso` (default), `temper-store-sim`, `temper-store-postgres`, `temper-store-redis` (event journal only)
+- **Mix — read last** — `temper-server` (HTTP + EntityActor + `apply_effects` + registry)
+
+Default serve is own-Rust actors. `--actor-runtime postgres` is an adapter, not a second kernel.
 
 ## Architecture Decision Records (ADRs)
 
@@ -193,3 +196,8 @@ Before deploying any spec change:
 3. Entity actors hot-deploy without dropping existing state
 4. OData endpoints respond correctly for all entity types
 5. Telemetry emits WideEvents for all transitions
+
+## Definition of done — review bar
+
+- **Three independent fresh-context reviews before anything is "done".** Nothing counts as fully implemented until all three have reviewed it, each with NO prior context on the work: **Codex** (`codex exec --model gpt-5.6-sol -c model_reasoning_effort="high" --sandbox read-only`), **a second independent Codex Sol session**, and **an independent Fable** (a fresh Claude subagent, `model: fable`). Run **Greptile** on every PR too (`@greptile review` as a PR comment). Ask each for severity, `file:line`, and a concrete failure scenario, then fix everything they find — including findings that criticise your own fixes — and re-verify. They catch different classes: one finds bypass surface, one finds fail-open behaviour, one finds whether it actually runs. Two agreeing does not excuse skipping the third.
+- **Test the production shape, not a convenient one.** A gate proven against a permissive or mock engine, and an end-to-end that only exercises the happy verb, are not proof — verify against the real policy/config set and probe the generic paths too (PATCH/PUT/DELETE, not only the named action).

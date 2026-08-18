@@ -1,8 +1,7 @@
-//! temper-server: HTTP server assembly for Temper entity services.
+//! Mix crate — control plane + default runtime + apply. Read last.
 //!
-//! Composes OData routing and actor dispatch into an axum server.
-//! The entity actor uses JIT TransitionTables for state machine transitions,
-//! ensuring the same logic verified by DST runs in production.
+//! HTTP / OData / Cedar / registry live here with EntityActor and
+//! `entity_actor/effects.rs` (the default `apply_effects`). Not a plug.
 
 pub mod adapters;
 mod admin;
