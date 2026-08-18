@@ -77,7 +77,8 @@ pub fn build_router(state: ServerState) -> Router {
 
     let router = Router::new()
         .nest("/tdata", tdata)
-        .nest("/v1", crate::agent_runtime::build_agent_runtime_router())
+        .nest("/v1", crate::agent_runtime::build_agent_runtime_router()
+            .layer(axum::middleware::from_fn(crate::agent_runtime::auth::inject_local_dev_auth)))
         .nest("/_admin", crate::admin::build_admin_router())
         .route("/temper-client.js", get(serve_temper_client))
         .route("/static/temper-client.js", get(serve_temper_client))
