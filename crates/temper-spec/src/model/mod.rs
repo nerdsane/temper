@@ -15,7 +15,6 @@ pub enum SpecSource {
 }
 
 /// The unified specification model that links CSDL + specification sources (IOA/TLA+).
-/// This is what codegen consumes to produce Rust actors.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpecModel {
     /// The CSDL document (data model).
@@ -28,7 +27,7 @@ pub struct SpecModel {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ValidationResult {
-    /// Validation failures that should block downstream codegen or linking.
+    /// Validation failures that should block linking.
     pub errors: Vec<String>,
     /// Non-blocking mismatches or gaps detected during spec linking.
     pub warnings: Vec<String>,
@@ -61,7 +60,7 @@ pub fn build_spec_model(
 /// `sources` maps entity type name → [`SpecSource`] (either IOA or TLA+).
 /// IOA sources go through `parse_automaton()` → `to_state_machine()`.
 /// TLA+ sources go through `extract_state_machine()`.
-/// Both produce the same `StateMachine` for the codegen pipeline.
+/// Both produce the same `StateMachine`.
 pub fn build_spec_model_mixed(
     csdl: csdl::CsdlDocument,
     sources: HashMap<String, SpecSource>,

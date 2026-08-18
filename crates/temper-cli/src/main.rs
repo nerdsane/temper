@@ -1,14 +1,13 @@
 //! temper-cli: Command-line interface for Temper.
 //!
-//! Provides commands for parsing specifications, generating code,
-//! running model checks, and managing Temper projects.
+//! Provides commands for parsing specifications, running model checks,
+//! and managing Temper projects.
 
 /// Use jemalloc to aggressively return freed pages to the OS via MADV_DONTNEED,
 /// preventing the RSS bloat caused by glibc malloc on Debian bookworm (Railway).
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-mod codegen;
 mod decide;
 mod init;
 mod install;
@@ -50,15 +49,6 @@ struct Cli {
 enum Commands {
     /// Initialize a new Temper project
     Init { name: String },
-    /// Generate Rust code from specifications
-    Codegen {
-        /// Path to the specs directory
-        #[arg(short, long, default_value = "specs")]
-        specs_dir: String,
-        /// Output directory for generated code
-        #[arg(short, long, default_value = "generated")]
-        output_dir: String,
-    },
     /// Run the verification cascade
     Verify {
         /// Path to the specs directory
@@ -159,10 +149,6 @@ enum Commands {
         /// per entity. Exit 0 = pass; non-zero or timeout = failure.
         #[arg(long)]
         verify_subprocess: bool,
-        /// Discord bot token for channel transport (enables Discord Gateway).
-        /// Falls back to DISCORD_BOT_TOKEN env var if not provided.
-        #[arg(long)]
-        discord_bot_token: Option<String>,
     },
     /// Run the verification cascade on IOA TOML source read from stdin.
     ///
@@ -325,10 +311,6 @@ async fn async_main() -> anyhow::Result<()> {
             None => install::run()?,
         },
         Commands::Decide { port, tenant } => decide::run(port, &tenant).await?,
-        Commands::Codegen {
-            specs_dir,
-            output_dir,
-        } => codegen::run(&specs_dir, &output_dir)?,
         Commands::Verify { specs_dir } => verify::run(&specs_dir)?,
         Commands::VerifyRemote {
             specs_dir,
@@ -347,7 +329,6 @@ async fn async_main() -> anyhow::Result<()> {
             specs_dir,
             tenant,
             verify_subprocess,
-            discord_bot_token,
         } => {
             let storage_explicit =
                 std::env::args().any(|arg| arg == "--storage" || arg.starts_with("--storage="));
@@ -394,8 +375,6 @@ async fn async_main() -> anyhow::Result<()> {
             {
                 apps.push((tenant.clone(), dir.clone()));
             }
-            let discord_token =
-                discord_bot_token.or_else(|| std::env::var("DISCORD_BOT_TOKEN").ok()); // determinism-ok: read once at startup
             serve::run(
                 port,
                 apps,
@@ -406,8 +385,6 @@ async fn async_main() -> anyhow::Result<()> {
                 actor_backed_type,
                 !no_observe,
                 verify_subprocess,
-                discord_token,
-                tenant,
             )
             .await?
         }
@@ -455,43 +432,6 @@ mod tests {
         match cli.command {
             Commands::Init { name } => assert_eq!(name, "my-project"),
             _ => panic!("expected Init command"),
-        }
-    }
-
-    #[test]
-    fn test_cli_parse_codegen_defaults() {
-        let cli = Cli::parse_from(["temper", "codegen"]);
-        match cli.command {
-            Commands::Codegen {
-                specs_dir,
-                output_dir,
-            } => {
-                assert_eq!(specs_dir, "specs");
-                assert_eq!(output_dir, "generated");
-            }
-            _ => panic!("expected Codegen command"),
-        }
-    }
-
-    #[test]
-    fn test_cli_parse_codegen_custom() {
-        let cli = Cli::parse_from([
-            "temper",
-            "codegen",
-            "--specs-dir",
-            "my-specs",
-            "--output-dir",
-            "my-out",
-        ]);
-        match cli.command {
-            Commands::Codegen {
-                specs_dir,
-                output_dir,
-            } => {
-                assert_eq!(specs_dir, "my-specs");
-                assert_eq!(output_dir, "my-out");
-            }
-            _ => panic!("expected Codegen command"),
         }
     }
 

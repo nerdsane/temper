@@ -323,8 +323,9 @@ pub struct VerificationSummary {
 /// Implementation plan for an approved change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImplementationPlan {
-    /// The codegen command to run (e.g., "temper codegen --from-spec v47").
-    pub codegen_command: String,
+    /// How to apply the approved spec change (reload the TransitionTable).
+    #[serde(default, alias = "codegen_command")]
+    pub apply_command: String,
     /// Whether a database migration is required.
     pub migration_required: bool,
     /// Deployment strategy (e.g., "Rolling restart", "Blue-green").
@@ -570,7 +571,7 @@ mod tests {
                 proptest_cases: 100_000,
             }),
             implementation: Some(ImplementationPlan {
-                codegen_command: "temper codegen --from-spec v47".to_string(),
+                apply_command: "reload TransitionTable from spec v47".to_string(),
                 migration_required: false,
                 deployment_strategy: "Rolling restart".to_string(),
             }),

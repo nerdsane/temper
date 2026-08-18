@@ -36,7 +36,6 @@ futures = { workspace = true }
 tempfile = "3.27.0"
 
 [dev-dependencies]
-temper-codegen = { workspace = true }
 tokio-test = { workspace = true }
 tower = { workspace = true }
 hyper = { workspace = true }

@@ -5,7 +5,6 @@
 - Deciders: Temper core maintainers
 - Related:
   - `README.md` (cross-entity invariants gap)
-  - `docs/GAP_TRACKER.md` (cross-entity coordination resolved via reactions)
   - `crates/temper-server/src/reaction/dispatcher.rs` (current fire-and-forget behavior)
 
 ## Context

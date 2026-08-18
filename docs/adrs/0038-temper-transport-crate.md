@@ -1,6 +1,6 @@
 # ADR-0038: temper-transport Crate — Platform-Agnostic Channel Transports
 
-- Status: Proposed
+- Status: Superseded — `temper-transport` and `os-apps/temper-channels` removed 2026-08-17. Live Discord is TemperPaw `paw-transport` + `paw-channels`.
 - Date: 2026-03-25
 - Deciders: Temper core maintainers
 - Supersedes: ADR-0037 (channel-transports)

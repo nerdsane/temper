@@ -275,7 +275,6 @@ Version 0.1.0. The architecture is stabilizing; the API surface is not frozen. D
 | **temper-cli** | CLI: parse, verify, serve, mcp, decide |
 | **temper-sandbox** | Shared Monty sandbox infrastructure |
 | **temper-sdk** | HTTP client library for Temper server |
-| **temper-codegen** | Generates Rust actor code from CSDL + behavioral specs |
 | **temper-store-sim** | In-memory deterministic event store with fault injection |
 | **temper-wasm-sdk** | SDK for writing WASM integration modules |
 | **temper-macros** | Proc macros: `#[derive(Message)]`, `#[derive(DomainEvent)]` |

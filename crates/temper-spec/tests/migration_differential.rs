@@ -89,11 +89,6 @@ const MIGRATIONS: &[(RepoFixture, &str, &str)] = &[
         "ad06abd",
         "os-apps/temper-agent/specs/temper_agent.ioa.toml",
     ),
-    (
-        TEMPER,
-        "ad06abd",
-        "os-apps/temper-channels/specs/channel.ioa.toml",
-    ),
     // --- openpaw repo — 7a644954 bulk migration ---
     (
         OPENPAW,

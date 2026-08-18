@@ -6,7 +6,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-pub(crate) use temper_spec::naming::{to_pascal_case, to_snake_case};
+pub(crate) use temper_spec::naming::to_pascal_case;
 
 /// Read all `.tla` files from a specs directory and return a map of
 /// entity name (PascalCase from file stem) to TLA+ source text.

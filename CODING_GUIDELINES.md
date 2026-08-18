@@ -458,8 +458,8 @@ unsafe { ... }
 ### 10.1 Specs Are Source of Truth
 
 Agents modify `.csdl.xml`, `.ioa.toml`, and `.cedar` files.
-Agents run `temper codegen` and `temper verify`.
-Agents NEVER hand-edit generated code.
+Agents run `temper verify`. The runtime interprets specs through a
+`TransitionTable`; there is no generated-actor step.
 
 ### 10.2 Verification Gate
 

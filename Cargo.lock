@@ -6687,7 +6687,6 @@ dependencies = [
  "sqlx",
  "temper-actor-runtime",
  "temper-authz",
- "temper-codegen",
  "temper-evolution",
  "temper-jit",
  "temper-mcp",
@@ -6700,7 +6699,6 @@ dependencies = [
  "temper-store-postgres",
  "temper-store-redis",
  "temper-store-turso",
- "temper-transport",
  "temper-verify",
  "tempfile",
  "termimad",
@@ -6710,16 +6708,6 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
-]
-
-[[package]]
-name = "temper-codegen"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "temper-spec",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -6861,7 +6849,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "temper-authz",
- "temper-codegen",
  "temper-jit",
  "temper-observe",
  "temper-optimize",
@@ -7063,21 +7050,6 @@ dependencies = [
  "tracing",
  "uuid",
  "wiremock",
-]
-
-[[package]]
-name = "temper-transport"
-version = "0.1.0"
-dependencies = [
- "axum 0.8.8",
- "futures-util",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tokio-tungstenite",
- "tracing",
 ]
 
 [[package]]

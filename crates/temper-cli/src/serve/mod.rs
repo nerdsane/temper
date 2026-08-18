@@ -64,8 +64,6 @@ pub async fn run(
     actor_backed_type: Vec<String>,
     observe: bool,
     verify_subprocess: bool,
-    discord_bot_token: Option<String>,
-    tenant: String,
 ) -> Result<()> {
     let _otel_guard = init_observability("temper-platform");
     temper_authz::init_metrics();
@@ -276,32 +274,6 @@ pub async fn run(
     state.server.spawn_runtime_metrics_loop();
     temper_server::profiling::spawn_continuous_profiler();
     let _pg_actor_runtime_cancel = pg_actor_runtime_cancel;
-
-    // Channel transports: spawn persistent connections to external messaging platforms.
-    // Resolve Discord bot token: CLI/env → vault fallback.
-    let discord_token_resolved = discord_bot_token.or_else(|| {
-        state
-            .server
-            .secrets_vault
-            .as_ref()
-            .and_then(|v| v.get_secret(&tenant, "discord_bot_token"))
-    });
-    if let Some(ref token) = discord_token_resolved {
-        // Seed into vault so WASM modules can also access it.
-        if let Some(ref vault) = state.server.secrets_vault {
-            let _ = vault.cache_platform_secret("discord_bot_token", token.clone());
-        }
-        spawn_channel_transport_discord(
-            &state,
-            token.clone(),
-            &tenant,
-            actual_port,
-            state.api_token.clone(),
-        );
-    } else {
-        println!("  Discord transport: not configured");
-        println!("    Set DISCORD_BOT_TOKEN env var or store 'discord_bot_token' in vault");
-    }
 
     // Spawn the HttpEndpoint reconciler (ADR-0056 Phase 2 slice 3b).
     // Subscribes to entity state changes; rebuilds the per-tenant
@@ -544,44 +516,6 @@ fn spawn_observe_ui(api_port: u16) {
             Err(e) => {
                 eprintln!("  Warning: failed to start Observe UI: {e}");
             }
-        }
-    });
-}
-
-/// Spawn the Discord channel transport using the temper-transport crate.
-///
-/// The transport is an OData API client — it bootstraps Channel + AgentRoute
-/// entities on startup, dispatches Channel.ReceiveMessage for inbound messages,
-/// and receives replies via a webhook listener that send_reply WASM calls.
-fn spawn_channel_transport_discord(
-    _state: &PlatformState,
-    bot_token: String,
-    tenant: &str,
-    port: u16,
-    api_key: Option<String>,
-) {
-    use temper_transport::TemperApiConfig;
-    use temper_transport::discord::types::intents;
-    use temper_transport::discord::{DiscordConfig, DiscordTransport};
-
-    let tenant = tenant.to_string();
-    let api_url = format!("http://127.0.0.1:{port}");
-    println!("  Discord channel transport (v2): connecting (tenant={tenant})...");
-    tokio::spawn(async move {
-        // determinism-ok: WebSocket for channel transport
-        let api = temper_transport::TemperApiClient::new(TemperApiConfig {
-            base_url: api_url,
-            tenant,
-            api_key,
-        });
-        let config = DiscordConfig {
-            bot_token,
-            intents: intents::DEFAULT,
-            webhook_port: 0, // Auto-assign
-        };
-        let transport = DiscordTransport::new(config, api);
-        if let Err(e) = transport.run().await {
-            eprintln!("  [discord] Transport fatal error: {e}");
         }
     });
 }
