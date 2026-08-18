@@ -19,6 +19,64 @@ use crate::blobs::{FIELD_OVERFLOW_BLOB_PREFIX, OverflowBlobWrite, blob_ref_value
 
 use super::types::{EntityEvent, EntityState, MAX_EVENTS_SINCE_SNAPSHOT};
 
+/// Journal event type for a PATCH-style field merge (ARN-189).
+pub(crate) const FIELDS_UPDATED_EVENT: &str = "FieldsUpdated";
+/// Journal event type for a PUT-style field replacement (ARN-189).
+pub(crate) const FIELDS_REPLACED_EVENT: &str = "FieldsReplaced";
+
+/// Apply a PATCH/PUT field update to entity state (ARN-189).
+///
+/// The single source of truth for field-update semantics, called by BOTH the
+/// live `EntityMsg::UpdateFields` handler and journal replay, so a rehydrated
+/// entity reaches exactly the state the live update produced.
+///
+/// - `replace == false` (PATCH): merge `fields` into the existing object.
+///   A non-object existing/incoming value leaves state unchanged, matching
+///   the historical live behavior.
+/// - `replace == true` (PUT): replace all fields, preserving `Id` and
+///   `Status` from the entity itself.
+#[must_use = "a field update that did not apply is a dropped update; count or refuse it"]
+pub(crate) fn apply_field_update(
+    state: &mut EntityState,
+    fields: &serde_json::Value,
+    replace: bool,
+) -> bool {
+    // One helper for both the live `UpdateFields` arm and journal replay
+    // (ARN-189). Replay must reproduce the live result exactly, so every
+    // transformation belongs here — a step applied only on the live path would
+    // silently rewrite the entity on the next rehydration.
+    //
+    // `canonicalize_entity_fields` is the single enforcement point for
+    // runtime-owned fields: it both strips the keys a caller must not set
+    // (`has_spec`, `ctx_owner_status`, ...) and restores the authoritative
+    // `Id`/`Status` (and their lowercase aliases). The live arm additionally
+    // sanitizes the *event payload* before journaling (see
+    // `field_updates::commit_field_update`) so the journal never records a forged
+    // key, which canonicalizing `state.fields` alone would not prevent.
+    //
+    // Guard here, not only at the live arm: replay feeds this the `params` of
+    // whatever is in the journal, including events written by a build that
+    // predates the live guard. A `FieldsReplaced` carrying `[1,2,3]` would set
+    // `fields` to an array, after which `canonicalize_entity_fields` cannot
+    // restore `Id`/`Status` — there is no object to insert into. Refusing in the
+    // shared helper is what makes live and replay agree on every input, not just
+    // the ones the live path screens.
+    if !fields.is_object() {
+        return false;
+    }
+    if replace {
+        state.fields = fields.clone();
+    } else if let (Some(existing), Some(updates)) =
+        (state.fields.as_object_mut(), fields.as_object())
+    {
+        for (k, v) in updates {
+            existing.insert(k.clone(), v.clone());
+        }
+    }
+    canonicalize_entity_fields(&mut state.fields, &state.entity_id, &state.status);
+    true
+}
+
 /// A scheduled action to fire after a delay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledAction {

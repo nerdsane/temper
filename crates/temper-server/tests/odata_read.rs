@@ -794,3 +794,235 @@ async fn patch_and_put_authorize_the_prospective_resource() {
 
     let _ = std::fs::remove_file(db_path);
 }
+
+/// ARN-189. The actor is fail-closed on the journal append, but
+/// `update_tenant_entity_fields` returned `Ok(response)` regardless of
+/// `response.success`, and the handler only maps `Err` to a non-2xx — so a
+/// rejected or unpersisted update was answered `200 OK`. Fail-closed actor,
+/// fail-open API, which defeats the point of journaling the update at all.
+///
+/// Driven through the real HTTP router rather than the actor, because the defect
+/// lived in the seam between them: every actor-level test passed while the client
+/// was still told the write had succeeded.
+#[tokio::test]
+async fn patch_returns_an_error_status_when_the_update_is_refused() {
+    let (state, sim) = build_default_state(4711, "odata-patch-fail-closed");
+    install_order_crud_test_policy(&state);
+    // HTTP writes are gated on verification status; the sim harness leaves it
+    // pending, so mark it Completed exactly as `build_turso_state` does.
+    {
+        let mut registry = state.registry.write().unwrap();
+        registry.set_verification_status(
+            &TenantId::default(),
+            "Order",
+            VerificationStatus::Completed(EntityVerificationResult {
+                all_passed: true,
+                levels: vec![EntityLevelSummary {
+                    level: "L0 SMT".to_string(),
+                    passed: true,
+                    summary: "OK".to_string(),
+                    details: None,
+                }],
+                verified_at: "2026-04-15T00:00:00Z".to_string(),
+            }),
+        );
+    }
+    let tenant = TenantId::default();
+
+    dispatch(
+        &state,
+        &tenant,
+        "Order",
+        "ord-fail-closed",
+        "Create",
+        serde_json::json!({}),
+    )
+    .await
+    .expect("create ord-fail-closed");
+
+    // A PATCH the actor cannot journal. The entity exists and the request is
+    // well-formed, so it reaches the actor and is refused there. The OData
+    // handler maps a refused response to an error status itself, so this does not
+    // exercise `update_tenant_entity_fields`' own propagation — see
+    // `field_update_failure_is_reported_to_callers_that_do_not_inspect_success`
+    // for that. What it pins is the end-to-end property: an update that was not
+    // persisted is never answered 2xx.
+    sim.inject_concurrency_violations("default:Order:ord-fail-closed", 8);
+
+    let (status, body) = patch_json(
+        &state,
+        "/tdata/Orders('ord-fail-closed')",
+        serde_json::json!({ "Currency": "USD" }),
+    )
+    .await;
+    assert!(
+        !status.is_success(),
+        "an update the actor could not persist must not answer 2xx; got {status} {body:?}"
+    );
+
+    // And the entity is unchanged — the refusal was not a partial write.
+    sim.inject_concurrency_violations("default:Order:ord-fail-closed", 0);
+    let (status, body) = get_json(&state, "/tdata/Orders('ord-fail-closed')").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(
+        body["fields"]["Currency"].as_str(),
+        Some("USD"),
+        "a refused update must leave the entity untouched: {body:?}"
+    );
+}
+
+/// ARN-189 regression guard. `update_tenant_entity_fields` converts a refused
+/// actor response into `Err`, which is what callers that do not inspect
+/// `response.success` rely on — `os_apps::entity_aliases` calls this and does
+/// `.map(|_| ())`, so if `Ok` ever stopped meaning "the update happened", a
+/// refused alias repair would be silently treated as done. Journaling field
+/// updates adds a new way for them to fail, so this pins that a failed append
+/// travels the same path.
+#[tokio::test]
+async fn field_update_failure_is_reported_to_callers_that_do_not_inspect_success() {
+    let (state, sim) = build_default_state(4713, "entity-ops-fail-closed");
+    let tenant = TenantId::default();
+
+    dispatch(
+        &state,
+        &tenant,
+        "Order",
+        "ord-ops-fail-closed",
+        "Create",
+        serde_json::json!({}),
+    )
+    .await
+    .expect("create ord-ops-fail-closed");
+
+    // Enough conflicts to outlast the retry budget, so the append genuinely fails.
+    sim.inject_concurrency_violations("default:Order:ord-ops-fail-closed", 8);
+
+    let result = state
+        .update_tenant_entity_fields(
+            &tenant,
+            "Order",
+            "ord-ops-fail-closed",
+            serde_json::json!({ "Currency": "USD" }),
+            false,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "an update that was not persisted must not be returned as Ok: {:?}",
+        result.map(|r| (r.success, r.error))
+    );
+}
+
+/// ARN-189 live end-to-end: the exact scenario the bug loses data in, driven
+/// through the real OData HTTP router over a real Turso file, across a full
+/// `ServerState` teardown and rebuild on the same database — a process restart in
+/// all but name (fresh actor system, fresh registry, fresh in-memory state; only
+/// the durable journal survives).
+///
+/// Before the fix, a PATCH mutated actor memory and journaled nothing, so the
+/// second `ServerState` — rehydrating purely from the journal — would not see it.
+#[tokio::test]
+async fn patched_fields_survive_a_server_restart_over_the_http_stack() {
+    let db_path =
+        std::env::temp_dir().join(format!("temper-arn189-live-{}.db", uuid::Uuid::new_v4()));
+    let db_url = format!("file:{}", db_path.display());
+
+    // --- Run 1: create, then PATCH a field over HTTP. ---
+    {
+        let store = TursoEventStore::new(&db_url, None)
+            .await
+            .expect("create turso db");
+        let state = build_turso_state("arn189-live-run1", store);
+
+        let (status, body) = post_json(
+            &state,
+            "/tdata/Orders",
+            serde_json::json!({ "id": "ord-arn189-live", "Currency": "EUR" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "create failed: {body:?}");
+
+        let (status, body) = patch_json(
+            &state,
+            "/tdata/Orders('ord-arn189-live')",
+            serde_json::json!({ "Currency": "USD", "Notes": "patched before restart" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "patch failed: {body:?}");
+
+        // Confirm run 1 sees the patch in memory.
+        let (status, body) = get_json(&state, "/tdata/Orders('ord-arn189-live')").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["fields"]["Currency"].as_str(), Some("USD"));
+        assert_eq!(
+            body["fields"]["Notes"].as_str(),
+            Some("patched before restart")
+        );
+    }
+
+    // --- The journal itself must carry the update. ---
+    //
+    // The read above is served from the durable query projection, which is a
+    // read-model *cache* written alongside the update. The source of truth is the
+    // event journal, and it is what a projection backfill (ARN-216) rebuilds from:
+    // before this fix the backfill dropped patched fields the live projection
+    // still had. So the discriminating assertion is that the append happened —
+    // read the raw journal back and find the field-update event with the new
+    // value. This is what fails if `commit_field_update` stops journaling.
+    {
+        use temper_runtime::persistence::EventStore as _;
+        let store = TursoEventStore::new(&db_url, None)
+            .await
+            .expect("reopen turso db for journal read");
+        let envelopes = store
+            .read_events("default:Order:ord-arn189-live", 0)
+            .await
+            .expect("read journal");
+        let patched = envelopes.iter().any(|env| {
+            let is_field_event =
+                env.event_type == "FieldsUpdated" || env.event_type == "FieldsReplaced";
+            is_field_event
+                && env
+                    .payload
+                    .get("params")
+                    .and_then(|p| p.get("Currency"))
+                    .and_then(|c| c.as_str())
+                    == Some("USD")
+        });
+        assert!(
+            patched,
+            "the PATCH must be durably journaled, not only cached in the projection; \
+             journal held {} events: {:?}",
+            envelopes.len(),
+            envelopes.iter().map(|e| &e.event_type).collect::<Vec<_>>()
+        );
+    }
+
+    // --- Run 2: a brand-new ServerState on the same journal reads it back. ---
+    {
+        let store = TursoEventStore::new(&db_url, None)
+            .await
+            .expect("reopen turso db");
+        let state = build_turso_state("arn189-live-run2", store);
+
+        let (status, body) = get_json(&state, "/tdata/Orders('ord-arn189-live')").await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "entity missing after restart: {body:?}"
+        );
+        assert_eq!(
+            body["fields"]["Currency"].as_str(),
+            Some("USD"),
+            "the PATCHed field must survive a restart: {body:?}"
+        );
+        assert_eq!(
+            body["fields"]["Notes"].as_str(),
+            Some("patched before restart"),
+            "the PATCHed field must survive a restart: {body:?}"
+        );
+    }
+
+    let _ = std::fs::remove_file(db_path);
+}

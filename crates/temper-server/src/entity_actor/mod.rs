@@ -6,6 +6,7 @@
 
 mod actor;
 pub mod effects;
+mod field_updates;
 mod replay_validation;
 pub mod sim_handler;
 mod snapshot_queue;

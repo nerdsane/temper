@@ -285,3 +285,84 @@ async fn authoritative_replay_rejects_misbound_actor_metadata() {
 
     assert!(error.to_string().contains("bound to actor"));
 }
+
+/// ARN-189. Authoritative replay backs identity and authority resolution, so a
+/// malformed field-update event must FAIL it, not be skipped: a `FieldsReplaced`
+/// that was written to revoke authority — clearing a privileged field — would
+/// otherwise be dropped, and the "authoritative" state would preserve exactly the
+/// authority it was meant to remove. The lenient path skips and counts; this pins
+/// the strict path.
+#[tokio::test]
+async fn authoritative_replay_rejects_malformed_field_update_events() {
+    for event_type in [
+        crate::entity_actor::effects::FIELDS_UPDATED_EVENT,
+        crate::entity_actor::effects::FIELDS_REPLACED_EVENT,
+    ] {
+        let malformed = PersistenceEnvelope {
+            sequence_nr: 1,
+            event_type: event_type.to_string(),
+            // Not deserializable as an EntityEvent: `action` is a number.
+            payload: serde_json::json!({
+                "action": 999,
+                "params": {"Privileged": true}
+            }),
+            metadata: EventMetadata {
+                event_id: sim_uuid(),
+                causation_id: sim_uuid(),
+                correlation_id: sim_uuid(),
+                timestamp: sim_now(),
+                actor_id: "default:Order:security-replay".to_string(),
+            },
+        };
+        let error = authoritative_replay(StaticEventStore {
+            events: vec![malformed],
+            read_error: None,
+            snapshot: None,
+        })
+        .await
+        .expect_err("a malformed field-update event must fail authoritative replay");
+        assert!(
+            error.to_string().contains("field-update"),
+            "unexpected error for {event_type}: {error}"
+        );
+    }
+}
+
+/// Same property for a payload that deserializes but is not an object: a
+/// journaled non-object `FieldsReplaced` (only writable by a build predating the
+/// live guard) cannot be applied, so strict replay must fail rather than
+/// pretending the journal was fully replayed.
+#[tokio::test]
+async fn authoritative_replay_rejects_non_object_field_update_payloads() {
+    let event = EntityEvent {
+        action: crate::entity_actor::effects::FIELDS_REPLACED_EVENT.to_string(),
+        from_status: "Draft".to_string(),
+        to_status: "Draft".to_string(),
+        timestamp: sim_now(),
+        params: serde_json::json!([1, 2, 3]),
+        idempotency_key: None,
+    };
+    let non_object = PersistenceEnvelope {
+        sequence_nr: 1,
+        event_type: event.action.clone(),
+        payload: serde_json::to_value(event).expect("serialize"),
+        metadata: EventMetadata {
+            event_id: sim_uuid(),
+            causation_id: sim_uuid(),
+            correlation_id: sim_uuid(),
+            timestamp: sim_now(),
+            actor_id: "default:Order:security-replay".to_string(),
+        },
+    };
+    let error = authoritative_replay(StaticEventStore {
+        events: vec![non_object],
+        read_error: None,
+        snapshot: None,
+    })
+    .await
+    .expect_err("a non-object field-update payload must fail authoritative replay");
+    assert!(
+        error.to_string().contains("field-update"),
+        "unexpected error: {error}"
+    );
+}
