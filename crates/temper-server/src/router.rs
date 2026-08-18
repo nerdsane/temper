@@ -332,18 +332,22 @@ async fn dispatch_matched_route(
     // any other tenant's guest (ADR-0156).
     let streams = state.http_stream_registry.clone();
     let scope = streams.mint_scope().await;
+
+    // Own the scope's lifetime from the moment it is minted — BEFORE opening the
+    // exchange (ARN-207). `open_inbound_exchange` takes the registry lock several
+    // times; if the handler future is cancelled between those acquisitions (client
+    // disconnect under contention), the handles already inserted under this scope
+    // would otherwise have no guard to reclaim them. Constructing the guard first
+    // means a cancellation at any point reclaims whatever the scope allocated.
+    // Held as a local so a mid-request drop still reclaims; moved into the response
+    // body stream on the success path so it lives until the body drains (ADR-0156).
+    let scope_cleanup = temper_wasm::http_stream::ScopeCleanupGuard::new(streams.clone(), scope);
+
     let exchange = streams.open_inbound_exchange(scope).await;
     let guest_request_body = exchange.guest_request_body;
     let guest_response_body = exchange.guest_response_body;
     let kernel_request_body = exchange.kernel_request_body;
     let kernel_response_body = exchange.kernel_response_body;
-
-    // Own the scope's lifetime from the moment it is opened. Held as a
-    // local so that if this handler future is dropped mid-request (client
-    // disconnect while the guest runs or we await its head), the scope is
-    // still reclaimed; moved into the response body stream on the success
-    // path so it lives until the body finishes draining (ADR-0156).
-    let scope_cleanup = temper_wasm::http_stream::ScopeCleanupGuard::new(streams.clone(), scope);
 
     // Spawn task A: axum body → kernel_request_body handle.
     // Streaming pump: each Frame::data() chunk is forwarded as it

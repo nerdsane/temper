@@ -321,10 +321,18 @@ impl HttpStreamRegistry {
         (StreamHandle(write_id), StreamHandle(read_id))
     }
 
-    /// Allocate a new paired (sender, receiver) channel under a private
-    /// scope with both ends guest-usable. Convenience for tests and
-    /// callers that own an unshared registry.
-    pub async fn create_pair(&self) -> (StreamHandle, StreamHandle) {
+    /// Allocate a paired (sender, receiver) channel under the fixed `PRIVATE`
+    /// scope with both ends guest-usable.
+    ///
+    /// Test-only, and deliberately not part of the public surface (ARN-207): it
+    /// is the one constructor that tags guest-facing handles with `PRIVATE` on
+    /// whatever registry it is called on. On the process-global shared registry
+    /// that would be a cross-invocation hole — a `PRIVATE`-scoped host could then
+    /// reach them — so production never has this convenience to reach for.
+    /// Production always mints a scope (`open_inbound_exchange` / the outbound
+    /// path), which `create_pair_scoped` binds the handles to.
+    #[cfg(test)]
+    pub(crate) async fn create_pair(&self) -> (StreamHandle, StreamHandle) {
         self.create_pair_scoped(StreamScope::PRIVATE, true, true)
             .await
     }
@@ -411,17 +419,15 @@ impl HttpStreamRegistry {
         let mut state = self.inner.lock().await;
         state.pending_reads.remove(&handle.0);
         match state.handles.remove(&handle.0) {
-            Some(entry) => {
-                // Releasing an outbound exchange's response-body handle
-                // frees a slot in its scope's concurrency budget.
-                if let Some(open) = state.outbound_open.get_mut(&entry.scope) {
-                    open.remove(&handle.0);
-                }
-                // The id is intentionally left in `scope_ids`: `close_scope`
-                // relies on it to also reclaim any head channel still keyed
-                // on this id that a guest never consumed. Every scope is
-                // eventually `close_scope`d (per dispatch, or on host drop
-                // for a private registry), so this does not grow unbounded.
+            Some(_entry) => {
+                // Closing a guest handle does NOT release an outbound
+                // concurrency slot (ARN-207). The slot represents a live bridge
+                // task — a real outbound socket plus its buffered request bytes —
+                // and a guest closing its read end leaves that bridge running.
+                // The slot is released only by `release_outbound_exchange`, which
+                // the bridge calls when it actually completes. The id is left in
+                // `scope_ids` so `close_scope` can still reclaim any head channel
+                // a guest never consumed.
                 Ok(())
             }
             None => Err(StreamError::InvalidHandle),
@@ -504,6 +510,48 @@ impl HttpStreamRegistry {
     /// Reclaim every handle, pending read, and head channel owned by
     /// `scope` (ADR-0156 Sub-Decision 3). Dropping the channels signals
     /// EOF/abort to any peer and unblocks pump/bridge tasks. Idempotent.
+    /// Release an outbound exchange's concurrency slot and reclaim its handles
+    /// and head receiver.
+    ///
+    /// Called by the bridge task when it completes — success, upstream error, or
+    /// guest hangup — so the per-scope budget (`MAX_OUTBOUND_STREAMS_PER_SCOPE`)
+    /// counts *live bridge tasks*, i.e. real outbound sockets and their buffered
+    /// request bytes, not guest read-handle closes. Without this a guest could
+    /// loop `begin_outbound -> close(response)` and free the slot while the bridge,
+    /// its socket, and up to a channel of buffered request bytes stayed resident
+    /// (ARN-207). Idempotent: a second call for an already-released exchange is a
+    /// no-op, so an explicit `close_scope` at request end cannot double-free.
+    pub async fn release_outbound_exchange(
+        &self,
+        scope: StreamScope,
+        response_reader: StreamHandle,
+        request_writer: StreamHandle,
+        request_reader: StreamHandle,
+        response_writer: StreamHandle,
+    ) {
+        let mut state = self.inner.lock().await;
+        if let Some(open) = state.outbound_open.get_mut(&scope) {
+            open.remove(&response_reader.0);
+            if open.is_empty() {
+                state.outbound_open.remove(&scope);
+            }
+        }
+        state.response_head_receivers.remove(&response_reader.0);
+        // Reclaim the REQUEST channel — the request has been fully sent (or the
+        // send aborted), so nothing reads it again. Do NOT touch the RESPONSE
+        // handles: the bridge has closed its writer, but the guest may still be
+        // draining buffered response chunks from `response_reader`. Those are
+        // bounded by channel capacity and reclaimed when the guest closes the
+        // handle or at `close_scope` (request end). The freed slot already bounds
+        // what matters here — the live socket — since the bridge has completed by
+        // the time this runs.
+        for id in [request_writer.0, request_reader.0] {
+            state.handles.remove(&id);
+            state.pending_reads.remove(&id);
+        }
+        let _ = response_writer;
+    }
+
     pub async fn close_scope(&self, scope: StreamScope) {
         let mut state = self.inner.lock().await;
         Self::close_scope_locked(&mut state, scope);

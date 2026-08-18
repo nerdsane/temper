@@ -1754,6 +1754,14 @@ impl WasmHost for ProductionWasmHost {
         let bridge_resp = exchange.bridge_response_body;
         let head_tx = exchange.bridge_head_sender;
         let streams = self.http_streams.clone();
+        // Captured for the slot release the bridge performs on completion, so the
+        // per-scope concurrency budget tracks live bridges, not guest closes
+        // (ARN-207). `guest.request_body`/`response_body` are the guest ends,
+        // `bridge_req`/`bridge_resp` the kernel ends.
+        let release_scope = self.stream_scope;
+        let release_resp_reader = guest.response_body;
+        let release_req_writer = guest.request_body;
+        let cleanup_streams = self.http_streams.clone();
         let (filtered_headers, mut span_hints) = split_span_hint_headers(&request.headers);
         // ARN-243: drop LLM content from span hints unless this tenant opted in.
         redact_llm_content_hints(&mut span_hints, self.export_llm_content);
@@ -1845,6 +1853,11 @@ impl WasmHost for ProductionWasmHost {
 
         tokio::spawn(
             async move {
+                // Run the bridge inside an inner future so its early returns
+                // still fall through to the slot release below (ARN-207): the
+                // per-scope budget must be freed whether the request succeeds,
+                // errors, or the guest hangs up.
+                let bridge = async move {
                 let started = Instant::now();
                 // Pull request body chunks from the registry; wrap as a
                 // Stream<Item = Result<Bytes, _>> for reqwest.
@@ -1906,6 +1919,20 @@ impl WasmHost for ProductionWasmHost {
                 tracing::Span::current()
                     .record("duration_ms", started.elapsed().as_millis() as u64);
                 let _ = streams.close(bridge_resp).await;
+                };
+                bridge.await;
+                // The bridge has finished, so its socket and buffered request
+                // bytes are gone; release the concurrency slot and reclaim the
+                // exchange's remaining handles + head receiver.
+                cleanup_streams
+                    .release_outbound_exchange(
+                        release_scope,
+                        release_resp_reader,
+                        release_req_writer,
+                        bridge_req,
+                        bridge_resp,
+                    )
+                    .await;
             }
             .instrument(span),
         );

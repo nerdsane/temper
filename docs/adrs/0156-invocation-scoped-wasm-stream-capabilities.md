@@ -106,16 +106,35 @@ map.
 
 ### Sub-Decision 4: Per-scope concurrent-stream bound
 
-A guest can open outbound streaming exchanges in a loop. Each currently-open
-exchange is counted against a per-scope budget (`MAX_OUTBOUND_STREAMS_PER_SCOPE`);
-once the concurrency limit is reached, `open_outbound_exchange` returns
-`StreamError::Aborted` and the guest's `http_stream_begin_outbound` surfaces it
-as an error. The count is a *concurrency* bound, not a cumulative one: the slot
-is released when the guest closes the exchange's response-body handle, so a guest
-that makes many outbound calls sequentially is never throttled — only one that
-holds many open at once. Combined with the per-handle channel bound (64 × 16 KiB),
-this bounds live buffered bytes per invocation. Inbound exchanges are minted
-one-per-request by the kernel and are not guest-multipliable.
+A guest can open outbound streaming exchanges in a loop. Each *live* exchange is
+counted against a per-scope budget (`MAX_OUTBOUND_STREAMS_PER_SCOPE`); once the
+limit is reached, `open_outbound_exchange` returns `StreamError::Aborted` and the
+guest's `http_stream_begin_outbound` surfaces it as an error.
+
+The slot represents the **bridge task's lifetime**, not a guest handle. It is
+released by `release_outbound_exchange`, which the bridge calls when it actually
+completes — success, upstream error, or guest hangup — so the count reflects live
+outbound sockets and their buffered request bytes. Closing the guest's read
+handle does **not** free a slot: adversarial review (ARN-207) showed that keying
+the budget on the guest close let a guest loop `begin_outbound → close(response)`
+and free slots while the bridge, its socket, and a channel of buffered request
+bytes stayed resident. A guest that makes many outbound calls *sequentially* — each
+bridge finishing before the next opens — is never throttled; one that holds many
+bridges live at once is capped at `MAX_OUTBOUND_STREAMS_PER_SCOPE`.
+
+Scope of this bound, stated precisely so it is not read as more than it is:
+- It bounds the **number** of concurrent bridges per invocation, hence the number
+  of concurrent sockets and request channels.
+- It does **not** bound bytes. Each channel is bounded in *chunks* (64), not
+  bytes, so a guest writing large in-bounds chunks can hold far more than the
+  nominal 1 MiB per channel. That aggregate per-invocation byte budget is
+  **ARN-348**, not closed here.
+- Inbound exchanges are kernel-minted one-per-request, so a guest cannot multiply
+  them — but a guest that submits its response head and then never closes its
+  response body can hold its own scope (and the request) open until the client
+  disconnects. Bounding that, and a global/per-tenant HttpEndpoint request
+  semaphore, is admission control — tracked as **ARN-356 / ARN-180**, not closed
+  here.
 
 ## Consequences
 
@@ -138,6 +157,11 @@ one-per-request by the kernel and are not guest-multipliable.
   required parameter minted from the registry's monotonic counter, so a unique
   scope is guaranteed by construction; private-registry hosts use a fixed default
   scope safely because their registry is not shared.
+- Handle ids are a monotonic `u32` and are not checked for wrap. After 2^32
+  cumulative allocations the counter wraps and could collide with a live handle,
+  weakening the "ids are never reused" premise the authorize-then-operate split
+  relies on. Negligible in practice (billions of allocations per process
+  lifetime) but not zero; tracked as **ARN-357**.
 
 ### DST Compliance
 - The scope counter lives in `RegistryState` behind the existing async `Mutex`
@@ -152,9 +176,14 @@ one-per-request by the kernel and are not guest-multipliable.
 - Opaque random tokens. Ambient scopes make guessability irrelevant, so
   randomness is unnecessary. (`StreamScope` could later be randomized if a handle
   ever needs to be safely externalized, but nothing externalizes it today.)
-- Bounding inbound exchanges per tenant across the whole process — inbound
-  exchanges are kernel-minted one-per-request and already flow-controlled by the
-  server's request admission path.
+- Bounding inbound exchanges per tenant across the whole process. Inbound
+  exchanges are kernel-minted one-per-request, but there is no global or
+  per-tenant HttpEndpoint request semaphore today, and a guest can hold its own
+  request open by not closing its response body, so total live scopes are bounded
+  only by client behaviour. This is admission control, tracked as ARN-356 /
+  ARN-180.
+- An aggregate per-invocation byte budget across all guest→host copies (streams
+  and reads). Tracked as ARN-348.
 
 ## Alternatives Considered
 
