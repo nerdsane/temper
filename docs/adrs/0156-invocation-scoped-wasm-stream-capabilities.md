@@ -125,8 +125,10 @@ their bridges finish, and accumulate undrained response handles and their buffer
 without limit — uncounted, because the slots were freed. Requiring **both**
 conditions bounds both dimensions: at most `MAX_OUTBOUND_STREAMS_PER_SCOPE`
 exchanges are ever live, counting live sockets *and* undrained response buffers.
-A guest that makes many calls *sequentially* — each fully done before the next —
-is never throttled.
+A guest that makes many calls *sequentially* — each fully done (bridge complete
+AND response **closed**) before the next — is never throttled. A guest that drains
+to EOF without closing is throttled at the cap until request end; see the
+`close`-on-EOF residual (ARN-359) below.
 
 Scope of this bound, stated precisely so it is not read as more than it is:
 - It bounds the **number** of live exchanges per invocation, hence the number of
@@ -135,6 +137,19 @@ Scope of this bound, stated precisely so it is not read as more than it is:
   bytes, so a guest writing large in-bounds chunks can hold far more than the
   nominal 1 MiB per channel. That aggregate per-invocation byte budget is
   **ARN-348**, not closed here.
+- The slot bounds *concurrent* live exchanges within a scope, but two edges keep
+  it from being an exact "socket lifetime" bound, both tracked rather than closed
+  here (adversarial review, ARN-207):
+  - `close_scope` reclaims the registry at request end but does not *cancel* the
+    detached reqwest bridge tasks, so their sockets live until the client's
+    configured request timeout (`WasmResourceLimits::max_duration`, which the
+    outbound client enforces) rather than dying promptly at scope close. Bounded
+    by that timeout, not unbounded, but not immediate — **ARN-358**.
+  - A guest that reads a response to EOF but never calls `close` (the SDK does not
+    close on EOF) holds the slot until request end, so such calls are throttled at
+    `MAX_OUTBOUND_STREAMS_PER_SCOPE` rather than "never throttled". The honest fix
+    is to close on EOF-drain, in the SDK or by auto-releasing a fully-drained
+    bridge-complete slot — **ARN-359**.
 - Inbound exchanges are kernel-minted one-per-request, so a guest cannot multiply
   them — but a guest that submits its response head and then never closes its
   response body can hold its own scope (and the request) open until the client

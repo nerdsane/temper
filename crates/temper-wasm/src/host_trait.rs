@@ -1924,10 +1924,21 @@ impl WasmHost for ProductionWasmHost {
                     .record("duration_ms", started.elapsed().as_millis() as u64);
                 let _ = streams.close(bridge_resp).await;
                 };
-                bridge.await;
-                // The bridge has finished, so its socket and buffered request
-                // bytes are gone; release the concurrency slot and reclaim the
-                // exchange's remaining handles + head receiver.
+                // Run the bridge under catch_unwind so a panic inside it still
+                // reaches the release below — otherwise a panicking bridge would
+                // leave its slot occupied until close_scope (ARN-207). The panic
+                // is logged; the detached task dies either way.
+                use futures_util::FutureExt as _;
+                if std::panic::AssertUnwindSafe(bridge)
+                    .catch_unwind()
+                    .await
+                    .is_err()
+                {
+                    tracing::error!("outbound stream bridge task panicked; releasing its slot");
+                }
+                // The bridge has finished (or panicked), so its socket and
+                // buffered request bytes are gone; release the concurrency slot
+                // and reclaim the exchange's remaining handles + head receiver.
                 cleanup_streams
                     .release_outbound_exchange(
                         release_scope,
