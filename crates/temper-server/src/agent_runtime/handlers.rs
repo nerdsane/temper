@@ -28,10 +28,10 @@ use super::models::{
 /// Build the `/v1/agent-runs` router.
 pub fn build_agent_runtime_router() -> axum::Router<ServerState> {
     axum::Router::new()
-        .route("/", post(create_run))
-        .route("/{id}", get(get_run))
-        .route("/{id}/steer", post(steer_run))
-        .route("/{id}/cancel", post(cancel_run))
+        .route("/agent-runs", post(create_run))
+        .route("/agent-runs/{id}", get(get_run))
+        .route("/agent-runs/{id}/steer", post(steer_run))
+        .route("/agent-runs/{id}/cancel", post(cancel_run))
 }
 
 /// Resolve the tenant and authenticated context from the request.
