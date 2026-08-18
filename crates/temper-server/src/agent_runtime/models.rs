@@ -100,7 +100,7 @@ pub struct ErrorResponse {
 // ── Defaults ─────────────────────────────────────────────────────────
 
 fn default_model() -> String {
-    "claude-sonnet-4-20250514".to_string()
+    "claude-sonnet-4-5-20250929".to_string()
 }
 
 fn default_provider() -> String {

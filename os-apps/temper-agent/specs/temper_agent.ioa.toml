@@ -27,7 +27,7 @@ initial = "Created"
 [[state]]
 name = "model"
 type = "string"
-initial = "claude-sonnet-4-20250514"
+initial = "claude-sonnet-4-5-20250929"
 
 [[state]]
 name = "provider"

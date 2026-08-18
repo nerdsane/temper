@@ -205,7 +205,7 @@ async fn get_run(
     {
         Ok(resp) => resp,
         Err(e) => {
-            return error_response(StatusCode::NOT_FOUND, &e);
+            return error_response(StatusCode::NOT_FOUND, &format!("Entity not found: {e}"));
         }
     };
 
