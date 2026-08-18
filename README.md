@@ -268,10 +268,9 @@ Version 0.1.0. The architecture is stabilizing; the API surface is not frozen. D
 | **temper-wasm** | WASM sandboxed integrations with per-call resource budgets |
 | **temper-mcp** | MCP server, Monty sandbox (execute tool) |
 | **temper-platform** | Hosting platform, verify-deploy pipeline, skill catalog |
-| **temper-optimize** | Query + cache optimizer, N+1 detection |
 | **temper-store-postgres** | Postgres event journal + snapshots (multi-tenant) |
 | **temper-store-turso** | Turso/libSQL event journal + snapshots |
-| **temper-store-redis** | Distributed mailbox, placement, cache traits |
+| **temper-store-redis** | Redis event journal (`--storage redis`) |
 | **temper-cli** | CLI: parse, verify, serve, mcp, decide |
 | **temper-sandbox** | Shared Monty sandbox infrastructure |
 | **temper-sdk** | HTTP client library for Temper server |

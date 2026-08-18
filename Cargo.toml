@@ -31,7 +31,6 @@ members = [
     "crates/temper-mcp",
     "crates/temper-evolution",
     "crates/temper-jit",
-    "crates/temper-optimize",
     "crates/temper-platform",
     "crates/temper-wasm",
     "crates/temper-wasm-sdk",
@@ -147,7 +146,6 @@ temper-cli = { path = "crates/temper-cli" }
 temper-mcp = { path = "crates/temper-mcp" }
 temper-evolution = { path = "crates/temper-evolution" }
 temper-jit = { path = "crates/temper-jit" }
-temper-optimize = { path = "crates/temper-optimize" }
 temper-platform = { path = "crates/temper-platform" }
 temper-wasm = { path = "crates/temper-wasm" }
 temper-wasm-sdk = { path = "crates/temper-wasm-sdk" }

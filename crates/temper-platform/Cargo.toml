@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Dogfooded hosting platform for Temper — verify-and-deploy pipeline, agentic evolution engine, and self-optimization"
+description = "Dogfooded hosting platform for Temper — verify-and-deploy pipeline and evolution engine"
 
 [dependencies]
 temper-spec = { workspace = true }
@@ -15,7 +15,6 @@ temper-store-turso = { workspace = true }
 temper-observe = { workspace = true }
 temper-runtime = { workspace = true }
 temper-authz = { workspace = true }
-temper-optimize = { workspace = true }
 temper-wasm = { workspace = true }
 opentelemetry = { workspace = true }
 reqwest = { workspace = true }

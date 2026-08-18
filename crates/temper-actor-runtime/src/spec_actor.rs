@@ -308,7 +308,7 @@ impl Actor for SpecDrivenActor {
 
                 // 3. Apply effects — may include SetState.
                 for effect in &r.effects {
-                    self.apply_effect(&mut actor_state, effect, ctx).await;
+                    self.apply_effect(&mut actor_state, effect, ctx).await?;
                 }
 
                 // 4. Apply state transition fallback (if no SetState effect fired).
@@ -354,7 +354,7 @@ impl SpecDrivenActor {
         state: &mut SpecActorState,
         effect: &temper_jit::table::Effect,
         ctx: &ActorContext,
-    ) {
+    ) -> Result<(), ActorError> {
         match effect {
             temper_jit::table::Effect::SetState(s) => {
                 state.status = s.clone();
@@ -375,6 +375,18 @@ impl SpecDrivenActor {
             }
             temper_jit::table::Effect::SetBool { var, value } => {
                 state.booleans.insert(var.clone(), *value);
+            }
+            temper_jit::table::Effect::IncrementCounterByParam { .. }
+            | temper_jit::table::Effect::DecrementCounterByParam { .. }
+            | temper_jit::table::Effect::SetCounterFromParam { .. }
+            | temper_jit::table::Effect::ListAppend(_)
+            | temper_jit::table::Effect::ListRemoveAt(_)
+            | temper_jit::table::Effect::ScheduleAction { .. }
+            | temper_jit::table::Effect::ScheduleAtAction { .. }
+            | temper_jit::table::Effect::SpawnEntity { .. } => {
+                return Err(ActorError::HandlerFailed(format!(
+                    "postgres actor runtime does not apply {effect:?}; use the default EntityActor path"
+                )));
             }
             temper_jit::table::Effect::EmitEvent(emit_name) => {
                 if let Some((target_type, target_action)) = self.routing.get(emit_name.as_str()) {
@@ -413,10 +425,8 @@ impl SpecDrivenActor {
                     );
                 }
             }
-            _ => {
-                tracing::debug!("unhandled effect: {:?}", effect);
-            }
         }
+        Ok(())
     }
 }
 

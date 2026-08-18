@@ -2,13 +2,13 @@
 //!
 //! All internal platform events are typed via [`PlatformEvent`]. These replace
 //! the old WebSocket messages — they're used for internal broadcast between
-//! subsystems (deploy pipeline, evolution engine, optimization loop).
+//! subsystems (deploy pipeline, evolution engine).
 
 use serde::{Deserialize, Serialize};
 
 /// Platform event broadcast envelope.
 ///
-/// Emitted by the deploy pipeline, evolution engine, and optimization loop.
+/// Emitted by the deploy pipeline and evolution engine.
 /// Subscribers (e.g., background tasks, logging) receive these via the
 /// broadcast channel in [`PlatformState`](crate::state::PlatformState).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,28 +65,6 @@ pub enum PlatformEvent {
         /// Summary of the event.
         summary: String,
         /// Associated record ID.
-        record_id: String,
-    },
-
-    /// An optimization recommendation was automatically applied.
-    OptimizationApplied {
-        /// Which optimizer produced this.
-        optimizer: String,
-        /// What action was taken.
-        action: String,
-        /// Estimated improvement (0.0–1.0).
-        improvement: f64,
-    },
-
-    /// An optimization recommendation was proposed (needs approval).
-    OptimizationProposed {
-        /// Which optimizer produced this.
-        optimizer: String,
-        /// Description of the recommendation.
-        description: String,
-        /// Risk level.
-        risk: String,
-        /// Record ID for tracking.
         record_id: String,
     },
 
@@ -200,43 +178,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_optimization_applied_roundtrip() {
-        let msg = PlatformEvent::OptimizationApplied {
-            optimizer: "CacheOptimizer".into(),
-            action: "UpdateCacheTtl".into(),
-            improvement: 0.25,
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let parsed: PlatformEvent = serde_json::from_str(&json).unwrap();
-        match parsed {
-            PlatformEvent::OptimizationApplied {
-                optimizer,
-                improvement,
-                ..
-            } => {
-                assert_eq!(optimizer, "CacheOptimizer");
-                assert!((improvement - 0.25).abs() < f64::EPSILON);
-            }
-            _ => panic!("expected OptimizationApplied"),
-        }
-    }
-
-    #[test]
-    fn test_optimization_proposed_roundtrip() {
-        let msg = PlatformEvent::OptimizationProposed {
-            optimizer: "QueryOptimizer".into(),
-            description: "Batch N+1 queries".into(),
-            risk: "Medium".into(),
-            record_id: "O-xyz".into(),
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let parsed: PlatformEvent = serde_json::from_str(&json).unwrap();
-        match parsed {
-            PlatformEvent::OptimizationProposed { risk, .. } => {
-                assert_eq!(risk, "Medium");
-            }
-            _ => panic!("expected OptimizationProposed"),
-        }
-    }
 }
