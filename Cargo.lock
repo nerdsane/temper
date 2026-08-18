@@ -6563,20 +6563,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "temper-optimize"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "temper-jit",
- "temper-observe",
- "temper-runtime",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "temper-ots"
 version = "0.1.0"
 dependencies = [
@@ -6607,7 +6593,6 @@ dependencies = [
  "temper-authz",
  "temper-jit",
  "temper-observe",
- "temper-optimize",
  "temper-runtime",
  "temper-server",
  "temper-spec",

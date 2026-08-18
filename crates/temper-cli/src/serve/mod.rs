@@ -19,9 +19,7 @@ use anyhow::{Context, Result};
 use tokio::io::AsyncBufReadExt;
 
 use temper_evolution::PostgresRecordStore;
-use temper_observe::ClickHouseStore;
 use temper_observe::otel::init_observability;
-use temper_platform::optimization::run_optimization_cycle;
 use temper_platform::router::build_platform_router;
 use temper_platform::state::PlatformState;
 use temper_runtime::tenant::TenantId;
@@ -269,7 +267,6 @@ pub async fn run(
     for (tenant, dir) in &apps {
         spawn_background_verification(&state, dir, tenant).await;
     }
-    spawn_optimization_loop(&state);
     spawn_actor_passivation_loop(&state);
     state.server.spawn_runtime_metrics_loop();
     temper_server::profiling::spawn_continuous_profiler();
@@ -329,30 +326,6 @@ fn cache_platform_secret_if_present(
     if let Some(value) = value {
         let _ = vault.cache_platform_secret(secret_name, value);
     }
-}
-
-fn spawn_optimization_loop(state: &PlatformState) {
-    let Some(store_url) = std::env::var("TEMPER_OPTIMIZE_STORE_URL").ok() else {
-        return;
-    };
-    let interval_secs = std::env::var("TEMPER_OPTIMIZE_INTERVAL_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(300)
-        .clamp(1, 86_400);
-
-    let state = state.clone();
-    tokio::spawn(async move {
-        let store = ClickHouseStore::new(&store_url);
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        ticker.tick().await; // consume immediate tick
-
-        loop {
-            ticker.tick().await;
-            let _ = run_optimization_cycle(&store, &state).await;
-        }
-    });
 }
 
 fn spawn_actor_passivation_loop(state: &PlatformState) {

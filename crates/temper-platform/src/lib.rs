@@ -12,7 +12,6 @@ pub mod deploy;
 pub mod genesis_install;
 pub mod hooks;
 pub mod integration;
-pub mod optimization;
 pub mod os_apps;
 pub mod protocol;
 pub mod recovery;
