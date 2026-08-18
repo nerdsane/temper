@@ -88,6 +88,13 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
             &format!("tool_runner: executing {} tool calls", tool_calls.len()),
         );
 
+        // Emit structured telemetry for tool batch start.
+        let _ = ctx.log_structured("info", "tool_batch_start", &json!({
+            "agent.run_id": ctx.entity_state.get("entity_id").and_then(|v| v.as_str()).unwrap_or(""),
+            "agent.batch_id": batch_id,
+            "agent.tool_count": tool_calls.len(),
+        }));
+
         // Execute each tool call and collect results
         let mut tool_results: Vec<Value> = Vec::new();
 
@@ -103,6 +110,15 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
                 "info",
                 &format!("tool_runner: executing tool '{tool_name}' id={tool_id}"),
             );
+
+            // Emit structured telemetry for tool execution.
+            let _ = ctx.log_structured("info", "tool.exec", &json!({
+                "agent.run_id": ctx.entity_state.get("entity_id").and_then(|v| v.as_str()).unwrap_or(""),
+                "agent.tool_name": tool_name,
+                "agent.tool_call_id": tool_id,
+                "agent.batch_id": batch_id,
+            }));
+
             emit_progress_ignore(
                 &ctx,
                 json!({

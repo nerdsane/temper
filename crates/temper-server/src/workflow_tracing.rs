@@ -181,7 +181,7 @@ pub(crate) fn should_use_workflow_root_span(
     explicit_workflow_context
         || matches!(
             entity_type,
-            "Session" | "ManagedSession" | "WorkCycle" | "AlertCycle"
+            "Session" | "ManagedSession" | "WorkCycle" | "AlertCycle" | "TemperAgent"
         )
 }
 
@@ -245,6 +245,7 @@ mod tests {
         ));
         assert!(super::should_use_workflow_root_span(false, "WorkCycle"));
         assert!(super::should_use_workflow_root_span(false, "AlertCycle"));
+        assert!(super::should_use_workflow_root_span(false, "TemperAgent"));
         assert!(super::should_use_workflow_root_span(true, "Invoice"));
         assert!(!super::should_use_workflow_root_span(false, "Invoice"));
     }

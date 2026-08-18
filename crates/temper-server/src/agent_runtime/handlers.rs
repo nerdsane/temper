@@ -11,8 +11,10 @@ use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
+use opentelemetry::trace::TraceContextExt;
 use serde_json::json;
 use temper_authz::AuthenticatedRequestContext;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use temper_runtime::tenant::TenantId;
 use uuid::Uuid;
 
@@ -39,6 +41,15 @@ fn resolve_tenant(authenticated: &AuthenticatedRequestContext) -> TenantId {
 }
 
 /// Create a new agent run: create entity → configure → provision.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        otel.name = "agent.run.create",
+        agent.run_id = tracing::field::Empty,
+        agent.provider = tracing::field::Empty,
+        agent.model = tracing::field::Empty,
+    )
+)]
 async fn create_run(
     State(state): State<ServerState>,
     Extension(authenticated): Extension<AuthenticatedRequestContext>,
@@ -46,6 +57,10 @@ async fn create_run(
 ) -> Response {
     let tenant = resolve_tenant(&authenticated);
     let run_id = format!("run_{}", Uuid::new_v4().simple());
+
+    tracing::Span::current().record("agent.run_id", &run_id);
+    tracing::Span::current().record("agent.provider", &req.sandbox_provider);
+    tracing::Span::current().record("agent.model", &req.model);
 
     let agent_ctx = AgentContext::for_service("agent-runtime-api");
 
@@ -140,6 +155,13 @@ async fn create_run(
 }
 
 /// Get the status of an agent run.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        otel.name = "agent.run.get",
+        agent.run_id = %id,
+    )
+)]
 async fn get_run(
     State(state): State<ServerState>,
     Extension(authenticated): Extension<AuthenticatedRequestContext>,
@@ -160,6 +182,18 @@ async fn get_run(
     let s = &entity_state.state;
     let fields = &s.fields;
 
+    // Extract trace ID from the current span context for correlation.
+    let trace_id = {
+        let span_ctx = tracing::Span::current().context();
+        let span = span_ctx.span();
+        let span_ctx = span.span_context();
+        if span_ctx.is_valid() {
+            Some(span_ctx.trace_id().to_string())
+        } else {
+            None
+        }
+    };
+
     let turn = s
         .counters
         .get("turn_count")
@@ -174,12 +208,6 @@ async fn get_run(
 
     let checkpoint_ref = fields
         .get("workspace_checkpoint")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(String::from);
-
-    let trace_id = fields
-        .get("trace_id")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(String::from);
@@ -214,6 +242,13 @@ async fn get_run(
 }
 
 /// Steer an active agent run by queuing a steering message.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        otel.name = "agent.run.steer",
+        agent.run_id = %id,
+    )
+)]
 async fn steer_run(
     State(state): State<ServerState>,
     Extension(authenticated): Extension<AuthenticatedRequestContext>,
@@ -252,6 +287,13 @@ async fn steer_run(
 }
 
 /// Cancel an agent run.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        otel.name = "agent.run.cancel",
+        agent.run_id = %id,
+    )
+)]
 async fn cancel_run(
     State(state): State<ServerState>,
     Extension(authenticated): Extension<AuthenticatedRequestContext>,

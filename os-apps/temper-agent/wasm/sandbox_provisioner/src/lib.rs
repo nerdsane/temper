@@ -23,6 +23,22 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
 
         let fields = ctx.entity_state.get("fields").cloned().unwrap_or(json!({}));
 
+        let entity_id = ctx
+            .entity_state
+            .get("entity_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let sandbox_provider = fields
+            .get("sandbox_provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("local");
+
+        // Emit structured telemetry for sandbox provisioning.
+        let _ = ctx.log_structured("info", "sandbox.provision", &json!({
+            "agent.run_id": entity_id,
+            "agent.sandbox_provider": sandbox_provider,
+        }));
+
         let user_message = fields
             .get("user_message")
             .and_then(|v| v.as_str())

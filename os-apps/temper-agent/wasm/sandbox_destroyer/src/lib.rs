@@ -38,6 +38,13 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
             .and_then(|v| v.as_str())
             .unwrap_or("local");
 
+        // Emit structured telemetry for sandbox teardown.
+        let _ = ctx.log_structured("info", "sandbox.destroy", &json!({
+            "agent.run_id": ctx.entity_state.get("entity_id").and_then(|v| v.as_str()).unwrap_or(""),
+            "agent.sandbox_id": sandbox_id,
+            "agent.sandbox_provider": sandbox_provider,
+        }));
+
         if sandbox_id.is_empty() || sandbox_id == "static-sandbox" {
             ctx.log(
                 "info",
