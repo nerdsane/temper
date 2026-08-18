@@ -2038,33 +2038,67 @@ async fn field_update_retry_does_not_double_apply_the_journal() {
 async fn preconditioned_field_update_refuses_rather_than_retrying_a_conflict() {
     let store = Arc::new(AppendFuseStore::no_faults(47));
     let entity_id = "arn189-cas-no-retry";
-    let persistence_id = format!("default:Order:{entity_id}");
+    let boxed = || crate::storage::BoxedEventStore::from_arc(store.clone());
 
     let system = ActorSystem::new("sim-arn189-cas");
-    let actor = EntityActor::with_persistence(
-        "Order",
+    let holder = system.spawn(
+        EntityActor::with_persistence(
+            "Order",
+            entity_id,
+            order_table(),
+            serde_json::json!({"Customer": "Alice"}),
+            boxed(),
+            crate::storage::BackendLabel::Sim,
+        ),
         entity_id,
-        order_table(),
-        serde_json::json!({"Customer": "Alice"}),
-        crate::storage::BoxedEventStore::from_arc(store.clone()),
-        crate::storage::BackendLabel::Sim,
     );
-    let actor_ref = system.spawn(actor, entity_id);
-
-    let current: EntityResponse = actor_ref
-        .ask(EntityMsg::GetState, Duration::from_secs(5))
+    let seeded: EntityResponse = holder
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Customer": "Seed"}),
+                replace: false,
+                expected_precondition: None,
+            },
+            Duration::from_secs(5),
+        )
         .await
-        .expect("state");
+        .expect("seed");
+    assert!(seeded.success);
+
+    // The digest the caller authorizes against — computed from the state this
+    // actor can currently see.
     let precondition =
-        crate::entity_actor::effects::entity_authorization_precondition(&current.state);
+        crate::entity_actor::effects::entity_authorization_precondition(&seeded.state);
 
-    // A single conflict — within the retry budget an unpreconditioned update
-    // would recover from it.
-    store
-        .inner
-        .inject_concurrency_violations(&persistence_id, 1);
+    // A genuine journal-advancing race: a second actor commits, so the holder's
+    // in-memory sequence goes stale. Its entry-time digest still matches its own
+    // memory, so only the append reveals the conflict — which is exactly the
+    // window in which a retry would commit against state the caller never saw.
+    let other = system.spawn(
+        EntityActor::with_persistence(
+            "Order",
+            entity_id,
+            order_table(),
+            serde_json::json!({"Customer": "Alice"}),
+            boxed(),
+            crate::storage::BackendLabel::Sim,
+        ),
+        format!("{entity_id}-other"),
+    );
+    let concurrent: EntityResponse = other
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Region": "eu"}),
+                replace: false,
+                expected_precondition: None,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("concurrent write");
+    assert!(concurrent.success);
 
-    let response: EntityResponse = actor_ref
+    let response: EntityResponse = holder
         .ask(
             EntityMsg::UpdateFields {
                 fields: serde_json::json!({"Customer": "Bob"}),
@@ -2078,8 +2112,9 @@ async fn preconditioned_field_update_refuses_rather_than_retrying_a_conflict() {
 
     assert!(
         !response.success,
-        "a compare-and-set must not be silently retried onto state the caller \
-         never authorized"
+        "a compare-and-set must not be retried onto state the caller never \
+         authorized: {:?}",
+        response.error
     );
     assert!(
         response
