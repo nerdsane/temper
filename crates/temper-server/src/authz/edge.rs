@@ -69,8 +69,6 @@ pub fn is_public_kernel_request(method: &Method, path: &str) -> bool {
     }
     (matches!(*method, Method::GET | Method::POST) && path.starts_with("/webhooks/"))
         || (method == Method::GET && path.starts_with("/genesis/"))
-        || path.starts_with("/v1/agent-runs")
-        || path.starts_with("/api/tenants/")
 }
 
 /// Reject protected kernel routes that lack authenticated typed authority.

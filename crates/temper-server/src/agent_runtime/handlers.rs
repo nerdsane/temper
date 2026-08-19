@@ -34,32 +34,22 @@ pub fn build_agent_runtime_router() -> axum::Router<ServerState> {
         .route("/agent-runs/{id}/cancel", post(cancel_run))
 }
 
-/// Resolve the tenant and authenticated context from the request.
-/// Falls back to the `X-Tenant-Id` header and an admin security context
-/// when no credential was resolved (local dev without TEMPER_API_KEY).
-fn resolve_auth(
+/// Require typed authenticated authority resolved by the platform bearer edge.
+///
+/// Identity is never reconstructed from request headers: the platform's
+/// `bearer_auth_check` resolves `Authorization: Bearer <token>` against the
+/// tenant's `AgentCredential` registry and attaches the typed context. A
+/// missing context means the caller presented no resolvable credential.
+fn require_auth(
     authenticated: Option<Extension<AuthenticatedRequestContext>>,
-    headers: &axum::http::HeaderMap,
 ) -> Result<(TenantId, AuthenticatedRequestContext), Response> {
-    if let Some(Extension(ctx)) = authenticated {
-        return Ok((ctx.tenant().clone(), ctx));
+    match authenticated {
+        Some(Extension(ctx)) => Ok((ctx.tenant().clone(), ctx)),
+        None => Err(error_response(
+            StatusCode::UNAUTHORIZED,
+            "a valid tenant credential is required (Authorization: Bearer <token>)",
+        )),
     }
-
-    // Fallback: resolve tenant from header, create an admin context.
-    let tenant = headers
-        .get("x-tenant-id")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
-        .map(|s| TenantId::try_new(s).unwrap_or_default())
-        .unwrap_or_default();
-
-    let security_ctx = temper_authz::SecurityContext::from_resolved_identity(
-        "admin",
-        "admin",
-        None,
-    );
-    let ctx = AuthenticatedRequestContext::new(tenant.clone(), security_ctx);
-    Ok((tenant, ctx))
 }
 
 /// Create a new agent run: create entity → configure → provision.
@@ -75,10 +65,9 @@ fn resolve_auth(
 async fn create_run(
     State(state): State<ServerState>,
     authenticated: Option<Extension<AuthenticatedRequestContext>>,
-    headers: axum::http::HeaderMap,
     Json(req): Json<CreateRunRequest>,
 ) -> Response {
-    let (tenant, _authenticated) = match resolve_auth(authenticated, &headers) {
+    let (tenant, authenticated) = match require_auth(authenticated) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -88,7 +77,9 @@ async fn create_run(
     tracing::Span::current().record("agent.provider", &req.sandbox_provider);
     tracing::Span::current().record("agent.model", &req.model);
 
-    let agent_ctx = AgentContext::for_service("agent-runtime-api");
+    // Carry the caller's exact typed authority into dispatch so Cedar
+    // evaluates the real principal (never a broad service identity).
+    let agent_ctx = caller_agent_context(&authenticated);
 
     // 1. Create the TemperAgent entity (implicit on first action).
     //    We call Configure first to set up all parameters.
@@ -193,10 +184,9 @@ async fn create_run(
 async fn get_run(
     State(state): State<ServerState>,
     authenticated: Option<Extension<AuthenticatedRequestContext>>,
-    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let (tenant, _authenticated) = match resolve_auth(authenticated, &headers) {
+    let (tenant, _authenticated) = match require_auth(authenticated) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -284,15 +274,16 @@ async fn get_run(
 async fn steer_run(
     State(state): State<ServerState>,
     authenticated: Option<Extension<AuthenticatedRequestContext>>,
-    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
     Json(req): Json<SteerRequest>,
 ) -> Response {
-    let (tenant, _authenticated) = match resolve_auth(authenticated, &headers) {
+    let (tenant, authenticated) = match require_auth(authenticated) {
         Ok(t) => t,
         Err(r) => return r,
     };
-    let agent_ctx = AgentContext::for_service("agent-runtime-api");
+    // Carry the caller's exact typed authority into dispatch so Cedar
+    // evaluates the real principal (never a broad service identity).
+    let agent_ctx = caller_agent_context(&authenticated);
 
     let steering_messages = json!([req.message]);
 
@@ -333,14 +324,15 @@ async fn steer_run(
 async fn cancel_run(
     State(state): State<ServerState>,
     authenticated: Option<Extension<AuthenticatedRequestContext>>,
-    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let (tenant, _authenticated) = match resolve_auth(authenticated, &headers) {
+    let (tenant, authenticated) = match require_auth(authenticated) {
         Ok(t) => t,
         Err(r) => return r,
     };
-    let agent_ctx = AgentContext::for_service("agent-runtime-api");
+    // Carry the caller's exact typed authority into dispatch so Cedar
+    // evaluates the real principal (never a broad service identity).
+    let agent_ctx = caller_agent_context(&authenticated);
 
     let result = state
         .dispatch_tenant_action(
@@ -369,6 +361,25 @@ async fn cancel_run(
         }
         Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
+}
+
+/// Build a dispatch context that carries the caller's exact authority.
+///
+/// Mirrors the OData write path: the security context is attached verbatim and
+/// agent identity fields are copied only for Agent/Admin principals. No field
+/// is reconstructed from request headers.
+fn caller_agent_context(authenticated: &AuthenticatedRequestContext) -> AgentContext {
+    let security_context = authenticated.security_context();
+    let mut agent_ctx = AgentContext::default();
+    agent_ctx.security_ctx = Some(security_context.clone());
+    if matches!(
+        security_context.principal.kind,
+        temper_authz::PrincipalKind::Agent | temper_authz::PrincipalKind::Admin
+    ) {
+        agent_ctx.agent_id = Some(security_context.principal.id.clone());
+        agent_ctx.agent_type = security_context.principal.agent_type.clone();
+    }
+    agent_ctx
 }
 
 /// Build a JSON error response.

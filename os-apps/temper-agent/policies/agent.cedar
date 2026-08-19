@@ -17,7 +17,7 @@ permit(
   action in [Action::"create", Action::"Configure", Action::"Provision", Action::"Resume"],
   resource is TemperAgent
 ) when {
-  ["supervisor", "human"].contains(principal.agent_type)
+  ["supervisor", "human", "operator"].contains(principal.agent_type)
 };
 
 // --- Read and List: any authenticated agent ---
@@ -35,7 +35,7 @@ permit(
   action in [Action::"Steer"],
   resource is TemperAgent
 ) when {
-  ["supervisor", "human", "system"].contains(principal.agent_type)
+  ["supervisor", "human", "system", "operator"].contains(principal.agent_type)
 };
 
 // --- Dispatch pipeline callbacks: system agents ---
@@ -90,7 +90,7 @@ permit(
   action in [Action::"Fail", Action::"Cancel", Action::"SandboxLost"],
   resource is TemperAgent
 ) when {
-  ["supervisor", "human", "system"].contains(principal.agent_type)
+  ["supervisor", "human", "system", "operator"].contains(principal.agent_type)
 };
 
 // --- Restricted tool policy (Milestone 3) ---
@@ -103,6 +103,6 @@ forbid(
   action == Action::"Configure",
   resource is TemperAgent
 ) when {
-  !["admin", "supervisor", "human"].contains(principal.agent_type) &&
+  !["admin", "supervisor", "human", "operator"].contains(principal.agent_type) &&
   resource.tools_enabled.contains("bash")
 };

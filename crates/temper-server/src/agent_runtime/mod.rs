@@ -9,7 +9,6 @@
 //! Internally dispatches via `ServerState::dispatch_tenant_action` against
 //! the existing `TemperAgent` IOA entity — no self-referential HTTP calls.
 
-pub mod auth;
 mod handlers;
 mod models;
 
