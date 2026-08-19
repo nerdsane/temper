@@ -545,3 +545,69 @@ async fn closing_the_bridge_response_writer_gives_the_guest_eof() {
         chunk.len()
     );
 }
+
+#[tokio::test]
+async fn live_scope_set_is_bounded_by_concurrency_not_total_requests() {
+    // ARN-207 review: tracking *live* scopes (insert at mint, remove at close)
+    // rather than tombstoning closed ones means the set is bounded by concurrent
+    // invocations, not total requests — no unbounded growth, no eviction hazard
+    // that could let a straggler reopen a forgotten scope.
+    let reg = HttpStreamRegistry::new();
+    for _ in 0..10_000 {
+        let scope = reg.mint_scope().await;
+        reg.close_scope(scope).await;
+        assert_eq!(
+            reg.live_scope_count().await,
+            0,
+            "a closed scope must leave the live set immediately"
+        );
+    }
+
+    // Concurrent (unclosed) scopes are the only thing that grows it.
+    let mut open = Vec::new();
+    for _ in 0..5 {
+        open.push(reg.mint_scope().await);
+    }
+    assert_eq!(reg.live_scope_count().await, 5);
+    for scope in open {
+        reg.close_scope(scope).await;
+    }
+    assert_eq!(reg.live_scope_count().await, 0);
+}
+
+#[tokio::test]
+async fn a_fast_bridge_that_released_before_guest_close_leaves_no_stale_abort_handle() {
+    // ARN-207 review P3: if the bridge completes (release) before the guest closes
+    // its response, and a late registration re-admitted an abort handle, closing
+    // the guest response must drop it so it cannot accumulate to close_scope.
+    let reg = HttpStreamRegistry::new();
+    let scope = reg.mint_scope().await;
+    let ex = reg.open_outbound_exchange(scope).await.expect("open");
+
+    // Bridge completes first (guest hasn't closed): slot stays, marked done.
+    reg.release_outbound_exchange(
+        scope,
+        ex.guest_response_body,
+        ex.guest_request_body,
+        ex.bridge_request_body,
+        ex.bridge_response_body,
+    )
+    .await;
+    // A late registration for the (now-finished) bridge is re-admitted by the
+    // slot-present check.
+    let join = tokio::spawn(async {});
+    let abort = join.abort_handle();
+    let _ = join.await;
+    reg.register_outbound_bridge(scope, ex.guest_response_body, abort)
+        .await;
+
+    // Guest closes: the slot frees AND the stale abort handle is dropped.
+    reg.close_as_guest(scope, ex.guest_response_body)
+        .await
+        .unwrap();
+    assert_eq!(
+        reg.live_outbound_bridge_count(scope).await,
+        0,
+        "closing the response must drop the stale abort handle"
+    );
+}

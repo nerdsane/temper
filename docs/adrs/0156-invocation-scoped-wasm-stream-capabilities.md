@@ -145,13 +145,16 @@ Scope of this bound, stated precisely so it is not read as more than it is:
     bridge completion so the map tracks only *live* bridges — not every call
     made), so sockets die promptly at request end rather than lingering until the
     outbound client's timeout (`WasmResourceLimits::max_duration`).
-  - A closed scope is **terminal**: `open_outbound_exchange` and
-    `register_outbound_bridge` refuse it (a late registration aborts its bridge
-    on the spot). A guest whose host call outlives `close_scope` — block-in-place
-    surviving the invocation abort, or a disconnect racing the response drain —
-    therefore cannot reopen the dead scope or slip a bridge in between spawn and
-    registration. Tombstones are a bounded ring (a host call cannot outlive that
-    many later requests), so this adds no unbounded state.
+  - A closed scope is **terminal**: the registry tracks the set of *live* scopes
+    (inserted at `mint_scope`, removed at `close_scope`), and
+    `open_outbound_exchange` and `register_outbound_bridge` refuse a scope that is
+    not live (a late registration aborts its bridge on the spot). A guest whose
+    host call outlives `close_scope` — block-in-place surviving the invocation
+    abort, or a disconnect racing the response drain — therefore cannot reopen the
+    dead scope or slip a bridge in between spawn and registration. The live set is
+    bounded by the number of *concurrent* invocations, not total requests, so it
+    needs no eviction and has no eviction hazard (a closed-scope tombstone ring
+    would eventually roll over and let a straggler reopen a forgotten scope).
   - A guest that reads a response to EOF but never calls `close` (the SDK does not
     close on EOF) holds the slot until request end, so such calls are throttled at
     `MAX_OUTBOUND_STREAMS_PER_SCOPE` rather than "never throttled". The honest fix
