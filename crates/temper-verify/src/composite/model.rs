@@ -13,9 +13,11 @@
 //! externally-enabled actions. Triggered cascades happen invisibly
 //! inside `next_state` (bounded by `MAX_TRIGGER_DEPTH`).
 //!
-//! Invariants: each participating entity's local invariants are lifted
-//! into the joint model via `Property::always` closures that project
-//! the joint state down to the entity's slice before evaluating.
+//! JCS properties: `joint_local_invariants` (each Automaton's
+//! `[[invariant]]` on its slice after reactions), `no_dropped_reaction`,
+//! and `related_field_constraints` (hard sidecar rows: fail when a matching
+//! action is enabled while `related(...).field` does not hold; ADR-0171).
+//! Those rows are never synthesized as extra `actions()` guards.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -26,6 +28,7 @@ use temper_spec::automaton::TriggerEdge;
 use crate::model::{ModelGuard, TemperModel, TemperModelAction, TemperModelState};
 
 use super::CompositeVerificationPlan;
+use super::related_field::{RelatedFieldRule, violations_in_state};
 
 /// Maximum cascade depth per `next_state` call. Matches the runtime
 /// `MAX_REACTION_DEPTH` (temper-server) so the verifier bounds exactly
@@ -137,6 +140,8 @@ pub struct CompositeTemperModel {
     edges: Vec<TriggerEdge>,
     /// Entity types in the composition (cached for iteration).
     entity_types: Vec<String>,
+    /// Hard related-field sidecar rules in this scope (ADR-0171).
+    pub(super) related_field_rules: Vec<RelatedFieldRule>,
 }
 
 impl CompositeTemperModel {
@@ -150,6 +155,7 @@ impl CompositeTemperModel {
             models: plan.models,
             edges: plan.edges,
             entity_types,
+            related_field_rules: plan.related_field_rules,
         }
     }
 
@@ -379,7 +385,7 @@ impl CompositeTemperModel {
 
 /// Visited-set key for a joint state: the per-entity rendering, with the
 /// per-transition `dropped` marker excluded (it is not part of identity).
-fn state_key(state: &CompositeState) -> String {
+pub(super) fn state_key(state: &CompositeState) -> String {
     let parts: Vec<String> = state
         .entities
         .iter()
@@ -498,10 +504,10 @@ impl Model for CompositeTemperModel {
         // against each entity's slice using the local invariant
         // evaluator.
         //
-        // Cross-entity invariants translation is a later slice; the
-        // per-entity projection below is already more than snapshot
-        // checking — Stateright's BFS visits every reachable joint
-        // state.
+        // JCS verifies `joint_local_invariants`, `no_dropped_reaction`, and
+        // hard sidecar rows as `related_field_constraints` (ADR-0171). The
+        // sidecar is not folded into `actions()` — a matching enabled action
+        // whose related() field fails is a counterexample, not a hidden edge.
         vec![
             Property::<Self>::always("joint_local_invariants", |m, s| {
                 for (entity_type, entity_state) in &s.entities {
@@ -520,6 +526,14 @@ impl Model for CompositeTemperModel {
             // a counterexample. `create`-resolver and `drop_ok` reactions are
             // exempt (never recorded), so they never trip this property.
             Property::<Self>::always("no_dropped_reaction", |_m, s| s.dropped.is_none()),
+            Property::<Self>::always("related_field_constraints", |m, s| {
+                violations_in_state(
+                    &m.related_field_rules,
+                    &m.enabled_external_actions(s),
+                    &s.entities,
+                )
+                .is_empty()
+            }),
         ]
     }
 }

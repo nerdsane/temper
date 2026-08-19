@@ -21,7 +21,7 @@ use crate::proptest_gen::PropTestResult;
 use crate::simulation::SimulationResult;
 use crate::smt::SmtResult;
 
-use temper_spec::automaton::{parse_automaton, Automaton};
+use temper_spec::automaton::{Automaton, parse_automaton};
 
 /// Result of an actor simulation level (Level 2b).
 ///

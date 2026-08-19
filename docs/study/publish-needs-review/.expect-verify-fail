@@ -1,0 +1,6 @@
+This directory is an expected-fail fixture for ADR-0171 / ARN-387.
+`temper verify` must fail: HumanCurator.Publish is enabled while
+related(ReviewAgent).status is Reviewing.
+
+The passing twin is docs/study/publish-needs-review/fixed/.
+Pre-commit skips the cascade when this file is present.

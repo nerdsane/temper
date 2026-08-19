@@ -248,7 +248,11 @@ fn is_identifier(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-pub(crate) fn split_trigger(trigger: &str) -> Option<(&str, Option<&str>)> {
+/// Split `Entity.*` or `Entity.Action` into `(entity, action)`.
+///
+/// `action` is `None` for the wildcard form. Returns `None` when the
+/// string is not that shape.
+pub fn split_trigger(trigger: &str) -> Option<(&str, Option<&str>)> {
     let (entity, action) = trigger.split_once('.')?;
     let entity = entity.trim();
     let action = action.trim();

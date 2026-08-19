@@ -1,0 +1,40 @@
+# Guarded copy of the publish-needs-review HumanCurator.
+# Publish requires ReviewAgent VerdictRecorded, matching the sidecar.
+
+[automaton]
+name = "HumanCurator"
+states = ["Reviewing", "Published"]
+initial = "Reviewing"
+allow_indefinite_states = ["Reviewing", "Published"]
+
+[[state]]
+name = "review_agent_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "has_review_verdict"
+type = "bool"
+initial = false
+
+[[action]]
+name = "RecordReviewVerdict"
+from = ["Reviewing"]
+to = "Reviewing"
+effect = [{ type = "set_bool", var = "has_review_verdict", value = "true" }]
+hint = "Flip a local flag. Does not look at ReviewAgent."
+
+[[action]]
+name = "Publish"
+from = ["Reviewing"]
+to = "Published"
+guard = [
+  { type = "is_true", var = "has_review_verdict" },
+  { type = "cross_entity_state", entity_type = "ReviewAgent", entity_id_source = "review_agent_id", required_status = ["VerdictRecorded"] },
+]
+hint = "Local flag plus ReviewAgent VerdictRecorded (matches the sidecar)."
+
+[[invariant]]
+name = "HumanDecidesPublish"
+when = ["Published"]
+assert = "has_review_verdict"

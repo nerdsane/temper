@@ -1,0 +1,11 @@
+# Same related-field row as the parent study dir. Publish is also guarded
+# in human_curator.ioa.toml so directory verify should PASS.
+
+version = 1
+default_delete_policy = "restrict"
+
+[[invariant]]
+name = "PublishNeedsThisReviewRecorded"
+kind = "hard"
+on = "HumanCurator.Publish"
+assert = 'related(ReviewAgent, review_agent_id).status in ["VerdictRecorded"]'

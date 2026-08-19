@@ -16,8 +16,8 @@ use stateright::Model;
 use temper_spec::automaton::AssertCompareOp;
 
 use crate::model::{
-    build_model_from_ioa, InvariantKind, LivenessKind, TemperModel, TemperModelAction,
-    TemperModelState,
+    InvariantKind, LivenessKind, TemperModel, TemperModelAction, TemperModelState,
+    build_model_from_ioa,
 };
 
 /// Configuration for a simulation run.

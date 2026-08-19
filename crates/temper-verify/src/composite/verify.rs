@@ -10,7 +10,9 @@
 //!    BFS bounded by a target state-count budget. If the budget is
 //!    exhausted before the space is, the result is marked
 //!    [`CompositeOutcome::Incomplete`] — never a silent pass.
-//! 3. [`verify_all`] runs every seed and aggregates.
+//! 3. [`verify_all`] runs every seed and aggregates. Optional sidecar
+//!    (`cross-invariants.toml`) unions `related()` pairs into the cover
+//!    and adds the `related_field_constraints` property (ADR-0171).
 //!
 //! Determinism: weakly-connected components are computed over `BTreeSet`s
 //! and seeds are the lexicographically smallest entity per component, so the
@@ -21,8 +23,10 @@ use std::fmt;
 
 use stateright::{Checker, Model};
 use temper_spec::automaton::{Automaton, TriggerGraph};
+use temper_spec::cross_invariant::CrossInvariantSpec;
 
 use super::model::{CompositeTemperModel, DroppedReaction};
+use super::related_field::{RelatedFieldViolation, related_composition_pairs};
 use super::{CompositePlanError, CompositeVerificationPlan};
 
 /// Default joint-state BFS budget (target unique-state count). The checker
@@ -72,8 +76,10 @@ pub struct CompositeVerifyResult {
     /// witnessed at the end of a counterexample path).
     pub dropped_reactions: Vec<DroppedReaction>,
     /// Names of any other violated properties (e.g. a joint local
-    /// invariant), for completeness.
+    /// invariant), for completeness. Includes hard related-field row names.
     pub other_violations: Vec<String>,
+    /// Hard related-field counterexamples (one per distinct row name).
+    pub related_field_violations: Vec<RelatedFieldViolation>,
 }
 
 impl CompositeVerifyResult {
@@ -84,13 +90,14 @@ impl CompositeVerifyResult {
     }
 }
 
-/// Seed cover: one seed per weakly-connected component of the trigger graph.
+/// Seed cover: one seed per weakly-connected component of the trigger graph
+/// union hard related-field `on` ↔ `related()` pairs (ADR-0171).
 ///
 /// Every entity belongs to exactly one weakly-connected component, so seeding
 /// each component's root reaches every entity (via the composite plan's
 /// reachability closure). The root is the lexicographically smallest entity
 /// in the component for deterministic output. Returns seeds in sorted order.
-pub fn seed_cover(automatons: &[&Automaton]) -> Vec<String> {
+pub fn seed_cover(automatons: &[&Automaton], sidecar: Option<&CrossInvariantSpec>) -> Vec<String> {
     let graph = TriggerGraph::from_automatons(automatons);
 
     // Union-find over the UNDIRECTED projection of the trigger graph: two
@@ -131,6 +138,14 @@ pub fn seed_cover(automatons: &[&Automaton]) -> Vec<String> {
         }
     }
 
+    if let Some(spec) = sidecar {
+        for (on_entity, target, _) in related_composition_pairs(spec) {
+            if parent.contains_key(&on_entity) && parent.contains_key(&target) {
+                union(&mut parent, &on_entity, &target);
+            }
+        }
+    }
+
     // Collect the canonical root of each component.
     let mut roots: BTreeSet<String> = BTreeSet::new();
     let entities: Vec<String> = graph.entities.iter().cloned().collect();
@@ -145,8 +160,9 @@ pub fn seed_cover(automatons: &[&Automaton]) -> Vec<String> {
 pub fn verify_composite(
     automatons: &[&Automaton],
     seed: &str,
+    sidecar: Option<&CrossInvariantSpec>,
 ) -> Result<CompositeVerifyResult, CompositePlanError> {
-    verify_composite_with_budget(automatons, seed, DEFAULT_COMPOSITE_STATE_BUDGET)
+    verify_composite_with_budget(automatons, seed, DEFAULT_COMPOSITE_STATE_BUDGET, sidecar)
 }
 
 /// Verify the composite rooted at `seed`, bounding the BFS to roughly
@@ -155,8 +171,9 @@ pub fn verify_composite_with_budget(
     automatons: &[&Automaton],
     seed: &str,
     state_budget: usize,
+    sidecar: Option<&CrossInvariantSpec>,
 ) -> Result<CompositeVerifyResult, CompositePlanError> {
-    let plan = CompositeVerificationPlan::new(automatons, seed)?;
+    let plan = CompositeVerificationPlan::new_with_sidecar(automatons, seed, sidecar)?;
     let scope: Vec<String> = plan.models.keys().cloned().collect();
     let model = CompositeTemperModel::from_plan(plan);
 
@@ -176,11 +193,11 @@ pub fn verify_composite_with_budget(
     // report INCOMPLETE rather than claim a pass.
     let property_complete = checker.is_done() && states_explored < state_budget;
 
-    // Collect every non-`no_dropped_reaction` property violation (e.g. a joint
-    // local invariant) from the Stateright run.
+    // Collect every property violation that is not expanded separately
+    // (`no_dropped_reaction`, `related_field_constraints`).
     let mut other_violations = Vec::new();
     for (property_name, _path) in checker.discoveries() {
-        if property_name != "no_dropped_reaction" {
+        if property_name != "no_dropped_reaction" && property_name != "related_field_constraints" {
             other_violations.push(property_name.to_string());
         }
     }
@@ -190,9 +207,17 @@ pub fn verify_composite_with_budget(
     // one run. `enumerate_drops` walks the reachable joint space directly.
     let model = checker.model();
     let (dropped_reactions, drops_complete) = model.enumerate_drops(state_budget);
+    let related_field_violations = model.enumerate_related_field_violations(state_budget);
+    for violation in &related_field_violations {
+        if !other_violations.iter().any(|n| n == &violation.name) {
+            other_violations.push(violation.name.clone());
+        }
+    }
 
     let is_complete = property_complete && drops_complete;
-    let has_violation = !dropped_reactions.is_empty() || !other_violations.is_empty();
+    let has_violation = !dropped_reactions.is_empty()
+        || !other_violations.is_empty()
+        || !related_field_violations.is_empty();
     let outcome = if has_violation {
         CompositeOutcome::Violated
     } else if is_complete {
@@ -208,6 +233,7 @@ pub fn verify_composite_with_budget(
         states_explored,
         dropped_reactions,
         other_violations,
+        related_field_violations,
     })
 }
 
@@ -215,25 +241,27 @@ pub fn verify_composite_with_budget(
 /// per seed. The aggregate is gating: any [`CompositeOutcome::Violated`]
 /// fails; any [`CompositeOutcome::Incomplete`] is surfaced as a warning by
 /// the caller (the proof is partial, not a pass).
-pub fn verify_all(automatons: &[&Automaton]) -> Vec<CompositeVerifyResult> {
-    let seeds = seed_cover(automatons);
+pub fn verify_all(
+    automatons: &[&Automaton],
+    sidecar: Option<&CrossInvariantSpec>,
+) -> Vec<CompositeVerifyResult> {
+    let seeds = seed_cover(automatons, sidecar);
     let mut results = Vec::with_capacity(seeds.len());
     for seed in seeds {
-        match verify_composite(automatons, &seed) {
+        match verify_composite(automatons, &seed, sidecar) {
             Ok(result) => results.push(result),
-            Err(_) => {
-                // A seed that cannot build a plan (e.g. a trigger to an
-                // entity outside the supplied set) is reported as an
-                // incomplete result so the caller never reads it as a pass.
+            Err(err) => {
+                // A seed that cannot build a plan (e.g. a trigger or related()
+                // target outside the supplied set) is reported as incomplete
+                // so the caller never reads it as a pass.
                 results.push(CompositeVerifyResult {
                     seed: seed.clone(),
                     scope: vec![seed],
                     outcome: CompositeOutcome::Incomplete,
                     states_explored: 0,
                     dropped_reactions: Vec::new(),
-                    other_violations: vec![
-                        "plan build failed (unknown trigger target?)".to_string(),
-                    ],
+                    other_violations: vec![format!("plan build failed: {err}")],
+                    related_field_violations: Vec::new(),
                 });
             }
         }

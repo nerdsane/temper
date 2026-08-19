@@ -8,10 +8,13 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use temper_spec::automaton::{lint_automata_bundle, lint_automaton, LintSeverity};
+use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton};
 use temper_spec::csdl::parse_csdl;
 
 use crate::util::to_pascal_case;
+
+mod joint;
+use joint::{load_related_field_sidecar, run_composite_verification};
 
 /// Run the `temper verify` command.
 ///
@@ -107,6 +110,8 @@ pub fn run(specs_dir: &str) -> Result<()> {
         );
     }
 
+    let sidecar = load_related_field_sidecar(specs_path)?;
+
     println!("\nRunning IOA verification cascade...");
     let mut cascade_summaries: Vec<(String, Vec<(bool, String)>)> = Vec::new();
     for (entity_name, automaton) in &parsed_automata {
@@ -128,14 +133,12 @@ pub fn run(specs_dir: &str) -> Result<()> {
     }
     println!("\nIOA verification cascade: ALL PASSED");
 
-    // ADR-0150: directory verification ALWAYS runs composite cross-entity
-    // verification as a first-class, gating step. It composes every
-    // entity's joint state machine and BFS-checks that no cross-entity
-    // reaction is dropped (target not in its required from-state). This is
-    // only meaningful with two or more entities — a single spec has nothing
-    // to compose (and stdin verification stays per-entity by design).
-    if parsed_automata.len() >= 2 {
-        run_composite_verification(&parsed_automata)?;
+    // ADR-0150 / ADR-0171: directory verification always runs composite
+    // when there are two or more entities, or when a related-field sidecar
+    // is present (so a missing related() target is not a silent pass).
+    // `temper verify-ioa` stays per-entity.
+    if parsed_automata.len() >= 2 || sidecar.is_some() {
+        run_composite_verification(&parsed_automata, sidecar.as_ref())?;
     }
 
     println!("\nVerification Report");
@@ -150,94 +153,6 @@ pub fn run(specs_dir: &str) -> Result<()> {
     }
     println!("\n{}", "=".repeat(50));
     println!("Result: PASS — L0–L3 cascade passed.");
-
-    Ok(())
-}
-
-/// Run always-on composite cross-entity verification over the parsed
-/// automata (ADR-0150).
-///
-/// Seeds the joint-state BFS from the root of each weakly-connected component
-/// of the entity trigger graph (so every entity is covered), checks the
-/// `no_dropped_reaction` property, and reports every dropped reaction with
-/// enough detail to name it. A dropped reaction GATES — it fails the command.
-/// An INCOMPLETE run (budget exhausted) is surfaced as a warning and does not
-/// claim a pass.
-fn run_composite_verification(
-    parsed_automata: &std::collections::BTreeMap<String, temper_spec::automaton::Automaton>,
-) -> Result<()> {
-    use temper_verify::composite::{verify_all, CompositeOutcome};
-
-    let automaton_refs: Vec<&temper_spec::automaton::Automaton> =
-        parsed_automata.values().collect();
-
-    println!("\nRunning composite cross-entity verification (ADR-0150)...");
-    let results = verify_all(&automaton_refs);
-
-    let mut any_violation = false;
-    let mut any_incomplete = false;
-    let mut dropped_lines: Vec<String> = Vec::new();
-
-    for result in &results {
-        let scope = result.scope.join(", ");
-        match result.outcome {
-            CompositeOutcome::Verified => {
-                println!(
-                    "    [PASS] seed={} scope=[{}] — {} joint states, no dropped reactions",
-                    result.seed, scope, result.states_explored,
-                );
-            }
-            CompositeOutcome::Violated => {
-                any_violation = true;
-                println!(
-                    "    [FAIL] seed={} scope=[{}] — {} joint states, {} dropped reaction(s)",
-                    result.seed,
-                    scope,
-                    result.states_explored,
-                    result.dropped_reactions.len(),
-                );
-                for drop in &result.dropped_reactions {
-                    let line = format!(
-                        "{}.{} fired trigger '{}' targeting {}.{}, but {} was in '{}' (action not enabled) — reaction DROPPED",
-                        drop.source_entity,
-                        drop.source_action,
-                        drop.trigger_name,
-                        drop.target_entity,
-                        drop.target_action,
-                        drop.target_entity,
-                        drop.target_state,
-                    );
-                    println!("           - {line}");
-                    dropped_lines.push(line);
-                }
-                for other in &result.other_violations {
-                    println!("           - other violated property: {other}");
-                }
-            }
-            CompositeOutcome::Incomplete => {
-                any_incomplete = true;
-                println!(
-                    "    [INCOMPLETE] seed={} scope=[{}] — explored {} joint states; BFS budget exhausted, proof is PARTIAL (not a pass)",
-                    result.seed, scope, result.states_explored,
-                );
-            }
-        }
-    }
-
-    if any_violation {
-        anyhow::bail!(
-            "composite cross-entity verification failed: {} dropped reaction(s):\n  - {}",
-            dropped_lines.len(),
-            dropped_lines.join("\n  - "),
-        );
-    }
-    if any_incomplete {
-        println!(
-            "\nWARNING: composite verification was INCOMPLETE for one or more seeds (budget exhausted). The cross-entity proof is partial — narrow the spec or raise the budget to fully verify."
-        );
-    } else {
-        println!("\nComposite cross-entity verification: ALL PASSED");
-    }
 
     Ok(())
 }
@@ -444,5 +359,29 @@ to = "Frozen"
             msg.contains("IncrementUsage") && msg.contains("Frozen"),
             "failure should name the dropped reaction + wrong state, got: {msg}"
         );
+    }
+
+    #[test]
+    fn test_verify_fails_on_unguarded_related_field_sidecar() {
+        let specs_dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/study/publish-needs-review"
+        );
+        let result = run(specs_dir);
+        let err = result.expect_err("unguarded Publish must fail related-field check");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("PublishNeedsThisReviewRecorded"),
+            "FAIL must name the sidecar row, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_verify_passes_guarded_related_field_sidecar() {
+        let specs_dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/study/publish-needs-review/fixed"
+        );
+        run(specs_dir).expect("Publish guarded on ReviewAgent VerdictRecorded must pass");
     }
 }

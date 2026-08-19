@@ -1,0 +1,11 @@
+# Related-field constraint for the JCS publish order.
+# On-disk name is cross-invariants.toml. This is not an Automaton [[invariant]].
+
+version = 1
+default_delete_policy = "restrict"
+
+[[invariant]]
+name = "PublishNeedsThisReviewRecorded"
+kind = "hard"
+on = "HumanCurator.Publish"
+assert = 'related(ReviewAgent, review_agent_id).status in ["VerdictRecorded"]'

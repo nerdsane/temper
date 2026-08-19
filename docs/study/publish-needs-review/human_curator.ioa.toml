@@ -1,0 +1,42 @@
+# HumanCurator slice used to show the sidecar vs a local flag.
+#
+# Publish is allowed by this machine as soon as a local flag is set.
+# The related-field sidecar (cross-invariants.toml) requires the linked
+# ReviewAgent to be VerdictRecorded. Directory `temper verify` checks that
+# hard row (ADR-0171). The write path also enforces it.
+# Guarded copy that should PASS: docs/study/publish-needs-review/fixed/
+
+[automaton]
+name = "HumanCurator"
+states = ["Reviewing", "Published"]
+initial = "Reviewing"
+allow_indefinite_states = ["Reviewing", "Published"]
+
+[[state]]
+name = "review_agent_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "has_review_verdict"
+type = "bool"
+initial = false
+
+[[action]]
+name = "RecordReviewVerdict"
+from = ["Reviewing"]
+to = "Reviewing"
+effect = [{ type = "set_bool", var = "has_review_verdict", value = "true" }]
+hint = "Flip a local flag. Does not look at ReviewAgent."
+
+[[action]]
+name = "Publish"
+from = ["Reviewing"]
+to = "Published"
+guard = [{ type = "is_true", var = "has_review_verdict" }]
+hint = "Local machine: flag is enough. Sidecar: ReviewAgent must be VerdictRecorded."
+
+[[invariant]]
+name = "HumanDecidesPublish"
+when = ["Published"]
+assert = "has_review_verdict"

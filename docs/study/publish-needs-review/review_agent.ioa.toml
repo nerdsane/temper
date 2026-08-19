@@ -1,0 +1,11 @@
+[automaton]
+name = "ReviewAgent"
+states = ["Reviewing", "VerdictRecorded"]
+initial = "Reviewing"
+allow_indefinite_states = ["Reviewing", "VerdictRecorded"]
+
+[[action]]
+name = "RecordVerdict"
+from = ["Reviewing"]
+to = "VerdictRecorded"
+hint = "The review agent records a verdict on its assigned submission."

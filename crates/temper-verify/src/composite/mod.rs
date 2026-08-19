@@ -1,18 +1,29 @@
-//! Composite verification for cross-entity trigger chains (ADR-0046 slice 8).
+//! Composite verification for entity-kind trigger chains (JCS, ADR-0150)
+//! plus hard related-field sidecar rows (ADR-0171).
 //!
 //! Builds on [`temper_spec::automaton::TriggerGraph`] to compose multiple
 //! entity [`TemperModel`](crate::TemperModel)s into a joint verification
-//! unit. Given a seed entity and the tenant's parsed automatons, this
-//! module:
+//! unit. JCS checks:
+//!
+//! - `joint_local_invariants` — each Automaton's `[[invariant]]` after reactions
+//! - `no_dropped_reaction` — entity-kind `[[action.triggers]]` must be enabled
+//!   on the target
+//! - `related_field_constraints` — a hard sidecar row fails when a matching
+//!   action is **enabled** while `related(...).field` does not hold (never
+//!   synthesized as extra `actions()` guards)
+//!
+//! Eventual-kind sidecar rows stay runtime-only.
+//!
+//! Given a seed entity and the tenant's parsed automatons, this module:
 //!
 //! 1. Walks the trigger graph from the seed to determine the participating
 //!    entity set (reachability closure).
 //! 2. Builds a [`TemperModel`] for each participating entity.
 //! 3. Materialises a [`CompositeVerificationPlan`] describing what the
 //!    joint state-machine verifier would check.
-//! 4. (Slice 8d) Implements [`stateright::Model`] over the composition
+//! 4. Implements [`stateright::Model`] over the composition
 //!    ([`CompositeTemperModel`]), so the verifier can BFS the joint
-//!    state space with cross-entity cascades applied within each step.
+//!    state space with reaction cascades applied within each step.
 //!
 //! Example:
 //!
@@ -29,9 +40,11 @@
 
 pub mod invariant_eval;
 pub mod model;
+pub mod related_field;
 pub mod verify;
 
 pub use model::{CompositeAction, CompositeState, CompositeTemperModel, DroppedReaction};
+pub use related_field::{RelatedFieldFailReason, RelatedFieldRule, RelatedFieldViolation};
 pub use verify::{
     CompositeOutcome, CompositeVerifyResult, seed_cover, verify_all, verify_composite,
     verify_composite_with_budget,
@@ -41,8 +54,11 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use temper_spec::automaton::{Automaton, TriggerEdge, TriggerGraph};
+use temper_spec::cross_invariant::CrossInvariantSpec;
 
 use crate::model::{TemperModel, build_model_from_automaton};
+
+use related_field::{compile_hard_related_field_rules, related_composition_pairs};
 
 /// Default per-entity counter ceiling used when building composite
 /// [`TemperModel`]s. Matches the single-entity cascade default.
@@ -63,6 +79,16 @@ pub enum CompositePlanError {
         /// Missing target entity type.
         target: String,
     },
+    /// A hard related-field row names a target entity type not present
+    /// in the supplied automaton set. Not a silent pass (ADR-0171).
+    UnknownRelatedTarget {
+        /// Entity named by the row's `on` selector.
+        source: String,
+        /// Sidecar row name.
+        constraint: String,
+        /// Missing `related()` target entity type.
+        target: String,
+    },
 }
 
 impl fmt::Display for CompositePlanError {
@@ -79,6 +105,14 @@ impl fmt::Display for CompositePlanError {
                 f,
                 "trigger '{trigger}' on '{source}' references unknown target entity '{target}'"
             ),
+            Self::UnknownRelatedTarget {
+                source,
+                constraint,
+                target,
+            } => write!(
+                f,
+                "related-field constraint '{constraint}' on '{source}' references unknown target entity '{target}'"
+            ),
         }
     }
 }
@@ -86,14 +120,14 @@ impl fmt::Display for CompositePlanError {
 impl std::error::Error for CompositePlanError {}
 
 /// Plan for verifying a joint state machine formed by a seed entity and
-/// every other entity reachable from it via entity-kind triggers.
+/// every other entity reachable from it via entity-kind triggers or hard
+/// related-field sidecar pairs (ADR-0171).
 ///
 /// Holds per-entity [`TemperModel`]s (indexed by entity type name) plus
-/// the trigger edges that link them. The future composite verifier (slice
-/// 8c) consumes this directly — state becomes
-/// `BTreeMap<EntityType, TemperModelState>`, actions become
-/// `(EntityType, TemperModelAction)`, and next_state walks `edges` to
-/// apply triggered transitions to target entities.
+/// the trigger edges that link them. The composite verifier consumes this
+/// directly — state becomes `BTreeMap<EntityType, TemperModelState>`,
+/// actions become `(EntityType, TemperModelAction)`, and next_state walks
+/// `edges` to apply triggered transitions to target entities.
 pub struct CompositeVerificationPlan {
     /// Seed entity this plan was rooted at.
     pub seed: String,
@@ -103,6 +137,8 @@ pub struct CompositeVerificationPlan {
     /// Trigger edges within the composition scope. Edges to/from
     /// entities outside the scope are filtered out at build time.
     pub edges: Vec<TriggerEdge>,
+    /// Hard related-field rules whose `on` entity is in this scope.
+    pub related_field_rules: Vec<RelatedFieldRule>,
     /// Whether the trigger graph contains a cycle reachable from the seed.
     /// Not an error (cycles are legal; cascade depth bounds them at
     /// runtime and verification) but surfaced for reporting.
@@ -115,6 +151,7 @@ impl fmt::Debug for CompositeVerificationPlan {
             .field("seed", &self.seed)
             .field("models", &self.models.keys().collect::<Vec<_>>())
             .field("edges", &self.edges.len())
+            .field("related_field_rules", &self.related_field_rules.len())
             .field("has_cycle", &self.has_cycle)
             .finish()
     }
@@ -122,19 +159,30 @@ impl fmt::Debug for CompositeVerificationPlan {
 
 impl CompositeVerificationPlan {
     /// Build a [`CompositeVerificationPlan`] from a set of parsed
-    /// automatons and a seed entity.
+    /// automatons and a seed entity (no sidecar).
     ///
     /// Walks the trigger graph from the seed, collects every reachable
     /// entity, and builds a per-entity [`TemperModel`] for each. Returns
     /// errors for missing seeds, missing trigger targets, and per-entity
     /// model-build failures.
     pub fn new(automatons: &[&Automaton], seed: &str) -> Result<Self, CompositePlanError> {
+        Self::new_with_sidecar(automatons, seed, None)
+    }
+
+    /// Build a plan, unioning hard related-field `on` ↔ `related()` pairs
+    /// into reachability so the target entity shares this seed (ADR-0171).
+    pub fn new_with_sidecar(
+        automatons: &[&Automaton],
+        seed: &str,
+        sidecar: Option<&CrossInvariantSpec>,
+    ) -> Result<Self, CompositePlanError> {
         let graph = TriggerGraph::from_automatons(automatons);
         if !graph.entities.contains(seed) {
             return Err(CompositePlanError::SeedMissing(seed.to_string()));
         }
 
-        let scope = graph.reachable_from(seed);
+        let related_pairs = sidecar.map(related_composition_pairs).unwrap_or_default();
+        let scope = composition_scope(&graph, seed, &related_pairs);
         let has_cycle = graph.has_cycle_from(seed);
 
         // Index automatons by entity type name for O(log n) lookup.
@@ -142,6 +190,23 @@ impl CompositeVerificationPlan {
             .iter()
             .map(|a| (a.automaton.name.as_str(), a))
             .collect();
+
+        for (on_entity, target, constraint) in &related_pairs {
+            if scope.contains(on_entity) && !by_name.contains_key(target.as_str()) {
+                return Err(CompositePlanError::UnknownRelatedTarget {
+                    source: on_entity.clone(),
+                    constraint: constraint.clone(),
+                    target: target.clone(),
+                });
+            }
+            if scope.contains(target) && !by_name.contains_key(on_entity.as_str()) {
+                return Err(CompositePlanError::UnknownRelatedTarget {
+                    source: on_entity.clone(),
+                    constraint: constraint.clone(),
+                    target: on_entity.clone(),
+                });
+            }
+        }
 
         // Validate every edge inside scope points at an in-scope target
         // (they must, since reachability is transitive, but this also
@@ -168,17 +233,29 @@ impl CompositeVerificationPlan {
         // direct-from-Automaton builder (no TOML round-trip).
         let mut models: BTreeMap<String, TemperModel> = BTreeMap::new();
         for entity in &scope {
-            let aut = by_name
-                .get(entity.as_str())
-                .expect("scope member is in input set");
+            let aut = by_name.get(entity.as_str()).ok_or_else(|| {
+                CompositePlanError::UnknownRelatedTarget {
+                    source: seed.to_string(),
+                    constraint: "related_field".to_string(),
+                    target: entity.clone(),
+                }
+            })?;
             let model = build_model_from_automaton(aut, DEFAULT_COMPOSITE_MAX_COUNTER);
             models.insert(entity.clone(), model);
         }
+
+        let related_field_rules = sidecar
+            .map(compile_hard_related_field_rules)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|rule| scope.contains(&rule.on_entity))
+            .collect();
 
         Ok(Self {
             seed: seed.to_string(),
             models,
             edges,
+            related_field_rules,
             has_cycle,
         })
     }
@@ -252,170 +329,56 @@ fn per_entity_state_bound(_model: &TemperModel) -> usize {
     1
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use temper_spec::automaton::parse_automaton;
+/// Directed trigger reachability from `seed`, plus undirected hard
+/// related-field pairs (ADR-0171). Trigger edges stay directed so today's
+/// trigger-only plans do not change; related() pairs pull the target in.
+fn composition_scope(
+    graph: &TriggerGraph,
+    seed: &str,
+    related_pairs: &[(String, String, String)],
+) -> std::collections::BTreeSet<String> {
+    use std::collections::{BTreeSet, VecDeque};
 
-    fn order_ioa() -> &'static str {
-        r#"
-[automaton]
-name = "Order"
-states = ["Draft", "Submitted", "Confirmed"]
-initial = "Draft"
-
-[[action]]
-name = "SubmitOrder"
-from = ["Draft"]
-to = "Submitted"
-
-[[action]]
-name = "ConfirmOrder"
-from = ["Submitted"]
-to = "Confirmed"
-
-[[action.triggers]]
-name = "confirm_triggers_auth"
-kind = "entity"
-principal = "payment-service"
-target_entity = "Payment"
-target_action = "AuthorizePayment"
-
-[action.triggers.resolve_target]
-type = "field"
-field = "payment_id"
-"#
+    let mut related_adj: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (on_entity, target, _) in related_pairs {
+        related_adj
+            .entry(on_entity.clone())
+            .or_default()
+            .insert(target.clone());
+        related_adj
+            .entry(target.clone())
+            .or_default()
+            .insert(on_entity.clone());
     }
 
-    fn payment_ioa() -> &'static str {
-        r#"
-[automaton]
-name = "Payment"
-states = ["Pending", "Authorized"]
-initial = "Pending"
-
-[[action]]
-name = "AuthorizePayment"
-from = ["Pending"]
-to = "Authorized"
-"#
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    if !graph.entities.contains(seed) && !related_adj.contains_key(seed) {
+        return visited;
     }
-
-    fn wiki_ioa() -> &'static str {
-        r#"
-[automaton]
-name = "Wiki"
-states = ["Draft", "Published"]
-initial = "Draft"
-
-[[action]]
-name = "Publish"
-from = ["Draft"]
-to = "Published"
-"#
+    queue.push_back(seed.to_string());
+    while let Some(entity) = queue.pop_front() {
+        if !visited.insert(entity.clone()) {
+            continue;
+        }
+        if let Some(edges) = graph.outgoing.get(&entity) {
+            for edge in edges {
+                if !visited.contains(&edge.to) {
+                    queue.push_back(edge.to.clone());
+                }
+            }
+        }
+        if let Some(neighbors) = related_adj.get(&entity) {
+            for neighbor in neighbors {
+                if !visited.contains(neighbor) {
+                    queue.push_back(neighbor.clone());
+                }
+            }
+        }
     }
-
-    #[test]
-    fn plan_from_two_entity_chain_collects_both() {
-        let order = parse_automaton(order_ioa()).unwrap();
-        let payment = parse_automaton(payment_ioa()).unwrap();
-        let plan = CompositeVerificationPlan::new(&[&order, &payment], "Order")
-            .expect("plan should build");
-        assert_eq!(plan.seed, "Order");
-        assert_eq!(plan.scope_size(), 2, "Order + Payment in scope");
-        assert_eq!(plan.edge_count(), 1);
-        assert!(!plan.has_cycle);
-    }
-
-    #[test]
-    fn plan_excludes_unrelated_entities() {
-        let order = parse_automaton(order_ioa()).unwrap();
-        let payment = parse_automaton(payment_ioa()).unwrap();
-        let wiki = parse_automaton(wiki_ioa()).unwrap();
-        let plan = CompositeVerificationPlan::new(&[&order, &payment, &wiki], "Order")
-            .expect("plan should build");
-        assert_eq!(plan.scope_size(), 2, "Wiki excluded from Order scope");
-        assert!(!plan.models.contains_key("Wiki"));
-    }
-
-    #[test]
-    fn plan_from_isolated_entity_has_no_edges() {
-        let wiki = parse_automaton(wiki_ioa()).unwrap();
-        let plan = CompositeVerificationPlan::new(&[&wiki], "Wiki")
-            .expect("plan should build for isolated entity");
-        assert_eq!(plan.scope_size(), 1);
-        assert_eq!(plan.edge_count(), 0);
-    }
-
-    #[test]
-    fn missing_seed_errors() {
-        let wiki = parse_automaton(wiki_ioa()).unwrap();
-        let err = CompositeVerificationPlan::new(&[&wiki], "NotAnEntity")
-            .expect_err("missing seed must error");
-        assert!(matches!(err, CompositePlanError::SeedMissing(_)));
-    }
-
-    #[test]
-    fn trigger_pointing_to_missing_entity_errors() {
-        // Order references Payment but Payment is not supplied.
-        let order = parse_automaton(order_ioa()).unwrap();
-        let err = CompositeVerificationPlan::new(&[&order], "Order")
-            .expect_err("missing target must error");
-        assert!(matches!(
-            err,
-            CompositePlanError::UnknownTriggerTarget { .. }
-        ));
-    }
-
-    #[test]
-    fn summary_renders_edges_and_scope() {
-        let order = parse_automaton(order_ioa()).unwrap();
-        let payment = parse_automaton(payment_ioa()).unwrap();
-        let plan = CompositeVerificationPlan::new(&[&order, &payment], "Order").unwrap();
-        let summary = plan.summary();
-        assert!(summary.contains("Order"));
-        assert!(summary.contains("Payment"));
-        assert!(summary.contains("ConfirmOrder"));
-        assert!(summary.contains("AuthorizePayment"));
-    }
-
-    #[test]
-    fn liveness_required_flag_propagates_to_plan() {
-        let spec_with_liveness = r#"
-[automaton]
-name = "A"
-states = ["X", "Y"]
-initial = "X"
-
-[[action]]
-name = "Go"
-from = ["X"]
-to = "Y"
-
-[[action.triggers]]
-name = "must_fire"
-kind = "entity"
-liveness = "required"
-target_entity = "B"
-target_action = "Do"
-
-[action.triggers.resolve_target]
-type = "same_id"
-"#;
-        let spec_b = r#"
-[automaton]
-name = "B"
-states = ["Idle", "Done"]
-initial = "Idle"
-
-[[action]]
-name = "Do"
-from = ["Idle"]
-to = "Done"
-"#;
-        let a = parse_automaton(spec_with_liveness).unwrap();
-        let b = parse_automaton(spec_b).unwrap();
-        let plan = CompositeVerificationPlan::new(&[&a, &b], "A").unwrap();
-        assert!(plan.requires_liveness());
-    }
+    visited
 }
+
+#[cfg(test)]
+#[path = "plan_test.rs"]
+mod tests;

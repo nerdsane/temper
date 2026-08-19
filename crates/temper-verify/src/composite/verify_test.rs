@@ -63,7 +63,7 @@ to = "Published"
 fn seed_cover_groups_connected_entities_into_one_seed() {
     let order = parse_automaton(order_ioa()).unwrap();
     let payment = parse_automaton(payment_ioa()).unwrap();
-    let seeds = seed_cover(&[&order, &payment]);
+    let seeds = seed_cover(&[&order, &payment], None);
     // Order -> Payment are one weakly-connected component, root = "Order"
     // (lexicographically smaller than "Payment").
     assert_eq!(seeds, vec!["Order".to_string()]);
@@ -74,7 +74,7 @@ fn seed_cover_includes_isolated_entities() {
     let order = parse_automaton(order_ioa()).unwrap();
     let payment = parse_automaton(payment_ioa()).unwrap();
     let wiki = parse_automaton(wiki_ioa()).unwrap();
-    let seeds = seed_cover(&[&order, &payment, &wiki]);
+    let seeds = seed_cover(&[&order, &payment, &wiki], None);
     // Two components: {Order, Payment} -> "Order"; {Wiki} -> "Wiki".
     assert_eq!(seeds, vec!["Order".to_string(), "Wiki".to_string()]);
 }
@@ -83,7 +83,7 @@ fn seed_cover_includes_isolated_entities() {
 fn verify_composite_passes_clean_chain() {
     let order = parse_automaton(order_ioa()).unwrap();
     let payment = parse_automaton(payment_ioa()).unwrap();
-    let result = verify_composite(&[&order, &payment], "Order").unwrap();
+    let result = verify_composite(&[&order, &payment], "Order", None).unwrap();
     assert_eq!(result.outcome, CompositeOutcome::Verified, "{result:?}");
     assert!(result.passed());
     assert!(result.dropped_reactions.is_empty());
@@ -94,7 +94,7 @@ fn verify_all_covers_every_component() {
     let order = parse_automaton(order_ioa()).unwrap();
     let payment = parse_automaton(payment_ioa()).unwrap();
     let wiki = parse_automaton(wiki_ioa()).unwrap();
-    let results = verify_all(&[&order, &payment, &wiki]);
+    let results = verify_all(&[&order, &payment, &wiki], None);
     assert_eq!(results.len(), 2);
     assert!(results.iter().all(|r| r.passed()));
     // Payment, though not a seed, is in Order's scope — covered.
@@ -158,7 +158,7 @@ to = "Frozen"
 fn no_dropped_reaction_catches_from_state_mismatch() {
     let file = parse_automaton(file_touch_increments_workspace()).unwrap();
     let workspace = parse_automaton(freezable_workspace()).unwrap();
-    let result = verify_composite(&[&file, &workspace], "File").unwrap();
+    let result = verify_composite(&[&file, &workspace], "File", None).unwrap();
     assert_eq!(result.outcome, CompositeOutcome::Violated, "{result:?}");
     assert!(!result.passed());
     let drop = result
@@ -211,7 +211,7 @@ field = "workspace_id"
 "#;
     let file = parse_automaton(file).unwrap();
     let workspace = parse_automaton(freezable_workspace()).unwrap();
-    let result = verify_composite(&[&file, &workspace], "File").unwrap();
+    let result = verify_composite(&[&file, &workspace], "File", None).unwrap();
     assert_eq!(
         result.outcome,
         CompositeOutcome::Verified,
@@ -261,7 +261,7 @@ field = "workspace_id"
 "#;
     let file = parse_automaton(file).unwrap();
     let workspace = parse_automaton(freezable_workspace()).unwrap();
-    let result = verify_composite(&[&file, &workspace], "File").unwrap();
+    let result = verify_composite(&[&file, &workspace], "File", None).unwrap();
     assert_eq!(
         result.outcome,
         CompositeOutcome::Verified,
@@ -321,7 +321,7 @@ to = "Superseded"
 "#;
     let file = parse_automaton(file).unwrap();
     let version = parse_automaton(version).unwrap();
-    let result = verify_composite(&[&file, &version], "File").unwrap();
+    let result = verify_composite(&[&file, &version], "File", None).unwrap();
     assert_eq!(
         result.outcome,
         CompositeOutcome::Verified,
@@ -359,7 +359,7 @@ field = "workspace_id"
 "#;
     let file = parse_automaton(file).unwrap();
     let workspace = parse_automaton(freezable_workspace()).unwrap();
-    let result = verify_composite(&[&file, &workspace], "File").unwrap();
+    let result = verify_composite(&[&file, &workspace], "File", None).unwrap();
     assert_eq!(
         result.outcome,
         CompositeOutcome::Verified,
@@ -443,11 +443,138 @@ effect = "increment n"
     }
     let parsed: Vec<_> = specs.iter().map(|s| parse_automaton(s).unwrap()).collect();
     let refs: Vec<&Automaton> = parsed.iter().collect();
-    let result = verify_composite_with_budget(&refs, "Counter0", 100).unwrap();
+    let result = verify_composite_with_budget(&refs, "Counter0", 100, None).unwrap();
     assert_eq!(
         result.outcome,
         CompositeOutcome::Incomplete,
         "exhausted budget must report INCOMPLETE: {result:?}"
     );
     assert!(!result.passed(), "incomplete is never a pass");
+}
+
+// ─── ADR-0171: related-field sidecar property ───────────────────────────
+
+fn study_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/study/publish-needs-review")
+}
+
+fn load_study_sidecar() -> temper_spec::cross_invariant::CrossInvariantSpec {
+    let src = std::fs::read_to_string(study_dir().join("cross-invariants.toml")).unwrap();
+    temper_spec::cross_invariant::parse_cross_invariants(&src).unwrap()
+}
+
+fn human_curator_ioa() -> String {
+    std::fs::read_to_string(study_dir().join("human_curator.ioa.toml")).unwrap()
+}
+
+fn review_agent_ioa() -> String {
+    std::fs::read_to_string(study_dir().join("review_agent.ioa.toml")).unwrap()
+}
+
+fn guarded_publish_ioa() -> &'static str {
+    r#"
+[automaton]
+name = "HumanCurator"
+states = ["Reviewing", "Published"]
+initial = "Reviewing"
+allow_indefinite_states = ["Reviewing", "Published"]
+
+[[state]]
+name = "review_agent_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "has_review_verdict"
+type = "bool"
+initial = false
+
+[[action]]
+name = "RecordReviewVerdict"
+from = ["Reviewing"]
+to = "Reviewing"
+effect = [{ type = "set_bool", var = "has_review_verdict", value = "true" }]
+
+[[action]]
+name = "Publish"
+from = ["Reviewing"]
+to = "Published"
+guard = [
+  { type = "is_true", var = "has_review_verdict" },
+  { type = "cross_entity_state", entity_type = "ReviewAgent", entity_id_source = "review_agent_id", required_status = ["VerdictRecorded"] },
+]
+
+[[invariant]]
+name = "HumanDecidesPublish"
+when = ["Published"]
+assert = "has_review_verdict"
+"#
+}
+
+#[test]
+fn seed_cover_unions_related_field_pairs() {
+    let curator = parse_automaton(&human_curator_ioa()).unwrap();
+    let review = parse_automaton(&review_agent_ioa()).unwrap();
+    let sidecar = load_study_sidecar();
+    assert_eq!(
+        seed_cover(&[&curator, &review], None),
+        vec!["HumanCurator".to_string(), "ReviewAgent".to_string()]
+    );
+    assert_eq!(
+        seed_cover(&[&curator, &review], Some(&sidecar)),
+        vec!["HumanCurator".to_string()]
+    );
+}
+
+#[test]
+fn unguarded_publish_fails_related_field_constraint() {
+    let curator = parse_automaton(&human_curator_ioa()).unwrap();
+    let review = parse_automaton(&review_agent_ioa()).unwrap();
+    let sidecar = load_study_sidecar();
+    let result = verify_composite(&[&curator, &review], "HumanCurator", Some(&sidecar)).unwrap();
+    assert_eq!(result.outcome, CompositeOutcome::Violated, "{result:?}");
+    assert!(
+        result
+            .other_violations
+            .iter()
+            .any(|n| n == "PublishNeedsThisReviewRecorded"),
+        "must name the sidecar row: {result:?}"
+    );
+    assert!(
+        result
+            .related_field_violations
+            .iter()
+            .any(|v| v.name == "PublishNeedsThisReviewRecorded"),
+        "{result:?}"
+    );
+    assert!(result.scope.contains(&"ReviewAgent".to_string()));
+}
+
+#[test]
+fn cross_entity_guard_on_publish_passes_related_field_constraint() {
+    let curator = parse_automaton(guarded_publish_ioa()).unwrap();
+    let review = parse_automaton(&review_agent_ioa()).unwrap();
+    let sidecar = load_study_sidecar();
+    let result = verify_composite(&[&curator, &review], "HumanCurator", Some(&sidecar)).unwrap();
+    assert_eq!(result.outcome, CompositeOutcome::Verified, "{result:?}");
+    assert!(result.related_field_violations.is_empty());
+}
+
+#[test]
+fn missing_related_target_is_not_a_silent_pass() {
+    let curator = parse_automaton(&human_curator_ioa()).unwrap();
+    let sidecar = load_study_sidecar();
+    let results = verify_all(&[&curator], Some(&sidecar));
+    assert!(
+        results.iter().all(|r| !r.passed()),
+        "missing related() target must not pass: {results:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .any(|r| r.outcome == CompositeOutcome::Incomplete
+                || r.other_violations.iter().any(|v| v.contains("ReviewAgent"))),
+        "{results:?}"
+    );
 }

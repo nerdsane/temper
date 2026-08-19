@@ -275,6 +275,8 @@ assert = "items > 0"
 4. `[[invariant]]`: Define safety invariants with `name`, `when` (trigger states), and `assert` expression.
 5. Action kinds: `input` = from environment (HTTP), always enabled in from-states; `output` = emitted events; `internal` = private state transitions.
 
+`[[invariant]]` is a safety property of one Automaton. It is not a field invariant, not a `cross_entity_state` guard, not an entity-kind `[[action.triggers]]` reaction, and not a row in `cross-invariants.toml`. That last file is the related-field / relation-policy sidecar. Hard rows are checked by JCS (`related_field_constraints`, [ADR-0171](adrs/0171-verify-related-field-constraints.md)); eventual-kind stays runtime. Map: [ADR-0170](adrs/0170-constraint-mechanism-map.md).
+
 ### 3.3 Cedar (Access Control)
 
 Cedar policies define **who** can do **what** to **which** resources.

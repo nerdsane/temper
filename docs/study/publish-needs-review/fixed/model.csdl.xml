@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="ReviewAgent">
+        <Key><PropertyRef Name="Id" /></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false" />
+        <Property Name="status" Type="Edm.String" />
+      </EntityType>
+      <EntityType Name="HumanCurator">
+        <Key><PropertyRef Name="Id" /></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false" />
+        <Property Name="status" Type="Edm.String" />
+        <Property Name="review_agent_id" Type="Edm.String" />
+      </EntityType>
+      <Action Name="RecordVerdict" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReviewAgent"/>
+        <ReturnType Type="Temper.ReviewAgent"/>
+      </Action>
+      <Action Name="RecordReviewVerdict" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.HumanCurator"/>
+        <ReturnType Type="Temper.HumanCurator"/>
+      </Action>
+      <Action Name="Publish" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.HumanCurator"/>
+        <ReturnType Type="Temper.HumanCurator"/>
+      </Action>
+      <EntityContainer Name="Service">
+        <EntitySet Name="ReviewAgents" EntityType="Temper.ReviewAgent" />
+        <EntitySet Name="HumanCurators" EntityType="Temper.HumanCurator" />
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

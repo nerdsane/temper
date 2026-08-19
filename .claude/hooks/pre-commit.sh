@@ -67,10 +67,22 @@ STAGED_SPECS="$(git diff --cached --name-only --diff-filter=ACM -- '*.ioa.toml' 
 if [ -n "$STAGED_SPECS" ]; then
     echo "Pre-commit: validating spec syntax..." >&2
 
+    SPEC_DIRS=""
     for SPEC in $STAGED_SPECS; do
-        # Try parsing the spec (syntax check only, not full cascade)
-        if ! cargo run -p temper-cli --quiet -- verify --specs-dir "$(dirname "$SPEC")" 2>/dev/null; then
-            echo "BLOCKED: Spec syntax error in $SPEC" >&2
+        SPEC_DIR="$(dirname "$SPEC")"
+        if [ -f "$SPEC_DIR/.expect-verify-fail" ]; then
+            echo "Pre-commit: skipping cascade for expected-fail fixture $SPEC_DIR" >&2
+            continue
+        fi
+        case " $SPEC_DIRS " in
+            *" $SPEC_DIR "*) ;;
+            *) SPEC_DIRS="$SPEC_DIRS $SPEC_DIR" ;;
+        esac
+    done
+
+    for SPEC_DIR in $SPEC_DIRS; do
+        if ! cargo run -p temper-cli --quiet -- verify --specs-dir "$SPEC_DIR" 2>/dev/null; then
+            echo "BLOCKED: Spec verification failed in $SPEC_DIR" >&2
             echo "Fix the spec before committing." >&2
             exit 1
         fi

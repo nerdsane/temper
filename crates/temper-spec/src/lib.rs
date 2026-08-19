@@ -24,7 +24,7 @@ pub use cross_invariant::{
     CrossInvariant, CrossInvariantLintFinding, CrossInvariantLintSeverity, CrossInvariantOperator,
     CrossInvariantParseError, CrossInvariantSpec, DeletePolicy, InvariantKind, RelatedFieldAssert,
     RelationOverride, lint_cross_invariants, parse_cross_invariants, parse_related_field_assert,
-    parse_related_status_in_assert,
+    parse_related_status_in_assert, split_trigger,
 };
 pub use csdl::{CsdlDocument, CsdlParseError, parse_csdl};
 pub use model::{SpecModel, build_spec_model};
