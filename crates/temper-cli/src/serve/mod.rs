@@ -157,15 +157,6 @@ pub async fn run(
         // EXA_API_KEY — makes {secret:exa_api_key} resolve in research integrations.
         cache_platform_secret_if_present(vault, "exa_api_key", std::env::var("EXA_API_KEY").ok());
 
-        // GITHUB_TOKEN — makes {secret:github_token} resolve in sandbox_provisioner for private repo clones.
-        cache_platform_secret_if_present(vault, "github_token", std::env::var("GITHUB_TOKEN").ok());
-
-        // TENSORLAKE_API_KEY — makes {secret:tensorlake_api_key} resolve in sandbox_provisioner.
-        cache_platform_secret_if_present(vault, "tensorlake_api_key", std::env::var("TENSORLAKE_API_KEY").ok());
-
-        // TENSORLAKE_API_URL — optional override for Tensorlake API base URL.
-        cache_platform_secret_if_present(vault, "tensorlake_api_url", std::env::var("TENSORLAKE_API_URL").ok());
-
         // blob_endpoint — points blob_adapter at the server's internal blob storage
         // when no external blob endpoint (R2/S3) is configured.
         // determinism-ok: env var read at startup for configuration
