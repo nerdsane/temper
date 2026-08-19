@@ -553,13 +553,15 @@ async fn live_scope_set_is_bounded_by_concurrency_not_total_requests() {
     // invocations, not total requests — no unbounded growth, no eviction hazard
     // that could let a straggler reopen a forgotten scope.
     let reg = HttpStreamRegistry::new();
+    // Baseline: the always-live PRIVATE scope for this (private) registry.
+    let baseline = reg.live_scope_count().await;
     for _ in 0..10_000 {
         let scope = reg.mint_scope().await;
         reg.close_scope(scope).await;
         assert_eq!(
             reg.live_scope_count().await,
-            0,
-            "a closed scope must leave the live set immediately"
+            baseline,
+            "a closed scope must leave the live set immediately — no accumulation"
         );
     }
 
@@ -568,11 +570,11 @@ async fn live_scope_set_is_bounded_by_concurrency_not_total_requests() {
     for _ in 0..5 {
         open.push(reg.mint_scope().await);
     }
-    assert_eq!(reg.live_scope_count().await, 5);
+    assert_eq!(reg.live_scope_count().await, baseline + 5);
     for scope in open {
         reg.close_scope(scope).await;
     }
-    assert_eq!(reg.live_scope_count().await, 0);
+    assert_eq!(reg.live_scope_count().await, baseline);
 }
 
 #[tokio::test]
@@ -610,4 +612,31 @@ async fn a_fast_bridge_that_released_before_guest_close_leaves_no_stale_abort_ha
         0,
         "closing the response must drop the stale abort handle"
     );
+}
+
+#[tokio::test]
+async fn private_scope_is_always_live_for_unshared_registries() {
+    // ARN-207: PRIVATE is the fixed scope for unshared/private-registry hosts. It
+    // is never minted or close_scoped, so the live-scope gate must treat it as
+    // always live — otherwise every outbound call on a private registry (e.g.
+    // ProductionWasmHost::new()) is refused. Regression guard for the live-scope
+    // change.
+    let reg = HttpStreamRegistry::new();
+    let ex = reg
+        .open_outbound_exchange(StreamScope::PRIVATE)
+        .await
+        .expect("PRIVATE scope must admit outbound exchanges on a private registry");
+    // And a bridge registers under it without being aborted.
+    let join = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    });
+    let abort = join.abort_handle();
+    reg.register_outbound_bridge(StreamScope::PRIVATE, ex.guest_response_body, abort)
+        .await;
+    assert_eq!(
+        reg.live_outbound_bridge_count(StreamScope::PRIVATE).await,
+        1,
+        "a bridge under PRIVATE must be tracked, not aborted as a dead scope"
+    );
+    join.abort();
 }

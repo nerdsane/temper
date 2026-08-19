@@ -279,7 +279,11 @@ impl HttpStreamRegistry {
                 scope_ids: BTreeMap::new(),
                 outbound_open: BTreeMap::new(),
                 outbound_bridges: BTreeMap::new(),
-                live_scopes: BTreeSet::new(),
+                // The fixed PRIVATE scope (unshared/private-registry hosts) is
+                // always live: it is never minted or close_scoped, and its
+                // registry is single-owner, so it must not be refused by the
+                // live-scope gate (ARN-207).
+                live_scopes: BTreeSet::from([StreamScope::PRIVATE]),
                 response_head_receivers: BTreeMap::new(),
                 inbound_head_senders: BTreeMap::new(),
                 inbound_head_receivers: BTreeMap::new(),
