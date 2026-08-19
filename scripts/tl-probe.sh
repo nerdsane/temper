@@ -105,6 +105,14 @@ echo "sandbox_id=$SBX"
 echo "initial status=$(printf '%s' "$CREATE_BODY_OUT" | jqp status)"
 echo "initial ingress_endpoint=$(printf '%s' "$CREATE_BODY_OUT" | jqp ingress_endpoint || true)"
 
+# `sandbox_url` is returned by the live API but is NOT declared in
+# CreateSandboxResponse in the OpenAPI spec. Observed values:
+#   ingress_endpoint = https://sandbox.tensorlake.ai              (SHARED host)
+#   sandbox_url      = https://<id>.sandbox.tensorlake.ai         (per-sandbox)
+# Proxy paths 404 with LIFECYCLE_PATH_NOT_FOUND on the shared host.
+SBX_URL=$(printf '%s' "$CREATE_BODY_OUT" | jqp sandbox_url)
+echo "initial sandbox_url=${SBX_URL:-<absent>}"
+
 # ── 2. Poll until running with a non-null ingress ────────────────────
 echo
 echo "--- 2. GET /sandboxes/$SBX (poll until running + ingress non-null) ---"
@@ -141,29 +149,62 @@ fi
 
 echo "ingress_endpoint=$ING"
 
-# ── 3. Proxy: run a process (SSE) ────────────────────────────────────
-# Confirms three unknowns at once:
-#   (a) the proxy accepts the same bearer token
-#   (b) the exact SSE frame shape (data: {line,...} / data: {exit_code})
-#   (c) whether the default image ships git + python3, which the repo clone
-#       and the fixture tests both require
-echo
-echo "--- 3. POST \$ING/api/v1/processes/run  (expect text/event-stream) ---"
-echo "request body: {\"command\":\"...\",\"working_dir\":\"/\"}   (note: working_dir, not workdir/cwd)"
-curl -s -N -w '\n__HTTP__%{http_code}\n' -X POST "$ING/api/v1/processes/run" \
-  -H "$AUTH" -H 'content-type: application/json' \
-  -d '{"command":"git --version; python3 --version; pip3 --version; echo PROBE_EXIT_OK","working_dir":"/"}' \
-  | head -60
+# ── 3. Proxy addressing: settle which base + headers actually route ──
+#
+# The shared ingress_endpoint rejects /api/v1/* with LIFECYCLE_PATH_NOT_FOUND.
+# That error names two candidate routes, so probe BOTH:
+#   (a) per-sandbox host  : $SBX_URL/api/v1/...        no routing header
+#   (b) shared ingress    : $ING/api/v1/...            + x-tensorlake-sandbox-id
+#
+# Whichever returns a process event stream is the one the WASM modules use.
+PROBE_CMD='{"command":"git --version; python3 --version; pip3 --version; echo PROBE_EXIT_OK","working_dir":"/"}'
+PROXY_BASE=""
+PROXY_MODE=""
+PROXY_HDR=()
 
-# ── 4. Proxy: file write + read ──────────────────────────────────────
-echo
-echo "--- 4. PUT + GET \$ING/api/v1/files?path=... ---"
-curl -s -o /dev/null -w 'PUT  HTTP:%{http_code}\n' \
-  -X PUT "$ING/api/v1/files?path=/tmp/probe.txt" \
-  -H "$AUTH" --data-binary 'hello-from-probe'
+try_proxy() {
+  # $1 = label, $2 = base url, $3... = extra curl args
+  local label="$1"; local base="$2"; shift 2
+  echo
+  echo "  [$label] POST $base/api/v1/processes/run"
+  local out
+  out=$(curl -s -N -m 45 -w '\n__HTTP__%{http_code}' -X POST "$base/api/v1/processes/run" \
+    -H "$AUTH" -H 'content-type: application/json' "$@" -d "$PROBE_CMD" || true)
+  local code="${out##*__HTTP__}"
+  local body="${out%__HTTP__*}"
+  echo "  HTTP:$code"
+  printf '%s\n' "$body" | head -40 | sed 's/^/    /'
+  [ "$code" = "200" ]
+}
 
-curl -s -w '\nGET  HTTP:%{http_code}\n' \
-  "$ING/api/v1/files?path=/tmp/probe.txt" -H "$AUTH"
+echo
+echo "--- 3. Proxy addressing (two candidates) ---"
+
+if [ -n "$SBX_URL" ] && try_proxy "a: per-sandbox host" "$SBX_URL"; then
+  PROXY_BASE="$SBX_URL"; PROXY_MODE="per-sandbox host (sandbox_url), no routing header"
+elif try_proxy "b: shared ingress + routing header" "$ING" -H "x-tensorlake-sandbox-id: $SBX"; then
+  PROXY_BASE="$ING"; PROXY_MODE="shared ingress_endpoint + x-tensorlake-sandbox-id header"
+  PROXY_HDR=(-H "x-tensorlake-sandbox-id: $SBX")
+fi
+
+if [ -z "$PROXY_BASE" ]; then
+  echo
+  echo "FAIL: neither proxy addressing mode returned 200. Skipping file probe."
+else
+  echo
+  echo "  => WORKING MODE: $PROXY_MODE"
+  echo "  => base: $PROXY_BASE"
+
+  # ── 4. Proxy: file write + read ────────────────────────────────────
+  echo
+  echo "--- 4. PUT + GET \$PROXY/api/v1/files?path=... ---"
+  curl -s -o /dev/null -w 'PUT  HTTP:%{http_code}\n' \
+    -X PUT "$PROXY_BASE/api/v1/files?path=/tmp/probe.txt" \
+    -H "$AUTH" "${PROXY_HDR[@]:-}" --data-binary 'hello-from-probe'
+
+  curl -s -w '\nGET  HTTP:%{http_code}\n' \
+    "$PROXY_BASE/api/v1/files?path=/tmp/probe.txt" -H "$AUTH" "${PROXY_HDR[@]:-}"
+fi
 
 # ── 5. Snapshot (checkpoint) ─────────────────────────────────────────
 # Documented as 202 with {snapshot_id, status}. Note the path is singular
