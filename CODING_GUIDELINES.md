@@ -476,12 +476,14 @@ review for:
 - Schema migrations (data model changes)
 - New entity types (architectural scope changes)
 
-### 10.4 `from_tla_source()` Only
+### 10.4 Parse once, then `from_automaton()`
 
-Agents MUST use `TransitionTable::from_tla_source()` in production code.
-`from_state_machine()` does not resolve `CanXxx` guard predicates and will
-silently produce incorrect guard constraints. This was discovered through
-DST and is documented in the paper (Section 11.5).
+Agents MUST parse IOA TOML once to `Automaton`. When that value is already
+in hand, call `TransitionTable::from_automaton()` and
+`VerificationCascade::from_automaton()`. `from_ioa_source()` /
+`try_from_ioa_source()` / `VerificationCascade::from_ioa()` are convenience
+wrappers that parse then delegate. TLA+ and `StateMachine` are removed
+(ADR-0169).
 
 ---
 

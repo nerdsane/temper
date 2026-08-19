@@ -21,8 +21,8 @@ use super::types::{
 
 /// Build a `TemperModel` from I/O Automaton TOML source.
 ///
-/// This is the sole entry point. The IOA format has explicit guards and effects,
-/// so the `Automaton` is translated directly — no intermediate representation.
+/// Convenience wrapper: parse once, then [`build_model_from_automaton`].
+/// Prefer `build_model_from_automaton` when an [`Automaton`] is already parsed.
 ///
 /// Returns an error if the IOA TOML fails to parse.
 pub fn build_model_from_ioa(ioa_toml: &str, max_counter: usize) -> Result<TemperModel, String> {

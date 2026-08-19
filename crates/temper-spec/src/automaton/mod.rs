@@ -3,14 +3,14 @@
 //! Based on Lynch-Tuttle I/O Automata (1987): a labeled state transition system
 //! with input, output, and internal actions, each specified by precondition/effect pairs.
 //!
-//! This replaces TLA+ as the primary agent-facing specification format because:
+//! This is the authored behavior IR (ADR-0169):
 //! - **Precondition/effect** maps 1:1 to TransitionTable guards and effects
 //! - **Input/output/internal** action classification maps to the actor model
 //! - **TOML format** is natively readable/writable by LLM agents
 //! - **Composition** via shared actions maps to actor message passing
 //! - **No temporal logic overhead** — we use Stateright for model checking
 //!
-//! TLA+ remains available for humans who want temporal reasoning.
+//! `TemperModel` and `TransitionTable` are views of [`Automaton`], not a second IR.
 
 pub mod assert_parser;
 pub mod field_invariant;
@@ -34,7 +34,7 @@ pub use lint::{
 pub use metadata::{LivenessViolation, SpecMetadata};
 pub use parser::{
     LivenessEnforcement, LivenessViolationReporter, parse_automaton, parse_automaton_with_liveness,
-    set_liveness_violation_reporter, to_state_machine,
+    set_liveness_violation_reporter,
 };
 pub use translate::{ResolvedAction, ResolvedEffect, ResolvedGuard, translate_actions};
 pub use trigger_graph::{TriggerEdge, TriggerGraph};

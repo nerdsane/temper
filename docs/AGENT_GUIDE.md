@@ -313,7 +313,7 @@ forbid(
 
 ## 4. How Entity Actors Work at Runtime
 
-The server builds a **JIT TransitionTable** from the I/O Automaton specification using `TransitionTable::from_ioa_source()`. Both the verification model and the runtime table derive from the same parsed `Automaton`, ensuring the behavior verified by the four-level cascade is identical to what runs in production. Each entity instance gets its own actor:
+The server builds a **JIT TransitionTable** from the parsed `Automaton` using `TransitionTable::from_automaton()` (or the `from_ioa_source()` wrapper). Both the verification model and the runtime table derive from the same parsed `Automaton`, ensuring the behavior verified by the four-level cascade is identical to what runs in production. Each entity instance gets its own actor:
 
 ```
 HTTP Request → OData Parse → Actor Registry (get or spawn) → Entity Actor → TransitionTable.evaluate() → Response
@@ -334,7 +334,7 @@ with a full `EvalContext` containing counters and booleans:
 4. If guards pass: apply effects (`SetState`, `IncrementCounter`, `SetBool`, `EmitEvent`, `Custom`), record event. `EmitEvent` feeds the Integration Engine for external webhooks (see [Section 9](#9-integration-engine)).
 5. If guards fail: return 409 Conflict with error message
 
-**Critical**: `TransitionTable::from_ioa_source(ioa_toml)` is the sole production constructor. The TLA+ code path has been fully removed.
+**Critical**: Parse IOA once to `Automaton`, then use `TransitionTable::from_automaton()`. `from_ioa_source(ioa_toml)` remains a convenience wrapper. TLA+ / `StateMachine` are removed (ADR-0169).
 
 ---
 
@@ -952,7 +952,7 @@ any of these causes silent failures that are hard to diagnose after the fact.
 | Anti-Pattern | Why It's Wrong | Do This Instead |
 |-------------|---------------|-----------------|
 | Hand-editing runtime actor code | Specs are the source of truth | Modify the CSDL/automaton specs |
-| Using any constructor other than `from_ioa_source()` | TLA+ path fully removed, only IOA is supported | Use `TransitionTable::from_ioa_source()` |
+| Re-parsing the same IOA string for table and cascade | Diverges from ADR-0169 (one `Automaton`) | Parse once; `from_automaton()` / `VerificationCascade::from_automaton()` |
 | Skipping verification | Deploys unverified state machines | Always run `temper verify` |
 | Skipping `temper verify` before `temper serve --specs-dir` | Server now runs cascade at startup, but pre-verifying catches errors earlier | Always run `temper verify` first |
 | Calling actions without checking status | Will get 409 Conflict | GET entity first, check `status` field |

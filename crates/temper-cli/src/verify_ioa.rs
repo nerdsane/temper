@@ -19,17 +19,23 @@ use anyhow::Result;
 ///
 /// Reads the full IOA TOML source from stdin and runs the verification cascade.
 /// Writes the JSON-encoded result to stdout and exits 0 if all levels pass,
-/// or exits 1 on failure.
+/// or exits 1 on failure. TLA+ (or any non-IOA input) fails as a parse error
+/// without panicking.
 pub fn run() -> Result<()> {
     let mut ioa_source = String::new();
     std::io::stdin()
         .read_to_string(&mut ioa_source)
         .map_err(|e| anyhow::anyhow!("failed to read IOA source from stdin: {e}"))?;
 
-    let result = temper_verify::cascade::VerificationCascade::from_ioa(&ioa_source)
+    if looks_like_tla(&ioa_source) {
+        anyhow::bail!("verify-ioa expects I/O Automaton TOML, not TLA+");
+    }
+
+    let cascade = temper_verify::cascade::VerificationCascade::try_from_ioa(&ioa_source)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
         .with_sim_seeds(5)
-        .with_prop_test_cases(100)
-        .run();
+        .with_prop_test_cases(100);
+    let result = cascade.run();
 
     let all_passed = result.all_passed;
 
@@ -42,4 +48,20 @@ pub fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn looks_like_tla(src: &str) -> bool {
+    let trimmed = src.trim_start();
+    trimmed.starts_with("----") || trimmed.contains("---- MODULE")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_tla;
+
+    #[test]
+    fn detects_tla_module_banner() {
+        assert!(looks_like_tla("---- MODULE Order ----\nVARIABLE status\n"));
+        assert!(!looks_like_tla("[automaton]\nname = \"Order\"\n"));
+    }
 }

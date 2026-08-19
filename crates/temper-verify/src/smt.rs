@@ -54,12 +54,18 @@ pub struct SmtResult {
 pub fn verify_symbolic(ioa_toml: &str, max_counter: usize) -> SmtResult {
     let model = build_model_from_ioa(ioa_toml, max_counter)
         .expect("SMT: IOA spec should have been validated before symbolic verification");
-    let approximation_notes = approximation_notes(&model);
+    verify_symbolic_model(&model)
+}
+
+/// Run symbolic verification on a pre-built [`TemperModel`].
+pub fn verify_symbolic_model(model: &TemperModel) -> SmtResult {
+    let max_counter = model.default_max_counter;
+    let approximation_notes = approximation_notes(model);
     let approximate = !approximation_notes.is_empty();
 
-    let guard_sat = check_guard_satisfiability(&model, max_counter);
-    let inductive = check_invariant_induction(&model, max_counter);
-    let unreachable = check_unreachable_states(&model);
+    let guard_sat = check_guard_satisfiability(model, max_counter);
+    let inductive = check_invariant_induction(model, max_counter);
+    let unreachable = check_unreachable_states(model);
 
     // Unreachable states are warnings, not failures — specs may declare states
     // that are only reachable through composition or external actions.

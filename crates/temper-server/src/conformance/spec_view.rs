@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use temper_spec::automaton::{Action, Automaton, Guard};
 
-use super::{KERNEL_PLATFORM_ACTIONS, ViolationKind};
+use super::{ViolationKind, KERNEL_PLATFORM_ACTIONS};
 
 /// The source states an action may fire from.
 pub(super) enum SourceStates<'a> {
@@ -25,7 +25,7 @@ pub(super) enum SourceStates<'a> {
 ///
 /// `kind = "output"` actions are emissions to the environment; the kernel
 /// leaves them out of the transition table entirely
-/// (`temper_spec::automaton::to_state_machine`), so they neither fire from a
+/// (`TransitionTable::from_automaton`), so they neither fire from a
 /// state nor land in one.
 fn is_emitted_event(action: &Action) -> bool {
     action.kind == "output"
@@ -34,7 +34,7 @@ fn is_emitted_event(action: &Action) -> bool {
 /// Legal source states for an action.
 ///
 /// Mirrors the kernel's own reading of a spec
-/// (`temper_spec::automaton::to_state_machine`): a `from` list is the source
+/// (`Automaton` / `TransitionTable::from_automaton`): a `from` list is the source
 /// set; an action written with a `state_in` guard instead still restricts its
 /// sources; and an `input` or `Composite` action with neither is always
 /// enabled, which is the I/O-automata property the kernel implements by giving

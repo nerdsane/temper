@@ -101,24 +101,6 @@ query_indexed = false
 }
 
 #[test]
-fn test_convert_to_state_machine() {
-    let automaton = parse_automaton(ORDER_IOA).unwrap();
-    let state_machine = to_state_machine(&automaton);
-    assert_eq!(state_machine.module_name, "Order");
-    assert_eq!(state_machine.states.len(), 10);
-    assert!(!state_machine.transitions.is_empty());
-    assert!(!state_machine.invariants.is_empty());
-
-    let submit = state_machine
-        .transitions
-        .iter()
-        .find(|transition| transition.name == "SubmitOrder")
-        .unwrap();
-    assert_eq!(submit.from_states, vec!["Draft"]);
-    assert_eq!(submit.to_state, Some("Submitted".to_string()));
-}
-
-#[test]
 fn test_invalid_initial_state_rejected() {
     let toml = r#"
 [automaton]

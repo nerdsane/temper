@@ -1,30 +1,21 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::automaton;
+use crate::automaton::{self, Automaton};
 use crate::csdl;
-use crate::tlaplus;
 
-/// Identifies whether a spec source is IOA TOML (primary) or TLA+ (legacy).
-#[derive(Debug, Clone)]
-pub enum SpecSource {
-    /// I/O Automaton TOML source (primary format).
-    Ioa(String),
-    /// TLA+ source (legacy format).
-    Tla(String),
-}
-
-/// The unified specification model that links CSDL + specification sources (IOA/TLA+).
+/// The unified specification model that links CSDL (data) to Automaton (behavior).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpecModel {
     /// The CSDL document (data model).
     pub csdl: csdl::CsdlDocument,
-    /// State machines keyed by entity type name (from IOA or TLA+ sources).
-    pub state_machines: HashMap<String, tlaplus::StateMachine>,
-    /// Validation results from linking.
+    /// Parsed automata keyed by entity type name.
+    pub automata: HashMap<String, Automaton>,
+    /// Validation results from linking CSDL annotations to Automaton states.
     pub validation: ValidationResult,
 }
 
+/// Result of linking CSDL annotations to Automaton states.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ValidationResult {
     /// Validation failures that should block linking.
@@ -40,88 +31,60 @@ impl ValidationResult {
     }
 }
 
-/// Build a unified SpecModel from a CSDL document and specification sources.
+/// Build a [`SpecModel`] from a CSDL document and I/O Automaton TOML sources.
 ///
-/// `tla_sources` maps entity type name → TLA+ source text (legacy API).
-/// For mixed IOA + TLA+ sources, use [`build_spec_model_mixed`].
+/// `ioa_sources` maps entity type name → IOA TOML source text. Each source is
+/// parsed once to [`Automaton`]. CSDL `TlaSpec` annotations are ignored XML
+/// (ADR-0169 / ARN-383) and do not require a `.tla` file.
 pub fn build_spec_model(
     csdl: csdl::CsdlDocument,
-    tla_sources: HashMap<String, String>,
-) -> SpecModel {
-    let sources: HashMap<String, SpecSource> = tla_sources
-        .into_iter()
-        .map(|(k, v)| (k, SpecSource::Tla(v)))
-        .collect();
-    build_spec_model_mixed(csdl, sources)
-}
-
-/// Build a unified SpecModel from a CSDL document and mixed specification sources.
-///
-/// `sources` maps entity type name → [`SpecSource`] (either IOA or TLA+).
-/// IOA sources go through `parse_automaton()` → `to_state_machine()`.
-/// TLA+ sources go through `extract_state_machine()`.
-/// Both produce the same `StateMachine`.
-pub fn build_spec_model_mixed(
-    csdl: csdl::CsdlDocument,
-    sources: HashMap<String, SpecSource>,
+    ioa_sources: HashMap<String, String>,
 ) -> SpecModel {
     let mut validation = ValidationResult::default();
-    let state_machines = parse_state_machines(&sources, &mut validation);
-    validate_csdl_links(&csdl, &state_machines, &mut validation);
+    let automata = parse_automata(&ioa_sources, &mut validation);
+    validate_csdl_links(&csdl, &automata, &mut validation);
 
     SpecModel {
         csdl,
-        state_machines,
+        automata,
         validation,
     }
 }
 
-fn parse_state_machines(
-    sources: &HashMap<String, SpecSource>,
+fn parse_automata(
+    sources: &HashMap<String, String>,
     validation: &mut ValidationResult,
-) -> HashMap<String, tlaplus::StateMachine> {
-    let mut state_machines = HashMap::new();
+) -> HashMap<String, Automaton> {
+    let mut automata = HashMap::new();
 
-    for (entity_name, source) in sources {
-        match parse_source_state_machine(entity_name, source) {
-            Ok(state_machine) => {
-                state_machines.insert(entity_name.clone(), state_machine);
+    for (entity_name, ioa_text) in sources {
+        match automaton::parse_automaton(ioa_text) {
+            Ok(parsed) => {
+                automata.insert(entity_name.clone(), parsed);
             }
-            Err(message) => validation.errors.push(message),
+            Err(error) => validation.errors.push(format!(
+                "Failed to parse IOA automaton for {entity_name}: {error}"
+            )),
         }
     }
 
-    state_machines
-}
-
-fn parse_source_state_machine(
-    entity_name: &str,
-    source: &SpecSource,
-) -> Result<tlaplus::StateMachine, String> {
-    match source {
-        SpecSource::Tla(tla_text) => tlaplus::extract_state_machine(tla_text).map_err(|error| {
-            format!("Failed to extract state machine for {entity_name} (TLA+): {error}")
-        }),
-        SpecSource::Ioa(ioa_text) => automaton::parse_automaton(ioa_text)
-            .map(|automaton| automaton::to_state_machine(&automaton))
-            .map_err(|error| format!("Failed to parse IOA automaton for {entity_name}: {error}")),
-    }
+    automata
 }
 
 fn validate_csdl_links(
     csdl: &csdl::CsdlDocument,
-    state_machines: &HashMap<String, tlaplus::StateMachine>,
+    automata: &HashMap<String, Automaton>,
     validation: &mut ValidationResult,
 ) {
     for schema in &csdl.schemas {
-        validate_entity_states(schema, state_machines, validation);
-        validate_action_bindings(schema, state_machines, validation);
+        validate_entity_states(schema, automata, validation);
+        validate_action_bindings(schema, automata, validation);
     }
 }
 
 fn validate_entity_states(
     schema: &csdl::Schema,
-    state_machines: &HashMap<String, tlaplus::StateMachine>,
+    automata: &HashMap<String, Automaton>,
     validation: &mut ValidationResult,
 ) {
     for entity_type in &schema.entity_types {
@@ -129,12 +92,12 @@ fn validate_entity_states(
             continue;
         };
 
-        if let Some(state_machine) = state_machines.get(&entity_type.name) {
-            record_missing_csdl_states(entity_type, &csdl_states, state_machine, validation);
-            record_missing_spec_states(entity_type, &csdl_states, state_machine, validation);
+        if let Some(automaton) = automata.get(&entity_type.name) {
+            record_missing_csdl_states(entity_type, &csdl_states, automaton, validation);
+            record_missing_spec_states(entity_type, &csdl_states, automaton, validation);
         } else if entity_type.tla_spec_path().is_some() {
             validation.warnings.push(format!(
-                "{}: has TlaSpec annotation but no specification source was provided",
+                "{}: has TlaSpec annotation (ignored; Automaton is the behavior IR) and no I/O Automaton source was provided",
                 entity_type.name
             ));
         }
@@ -144,11 +107,11 @@ fn validate_entity_states(
 fn record_missing_csdl_states(
     entity_type: &csdl::EntityType,
     csdl_states: &[String],
-    state_machine: &tlaplus::StateMachine,
+    automaton: &Automaton,
     validation: &mut ValidationResult,
 ) {
     for state in csdl_states {
-        if !state_machine.states.contains(state) {
+        if !automaton.automaton.states.contains(state) {
             validation.errors.push(format!(
                 "{}: CSDL declares state '{}' but specification does not contain it",
                 entity_type.name, state
@@ -160,10 +123,10 @@ fn record_missing_csdl_states(
 fn record_missing_spec_states(
     entity_type: &csdl::EntityType,
     csdl_states: &[String],
-    state_machine: &tlaplus::StateMachine,
+    automaton: &Automaton,
     validation: &mut ValidationResult,
 ) {
-    for state in &state_machine.states {
+    for state in &automaton.automaton.states {
         if !csdl_states.contains(state) {
             validation.warnings.push(format!(
                 "{}: specification has state '{}' not declared in CSDL annotations",
@@ -175,7 +138,7 @@ fn record_missing_spec_states(
 
 fn validate_action_bindings(
     schema: &csdl::Schema,
-    state_machines: &HashMap<String, tlaplus::StateMachine>,
+    automata: &HashMap<String, Automaton>,
     validation: &mut ValidationResult,
 ) {
     for action in &schema.actions {
@@ -187,12 +150,12 @@ fn validate_action_bindings(
         };
 
         let entity_name = binding_type.rsplit('.').next().unwrap_or(binding_type);
-        let Some(state_machine) = state_machines.get(entity_name) else {
+        let Some(automaton) = automata.get(entity_name) else {
             continue;
         };
 
         for state in &from_states {
-            if !state_machine.states.contains(state) {
+            if !automaton.automaton.states.contains(state) {
                 validation.errors.push(format!(
                     "Action {}: ValidFromStates contains '{}' which is not in {}'s specification states",
                     action.name, state, entity_name
@@ -208,34 +171,6 @@ mod tests {
     use crate::csdl::parse_csdl;
 
     #[test]
-    fn test_build_spec_model_from_reference() {
-        let csdl_xml = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
-        let order_tla = include_str!("../../../../test-fixtures/specs/order.tla");
-
-        let csdl = parse_csdl(csdl_xml).expect("CSDL should parse");
-
-        let mut tla_sources = HashMap::new();
-        tla_sources.insert("Order".to_string(), order_tla.to_string());
-
-        let spec = build_spec_model(csdl, tla_sources);
-
-        // Should be valid (no errors)
-        assert!(
-            spec.validation.is_valid(),
-            "validation errors: {:?}",
-            spec.validation.errors
-        );
-
-        // Should have the Order state machine
-        assert!(spec.state_machines.contains_key("Order"));
-
-        let order_sm = &spec.state_machines["Order"];
-        assert_eq!(order_sm.states.len(), 10);
-        assert!(!order_sm.transitions.is_empty());
-        assert!(!order_sm.invariants.is_empty());
-    }
-
-    #[test]
     fn test_build_spec_model_from_ioa() {
         let csdl_xml = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
         let order_ioa = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
@@ -243,49 +178,39 @@ mod tests {
         let csdl = parse_csdl(csdl_xml).expect("CSDL should parse");
 
         let mut sources = HashMap::new();
-        sources.insert("Order".to_string(), SpecSource::Ioa(order_ioa.to_string()));
+        sources.insert("Order".to_string(), order_ioa.to_string());
 
-        let spec = build_spec_model_mixed(csdl, sources);
+        let spec = build_spec_model(csdl, sources);
 
-        // Should be valid (no errors)
         assert!(
             spec.validation.is_valid(),
             "validation errors: {:?}",
             spec.validation.errors
         );
 
-        // Should have the Order state machine from IOA
-        assert!(spec.state_machines.contains_key("Order"));
+        assert!(spec.automata.contains_key("Order"));
 
-        let order_sm = &spec.state_machines["Order"];
-        assert!(!order_sm.states.is_empty());
-        assert!(!order_sm.transitions.is_empty());
+        let order = &spec.automata["Order"];
+        assert_eq!(order.automaton.states.len(), 10);
+        assert!(!order.actions.is_empty());
+        assert!(!order.invariants.is_empty());
     }
 
     #[test]
-    fn test_ioa_takes_precedence_over_tla() {
+    fn test_tla_spec_annotation_does_not_require_tla_file() {
         let csdl_xml = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
-        let order_ioa = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
-        let order_tla = include_str!("../../../../test-fixtures/specs/order.tla");
-
         let csdl = parse_csdl(csdl_xml).expect("CSDL should parse");
 
-        // Build with IOA only
-        let mut ioa_sources = HashMap::new();
-        ioa_sources.insert("Order".to_string(), SpecSource::Ioa(order_ioa.to_string()));
-        let ioa_spec = build_spec_model_mixed(csdl.clone(), ioa_sources);
+        let spec = build_spec_model(csdl, HashMap::new());
 
-        // Build with TLA+ only
-        let mut tla_sources = HashMap::new();
-        tla_sources.insert("Order".to_string(), SpecSource::Tla(order_tla.to_string()));
-        let tla_spec = build_spec_model_mixed(csdl, tla_sources);
-
-        // Both should produce valid specs
-        assert!(ioa_spec.validation.is_valid());
-        assert!(tla_spec.validation.is_valid());
-
-        // Both should have Order state machine
-        assert!(ioa_spec.state_machines.contains_key("Order"));
-        assert!(tla_spec.state_machines.contains_key("Order"));
+        assert!(spec.validation.is_valid());
+        assert!(
+            spec.validation
+                .warnings
+                .iter()
+                .any(|w| w.contains("TlaSpec") && w.contains("Order")),
+            "TlaSpec without IOA should warn, got: {:?}",
+            spec.validation.warnings
+        );
     }
 }

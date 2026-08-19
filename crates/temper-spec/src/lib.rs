@@ -1,12 +1,12 @@
 //! temper-spec: Specification parsers for the Temper framework.
 //!
-//! Supports two specification formats:
-//! - **I/O Automaton TOML** (primary): Lynch-Tuttle precondition/effect style, agent-friendly
-//! - **TLA+** (legacy): temporal logic for deep correctness reasoning
-//! - **CSDL** (data model): OData v4 Common Schema Definition Language
+//! - **I/O Automaton TOML** (behavior): Lynch-Tuttle precondition/effect style.
+//!   Parsed once to [`Automaton`]. Downstream crates derive verification and
+//!   runtime views from that value (`TemperModel`, `TransitionTable`).
+//! - **CSDL** (data model): OData v4 Common Schema Definition Language.
 //!
-//! Both I/O Automaton and TLA+ compile to the same [`StateMachine`] intermediate
-//! representation, which feeds the verification cascade and runtime.
+//! TLA+ is not an authored format. The extractor and `StateMachine` IR were
+//! removed (ADR-0169).
 
 pub mod automaton;
 pub mod cross_invariant;
@@ -14,14 +14,11 @@ pub mod csdl;
 pub mod model;
 pub mod naming;
 
-/// TLA+ specification extractor (legacy — prefer [`automaton`] for new specs).
-pub mod tlaplus;
-
 // Re-export primary public API at crate root.
 pub use automaton::{
     Automaton, FieldInvariant, FieldPredicate, LintFinding, LintSeverity, lint_automaton,
     parse_automaton, parse_bool_initial, parse_counter_initial_usize, parse_list_initial,
-    parse_var_initial_json, to_state_machine,
+    parse_var_initial_json,
 };
 pub use cross_invariant::{
     CrossInvariant, CrossInvariantLintFinding, CrossInvariantLintSeverity, CrossInvariantOperator,
@@ -30,6 +27,5 @@ pub use cross_invariant::{
     parse_related_status_in_assert,
 };
 pub use csdl::{CsdlDocument, CsdlParseError, parse_csdl};
-pub use model::{SpecModel, SpecSource, build_spec_model, build_spec_model_mixed};
+pub use model::{SpecModel, build_spec_model};
 pub use naming::{to_pascal_case, to_snake_case};
-pub use tlaplus::{Invariant, StateMachine, Transition, extract_state_machine};

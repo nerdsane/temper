@@ -16,8 +16,8 @@ use stateright::Model;
 use temper_spec::automaton::AssertCompareOp;
 
 use crate::model::{
-    InvariantKind, LivenessKind, TemperModel, TemperModelAction, TemperModelState,
-    build_model_from_ioa,
+    build_model_from_ioa, InvariantKind, LivenessKind, TemperModel, TemperModelAction,
+    TemperModelState,
 };
 
 /// Configuration for a simulation run.
@@ -131,7 +131,12 @@ pub fn run_simulation_from_ioa(
     config: &SimConfig,
 ) -> Result<SimulationResult, String> {
     let model = build_model_from_ioa(ioa_toml, config.max_counter)?;
-    Ok(run_simulation_impl(&model, config))
+    Ok(run_simulation(&model, config))
+}
+
+/// Run a deterministic simulation on a pre-built [`TemperModel`].
+pub fn run_simulation(model: &TemperModel, config: &SimConfig) -> SimulationResult {
+    run_simulation_impl(model, config)
 }
 
 /// Run simulation across multiple seeds from I/O Automaton TOML source.
@@ -143,13 +148,22 @@ pub fn run_multi_seed_simulation_from_ioa(
     num_seeds: u64,
 ) -> Result<Vec<SimulationResult>, String> {
     let model = build_model_from_ioa(ioa_toml, base_config.max_counter)?;
-    Ok((0..num_seeds)
+    Ok(run_multi_seed_simulation(&model, base_config, num_seeds))
+}
+
+/// Run simulation across multiple seeds on a pre-built [`TemperModel`].
+pub fn run_multi_seed_simulation(
+    model: &TemperModel,
+    base_config: &SimConfig,
+    num_seeds: u64,
+) -> Vec<SimulationResult> {
+    (0..num_seeds)
         .map(|i| {
             let mut config = base_config.clone();
             config.seed = base_config.seed.wrapping_add(i);
-            run_simulation_impl(&model, &config)
+            run_simulation_impl(model, &config)
         })
-        .collect())
+        .collect()
 }
 
 fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationResult {

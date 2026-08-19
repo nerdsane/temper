@@ -105,8 +105,8 @@ Cedar policies reference this attribute to distinguish verified agents from unve
 
 ### Spec Format
 - I/O Automaton TOML (`.ioa.toml`) is the primary spec format
-- Use `TransitionTable::from_ioa_source()` in production
-- TLA+ is legacy — `from_tla_source()` is `#[cfg(test)]` only
+- Parse IOA once to `Automaton`. Use `TransitionTable::from_automaton()` when the automaton is already parsed; `from_ioa_source()` / `try_from_ioa_source()` remain convenience wrappers
+- TLA+ / `StateMachine` are removed (ADR-0169). Do not call `from_tla_source`.
 
 ### Multi-Tenancy
 - SpecRegistry maps (TenantId, EntityType) → specs + TransitionTable

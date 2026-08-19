@@ -227,7 +227,9 @@ impl EntityType {
             })
     }
 
-    /// Get the TLA+ spec path from annotations.
+    /// Get the legacy `TlaSpec` annotation path, if present.
+    ///
+    /// Ignored XML (ADR-0169 / ARN-383). Does not require a `.tla` file.
     pub fn tla_spec_path(&self) -> Option<String> {
         self.annotation("StateMachine.TlaSpec")
             .and_then(|a| match &a.value {

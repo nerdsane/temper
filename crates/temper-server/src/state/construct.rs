@@ -8,8 +8,9 @@ use temper_authz::AuthzEngine;
 #[allow(deprecated)]
 use temper_evolution::store::RecordStore;
 use temper_jit::table::TransitionTable;
-use temper_runtime::ActorSystem;
 use temper_runtime::scheduler::sim_now;
+use temper_runtime::ActorSystem;
+use temper_spec::automaton::parse_automaton;
 use temper_spec::csdl::CsdlDocument;
 use temper_store_postgres::PostgresEventStore;
 
@@ -23,9 +24,9 @@ use crate::wasm_registry::WasmModuleRegistry;
 use temper_wasm::WasmEngine;
 
 use super::{
-    AdmissionController, AgentProgressEvent, EntityObserveEvent, MetricsCollector,
-    PolicySuggestionEngine, ServerState, StateTimeoutTracker, env_bool, env_local_tdata_hosts,
-    env_timeout, install_liveness_metrics_reporter_once, state_cache_budget,
+    env_bool, env_local_tdata_hosts, env_timeout, install_liveness_metrics_reporter_once,
+    state_cache_budget, AdmissionController, AgentProgressEvent, EntityObserveEvent,
+    MetricsCollector, PolicySuggestionEngine, ServerState, StateTimeoutTracker,
 };
 
 impl ServerState {
@@ -252,8 +253,10 @@ impl ServerState {
         let mut state = Self::new(system, csdl, csdl_xml);
         let mut tables = BTreeMap::new();
         for (entity_type, ioa_source) in &ioa_sources {
-            let table = TransitionTable::try_from_ioa_source(ioa_source)
-                .map_err(|e| format!("entity '{entity_type}': {e}"))?;
+            let automaton = parse_automaton(ioa_source).map_err(|e| {
+                format!("entity '{entity_type}': failed to parse I/O Automaton TOML: {e}")
+            })?;
+            let table = TransitionTable::from_automaton(&automaton);
             tables.insert(entity_type.clone(), Arc::new(table));
         }
         state.transition_tables = Arc::new(tables);

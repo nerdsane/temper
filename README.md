@@ -256,7 +256,7 @@ Version 0.1.0. The architecture is stabilizing; the API surface is not frozen. D
 
 | Crate | Purpose |
 |-------|---------|
-| **temper-spec** | IOA TOML + CSDL parsers, compiles to StateMachine IR |
+| **temper-spec** | IOA TOML + CSDL parsers; `Automaton` is the behavior IR |
 | **temper-verify** | L0–L3 verification cascade (Z3, Stateright, DST, proptest) |
 | **temper-jit** | TransitionTable builder, hot-swap controller |
 | **temper-runtime** | Actor system, bounded mailboxes, event sourcing, SimScheduler |
