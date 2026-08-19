@@ -4,13 +4,14 @@ use tokio::sync::Semaphore;
 use tracing::{Instrument, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use crate::entity_actor::{EntityMsg, EntityResponse};
+use crate::entity_actor::{EntityResponse, InProcessEntityRuntime};
 use crate::request_context::{AgentContext, remote_parent_context};
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
+use temper_runtime::plug::RuntimeRequest;
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
-use super::effects::PostDispatchContext;
+use super::post_dispatch::PostDispatchContext;
 use super::retry;
 use super::{DispatchCommand, DispatchError, DispatchExtOptions, record_workflow_span_attrs};
 use crate::state::admission::AdmissionOutcome;
@@ -580,16 +581,16 @@ impl crate::state::ServerState {
         );
         let outcome = {
             use tracing::Instrument;
-            retry::ask_with_backoff::<_, EntityResponse, _>(
-                &actor_ref,
-                || EntityMsg::Action {
-                    name: action_name.clone(),
-                    params: params_for_retry.clone(),
-                    cross_entity_booleans: cross_for_retry.clone(),
-                    idempotency_key: idempotency_key.clone(),
-                    expected_authorization_precondition: authorization_precondition_for_retry
-                        .clone(),
-                },
+            let runtime = InProcessEntityRuntime::new(actor_ref);
+            retry::execute_with_backoff(
+                &runtime,
+                RuntimeRequest::action(
+                    action_name.clone(),
+                    params_for_retry,
+                    cross_for_retry,
+                    idempotency_key.clone(),
+                    authorization_precondition_for_retry,
+                ),
                 &policy,
             )
             .instrument(ask_span)

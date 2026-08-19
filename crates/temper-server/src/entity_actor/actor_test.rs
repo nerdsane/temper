@@ -1,8 +1,12 @@
 use super::*;
+use crate::entity_actor::*;
 use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
+use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope};
+use temper_runtime::scheduler::sim_now;
 
 const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
 

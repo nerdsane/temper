@@ -6,6 +6,7 @@
 
 mod actor;
 pub mod effects;
+mod in_process;
 mod replay_validation;
 pub mod sim_handler;
 mod snapshot_queue;
@@ -19,6 +20,7 @@ pub use effects::{
     ProcessResult, ScheduledAction, apply_effects, apply_new_state_fallback, build_eval_context,
     process_action, process_action_with_xref, sync_fields,
 };
+pub use in_process::InProcessEntityRuntime;
 pub use sim_handler::EntityActorHandler;
 pub(crate) use snapshot_queue::SnapshotWriteQueue;
 pub use types::{EntityEvent, EntityMsg, EntityResponse, EntityState};

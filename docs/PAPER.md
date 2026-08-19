@@ -993,7 +993,7 @@ Postgres events are tenant-scoped.  The Redis key naming convention
 
 **E2E proof.**  The `compile_first_e2e` tests prove the full HTTP lifecycle through
 the platform-hosted path: entity creation, action dispatch, entity read, `$metadata`
-retrieval, and service document discovery.  The `platform_e2e_dst` tests prove
+retrieval, and service document discovery.  The `platform_e2e` tests prove
 multi-tenant isolation: two tenants with different entity types coexist on the same
 server, each seeing only their own entities and actions.
 

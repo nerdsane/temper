@@ -39,8 +39,8 @@ You evaluate **6 areas**. For each area, you must READ the actual files and COUN
 - `reference-apps/ecommerce/specs/*.ioa.toml` — ecommerce entity specs
 - `reference-apps/oncall/specs/*.ioa.toml` — oncall entity specs
 - `test-fixtures/specs/*.ioa.toml` — test fixture specs
-- `crates/temper-platform/tests/platform_e2e_dst.rs` — platform E2E DST tests
-- `crates/temper-platform/tests/system_entity_dst.rs` — system entity DST tests
+- `crates/temper-dst/` — Temper DST suite home (helpers + tests)
+- `crates/temper-platform/tests/platform_e2e.rs` — platform E2E (shared registry; not DST)
 - `reference-apps/ecommerce/tests/ecommerce_dst.rs` — ecommerce DST tests
 
 ### 2. Invariant Quality

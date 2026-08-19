@@ -4,7 +4,7 @@
 //! failed installs leave no partial state, and failed dispatches
 //! do not corrupt persisted data.
 
-mod common;
+use temper_dst as common;
 
 use common::platform_harness::SimPlatformHarness;
 use common::platform_invariants::*;

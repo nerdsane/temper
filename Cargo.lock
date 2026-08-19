@@ -6467,6 +6467,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "temper-dst"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "temper-jit",
+ "temper-platform",
+ "temper-runtime",
+ "temper-server",
+ "temper-spec",
+ "temper-store-sim",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "temper-evolution"
 version = "0.1.0"
 dependencies = [
@@ -6685,6 +6700,7 @@ dependencies = [
  "sqlx",
  "temper-actor-runtime",
  "temper-authz",
+ "temper-dst",
  "temper-evolution",
  "temper-jit",
  "temper-observe",

@@ -237,7 +237,8 @@ impl Default for HttpEndpointTables {
 /// the rest of the table. Metrics + warn-level logs cover
 /// visibility.
 pub async fn rebuild_tenant_table(state: &crate::state::ServerState, tenant: &TenantId) {
-    use crate::entity_actor::types::{EntityMsg, EntityResponse};
+    use crate::entity_actor::{EntityResponse, InProcessEntityRuntime};
+    use temper_runtime::plug::{EntityRuntime, RuntimeRequest};
 
     // On fresh pod boots the in-memory entity_index is lazily
     // populated — we need to prime it from the event store or
@@ -272,19 +273,21 @@ pub async fn rebuild_tenant_table(state: &crate::state::ServerState, tenant: &Te
         let Some(actor_ref) = actor_ref else {
             continue; // actor passivated — will rematerialize on next request
         };
-        let response: EntityResponse =
-            match actor_ref.ask(EntityMsg::GetState, ACTOR_ASK_TIMEOUT).await {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(
-                        tenant = %tenant.as_str(),
-                        entity_id,
-                        error = %e,
-                        "HttpEndpoint actor ask failed during rebuild"
-                    );
-                    continue;
-                }
-            };
+        let response: EntityResponse = match InProcessEntityRuntime::new(actor_ref)
+            .execute(RuntimeRequest::GetState, ACTOR_ASK_TIMEOUT)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    tenant = %tenant.as_str(),
+                    entity_id,
+                    error = %e,
+                    "HttpEndpoint actor ask failed during rebuild"
+                );
+                continue;
+            }
+        };
         if response.state.status != "Active" {
             continue;
         }

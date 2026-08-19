@@ -4,7 +4,7 @@
 //! are isolated across tenants, and remain coherent with specs under
 //! fault injection.
 
-mod common;
+use temper_dst as common;
 
 use common::platform_harness::SimPlatformHarness;
 use common::platform_invariants::*;

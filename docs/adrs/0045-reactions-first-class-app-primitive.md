@@ -114,7 +114,7 @@ All five land in one PR.
 
 ## Readiness Gates
 
-- `cargo test --workspace` green, including `temper-platform --test platform_e2e_dst`.
+- `cargo test --workspace` green, including `temper-platform --test platform_e2e`.
 - `paw-fs` regression: existing `os-apps/temper-fs/reactions/reactions.toml` loads and dispatches byte-identically under the extended parser.
 - Agent-trigger synthesis regression: `synthesize_agent_trigger_reactions` output unchanged (no `guard`, no `params_from`, no `Create`).
 - DST replay: two seeded runs under `SimReactionSystem` produce identical reaction firing order and identical `Create`-resolver IDs.

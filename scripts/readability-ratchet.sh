@@ -28,7 +28,7 @@ trap cleanup EXIT
 is_production_file() {
     local file="$1"
     case "$file" in
-        */tests/*|*/benches/*|*test_*.rs|*_test.rs|*/temper-macros/*)
+        */tests/*|*/benches/*|*test_*.rs|*_test.rs|*/temper-macros/*|*/temper-dst/*)
             return 1
             ;;
         *)

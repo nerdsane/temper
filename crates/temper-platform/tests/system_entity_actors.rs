@@ -4,7 +4,7 @@
 //! spawned in a real `ActorSystem`, receiving `EntityMsg::Action` via `ask()`.
 //! This is the same code that runs in the live server — no simulation abstractions.
 //!
-//! Combined with the DST tests in `system_entity_dst.rs` (which prove invariant
+//! Combined with the DST tests in `temper-dst` (`system_entities`) (which prove invariant
 //! correctness under fault injection), these tests verify the production wiring.
 
 use std::time::Duration;

@@ -14,7 +14,7 @@ mod adapter;
 mod compensation;
 mod composite;
 mod cross_entity;
-mod effects;
+mod post_dispatch;
 pub(crate) mod retry;
 pub(crate) mod state_timeouts;
 mod wasm;

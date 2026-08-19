@@ -143,7 +143,8 @@ In simulation-visible crates (temper-runtime, temper-jit, temper-server):
 cargo test --workspace              # Full workspace (430+ tests)
 cargo test -p temper-server         # Including multi-tenant integration
 cargo test -p temper-platform       # Platform unit + deploy pipeline
-cargo test -p temper-platform --test platform_e2e_dst  # E2E shared registry proof
+cargo test -p temper-platform --test platform_e2e  # E2E shared registry proof
+cargo test -p temper-dst                          # Temper DST suite home
 ```
 
 ## Development Harness

@@ -11,10 +11,11 @@ use tracing::{Instrument, instrument};
 use crate::adapters::{
     AdapterAgentContext, AdapterContext, AdapterError, AdapterResult, AgentAdapter,
 };
-use crate::entity_actor::{EntityMsg, EntityResponse, EntityState};
+use crate::entity_actor::{EntityResponse, EntityState, InProcessEntityRuntime};
 use crate::identity::hash_token;
 use crate::request_context::AgentContext;
 use crate::secrets::template::resolve_secret_templates;
+use temper_runtime::plug::RuntimeRequest;
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
@@ -481,15 +482,16 @@ impl crate::state::ServerState {
         let mut last_error = "credential remained Active".to_string();
 
         for attempt in 1..=ADAPTER_CREDENTIAL_REVOKE_ATTEMPTS {
-            let outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
-                &actor,
-                || EntityMsg::Action {
-                    name: "Revoke".to_string(),
-                    params: serde_json::json!({}),
-                    cross_entity_booleans: BTreeMap::new(),
-                    idempotency_key: Some(idempotency_key.clone()),
-                    expected_authorization_precondition: None,
-                },
+            let runtime = InProcessEntityRuntime::new(actor.clone());
+            let outcome = retry::execute_with_backoff(
+                &runtime,
+                RuntimeRequest::action(
+                    "Revoke",
+                    serde_json::json!({}),
+                    BTreeMap::new(),
+                    Some(idempotency_key.clone()),
+                    None,
+                ),
                 &policy,
             )
             .await;

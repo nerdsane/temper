@@ -1,8 +1,12 @@
 use super::*;
-
+use crate::entity_actor::*;
+use crate::storage::{BackendLabel, BoxedEventStore};
+use temper_runtime::actor::ActorError;
 use temper_runtime::persistence::{
-    EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceError,
+    EventMetadata, EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
+    PersistenceError,
 };
+use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
 

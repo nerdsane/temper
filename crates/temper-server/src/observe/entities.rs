@@ -15,8 +15,9 @@ use tracing::instrument;
 
 use crate::authz::{observe_tenant_scope, require_authenticated_context, require_observe_auth};
 use crate::blobs::hydrate_blob_refs_for_tenant;
-use crate::entity_actor::{EntityEvent, EntityMsg, EntityResponse};
+use crate::entity_actor::{EntityEvent, EntityResponse, InProcessEntityRuntime};
 use crate::state::ServerState;
+use temper_runtime::plug::{EntityRuntime, RuntimeRequest};
 
 use super::{EntityInstanceSummary, EventStreamParams};
 
@@ -88,8 +89,8 @@ pub(crate) async fn handle_get_entity_history(
     };
 
     if let Some(actor_ref) = actor_ref
-        && let Ok(response) = actor_ref
-            .ask::<EntityResponse>(EntityMsg::GetState, state.action_dispatch_timeout)
+        && let Ok(response) = InProcessEntityRuntime::new(actor_ref)
+            .execute(RuntimeRequest::GetState, state.action_dispatch_timeout)
             .await
     {
         let mut json = format_history_response(&entity_type, &entity_id, &response.state.events);

@@ -26,6 +26,7 @@ members = [
     "crates/temper-store-turso",
     "crates/temper-store-redis",
     "crates/temper-store-sim",
+    "crates/temper-dst",
     "crates/temper-server",
     "crates/temper-cli",
     "crates/temper-mcp",
@@ -141,6 +142,7 @@ temper-store-postgres = { path = "crates/temper-store-postgres" }
 temper-store-turso = { path = "crates/temper-store-turso", features = ["cloud"] }
 temper-store-redis = { path = "crates/temper-store-redis" }
 temper-store-sim = { path = "crates/temper-store-sim" }
+temper-dst = { path = "crates/temper-dst" }
 temper-server = { path = "crates/temper-server" }
 temper-cli = { path = "crates/temper-cli" }
 temper-mcp = { path = "crates/temper-mcp" }

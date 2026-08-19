@@ -6,7 +6,7 @@
 //!
 //! FoundationDB pattern: same code, simulated I/O, multi-seed coverage.
 
-mod common;
+use temper_dst as common;
 
 use temper_runtime::scheduler::install_deterministic_context;
 use temper_server::platform_store::SimPlatformFaultConfig;

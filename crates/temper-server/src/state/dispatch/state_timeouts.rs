@@ -48,7 +48,7 @@ use temper_runtime::tenant::TenantId;
 
 use crate::entity_actor::{EntityEvent, EntityResponse};
 
-use super::effects::PostDispatchContext;
+use super::post_dispatch::PostDispatchContext;
 
 /// Walk the event history backward to find the timestamp of the most recent
 /// "progress" signal for the given state: either the transition that entered
@@ -563,7 +563,7 @@ mod tests {
 
     use crate::registry::SpecRegistry;
     use crate::request_context::AgentContext;
-    use crate::state::dispatch::effects::PostDispatchContext;
+    use crate::state::dispatch::post_dispatch::PostDispatchContext;
     use crate::state::{DispatchCommand, ServerState};
     use temper_runtime::ActorSystem;
     use temper_spec::csdl::parse_csdl;

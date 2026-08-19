@@ -275,6 +275,7 @@ Version 0.1.0. The architecture is stabilizing; the API surface is not frozen. D
 | **temper-sandbox** | Shared Monty sandbox infrastructure |
 | **temper-sdk** | HTTP client library for Temper server |
 | **temper-store-sim** | In-memory deterministic event store with fault injection |
+| **temper-dst** | Temper DST suite home (test crate; not a production dependency) |
 | **temper-wasm-sdk** | SDK for writing WASM integration modules |
 | **temper-macros** | Proc macros: `#[derive(Message)]`, `#[derive(DomainEvent)]` |
 | **temper-ots** | Open Trajectory Specification — DST-compatible trajectory capture for agent decisions |

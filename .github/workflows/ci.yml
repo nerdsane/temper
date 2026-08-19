@@ -222,6 +222,13 @@ jobs:
               exit 1
             fi
           done
+          # temper-dst is the suite home — production binaries must not depend on it
+          for crate in temper-server temper-platform temper-cli temper-runtime temper-jit; do
+            if cargo tree --no-dev -p "$crate" 2>/dev/null | grep -q temper-dst; then
+              echo "FAIL: $crate production graph includes temper-dst"
+              exit 1
+            fi
+          done
           echo "Dependency isolation: OK"
 
   # ─────────────────────────────────────────────────────
@@ -262,8 +269,8 @@ jobs:
             (cd "wasm-modules/$module" && cargo build --target wasm32-unknown-unknown --release)
           done
 
-      - name: cargo test --workspace -- --skip dst_
-        run: cargo test --workspace -- --skip dst_
+      - name: cargo test --workspace --exclude temper-dst
+        run: cargo test --workspace --exclude temper-dst -- --skip dst_
 
       # spec_validate_endpoint declares required-features = ["observe"]. The
       # workspace run above usually still covers it via feature unification
@@ -283,7 +290,7 @@ jobs:
   # Gate 3b: DST/platform coverage (matrixed)
   # ─────────────────────────────────────────────────────
   dst-platform-tests:
-    name: DST/Platform Tests (${{ matrix.suite }})
+    name: DST (${{ matrix.suite }})
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -291,13 +298,17 @@ jobs:
       matrix:
         include:
           - suite: core
-            command: cargo test -p temper-server --test dst_concurrency_retry --test dst_hotswap --test dst_lifecycle --test dst_multi_tenant --test dst_persistence
-          - suite: platform-boot
-            command: cargo test -p temper-server --test dst_platform_boot
-          - suite: platform-consistency
-            command: cargo test -p temper-server --test dst_platform_cedar --test dst_platform_index --test dst_platform_rollback
-          - suite: platform-random
-            command: cargo test -p temper-server --test dst_platform_random
+            command: cargo test -p temper-dst --test concurrency_retry --test hotswap --test lifecycle --test multi_tenant --test persist
+          - suite: boot
+            command: cargo test -p temper-dst --test boot
+          - suite: consistency
+            command: cargo test -p temper-dst --test cedar --test index --test rollback
+          - suite: random
+            command: cargo test -p temper-dst --test random
+          - suite: entities
+            command: cargo test -p temper-dst --test system_entities --test gmail_oauth --test entity_key_index --test entity_vector_index
+          - suite: projection-lag
+            command: cargo test -p temper-server dst_projection_lag
     steps:
       - uses: actions/checkout@v4
 
@@ -321,7 +332,7 @@ jobs:
 
       - name: cargo test DST/platform suite
         env:
-          TEMPER_DST_RANDOM_MODE: ${{ matrix.suite == 'platform-random' && github.event_name == 'pull_request' && 'smoke' || 'full' }}
+          TEMPER_DST_RANDOM_MODE: ${{ matrix.suite == 'random' && github.event_name == 'pull_request' && 'smoke' || 'full' }}
         run: ${{ matrix.command }}
 
   # ─────────────────────────────────────────────────────

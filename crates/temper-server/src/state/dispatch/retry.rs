@@ -1,8 +1,8 @@
-//! Retry-with-backoff wrapper around `ActorRef::ask`.
+//! Retry-with-backoff wrapper around [`EntityRuntime::execute`].
 //!
 //! Provides the dispatch layer with uniform handling of transient actor
 //! failures (`AskTimeout`, `MailboxFull`) so call sites do not need to
-//! re-implement retry logic. See ADR-0048.
+//! re-implement retry logic. See ADR-0048 and ADR-0167.
 //!
 //! ## Policy shape
 //!
@@ -26,12 +26,14 @@
 //! Permanent `ActorError` variants short-circuit immediately — no further
 //! attempts. Transient variants consume an attempt and back off.
 
+use std::future::Future;
 use std::time::{Duration, Instant};
 
-use temper_runtime::actor::{ActorError, ActorRef, Message};
+use temper_runtime::actor::ActorError;
+use temper_runtime::plug::{EntityRuntime, RuntimeRequest};
 use temper_runtime::scheduler::sim_now;
 
-/// Retry policy for `ask_with_backoff`.
+/// Retry policy for `execute_with_backoff`.
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
     /// Wall-clock budget across all attempts including backoff sleeps.
@@ -57,8 +59,7 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// Disable retries entirely — equivalent to a plain `ActorRef::ask`
-    /// call with the configured per-attempt timeout.
+    /// Disable retries entirely — one `execute` with the per-attempt timeout.
     #[allow(dead_code)] // kept as a documented escape hatch for tests/tools
     pub fn single_attempt() -> Self {
         Self {
@@ -102,7 +103,7 @@ impl RetryPolicy {
     }
 }
 
-/// Outcome of `ask_with_backoff`.
+/// Outcome of `execute_with_backoff`.
 #[derive(Debug)]
 pub struct AskResult<R> {
     /// Final result — `Ok` on any successful attempt; last-seen `ActorError`
@@ -117,25 +118,28 @@ pub struct AskResult<R> {
     pub retried_after_transient: bool,
 }
 
-/// Ask an actor with bounded retry on transient failures.
+/// Ask a runtime with bounded retry on transient failures.
 ///
-/// `make_msg` is called once per attempt so each attempt builds a fresh
-/// `M` — required because `ActorRef::ask` moves its message.
-///
-/// Returns as soon as any of:
+/// `request` is cloned once per attempt. Returns as soon as any of:
 /// - an attempt succeeds,
 /// - an attempt returns a permanent `ActorError`,
 /// - `policy.max_attempts` is reached, or
 /// - `policy.total_deadline` has elapsed.
-pub async fn ask_with_backoff<M, R, F>(
-    actor_ref: &ActorRef<M>,
-    mut make_msg: F,
+pub async fn execute_with_backoff<Rt>(
+    runtime: &Rt,
+    request: RuntimeRequest,
     policy: &RetryPolicy,
-) -> AskResult<R>
+) -> AskResult<Rt::Response>
 where
-    M: Message,
-    R: Send + 'static,
-    F: FnMut() -> M,
+    Rt: EntityRuntime<Error = ActorError>,
+{
+    try_with_backoff(policy, |timeout| runtime.execute(request.clone(), timeout)).await
+}
+
+async fn try_with_backoff<R, F, Fut>(policy: &RetryPolicy, mut attempt_fn: F) -> AskResult<R>
+where
+    F: FnMut(Duration) -> Fut,
+    Fut: Future<Output = Result<R, ActorError>>,
 {
     let start = Instant::now();
     let max_attempts = policy.max_attempts.max(1);
@@ -167,8 +171,7 @@ where
             break;
         }
 
-        let msg = make_msg();
-        match actor_ref.ask::<R>(msg, attempt_timeout).await {
+        match attempt_fn(attempt_timeout).await {
             Ok(value) => {
                 return AskResult {
                     result: Ok(value),
@@ -322,11 +325,53 @@ mod tests {
             max_attempts: 0,
             ..RetryPolicy::default()
         };
-        // ask_with_backoff internally coerces max_attempts to >= 1 so the
+        // execute_with_backoff internally coerces max_attempts to >= 1 so the
         // loop always runs at least once; this is the contract the dispatch
         // layer depends on.
         let effective = p.max_attempts.max(1);
         assert_eq!(effective, 1);
+    }
+
+    #[tokio::test]
+    async fn execute_with_backoff_retries_transient_then_succeeds() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use temper_runtime::plug::EntityRuntime;
+
+        struct OnceFlaky {
+            tries: AtomicU32,
+        }
+        impl EntityRuntime for OnceFlaky {
+            type Response = u8;
+            type Error = ActorError;
+            fn execute(
+                &self,
+                _request: RuntimeRequest,
+                _timeout: Duration,
+            ) -> impl Future<Output = Result<u8, ActorError>> + Send {
+                let n = self.tries.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if n == 0 {
+                        Err(ActorError::MailboxFull)
+                    } else {
+                        Ok(7)
+                    }
+                }
+            }
+        }
+
+        let runtime = OnceFlaky {
+            tries: AtomicU32::new(0),
+        };
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            per_attempt_timeout: Duration::from_millis(50),
+            total_deadline: Duration::from_secs(2),
+            base_delays_ms: vec![0, 0, 0],
+        };
+        let outcome = execute_with_backoff(&runtime, RuntimeRequest::GetState, &policy).await;
+        assert_eq!(outcome.result.unwrap(), 7);
+        assert_eq!(outcome.attempts, 2);
+        assert!(outcome.retried_after_transient);
     }
 
     #[test]

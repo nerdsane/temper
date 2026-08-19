@@ -4,7 +4,7 @@
 //! - Create → dispatch → persist → crash → respawn → replay → continue
 //! - Full lifecycle through all states with persistence
 
-mod common;
+use temper_dst as common;
 
 use temper_runtime::scheduler::install_deterministic_context;
 use temper_runtime::tenant::TenantId;

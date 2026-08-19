@@ -185,7 +185,7 @@ All eight land in one PR.
 
 ## Readiness Gates
 
-- `cargo test --workspace` green, including `temper-platform --test platform_e2e_dst`.
+- `cargo test --workspace` green, including `temper-platform --test platform_e2e`.
 - `temper-fs` regression: the three migrated triggers dispatch with byte-identical behavior to the pre-migration `reactions.toml` runtime (same target entities, same params, same resolver IDs).
 - Parse-time authority check: spec with a trigger declaring a principal that lacks Cedar authority fails L0 verification.
 - Composite L1 runs for any entity whose trigger graph includes at least one cross-entity edge; single-entity fast path runs for entities with no triggers.

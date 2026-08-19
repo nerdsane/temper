@@ -5,7 +5,7 @@
 //! - Actions can't cross tenant boundaries
 //! - Hot-swapping one tenant doesn't affect another
 
-mod common;
+use temper_dst as common;
 
 use temper_runtime::scheduler::install_deterministic_context;
 use temper_runtime::tenant::TenantId;

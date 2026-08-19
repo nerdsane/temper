@@ -4,7 +4,7 @@
 //! after restarts, and that index entries are consistent across entity types
 //! and tenants.
 
-mod common;
+use temper_dst as common;
 
 use common::platform_harness::SimPlatformHarness;
 use common::platform_invariants::*;
