@@ -579,17 +579,16 @@ fn provision_tensorlake(ctx: &Context, fields: &Value) -> Result<SandboxResult, 
 
     ctx.log("info", "sandbox_provisioner: provisioning via Tensorlake API");
 
-    let api_url = ctx
-        .config
-        .get("tensorlake_api_url")
-        .cloned()
+    let api_url = resolved_config(ctx, "tensorlake_api_url")
         .unwrap_or_else(|| "https://api.tensorlake.ai".to_string());
 
     let image = fields
         .get("sandbox_image")
         .and_then(|v| v.as_str())
-        .or_else(|| ctx.config.get("tensorlake_image").map(|s| s.as_str()))
-        .unwrap_or("tensorlake/ubuntu");
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| resolved_config(ctx, "tensorlake_image"))
+        .unwrap_or_else(|| "tensorlake/ubuntu".to_string());
 
     let _workdir = fields
         .get("workdir")
@@ -682,7 +681,7 @@ fn clone_repo_into_sandbox(
         .and_then(|v| v.as_str())
         .unwrap_or("/workspace");
 
-    let github_token = ctx.config.get("github_token").cloned().unwrap_or_default();
+    let github_token = resolved_config(ctx, "github_token").unwrap_or_default();
 
     // Inject token for private repos.
     let clone_url = if !github_token.is_empty() && repo_url.starts_with("https://github.com") {
@@ -736,4 +735,19 @@ fn clone_repo_into_sandbox(
     }
 
     Ok(())
+}
+
+/// Read an integration config value, treating an unresolved `{secret:NAME}`
+/// template as absent.
+///
+/// `resolve_secret_templates` leaves the literal pattern in place when a secret
+/// is missing (see `temper-server/src/secrets/template.rs`), so `config.get()`
+/// returns `Some("{secret:...}")` rather than `None`. Without this filter a
+/// `unwrap_or_else` default never fires and the raw template reaches the wire.
+fn resolved_config(ctx: &Context, key: &str) -> Option<String> {
+    ctx.config
+        .get(key)
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty() && !value.contains("{secret:"))
+        .map(str::to_string)
 }

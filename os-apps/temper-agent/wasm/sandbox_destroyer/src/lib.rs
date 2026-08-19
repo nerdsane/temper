@@ -118,10 +118,7 @@ fn destroy_tensorlake(
         return Ok(()); // Non-fatal
     }
 
-    let api_url = ctx
-        .config
-        .get("tensorlake_api_url")
-        .cloned()
+    let api_url = resolved_config(ctx, "tensorlake_api_url")
         .unwrap_or_else(|| "https://api.tensorlake.ai".to_string());
 
     let url = format!("{api_url}/v2/sandboxes/{sandbox_id}");
@@ -155,10 +152,7 @@ fn destroy_e2b(ctx: &Context, sandbox_id: &str) -> Result<(), String> {
         return Ok(()); // Non-fatal
     }
 
-    let api_url = ctx
-        .config
-        .get("e2b_api_url")
-        .cloned()
+    let api_url = resolved_config(ctx, "e2b_api_url")
         .unwrap_or_else(|| "https://api.e2b.dev".to_string());
 
     let url = format!("{api_url}/sandboxes/{sandbox_id}");
@@ -178,4 +172,19 @@ fn destroy_e2b(ctx: &Context, sandbox_id: &str) -> Result<(), String> {
             &resp.body[..resp.body.len().min(200)]
         ))
     }
+}
+
+/// Read an integration config value, treating an unresolved `{secret:NAME}`
+/// template as absent.
+///
+/// `resolve_secret_templates` leaves the literal pattern in place when a secret
+/// is missing (see `temper-server/src/secrets/template.rs`), so `config.get()`
+/// returns `Some("{secret:...}")` rather than `None`. Without this filter a
+/// `unwrap_or_else` default never fires and the raw template reaches the wire.
+fn resolved_config(ctx: &Context, key: &str) -> Option<String> {
+    ctx.config
+        .get(key)
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty() && !value.contains("{secret:"))
+        .map(str::to_string)
 }

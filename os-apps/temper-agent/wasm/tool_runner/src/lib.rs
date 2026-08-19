@@ -942,10 +942,7 @@ fn checkpoint_tensorlake(ctx: &Context, sandbox_id: &str) -> Result<String, Stri
         return Err("tensorlake_api_key not set".to_string());
     }
 
-    let api_url = ctx
-        .config
-        .get("tensorlake_api_url")
-        .cloned()
+    let api_url = resolved_config(ctx, "tensorlake_api_url")
         .unwrap_or_else(|| "https://api.tensorlake.ai".to_string());
 
     let url = format!("{api_url}/v2/sandboxes/{sandbox_id}/snapshots");
@@ -2005,4 +2002,19 @@ fn resolve_temper_api_url(ctx: &Context, fields: &Value) -> String {
                 .cloned()
         })
         .unwrap_or_else(|| "http://127.0.0.1:3000".to_string())
+}
+
+/// Read an integration config value, treating an unresolved `{secret:NAME}`
+/// template as absent.
+///
+/// `resolve_secret_templates` leaves the literal pattern in place when a secret
+/// is missing (see `temper-server/src/secrets/template.rs`), so `config.get()`
+/// returns `Some("{secret:...}")` rather than `None`. Without this filter a
+/// `unwrap_or_else` default never fires and the raw template reaches the wire.
+fn resolved_config(ctx: &Context, key: &str) -> Option<String> {
+    ctx.config
+        .get(key)
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty() && !value.contains("{secret:"))
+        .map(str::to_string)
 }
