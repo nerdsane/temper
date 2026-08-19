@@ -110,6 +110,8 @@ async fn create_run(
         "sandbox_url": req.sandbox_url,
         "sandbox_provider": req.sandbox_provider,
         "sandbox_image": req.sandbox_image.unwrap_or_default(),
+        "repo_url": req.repo.as_ref().map(|r| r.url.clone()).unwrap_or_default(),
+        "repo_ref": req.repo.as_ref().map(|r| r.r#ref.clone()).unwrap_or_default(),
         "workdir": req.workdir,
         "max_turns": max_turns,
     });

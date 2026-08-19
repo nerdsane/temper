@@ -95,6 +95,30 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
             }
         };
 
+        // Clone repo into sandbox if repo_url is set.
+        let repo_url = fields
+            .get("repo_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let repo_ref = fields
+            .get("repo_ref")
+            .and_then(|v| v.as_str())
+            .unwrap_or("main");
+        if !repo_url.is_empty() {
+            match clone_repo_into_sandbox(
+                &ctx,
+                &sandbox_result.sandbox_url,
+                repo_url,
+                repo_ref,
+                &fields,
+            ) {
+                Ok(_) => ctx.log("info", "sandbox_provisioner: repo cloned successfully"),
+                Err(e) => {
+                    ctx.log("warn", &format!("sandbox_provisioner: repo clone failed: {e}"));
+                }
+            }
+        }
+
         // Return sandbox + TemperFS details to the state machine
         set_success_result(
             "SandboxReady",
@@ -642,4 +666,74 @@ fn provision_tensorlake(ctx: &Context, fields: &Value) -> Result<SandboxResult, 
         sandbox_url,
         sandbox_id,
     })
+}
+
+/// Clone a git repo into the sandbox workdir.
+/// Uses github_token from integration config for private repos.
+fn clone_repo_into_sandbox(
+    ctx: &Context,
+    sandbox_url: &str,
+    repo_url: &str,
+    repo_ref: &str,
+    fields: &Value,
+) -> Result<(), String> {
+    let workdir = fields
+        .get("workdir")
+        .and_then(|v| v.as_str())
+        .unwrap_or("/workspace");
+
+    let github_token = ctx.config.get("github_token").cloned().unwrap_or_default();
+
+    // Inject token for private repos.
+    let clone_url = if !github_token.is_empty() && repo_url.starts_with("https://github.com") {
+        repo_url.replacen("https://", &format!("https://x-access-token:{github_token}@"), 1)
+    } else {
+        repo_url.to_string()
+    };
+
+    ctx.log(
+        "info",
+        &format!("sandbox_provisioner: cloning {repo_url} (ref={repo_ref}) into {workdir}"),
+    );
+
+    let is_e2b = sandbox_url.contains("e2b.app") || sandbox_url.contains("e2b.dev");
+
+    let clone_cmd = format!(
+        "mkdir -p {workdir} && cd {workdir} && git clone {clone_url} repo && cd repo && git checkout {repo_ref} 2>/dev/null || true"
+    );
+
+    if is_e2b {
+        let url = format!("{sandbox_url}/process.Process/Start");
+        let body = serde_json::to_string(&json!({
+            "command": clone_cmd,
+            "envs": {},
+            "cwd": workdir,
+        }))
+        .unwrap_or_default();
+        let resp = ctx.http_call("POST", &url, &[], &body)?;
+        if resp.status < 200 || resp.status >= 300 {
+            return Err(format!("git clone failed (HTTP {}): {}", resp.status, &resp.body[..resp.body.len().min(200)]));
+        }
+    } else {
+        let url = format!("{sandbox_url}/v1/processes/run");
+        let body = serde_json::to_string(&json!({
+            "command": clone_cmd,
+            "workdir": workdir,
+        }))
+        .unwrap_or_default();
+        let headers = vec![("content-type".to_string(), "application/json".to_string())];
+        let resp = ctx.http_call("POST", &url, &headers, &body)?;
+        if resp.status < 200 || resp.status >= 300 {
+            return Err(format!("git clone failed (HTTP {}): {}", resp.status, &resp.body[..resp.body.len().min(200)]));
+        }
+        let parsed: Value = serde_json::from_str(&resp.body)
+            .map_err(|e| format!("failed to parse clone response: {e}"))?;
+        let exit_code = parsed.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
+        if exit_code != 0 {
+            let stderr = parsed.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+            return Err(format!("git clone failed (exit {exit_code}): {stderr}"));
+        }
+    }
+
+    Ok(())
 }
