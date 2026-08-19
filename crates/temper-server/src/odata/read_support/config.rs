@@ -20,9 +20,16 @@ fn env_bool(name: &str, default: bool) -> bool {
 }
 
 /// Default OData collection page size when `$top` is absent.
+///
+/// Defaults to the same value as `odata_max_entities` (the no-`$top` safety
+/// ceiling): a bare list read returns the whole realistic collection in one
+/// page, with an `@odata.nextLink` (`$skiptoken`) only beyond the ceiling.
+/// The previous default of 100 was an arbitrary small cap that silently
+/// returned only the first 100 rows to any consumer that didn't follow the
+/// nextLink — a recurring data-loss footgun (ARN-363). Overridable via env.
 pub(in crate::odata) fn odata_default_page_size() -> usize {
     static DEFAULT_PAGE_SIZE: OnceLock<usize> = OnceLock::new();
-    *DEFAULT_PAGE_SIZE.get_or_init(|| env_usize("TEMPER_ODATA_DEFAULT_PAGE_SIZE", 100))
+    *DEFAULT_PAGE_SIZE.get_or_init(|| env_usize("TEMPER_ODATA_DEFAULT_PAGE_SIZE", 1000))
 }
 
 /// Maximum OData collection page size.
