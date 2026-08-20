@@ -778,6 +778,31 @@ impl EventStore for TenantStoreRouter {
             .await
     }
 
+    async fn list_scoped_entity_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        bundle_digest: &str,
+        after_entity_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .list_scoped_entity_ids_page(tenant, entity_type, bundle_digest, after_entity_id, limit)
+            .await
+    }
+
+    async fn scoped_bundle_write_version(
+        &self,
+        tenant: &str,
+        bundle_digest: &str,
+    ) -> Result<u64, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .scoped_bundle_write_version(tenant, bundle_digest)
+            .await
+    }
+
     // ADR-0155: forward the vector-index surface to the per-tenant store so kNN works
     // on the routed Turso deployment. (Keys deliberately fall through to the no-op
     // defaults — Turso does not maintain entity_key_index live; see event_store.rs.)

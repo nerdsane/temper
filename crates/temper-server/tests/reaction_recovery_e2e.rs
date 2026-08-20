@@ -168,6 +168,7 @@ type = "same_id"
         rule: serde_json::to_value(rule).expect("rule must serialize"),
         authority: serde_json::to_value(authority).expect("authority must serialize"),
         created_at: sim_now(),
+        schema_pin: None,
     };
     let mut payload = serde_json::json!({
         "action": "ConfirmOrder",
@@ -301,6 +302,7 @@ type = "same_id"
         )
         .expect("serialize authority"),
         created_at: sim_now(),
+        schema_pin: None,
     };
     let mut payload = serde_json::json!({});
     attach_intents(&mut payload, std::slice::from_ref(&intent)).expect("attach intent");
@@ -407,6 +409,7 @@ type = "same_id"
         )
         .expect("serialize authority"),
         created_at: sim_now(),
+        schema_pin: None,
     };
     let dispatcher = state
         .reaction_dispatcher

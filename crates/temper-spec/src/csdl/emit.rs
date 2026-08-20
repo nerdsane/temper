@@ -340,7 +340,9 @@ fn emit_annotation(out: &mut String, ann: &Annotation, indent: usize) {
         AnnotationValue::Record(map) => {
             out.push_str(&format!("{pad}<Annotation Term=\"{}\">\n", ann.term));
             out.push_str(&format!("{pad}  <Record>\n"));
-            for (k, v) in map {
+            let mut entries = map.iter().collect::<Vec<_>>();
+            entries.sort_by_key(|(key, _)| *key);
+            for (k, v) in entries {
                 out.push_str(&format!(
                     "{pad}    <PropertyValue Property=\"{k}\" String=\"{}\"/>\n",
                     xml_escape(v)

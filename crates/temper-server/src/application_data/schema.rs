@@ -230,9 +230,9 @@ impl ApplicationDataInvocation {
             &self.authority.tenant,
             short_type(entity_type),
             entity_id,
-            action,
-            operation,
+            (action, operation),
             fields,
+            None,
         )
         .await
         .map_err(|_| {

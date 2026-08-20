@@ -6,6 +6,7 @@
 mod data_host_functions;
 mod guest_spans;
 mod host_functions;
+mod migration;
 mod telemetry;
 #[cfg(test)]
 mod tests;
@@ -26,6 +27,8 @@ use crate::stream::StreamRegistry;
 use crate::types::{
     MAX_MODULE_SIZE, WasmInvocationContext, WasmInvocationResult, WasmResourceLimits,
 };
+
+pub use migration::{PureMigrationError, PureMigrationLimits};
 
 pub(crate) use guest_spans::GuestSpanRegistry;
 

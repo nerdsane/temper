@@ -43,6 +43,46 @@ impl PostgresEventStore {
     }
 }
 
+async fn assert_scoped_journal_write_fence(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant: &str,
+    entity_id: &str,
+) -> Result<(), PersistenceError> {
+    let Some((_, digest)) = entity_id.rsplit_once(":schema:") else {
+        return Ok(());
+    };
+    let active: Option<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT pointer_json FROM schema_active_pointers
+         WHERE tenant = $1 AND pointer_json->>'bundle_digest' = $2 FOR SHARE",
+    )
+    .bind(tenant)
+    .bind(digest)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+    if active.is_some() {
+        return Ok(());
+    }
+    let migration: Option<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT job_json FROM schema_migration_jobs
+         WHERE tenant = $1
+           AND job_json->'command'->>'target_bundle_digest' = $2
+           AND job_json->>'status' IN ('submitted', 'migrating', 'validating', 'ready')
+         FOR SHARE",
+    )
+    .bind(tenant)
+    .bind(digest)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+    if migration.is_none() {
+        return Err(PersistenceError::Storage(
+            "stale scoped schema write fence".into(),
+        ));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // EventStore implementation
 // ---------------------------------------------------------------------------
@@ -118,6 +158,8 @@ impl EventStore for PostgresEventStore {
                 return Err(PersistenceError::Storage(e.to_string()));
             }
         };
+
+        assert_scoped_journal_write_fence(&mut tx, tenant, entity_id).await?;
 
         let row: Option<(i64,)> = crate::dbm::postgres_query_as!(
             "SELECT COALESCE(MAX(sequence_nr), 0) FROM events \
@@ -683,6 +725,7 @@ impl EventStore for PostgresEventStore {
             let (tenant, entity_type, entity_id) =
                 parse_persistence_id_parts(&append.persistence_id)
                     .map_err(PersistenceError::Storage)?;
+            assert_scoped_journal_write_fence(&mut tx, tenant, entity_id).await?;
             let row: Option<(i64,)> = crate::dbm::postgres_query_as!(
                 "SELECT COALESCE(MAX(sequence_nr), 0) FROM events \
                  WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
@@ -1177,6 +1220,59 @@ impl EventStore for PostgresEventStore {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| PersistenceError::Storage(error.to_string()))
+    }
+
+    async fn list_scoped_entity_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        bundle_digest: &str,
+        after_entity_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let suffix = format!(":schema:{bundle_digest}");
+        let pattern = format!("%{suffix}");
+        let after = after_entity_id.unwrap_or("");
+        let suffix_len = i32::try_from(suffix.len())
+            .map_err(|_| PersistenceError::Storage("schema digest suffix too long".to_string()))?;
+        let limit = limit.min(i64::MAX as usize) as i64;
+        crate::dbm::postgres_query_scalar!(
+            "SELECT DISTINCT left(entity_id, length(entity_id) - $3) AS scoped_id \
+             FROM events \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id LIKE $4 \
+               AND left(entity_id, length(entity_id) - $3) > $5 \
+             ORDER BY scoped_id LIMIT $6",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(suffix_len)
+        .bind(pattern)
+        .bind(after)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| PersistenceError::Storage(error.to_string()))
+    }
+
+    async fn scoped_bundle_write_version(
+        &self,
+        tenant: &str,
+        bundle_digest: &str,
+    ) -> Result<u64, PersistenceError> {
+        let pattern = format!("%:schema:{bundle_digest}");
+        let count: i64 = crate::dbm::postgres_query_scalar!(
+            "SELECT COUNT(*) FROM events WHERE tenant = $1 AND entity_id LIKE $2",
+        )
+        .bind(tenant)
+        .bind(pattern)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+        u64::try_from(count)
+            .map_err(|_| PersistenceError::Storage("invalid schema write version".into()))
     }
 }
 

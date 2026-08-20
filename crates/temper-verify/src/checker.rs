@@ -38,7 +38,24 @@ pub struct VerificationResult {
 /// This spawns Stateright's BFS checker, joins it, and then inspects the
 /// discoveries to build a `VerificationResult`.
 pub fn check_model(model: &TemperModel) -> VerificationResult {
-    let checker_result = model.clone().checker().spawn_bfs().join();
+    check_model_with_state_budget(model, usize::MAX)
+}
+
+/// Run BFS model checking with an explicit unique-state budget.
+pub fn check_model_with_state_budget(
+    model: &TemperModel,
+    state_budget: usize,
+) -> VerificationResult {
+    assert!(
+        state_budget > 0,
+        "model-check state budget must be positive"
+    );
+    let checker_result = model
+        .clone()
+        .checker()
+        .target_state_count(state_budget)
+        .spawn_bfs()
+        .join();
 
     let states_explored = checker_result.unique_state_count();
     let is_complete = checker_result.is_done();
@@ -58,8 +75,13 @@ pub fn check_model(model: &TemperModel) -> VerificationResult {
         });
     }
 
-    let dead_transitions = find_dead_transitions(model);
-    let all_properties_hold = counterexamples.is_empty() && dead_transitions.is_empty();
+    let dead_transitions = if is_complete {
+        find_dead_transitions(model)
+    } else {
+        vec!["model-check state budget exhausted".to_string()]
+    };
+    let all_properties_hold =
+        is_complete && counterexamples.is_empty() && dead_transitions.is_empty();
 
     VerificationResult {
         states_explored,

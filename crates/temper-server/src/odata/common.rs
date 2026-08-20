@@ -3,6 +3,9 @@
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use temper_odata::path::{KeyValue, ODataPath};
+use temper_runtime::persistence::schema_deployment::{
+    SchemaExecutionPin, SchemaScope, SchemaScopeKind,
+};
 use temper_runtime::tenant::TenantId;
 
 use super::constraints::{
@@ -39,6 +42,91 @@ pub(crate) fn extract_tenant(
     // Single-tenant compatibility: deterministic fallback to the well-known
     // default tenant rather than relying on registry registration order.
     Ok(TenantId::default())
+}
+
+/// Resolve an optional task scope to its immutable active bundle.
+///
+/// Both headers are required together. A declared scope never silently falls
+/// back to tenant-global behavior; that path is enabled only by the registry's
+/// explicit compatibility bit.
+pub(crate) async fn extract_schema_pin(
+    headers: &HeaderMap,
+    state: &ServerState,
+    tenant: &TenantId,
+) -> Result<Option<SchemaExecutionPin>, (StatusCode, String)> {
+    let kind = headers.get("x-temper-schema-scope-kind");
+    let id = headers.get("x-temper-schema-scope-id");
+    let (kind, id) = match (kind, id) {
+        (None, None) => return Ok(None),
+        (Some(kind), Some(id)) => {
+            let kind = kind.to_str().map(str::trim).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Schema scope kind must be valid UTF-8".to_string(),
+                )
+            })?;
+            let id = id.to_str().map(str::trim).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Schema scope id must be valid UTF-8".to_string(),
+                )
+            })?;
+            if kind.is_empty() || id.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Schema scope kind and id must be non-empty".to_string(),
+                ));
+            }
+            (kind, id)
+        }
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Schema scope kind and id must be supplied together".to_string(),
+            ));
+        }
+    };
+    if kind != "task" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Unsupported schema scope kind".to_string(),
+        ));
+    }
+    let scope = SchemaScope {
+        kind: SchemaScopeKind::Task,
+        id: id.to_string(),
+    };
+    if state
+        .registry
+        .read()
+        .expect("registry lock poisoned")
+        .active_scope_digest(tenant, &scope)
+        .is_none()
+        && state
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.schema_deployments.as_ref())
+            .is_some()
+    {
+        crate::schema_deployment::GovernedSchemaDeploymentService::new(state)
+            .recover_registry_pointer(tenant.as_str(), &scope)
+            .await
+            .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.message().to_string()))?;
+    }
+    let registry = state.registry.read().expect("registry lock poisoned");
+    if let Some(bundle_digest) = registry.active_scope_digest(tenant, &scope) {
+        return Ok(Some(SchemaExecutionPin {
+            scope,
+            bundle_digest: bundle_digest.to_string(),
+        }));
+    }
+    if registry.scope_allows_global_compatibility(tenant, &scope) {
+        return Ok(None);
+    }
+    Err((
+        StatusCode::CONFLICT,
+        "Schema scope has no active bundle".to_string(),
+    ))
 }
 
 pub(super) fn extract_key(key: &KeyValue) -> String {
@@ -94,6 +182,24 @@ pub(super) fn resolve_entity_type(
     result
 }
 
+/// Resolve against an exact immutable bundle when a scoped pin is present.
+pub(super) fn resolve_entity_type_for_pin(
+    state: &ServerState,
+    tenant: &TenantId,
+    schema_pin: Option<&SchemaExecutionPin>,
+    entity_set: &str,
+) -> Option<String> {
+    match schema_pin {
+        Some(pin) => state
+            .registry
+            .read()
+            .expect("registry lock poisoned")
+            .get_scoped_config_at_digest(tenant, &pin.scope, &pin.bundle_digest)
+            .and_then(|config| config.entity_set_map.get(entity_set).cloned()),
+        None => resolve_entity_type(state, tenant, entity_set),
+    }
+}
+
 /// Get the CSDL XML for a tenant.
 ///
 /// Tries SpecRegistry first, then legacy csdl_xml.
@@ -107,6 +213,22 @@ pub(super) fn tenant_csdl_xml(state: &ServerState, tenant: &TenantId) -> String 
         .unwrap_or_else(|| state.csdl_xml.as_ref().clone())
 }
 
+pub(super) fn tenant_csdl_xml_for_pin(
+    state: &ServerState,
+    tenant: &TenantId,
+    schema_pin: Option<&SchemaExecutionPin>,
+) -> Option<String> {
+    match schema_pin {
+        Some(pin) => state
+            .registry
+            .read()
+            .expect("registry lock poisoned")
+            .get_scoped_config_at_digest(tenant, &pin.scope, &pin.bundle_digest)
+            .map(|config| config.csdl_xml.as_ref().clone()),
+        None => Some(tenant_csdl_xml(state, tenant)),
+    }
+}
+
 /// List entity sets for a tenant.
 ///
 /// Tries SpecRegistry first, then legacy entity_set_map.
@@ -116,6 +238,22 @@ pub(super) fn tenant_entity_sets(state: &ServerState, tenant: &TenantId) -> Vec<
         tc.entity_set_map.keys().cloned().collect()
     } else {
         state.entity_set_map.keys().cloned().collect()
+    }
+}
+
+pub(super) fn tenant_entity_sets_for_pin(
+    state: &ServerState,
+    tenant: &TenantId,
+    schema_pin: Option<&SchemaExecutionPin>,
+) -> Option<Vec<String>> {
+    match schema_pin {
+        Some(pin) => state
+            .registry
+            .read()
+            .expect("registry lock poisoned")
+            .get_scoped_config_at_digest(tenant, &pin.scope, &pin.bundle_digest)
+            .map(|config| config.entity_set_map.keys().cloned().collect()),
+        None => Some(tenant_entity_sets(state, tenant)),
     }
 }
 
@@ -167,18 +305,34 @@ pub(crate) async fn run_write_prechecks(
     tenant: &TenantId,
     entity_type: &str,
     entity_id: &str,
-    action: &str,
-    operation: &str,
+    labels: (&str, &str),
     fields: &serde_json::Value,
+    schema_pin: Option<&SchemaExecutionPin>,
 ) -> Result<(), axum::response::Response> {
-    if let Err(v) =
-        pre_upsert_relation_checks(state, tenant, entity_type, entity_id, operation, fields).await
+    let (action, operation) = labels;
+    if let Err(v) = pre_upsert_relation_checks(
+        state,
+        tenant,
+        entity_type,
+        entity_id,
+        operation,
+        fields,
+        schema_pin,
+    )
+    .await
     {
         return Err(constraint_violation_response(v));
     }
-    if let Err(v) =
-        pre_upsert_field_invariant_checks(state, tenant, entity_type, entity_id, operation, fields)
-            .await
+    if let Err(v) = pre_upsert_field_invariant_checks(
+        state,
+        tenant,
+        entity_type,
+        entity_id,
+        operation,
+        fields,
+        schema_pin,
+    )
+    .await
     {
         return Err(constraint_violation_response(v));
     }
@@ -187,9 +341,9 @@ pub(crate) async fn run_write_prechecks(
         tenant,
         entity_type,
         entity_id,
-        action,
+        (action, operation),
         fields,
-        operation,
+        schema_pin,
     )
     .await
     {
@@ -208,18 +362,28 @@ pub(super) async fn load_entity_or_404(
     entity_type: &str,
     set_name: &str,
     key: &str,
+    schema_pin: Option<&SchemaExecutionPin>,
 ) -> Result<crate::EntityResponse, axum::response::Response> {
-    crate::application_data::GovernedApplicationDataService::new(state)
-        .get(tenant, entity_type, key)
-        .await
-        .map_err(|e| {
-            crate::response::odata_error(
-                StatusCode::NOT_FOUND,
-                "ResourceNotFound",
-                &format!("Entity '{set_name}' with key '{key}' not found: {e}"),
-            )
-            .into_response()
-        })
+    let result = match schema_pin {
+        Some(pin) => {
+            state
+                .get_scoped_entity_state(tenant, entity_type, key, pin.clone())
+                .await
+        }
+        None => {
+            crate::application_data::GovernedApplicationDataService::new(state)
+                .get(tenant, entity_type, key)
+                .await
+        }
+    };
+    result.map_err(|e| {
+        crate::response::odata_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFound",
+            &format!("Entity '{set_name}' with key '{key}' not found: {e}"),
+        )
+        .into_response()
+    })
 }
 
 /// Resolve the parent of a `$value` path to `(set_name, entity_id)`.

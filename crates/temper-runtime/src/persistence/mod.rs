@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub mod schema_deployment;
+
 /// Event type used for the parent-journal record of a Composite action.
 ///
 /// Concrete sub-write events remain the state-changing events on their target
@@ -36,7 +38,7 @@ pub trait DomainEvent:
 }
 
 /// Metadata attached to every persisted event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventMetadata {
     /// Unique ID of this event.
     pub event_id: uuid::Uuid,
@@ -523,10 +525,114 @@ pub trait EventStore: Send + Sync + 'static {
             Ok(entities)
         }
     }
+
+    /// Page durable entity IDs for one immutable scoped-schema journal set.
+    ///
+    /// Scoped actors encode the bundle digest in the durable journal identity.
+    /// Implementations must apply `limit` before returning so migration and
+    /// query callers never need an unbounded journal scan.
+    fn list_scoped_entity_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        bundle_digest: &str,
+        after_entity_id: Option<&str>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = Result<Vec<String>, PersistenceError>> + Send {
+        async move {
+            if limit == 0 {
+                return Ok(Vec::new());
+            }
+            const JOURNAL_PAGE_BUDGET: usize = 256;
+            let suffix = format!(":schema:{bundle_digest}");
+            let mut cursor: Option<(String, String)> = None;
+            let mut entity_ids = Vec::new();
+            while entity_ids.len() < limit {
+                let journals = self
+                    .list_journal_ids_page(
+                        tenant,
+                        Some(entity_type),
+                        cursor
+                            .as_ref()
+                            .map(|(found_type, id)| (found_type.as_str(), id.as_str())),
+                        JOURNAL_PAGE_BUDGET,
+                    )
+                    .await?;
+                let page_len = journals.len();
+                let Some(last) = journals.last().cloned() else {
+                    break;
+                };
+                cursor = Some(last);
+                entity_ids.extend(journals.into_iter().filter_map(|(_, journal_entity_id)| {
+                    journal_entity_id
+                        .strip_suffix(&suffix)
+                        .filter(|entity_id| after_entity_id.is_none_or(|after| *entity_id > after))
+                        .map(str::to_string)
+                }));
+                if page_len < JOURNAL_PAGE_BUDGET {
+                    break;
+                }
+            }
+            entity_ids.sort();
+            entity_ids.truncate(limit);
+            Ok(entity_ids)
+        }
+    }
+
+    /// Return the monotonic number of committed events for one bundle digest.
+    ///
+    /// Migration uses this as a bounded catch-up fence: a complete keyset pass
+    /// is stable only when the value is unchanged from pass start to pass end.
+    fn scoped_bundle_write_version(
+        &self,
+        tenant: &str,
+        bundle_digest: &str,
+    ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send {
+        async move {
+            const JOURNAL_PAGE_BUDGET: usize = 256;
+            let suffix = format!(":schema:{bundle_digest}");
+            let mut cursor: Option<(String, String)> = None;
+            let mut version = 0_u64;
+            loop {
+                let journals = self
+                    .list_journal_ids_page(
+                        tenant,
+                        None,
+                        cursor
+                            .as_ref()
+                            .map(|(entity_type, id)| (entity_type.as_str(), id.as_str())),
+                        JOURNAL_PAGE_BUDGET,
+                    )
+                    .await?;
+                let page_len = journals.len();
+                let Some(last) = journals.last().cloned() else {
+                    break;
+                };
+                cursor = Some(last);
+                for (entity_type, journal_entity_id) in journals {
+                    if journal_entity_id.ends_with(&suffix) {
+                        let persistence_id = format!("{tenant}:{entity_type}:{journal_entity_id}");
+                        let count = self.read_events(&persistence_id, 0).await?.len();
+                        version = version
+                            .checked_add(u64::try_from(count).map_err(|_| {
+                                PersistenceError::Storage("schema write version exhausted".into())
+                            })?)
+                            .ok_or_else(|| {
+                                PersistenceError::Storage("schema write version exhausted".into())
+                            })?;
+                    }
+                }
+                if page_len < JOURNAL_PAGE_BUDGET {
+                    break;
+                }
+            }
+            Ok(version)
+        }
+    }
 }
 
 /// A persisted event with metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistenceEnvelope {
     /// Monotonic sequence number within the entity's journal.
     pub sequence_nr: u64,

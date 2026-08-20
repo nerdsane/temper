@@ -3,6 +3,18 @@ use super::*;
 const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
 
 #[test]
+fn symbolic_verification_fails_closed_when_resource_budget_is_exhausted() {
+    let result = verify_symbolic_with_budget(ORDER_IOA, 2, 1);
+    assert!(!result.all_passed);
+    assert!(
+        result
+            .approximation_notes
+            .iter()
+            .any(|note| note.contains("resource budget"))
+    );
+}
+
+#[test]
 fn test_all_guards_satisfiable() {
     let result = verify_symbolic(ORDER_IOA, 2);
     for (action, sat) in &result.guard_satisfiability {

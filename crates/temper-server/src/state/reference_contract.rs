@@ -148,19 +148,66 @@ impl ServerState {
         supplied_id: Option<&str>,
         initial_fields: &serde_json::Value,
     ) -> Result<Option<String>, String> {
+        self.prepare_reference_contract_create_with_pin(
+            tenant,
+            entity_type,
+            supplied_id,
+            initial_fields,
+            None,
+        )
+        .await
+    }
+
+    /// Validate a create against one exact immutable scoped schema.
+    pub async fn prepare_scoped_reference_contract_create(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        supplied_id: Option<&str>,
+        initial_fields: &serde_json::Value,
+        schema_pin: &temper_runtime::persistence::schema_deployment::SchemaExecutionPin,
+    ) -> Result<Option<String>, String> {
+        self.prepare_reference_contract_create_with_pin(
+            tenant,
+            entity_type,
+            supplied_id,
+            initial_fields,
+            Some(schema_pin),
+        )
+        .await
+    }
+
+    async fn prepare_reference_contract_create_with_pin(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        supplied_id: Option<&str>,
+        initial_fields: &serde_json::Value,
+        schema_pin: Option<&temper_runtime::persistence::schema_deployment::SchemaExecutionPin>,
+    ) -> Result<Option<String>, String> {
         let table = {
             let registry = self
                 .registry
                 .read()
                 .expect("spec registry lock should not be poisoned");
-            registry
-                .get_table_live(tenant, entity_type)
-                .map(|table| table.read().expect("table lock poisoned").clone())
+            match schema_pin {
+                Some(pin) => registry
+                    .get_scoped_table_at_digest(tenant, &pin.scope, &pin.bundle_digest, entity_type)
+                    .map(|table| (*table).clone()),
+                None => registry
+                    .get_table_live(tenant, entity_type)
+                    .map(|table| table.read().expect("table lock poisoned").clone()),
+            }
         }
         .or_else(|| {
-            self.transition_tables
-                .get(entity_type)
-                .map(|table| (**table).clone())
+            schema_pin
+                .is_none()
+                .then(|| {
+                    self.transition_tables
+                        .get(entity_type)
+                        .map(|table| (**table).clone())
+                })
+                .flatten()
         });
         let Some(table) = table else {
             return Ok(supplied_id.map(str::to_string));
@@ -179,7 +226,14 @@ impl ServerState {
             return Ok(None);
         };
         let evidence = self
-            .resolve_reference_evidence(tenant, entity_type, &entity_id, None, initial_fields)
+            .resolve_reference_evidence(
+                tenant,
+                entity_type,
+                &entity_id,
+                None,
+                initial_fields,
+                schema_pin,
+            )
             .await;
         let current = empty_entity(entity_type, &entity_id, &table.initial_state);
         let mut prospective = current.clone();

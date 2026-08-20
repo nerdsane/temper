@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use z3::ast::{Bool, Int};
-use z3::{SatResult, Solver};
+use z3::{Params, SatResult, Solver};
 
 use temper_spec::automaton::AssertCompareOp;
 
@@ -54,14 +54,48 @@ pub struct SmtResult {
 /// 2. Invariant induction: does each invariant hold after every transition?
 /// 3. Unreachable states: can each declared state be reached?
 pub fn verify_symbolic(ioa_toml: &str, max_counter: usize) -> SmtResult {
+    verify_symbolic_inner(ioa_toml, max_counter, None)
+}
+
+/// Run symbolic verification under a hard Z3 resource-unit budget.
+pub fn verify_symbolic_with_budget(
+    ioa_toml: &str,
+    max_counter: usize,
+    resource_budget: u32,
+) -> SmtResult {
+    verify_symbolic_inner(ioa_toml, max_counter, Some(resource_budget))
+}
+
+fn verify_symbolic_inner(
+    ioa_toml: &str,
+    max_counter: usize,
+    resource_budget: Option<u32>,
+) -> SmtResult {
     let model = build_model_from_ioa(ioa_toml, max_counter)
         .expect("SMT: IOA spec should have been validated before symbolic verification");
-    let approximation_notes = approximation_notes(&model);
+    let mut approximation_notes = approximation_notes(&model);
     let approximate = !approximation_notes.is_empty();
 
-    let guard_sat = check_guard_satisfiability(&model, max_counter);
-    let inductive = check_invariant_induction(&model, max_counter);
-    let reference_contracts = check_reference_contract_induction(&model);
+    let query_upper_bound = solver_query_upper_bound(&model);
+    let per_query_budget = resource_budget.map(|budget| budget / query_upper_bound);
+    if per_query_budget == Some(0) {
+        approximation_notes.push(format!(
+            "symbolic resource budget is smaller than the {query_upper_bound} bounded solver queries"
+        ));
+        return SmtResult {
+            guard_satisfiability: Vec::new(),
+            inductive_invariants: Vec::new(),
+            reference_contracts: Vec::new(),
+            unreachable_states: check_unreachable_states(&model),
+            approximate: true,
+            approximation_notes,
+            all_passed: false,
+        };
+    }
+
+    let guard_sat = check_guard_satisfiability(&model, max_counter, per_query_budget);
+    let inductive = check_invariant_induction(&model, max_counter, per_query_budget);
+    let reference_contracts = check_reference_contract_induction(&model, per_query_budget);
     let unreachable = check_unreachable_states(&model);
 
     // Unreachable states are warnings, not failures — specs may declare states
@@ -81,7 +115,44 @@ pub fn verify_symbolic(ioa_toml: &str, max_counter: usize) -> SmtResult {
     }
 }
 
-fn check_reference_contract_induction(model: &TemperModel) -> Vec<(String, bool)> {
+fn bounded_solver(resource_budget: Option<u32>) -> Solver {
+    let solver = Solver::new();
+    if let Some(resource_budget) = resource_budget {
+        let mut params = Params::new();
+        params.set_u32("rlimit", resource_budget);
+        solver.set_params(&params);
+    }
+    solver
+}
+
+fn invariant_node_count(kind: &InvariantKind) -> u32 {
+    match kind {
+        InvariantKind::And(parts) | InvariantKind::Or(parts) => 1u32.saturating_add(
+            parts
+                .iter()
+                .map(invariant_node_count)
+                .fold(0u32, u32::saturating_add),
+        ),
+        _ => 1,
+    }
+}
+
+fn solver_query_upper_bound(model: &TemperModel) -> u32 {
+    let transitions = u32::try_from(model.transitions.len()).unwrap_or(u32::MAX);
+    let invariant_nodes = model
+        .invariants
+        .iter()
+        .map(|invariant| invariant_node_count(&invariant.kind))
+        .fold(0u32, u32::saturating_add);
+    transitions
+        .saturating_mul(2u32.saturating_add(invariant_nodes))
+        .max(1)
+}
+
+fn check_reference_contract_induction(
+    model: &TemperModel,
+    resource_budget: Option<u32>,
+) -> Vec<(String, bool)> {
     let references = model
         .reference_properties_by_type
         .values()
@@ -95,7 +166,7 @@ fn check_reference_contract_induction(model: &TemperModel) -> Vec<(String, bool)
             if references.is_empty() {
                 return (transition.name.clone(), true);
             }
-            let solver = Solver::new();
+            let solver = bounded_solver(resource_budget);
             let params = make_reference_param_vars(transition, &solver);
             let zero = Int::from_i64(0);
             let max = Int::from_i64(
@@ -185,12 +256,16 @@ fn concrete_transitions(model: &TemperModel) -> impl Iterator<Item = &ResolvedTr
 ///
 /// A guard is satisfiable if there exists an assignment of counter values
 /// (0..max_counter) and boolean values that makes the guard true.
-fn check_guard_satisfiability(model: &TemperModel, max_counter: usize) -> Vec<(String, bool)> {
+fn check_guard_satisfiability(
+    model: &TemperModel,
+    max_counter: usize,
+    resource_budget: Option<u32>,
+) -> Vec<(String, bool)> {
     model
         .transitions
         .iter()
         .map(|t| {
-            let solver = Solver::new();
+            let solver = bounded_solver(resource_budget);
 
             // Check that at least one from_state exists in the state space
             if !t.from_states.is_empty() {
@@ -261,7 +336,11 @@ fn make_reference_param_vars(
 ///   - Assume: invariant(S) ∧ guard(S) ∧ bounds
 ///   - Apply: encode effects as S → S'
 ///   - Prove: invariant(S') holds (check that ¬invariant(S') is UNSAT)
-fn check_invariant_induction(model: &TemperModel, max_counter: usize) -> Vec<(String, bool)> {
+fn check_invariant_induction(
+    model: &TemperModel,
+    max_counter: usize,
+    resource_budget: Option<u32>,
+) -> Vec<(String, bool)> {
     model
         .invariants
         .iter()
@@ -282,13 +361,19 @@ fn check_invariant_induction(model: &TemperModel, max_counter: usize) -> Vec<(St
                     &inv.trigger_states,
                     var,
                     max_counter,
+                    resource_budget,
                 ),
                 InvariantKind::BoolRequired { var, expect } => {
                     // Induction checker assumes `expect = true`. For `!flag`,
                     // fall back to runtime simulation (model checking still
                     // exercises it via proptest_gen and simulation).
                     if *expect {
-                        check_bool_required_induction_z3(model, &inv.trigger_states, var)
+                        check_bool_required_induction_z3(
+                            model,
+                            &inv.trigger_states,
+                            var,
+                            resource_budget,
+                        )
                     } else {
                         true
                     }
@@ -331,6 +416,7 @@ fn check_invariant_induction(model: &TemperModel, max_counter: usize) -> Vec<(St
                         op,
                         *value,
                         max_counter,
+                        resource_budget,
                     )
                 }
                 InvariantKind::NeverState { state } => {
@@ -341,9 +427,15 @@ fn check_invariant_induction(model: &TemperModel, max_counter: usize) -> Vec<(St
                 InvariantKind::And(parts) => {
                     // Sound over-approximation: `a && b` is inductive iff each
                     // part is inductive under the same trigger_states.
-                    parts
-                        .iter()
-                        .all(|p| kind_inductive_smt(model, &inv.trigger_states, p, max_counter))
+                    parts.iter().all(|p| {
+                        kind_inductive_smt(
+                            model,
+                            &inv.trigger_states,
+                            p,
+                            max_counter,
+                            resource_budget,
+                        )
+                    })
                 }
                 InvariantKind::Or(_) => {
                     // Disjunctive induction requires joint encoding; runtime
@@ -371,6 +463,7 @@ fn kind_inductive_smt(
     trigger_states: &[String],
     kind: &InvariantKind,
     max_counter: usize,
+    resource_budget: Option<u32>,
 ) -> bool {
     match kind {
         InvariantKind::StatusInSet => concrete_transitions(model).all(|t| {
@@ -379,12 +472,16 @@ fn kind_inductive_smt(
                 .map(|s| model.states.contains(s))
                 .unwrap_or(true)
         }),
-        InvariantKind::CounterPositive { var } => {
-            check_counter_positive_induction_z3(model, trigger_states, var, max_counter)
-        }
+        InvariantKind::CounterPositive { var } => check_counter_positive_induction_z3(
+            model,
+            trigger_states,
+            var,
+            max_counter,
+            resource_budget,
+        ),
         InvariantKind::BoolRequired { var, expect } => {
             if *expect {
-                check_bool_required_induction_z3(model, trigger_states, var)
+                check_bool_required_induction_z3(model, trigger_states, var, resource_budget)
             } else {
                 true
             }
@@ -394,15 +491,21 @@ fn kind_inductive_smt(
                 .any(|t| t.from_states.contains(trigger) || t.from_states.is_empty())
         }),
         InvariantKind::Implication => true,
-        InvariantKind::CounterCompare { var, op, value } => {
-            check_counter_compare_induction_z3(model, trigger_states, var, op, *value, max_counter)
-        }
+        InvariantKind::CounterCompare { var, op, value } => check_counter_compare_induction_z3(
+            model,
+            trigger_states,
+            var,
+            op,
+            *value,
+            max_counter,
+            resource_budget,
+        ),
         InvariantKind::NeverState { state } => {
             !concrete_transitions(model).any(|t| t.to_state.as_ref().is_some_and(|to| to == state))
         }
         InvariantKind::And(parts) => parts
             .iter()
-            .all(|p| kind_inductive_smt(model, trigger_states, p, max_counter)),
+            .all(|p| kind_inductive_smt(model, trigger_states, p, max_counter, resource_budget)),
         InvariantKind::Or(_) | InvariantKind::Unverifiable { .. } => true,
     }
 }
@@ -418,6 +521,7 @@ fn check_counter_positive_induction_z3(
     trigger_states: &[String],
     var: &str,
     max_counter: usize,
+    resource_budget: Option<u32>,
 ) -> bool {
     for t in &model.transitions {
         if t.guard.contains_cross_entity() {
@@ -433,7 +537,7 @@ fn check_counter_positive_induction_z3(
             continue;
         }
 
-        let solver = Solver::new();
+        let solver = bounded_solver(resource_budget);
 
         // Pre-state counter variable
         let counter_pre = Int::new_const(format!("{var}_pre"));
@@ -465,7 +569,7 @@ fn check_counter_positive_induction_z3(
         // Check: ¬(var' > 0) — if SAT, invariant is not preserved
         solver.assert(counter_post.le(&zero));
 
-        if matches!(solver.check(), SatResult::Sat) {
+        if !matches!(solver.check(), SatResult::Unsat) {
             return false;
         }
     }
@@ -482,6 +586,7 @@ fn check_bool_required_induction_z3(
     model: &TemperModel,
     trigger_states: &[String],
     var: &str,
+    resource_budget: Option<u32>,
 ) -> bool {
     for t in &model.transitions {
         if t.guard.contains_cross_entity() {
@@ -496,7 +601,7 @@ fn check_bool_required_induction_z3(
             continue;
         }
 
-        let solver = Solver::new();
+        let solver = bounded_solver(resource_budget);
 
         // Pre-state: var = true (invariant holds)
         let bool_pre = Bool::new_const(format!("{var}_pre"));
@@ -515,7 +620,7 @@ fn check_bool_required_induction_z3(
         // Check: ¬var' — if SAT, invariant is not preserved
         solver.assert(bool_post.not());
 
-        if matches!(solver.check(), SatResult::Sat) {
+        if !matches!(solver.check(), SatResult::Unsat) {
             return false;
         }
     }
@@ -535,6 +640,7 @@ fn check_counter_compare_induction_z3(
     op: &AssertCompareOp,
     value: usize,
     max_counter: usize,
+    resource_budget: Option<u32>,
 ) -> bool {
     for t in &model.transitions {
         if t.guard.contains_cross_entity() {
@@ -549,7 +655,7 @@ fn check_counter_compare_induction_z3(
             continue;
         }
 
-        let solver = Solver::new();
+        let solver = bounded_solver(resource_budget);
 
         let counter_pre = Int::new_const(format!("{var}_pre"));
         let zero = Int::from_i64(0);
@@ -596,7 +702,7 @@ fn check_counter_compare_induction_z3(
         };
         solver.assert(post_invariant.not());
 
-        if matches!(solver.check(), SatResult::Sat) {
+        if !matches!(solver.check(), SatResult::Unsat) {
             return false;
         }
     }

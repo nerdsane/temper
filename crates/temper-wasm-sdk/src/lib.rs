@@ -21,6 +21,7 @@
 pub mod context;
 pub mod data;
 pub mod host;
+pub mod schema_deployment;
 
 #[cfg(target_arch = "wasm32")]
 pub mod http_stream;

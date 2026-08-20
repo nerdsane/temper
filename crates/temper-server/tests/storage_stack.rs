@@ -262,6 +262,7 @@ fn storage_stack_labels_backend_and_exposes_boxed_events() {
         None,
         None,
         None,
+        None,
     );
 
     assert_eq!(stack.backend, BackendLabel::Postgres);
@@ -285,6 +286,7 @@ async fn storage_stack_exposes_query_plane_and_trajectory_capabilities() {
         Some(Arc::new(RecordingQueryPlane)),
         None,
         Some(Arc::new(RecordingTrajectorySink)),
+        None,
         None,
     );
 

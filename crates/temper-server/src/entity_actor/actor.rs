@@ -28,6 +28,7 @@ use std::time::Instant;
 use temper_jit::table::{Effect, TransitionTable};
 use temper_observe::wide_event;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
+use temper_runtime::persistence::schema_deployment::{SchemaEventPin, SchemaExecutionPin};
 use temper_runtime::persistence::{
     COMPOSITE_EVENT_TYPE, EventMetadata, PersistenceEnvelope, PersistenceError,
 };
@@ -44,6 +45,31 @@ use super::types::{
     EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_SINCE_SNAPSHOT,
     MAX_ITEMS_PER_ENTITY,
 };
+
+/// Reserved state/event field holding immutable scoped schema evidence.
+pub const SCHEMA_PIN_FIELD: &str = "_temper_schema_pin_v1";
+
+pub(crate) fn schema_event_pin(
+    execution: &SchemaExecutionPin,
+    entity_type: &str,
+    action: &str,
+) -> SchemaEventPin {
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    for frame in [
+        execution.bundle_digest.as_bytes(),
+        entity_type.as_bytes(),
+        action.as_bytes(),
+    ] {
+        digest.update((frame.len() as u64).to_be_bytes());
+        digest.update(frame);
+    }
+    SchemaEventPin {
+        execution: execution.clone(),
+        action_digest: format!("sha256:{:x}", digest.finalize()),
+    }
+}
 
 fn event_budget_workspace_id(state: &EntityState) -> String {
     if state.entity_type == "Workspace" {
@@ -119,6 +145,8 @@ pub struct EntityActor {
     idempotency_cache: Option<Arc<crate::idempotency::IdempotencyCache>>,
     /// Object store for field-overflow blob bytes. SQL stores only refs.
     blob_store: Option<crate::blob_store::BlobStore>,
+    /// Immutable scoped schema identity. `None` is tenant-global behavior.
+    schema_pin: Option<SchemaExecutionPin>,
 }
 
 impl EntityActor {
@@ -242,6 +270,7 @@ impl EntityActor {
             trace_id: sim_uuid().to_string(),
             idempotency_cache: None,
             blob_store: None,
+            schema_pin: None,
         }
     }
 
@@ -267,12 +296,27 @@ impl EntityActor {
             trace_id: sim_uuid().to_string(),
             idempotency_cache: None,
             blob_store: None,
+            schema_pin: None,
         }
     }
 
     /// Set the tenant for this actor (must be called before spawning).
     pub fn with_tenant(mut self, tenant: impl Into<String>) -> Self {
         self.tenant = tenant.into();
+        self
+    }
+
+    /// Pin this actor to one immutable task-scoped bundle.
+    pub fn with_schema_pin(mut self, pin: SchemaExecutionPin) -> Self {
+        let fields = self
+            .initial_fields
+            .as_object_mut()
+            .expect("entity initial fields must be a JSON object");
+        fields.insert(
+            SCHEMA_PIN_FIELD.to_string(),
+            serde_json::to_value(&pin).expect("schema execution pin must serialize"),
+        );
+        self.schema_pin = Some(pin);
         self
     }
 
@@ -319,7 +363,19 @@ impl EntityActor {
 
     /// Persistence ID for this entity: "tenant:EntityType:EntityId".
     fn persistence_id(&self) -> String {
-        format!("{}:{}:{}", self.tenant, self.entity_type, self.entity_id)
+        match self.schema_pin.as_ref() {
+            Some(pin) => format!(
+                "{}:{}:{}:schema:{}",
+                self.tenant, self.entity_type, self.entity_id, pin.bundle_digest
+            ),
+            None => format!("{}:{}:{}", self.tenant, self.entity_type, self.entity_id),
+        }
+    }
+
+    fn schema_event_pin(&self, action: &str) -> Option<SchemaEventPin> {
+        self.schema_pin
+            .as_ref()
+            .map(|execution| schema_event_pin(execution, &self.entity_type, action))
     }
 
     fn field_sync_mode_for_backend(
@@ -347,6 +403,16 @@ impl EntityActor {
     ) -> Result<u64, PersistenceError> {
         let mut payload = serde_json::to_value(event)
             .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+        if let Some(pin) = self.schema_event_pin(&event.action) {
+            payload
+                .as_object_mut()
+                .expect("serialized entity event must be an object")
+                .insert(
+                    SCHEMA_PIN_FIELD.to_string(),
+                    serde_json::to_value(pin)
+                        .map_err(|e| PersistenceError::Serialization(e.to_string()))?,
+                );
+        }
         if let Some(context) = reaction_context {
             let source_sequence = state.sequence_nr + 1;
             let mut intents = Vec::with_capacity(context.rules.len());
@@ -399,12 +465,15 @@ impl EntityActor {
                         .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
                     authority: context.authority.clone(),
                     created_at: event.timestamp,
+                    schema_pin: self.schema_event_pin(&event.action),
                 });
             }
             crate::trigger::delivery::attach_intents(&mut payload, &intents)
                 .map_err(PersistenceError::Serialization)?;
             if let Some(receipt) = context.receipt.as_ref() {
-                crate::trigger::delivery::attach_receipt(&mut payload, receipt)
+                let mut receipt = receipt.clone();
+                receipt.schema_pin = self.schema_event_pin(&event.action);
+                crate::trigger::delivery::attach_receipt(&mut payload, &receipt)
                     .map_err(PersistenceError::Serialization)?;
             }
         }
@@ -569,11 +638,14 @@ impl EntityActor {
     /// all state variables (status, counters, booleans). This is option 2 from
     /// the replay design: the TransitionTable is the authoritative source of
     /// effects, so replay produces the same state as the original execution.
+    #[allow(clippy::too_many_arguments)]
     async fn replay_events(
         table: &TransitionTable,
         store: &BoxedEventStore,
         backend: BackendLabel,
         state: &mut EntityState,
+        persistence_id: &str,
+        expected_schema_pin: Option<&SchemaExecutionPin>,
         tenant: &str,
         blob_store: Option<&crate::blob_store::BlobStore>,
         // When true, a journal read failure PROPAGATES as an error instead of being
@@ -584,8 +656,6 @@ impl EntityActor {
         strict_journal_read: bool,
     ) -> Result<(), ActorError> {
         let replay_start = Instant::now(); // determinism-ok: wall-clock for production replay duration metric only
-        let persistence_id = format!("{tenant}:{}:{}", state.entity_type, state.entity_id);
-        let persistence_id = persistence_id.as_str();
         let mut from_sequence = 0;
         let mut loaded_snapshot = false;
 
@@ -634,7 +704,44 @@ impl EntityActor {
                         continue;
                     }
 
+                    if let Some(expected_pin) = expected_schema_pin {
+                        let event_pin = env
+                            .payload
+                            .get(SCHEMA_PIN_FIELD)
+                            .cloned()
+                            .ok_or_else(|| {
+                                ActorError::custom(format!(
+                                    "scoped event {} is missing immutable schema pin",
+                                    env.sequence_nr
+                                ))
+                            })
+                            .and_then(|value| {
+                                serde_json::from_value::<SchemaEventPin>(value).map_err(|error| {
+                                    ActorError::custom(format!(
+                                        "scoped event {} has invalid schema pin: {error}",
+                                        env.sequence_nr
+                                    ))
+                                })
+                            })?;
+                        let expected_event_pin =
+                            schema_event_pin(expected_pin, &state.entity_type, &env.event_type);
+                        if event_pin != expected_event_pin {
+                            return Err(ActorError::custom(format!(
+                                "scoped event {} schema pin or action digest does not match actor pin",
+                                env.sequence_nr
+                            )));
+                        }
+                    }
+
                     let parsed_event = serde_json::from_value::<EntityEvent>(env.payload.clone());
+                    if let Ok(event) = &parsed_event
+                        && event.action != env.event_type
+                    {
+                        return Err(ActorError::custom(format!(
+                            "event {} payload action does not match envelope event type",
+                            env.sequence_nr
+                        )));
+                    }
 
                     // Tombstone is terminal: once deleted, entity must not replay
                     // into a live state. Stop at the first Deleted event.
@@ -662,6 +769,14 @@ impl EntityActor {
                     match parsed_event {
                         Ok(event) => {
                             if env.event_type == super::types::FIELD_UPDATE_EVENT_TYPE {
+                                if event
+                                    .params
+                                    .get("migration")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(false)
+                                {
+                                    state.status = event.to_status.clone();
+                                }
                                 let replace = event
                                     .params
                                     .get("replace")
@@ -673,6 +788,18 @@ impl EntityActor {
                                     .cloned()
                                     .unwrap_or_else(|| serde_json::json!({}));
                                 super::effects::apply_field_update(state, &fields, replace);
+                                if let Some(pin) = expected_schema_pin
+                                    && let Some(fields) = state.fields.as_object_mut()
+                                {
+                                    fields.insert(
+                                        SCHEMA_PIN_FIELD.to_string(),
+                                        serde_json::to_value(pin).map_err(|error| {
+                                            ActorError::custom(format!(
+                                                "failed to restore scoped schema pin: {error}"
+                                            ))
+                                        })?,
+                                    );
+                                }
                                 state.push_event_bounded(event);
                                 state.sequence_nr = env.sequence_nr;
                                 continue;
@@ -838,12 +965,45 @@ pub(crate) async fn recover_entity_state_from_store(
     blob_store: Option<&crate::blob_store::BlobStore>,
     strict_journal_read: bool,
 ) -> Result<EntityState, ActorError> {
+    let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+    recover_entity_state_from_store_with_pin(
+        tenant,
+        entity_type,
+        entity_id,
+        table,
+        store,
+        backend,
+        initial_fields,
+        blob_store,
+        strict_journal_read,
+        &persistence_id,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recover_entity_state_from_store_with_pin(
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+    table: &TransitionTable,
+    store: &BoxedEventStore,
+    backend: BackendLabel,
+    initial_fields: &serde_json::Value,
+    blob_store: Option<&crate::blob_store::BlobStore>,
+    strict_journal_read: bool,
+    persistence_id: &str,
+    expected_schema_pin: Option<&SchemaExecutionPin>,
+) -> Result<EntityState, ActorError> {
     let mut state = EntityActor::build_initial_state(entity_type, entity_id, table, initial_fields);
     EntityActor::replay_events(
         table,
         store,
         backend,
         &mut state,
+        persistence_id,
+        expected_schema_pin,
         tenant,
         blob_store,
         strict_journal_read,
@@ -872,7 +1032,7 @@ impl Actor for EntityActor {
         // Re-evaluates each event through the TransitionTable to reconstruct
         // all state variables (status, counters, booleans) — not just item_count.
         if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend) {
-            state = recover_entity_state_from_store(
+            state = recover_entity_state_from_store_with_pin(
                 &self.tenant,
                 &self.entity_type,
                 &self.entity_id,
@@ -882,8 +1042,30 @@ impl Actor for EntityActor {
                 &self.initial_fields,
                 self.blob_store.as_ref(),
                 false, // hydration: keep serving on a transient journal read failure
+                &self.persistence_id(),
+                self.schema_pin.as_ref(),
             )
             .await?;
+        }
+
+        if let Some(expected_pin) = self.schema_pin.as_ref() {
+            let recovered_pin = state
+                .fields
+                .get(SCHEMA_PIN_FIELD)
+                .cloned()
+                .ok_or_else(|| ActorError::custom("scoped entity state is missing schema pin"))
+                .and_then(|value| {
+                    serde_json::from_value::<SchemaExecutionPin>(value).map_err(|error| {
+                        ActorError::custom(format!(
+                            "scoped entity state has invalid schema pin: {error}"
+                        ))
+                    })
+                })?;
+            if &recovered_pin != expected_pin {
+                return Err(ActorError::custom(
+                    "scoped entity state schema pin does not match actor pin",
+                ));
+            }
         }
 
         if state.total_event_count == 0 {
@@ -1215,6 +1397,8 @@ impl Actor for EntityActor {
                                         store,
                                         backend,
                                         state,
+                                        &self.persistence_id(),
+                                        self.schema_pin.as_ref(),
                                         &self.tenant,
                                         self.blob_store.as_ref(),
                                         // Actor hydration keeps the lenient "start
@@ -1572,6 +1756,21 @@ impl Actor for EntityActor {
                 reference_evidence,
                 expected_sequence,
             } => {
+                if fields
+                    .as_object()
+                    .is_some_and(|fields| fields.contains_key(SCHEMA_PIN_FIELD))
+                {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some("ReservedFieldMutation".into()),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
                 if expected_sequence.is_some_and(|expected| expected != state.sequence_nr) {
                     ctx.reply(EntityResponse {
                         success: false,
@@ -1615,6 +1814,21 @@ impl Actor for EntityActor {
                         .unwrap_or(&serde_json::Value::Null),
                     replace,
                 );
+                if let Some(schema_pin) = state.fields.get(SCHEMA_PIN_FIELD).cloned() {
+                    let Some(prospective_fields) = prospective.fields.as_object_mut() else {
+                        ctx.reply(EntityResponse {
+                            success: false,
+                            state: state.clone(),
+                            error: Some("FieldsMustBeObject".into()),
+                            custom_effects: vec![],
+                            scheduled_actions: vec![],
+                            spawn_requests: vec![],
+                            spec_governed: true,
+                        });
+                        return Ok(());
+                    };
+                    prospective_fields.insert(SCHEMA_PIN_FIELD.to_string(), schema_pin);
+                }
                 let contract_result = {
                     let table = self.table.read().expect("table lock poisoned");
                     super::reference_contract::validate_prospective_state(

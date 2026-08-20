@@ -6,6 +6,7 @@ mod helpers;
 mod invocation;
 mod query;
 mod schema;
+mod schema_deployment;
 mod service;
 mod streams;
 mod telemetry;
@@ -27,6 +28,8 @@ use telemetry::{record_operation_fields, result_kind};
 
 #[cfg(test)]
 mod parity_tests;
+#[cfg(all(test, feature = "sim"))]
+mod schema_deployment_tests;
 #[cfg(test)]
 mod telemetry_span_tests;
 #[cfg(test)]
@@ -55,6 +58,14 @@ impl ApplicationDataInvocation {
         )
     )]
     pub(super) async fn call_encoded(&self, bytes: &[u8]) -> Result<Vec<u8>, String> {
+        if let Ok(request) = serde_json::from_slice::<
+            temper_wasm_sdk::schema_deployment::SchemaDeploymentRequestV1,
+        >(bytes)
+        {
+            return self
+                .call_schema_deployment_encoded(bytes.len(), request)
+                .await;
+        }
         let mut response = match self.admit_call(bytes) {
             Ok(request) => {
                 record_operation_fields(&request.operation);

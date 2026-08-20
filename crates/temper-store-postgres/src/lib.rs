@@ -19,6 +19,7 @@ pub mod migration;
 pub mod platform;
 mod query_page;
 pub mod schema;
+mod schema_deployment;
 mod schema_event_history;
 mod segments;
 mod selected_catalog;

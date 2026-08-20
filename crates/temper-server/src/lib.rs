@@ -38,6 +38,7 @@ pub mod request_context;
 mod response;
 mod router;
 pub mod runtime_metrics;
+mod schema_deployment;
 pub mod secrets;
 #[cfg(feature = "observe")]
 pub mod sentinel;

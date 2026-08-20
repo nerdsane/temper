@@ -31,4 +31,4 @@ pub use simulation::{
     LivenessViolation, SimConfig, SimulationResult, run_multi_seed_simulation_from_ioa,
     run_simulation_from_ioa,
 };
-pub use smt::{SmtResult, verify_symbolic};
+pub use smt::{SmtResult, verify_symbolic, verify_symbolic_with_budget};

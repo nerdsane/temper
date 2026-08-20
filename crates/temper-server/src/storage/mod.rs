@@ -39,9 +39,11 @@ mod published_artifacts;
 pub use backend_label::{BackendLabel, DataOnlyCreateRecord, DataOnlyCreateStore, PolicyStoreRow};
 mod query_plane_impls;
 mod query_plane_read;
+mod schema_deployment;
 pub use published_artifacts::{
     PublishedArtifactStore, PublishedArtifactStoreRow, PublishedArtifactStoreUpsert,
 };
+pub use schema_deployment::SchemaDeploymentStoreDyn;
 mod query_plane;
 pub use query_plane::{
     EntityCatalogRow, QueryFieldIndexOrder, QueryFieldIndexOrderDirection, QueryFieldIndexPage,
@@ -213,6 +215,21 @@ pub trait DynEventStore: Send + Sync {
         after: Option<(&'a str, &'a str)>,
         limit: usize,
     ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>>;
+
+    fn list_scoped_entity_ids_page<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        bundle_digest: &'a str,
+        after_entity_id: Option<&'a str>,
+        limit: usize,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
+
+    fn scoped_bundle_write_version<'a>(
+        &'a self,
+        tenant: &'a str,
+        bundle_digest: &'a str,
+    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>>;
 }
 
 impl<T> DynEventStore for T
@@ -510,6 +527,36 @@ where
             limit,
         ))
     }
+
+    fn list_scoped_entity_ids_page<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        bundle_digest: &'a str,
+        after_entity_id: Option<&'a str>,
+        limit: usize,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>> {
+        Box::pin(EventStore::list_scoped_entity_ids_page(
+            self,
+            tenant,
+            entity_type,
+            bundle_digest,
+            after_entity_id,
+            limit,
+        ))
+    }
+
+    fn scoped_bundle_write_version<'a>(
+        &'a self,
+        tenant: &'a str,
+        bundle_digest: &'a str,
+    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>> {
+        Box::pin(EventStore::scoped_bundle_write_version(
+            self,
+            tenant,
+            bundle_digest,
+        ))
+    }
 }
 
 /// Cloneable boxed event store handle.
@@ -769,6 +816,29 @@ impl BoxedEventStore {
     ) -> Result<Vec<(String, String)>, PersistenceError> {
         self.0
             .list_journal_ids_page(tenant, entity_type, after, limit)
+            .await
+    }
+
+    pub async fn list_scoped_entity_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        bundle_digest: &str,
+        after_entity_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        self.0
+            .list_scoped_entity_ids_page(tenant, entity_type, bundle_digest, after_entity_id, limit)
+            .await
+    }
+
+    pub async fn scoped_bundle_write_version(
+        &self,
+        tenant: &str,
+        bundle_digest: &str,
+    ) -> Result<u64, PersistenceError> {
+        self.0
+            .scoped_bundle_write_version(tenant, bundle_digest)
             .await
     }
 }
@@ -1154,6 +1224,7 @@ pub struct StorageStack {
     pub data_only_create: Option<Arc<dyn DataOnlyCreateStore>>,
     pub trajectory: Option<Arc<dyn TrajectorySink>>,
     pub metadata: Option<Arc<dyn MetadataStoreProvider>>,
+    pub schema_deployments: Option<Arc<dyn SchemaDeploymentStoreDyn>>,
 }
 
 impl StorageStack {
@@ -1169,6 +1240,7 @@ impl StorageStack {
         data_only_create: Option<Arc<dyn DataOnlyCreateStore>>,
         trajectory: Option<Arc<dyn TrajectorySink>>,
         metadata: Option<Arc<dyn MetadataStoreProvider>>,
+        schema_deployments: Option<Arc<dyn SchemaDeploymentStoreDyn>>,
     ) -> Self {
         Self {
             backend,
@@ -1181,6 +1253,7 @@ impl StorageStack {
             data_only_create,
             trajectory,
             metadata,
+            schema_deployments,
         }
     }
 
@@ -1196,7 +1269,8 @@ impl StorageStack {
             Some(store.clone() as Arc<dyn QueryPlaneStore>),
             Some(store.clone() as Arc<dyn DataOnlyCreateStore>),
             Some(store.clone() as Arc<dyn TrajectorySink>),
-            Some(Arc::new(SingleMetadataStoreProvider::new(store))),
+            Some(Arc::new(SingleMetadataStoreProvider::new(store.clone()))),
+            Some(store.clone() as Arc<dyn SchemaDeploymentStoreDyn>),
         )
     }
 
@@ -1212,7 +1286,8 @@ impl StorageStack {
             Some(store.clone() as Arc<dyn QueryPlaneStore>),
             None,
             Some(store.clone() as Arc<dyn TrajectorySink>),
-            Some(Arc::new(SingleMetadataStoreProvider::new(store))),
+            Some(Arc::new(SingleMetadataStoreProvider::new(store.clone()))),
+            Some(store.clone() as Arc<dyn SchemaDeploymentStoreDyn>),
         )
     }
 
@@ -1234,6 +1309,7 @@ impl StorageStack {
             Some(Arc::new(TenantRoutedMetadataStoreProvider::new(
                 router.as_ref().clone(),
             ))),
+            Some(router.clone() as Arc<dyn SchemaDeploymentStoreDyn>),
         )
     }
 
@@ -1242,6 +1318,7 @@ impl StorageStack {
         Self::new(
             BackendLabel::Redis,
             BoxedEventStore::from_arc(store),
+            None,
             None,
             None,
             None,
@@ -1262,7 +1339,7 @@ impl StorageStack {
         let platform = platform_store.map(|store| store as Arc<dyn PlatformStore>);
         Self::new(
             BackendLabel::Sim,
-            BoxedEventStore::from_arc(store),
+            BoxedEventStore::from_arc(store.clone()),
             None,
             None,
             platform,
@@ -1271,6 +1348,7 @@ impl StorageStack {
             None,
             None,
             None,
+            Some(store as Arc<dyn SchemaDeploymentStoreDyn>),
         )
     }
 }

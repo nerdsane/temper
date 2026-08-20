@@ -4,6 +4,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use opentelemetry::KeyValue as OtelKeyValue;
 use opentelemetry::trace::{Span, Status, Tracer};
+use temper_runtime::persistence::schema_deployment::SchemaExecutionPin;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -21,8 +22,19 @@ use crate::request_context::AgentContext;
 use crate::response::{ODataResponse, odata_error};
 use crate::state::{BoundActionHookContext, DispatchError, ServerState};
 
-fn idempotency_actor_key(tenant: &TenantId, entity_type: &str, entity_id: &str) -> String {
-    format!("{tenant}:{entity_type}:{entity_id}")
+fn idempotency_actor_key(
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_id: &str,
+    schema_pin: Option<&SchemaExecutionPin>,
+) -> String {
+    match schema_pin {
+        Some(pin) => format!(
+            "{tenant}:{entity_type}:{entity_id}:schema:{}",
+            pin.bundle_digest
+        ),
+        None => format!("{tenant}:{entity_type}:{entity_id}"),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -103,7 +115,19 @@ pub(super) async fn dispatch_bound_action(
     dispatch_agent_ctx.security_ctx = Some(security_ctx.clone());
 
     // Default-deny: reject actions on entity types with no registered spec.
-    let is_governed = match state.is_entity_type_governed(tenant, entity_type) {
+    let is_governed = match agent_ctx.schema_pin.as_ref() {
+        Some(pin) => state
+            .registry
+            .read()
+            .map(|registry| {
+                registry
+                    .get_scoped_table_at_digest(tenant, &pin.scope, &pin.bundle_digest, entity_type)
+                    .is_some()
+            })
+            .map_err(|error| format!("registry lock poisoned: {error}")),
+        None => state.is_entity_type_governed(tenant, entity_type),
+    };
+    let is_governed = match is_governed {
         Ok(value) => value,
         Err(e) => {
             http_span.set_status(Status::error(e.clone()));
@@ -130,11 +154,31 @@ pub(super) async fn dispatch_bound_action(
         .into_response();
     }
 
-    let authz_snapshot = match state
-        .load_authz_resource_snapshot(tenant, entity_type, key_str)
-        .await
-    {
-        Ok(v) => v,
+    let authz_snapshot = match agent_ctx.schema_pin.as_ref() {
+        Some(pin) => state
+            .get_scoped_entity_state(tenant, entity_type, key_str, pin.clone())
+            .await
+            .map(|current_state| {
+                let mut resource_attrs = current_state
+                    .state
+                    .fields
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                resource_attrs.insert("id".into(), key_str.into());
+                resource_attrs.insert("status".into(), current_state.state.status.clone().into());
+                resource_attrs.insert("has_spec".into(), true.into());
+                (current_state, resource_attrs)
+            }),
+        None => state
+            .load_authz_resource_snapshot(tenant, entity_type, key_str)
+            .await
+            .map(|snapshot| (snapshot.current_state, snapshot.resource_attrs)),
+    };
+    let authz_snapshot = match authz_snapshot {
+        Ok(value) => value,
         Err(e) => {
             http_span.set_status(Status::error(e.clone()));
             http_span.set_attribute(OtelKeyValue::new("http.status_code", 500i64));
@@ -148,8 +192,7 @@ pub(super) async fn dispatch_bound_action(
             return odata_error(StatusCode::INTERNAL_SERVER_ERROR, code, &e).into_response();
         }
     };
-    let current_state = authz_snapshot.current_state;
-    let resource_attrs = authz_snapshot.resource_attrs;
+    let (current_state, resource_attrs) = authz_snapshot;
 
     if let Err(resp) = enforce_commons_account_verified_for_action(
         state,
@@ -224,9 +267,9 @@ pub(super) async fn dispatch_bound_action(
         tenant,
         entity_type,
         key_str,
-        action,
-        "bound_action",
+        (action, "bound_action"),
         &current_fields,
+        agent_ctx.schema_pin.as_ref(),
     )
     .await
     {
@@ -238,7 +281,8 @@ pub(super) async fn dispatch_bound_action(
     }
 
     // Idempotency cache check
-    let actor_key = idempotency_actor_key(tenant, entity_type, key_str);
+    let actor_key =
+        idempotency_actor_key(tenant, entity_type, key_str, agent_ctx.schema_pin.as_ref());
     if let Some(ref idem_key) = idempotency_key
         && let Some(cached) = state
             .idempotency_cache
@@ -429,7 +473,7 @@ mod tests {
         let tenant = TenantId::new("acme");
 
         assert_eq!(
-            idempotency_actor_key(&tenant, "WorkCycle", "wc-1"),
+            idempotency_actor_key(&tenant, "WorkCycle", "wc-1", None),
             "acme:WorkCycle:wc-1"
         );
     }

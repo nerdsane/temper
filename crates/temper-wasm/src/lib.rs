@@ -15,7 +15,7 @@ pub mod types;
 mod workflow_headers;
 
 pub use authorized_host::{AuthorizedWasmHost, WasmAuthzDecision, WasmAuthzGate, extract_domain};
-pub use engine::{WasmEngine, WasmError};
+pub use engine::{PureMigrationError, PureMigrationLimits, WasmEngine, WasmError};
 pub use host_trait::{
     BinaryHttpInterceptorFn, ProductionWasmHost, ProgressEmitterFn, SecretResolverFn, SimWasmHost,
     SpecEvaluatorFn, TemperDataCallFn, TemperFileReadFn, TemperFileWriteFn, TextHttpInterceptorFn,

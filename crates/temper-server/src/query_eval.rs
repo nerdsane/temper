@@ -3,9 +3,11 @@
 //! Applies `$filter`, `$select`, `$orderby`, `$top`, `$skip`, and `$count`
 //! to in-memory entity result sets. Uses the parsed AST from `temper-odata`.
 
+use axum::response::IntoResponse;
 use temper_odata::query::types::{
     BinaryOperator, FilterExpr, ODataValue, OrderByClause, OrderDirection, QueryOptions,
 };
+use temper_runtime::persistence::schema_deployment::SchemaExecutionPin;
 
 use crate::blobs::hydrate_blob_refs_for_tenant;
 
@@ -396,6 +398,7 @@ struct ExpansionContext<'a> {
     state: &'a crate::state::ServerState,
     tenant: &'a temper_runtime::tenant::TenantId,
     security_ctx: &'a temper_authz::SecurityContext,
+    schema_pin: Option<&'a SchemaExecutionPin>,
 }
 
 /// Resolve navigation properties for $expand on a single entity.
@@ -417,6 +420,26 @@ pub async fn expand_entity(
         state,
         tenant,
         security_ctx,
+        schema_pin: None,
+    };
+    expand_entity_recursive(entity, expand_items, entity_type, &context, 0, &mut vec![]).await
+}
+
+/// Resolve `$expand` using one exact immutable scoped bundle.
+pub async fn expand_scoped_entity(
+    entity: &mut serde_json::Value,
+    expand_items: &[temper_odata::query::types::ExpandItem],
+    entity_type: &str,
+    state: &crate::state::ServerState,
+    tenant: &temper_runtime::tenant::TenantId,
+    security_ctx: &temper_authz::SecurityContext,
+    schema_pin: &SchemaExecutionPin,
+) -> Result<(), axum::response::Response> {
+    let context = ExpansionContext {
+        state,
+        tenant,
+        security_ctx,
+        schema_pin: Some(schema_pin),
     };
     expand_entity_recursive(entity, expand_items, entity_type, &context, 0, &mut vec![]).await
 }
@@ -434,6 +457,7 @@ async fn expand_entity_recursive(
         state,
         tenant,
         security_ctx,
+        schema_pin,
     } = context;
     if depth >= MAX_EXPAND_DEPTH {
         return Ok(());
@@ -448,17 +472,28 @@ async fn expand_entity_recursive(
         Option<NavExpansionInfo>,
     )> = {
         let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
-        let tenant_config = registry.get_tenant(tenant);
+        let tenant_config = match schema_pin {
+            Some(pin) => {
+                registry.get_scoped_config_at_digest(tenant, &pin.scope, &pin.bundle_digest)
+            }
+            None => registry.get_tenant(tenant),
+        };
         expand_items
             .iter()
             .map(|item| {
                 let target = tenant_config
                     .and_then(|tc| find_nav_target(&tc.csdl, entity_type, &item.property))
-                    .or_else(|| find_nav_target(&state.csdl, entity_type, &item.property));
+                    .or_else(|| {
+                        schema_pin
+                            .is_none()
+                            .then(|| find_nav_target(&state.csdl, entity_type, &item.property))
+                            .flatten()
+                    });
                 let info = target.map(|target_type| {
                     let is_collection = tenant_config
                         .is_some_and(|tc| is_collection_nav(&tc.csdl, entity_type, &item.property))
-                        || is_collection_nav(&state.csdl, entity_type, &item.property);
+                        || (schema_pin.is_none()
+                            && is_collection_nav(&state.csdl, entity_type, &item.property));
                     // Compute FK resolution from RelationGraph
                     let fk_resolution = tenant_config.and_then(|tc| {
                         find_fk_resolution(
@@ -509,24 +544,39 @@ async fn expand_entity_recursive(
                         .get("fields")
                         .and_then(|f| f.get(source_field.as_str()))
                         .and_then(|v| v.as_str());
-                    if let Some(fk) = fk_value
-                        && let Ok(response) = state
-                            .get_tenant_entity_state(tenant, &info.target_type, fk)
-                            .await
-                    {
-                        let mut json = serde_json::to_value(&response.state).unwrap_or_default();
-                        hydrate_blob_refs_for_tenant(state, tenant, &mut json).await;
-                        related_entities.push(json);
+                    if let Some(fk) = fk_value {
+                        let response = match schema_pin {
+                            Some(pin) => {
+                                state
+                                    .get_scoped_entity_state(
+                                        tenant,
+                                        &info.target_type,
+                                        fk,
+                                        (*pin).clone(),
+                                    )
+                                    .await
+                            }
+                            None => {
+                                state
+                                    .get_tenant_entity_state(tenant, &info.target_type, fk)
+                                    .await
+                            }
+                        };
+                        if let Ok(response) = response {
+                            let mut json =
+                                serde_json::to_value(&response.state).unwrap_or_default();
+                            hydrate_blob_refs_for_tenant(state, tenant, &mut json).await;
+                            related_entities.push(json);
+                        }
                     }
                 }
                 Some(FkResolution::Reverse { target_fk_field }) => {
                     // One-to-many: target entities hold FK back to us.
                     // e.g., Customer→Orders: filter Orders where CustomerId == parent_id.
-                    let related_ids = state.list_entity_ids(tenant, &info.target_type);
+                    let related_ids = expansion_entity_ids(context, &info.target_type).await?;
                     for related_id in &related_ids {
-                        if let Ok(response) = state
-                            .get_tenant_entity_state(tenant, &info.target_type, related_id)
-                            .await
+                        if let Ok(response) =
+                            expansion_entity_state(context, &info.target_type, related_id).await
                         {
                             let mut json =
                                 serde_json::to_value(&response.state).unwrap_or_default();
@@ -544,11 +594,10 @@ async fn expand_entity_recursive(
                 }
                 None => {
                     // Fallback: convention scan (parentId / {EntityType}Id).
-                    let related_ids = state.list_entity_ids(tenant, &info.target_type);
+                    let related_ids = expansion_entity_ids(context, &info.target_type).await?;
                     for related_id in &related_ids {
-                        if let Ok(response) = state
-                            .get_tenant_entity_state(tenant, &info.target_type, related_id)
-                            .await
+                        if let Ok(response) =
+                            expansion_entity_state(context, &info.target_type, related_id).await
                         {
                             let mut json =
                                 serde_json::to_value(&response.state).unwrap_or_default();
@@ -636,6 +685,66 @@ async fn expand_entity_recursive(
     }
     visited.pop();
     Ok(())
+}
+
+const SCOPED_EXPAND_SCAN_BUDGET: usize = 1_000;
+
+async fn expansion_entity_ids(
+    context: &ExpansionContext<'_>,
+    entity_type: &str,
+) -> Result<Vec<String>, axum::response::Response> {
+    let Some(pin) = context.schema_pin else {
+        return Ok(context.state.list_entity_ids(context.tenant, entity_type));
+    };
+    let types = vec![entity_type.to_string()];
+    let rows = context
+        .state
+        .page_scoped_entity_ids(
+            context.tenant,
+            &types,
+            &pin.bundle_digest,
+            None,
+            SCOPED_EXPAND_SCAN_BUDGET + 1,
+        )
+        .await
+        .map_err(|error| {
+            crate::response::odata_error(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "ScopedReadFailed",
+                &error,
+            )
+            .into_response()
+        })?;
+    if rows.len() > SCOPED_EXPAND_SCAN_BUDGET {
+        return Err(crate::response::odata_error(
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            "ScopedExpandBudgetExceeded",
+            "Scoped navigation expansion exceeded its entity scan budget",
+        )
+        .into_response());
+    }
+    Ok(rows.into_iter().map(|(_, entity_id)| entity_id).collect())
+}
+
+async fn expansion_entity_state(
+    context: &ExpansionContext<'_>,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<crate::entity_actor::EntityResponse, String> {
+    match context.schema_pin {
+        Some(pin) => {
+            context
+                .state
+                .get_scoped_entity_state(context.tenant, entity_type, entity_id, (*pin).clone())
+                .await
+        }
+        None => {
+            context
+                .state
+                .get_tenant_entity_state(context.tenant, entity_type, entity_id)
+                .await
+        }
+    }
 }
 
 /// Resolve an entity's id from the top-level `entity_id` field, falling back

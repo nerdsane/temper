@@ -31,6 +31,7 @@ pub mod ots;
 mod policy;
 mod published_artifacts;
 mod query_page;
+mod schema_deployment;
 mod secrets;
 mod specs;
 #[cfg(test)]
@@ -152,6 +153,66 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_SPECS_TABLE, ())
             .await
             .map_err(storage_error)?;
+        conn.execute(
+            schema::schema_deployment::CREATE_SCHEMA_DEPLOYMENTS_TABLE,
+            (),
+        )
+        .await
+        .map_err(storage_error)?;
+        conn.execute(
+            schema::schema_deployment::CREATE_SCHEMA_DEPLOYMENT_IDEMPOTENCY_TABLE,
+            (),
+        )
+        .await
+        .map_err(storage_error)?;
+        conn.execute(
+            schema::schema_deployment::CREATE_SCHEMA_VERIFICATION_RECEIPTS_TABLE,
+            (),
+        )
+        .await
+        .map_err(storage_error)?;
+        conn.execute(
+            schema::schema_deployment::CREATE_SCHEMA_ACTIVE_POINTERS_TABLE,
+            (),
+        )
+        .await
+        .map_err(storage_error)?;
+        conn.execute(
+            schema::schema_deployment::CREATE_SCHEMA_MIGRATION_JOBS_TABLE,
+            (),
+        )
+        .await
+        .map_err(storage_error)?;
+        conn.execute(
+            schema::schema_deployment::CREATE_SCHEMA_MIGRATION_IDEMPOTENCY_TABLE,
+            (),
+        )
+        .await
+        .map_err(storage_error)?;
+        conn.execute(
+            schema::schema_deployment::CREATE_SCHEMA_MIGRATION_RETRY_IDEMPOTENCY_TABLE,
+            (),
+        )
+        .await
+        .map_err(storage_error)?;
+        conn.execute(
+            schema::schema_deployment::CREATE_SCHEMA_MIGRATION_SHADOW_TABLE,
+            (),
+        )
+        .await
+        .map_err(storage_error)?;
+        conn.execute(
+            schema::schema_deployment::CREATE_SCHEMA_MIGRATION_BATCH_RECEIPTS_TABLE,
+            (),
+        )
+        .await
+        .map_err(storage_error)?;
+        conn.execute(
+            schema::schema_deployment::CREATE_SCHEMA_MIGRATION_VALIDATION_RECEIPTS_TABLE,
+            (),
+        )
+        .await
+        .map_err(storage_error)?;
         conn.execute(schema::CREATE_TRAJECTORIES_TABLE, ())
             .await
             .map_err(storage_error)?;

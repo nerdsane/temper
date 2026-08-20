@@ -19,6 +19,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::CSDL_XML;
 use temper_runtime::ActorSystem;
+use temper_runtime::persistence::schema_deployment::{SchemaScope, SchemaScopeKind};
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::{
     EntityLevelSummary, EntityVerificationResult, SpecRegistry, VerificationStatus,
@@ -243,4 +244,43 @@ async fn field_invariant_bypass_respects_feature_flag() {
         StatusCode::CREATED,
         "with enforcement disabled, invariant should be bypassed: {body:?}"
     );
+}
+
+#[tokio::test]
+async fn scoped_create_enforces_the_exact_bundle_field_invariant() {
+    let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
+    let scope = SchemaScope {
+        kind: SchemaScopeKind::Task,
+        id: "field-invariant-task".into(),
+    };
+    let digest = format!("sha256:{}", "d".repeat(64));
+    let mut registry = SpecRegistry::new();
+    registry
+        .stage_scoped_bundle(
+            TenantId::default(),
+            scope.clone(),
+            digest.clone(),
+            csdl,
+            CSDL_XML.to_string(),
+            &[("Order", ORDER_WITH_FIELD_INVARIANT_IOA)],
+        )
+        .expect("scoped bundle should stage");
+    registry
+        .activate_scoped_bundle(&TenantId::default(), &scope, &digest, None)
+        .expect("scoped bundle should activate");
+    let state = ServerState::from_registry(ActorSystem::new("scoped-field-invariant"), registry);
+    let response = build_router(state)
+        .oneshot(
+            Request::post("/tdata/Orders")
+                .header("content-type", "application/json")
+                .header("x-temper-schema-scope-kind", "task")
+                .header("x-temper-schema-scope-id", "field-invariant-task")
+                .body(Body::from(
+                    r#"{"id":"scoped-invalid","Currency":"USD","Notes":"forbidden"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 }

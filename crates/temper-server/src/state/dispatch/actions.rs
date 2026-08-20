@@ -160,7 +160,7 @@ impl crate::state::ServerState {
         } = cmd;
 
         if self
-            .composite_metadata_for(tenant, entity_type, action)?
+            .composite_metadata_for(tenant, entity_type, action, agent_ctx.schema_pin.as_ref())?
             .is_some()
         {
             self.reject_action_supplied_sub_writes(entity_type, action, &params)?;
@@ -172,14 +172,33 @@ impl crate::state::ServerState {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let reaction_context = if let Some(dispatcher) = dispatcher.as_ref() {
-            let rules = dispatcher.candidate_rules(tenant, entity_type, action);
+            let rules = if let Some(pin) = agent_ctx.schema_pin.as_ref() {
+                self.registry
+                    .read()
+                    .map_err(|_| DispatchError::Internal("registry lock poisoned".into()))?
+                    .scoped_reaction_candidates_at_digest(
+                        tenant,
+                        &pin.scope,
+                        &pin.bundle_digest,
+                        entity_type,
+                        action,
+                    )
+            } else {
+                dispatcher.candidate_rules(tenant, entity_type, action)
+            };
             if rules.is_empty() {
                 None
             } else {
-                let guard_source = self
-                    .get_tenant_entity_state(tenant, entity_type, entity_id)
-                    .await
-                    .map_err(DispatchError::Internal)?;
+                let guard_source = match agent_ctx.schema_pin.as_ref() {
+                    Some(pin) => self
+                        .get_scoped_entity_state(tenant, entity_type, entity_id, pin.clone())
+                        .await
+                        .map_err(DispatchError::Internal)?,
+                    None => self
+                        .get_tenant_entity_state(tenant, entity_type, entity_id)
+                        .await
+                        .map_err(DispatchError::Internal)?,
+                };
                 let expected_source_sequence = guard_source.state.sequence_nr;
                 let mut guard_fields = guard_source.state.fields;
                 if let (Some(fields), Some(action_params)) =
@@ -194,6 +213,7 @@ impl crate::state::ServerState {
                     tenant,
                     &rules,
                     &guard_fields,
+                    agent_ctx.schema_pin.as_ref(),
                 )
                 .await;
                 let authority = serde_json::to_value(
@@ -250,6 +270,7 @@ impl crate::state::ServerState {
                         entity_type,
                         entity_id,
                         response.state.sequence_nr,
+                        agent_ctx.schema_pin.as_ref(),
                     )
                     .await?
                 } else {
@@ -330,6 +351,7 @@ impl crate::state::ServerState {
         entity_type: &str,
         entity_id: &str,
         source_sequence: u64,
+        schema_pin: Option<&temper_runtime::persistence::schema_deployment::SchemaExecutionPin>,
     ) -> Result<Vec<crate::trigger::delivery::PersistedReactionIntent>, DispatchError> {
         let (store, _) = self.event_journal().ok_or_else(|| {
             DispatchError::Internal(
@@ -341,7 +363,13 @@ impl crate::state::ServerState {
                 "successful persisted action returned sequence zero".to_string(),
             ));
         }
-        let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+        let persistence_id = match schema_pin {
+            Some(pin) => format!(
+                "{tenant}:{entity_type}:{entity_id}:schema:{}",
+                pin.bundle_digest
+            ),
+            None => format!("{tenant}:{entity_type}:{entity_id}"),
+        };
         let events = store
             .read_events_limited(&persistence_id, source_sequence - 1, 1)
             .await
@@ -533,10 +561,17 @@ impl crate::state::ServerState {
         current_span.record("intent", agent_ctx.intent.as_deref().unwrap_or(""));
         let observation_metadata = agent_ctx.observation_metadata_json().unwrap_or_default();
         current_span.record("observation_metadata", observation_metadata.as_str());
-        if !self
-            .is_entity_type_governed(tenant, entity_type)
-            .map_err(DispatchError::Internal)?
-        {
+        let entity_type_governed = if let Some(pin) = agent_ctx.schema_pin.as_ref() {
+            self.registry
+                .read()
+                .map_err(|_| DispatchError::Internal("registry lock poisoned".to_string()))?
+                .get_scoped_table_at_digest(tenant, &pin.scope, &pin.bundle_digest, entity_type)
+                .is_some()
+        } else {
+            self.is_entity_type_governed(tenant, entity_type)
+                .map_err(DispatchError::Internal)?
+        };
+        if !entity_type_governed {
             // Default-deny: entity type has no registered spec.
             tracing::warn!(
                 tenant = %tenant,
@@ -569,13 +604,29 @@ impl crate::state::ServerState {
             )
             .entered();
             let registry_start = std::time::Instant::now(); // determinism-ok: wall-clock latency metric only, not on simulation path
-            let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
+            let actor_key = match agent_ctx.schema_pin.as_ref() {
+                Some(pin) => format!(
+                    "{tenant}:{entity_type}:{entity_id}:schema:{}",
+                    pin.bundle_digest
+                ),
+                None => format!("{tenant}:{entity_type}:{entity_id}"),
+            };
             let existed = self
                 .actor_registry
                 .read()
                 .map(|reg| reg.contains_key(&actor_key))
                 .unwrap_or(false);
-            let Some(ar) = self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id) else {
+            let actor = match agent_ctx.schema_pin.as_ref() {
+                Some(pin) => self.get_or_spawn_scoped_actor_with_fields(
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    serde_json::json!({}),
+                    pin.clone(),
+                ),
+                None => self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id),
+            };
+            let Some(ar) = actor else {
                 return Err(DispatchError::Internal(format!(
                     "failed to resolve actor for governed entity type '{entity_type}'"
                 )));
@@ -595,11 +646,24 @@ impl crate::state::ServerState {
 
         // Pre-resolve cross-entity state gates (Gap 1: Agent OS).
         let mut cross_entity_booleans = self
-            .resolve_cross_entity_guards(tenant, entity_type, entity_id, action)
+            .resolve_cross_entity_guards(
+                tenant,
+                entity_type,
+                entity_id,
+                action,
+                agent_ctx.schema_pin.as_ref(),
+            )
             .await;
         cross_entity_booleans.extend(
-            self.resolve_reference_evidence(tenant, entity_type, entity_id, Some(action), &params)
-                .await,
+            self.resolve_reference_evidence(
+                tenant,
+                entity_type,
+                entity_id,
+                Some(action),
+                &params,
+                agent_ctx.schema_pin.as_ref(),
+            )
+            .await,
         );
 
         let action_params = params.clone();

@@ -340,6 +340,7 @@ async fn sim_pagination_is_deterministic_across_seeds() {
             None,
             None,
             None,
+            None,
         ));
         let tenant = TenantId::default();
         let agent_ctx = AgentContext::for_service("paging-sim");
