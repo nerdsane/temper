@@ -10,6 +10,7 @@ pub(super) use finalize::{complete, page_shadow};
 pub(super) use query::{claim, get, get_in_scope, list_incomplete};
 use read_write::*;
 pub(super) use retry::reserve_retry;
+pub(super) use validation::validate;
 use validation::*;
 
 use sqlx::{Acquire, Postgres, Row, Transaction};
@@ -288,102 +289,6 @@ pub(super) async fn commit_batch(
     .execute(&mut *tx)
     .await
     .map_err(backend)?;
-    tx.commit().await.map_err(backend)?;
-    Ok(job)
-}
-
-pub(super) async fn validate(
-    store: &PostgresEventStore,
-    tenant: &str,
-    job_id: &str,
-    expected_fence: u64,
-    receipt: SchemaMigrationValidationReceipt,
-) -> Result<SchemaMigrationJob, SchemaDeploymentStoreError> {
-    validate_text("validation receipt", &receipt.id)?;
-    validate_digest("migration shadow digest", &receipt.shadow_digest)?;
-    let mut connection = store.pool().acquire().await.map_err(backend)?;
-    let mut tx = connection.begin().await.map_err(backend)?;
-    let mut job = locked_job(&mut tx, tenant, job_id)
-        .await?
-        .ok_or(SchemaDeploymentStoreError::NotFound)?;
-    let prior = load_receipt::<SchemaMigrationValidationReceipt>(
-        &mut tx,
-        "schema_migration_validation_receipts",
-        tenant,
-        job_id,
-        &receipt.id,
-    )
-    .await?;
-    if prior.as_ref().is_some_and(|prior| prior != &receipt) {
-        return Err(SchemaDeploymentStoreError::MigrationRejected);
-    }
-    if job.status == SchemaMigrationStatus::Rejected
-        && job.validation_receipt_id.as_deref() == Some(receipt.id.as_str())
-        && prior.is_some()
-    {
-        tx.commit().await.map_err(backend)?;
-        return Ok(job);
-    }
-    if job.fence != expected_fence {
-        return Err(SchemaDeploymentStoreError::StaleFence);
-    }
-    if receipt.passed {
-        if job.status != SchemaMigrationStatus::Validating || !job.scan_complete {
-            return Err(SchemaDeploymentStoreError::InvalidLifecycleTransition);
-        }
-    } else if !matches!(
-        job.status,
-        SchemaMigrationStatus::Migrating | SchemaMigrationStatus::Validating
-    ) {
-        return Err(SchemaDeploymentStoreError::InvalidLifecycleTransition);
-    }
-    let source_pattern = format!("%:schema:{}", job.command.source_bundle_digest);
-    let current_write_version: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE tenant = $1 AND entity_id LIKE $2")
-            .bind(tenant)
-            .bind(&source_pattern)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(backend)?;
-    if receipt.passed
-        && (u64::try_from(current_write_version).ok() != Some(receipt.caught_up_sequence)
-            || receipt.caught_up_sequence != job.catch_up_sequence)
-    {
-        job.status = SchemaMigrationStatus::Migrating;
-        job.scan_cursor = None;
-        job.scan_complete = false;
-        job.catch_up_sequence = u64::try_from(current_write_version)
-            .map_err(|_| SchemaDeploymentStoreError::MigrationBudgetExhausted)?;
-        job.validation_receipt_id = None;
-        job.committed_sequence = checked_add(job.committed_sequence, "migration sequence")?;
-        write_job(&mut tx, &job).await?;
-        tx.commit().await.map_err(backend)?;
-        return Err(SchemaDeploymentStoreError::StaleFence);
-    }
-    if prior.is_none() {
-        sqlx::query(
-            "INSERT INTO schema_migration_validation_receipts
-             (tenant, job_id, receipt_id, receipt_json) VALUES ($1, $2, $3, $4)",
-        )
-        .bind(tenant)
-        .bind(job_id)
-        .bind(&receipt.id)
-        .bind(encode(&receipt)?)
-        .execute(&mut *tx)
-        .await
-        .map_err(backend)?;
-    }
-    job.status = if receipt.passed {
-        SchemaMigrationStatus::Ready
-    } else {
-        SchemaMigrationStatus::Rejected
-    };
-    job.validation_receipt_id = Some(receipt.id);
-    if !receipt.passed {
-        job.migration_receipt_id = Some(format!("migration-rejected:{job_id}"));
-    }
-    job.committed_sequence = checked_add(job.committed_sequence, "migration sequence")?;
-    write_job(&mut tx, &job).await?;
     tx.commit().await.map_err(backend)?;
     Ok(job)
 }

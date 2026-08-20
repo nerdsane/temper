@@ -1,6 +1,105 @@
 pub(super) use super::super::helpers::validate_digest;
 use super::*;
 
+pub(crate) async fn validate(
+    store: &TursoEventStore,
+    tenant: &str,
+    job_id: &str,
+    expected_fence: u64,
+    receipt: SchemaMigrationValidationReceipt,
+) -> Result<SchemaMigrationJob, SchemaDeploymentStoreError> {
+    validate_text("validation receipt", &receipt.id)?;
+    validate_digest("migration shadow digest", &receipt.shadow_digest)?;
+    let _permit = store
+        .acquire_write_permit("schema_migration_validate", WritePriority::High)
+        .await
+        .map_err(backend)?;
+    let connection = store.configured_connection().await.map_err(backend)?;
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .map_err(backend)?;
+    let mut job = load_job(&tx, tenant, job_id)
+        .await?
+        .ok_or(SchemaDeploymentStoreError::NotFound)?;
+    let prior = load_validation_receipt(&tx, tenant, job_id, &receipt.id).await?;
+    if prior.as_ref().is_some_and(|prior| prior != &receipt) {
+        return Err(SchemaDeploymentStoreError::MigrationRejected);
+    }
+    if job.status == SchemaMigrationStatus::Rejected
+        && job.validation_receipt_id.as_deref() == Some(receipt.id.as_str())
+        && prior.is_some()
+    {
+        tx.commit().await.map_err(backend)?;
+        return Ok(job);
+    }
+    if job.fence != expected_fence {
+        return Err(SchemaDeploymentStoreError::StaleFence);
+    }
+    if receipt.passed {
+        if job.status != SchemaMigrationStatus::Validating || !job.scan_complete {
+            return Err(SchemaDeploymentStoreError::InvalidLifecycleTransition);
+        }
+    } else if !matches!(
+        job.status,
+        SchemaMigrationStatus::Migrating | SchemaMigrationStatus::Validating
+    ) {
+        return Err(SchemaDeploymentStoreError::InvalidLifecycleTransition);
+    }
+    let source_pattern = format!("%:schema:{}", job.command.source_bundle_digest);
+    let mut version_rows = tx
+        .query(
+            "SELECT COUNT(*) FROM events WHERE tenant = ?1 AND entity_id LIKE ?2",
+            params![tenant, source_pattern],
+        )
+        .await
+        .map_err(backend)?;
+    let current_write_version = version_rows
+        .next()
+        .await
+        .map_err(backend)?
+        .ok_or_else(|| backend("schema write version query returned no row"))?
+        .get::<i64>(0)
+        .map_err(backend)?;
+    if receipt.passed
+        && (u64::try_from(current_write_version).ok() != Some(receipt.caught_up_sequence)
+            || receipt.caught_up_sequence != job.catch_up_sequence)
+    {
+        job.status = SchemaMigrationStatus::Migrating;
+        job.scan_cursor = None;
+        job.scan_complete = false;
+        job.catch_up_sequence = u64::try_from(current_write_version)
+            .map_err(|_| SchemaDeploymentStoreError::MigrationBudgetExhausted)?;
+        job.validation_receipt_id = None;
+        job.committed_sequence = checked_add(job.committed_sequence, "migration sequence")?;
+        write_job(&tx, &job).await?;
+        tx.commit().await.map_err(backend)?;
+        return Err(SchemaDeploymentStoreError::StaleFence);
+    }
+    if prior.is_none() {
+        tx.execute(
+            "INSERT INTO schema_migration_validation_receipts
+             (tenant, job_id, receipt_id, receipt_json) VALUES (?1, ?2, ?3, ?4)",
+            params![tenant, job_id, receipt.id.as_str(), encode(&receipt)?],
+        )
+        .await
+        .map_err(backend)?;
+    }
+    job.status = if receipt.passed {
+        SchemaMigrationStatus::Ready
+    } else {
+        SchemaMigrationStatus::Rejected
+    };
+    job.validation_receipt_id = Some(receipt.id);
+    if !receipt.passed {
+        job.migration_receipt_id = Some(format!("migration-rejected:{job_id}"));
+    }
+    job.committed_sequence = checked_add(job.committed_sequence, "migration sequence")?;
+    write_job(&tx, &job).await?;
+    tx.commit().await.map_err(backend)?;
+    Ok(job)
+}
+
 pub(super) fn validate_create(
     command: &CreateSchemaMigration,
 ) -> Result<(), SchemaDeploymentStoreError> {
