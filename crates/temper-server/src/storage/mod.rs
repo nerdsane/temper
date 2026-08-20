@@ -225,6 +225,14 @@ pub trait DynEventStore: Send + Sync {
         limit: usize,
     ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
 
+    fn scoped_entity_bundle_digests<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        entity_id: &'a str,
+        limit: usize,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
+
     fn scoped_bundle_write_version<'a>(
         &'a self,
         tenant: &'a str,
@@ -546,6 +554,22 @@ where
         ))
     }
 
+    fn scoped_entity_bundle_digests<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        entity_id: &'a str,
+        limit: usize,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>> {
+        Box::pin(EventStore::scoped_entity_bundle_digests(
+            self,
+            tenant,
+            entity_type,
+            entity_id,
+            limit,
+        ))
+    }
+
     fn scoped_bundle_write_version<'a>(
         &'a self,
         tenant: &'a str,
@@ -829,6 +853,19 @@ impl BoxedEventStore {
     ) -> Result<Vec<String>, PersistenceError> {
         self.0
             .list_scoped_entity_ids_page(tenant, entity_type, bundle_digest, after_entity_id, limit)
+            .await
+    }
+
+    /// Return the bounded durable bundle identities for one scoped entity.
+    pub async fn scoped_entity_bundle_digests(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        self.0
+            .scoped_entity_bundle_digests(tenant, entity_type, entity_id, limit)
             .await
     }
 

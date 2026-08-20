@@ -22,7 +22,7 @@ use super::bindings::dispatch_bound_action;
 use super::common::{
     constraint_violation_response, extract_key, extract_schema_pin, extract_tenant,
     load_entity_or_404, resolve_entity_type_for_pin, run_write_prechecks,
-    verification_gate_response,
+    schema_pin_extraction_error_response, schema_pin_mismatch_response, verification_gate_response,
 };
 use super::constraints::pre_delete_relation_checks;
 use super::rate_limit::{enforce_commons_write_rate_limit, owner_id_from_fields};
@@ -246,10 +246,10 @@ async fn authorize_existing_mutation(
                 .get_scoped_entity_state(tenant, entity_type, entity_id, pin.clone())
                 .await
                 .map_err(|error| {
-                    Box::new(
+                    Box::new(schema_pin_mismatch_response(&error).unwrap_or_else(|| {
                         odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &error)
-                            .into_response(),
-                    )
+                            .into_response()
+                    }))
                 })?;
             let mut attrs = response
                 .state
@@ -313,7 +313,7 @@ pub async fn handle_odata_post(
     let mut agent_ctx = extract_agent_context(&headers);
     agent_ctx.schema_pin = match extract_schema_pin(&headers, &state, &tenant).await {
         Ok(pin) => pin,
-        Err(error) => return error.into_response(),
+        Err(error) => return schema_pin_extraction_error_response(error),
     };
     if let Some(remote_parent) = remote_parent_context(&agent_ctx) {
         tracing::Span::current().set_parent(remote_parent);
@@ -656,8 +656,10 @@ pub async fn handle_odata_post(
                     }
                     .into_response()
                 }
-                Err(e) => odata_error(StatusCode::INTERNAL_SERVER_ERROR, "CreateError", &e)
-                    .into_response(),
+                Err(e) => schema_pin_mismatch_response(&e).unwrap_or_else(|| {
+                    odata_error(StatusCode::INTERNAL_SERVER_ERROR, "CreateError", &e)
+                        .into_response()
+                }),
             }
         }
 
@@ -843,7 +845,7 @@ pub async fn handle_odata_patch(
     let mut agent_ctx = extract_agent_context(&headers);
     agent_ctx.schema_pin = match extract_schema_pin(&headers, &state, &tenant).await {
         Ok(pin) => pin,
-        Err(error) => return error.into_response(),
+        Err(error) => return schema_pin_extraction_error_response(error),
     };
     if let Some(ref identity) = resolved_identity {
         agent_ctx.agent_id = Some(identity.agent_instance_id.clone());
@@ -1054,7 +1056,7 @@ pub async fn handle_odata_put(
     let mut agent_ctx = extract_agent_context(&headers);
     agent_ctx.schema_pin = match extract_schema_pin(&headers, &state, &tenant).await {
         Ok(pin) => pin,
-        Err(error) => return error.into_response(),
+        Err(error) => return schema_pin_extraction_error_response(error),
     };
     if let Some(ref identity) = resolved_identity {
         agent_ctx.agent_id = Some(identity.agent_instance_id.clone());
@@ -1255,7 +1257,7 @@ pub async fn handle_odata_delete(
     let mut agent_ctx = extract_agent_context(&headers);
     agent_ctx.schema_pin = match extract_schema_pin(&headers, &state, &tenant).await {
         Ok(pin) => pin,
-        Err(error) => return error.into_response(),
+        Err(error) => return schema_pin_extraction_error_response(error),
     };
     if let Some(ref identity) = resolved_identity {
         agent_ctx.agent_id = Some(identity.agent_instance_id.clone());

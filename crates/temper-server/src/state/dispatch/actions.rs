@@ -191,7 +191,12 @@ impl crate::state::ServerState {
             } else {
                 let guard_source = match agent_ctx.schema_pin.as_ref() {
                     Some(pin) => self
-                        .get_scoped_entity_state(tenant, entity_type, entity_id, pin.clone())
+                        .get_or_initialize_scoped_entity_state(
+                            tenant,
+                            entity_type,
+                            entity_id,
+                            pin.clone(),
+                        )
                         .await
                         .map_err(DispatchError::Internal)?,
                     None => self
@@ -561,6 +566,11 @@ impl crate::state::ServerState {
         current_span.record("intent", agent_ctx.intent.as_deref().unwrap_or(""));
         let observation_metadata = agent_ctx.observation_metadata_json().unwrap_or_default();
         current_span.record("observation_metadata", observation_metadata.as_str());
+        if let Some(pin) = agent_ctx.schema_pin.as_ref() {
+            self.validate_scoped_entity_pin_for_dispatch(tenant, entity_type, entity_id, pin)
+                .await
+                .map_err(DispatchError::Internal)?;
+        }
         let entity_type_governed = if let Some(pin) = agent_ctx.schema_pin.as_ref() {
             self.registry
                 .read()

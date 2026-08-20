@@ -10,7 +10,7 @@ use temper_runtime::persistence::schema_deployment::{
     SchemaMigrationValidationReceipt, SchemaOperationIdentity, SchemaScope, SchemaScopeKind,
     SchemaVerificationReceipt, SubmitSchemaBundle,
 };
-use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope};
+use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
 
 use crate::{PostgresEventStore, migration::run_migrations};
 
@@ -165,6 +165,33 @@ fn postgres_schema_migration_contract() {
                 })
                 .await
                 .expect("activate source"),
+        );
+        let pinned_id = format!("{tenant}:Example.Task:entity-雪:schema:{source_digest}");
+        store
+            .append(
+                &pinned_id,
+                0,
+                &[PersistenceEnvelope {
+                    sequence_nr: 1,
+                    event_type: "Configure".into(),
+                    payload: serde_json::json!({}),
+                    metadata: EventMetadata {
+                        event_id: temper_runtime::scheduler::sim_uuid(),
+                        causation_id: temper_runtime::scheduler::sim_uuid(),
+                        correlation_id: temper_runtime::scheduler::sim_uuid(),
+                        timestamp: temper_runtime::scheduler::sim_now(),
+                        actor_id: "pin-contract".into(),
+                    },
+                }],
+            )
+            .await
+            .expect("append pinned entity event");
+        assert_eq!(
+            store
+                .scoped_entity_bundle_digests(&tenant, "Example.Task", "entity-雪", 2)
+                .await
+                .expect("load pinned entity digest"),
+            vec![source_digest.clone()]
         );
 
         let target_digest = format!("sha256:{}", "3".repeat(64));

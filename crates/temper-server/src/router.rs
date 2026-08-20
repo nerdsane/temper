@@ -134,6 +134,7 @@ pub fn build_router(state: ServerState) -> Router {
             HeaderName::from_static("x-temper-agent-type"),
             HeaderName::from_static("x-temper-schema-scope-kind"),
             HeaderName::from_static("x-temper-schema-scope-id"),
+            HeaderName::from_static("x-temper-schema-bundle-digest"),
             HeaderName::from_static("x-temper-request-id"),
         ]);
 

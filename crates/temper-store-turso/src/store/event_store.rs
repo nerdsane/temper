@@ -963,6 +963,42 @@ impl EventStore for TursoEventStore {
         Ok(out)
     }
 
+    async fn scoped_entity_bundle_digests(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.configured_connection().await?;
+        let prefix = format!("{entity_id}:schema:");
+        let prefix_len = i64::try_from(prefix.chars().count())
+            .map_err(|_| PersistenceError::Storage("scoped entity id is too long".to_string()))?;
+        let limit = limit.min(i64::MAX as usize) as i64;
+        let mut rows = conn
+            .query(
+                "SELECT DISTINCT substr(entity_id, ?4 + 1) AS bundle_digest
+                 FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2
+                   AND substr(entity_id, 1, ?4) = ?3
+                 ORDER BY bundle_digest LIMIT ?5",
+                params![tenant, entity_type, prefix, prefix_len, limit],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            let digest = row.get::<String>(0).map_err(storage_error)?;
+            if temper_runtime::persistence::schema_deployment::is_canonical_sha256_digest(&digest) {
+                out.push(digest);
+            }
+        }
+        Ok(out)
+    }
+
     async fn scoped_bundle_write_version(
         &self,
         tenant: &str,

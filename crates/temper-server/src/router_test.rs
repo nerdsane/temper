@@ -16,6 +16,9 @@ use tower::ServiceExt;
 use crate::events::EntityStateChange;
 use crate::storage::StorageStack;
 
+#[path = "router_test/scoped_schema_pin.rs"]
+mod scoped_schema_pin;
+
 fn test_state() -> ServerState {
     let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
     let csdl = parse_csdl(csdl_xml).unwrap();
@@ -34,11 +37,16 @@ fn test_state_with_ioa() -> ServerState {
 }
 
 fn test_state_with_active_task_schema() -> ServerState {
+    test_state_with_active_task_schema_and_ioa(include_str!(
+        "../../../test-fixtures/specs/order.ioa.toml"
+    ))
+}
+
+fn test_state_with_active_task_schema_and_ioa(order_ioa: &str) -> ServerState {
     let state = test_state_with_ioa();
     let global_csdl = include_str!("../../../test-fixtures/specs/model.csdl.xml");
     let scoped_csdl = global_csdl.replace("Temper.Example", "Temper.ScopedExample");
     let parsed = parse_csdl(&scoped_csdl).expect("scoped CSDL fixture");
-    let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml");
     let scope = SchemaScope {
         kind: SchemaScopeKind::Task,
         id: "task-router".to_string(),
@@ -64,8 +72,23 @@ fn test_state_with_active_task_schema() -> ServerState {
 }
 
 async fn test_state_with_durable_active_task_schema() -> (ServerState, SimEventStore) {
-    let mut state = test_state_with_active_task_schema();
+    test_state_with_durable_active_task_schema_and_ioa(include_str!(
+        "../../../test-fixtures/specs/order.ioa.toml"
+    ))
+    .await
+}
+
+async fn test_state_with_durable_active_task_schema_and_ioa(
+    order_ioa: &str,
+) -> (ServerState, SimEventStore) {
+    let mut state = test_state_with_active_task_schema_and_ioa(order_ioa);
     let store = SimEventStore::no_faults(1_114);
+    persist_active_task_schema(&store, order_ioa).await;
+    state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
+    (state, store)
+}
+
+async fn persist_active_task_schema(store: &impl SchemaDeploymentStore, order_ioa: &str) {
     let scope = SchemaScope {
         kind: SchemaScopeKind::Task,
         id: "task-router".into(),
@@ -73,7 +96,6 @@ async fn test_state_with_durable_active_task_schema() -> (ServerState, SimEventS
     let digest = format!("sha256:{}", "a".repeat(64));
     let scoped_csdl = include_str!("../../../test-fixtures/specs/model.csdl.xml")
         .replace("Temper.Example", "Temper.ScopedExample");
-    let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml");
     store
         .submit_schema_bundle(SubmitSchemaBundle {
             bundle: SchemaBundleRecord {
@@ -149,8 +171,6 @@ async fn test_state_with_durable_active_task_schema() -> (ServerState, SimEventS
         })
         .await
         .unwrap();
-    state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
-    (state, store)
 }
 
 fn test_state_with_order_and_payment_ioa() -> ServerState {
@@ -958,6 +978,57 @@ async fn malformed_or_inactive_task_scope_never_falls_back_to_global_metadata() 
         .await
         .unwrap();
     assert_eq!(invalid_utf8.status(), StatusCode::BAD_REQUEST);
+
+    let digest_without_scope = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata/$metadata")
+                .header(
+                    "x-temper-schema-bundle-digest",
+                    format!("sha256:{}", "a".repeat(64)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(digest_without_scope.status(), StatusCode::BAD_REQUEST);
+
+    let malformed_digest = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata/$metadata")
+                .header("x-temper-schema-scope-kind", "task")
+                .header("x-temper-schema-scope-id", "task-router")
+                .header("x-temper-schema-bundle-digest", "sha256:NOT-CANONICAL")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(malformed_digest.status(), StatusCode::BAD_REQUEST);
+
+    let missing_digest = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata/$metadata")
+                .header("x-temper-schema-scope-kind", "task")
+                .header("x-temper-schema-scope-id", "task-router")
+                .header(
+                    "x-temper-schema-bundle-digest",
+                    format!("sha256:{}", "b".repeat(64)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_digest.status(), StatusCode::CONFLICT);
+    let missing_body = axum::body::to_bytes(missing_digest.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let missing_json: serde_json::Value = serde_json::from_slice(&missing_body).unwrap();
+    assert_eq!(missing_json["error"]["code"], "SchemaPinMismatch");
 
     let inactive = app
         .oneshot(

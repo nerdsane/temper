@@ -1,6 +1,6 @@
 //! Entity lifecycle methods for ServerState (spawn, query, delete, index).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 
@@ -19,6 +19,24 @@ use crate::events::EntityStateChange;
 use crate::registry::{VerificationDetail, VerificationStatus};
 use crate::runtime_metrics;
 use crate::storage::DataOnlyCreateRecord;
+
+pub(crate) const SCHEMA_PIN_MISMATCH_PREFIX: &str = "SchemaPinMismatch:";
+
+fn authoritative_scoped_digest(
+    digests: &BTreeSet<String>,
+    active_digest: Option<&str>,
+) -> Result<Option<String>, &'static str> {
+    match digests.len() {
+        0 => Ok(None),
+        1 => Ok(digests.iter().next().cloned()),
+        2 => active_digest
+            .filter(|digest| digests.contains(*digest))
+            .map(str::to_string)
+            .map(Some)
+            .ok_or("durable pins do not agree with the committed cutover pointer"),
+        _ => Err("more than two durable pins exist"),
+    }
+}
 
 fn actor_idle_timeout_secs() -> i64 {
     static ACTOR_IDLE_TIMEOUT: OnceLock<i64> = OnceLock::new();
@@ -1158,6 +1176,68 @@ impl ServerState {
         entity_id: &str,
         schema_pin: SchemaExecutionPin,
     ) -> Result<EntityResponse, String> {
+        let pin_exists = self
+            .scoped_entity_pin_matches(tenant, entity_type, entity_id, &schema_pin)
+            .await?;
+        if !pin_exists {
+            return Err(format!(
+                "{SCHEMA_PIN_MISMATCH_PREFIX} scoped entity '{entity_type}/{entity_id}' has no durable pin for {}",
+                schema_pin.bundle_digest
+            ));
+        }
+        self.query_scoped_entity_state(tenant, entity_type, entity_id, schema_pin)
+            .await
+    }
+
+    /// Read a scoped entity for dispatch, initializing it only at the active pin.
+    pub(crate) async fn get_or_initialize_scoped_entity_state(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: SchemaExecutionPin,
+    ) -> Result<EntityResponse, String> {
+        self.validate_scoped_entity_pin_for_dispatch(tenant, entity_type, entity_id, &schema_pin)
+            .await?;
+        self.query_scoped_entity_state(tenant, entity_type, entity_id, schema_pin)
+            .await
+    }
+
+    /// Validate the durable identity before any scoped dispatch selects a table or actor.
+    pub(crate) async fn validate_scoped_entity_pin_for_dispatch(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: &SchemaExecutionPin,
+    ) -> Result<(), String> {
+        let pin_exists = self
+            .scoped_entity_pin_matches(tenant, entity_type, entity_id, schema_pin)
+            .await?;
+        if !pin_exists {
+            let pin_is_active = self
+                .registry
+                .read()
+                .map_err(|_| "registry lock poisoned".to_string())?
+                .active_scope_digest(tenant, &schema_pin.scope)
+                == Some(schema_pin.bundle_digest.as_str());
+            if !pin_is_active {
+                return Err(format!(
+                    "{SCHEMA_PIN_MISMATCH_PREFIX} scoped entity '{entity_type}/{entity_id}' has no durable pin for {}",
+                    schema_pin.bundle_digest
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn query_scoped_entity_state(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: SchemaExecutionPin,
+    ) -> Result<EntityResponse, String> {
         let actor_ref = self
             .get_or_spawn_scoped_actor_with_fields(
                 tenant,
@@ -1176,6 +1256,82 @@ impl ServerState {
             .await
             .result
             .map_err(|error| format!("Scoped actor query failed: {error}"))
+    }
+
+    /// Read an exact migration shadow journal without granting it dispatch authority.
+    pub(crate) async fn get_scoped_migration_shadow_state(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: SchemaExecutionPin,
+    ) -> Result<EntityResponse, String> {
+        self.query_scoped_entity_state(tenant, entity_type, entity_id, schema_pin)
+            .await
+    }
+
+    async fn scoped_entity_pin_matches(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        requested_pin: &SchemaExecutionPin,
+    ) -> Result<bool, String> {
+        let prefix = format!("{tenant}:{entity_type}:{entity_id}:schema:");
+        let mut digests = self
+            .actor_registry
+            .read()
+            .map_err(|_| "actor registry lock poisoned".to_string())?
+            .keys()
+            .filter_map(|key| key.strip_prefix(&prefix))
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        if let Some((store, _)) = self.event_journal() {
+            digests.extend(
+                store
+                    .scoped_entity_bundle_digests(tenant.as_str(), entity_type, entity_id, 3)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+        let active_digest = if digests.len() == 2 {
+            Some(
+                self
+                .schema_deployment_store()
+                .ok_or_else(|| {
+                    format!(
+                        "{SCHEMA_PIN_MISMATCH_PREFIX} scoped entity '{entity_type}/{entity_id}' has ambiguous durable pins and no cutover authority"
+                    )
+                })?
+                .active_schema_pointer(tenant.as_str(), &requested_pin.scope)
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| {
+                    format!(
+                        "{SCHEMA_PIN_MISMATCH_PREFIX} scoped entity '{entity_type}/{entity_id}' has ambiguous durable pins and no active cutover pointer"
+                    )
+                })?
+                .bundle_digest,
+            )
+        } else {
+            None
+        };
+        let authoritative_digest = authoritative_scoped_digest(&digests, active_digest.as_deref())
+            .map_err(|reason| {
+                format!(
+                    "{SCHEMA_PIN_MISMATCH_PREFIX} scoped entity '{entity_type}/{entity_id}' {reason}"
+                )
+            })?;
+        let Some(authoritative_digest) = authoritative_digest else {
+            return Ok(false);
+        };
+        if authoritative_digest == requested_pin.bundle_digest {
+            return Ok(true);
+        }
+        Err(format!(
+            "{SCHEMA_PIN_MISMATCH_PREFIX} scoped entity '{entity_type}/{entity_id}' is pinned to {authoritative_digest}, not {}",
+            requested_pin.bundle_digest
+        ))
     }
 
     /// Enumerate exact-digest entity IDs within a caller-supplied work budget.
@@ -1264,15 +1420,24 @@ impl ServerState {
     ) -> Result<EntityResponse, String> {
         let creating = match schema_pin.as_ref() {
             Some(pin) => {
-                let key = format!(
-                    "{tenant}:{entity_type}:{entity_id}:schema:{}",
-                    pin.bundle_digest
-                );
-                !self
-                    .actor_registry
-                    .read()
-                    .map(|registry| registry.contains_key(&key))
-                    .unwrap_or(false)
+                let exists = self
+                    .scoped_entity_pin_matches(tenant, entity_type, entity_id, pin)
+                    .await?;
+                if !exists {
+                    let active_digest = self
+                        .registry
+                        .read()
+                        .map_err(|_| "registry lock poisoned".to_string())?
+                        .active_scope_digest(tenant, &pin.scope)
+                        .map(str::to_string);
+                    if active_digest.as_deref() != Some(pin.bundle_digest.as_str()) {
+                        return Err(format!(
+                            "{SCHEMA_PIN_MISMATCH_PREFIX} bundle {} is not active for new entity '{entity_type}/{entity_id}'",
+                            pin.bundle_digest
+                        ));
+                    }
+                }
+                !exists
             }
             None => {
                 !self
@@ -2348,3 +2513,37 @@ impl ServerState {
 
 use temper_authz::{AuthzDecision, AuthzDenial, SecurityContext};
 use temper_runtime::actor::ActorRef;
+
+#[cfg(test)]
+mod schema_pin_authority_tests {
+    use super::*;
+
+    #[test]
+    fn committed_pointer_selects_one_side_of_shadow_cutover() {
+        let source = format!("sha256:{}", "a".repeat(64));
+        let target = format!("sha256:{}", "b".repeat(64));
+        let digests = BTreeSet::from([source.clone(), target.clone()]);
+
+        assert_eq!(
+            authoritative_scoped_digest(&digests, Some(&source)),
+            Ok(Some(source))
+        );
+        assert_eq!(
+            authoritative_scoped_digest(&digests, Some(&target)),
+            Ok(Some(target))
+        );
+        assert!(authoritative_scoped_digest(&digests, None).is_err());
+    }
+
+    #[test]
+    fn single_durable_pin_is_not_reinterpreted_by_pointer_change() {
+        let source = format!("sha256:{}", "a".repeat(64));
+        let replacement = format!("sha256:{}", "b".repeat(64));
+        let digests = BTreeSet::from([source.clone()]);
+
+        assert_eq!(
+            authoritative_scoped_digest(&digests, Some(&replacement)),
+            Ok(Some(source))
+        );
+    }
+}

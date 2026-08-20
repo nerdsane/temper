@@ -6,6 +6,7 @@ pub(crate) mod app_uniqueness;
 pub mod custom_effects;
 mod dispatch;
 mod entity_ops;
+pub(crate) use entity_ops::SCHEMA_PIN_MISMATCH_PREFIX;
 mod evolution;
 mod file_initial_writes;
 mod file_read_blobs;
@@ -71,7 +72,7 @@ use crate::registry::SpecRegistry;
 use crate::secrets::vault::SecretsVault;
 use crate::storage::{
     BackendLabel, BoxedEventStore, DataOnlyCreateStore, MetadataStore, PolicyStore,
-    QueryPlaneStore, StorageStack, TrajectorySink,
+    QueryPlaneStore, SchemaDeploymentStoreDyn, StorageStack, TrajectorySink,
 };
 use crate::trigger::ReactionDispatcher;
 use crate::wasm_registry::WasmModuleRegistry;
@@ -735,6 +736,13 @@ impl ServerState {
         self.storage_stack
             .as_ref()
             .map(|stack| (stack.events.clone(), stack.backend))
+    }
+
+    /// Return the durable schema-deployment capability when configured.
+    pub(crate) fn schema_deployment_store(&self) -> Option<Arc<dyn SchemaDeploymentStoreDyn>> {
+        self.storage_stack
+            .as_ref()
+            .and_then(|stack| stack.schema_deployments.clone())
     }
 
     /// Return the granular Cedar policy persistence capability.

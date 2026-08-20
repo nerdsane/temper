@@ -1199,6 +1199,39 @@ impl EventStore for SimEventStore {
             .collect())
     }
 
+    async fn scoped_entity_bundle_digests(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let prefix = format!("{entity_id}:schema:");
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        Ok(inner
+            .journals
+            .keys()
+            .filter_map(|persistence_id| {
+                parse_persistence_id_parts(persistence_id)
+                    .ok()
+                    .filter(|(found_tenant, found_type, _)| {
+                        *found_tenant == tenant && *found_type == entity_type
+                    })
+                    .and_then(|(_, _, journal_entity_id)| journal_entity_id.strip_prefix(&prefix))
+                    .filter(|digest| {
+                        temper_runtime::persistence::schema_deployment::is_canonical_sha256_digest(
+                            digest,
+                        )
+                    })
+            })
+            .take(limit)
+            .map(str::to_string)
+            .collect())
+    }
+
     async fn scoped_bundle_write_version(
         &self,
         tenant: &str,

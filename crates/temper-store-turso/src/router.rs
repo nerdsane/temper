@@ -792,6 +792,19 @@ impl EventStore for TenantStoreRouter {
             .await
     }
 
+    async fn scoped_entity_bundle_digests(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .scoped_entity_bundle_digests(tenant, entity_type, entity_id, limit)
+            .await
+    }
+
     async fn scoped_bundle_write_version(
         &self,
         tenant: &str,

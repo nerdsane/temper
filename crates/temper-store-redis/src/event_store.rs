@@ -653,6 +653,47 @@ impl EventStore for RedisEventStore {
             .map(|member| Self::parse_journal_member(&member))
             .collect()
     }
+
+    async fn scoped_entity_bundle_digests(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let key = Self::tenant_journals_key(tenant);
+        let type_prefix = encode_lex_component(entity_type);
+        let entity_prefix = encode_lex_component(&format!("{entity_id}:schema:"));
+        let member_prefix = format!("{type_prefix}!{entity_prefix}");
+        let count = limit.min(i64::MAX as usize) as i64;
+        let members: Vec<String> = self
+            .client
+            .zrangebylex(
+                &key,
+                format!("[{member_prefix}"),
+                format!("[{member_prefix}~"),
+                Some((0, count)),
+            )
+            .await
+            .map_err(storage_error)?;
+        members
+            .into_iter()
+            .map(|member| {
+                let (_, scoped_id) = Self::parse_journal_member(&member)?;
+                scoped_id
+                    .strip_prefix(&format!("{entity_id}:schema:"))
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        PersistenceError::Serialization(
+                            "invalid Redis scoped journal index member".to_string(),
+                        )
+                    })
+            })
+            .collect()
+    }
 }
 
 fn encode_lex_component(value: &str) -> String {
@@ -763,6 +804,44 @@ mod tests {
         assert_eq!(partial.len(), 1);
         assert_eq!(partial[0].sequence_nr, 2);
         assert_eq!(partial[0].event_type, "OrderApproved");
+    }
+
+    #[tokio::test]
+    async fn scoped_entity_bundle_digest_lookup_is_exact_and_bounded() {
+        let Some(store) = make_store().await else {
+            eprintln!("REDIS_URL not set, skipping test");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let tenant = format!("schema-pin-{suffix}");
+        let entity_id = format!("order-{suffix}");
+        let first = format!("sha256:{}", "a".repeat(64));
+        let second = format!("sha256:{}", "b".repeat(64));
+        for digest in [&first, &second] {
+            let persistence_id = format!("{tenant}:Order:{entity_id}:schema:{digest}");
+            store
+                .append(
+                    &persistence_id,
+                    0,
+                    &[test_envelope("OrderCreated", serde_json::json!({}))],
+                )
+                .await
+                .expect("append scoped event");
+        }
+        assert_eq!(
+            store
+                .scoped_entity_bundle_digests(&tenant, "Order", &entity_id, 1)
+                .await
+                .expect("lookup scoped pin"),
+            vec![first.clone()]
+        );
+        assert_eq!(
+            store
+                .scoped_entity_bundle_digests(&tenant, "Order", &entity_id, 2)
+                .await
+                .expect("lookup scoped pins"),
+            vec![first, second]
+        );
     }
 
     #[tokio::test]

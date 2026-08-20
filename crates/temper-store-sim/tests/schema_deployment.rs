@@ -365,6 +365,33 @@ async fn activation_compares_receipt_predecessor_and_fence_atomically() {
             .unwrap(),
         Some(pointer.clone())
     );
+    let pinned_id = format!("tenant-a:Task:entity-1:schema:{digest}");
+    store
+        .append(
+            &pinned_id,
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 1,
+                event_type: "Configure".into(),
+                payload: serde_json::json!({}),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: "pin-contract".into(),
+                },
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .scoped_entity_bundle_digests("tenant-a", "Task", "entity-1", 2)
+            .await
+            .unwrap(),
+        vec![digest.clone()]
+    );
     assert_eq!(
         store
             .retire_schema_bundle(retire_command("retire-stale", &digest, pointer.fence - 1))

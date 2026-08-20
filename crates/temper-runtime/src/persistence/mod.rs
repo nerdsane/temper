@@ -579,6 +579,26 @@ pub trait EventStore: Send + Sync + 'static {
         }
     }
 
+    /// Return the immutable bundle digests that have a durable journal for one
+    /// scoped entity identity.
+    ///
+    /// Implementations must apply `limit` in the backing store. Callers use a
+    /// budget of three so a valid two-sided cutover can be distinguished from
+    /// an invalid third durable identity.
+    fn scoped_entity_bundle_digests(
+        &self,
+        _tenant: &str,
+        _entity_type: &str,
+        _entity_id: &str,
+        _limit: usize,
+    ) -> impl std::future::Future<Output = Result<Vec<String>, PersistenceError>> + Send {
+        async {
+            Err(PersistenceError::Storage(
+                "scoped entity pin lookup is unsupported by this event store".to_string(),
+            ))
+        }
+    }
+
     /// Return the monotonic number of committed events for one bundle digest.
     ///
     /// Migration uses this as a bounded catch-up fence: a complete keyset pass

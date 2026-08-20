@@ -13,6 +13,7 @@ use temper_authz::SecurityContext;
 
 use super::account_verification::enforce_commons_account_verified_for_action;
 use super::common::run_write_prechecks;
+use super::common::schema_pin_mismatch_response;
 use super::rate_limit::{enforce_commons_write_rate_limit, owner_id_from_action};
 use super::response::annotate_entity;
 use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
@@ -130,6 +131,13 @@ pub(super) async fn dispatch_bound_action(
     let is_governed = match is_governed {
         Ok(value) => value,
         Err(e) => {
+            if let Some(response) = schema_pin_mismatch_response(&e) {
+                http_span.set_status(Status::error("SchemaPinMismatch"));
+                http_span.set_attribute(OtelKeyValue::new("http.status_code", 409i64));
+                let end_time: std::time::SystemTime = sim_now().into();
+                http_span.end_with_timestamp(end_time);
+                return response;
+            }
             http_span.set_status(Status::error(e.clone()));
             http_span.set_attribute(OtelKeyValue::new("http.status_code", 500i64));
             let end_time: std::time::SystemTime = sim_now().into();
@@ -180,6 +188,13 @@ pub(super) async fn dispatch_bound_action(
     let authz_snapshot = match authz_snapshot {
         Ok(value) => value,
         Err(e) => {
+            if let Some(response) = schema_pin_mismatch_response(&e) {
+                http_span.set_status(Status::error("SchemaPinMismatch"));
+                http_span.set_attribute(OtelKeyValue::new("http.status_code", 409i64));
+                let end_time: std::time::SystemTime = sim_now().into();
+                http_span.end_with_timestamp(end_time);
+                return response;
+            }
             http_span.set_status(Status::error(e.clone()));
             http_span.set_attribute(OtelKeyValue::new("http.status_code", 500i64));
             let end_time: std::time::SystemTime = sim_now().into();

@@ -19,7 +19,8 @@ use tracing::instrument;
 use super::authz::{READ_ACTION, authorize_read, request_security_context};
 use super::common::{
     check_has_stream_or_400, extract_key, extract_schema_pin, extract_tenant, has_expand_options,
-    resolve_entity_type, resolve_entity_type_for_pin, resolve_value_parent, tenant_csdl_xml,
+    resolve_entity_type, resolve_entity_type_for_pin, resolve_value_parent,
+    schema_pin_extraction_error_response, schema_pin_mismatch_response, tenant_csdl_xml,
     tenant_csdl_xml_for_pin, tenant_entity_sets_for_pin,
 };
 use super::filter_sql;
@@ -366,7 +367,10 @@ async fn load_authorized_entity_body_for_pin(
     let response = state
         .get_scoped_entity_state(tenant, entity_type, key, pin.clone())
         .await
-        .map_err(|_| resource_not_found_response(set_name, key))?;
+        .map_err(|error| {
+            schema_pin_mismatch_response(&error)
+                .unwrap_or_else(|| resource_not_found_response(set_name, key))
+        })?;
     let mut body = serde_json::to_value(&response.state).unwrap_or_default();
     authorize_read(
         state,
@@ -925,6 +929,9 @@ async fn handle_scoped_entity(
     {
         Ok(response) => response,
         Err(error) => {
+            if let Some(response) = schema_pin_mismatch_response(&error) {
+                return response;
+            }
             return odata_error(StatusCode::NOT_FOUND, "ResourceNotFound", &error).into_response();
         }
     };
@@ -1013,11 +1020,22 @@ async fn handle_scoped_entity_set(
     };
     let mut entities = Vec::new();
     for (_, id) in ids {
-        let Ok(response) = state
+        let response = match state
             .get_scoped_entity_state(tenant, &entity_type, &id, schema_pin.clone())
             .await
-        else {
-            continue;
+        {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some(response) = schema_pin_mismatch_response(&error) {
+                    return response;
+                }
+                return odata_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "ScopedReadFailed",
+                    &error,
+                )
+                .into_response();
+            }
         };
         let mut body = serde_json::to_value(&response.state).unwrap_or_default();
         if authorize_read(
@@ -1607,7 +1625,7 @@ pub async fn handle_odata_get(
     };
     let schema_pin = match extract_schema_pin(&headers, &state, &tenant).await {
         Ok(pin) => pin,
-        Err(error) => return error.into_response(),
+        Err(error) => return schema_pin_extraction_error_response(error),
     };
     let agent_ctx = extract_agent_context(&headers);
     let resolved_identity = resolved_id.map(|Extension(identity)| identity);
@@ -1626,7 +1644,7 @@ pub async fn handle_service_document(
     };
     let schema_pin = match extract_schema_pin(&headers, &state, &tenant).await {
         Ok(pin) => pin,
-        Err(error) => return error.into_response(),
+        Err(error) => return schema_pin_extraction_error_response(error),
     };
     ODataResponse {
         status: StatusCode::OK,
@@ -1647,7 +1665,7 @@ pub async fn handle_metadata(
     };
     let schema_pin = match extract_schema_pin(&headers, &state, &tenant).await {
         Ok(pin) => pin,
-        Err(error) => return error.into_response(),
+        Err(error) => return schema_pin_extraction_error_response(error),
     };
     let Some(body) = tenant_csdl_xml_for_pin(&state, &tenant, schema_pin.as_ref()) else {
         return (StatusCode::CONFLICT, "Scoped schema bundle not found").into_response();

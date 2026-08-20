@@ -1257,6 +1257,36 @@ impl EventStore for PostgresEventStore {
         .map_err(|error| PersistenceError::Storage(error.to_string()))
     }
 
+    async fn scoped_entity_bundle_digests(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let prefix = format!("{entity_id}:schema:");
+        let prefix_len = i32::try_from(prefix.chars().count())
+            .map_err(|_| PersistenceError::Storage("scoped entity id is too long".to_string()))?;
+        let limit = limit.min(i64::MAX as usize) as i64;
+        crate::dbm::postgres_query_scalar!(
+            "SELECT DISTINCT substring(entity_id FROM $4 + 1) AS bundle_digest \
+             FROM events \
+             WHERE tenant = $1 AND entity_type = $2 AND left(entity_id, $4) = $3 \
+             ORDER BY bundle_digest LIMIT $5",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(prefix)
+        .bind(prefix_len)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| PersistenceError::Storage(error.to_string()))
+    }
+
     async fn scoped_bundle_write_version(
         &self,
         tenant: &str,
