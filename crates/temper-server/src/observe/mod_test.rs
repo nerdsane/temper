@@ -1232,6 +1232,99 @@ async fn test_tenant_decision_mutations_require_manage_policies() {
 }
 
 #[tokio::test]
+async fn denied_principal_cannot_approve_or_deny_even_with_manage_policies() {
+    let state = test_state_with_turso().await;
+    state
+        .authz
+        .reload_tenant_policies(
+            "default",
+            r#"
+permit(
+  principal is Agent,
+  action == Action::"manage_policies",
+  resource is PolicySet
+);
+permit(
+  principal is Admin,
+  action == Action::"manage_policies",
+  resource is PolicySet
+);
+"#,
+        )
+        .expect("manage_policies policy should parse");
+
+    let pending = crate::state::PendingDecision::from_denial(
+        "default",
+        "agent-1",
+        "Assign",
+        "Issue",
+        "issue-1",
+        serde_json::json!({"id":"issue-1"}),
+        "test denial",
+        None,
+    );
+    let decision_id = pending.id.clone();
+    state
+        .persist_pending_decision(&pending)
+        .await
+        .expect("persist pending decision");
+
+    let app = build_app_with_state(state.clone());
+    let approve_body = r#"{"scope":{"principal":"this_agent","action":"this_action","resource":"this_resource","duration":"always"}}"#;
+
+    let self_approve = app
+        .clone()
+        .oneshot(agent_request(
+            Request::post(format!(
+                "/api/tenants/default/decisions/{decision_id}/approve"
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(approve_body))
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        self_approve.status(),
+        StatusCode::FORBIDDEN,
+        "denied agent must not approve their own decision"
+    );
+
+    let self_deny = app
+        .clone()
+        .oneshot(agent_request(
+            Request::post(format!("/api/tenants/default/decisions/{decision_id}/deny"))
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        self_deny.status(),
+        StatusCode::FORBIDDEN,
+        "denied agent must not deny their own decision"
+    );
+
+    let operator_approve = app
+        .oneshot(admin_request(
+            Request::post(format!(
+                "/api/tenants/default/decisions/{decision_id}/approve"
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(approve_body))
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        operator_approve.status(),
+        StatusCode::OK,
+        "a different principal with manage_policies must still approve"
+    );
+}
+
+#[tokio::test]
 async fn test_approve_decision_reload_failure_keeps_pending_and_policies_unchanged() {
     let state = test_state_with_turso().await;
     install_admin_policy(&state);

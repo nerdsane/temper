@@ -12,6 +12,7 @@ pub mod deploy;
 pub mod genesis_install;
 pub mod hooks;
 pub mod integration;
+mod operator_manage_policies;
 pub mod optimization;
 pub mod os_apps;
 pub mod protocol;

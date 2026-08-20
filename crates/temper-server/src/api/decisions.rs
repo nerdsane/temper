@@ -139,6 +139,10 @@ pub(crate) async fn handle_approve_decision(
             .into_response();
     }
 
+    if let Some(resp) = decisions_access::reject_self_resolution(&decided_by, &decision) {
+        return resp;
+    }
+
     let generated_policy = decision.generate_policy_from_matrix(&scope);
     let evolution_record_id = decision.evolution_record_id.clone();
     let pending_decision_json = match serde_json::to_string(&decision) {
@@ -347,7 +351,7 @@ pub(crate) async fn handle_deny_decision(
     _body: Option<axum::Json<serde_json::Value>>,
 ) -> impl IntoResponse {
     let tenant = auth.tenant().as_str().to_string();
-    let decided_by = Some(auth.security_context().principal.id.clone());
+    let principal_id = auth.security_context().principal.id.clone();
 
     // Read decision from the durable metadata backend.
     let mut decision: PendingDecision = {
@@ -391,8 +395,12 @@ pub(crate) async fn handle_deny_decision(
             .into_response();
     }
 
+    if let Some(resp) = decisions_access::reject_self_resolution(&principal_id, &decision) {
+        return resp;
+    }
+
     decision.status = DecisionStatus::Denied;
-    decision.decided_by = decided_by;
+    decision.decided_by = Some(principal_id);
     decision.decided_at = Some(sim_now().to_rfc3339());
     let denied_decision = decision.clone();
 
