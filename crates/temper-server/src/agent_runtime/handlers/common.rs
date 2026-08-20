@@ -10,6 +10,10 @@ use temper_runtime::tenant::TenantId;
 
 use crate::agent_runtime::models::ErrorResponse;
 use crate::request_context::AgentContext;
+use crate::state::ServerState;
+
+/// Entity type served by the app-installed agent runtime façade.
+pub(super) const AGENT_ENTITY_TYPE: &str = "TemperAgent";
 
 /// Require typed authenticated authority resolved by the platform bearer edge.
 ///
@@ -25,6 +29,28 @@ pub(super) fn require_auth(
         None => Err(Box::new(error_response(
             StatusCode::UNAUTHORIZED,
             "a valid tenant credential is required (Authorization: Bearer <token>)",
+        ))),
+    }
+}
+
+/// Require the agent-runtime app contract to be installed for this tenant.
+///
+/// The `/v1/agent-runs` surface is an app façade over `TemperAgent`, not a
+/// provider-neutral kernel primitive. Keep requests fail-closed unless the
+/// app's governed IOA spec is registered for the caller's tenant.
+pub(super) fn require_agent_app_contract(
+    state: &ServerState,
+    tenant: &TenantId,
+) -> Result<(), Box<Response>> {
+    match state.has_registered_spec(tenant, AGENT_ENTITY_TYPE) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(Box::new(error_response(
+            StatusCode::NOT_FOUND,
+            "agent runtime app contract is not installed for this tenant",
+        ))),
+        Err(error) => Err(Box::new(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &error,
         ))),
     }
 }

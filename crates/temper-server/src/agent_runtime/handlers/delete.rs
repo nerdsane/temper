@@ -12,7 +12,10 @@ use temper_runtime::tenant::TenantId;
 use crate::agent_runtime::models::DeleteRunResponse;
 use crate::state::ServerState;
 
-use super::common::{caller_agent_context, error_response, require_auth};
+use super::common::{
+    AGENT_ENTITY_TYPE, caller_agent_context, error_response, require_agent_app_contract,
+    require_auth,
+};
 
 /// Delete a terminal agent run after its sandbox teardown succeeds.
 ///
@@ -38,9 +41,12 @@ pub(super) async fn delete_run(
         Ok(t) => t,
         Err(r) => return *r,
     };
+    if let Err(response) = require_agent_app_contract(&state, &tenant) {
+        return *response;
+    }
 
     let entity_state = match state
-        .get_tenant_entity_state(&tenant, "TemperAgent", &id)
+        .get_tenant_entity_state(&tenant, AGENT_ENTITY_TYPE, &id)
         .await
     {
         Ok(resp) => resp,
@@ -72,7 +78,14 @@ pub(super) async fn delete_run(
 
     let agent_ctx = caller_agent_context(&authenticated);
     let result = state
-        .dispatch_tenant_action(&tenant, "TemperAgent", &id, action, json!({}), &agent_ctx)
+        .dispatch_tenant_action(
+            &tenant,
+            AGENT_ENTITY_TYPE,
+            &id,
+            action,
+            json!({}),
+            &agent_ctx,
+        )
         .await;
 
     match result {
@@ -99,7 +112,7 @@ async fn authorize_deleted_delete(
     authenticated: &AuthenticatedRequestContext,
 ) -> Response {
     let resource_attrs = match state
-        .build_authz_resource_attrs(tenant, "TemperAgent", run_id, status, fields)
+        .build_authz_resource_attrs(tenant, AGENT_ENTITY_TYPE, run_id, status, fields)
         .await
     {
         Ok(attrs) => attrs,
@@ -108,7 +121,7 @@ async fn authorize_deleted_delete(
     match state.authorize_with_context(
         authenticated.security_context(),
         "RequestDeletion",
-        "TemperAgent",
+        AGENT_ENTITY_TYPE,
         &resource_attrs,
         tenant.as_str(),
     ) {
@@ -142,7 +155,7 @@ async fn deletion_race_response(
     }
 
     match state
-        .get_tenant_entity_state(tenant, "TemperAgent", run_id)
+        .get_tenant_entity_state(tenant, AGENT_ENTITY_TYPE, run_id)
         .await
     {
         Ok(current) => match current.state.status.as_str() {

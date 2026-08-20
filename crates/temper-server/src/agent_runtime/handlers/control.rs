@@ -11,7 +11,10 @@ use temper_authz::AuthenticatedRequestContext;
 use crate::agent_runtime::models::{CancelResponse, SteerRequest};
 use crate::state::ServerState;
 
-use super::common::{caller_agent_context, error_response, require_auth};
+use super::common::{
+    AGENT_ENTITY_TYPE, caller_agent_context, error_response, require_agent_app_contract,
+    require_auth,
+};
 
 /// Steer an active agent run by queuing a steering message.
 #[tracing::instrument(
@@ -31,13 +34,16 @@ pub(super) async fn steer_run(
         Ok(t) => t,
         Err(r) => return *r,
     };
+    if let Err(response) = require_agent_app_contract(&state, &tenant) {
+        return *response;
+    }
     let agent_ctx = caller_agent_context(&authenticated);
     let steering_messages = json!([req.message]);
 
     let result = state
         .dispatch_tenant_action(
             &tenant,
-            "TemperAgent",
+            AGENT_ENTITY_TYPE,
             &id,
             "Steer",
             json!({ "steering_messages": steering_messages }),
@@ -77,10 +83,20 @@ pub(super) async fn cancel_run(
         Ok(t) => t,
         Err(r) => return *r,
     };
+    if let Err(response) = require_agent_app_contract(&state, &tenant) {
+        return *response;
+    }
     let agent_ctx = caller_agent_context(&authenticated);
 
     let result = state
-        .dispatch_tenant_action(&tenant, "TemperAgent", &id, "Cancel", json!({}), &agent_ctx)
+        .dispatch_tenant_action(
+            &tenant,
+            AGENT_ENTITY_TYPE,
+            &id,
+            "Cancel",
+            json!({}),
+            &agent_ctx,
+        )
         .await;
 
     match result {

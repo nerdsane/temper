@@ -12,7 +12,10 @@ use temper_runtime::scheduler::sim_uuid;
 use crate::agent_runtime::models::{CreateRunRequest, CreateRunResponse};
 use crate::state::ServerState;
 
-use super::common::{caller_agent_context, error_response, require_auth};
+use super::common::{
+    AGENT_ENTITY_TYPE, caller_agent_context, error_response, require_agent_app_contract,
+    require_auth,
+};
 
 /// Create a new agent run: create entity → configure → provision.
 #[tracing::instrument(
@@ -33,6 +36,9 @@ pub(super) async fn create_run(
         Ok(t) => t,
         Err(r) => return *r,
     };
+    if let Err(response) = require_agent_app_contract(&state, &tenant) {
+        return *response;
+    }
     let run_id = format!("run_{}", sim_uuid().simple());
 
     tracing::Span::current().record("agent.run_id", &run_id);
@@ -73,7 +79,7 @@ pub(super) async fn create_run(
     let configure_result = state
         .dispatch_tenant_action(
             &tenant,
-            "TemperAgent",
+            AGENT_ENTITY_TYPE,
             &run_id,
             "Configure",
             configure_params,
@@ -95,7 +101,7 @@ pub(super) async fn create_run(
     let provision_result = state
         .dispatch_tenant_action(
             &tenant,
-            "TemperAgent",
+            AGENT_ENTITY_TYPE,
             &run_id,
             "Provision",
             json!({}),
@@ -115,7 +121,7 @@ pub(super) async fn create_run(
     }
 
     let entity_state = state
-        .get_tenant_entity_state(&tenant, "TemperAgent", &run_id)
+        .get_tenant_entity_state(&tenant, AGENT_ENTITY_TYPE, &run_id)
         .await;
 
     let status = entity_state
