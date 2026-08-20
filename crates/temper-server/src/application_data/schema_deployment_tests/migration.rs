@@ -1,3 +1,6 @@
+#[cfg(test)]
+const _: () = ();
+
 use super::*;
 use temper_wasm_sdk::schema_deployment::GetSchemaMigrationRequestV1;
 
