@@ -440,8 +440,10 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
     }
 
     let default_cache = load_verified_cache(state, "default").await;
+    // Phase 2 may already have user specs on `default`; merge the built-in
+    // agent OS entities so we do not replace the entity-set map.
     let default_hashes =
-        temper_platform::bootstrap_agent_specs(state, "default", false, &default_cache);
+        temper_platform::bootstrap_agent_specs(state, "default", true, &default_cache);
     if let Some(turso) = state.server.turso_store_for_tenant("default").await {
         temper_platform::persist_agent_verification(
             &turso,
@@ -627,7 +629,7 @@ mod tests {
     use temper_spec::csdl::parse_csdl;
     use temper_store_turso::TursoEventStore;
 
-    use super::bootstrap_installed_apps;
+    use super::{bootstrap_installed_apps, bootstrap_tenants};
 
     #[tokio::test]
     async fn bootstrap_installed_apps_replays_persisted_app_when_registry_specs_are_stale() {
@@ -680,5 +682,65 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_tenants_merges_agent_specs_onto_existing_default_app() {
+        let state = PlatformState::new(None);
+        let tenant = TenantId::new("default");
+        let custom_csdl = r#"<?xml version="1.0" encoding="UTF-8"?>
+<edmx:Edmx Version="4.0"
+  xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Example"
+      xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Widget">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="ExampleService">
+        <EntitySet Name="Widgets" EntityType="Temper.Example.Widget"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+        let custom_ioa = r#"
+[automaton]
+name = "Widget"
+states = ["Created"]
+initial = "Created"
+"#;
+
+        {
+            let mut registry = state.registry.write().unwrap();
+            registry.register_tenant(
+                tenant.clone(),
+                parse_csdl(custom_csdl).unwrap(),
+                custom_csdl.to_string(),
+                &[("Widget", custom_ioa)],
+            );
+        }
+
+        bootstrap_tenants(&state, &[]).await;
+
+        let registry = state.registry.read().unwrap();
+        assert!(
+            registry.get_table(&tenant, "Widget").is_some(),
+            "Phase 2 app entity on default must survive Phase 8 agent bootstrap"
+        );
+        assert!(
+            registry.get_table(&tenant, "Agent").is_some(),
+            "agent entities must still be registered on default"
+        );
+        assert_eq!(
+            registry.resolve_entity_type(&tenant, "Widgets").as_deref(),
+            Some("Widget"),
+            "existing app entity-set mapping on default must survive Phase 8"
+        );
+        assert_eq!(
+            registry.resolve_entity_type(&tenant, "Agents").as_deref(),
+            Some("Agent"),
+            "agent entity-set mapping must be merged onto default"
+        );
     }
 }
