@@ -166,6 +166,20 @@ impl<'a> GovernedApplicationDataService<'a> {
             .await
     }
 
+    /// Create through the immutable task-scoped actor path.
+    pub(crate) async fn create_scoped(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        fields: serde_json::Value,
+        schema_pin: temper_runtime::persistence::schema_deployment::SchemaExecutionPin,
+    ) -> Result<EntityResponse, String> {
+        self.state
+            .get_or_create_scoped_entity(tenant, entity_type, entity_id, fields, schema_pin)
+            .await
+    }
+
     /// Patch through the common exact-sequence actor path.
     #[tracing::instrument(skip_all, fields(otel.name = "application_data.service.patch", entity_type))]
     pub(crate) async fn patch(
@@ -187,6 +201,29 @@ impl<'a> GovernedApplicationDataService<'a> {
         .await
     }
 
+    /// Patch through one immutable task-scoped actor.
+    pub(crate) async fn patch_scoped(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        fields: serde_json::Value,
+        expected_sequence: Option<u64>,
+        schema_pin: temper_runtime::persistence::schema_deployment::SchemaExecutionPin,
+    ) -> Result<EntityResponse, String> {
+        self.state
+            .update_scoped_entity_fields_if_sequence(
+                tenant,
+                entity_type,
+                entity_id,
+                fields,
+                false,
+                expected_sequence,
+                schema_pin,
+            )
+            .await
+    }
+
     /// Replace through the common actor path used by the OData adapter.
     pub(crate) async fn replace(
         &self,
@@ -196,6 +233,28 @@ impl<'a> GovernedApplicationDataService<'a> {
         fields: serde_json::Value,
     ) -> Result<EntityResponse, String> {
         self.write_fields(tenant, entity_type, entity_id, fields, true, None)
+            .await
+    }
+
+    /// Replace through one immutable task-scoped actor.
+    pub(crate) async fn replace_scoped(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        fields: serde_json::Value,
+        schema_pin: temper_runtime::persistence::schema_deployment::SchemaExecutionPin,
+    ) -> Result<EntityResponse, String> {
+        self.state
+            .update_scoped_entity_fields_if_sequence(
+                tenant,
+                entity_type,
+                entity_id,
+                fields,
+                true,
+                None,
+                schema_pin,
+            )
             .await
     }
 

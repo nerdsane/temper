@@ -107,6 +107,16 @@ fn digest_budgets(hasher: &mut Sha256, budgets: &ScopedBundleBudgets) {
         b"budget_migration_total_entities",
         &budgets.migration_total_entities.to_be_bytes(),
     );
+    digest_frame(
+        hasher,
+        b"budget_migration_total_batches",
+        &budgets.migration_total_batches.to_be_bytes(),
+    );
+    digest_frame(
+        hasher,
+        b"budget_migration_attempts",
+        &budgets.migration_attempts.to_be_bytes(),
+    );
 }
 
 fn digest_frame(hasher: &mut Sha256, label: &[u8], value: &[u8]) {

@@ -3,6 +3,7 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use temper_runtime::persistence::schema_deployment::SchemaEventPin;
 use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 
@@ -50,6 +51,9 @@ pub struct ReactionReceipt {
     pub fencing_token: u64,
     /// Target commit time from the scheduler clock.
     pub received_at: DateTime<Utc>,
+    /// Exact target action schema, absent only for tenant-global compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_pin: Option<SchemaEventPin>,
 }
 
 /// Immutable normalized reaction input committed with the source event.
@@ -90,6 +94,9 @@ pub struct PersistedReactionIntent {
     pub authority: serde_json::Value,
     /// Logical creation time from the scheduler clock.
     pub created_at: DateTime<Utc>,
+    /// Exact source action schema, absent only for tenant-global compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_pin: Option<SchemaEventPin>,
 }
 
 /// Durable delivery lifecycle from persisted intent through terminal outcome.

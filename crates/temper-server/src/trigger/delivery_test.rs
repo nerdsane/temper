@@ -31,6 +31,7 @@ fn intent() -> PersistedReactionIntent {
         rule: json!({"name": "create-payment"}),
         authority: json!({"principal": {"id": "User::alice"}}),
         created_at: Utc.timestamp_opt(1_800_000_000, 0).single().unwrap(),
+        schema_pin: None,
     }
 }
 
@@ -96,6 +97,7 @@ fn receipt_round_trips_inside_the_atomic_target_event_payload() {
         delivery_id: "reaction-v1-a".to_string(),
         fencing_token: 3,
         received_at: Utc.timestamp_opt(1_800_000_001, 0).single().unwrap(),
+        schema_pin: None,
     };
 
     attach_receipt(&mut payload, &receipt).unwrap();

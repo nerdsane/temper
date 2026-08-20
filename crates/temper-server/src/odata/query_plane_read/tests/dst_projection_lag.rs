@@ -198,6 +198,7 @@ fn sim_state(seed: u64, qp: std::sync::Arc<SimQueryPlane>) -> (ServerState, Boxe
         None,
         None,
         None,
+        None,
     ));
     state.transition_tables = std::sync::Arc::new(
         [(

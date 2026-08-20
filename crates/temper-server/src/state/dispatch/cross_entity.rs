@@ -1,4 +1,5 @@
 use crate::request_context::AgentContext;
+use temper_runtime::persistence::schema_deployment::SchemaExecutionPin;
 use temper_runtime::tenant::TenantId;
 use tracing::Instrument;
 
@@ -20,6 +21,7 @@ impl crate::state::ServerState {
         entity_id: &str,
         action: Option<&str>,
         incoming: &serde_json::Value,
+        schema_pin: Option<&SchemaExecutionPin>,
     ) -> std::collections::BTreeMap<String, bool> {
         use crate::entity_actor::reference_contract::target_evidence_key;
 
@@ -28,11 +30,23 @@ impl crate::state::ServerState {
                 .registry
                 .read()
                 .expect("spec registry lock should not be poisoned");
-            registry
-                .get_spec(tenant, entity_type)
-                .map(|spec| spec.table())
-        }
-        .or_else(|| self.transition_tables.get(entity_type).cloned());
+            match schema_pin {
+                Some(pin) => registry.get_scoped_table_at_digest(
+                    tenant,
+                    &pin.scope,
+                    &pin.bundle_digest,
+                    entity_type,
+                ),
+                None => registry
+                    .get_spec(tenant, entity_type)
+                    .map(|spec| spec.table()),
+            }
+        };
+        let table = if schema_pin.is_none() {
+            table.or_else(|| self.transition_tables.get(entity_type).cloned())
+        } else {
+            table
+        };
         let Some(table) = table else {
             return std::collections::BTreeMap::new();
         };
@@ -66,17 +80,24 @@ impl crate::state::ServerState {
         if state_refs.is_empty() && action_refs.is_empty() {
             return std::collections::BTreeMap::new();
         }
-        let current = if self
-            .ensure_entity_loaded(tenant, entity_type, entity_id)
-            .await
-        {
-            self.get_tenant_entity_state(tenant, entity_type, entity_id)
+        let current = match schema_pin {
+            Some(pin) => self
+                .get_scoped_entity_state(tenant, entity_type, entity_id, pin.clone())
                 .await
                 .ok()
                 .map(|response| response.state.fields)
-                .unwrap_or_else(|| serde_json::json!({}))
-        } else {
-            serde_json::json!({})
+                .unwrap_or_else(|| serde_json::json!({})),
+            None if self
+                .ensure_entity_loaded(tenant, entity_type, entity_id)
+                .await =>
+            {
+                self.get_tenant_entity_state(tenant, entity_type, entity_id)
+                    .await
+                    .ok()
+                    .map(|response| response.state.fields)
+                    .unwrap_or_else(|| serde_json::json!({}))
+            }
+            None => serde_json::json!({}),
         };
         let mut targets = Vec::new();
         for (name, target_type) in state_refs {
@@ -103,9 +124,16 @@ impl crate::state::ServerState {
         );
         let mut evidence = std::collections::BTreeMap::new();
         for (target_type, target_id) in targets {
-            let exists = self
-                .durable_reference_target_exists(tenant, &target_type, &target_id)
-                .await;
+            let exists = match schema_pin {
+                Some(pin) => {
+                    self.scoped_reference_target_exists(tenant, &target_type, &target_id, pin)
+                        .await
+                }
+                None => {
+                    self.durable_reference_target_exists(tenant, &target_type, &target_id)
+                        .await
+                }
+            };
             evidence.insert(target_evidence_key(&target_type, &target_id), exists);
         }
         evidence
@@ -136,6 +164,37 @@ impl crate::state::ServerState {
             .await
     }
 
+    pub(crate) async fn scoped_reference_target_exists(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        pin: &SchemaExecutionPin,
+    ) -> bool {
+        let Some((store, _)) = self.event_journal() else {
+            let actor_key = format!(
+                "{tenant}:{entity_type}:{entity_id}:schema:{}",
+                pin.bundle_digest
+            );
+            return self
+                .actor_registry
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&actor_key);
+        };
+        let persistence_id = format!(
+            "{tenant}:{entity_type}:{entity_id}:schema:{}",
+            pin.bundle_digest
+        );
+        let Ok(events) = store.read_events(&persistence_id, 0).await else {
+            return false;
+        };
+        !events.is_empty()
+            && events
+                .last()
+                .is_none_or(|event| event.event_type != "Deleted")
+    }
+
     /// Pre-resolve cross-entity state guards for an action.
     ///
     /// Reads the TransitionTable, walks rules for the given action, and for each
@@ -147,6 +206,7 @@ impl crate::state::ServerState {
         entity_type: &str,
         entity_id: &str,
         action: &str,
+        schema_pin: Option<&SchemaExecutionPin>,
     ) -> std::collections::BTreeMap<String, bool> {
         use crate::entity_actor::effects::MAX_CROSS_ENTITY_LOOKUPS;
 
@@ -155,10 +215,20 @@ impl crate::state::ServerState {
         // Get the transition table to find cross-entity guards.
         let cross_guards: Vec<CrossGuardSpec> = {
             let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
-            let Some(spec) = registry.get_spec(tenant, entity_type) else {
+            let table = match schema_pin {
+                Some(pin) => registry.get_scoped_table_at_digest(
+                    tenant,
+                    &pin.scope,
+                    &pin.bundle_digest,
+                    entity_type,
+                ),
+                None => registry
+                    .get_spec(tenant, entity_type)
+                    .map(|spec| spec.table()),
+            };
+            let Some(table) = table else {
                 return result;
             };
-            let table = spec.table();
 
             // Collect CrossEntityStateIn guards from rules matching this action
             let mut guards = Vec::new();
@@ -175,10 +245,17 @@ impl crate::state::ServerState {
         }
 
         // Get current entity fields to resolve target entity IDs
-        let current_fields = match self
-            .get_tenant_entity_state(tenant, entity_type, entity_id)
-            .await
-        {
+        let current_response = match schema_pin {
+            Some(pin) => {
+                self.get_scoped_entity_state(tenant, entity_type, entity_id, pin.clone())
+                    .await
+            }
+            None => {
+                self.get_tenant_entity_state(tenant, entity_type, entity_id)
+                    .await
+            }
+        };
+        let current_fields = match current_response {
             Ok(resp) => resp.state.fields,
             Err(_) => return result,
         };
@@ -237,10 +314,18 @@ impl crate::state::ServerState {
                         all_matched = false;
                         break;
                     }
-                    if let Some(status) = self
-                        .resolve_entity_status(tenant, target_type, item_id)
-                        .await
-                    {
+                    let status = match schema_pin {
+                        Some(pin) => self
+                            .get_scoped_entity_state(tenant, target_type, item_id, pin.clone())
+                            .await
+                            .ok()
+                            .map(|response| response.state.status),
+                        None => {
+                            self.resolve_entity_status(tenant, target_type, item_id)
+                                .await
+                        }
+                    };
+                    if let Some(status) = status {
                         if !status_ok(&status, required_statuses, forbidden_statuses) {
                             all_matched = false;
                             break;
@@ -274,10 +359,18 @@ impl crate::state::ServerState {
             }
 
             lookup_count += 1;
-            if let Some(status) = self
-                .resolve_entity_status(tenant, target_type, target_id)
-                .await
-            {
+            let status = match schema_pin {
+                Some(pin) => self
+                    .get_scoped_entity_state(tenant, target_type, target_id, pin.clone())
+                    .await
+                    .ok()
+                    .map(|response| response.state.status),
+                None => {
+                    self.resolve_entity_status(tenant, target_type, target_id)
+                        .await
+                }
+            };
+            if let Some(status) = status {
                 result.insert(
                     key,
                     status_ok(&status, required_statuses, forbidden_statuses),

@@ -4,6 +4,7 @@ use std::time::Instant; // determinism-ok: scoped duration measurement only
 
 use tracing::instrument;
 
+use temper_runtime::persistence::schema_deployment::SchemaExecutionPin;
 use temper_runtime::tenant::TenantId;
 use temper_spec::FieldInvariant;
 use temper_spec::cross_invariant::{
@@ -92,6 +93,7 @@ pub async fn pre_upsert_relation_checks(
     entity_id: &str,
     operation: &str,
     fields: &serde_json::Value,
+    schema_pin: Option<&SchemaExecutionPin>,
 ) -> Result<(), ConstraintViolation> {
     if !state.cross_invariant_enforce {
         state.metrics.record_cross_bypass();
@@ -100,7 +102,13 @@ pub async fn pre_upsert_relation_checks(
 
     let (tenant_name, edges): (String, Vec<RelationEdge>) = {
         let registry = state.registry.read().unwrap();
-        let Some(tc) = registry.get_tenant(tenant) else {
+        let config = match schema_pin {
+            Some(pin) => {
+                registry.get_scoped_config_at_digest(tenant, &pin.scope, &pin.bundle_digest)
+            }
+            None => registry.get_tenant(tenant),
+        };
+        let Some(tc) = config else {
             return Ok(());
         };
         (
@@ -157,10 +165,19 @@ pub async fn pre_upsert_relation_checks(
                 operation,
             ));
         };
-        if !state
-            .ensure_entity_loaded(tenant, &edge.to_entity, target_id)
-            .await
-        {
+        let target_exists = match schema_pin {
+            Some(pin) => {
+                state
+                    .scoped_reference_target_exists(tenant, &edge.to_entity, target_id, pin)
+                    .await
+            }
+            None => {
+                state
+                    .ensure_entity_loaded(tenant, &edge.to_entity, target_id)
+                    .await
+            }
+        };
+        if !target_exists {
             tracing::warn!(
                 tenant = %tenant_name, entity_type, entity_id, operation,
                 target_entity = %edge.to_entity, target_id,
@@ -192,6 +209,7 @@ pub async fn pre_delete_relation_checks(
     entity_type: &str,
     entity_id: &str,
     operation: &str,
+    schema_pin: Option<&SchemaExecutionPin>,
 ) -> Result<(), ConstraintViolation> {
     if !state.cross_invariant_enforce {
         state.metrics.record_cross_bypass();
@@ -200,7 +218,13 @@ pub async fn pre_delete_relation_checks(
 
     let (tenant_name, edges): (String, Vec<RelationEdge>) = {
         let registry = state.registry.read().unwrap();
-        let Some(tc) = registry.get_tenant(tenant) else {
+        let config = match schema_pin {
+            Some(pin) => {
+                registry.get_scoped_config_at_digest(tenant, &pin.scope, &pin.bundle_digest)
+            }
+            None => registry.get_tenant(tenant),
+        };
+        let Some(tc) = config else {
             return Ok(());
         };
         (
@@ -217,15 +241,49 @@ pub async fn pre_delete_relation_checks(
         if edge.delete_policy != DeletePolicy::Restrict {
             continue;
         }
-        let source_ids = crate::application_data::GovernedApplicationDataService::new(state)
-            .fallback_candidates(tenant, &edge.from_entity)
-            .await;
-        for source_id in source_ids {
-            if let Ok(source_state) =
+        const DELETE_RELATION_SCAN_BUDGET: usize = 10_000;
+        let source_ids = match schema_pin {
+            Some(pin) => {
+                let ids = state
+                    .list_scoped_entity_ids_bounded(
+                        tenant,
+                        &edge.from_entity,
+                        pin,
+                        DELETE_RELATION_SCAN_BUDGET + 1,
+                    )
+                    .await
+                    .map_err(|error| {
+                        ConstraintViolation::relation(error, entity_type, entity_id, operation)
+                    })?;
+                if ids.len() > DELETE_RELATION_SCAN_BUDGET {
+                    return Err(ConstraintViolation::relation(
+                        "scoped delete relation scan budget exhausted",
+                        entity_type,
+                        entity_id,
+                        operation,
+                    ));
+                }
+                ids
+            }
+            None => {
                 crate::application_data::GovernedApplicationDataService::new(state)
+                    .fallback_candidates(tenant, &edge.from_entity)
+                    .await
+            }
+        };
+        for source_id in source_ids {
+            let source_state = match schema_pin {
+                Some(pin) => {
+                    state
+                        .get_scoped_entity_state(tenant, &edge.from_entity, &source_id, pin.clone())
+                        .await
+                }
+                None => crate::application_data::GovernedApplicationDataService::new(state)
                     .get(tenant, &edge.from_entity, &source_id)
                     .await
-            {
+                    .map_err(|error| error.to_string()),
+            };
+            if let Ok(source_state) = source_state {
                 let source_fields =
                     serde_json::to_value(&source_state.state.fields).unwrap_or_default();
                 if extract_field_as_str(&source_fields, &edge.source_field) == Some(entity_id) {
@@ -257,16 +315,17 @@ pub async fn pre_delete_relation_checks(
 }
 
 /// Evaluate cross-entity invariants triggered by a write.
-#[instrument(skip_all, fields(otel.name = "constraint.post_write_invariant_checks", tenant = %tenant, entity_type, entity_id, action_name = action, operation))]
+#[instrument(skip_all, fields(otel.name = "constraint.post_write_invariant_checks", tenant = %tenant, entity_type, entity_id, action_name = labels.0, operation = labels.1))]
 pub async fn post_write_invariant_checks(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
     entity_id: &str,
-    action: &str,
+    labels: (&str, &str),
     fields: &serde_json::Value,
-    operation: &str,
+    schema_pin: Option<&SchemaExecutionPin>,
 ) -> Result<(), ConstraintViolation> {
+    let (action, operation) = labels;
     if !state.cross_invariant_enforce {
         state.metrics.record_cross_bypass();
         return Ok(());
@@ -275,7 +334,13 @@ pub async fn post_write_invariant_checks(
     let start = Instant::now(); // determinism-ok: scoped duration measurement, not simulation-visible state
     let (tenant_name, invariants): (String, Vec<CrossInvariant>) = {
         let registry = state.registry.read().unwrap();
-        let Some(tc) = registry.get_tenant(tenant) else {
+        let config = match schema_pin {
+            Some(pin) => {
+                registry.get_scoped_config_at_digest(tenant, &pin.scope, &pin.bundle_digest)
+            }
+            None => registry.get_tenant(tenant),
+        };
+        let Some(tc) = config else {
             return Ok(());
         };
         (
@@ -336,10 +401,24 @@ pub async fn post_write_invariant_checks(
             ));
         };
 
-        if !state
-            .ensure_entity_loaded(tenant, &assertion.target_entity, target_id)
-            .await
-        {
+        let target_exists = match schema_pin {
+            Some(pin) => {
+                state
+                    .scoped_reference_target_exists(
+                        tenant,
+                        &assertion.target_entity,
+                        target_id,
+                        pin,
+                    )
+                    .await
+            }
+            None => {
+                state
+                    .ensure_entity_loaded(tenant, &assertion.target_entity, target_id)
+                    .await
+            }
+        };
+        if !target_exists {
             tracing::warn!(
                 tenant = %tenant_name, entity_type, entity_id, invariant = %inv.name,
                 target_entity = %assertion.target_entity, target_id,
@@ -367,12 +446,23 @@ pub async fn post_write_invariant_checks(
             return Err(violation);
         }
 
-        let target_field_value = match crate::application_data::GovernedApplicationDataService::new(
-            state,
-        )
-        .get(tenant, &assertion.target_entity, target_id)
-        .await
-        {
+        let target_state = match schema_pin {
+            Some(pin) => {
+                state
+                    .get_scoped_entity_state(
+                        tenant,
+                        &assertion.target_entity,
+                        target_id,
+                        pin.clone(),
+                    )
+                    .await
+            }
+            None => crate::application_data::GovernedApplicationDataService::new(state)
+                .get(tenant, &assertion.target_entity, target_id)
+                .await
+                .map_err(|error| error.to_string()),
+        };
+        let target_field_value = match target_state {
             Ok(resp) => {
                 if assertion.field_name == "status" {
                     resp.state.status.clone()
@@ -586,6 +676,7 @@ pub async fn pre_upsert_field_invariant_checks(
     entity_id: &str,
     operation: &str,
     fields: &serde_json::Value,
+    schema_pin: Option<&SchemaExecutionPin>,
 ) -> Result<(), ConstraintViolation> {
     if !state.cross_invariant_enforce {
         state.metrics.record_cross_bypass();
@@ -597,9 +688,16 @@ pub async fn pre_upsert_field_invariant_checks(
     // later in the function.
     let invariants: Vec<FieldInvariant> = {
         let registry = state.registry.read().unwrap(); // ci-ok: RwLock read — poisoned lock = prior panic, fail-fast correct
-        registry
-            .field_invariants_for(tenant, entity_type)
-            .unwrap_or_default()
+        match schema_pin {
+            Some(pin) => registry
+                .get_scoped_config_at_digest(tenant, &pin.scope, &pin.bundle_digest)
+                .and_then(|config| config.entities.get(entity_type))
+                .map(|spec| spec.automaton.field_invariants.clone())
+                .unwrap_or_default(),
+            None => registry
+                .field_invariants_for(tenant, entity_type)
+                .unwrap_or_default(),
+        }
     };
     if invariants.is_empty() {
         return Ok(());

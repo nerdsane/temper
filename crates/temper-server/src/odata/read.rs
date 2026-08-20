@@ -11,27 +11,27 @@ use temper_odata::query::parse_query_options;
 use temper_odata::query::types::{
     BinaryOperator, ExpandItem, ExpandOptions, FilterExpr, ODataValue, QueryOptions,
 };
+use temper_runtime::persistence::schema_deployment::SchemaExecutionPin;
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{StreamRegistry, WasmInvocationContext};
 use tracing::instrument;
 
 use super::authz::{READ_ACTION, authorize_read, request_security_context};
 use super::common::{
-    check_has_stream_or_400, extract_key, extract_tenant, has_expand_options, resolve_entity_type,
-    resolve_value_parent, tenant_csdl_xml, tenant_entity_sets,
+    check_has_stream_or_400, extract_key, extract_schema_pin, extract_tenant, has_expand_options,
+    resolve_entity_type, resolve_entity_type_for_pin, resolve_value_parent, tenant_csdl_xml,
+    tenant_csdl_xml_for_pin, tenant_entity_sets_for_pin,
 };
 use super::filter_sql;
 use super::query_plane_read::{
     QueryPlaneReadBudget, QueryPlaneReadRequest, read_entity_set_from_query_plane,
 };
-use super::read_support::{
-    record_entity_set_not_found, resolve_entity_set_name, try_load_entity_body_from_catalog,
-};
+use super::read_support::{record_entity_set_not_found, try_load_entity_body_from_catalog};
 use super::response::annotate_entity;
 use super::stream_fast_path::try_file_stream_fast_path;
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::identity::ResolvedIdentity;
-use crate::query_eval::{expand_entity, select_fields};
+use crate::query_eval::{apply_query_options, expand_entity, expand_scoped_entity, select_fields};
 use crate::request_context::extract_agent_context;
 use crate::response::{ODataResponse, ODataStreamResponse, ODataXmlResponse, odata_error};
 use crate::state::ServerState;
@@ -47,31 +47,41 @@ async fn resolve_parent_entity(
     state: &ServerState,
     tenant: &TenantId,
     security_ctx: &SecurityContext,
+    schema_pin: Option<&SchemaExecutionPin>,
 ) -> Result<(String, String, String), (StatusCode, String)> {
     match path {
         ODataPath::Entity(set_name, key) => {
-            let entity_type = resolve_entity_type(state, tenant, set_name).ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    format!("Entity set '{set_name}' not found"),
-                )
-            })?;
+            let entity_type = resolve_entity_type_for_pin(state, tenant, schema_pin, set_name)
+                .ok_or_else(|| {
+                    (
+                        StatusCode::NOT_FOUND,
+                        format!("Entity set '{set_name}' not found"),
+                    )
+                })?;
             let key_str = extract_key(key);
             Ok((entity_type, key_str, set_name.clone()))
         }
         ODataPath::NavigationProperty { parent, property } => {
-            let (parent_type, parent_key, _parent_set) =
-                Box::pin(resolve_parent_entity(parent, state, tenant, security_ctx)).await?;
+            let (parent_type, parent_key, _parent_set) = Box::pin(resolve_parent_entity(
+                parent,
+                state,
+                tenant,
+                security_ctx,
+                schema_pin,
+            ))
+            .await?;
 
             // Use expand to resolve the nav property
-            let parent_set = resolve_entity_set_name(state, tenant, &parent_type);
-            let mut parent_body = load_authorized_entity_body(
+            let parent_set =
+                resolve_entity_set_name_for_pin(state, tenant, schema_pin, &parent_type);
+            let mut parent_body = load_authorized_entity_body_for_pin(
                 state,
                 tenant,
                 &parent_type,
                 &parent_set,
                 &parent_key,
                 security_ctx,
+                schema_pin,
             )
             .await
             .map_err(|_| {
@@ -84,15 +94,31 @@ async fn resolve_parent_entity(
                 property: property.clone(),
                 options: None,
             };
-            expand_entity(
-                &mut parent_body,
-                &[expand_item],
-                &parent_type,
-                state,
-                tenant,
-                security_ctx,
-            )
-            .await
+            match schema_pin {
+                Some(pin) => {
+                    expand_scoped_entity(
+                        &mut parent_body,
+                        &[expand_item],
+                        &parent_type,
+                        state,
+                        tenant,
+                        security_ctx,
+                        pin,
+                    )
+                    .await
+                }
+                None => {
+                    expand_entity(
+                        &mut parent_body,
+                        &[expand_item],
+                        &parent_type,
+                        state,
+                        tenant,
+                        security_ctx,
+                    )
+                    .await
+                }
+            }
             .map_err(|_| {
                 (
                     StatusCode::FORBIDDEN,
@@ -109,7 +135,7 @@ async fn resolve_parent_entity(
 
             // For single-valued nav, extract the target entity type and id
             let target_type =
-                resolve_navigation_target_type(state, tenant, &parent_type, property)?;
+                resolve_navigation_target_type(state, tenant, schema_pin, &parent_type, property)?;
 
             let entity_id = nav_value
                 .get("entity_id")
@@ -128,7 +154,7 @@ async fn resolve_parent_entity(
                 })?
                 .to_string();
 
-            let set_name = resolve_entity_set_name(state, tenant, &target_type);
+            let set_name = resolve_entity_set_name_for_pin(state, tenant, schema_pin, &target_type);
             Ok((target_type, entity_id, set_name))
         }
         ODataPath::NavigationEntity {
@@ -137,14 +163,20 @@ async fn resolve_parent_entity(
             key,
         } => {
             // Resolve the parent, then the keyed entity in the nav collection
-            let (parent_type, _parent_key, _parent_set) =
-                Box::pin(resolve_parent_entity(parent, state, tenant, security_ctx)).await?;
+            let (parent_type, _parent_key, _parent_set) = Box::pin(resolve_parent_entity(
+                parent,
+                state,
+                tenant,
+                security_ctx,
+                schema_pin,
+            ))
+            .await?;
 
             let target_type =
-                resolve_navigation_target_type(state, tenant, &parent_type, property)?;
+                resolve_navigation_target_type(state, tenant, schema_pin, &parent_type, property)?;
 
             let key_str = extract_key(key);
-            let set_name = resolve_entity_set_name(state, tenant, &target_type);
+            let set_name = resolve_entity_set_name_for_pin(state, tenant, schema_pin, &target_type);
             Ok((target_type, key_str, set_name))
         }
         _ => Err((
@@ -157,6 +189,7 @@ async fn resolve_parent_entity(
 fn resolve_navigation_target_type(
     state: &ServerState,
     tenant: &TenantId,
+    schema_pin: Option<&SchemaExecutionPin>,
     parent_type: &str,
     property: &str,
 ) -> Result<String, (StatusCode, String)> {
@@ -164,7 +197,10 @@ fn resolve_navigation_target_type(
         .registry
         .read()
         .expect("registry lock should not be poisoned"); // ci-ok: infallible lock
-    let tenant_config = registry.get_tenant(tenant);
+    let tenant_config = match schema_pin {
+        Some(pin) => registry.get_scoped_config_at_digest(tenant, &pin.scope, &pin.bundle_digest),
+        None => registry.get_tenant(tenant),
+    };
     tenant_config
         .and_then(|tc| crate::query_eval::find_nav_target(&tc.csdl, parent_type, property))
         .ok_or_else(|| {
@@ -175,12 +211,44 @@ fn resolve_navigation_target_type(
         })
 }
 
+fn resolve_entity_set_name_for_pin(
+    state: &ServerState,
+    tenant: &TenantId,
+    schema_pin: Option<&SchemaExecutionPin>,
+    entity_type: &str,
+) -> String {
+    let registry = state.registry.read().expect("registry lock poisoned");
+    let config = match schema_pin {
+        Some(pin) => registry.get_scoped_config_at_digest(tenant, &pin.scope, &pin.bundle_digest),
+        None => registry.get_tenant(tenant),
+    };
+    config
+        .and_then(|config| {
+            config
+                .entity_set_map
+                .iter()
+                .find(|(_, found_type)| found_type.as_str() == entity_type)
+                .map(|(set_name, _)| set_name.clone())
+        })
+        .unwrap_or_else(|| format!("{entity_type}s"))
+}
+
+fn service_document_body_for_pin(
+    state: &ServerState,
+    tenant: &TenantId,
+    schema_pin: Option<&temper_runtime::persistence::schema_deployment::SchemaExecutionPin>,
+) -> Option<serde_json::Value> {
+    let entity_sets: Vec<serde_json::Value> =
+        tenant_entity_sets_for_pin(state, tenant, schema_pin)?
+            .iter()
+            .map(|name| serde_json::json!({"name": name, "kind": "EntitySet", "url": name}))
+            .collect();
+    Some(serde_json::json!({"@odata.context": "$metadata", "value": entity_sets}))
+}
+
 fn service_document_body(state: &ServerState, tenant: &TenantId) -> serde_json::Value {
-    let entity_sets: Vec<serde_json::Value> = tenant_entity_sets(state, tenant)
-        .iter()
-        .map(|name| serde_json::json!({"name": name, "kind": "EntitySet", "url": name}))
-        .collect();
-    serde_json::json!({"@odata.context": "$metadata", "value": entity_sets})
+    service_document_body_for_pin(state, tenant, None)
+        .expect("tenant-global service document is always available")
 }
 
 async fn entity_set_not_found_response(
@@ -272,6 +340,45 @@ async fn load_authorized_entity_body(
         &body,
     )
     .map_err(|response| *response)?;
+    Ok(body)
+}
+
+async fn load_authorized_entity_body_for_pin(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    set_name: &str,
+    key: &str,
+    security_ctx: &SecurityContext,
+    schema_pin: Option<&SchemaExecutionPin>,
+) -> Result<serde_json::Value, Response> {
+    let Some(pin) = schema_pin else {
+        return load_authorized_entity_body(
+            state,
+            tenant,
+            entity_type,
+            set_name,
+            key,
+            security_ctx,
+        )
+        .await;
+    };
+    let response = state
+        .get_scoped_entity_state(tenant, entity_type, key, pin.clone())
+        .await
+        .map_err(|_| resource_not_found_response(set_name, key))?;
+    let mut body = serde_json::to_value(&response.state).unwrap_or_default();
+    authorize_read(
+        state,
+        tenant,
+        security_ctx,
+        READ_ACTION,
+        entity_type,
+        key,
+        &body,
+    )
+    .map_err(|response| *response)?;
+    hydrate_blob_refs_for_tenant(state, tenant, &mut body).await;
     Ok(body)
 }
 
@@ -567,6 +674,7 @@ pub(super) async fn handle_odata_get_for_tenant(
     security_ctx: SecurityContext,
     path: String,
     query_params: std::collections::BTreeMap<String, String>,
+    schema_pin: Option<SchemaExecutionPin>,
 ) -> axum::response::Response {
     let odata_path = match parse_path(&format!("/{path}")) {
         Ok(p) => p,
@@ -590,6 +698,101 @@ pub(super) async fn handle_odata_get_for_tenant(
     };
 
     match odata_path {
+        ODataPath::Metadata if schema_pin.is_some() => {
+            let pin = schema_pin.as_ref().expect("guarded above");
+            match tenant_csdl_xml_for_pin(&state, &tenant, Some(pin)) {
+                Some(body) => ODataXmlResponse { body }.into_response(),
+                None => odata_error(
+                    StatusCode::NOT_FOUND,
+                    "ScopedSchemaNotFound",
+                    "The pinned scoped schema bundle is unavailable",
+                )
+                .into_response(),
+            }
+        }
+
+        ODataPath::ServiceDocument if schema_pin.is_some() => {
+            let pin = schema_pin.as_ref().expect("guarded above");
+            match service_document_body_for_pin(&state, &tenant, Some(pin)) {
+                Some(body) => ODataResponse {
+                    status: StatusCode::OK,
+                    body,
+                }
+                .into_response(),
+                None => odata_error(
+                    StatusCode::NOT_FOUND,
+                    "ScopedSchemaNotFound",
+                    "The pinned scoped schema bundle is unavailable",
+                )
+                .into_response(),
+            }
+        }
+
+        ODataPath::EntitySet(name) if schema_pin.is_some() => {
+            handle_scoped_entity_set(
+                &state,
+                &tenant,
+                &security_ctx,
+                schema_pin.as_ref().expect("guarded above"),
+                &name,
+                &query_options,
+            )
+            .await
+        }
+
+        ODataPath::Entity(set_name, key) if schema_pin.is_some() => {
+            handle_scoped_entity(
+                &state,
+                &tenant,
+                &security_ctx,
+                schema_pin.as_ref().expect("guarded above"),
+                &set_name,
+                &key,
+                &query_options,
+            )
+            .await
+        }
+
+        ODataPath::NavigationProperty {
+            ref parent,
+            ref property,
+        } if schema_pin.is_some() => {
+            handle_navigation_property(
+                &state,
+                &tenant,
+                &security_ctx,
+                schema_pin.as_ref(),
+                parent,
+                property,
+                &query_options,
+            )
+            .await
+        }
+
+        ODataPath::NavigationEntity {
+            ref parent,
+            ref property,
+            ref key,
+        } if schema_pin.is_some() => {
+            handle_navigation_entity(
+                &state,
+                &tenant,
+                &security_ctx,
+                schema_pin.as_ref(),
+                parent,
+                NavigationEntityTarget { property, key },
+                &query_options,
+            )
+            .await
+        }
+
+        _ if schema_pin.is_some() => odata_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "ScopedPathNotImplemented",
+            "This scoped OData path is not implemented",
+        )
+        .into_response(),
+
         ODataPath::Metadata => ODataXmlResponse {
             body: tenant_csdl_xml(&state, &tenant),
         }
@@ -633,6 +836,7 @@ pub(super) async fn handle_odata_get_for_tenant(
                 &state,
                 &tenant,
                 &security_ctx,
+                None,
                 parent,
                 property,
                 &query_options,
@@ -649,9 +853,9 @@ pub(super) async fn handle_odata_get_for_tenant(
                 &state,
                 &tenant,
                 &security_ctx,
+                None,
                 parent,
-                property,
-                key,
+                NavigationEntityTarget { property, key },
                 &query_options,
             )
             .await
@@ -699,6 +903,192 @@ pub(super) async fn handle_odata_get_for_tenant(
         )
         .into_response(),
     }
+}
+
+async fn handle_scoped_entity(
+    state: &ServerState,
+    tenant: &TenantId,
+    security_ctx: &SecurityContext,
+    schema_pin: &SchemaExecutionPin,
+    set_name: &str,
+    key: &KeyValue,
+    query_options: &QueryOptions,
+) -> Response {
+    let Some(entity_type) = resolve_entity_type_for_pin(state, tenant, Some(schema_pin), set_name)
+    else {
+        return entity_set_not_found_response(state, tenant, set_name).await;
+    };
+    let key = extract_key(key);
+    let response = match state
+        .get_scoped_entity_state(tenant, &entity_type, &key, schema_pin.clone())
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return odata_error(StatusCode::NOT_FOUND, "ResourceNotFound", &error).into_response();
+        }
+    };
+    let mut body = serde_json::to_value(&response.state).unwrap_or_default();
+    if let Err(response) = authorize_read(
+        state,
+        tenant,
+        security_ctx,
+        READ_ACTION,
+        &entity_type,
+        &key,
+        &body,
+    ) {
+        return *response;
+    }
+    hydrate_blob_refs_for_tenant(state, tenant, &mut body).await;
+    if let Some(expand) = query_options.expand.as_ref()
+        && let Err(response) = expand_scoped_entity(
+            &mut body,
+            expand,
+            &entity_type,
+            state,
+            tenant,
+            security_ctx,
+            schema_pin,
+        )
+        .await
+    {
+        return response;
+    }
+    body = annotate_entity(
+        body,
+        format!("$metadata#{set_name}/$entity"),
+        Some(format!("{set_name}('{key}')")),
+    );
+    if let Some(select) = query_options.select.as_ref() {
+        body = select_fields(vec![body], select).pop().unwrap_or_default();
+    }
+    ODataResponse {
+        status: StatusCode::OK,
+        body,
+    }
+    .into_response()
+}
+
+async fn handle_scoped_entity_set(
+    state: &ServerState,
+    tenant: &TenantId,
+    security_ctx: &SecurityContext,
+    schema_pin: &SchemaExecutionPin,
+    set_name: &str,
+    query_options: &QueryOptions,
+) -> Response {
+    let Some(entity_type) = resolve_entity_type_for_pin(state, tenant, Some(schema_pin), set_name)
+    else {
+        return entity_set_not_found_response(state, tenant, set_name).await;
+    };
+    const SCOPED_COLLECTION_SCAN_BUDGET: usize = 1_000;
+    let ids = match state
+        .page_scoped_entity_ids(
+            tenant,
+            std::slice::from_ref(&entity_type),
+            &schema_pin.bundle_digest,
+            None,
+            SCOPED_COLLECTION_SCAN_BUDGET + 1,
+        )
+        .await
+    {
+        Ok(ids) if ids.len() <= SCOPED_COLLECTION_SCAN_BUDGET => ids,
+        Ok(_) => {
+            return odata_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "ScopedQueryBudgetExceeded",
+                "Scoped collection query exceeded its entity scan budget",
+            )
+            .into_response();
+        }
+        Err(error) => {
+            return odata_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ScopedReadFailed",
+                &error,
+            )
+            .into_response();
+        }
+    };
+    let mut entities = Vec::new();
+    for (_, id) in ids {
+        let Ok(response) = state
+            .get_scoped_entity_state(tenant, &entity_type, &id, schema_pin.clone())
+            .await
+        else {
+            continue;
+        };
+        let mut body = serde_json::to_value(&response.state).unwrap_or_default();
+        if authorize_read(
+            state,
+            tenant,
+            security_ctx,
+            READ_ACTION,
+            &entity_type,
+            &id,
+            &body,
+        )
+        .is_err()
+        {
+            continue;
+        }
+        hydrate_blob_refs_for_tenant(state, tenant, &mut body).await;
+        entities.push(body);
+    }
+    let bounded_options = QueryOptions {
+        filter: query_options.filter.clone(),
+        select: None,
+        expand: None,
+        orderby: query_options.orderby.clone(),
+        top: Some(query_options.top.unwrap_or(100).min(100)),
+        skip: query_options.skip,
+        count: query_options.count,
+        skiptoken: None,
+    };
+    let (mut entities, count) = apply_query_options(entities, &bounded_options);
+    if let Some(expand) = query_options.expand.as_ref() {
+        for entity in &mut entities {
+            if let Err(response) = expand_scoped_entity(
+                entity,
+                expand,
+                &entity_type,
+                state,
+                tenant,
+                security_ctx,
+                schema_pin,
+            )
+            .await
+            {
+                return response;
+            }
+        }
+    }
+    if let Some(select) = query_options.select.as_ref() {
+        entities = select_fields(entities, select);
+    }
+    for entity in &mut entities {
+        let id = crate::odata::authz::entity_id_from_body(entity)
+            .unwrap_or_default()
+            .to_string();
+        *entity = annotate_entity(
+            std::mem::take(entity),
+            format!("$metadata#{set_name}/$entity"),
+            Some(format!("{set_name}('{id}')")),
+        );
+    }
+    let mut body = serde_json::json!({
+        "@odata.context": format!("$metadata#{set_name}"),
+        "value": entities,
+    });
+    if let Some(count) = count {
+        body["@odata.count"] = serde_json::json!(count);
+    }
+    ODataResponse {
+        status: StatusCode::OK,
+        body,
+    }
+    .into_response()
 }
 
 /// Handle `EntitySet` path: list all entities in a set with query options.
@@ -934,25 +1324,27 @@ async fn handle_navigation_property(
     state: &ServerState,
     tenant: &TenantId,
     security_ctx: &SecurityContext,
+    schema_pin: Option<&SchemaExecutionPin>,
     parent: &ODataPath,
     property: &str,
     query_options: &QueryOptions,
 ) -> axum::response::Response {
     let (parent_type, parent_key, parent_set) =
-        match resolve_parent_entity(parent, state, tenant, security_ctx).await {
+        match resolve_parent_entity(parent, state, tenant, security_ctx, schema_pin).await {
             Ok(r) => r,
             Err((status, msg)) => {
                 return odata_error(status, "InvalidPath", &msg).into_response();
             }
         };
 
-    let parent_body = match load_authorized_entity_body(
+    let parent_body = match load_authorized_entity_body_for_pin(
         state,
         tenant,
         &parent_type,
         &parent_set,
         &parent_key,
         security_ctx,
+        schema_pin,
     )
     .await
     {
@@ -978,16 +1370,32 @@ async fn handle_navigation_property(
         },
     };
 
-    if let Err(response) = expand_entity(
-        &mut parent_body,
-        &[expand_item],
-        &parent_type,
-        state,
-        tenant,
-        security_ctx,
-    )
-    .await
-    {
+    let expanded = match schema_pin {
+        Some(pin) => {
+            expand_scoped_entity(
+                &mut parent_body,
+                &[expand_item],
+                &parent_type,
+                state,
+                tenant,
+                security_ctx,
+                pin,
+            )
+            .await
+        }
+        None => {
+            expand_entity(
+                &mut parent_body,
+                &[expand_item],
+                &parent_type,
+                state,
+                tenant,
+                security_ctx,
+            )
+            .await
+        }
+    };
+    if let Err(response) = expanded {
         return response;
     }
 
@@ -1034,36 +1442,44 @@ async fn handle_navigation_property(
 }
 
 /// Handle `NavigationEntity` path: resolve parent, then fetch keyed child.
+struct NavigationEntityTarget<'a> {
+    property: &'a str,
+    key: &'a temper_odata::path::KeyValue,
+}
+
 async fn handle_navigation_entity(
     state: &ServerState,
     tenant: &TenantId,
     security_ctx: &SecurityContext,
+    schema_pin: Option<&SchemaExecutionPin>,
     parent: &ODataPath,
-    property: &str,
-    key: &temper_odata::path::KeyValue,
+    target: NavigationEntityTarget<'_>,
     query_options: &QueryOptions,
 ) -> axum::response::Response {
+    let NavigationEntityTarget { property, key } = target;
     let (parent_type, parent_key, parent_set) =
-        match resolve_parent_entity(parent, state, tenant, security_ctx).await {
+        match resolve_parent_entity(parent, state, tenant, security_ctx, schema_pin).await {
             Ok(r) => r,
             Err((status, msg)) => {
                 return odata_error(status, "InvalidPath", &msg).into_response();
             }
         };
-    if let Err(response) = load_authorized_entity_body(
+    if let Err(response) = load_authorized_entity_body_for_pin(
         state,
         tenant,
         &parent_type,
         &parent_set,
         &parent_key,
         security_ctx,
+        schema_pin,
     )
     .await
     {
         return response;
     }
 
-    let Ok(target_type) = resolve_navigation_target_type(state, tenant, &parent_type, property)
+    let Ok(target_type) =
+        resolve_navigation_target_type(state, tenant, schema_pin, &parent_type, property)
     else {
         return odata_error(
             StatusCode::NOT_FOUND,
@@ -1074,7 +1490,20 @@ async fn handle_navigation_entity(
     };
 
     let key_str = extract_key(key);
-    let target_set = resolve_entity_set_name(state, tenant, &target_type);
+    let target_set = resolve_entity_set_name_for_pin(state, tenant, schema_pin, &target_type);
+
+    if let Some(pin) = schema_pin {
+        return handle_scoped_entity(
+            state,
+            tenant,
+            security_ctx,
+            pin,
+            &target_set,
+            key,
+            query_options,
+        )
+        .await;
+    }
 
     match build_entity_body(
         state,
@@ -1176,10 +1605,14 @@ pub async fn handle_odata_get(
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
+    let schema_pin = match extract_schema_pin(&headers, &state, &tenant).await {
+        Ok(pin) => pin,
+        Err(error) => return error.into_response(),
+    };
     let agent_ctx = extract_agent_context(&headers);
     let resolved_identity = resolved_id.map(|Extension(identity)| identity);
     let security_ctx = request_security_context(&headers, &agent_ctx, resolved_identity.as_ref());
-    handle_odata_get_for_tenant(state, tenant, security_ctx, path, query_params).await
+    handle_odata_get_for_tenant(state, tenant, security_ctx, path, query_params, schema_pin).await
 }
 
 #[instrument(skip_all, fields(otel.name = "GET /odata"))]
@@ -1191,9 +1624,14 @@ pub async fn handle_service_document(
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
+    let schema_pin = match extract_schema_pin(&headers, &state, &tenant).await {
+        Ok(pin) => pin,
+        Err(error) => return error.into_response(),
+    };
     ODataResponse {
         status: StatusCode::OK,
-        body: service_document_body(&state, &tenant),
+        body: service_document_body_for_pin(&state, &tenant, schema_pin.as_ref())
+            .unwrap_or_else(|| serde_json::json!({"error": "Scoped schema bundle not found"})),
     }
     .into_response()
 }
@@ -1207,10 +1645,14 @@ pub async fn handle_metadata(
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
-    ODataXmlResponse {
-        body: tenant_csdl_xml(&state, &tenant),
-    }
-    .into_response()
+    let schema_pin = match extract_schema_pin(&headers, &state, &tenant).await {
+        Ok(pin) => pin,
+        Err(error) => return error.into_response(),
+    };
+    let Some(body) = tenant_csdl_xml_for_pin(&state, &tenant, schema_pin.as_ref()) else {
+        return (StatusCode::CONFLICT, "Scoped schema bundle not found").into_response();
+    };
+    ODataXmlResponse { body }.into_response()
 }
 
 #[instrument(skip_all, fields(otel.name = "GET /odata/hints"))]

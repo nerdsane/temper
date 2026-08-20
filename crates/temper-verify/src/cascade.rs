@@ -147,6 +147,10 @@ pub struct VerificationCascade {
     prop_test_cases: u32,
     /// Max steps per property test case.
     prop_test_max_steps: usize,
+    /// Maximum unique states explored by model checking.
+    model_state_budget: usize,
+    /// Optional hard Z3 resource-unit budget for Level 0.
+    smt_resource_budget: Option<u32>,
     /// Optional actor simulation runner (Level 2b).
     actor_sim_runner: Option<ActorSimRunner>,
     /// If true, stop after the first failing level.
@@ -174,6 +178,8 @@ impl VerificationCascade {
             sim_ticks: 200,
             prop_test_cases: 1000,
             prop_test_max_steps: 30,
+            model_state_budget: usize::MAX,
+            smt_resource_budget: None,
             actor_sim_runner: None,
             fail_fast: false,
             path_extraction_config: None,
@@ -202,6 +208,30 @@ impl VerificationCascade {
     /// Set the number of property test cases.
     pub fn with_prop_test_cases(mut self, cases: u32) -> Self {
         self.prop_test_cases = cases;
+        self
+    }
+
+    /// Set the deterministic simulation tick budget per seed.
+    pub fn with_sim_ticks(mut self, ticks: u64) -> Self {
+        self.sim_ticks = ticks;
+        self
+    }
+
+    /// Set the maximum action-sequence length per property-test case.
+    pub fn with_prop_test_max_steps(mut self, steps: usize) -> Self {
+        self.prop_test_max_steps = steps;
+        self
+    }
+
+    /// Set the maximum unique states explored by Level 1 model checking.
+    pub fn with_model_state_budget(mut self, states: usize) -> Self {
+        self.model_state_budget = states;
+        self
+    }
+
+    /// Set the hard Z3 resource-unit budget for symbolic verification.
+    pub fn with_smt_resource_budget(mut self, resource_units: u32) -> Self {
+        self.smt_resource_budget = Some(resource_units);
         self
     }
 
@@ -344,7 +374,12 @@ impl VerificationCascade {
 
     /// Level 0: SMT symbolic verification.
     fn run_symbolic_verification(&self) -> LevelResult {
-        let result = smt::verify_symbolic(&self.ioa_source, self.max_counter);
+        let result = match self.smt_resource_budget {
+            Some(resource_units) => {
+                smt::verify_symbolic_with_budget(&self.ioa_source, self.max_counter, resource_units)
+            }
+            None => smt::verify_symbolic(&self.ioa_source, self.max_counter),
+        };
         let passed = result.all_passed;
 
         let dead_guards: Vec<&str> = result
@@ -405,7 +440,7 @@ impl VerificationCascade {
 
     /// Level 1: Stateright exhaustive model checking.
     fn run_model_check(&self, model: &TemperModel) -> LevelResult {
-        let verification = checker::check_model(model);
+        let verification = checker::check_model_with_state_budget(model, self.model_state_budget);
         let passed = verification.all_properties_hold;
         let summary = if passed {
             format!(

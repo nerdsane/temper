@@ -456,29 +456,6 @@ pub(super) fn select_entity_ids_for_materialization(
     })
 }
 
-/// Resolve an entity set name from an entity type name.
-///
-/// Reverse-lookups the entity_set_map to find the set name for a given type.
-pub(super) fn resolve_entity_set_name(
-    state: &ServerState,
-    tenant: &TenantId,
-    entity_type: &str,
-) -> String {
-    let registry = state
-        .registry
-        .read()
-        .expect("registry lock should not be poisoned"); // ci-ok: infallible lock
-    if let Some(tc) = registry.get_tenant(tenant) {
-        for (set_name, type_name) in &tc.entity_set_map {
-            if type_name == entity_type {
-                return set_name.clone();
-            }
-        }
-    }
-    // Fallback: pluralize entity type
-    format!("{entity_type}s")
-}
-
 /// Record a trajectory entry for an EntitySetNotFound error.
 pub(super) async fn record_entity_set_not_found(state: &ServerState, tenant: &str, set_name: &str) {
     tracing::warn!(tenant = %tenant, entity_set = %set_name, "entity set not found");

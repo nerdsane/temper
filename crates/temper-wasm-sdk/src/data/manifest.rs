@@ -7,6 +7,10 @@ use sha2::{Digest, Sha256};
 
 use super::{DATA_ABI_VERSION_V1, ModuleSdkCompatibilityProof};
 
+mod operation;
+
+pub use operation::DataOperationKind;
+
 /// Per-module application-data capability declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +75,14 @@ impl ModuleDataGrant {
             return false;
         };
         match operation {
+            DataOperationKind::SchemaBundleSubmit
+            | DataOperationKind::SchemaBundleGet
+            | DataOperationKind::SchemaBundleVerify
+            | DataOperationKind::SchemaBundleActivate
+            | DataOperationKind::SchemaBundleRetire
+            | DataOperationKind::SchemaMigrationStart
+            | DataOperationKind::SchemaMigrationGet
+            | DataOperationKind::SchemaMigrationRetry => true,
             DataOperationKind::ActionInvoke => {
                 action.is_some_and(|name| entity.actions.contains(name))
             }
@@ -91,21 +103,6 @@ impl ModuleDataGrant {
             .map_err(|error| format!("failed to serialize module data grant: {error}"))?;
         Ok(hex_sha256(&bytes))
     }
-}
-
-/// Closed operation names accepted in `app.toml`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DataOperationKind {
-    EntityGet,
-    EntityQuery,
-    EntityCreate,
-    EntityPatch,
-    ActionInvoke,
-    Batch,
-    CompositeInvoke,
-    FileRead,
-    FileWrite,
 }
 
 /// Exact per-entity capability surface.

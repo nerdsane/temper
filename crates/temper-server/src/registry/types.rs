@@ -87,6 +87,20 @@ pub enum RegistryError {
         entity_type: String,
         source: String,
     },
+    /// One immutable scoped digest was staged with different content.
+    ScopedBundleConflict {
+        tenant: String,
+        scope: String,
+        digest: String,
+    },
+    /// Activation named a scoped bundle that was never staged.
+    ScopedBundleMissing {
+        tenant: String,
+        scope: String,
+        digest: String,
+    },
+    /// Activation's predecessor does not match the current scoped pointer.
+    ScopedPredecessorMismatch { tenant: String, scope: String },
 }
 
 impl std::fmt::Display for RegistryError {
@@ -108,6 +122,26 @@ impl std::fmt::Display for RegistryError {
                     "failed to parse IOA for tenant '{tenant}', entity '{entity_type}': {source}"
                 )
             }
+            Self::ScopedBundleConflict {
+                tenant,
+                scope,
+                digest,
+            } => write!(
+                f,
+                "scoped bundle conflict for tenant '{tenant}', scope '{scope}', digest '{digest}'"
+            ),
+            Self::ScopedBundleMissing {
+                tenant,
+                scope,
+                digest,
+            } => write!(
+                f,
+                "scoped bundle missing for tenant '{tenant}', scope '{scope}', digest '{digest}'"
+            ),
+            Self::ScopedPredecessorMismatch { tenant, scope } => write!(
+                f,
+                "scoped predecessor mismatch for tenant '{tenant}', scope '{scope}'"
+            ),
         }
     }
 }

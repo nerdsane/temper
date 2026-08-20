@@ -117,7 +117,7 @@ fn canonical_bundle_identity_ignores_formatting_and_input_order() {
     assert_eq!(first.ioa_specs(), second.ioa_specs());
     assert_eq!(
         first.digest(),
-        "sha256:3586b27317d263dc5d705c190da24b03a2a91b9a1d7a212ba1f3300273f4e512"
+        "sha256:6b293f239f73fe84da171f8fbfe21daa60a6e3fa7bff7681cd5ea10980884603"
     );
 }
 
@@ -368,4 +368,66 @@ fn invalid_inputs_have_stable_error_codes() {
             .to_string();
     assert!(bounded_error.len() <= 1_100);
     assert!(bounded_error.is_char_boundary(bounded_error.len()));
+}
+
+#[test]
+fn bundle_rejects_typed_references_outside_its_ioa_set() {
+    let referencing_ioa = r#"
+[automaton]
+name = "Alpha"
+states = ["Draft"]
+initial = "Draft"
+
+[[state]]
+name = "beta_id"
+type = "ref"
+entity_type = "Beta"
+initial = ""
+"#;
+
+    let error = ScopedSpecBundle::compile(input(
+        ORDERED_CSDL,
+        vec![("Example.Alpha", referencing_ioa)],
+    ))
+    .unwrap_err();
+
+    assert_eq!(error.code(), BundleErrorCode::InvalidBundle);
+    assert!(error.to_string().contains("reference_target_missing"));
+    assert!(error.to_string().contains("Beta"));
+}
+
+#[test]
+fn bundle_rejects_csdl_reference_contract_contradictions() {
+    let referencing_ioa = r#"
+[automaton]
+name = "Alpha"
+states = ["Draft"]
+initial = "Draft"
+
+[[state]]
+name = "beta_id"
+type = "ref"
+entity_type = "Beta"
+initial = ""
+"#;
+    let contradictory_csdl = ORDERED_CSDL.replace(
+        "        <Property Name=\"Label\" Type=\"Edm.String\"/>",
+        "        <Property Name=\"Label\" Type=\"Edm.String\"/>\n        <Property Name=\"beta_id\" Type=\"Edm.Guid\"/>\n        <NavigationProperty Name=\"Beta\" Type=\"Example.Alpha\"><ReferentialConstraint Property=\"beta_id\" ReferencedProperty=\"Id\"/></NavigationProperty>",
+    );
+
+    let error = ScopedSpecBundle::compile(input(
+        &contradictory_csdl,
+        vec![
+            ("Example.Alpha", referencing_ioa),
+            ("Example.Beta", BETA_IOA),
+        ],
+    ))
+    .unwrap_err();
+
+    assert_eq!(error.code(), BundleErrorCode::InvalidBundle);
+    assert!(
+        error
+            .to_string()
+            .contains("csdl_reference_contract_mismatch")
+    );
 }

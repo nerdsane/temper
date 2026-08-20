@@ -48,6 +48,7 @@ async fn awaited_drain_waits_for_logical_retry_and_completes_it() {
         )
         .expect("serialize authority"),
         created_at: sim_now(),
+        schema_pin: None,
     };
     let mut payload = serde_json::json!({});
     attach_intents(&mut payload, std::slice::from_ref(&intent)).expect("attach intent");

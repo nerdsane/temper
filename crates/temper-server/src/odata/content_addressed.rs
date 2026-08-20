@@ -200,9 +200,9 @@ async fn ingest_raw_inner(
         &tenant,
         entity_type,
         &sha,
-        "Create",
-        "create",
+        ("Create", "create"),
         &initial_fields,
+        None,
     )
     .await
     {

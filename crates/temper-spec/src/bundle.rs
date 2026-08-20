@@ -1,8 +1,11 @@
 //! Pure, deterministic compilation of immutable scoped specification bundles.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::automaton::parse_automaton;
+use crate::automaton::{
+    Automaton, LintSeverity, lint_automata_bundle, lint_csdl_reference_contracts, parse_automaton,
+};
+use crate::csdl::parse_csdl;
 
 mod csdl;
 mod digest;
@@ -56,6 +59,7 @@ impl ScopedSpecBundle {
 
         let canonical_csdl = canonical_csdl(&input.csdl_xml)?;
         let ioa_specs = canonical_ioa_specs(input.ioa_sources)?;
+        validate_bundle_contracts(&canonical_csdl, &ioa_specs)?;
         let cedar_policies = canonical_policies(input.cedar_policies)?;
         let wasm_modules = canonical_wasm_modules(input.wasm_modules)?;
         let migration = validate_migration(input.migration)?;
@@ -83,6 +87,72 @@ impl ScopedSpecBundle {
             digest,
         })
     }
+}
+
+fn validate_bundle_contracts(
+    canonical_csdl: &str,
+    ioa_specs: &[CanonicalIoaSpec],
+) -> Result<(), BundleError> {
+    let csdl = parse_csdl(canonical_csdl).map_err(|error| {
+        BundleError::new(
+            BundleErrorCode::InvalidCsdl,
+            format!("failed to reparse canonical CSDL: {error}"),
+        )
+    })?;
+    let csdl_entities = csdl
+        .schemas
+        .iter()
+        .flat_map(|schema| {
+            schema
+                .entity_types
+                .iter()
+                .map(move |entity| format!("{}.{}", schema.namespace, entity.name))
+        })
+        .collect::<BTreeSet<_>>();
+    let mut automata = BTreeMap::<String, Automaton>::new();
+    for spec in ioa_specs {
+        if !csdl_entities.contains(&spec.entity_type) {
+            return Err(BundleError::new(
+                BundleErrorCode::InvalidBundle,
+                format!(
+                    "IOA entity '{}' is absent from the canonical CSDL",
+                    spec.entity_type
+                ),
+            ));
+        }
+        let automaton = parse_automaton(&spec.canonical_source).map_err(|error| {
+            BundleError::new(
+                BundleErrorCode::InvalidIoa,
+                format!(
+                    "failed to reparse canonical IOA '{}': {error}",
+                    spec.entity_type
+                ),
+            )
+        })?;
+        let short_name = automaton.automaton.name.clone();
+        if automata.insert(short_name.clone(), automaton).is_some() {
+            return Err(BundleError::new(
+                BundleErrorCode::InvalidBundle,
+                format!("IOA short name '{short_name}' is ambiguous across CSDL namespaces"),
+            ));
+        }
+    }
+
+    let mut findings = lint_automata_bundle(&automata);
+    findings.extend(lint_csdl_reference_contracts(&csdl, &automata));
+    findings.sort_by(|left, right| {
+        (&left.entity, &left.code, &left.message).cmp(&(&right.entity, &right.code, &right.message))
+    });
+    if let Some(finding) = findings
+        .into_iter()
+        .find(|finding| finding.severity == LintSeverity::Error)
+    {
+        return Err(BundleError::new(
+            BundleErrorCode::InvalidBundle,
+            format!("{}: {}: {}", finding.entity, finding.code, finding.message),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_scope(scope_id: &str) -> Result<(), BundleError> {
@@ -291,11 +361,15 @@ fn validate_budgets(budgets: &ScopedBundleBudgets) -> Result<(), BundleError> {
         || budgets.migration_output_bytes == 0
         || budgets.migration_entities_per_batch == 0
         || budgets.migration_total_entities == 0
+        || budgets.migration_total_batches == 0
+        || budgets.migration_attempts == 0
         || u64::from(budgets.migration_entities_per_batch) > budgets.migration_total_entities
+        || budgets.migration_total_batches > budgets.migration_total_entities
+        || u64::from(budgets.migration_attempts) > budgets.migration_total_batches
     {
         return Err(BundleError::new(
             BundleErrorCode::BudgetExceeded,
-            "scoped bundle budgets must be positive and the per-batch entity budget must not exceed the total entity budget",
+            "scoped bundle budgets must be positive and internally consistent",
         ));
     }
     Ok(())

@@ -30,6 +30,37 @@ struct PreparedEventInsert {
     expected_sequence: u64,
 }
 
+async fn assert_scoped_journal_write_fence(
+    tx: &libsql::Transaction,
+    tenant: &str,
+    entity_id: &str,
+) -> Result<(), PersistenceError> {
+    let Some((_, digest)) = entity_id.rsplit_once(":schema:") else {
+        return Ok(());
+    };
+    let mut rows = tx
+        .query(
+            "SELECT 1 FROM schema_active_pointers
+             WHERE tenant = ?1 AND json_extract(pointer_json, '$.bundle_digest') = ?2
+             UNION ALL
+             SELECT 1 FROM schema_migration_jobs
+             WHERE tenant = ?1
+               AND json_extract(job_json, '$.command.target_bundle_digest') = ?2
+               AND json_extract(job_json, '$.status') IN
+                   ('submitted', 'migrating', 'validating', 'ready')
+             LIMIT 1",
+            params![tenant, digest],
+        )
+        .await
+        .map_err(storage_error)?;
+    if rows.next().await.map_err(storage_error)?.is_none() {
+        return Err(PersistenceError::Storage(
+            "stale scoped schema write fence".into(),
+        ));
+    }
+    Ok(())
+}
+
 impl EventStore for TursoEventStore {
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.append"))]
     async fn append(
@@ -897,6 +928,62 @@ impl EventStore for TursoEventStore {
         }
         Ok(out)
     }
+
+    async fn list_scoped_entity_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        bundle_digest: &str,
+        after_entity_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.configured_connection().await?;
+        let suffix = format!(":schema:{bundle_digest}");
+        let pattern = format!("%{suffix}");
+        let after = after_entity_id.unwrap_or("");
+        let limit = limit.min(i64::MAX as usize) as i64;
+        let mut rows = conn
+            .query(
+                "SELECT DISTINCT substr(entity_id, 1, length(entity_id) - length(?3)) AS scoped_id
+                 FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id LIKE ?4
+                   AND substr(entity_id, 1, length(entity_id) - length(?3)) > ?5
+                 ORDER BY scoped_id LIMIT ?6",
+                params![tenant, entity_type, suffix, pattern, after, limit],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(row.get::<String>(0).map_err(storage_error)?);
+        }
+        Ok(out)
+    }
+
+    async fn scoped_bundle_write_version(
+        &self,
+        tenant: &str,
+        bundle_digest: &str,
+    ) -> Result<u64, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let pattern = format!("%:schema:{bundle_digest}");
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM events WHERE tenant = ?1 AND entity_id LIKE ?2",
+                params![tenant, pattern],
+            )
+            .await
+            .map_err(storage_error)?;
+        let Some(row) = rows.next().await.map_err(storage_error)? else {
+            return Ok(0);
+        };
+        let count = row.get::<i64>(0).map_err(storage_error)?;
+        u64::try_from(count)
+            .map_err(|_| PersistenceError::Storage("invalid schema write version".into()))
+    }
 }
 
 impl TursoEventStore {
@@ -976,7 +1063,9 @@ impl TursoEventStore {
             return Ok(expected_sequence);
         }
 
-        if let [event] = events {
+        if let [event] = events
+            && !persistence_id.contains(":schema:")
+        {
             return self
                 .append_single_event_inner(persistence_id, expected_sequence, event)
                 .await;
@@ -989,6 +1078,8 @@ impl TursoEventStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(storage_error)?;
+
+        assert_scoped_journal_write_fence(&tx, tenant, entity_id).await?;
 
         let select_start = std::time::Instant::now();
         let rows_result = tx
@@ -1172,6 +1263,7 @@ impl TursoEventStore {
             let (tenant, entity_type, entity_id) =
                 parse_persistence_id_parts(&append.persistence_id)
                     .map_err(PersistenceError::Storage)?;
+            assert_scoped_journal_write_fence(&tx, tenant, entity_id).await?;
 
             if append.expected_sequence == 0 && !append.events.is_empty() {
                 parsed.push((

@@ -204,6 +204,17 @@ impl ReactionDispatcher {
             load_delivery_record,
         };
 
+        if let Some(pin) = intent.schema_pin.as_ref() {
+            crate::schema_deployment::GovernedSchemaDeploymentService::new(state)
+                .recover_registry_bundle(
+                    &intent.tenant,
+                    &pin.execution.scope,
+                    &pin.execution.bundle_digest,
+                )
+                .await
+                .map_err(|error| error.message().to_string())?;
+        }
+
         let (store, _) = state
             .event_journal()
             .ok_or_else(|| "durable reaction delivery requires an event journal".to_string())?;
@@ -282,10 +293,19 @@ impl ReactionDispatcher {
         }
 
         if let Some(target_entity_id) = intent.target_entity_id.as_deref() {
-            let target_persistence_id = format!(
-                "{}:{}:{}",
-                intent.tenant, rule.then.entity_type, target_entity_id
-            );
+            let target_persistence_id = match intent.schema_pin.as_ref() {
+                Some(pin) => format!(
+                    "{}:{}:{}:schema:{}",
+                    intent.tenant,
+                    rule.then.entity_type,
+                    target_entity_id,
+                    pin.execution.bundle_digest
+                ),
+                None => format!(
+                    "{}:{}:{}",
+                    intent.tenant, rule.then.entity_type, target_entity_id
+                ),
+            };
             let target_events = store
                 .read_latest_events(
                     &target_persistence_id,
@@ -307,6 +327,7 @@ impl ReactionDispatcher {
                         &rule.then.entity_type,
                         target_entity_id,
                         target_event.sequence_nr,
+                        intent.schema_pin.as_ref().map(|pin| &pin.execution),
                     )
                     .await
                     .map_err(|error| error.to_string())?;
@@ -354,6 +375,7 @@ impl ReactionDispatcher {
         let invoking_ctx = AgentContext {
             security_ctx: Some(security_ctx),
             idempotency_key: Some(intent.delivery_id.clone()),
+            schema_pin: intent.schema_pin.as_ref().map(|pin| pin.execution.clone()),
             ..AgentContext::default()
         };
         let drop_ok = rule.drop_ok;

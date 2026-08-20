@@ -40,6 +40,104 @@ module = "scm_ingest_pack"
     )))
 }
 
+fn task_schema_pin(digest: &str) -> SchemaExecutionPin {
+    SchemaExecutionPin {
+        scope: temper_runtime::persistence::schema_deployment::SchemaScope {
+            kind: temper_runtime::persistence::schema_deployment::SchemaScopeKind::Task,
+            id: "task-114".to_string(),
+        },
+        bundle_digest: digest.to_string(),
+    }
+}
+
+#[cfg(feature = "sim")]
+async fn activate_schema_pin(store: &temper_store_sim::SimEventStore, pin: &SchemaExecutionPin) {
+    use temper_runtime::persistence::schema_deployment::{
+        ActivateSchemaBundle, ClaimSchemaVerification, ClaimSchemaVerificationOutcome,
+        SchemaBundleRecord, SchemaDeploymentStore, SchemaOperationIdentity,
+        SchemaVerificationReceipt, SubmitSchemaBundle, SubmitSchemaBundleOutcome,
+    };
+
+    let outcome = store
+        .submit_schema_bundle(SubmitSchemaBundle {
+            bundle: SchemaBundleRecord {
+                tenant: "default".to_string(),
+                scope: pin.scope.clone(),
+                digest: pin.bundle_digest.clone(),
+                predecessor_digest: None,
+                canonical_csdl: "<Schema/>".to_string(),
+                canonical_ioa: BTreeMap::new(),
+                cedar_policies: BTreeMap::new(),
+                wasm_module_digests: BTreeMap::new(),
+                migration_module_name: None,
+                migration_module_digest: None,
+                migration_abi_version: None,
+                canonical_budgets: "{}".to_string(),
+            },
+            idempotency_key: format!("submit:{}", pin.bundle_digest),
+            request_digest: pin.bundle_digest.clone(),
+            request_id: format!("request:{}", pin.bundle_digest),
+        })
+        .await
+        .expect("schema fixture submission should succeed");
+    let record = match outcome {
+        SubmitSchemaBundleOutcome::Created(record)
+        | SubmitSchemaBundleOutcome::Replayed(record) => record,
+    };
+    let claim = match store
+        .claim_schema_verification(ClaimSchemaVerification {
+            tenant: "default".to_string(),
+            scope: pin.scope.clone(),
+            bundle_digest: pin.bundle_digest.clone(),
+            logical_now: 1,
+            lease_expires_at: 10,
+            operation: SchemaOperationIdentity {
+                idempotency_key: format!("verify:{}", pin.bundle_digest),
+                request_digest: pin.bundle_digest.clone(),
+                request_id: format!("verify-request:{}", pin.bundle_digest),
+            },
+        })
+        .await
+        .expect("schema fixture verification claim should succeed")
+    {
+        ClaimSchemaVerificationOutcome::Claimed(record)
+        | ClaimSchemaVerificationOutcome::Replayed(record) => record,
+    };
+    let receipt_id = format!("verify:{}", pin.bundle_digest);
+    let verified = store
+        .finish_schema_verification(
+            "default",
+            &pin.scope,
+            &pin.bundle_digest,
+            claim.fence,
+            SchemaVerificationReceipt {
+                id: receipt_id.clone(),
+                verifier_version: "test/v1".to_string(),
+                input_digest: pin.bundle_digest.clone(),
+                passed: true,
+            },
+        )
+        .await
+        .expect("schema fixture verification should succeed");
+    store
+        .activate_schema_bundle(ActivateSchemaBundle {
+            tenant: "default".to_string(),
+            scope: pin.scope.clone(),
+            bundle_digest: pin.bundle_digest.clone(),
+            expected_predecessor: None,
+            expected_fence: verified.fence,
+            verification_receipt_id: receipt_id,
+            operation: SchemaOperationIdentity {
+                idempotency_key: format!("activate:{}", pin.bundle_digest),
+                request_digest: pin.bundle_digest.clone(),
+                request_id: format!("activate-request:{}", pin.bundle_digest),
+            },
+        })
+        .await
+        .expect("schema fixture activation should succeed");
+    assert_eq!(record.bundle.digest, pin.bundle_digest);
+}
+
 #[test]
 fn event_budget_workspace_id_uses_workspace_entity_id_or_field() {
     let workspace_state = EntityState {
@@ -145,6 +243,167 @@ async fn queued_snapshot_only_advances_replay_boundary_after_write_applies() {
     assert_eq!(state.events_since_snapshot, 1);
 }
 
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn scoped_actor_commits_immutable_schema_pin_to_state_and_events() {
+    use temper_runtime::persistence::EventStore;
+    use temper_store_sim::SimEventStore;
+
+    let store = Arc::new(SimEventStore::no_faults(114));
+    let pin = task_schema_pin(&format!("sha256:{}", "a".repeat(64)));
+    activate_schema_pin(store.as_ref(), &pin).await;
+    let actor = EntityActor::with_persistence(
+        "Order",
+        "scoped-1",
+        order_table(),
+        serde_json::json!({}),
+        crate::storage::BoxedEventStore::from_arc(store.clone()),
+        crate::storage::BackendLabel::Sim,
+    )
+    .with_schema_pin(pin.clone());
+    let system = ActorSystem::new("scoped-pin");
+    let actor_ref = system.spawn(actor, "scoped-pin-actor");
+
+    let response: EntityResponse = actor_ref
+        .ask(EntityMsg::GetState, Duration::from_secs(1))
+        .await
+        .expect("scoped actor should start");
+    assert_eq!(
+        serde_json::from_value::<SchemaExecutionPin>(
+            response.state.fields[SCHEMA_PIN_FIELD].clone()
+        )
+        .expect("state pin should decode"),
+        pin
+    );
+
+    let rule = crate::trigger::ReactionRule {
+        name: "scoped-reaction".to_string(),
+        when: crate::trigger::ReactionTrigger {
+            entity_type: "Order".to_string(),
+            action: Some("AddItem".to_string()),
+            to_state: Some("Draft".to_string()),
+            guard: None,
+        },
+        then: crate::trigger::ReactionTarget {
+            entity_type: "Payment".to_string(),
+            action: "Create".to_string(),
+            params: serde_json::json!({}),
+            params_from: BTreeMap::new(),
+        },
+        resolve_target: crate::trigger::TargetResolver::SameId,
+        principal: None,
+        drop_ok: false,
+    };
+    let action: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::Action {
+                name: "AddItem".to_string(),
+                params: serde_json::json!({"ProductId": "scoped-product"}),
+                cross_entity_booleans: BTreeMap::new(),
+                idempotency_key: None,
+                expected_sequence: None,
+                reaction_context: Some(Box::new(crate::trigger::delivery::ReactionCommitContext {
+                    rules: vec![rule],
+                    authority: serde_json::json!({}),
+                    depth: 0,
+                    root_delivery_id: None,
+                    expected_source_sequence: response.state.sequence_nr,
+                    resolved_guards: BTreeMap::new(),
+                    receipt: Some(crate::trigger::delivery::ReactionReceipt {
+                        delivery_id: "incoming-scoped-delivery".to_string(),
+                        fencing_token: 7,
+                        received_at: sim_now(),
+                        schema_pin: None,
+                    }),
+                })),
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("scoped action should execute");
+    assert!(action.success);
+
+    let persistence_id = format!("default:Order:scoped-1:schema:{}", pin.bundle_digest);
+    let events = store
+        .read_events(&persistence_id, 0)
+        .await
+        .expect("event read should succeed");
+    let action_event = events
+        .iter()
+        .find(|event| event.event_type == "AddItem")
+        .expect("scoped action event should be durable");
+    let event_pin: SchemaEventPin =
+        serde_json::from_value(action_event.payload[SCHEMA_PIN_FIELD].clone())
+            .expect("event pin should decode");
+    assert_eq!(event_pin.execution, pin);
+    assert!(event_pin.action_digest.starts_with("sha256:"));
+    let intents = crate::trigger::delivery::extract_intents(&action_event.payload)
+        .expect("reaction intents should decode");
+    assert_eq!(intents[0].schema_pin.as_ref(), Some(&event_pin));
+    let receipt = crate::trigger::delivery::extract_receipt(&action_event.payload)
+        .expect("reaction receipt should decode")
+        .expect("reaction receipt should be present");
+    assert_eq!(receipt.schema_pin.as_ref(), Some(&event_pin));
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn scoped_actor_recovery_rejects_mismatched_event_pin() {
+    use temper_runtime::persistence::EventStore;
+    use temper_store_sim::SimEventStore;
+
+    let store = Arc::new(SimEventStore::no_faults(115));
+    let expected = task_schema_pin(&format!("sha256:{}", "b".repeat(64)));
+    let wrong = task_schema_pin(&format!("sha256:{}", "c".repeat(64)));
+    activate_schema_pin(store.as_ref(), &expected).await;
+    let persistence_id = format!("default:Order:scoped-2:schema:{}", expected.bundle_digest);
+    let envelope = PersistenceEnvelope {
+        sequence_nr: 0,
+        event_type: "Created".to_string(),
+        payload: serde_json::json!({
+            "action": "Created",
+            "from_status": "",
+            "to_status": "Draft",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "params": {},
+            SCHEMA_PIN_FIELD: SchemaEventPin {
+                execution: wrong,
+                action_digest: format!("sha256:{}", "d".repeat(64)),
+            }
+        }),
+        metadata: EventMetadata {
+            event_id: sim_uuid(),
+            causation_id: sim_uuid(),
+            correlation_id: sim_uuid(),
+            timestamp: sim_now(),
+            actor_id: persistence_id.clone(),
+        },
+    };
+    store
+        .append(&persistence_id, 0, &[envelope])
+        .await
+        .expect("fixture append should succeed");
+
+    let actor = EntityActor::with_persistence(
+        "Order",
+        "scoped-2",
+        order_table(),
+        serde_json::json!({}),
+        crate::storage::BoxedEventStore::from_arc(store),
+        crate::storage::BackendLabel::Sim,
+    )
+    .with_schema_pin(expected);
+    let system = ActorSystem::new("scoped-pin-mismatch");
+    let actor_ref = system.spawn(actor, "scoped-pin-mismatch-actor");
+    let result = actor_ref
+        .ask::<EntityResponse>(EntityMsg::GetState, Duration::from_secs(1))
+        .await;
+    assert!(
+        result.is_err(),
+        "mismatched durable pin must fail actor startup"
+    );
+}
+
 // =============================================
 // DST-FIRST: Test the actor through the runtime
 // =============================================
@@ -246,6 +505,58 @@ async fn sequence_preconditions_are_checked_atomically_by_actor() {
         .unwrap();
     assert!(!stale.success);
     assert_eq!(stale.error.as_deref(), Some("SequenceConflict"));
+}
+
+#[tokio::test]
+async fn scoped_schema_pin_cannot_be_replaced_or_removed_by_field_updates() {
+    let system = ActorSystem::new("schema-pin-field-guard");
+    let pin =
+        task_schema_pin("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    let actor = EntityActor::new(
+        "Order",
+        "order-scoped",
+        order_table(),
+        serde_json::json!({"Name": "before"}),
+    )
+    .with_schema_pin(pin.clone());
+    let actor_ref = system.spawn(actor, "order-scoped");
+
+    let forged: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({(SCHEMA_PIN_FIELD): {"bundle_digest": "forged"}}),
+                replace: false,
+                reference_evidence: BTreeMap::new(),
+                expected_sequence: None,
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    assert!(!forged.success);
+    assert_eq!(forged.error.as_deref(), Some("ReservedFieldMutation"));
+
+    let replaced: EntityResponse = actor_ref
+        .ask(
+            EntityMsg::UpdateFields {
+                fields: serde_json::json!({"Name": "after"}),
+                replace: true,
+                reference_evidence: BTreeMap::new(),
+                expected_sequence: Some(forged.state.sequence_nr),
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    assert!(replaced.success);
+    assert_eq!(replaced.state.fields["Name"], "after");
+    assert_eq!(
+        serde_json::from_value::<SchemaExecutionPin>(
+            replaced.state.fields[SCHEMA_PIN_FIELD].clone()
+        )
+        .unwrap(),
+        pin
+    );
 }
 
 #[tokio::test]

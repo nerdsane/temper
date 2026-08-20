@@ -56,6 +56,7 @@ use temper_evolution::store::RecordStore;
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
 use temper_runtime::actor::ActorRef;
+use temper_runtime::persistence::schema_deployment::{SchemaMigrationJob, SchemaMigrationStatus};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::CsdlDocument;
@@ -430,6 +431,13 @@ pub struct ServerState {
     reaction_recovery_generation: Arc<std::sync::atomic::AtomicU64>,
     /// Lifetime sentinel held by server-owned state clones, but not recovery workers.
     reaction_recovery_owner: Arc<()>,
+    /// Bounded handoff to the durable schema-migration supervisor.
+    schema_migration_supervisor_tx:
+        Arc<Mutex<Option<tokio::sync::mpsc::Sender<SchemaMigrationJob>>>>,
+    /// Generation used to retire replaced schema-migration supervisors.
+    schema_migration_supervisor_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Lifetime sentinel held by server-owned state clones, not the worker clone.
+    schema_migration_supervisor_owner: Arc<()>,
     /// Optional webhook dispatcher for external system notifications.
     pub webhook_dispatcher: Option<Arc<WebhookDispatcher>>,
     /// Native adapter integration registry (`type = "adapter"` dispatch path).
@@ -595,6 +603,7 @@ impl ServerState {
             }
         }
         self.storage_stack = Some(stack);
+        self.spawn_schema_migration_supervisor();
         let dispatcher = self
             .reaction_dispatcher
             .read()
@@ -603,6 +612,108 @@ impl ServerState {
         if let Some(dispatcher) = dispatcher {
             self.spawn_reaction_recovery(dispatcher);
         }
+    }
+
+    /// Hand one already-claimed migration to the bounded local supervisor.
+    pub(crate) fn enqueue_schema_migration(&self, job: SchemaMigrationJob) -> Result<(), String> {
+        let sender = self
+            .schema_migration_supervisor_tx
+            .lock()
+            .map_err(|_| "schema migration supervisor lock poisoned".to_string())?
+            .clone()
+            .ok_or_else(|| "schema migration supervisor is unavailable".to_string())?;
+        sender.try_send(job).map_err(|error| match error {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                "schema migration supervisor queue budget exhausted".to_string()
+            }
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                "schema migration supervisor stopped".to_string()
+            }
+        })
+    }
+
+    fn spawn_schema_migration_supervisor(&self) {
+        if self
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.schema_deployments.as_ref())
+            .is_none()
+            || tokio::runtime::Handle::try_current().is_err()
+        {
+            return;
+        }
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(128);
+        if let Ok(mut slot) = self.schema_migration_supervisor_tx.lock() {
+            *slot = Some(sender);
+        } else {
+            return;
+        }
+        let generation = self
+            .schema_migration_supervisor_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+        let owner = Arc::downgrade(&self.schema_migration_supervisor_owner);
+        let mut state = self.clone();
+        state.schema_migration_supervisor_owner = Arc::new(());
+        tokio::spawn(async move {
+            // determinism-ok: production durable-work supervisor; simulation
+            // tests drive the same fenced batch method explicitly.
+            let mut scan = tokio::time::interval(std::time::Duration::from_secs(1));
+            scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                if owner.upgrade().is_none()
+                    || state
+                        .schema_migration_supervisor_generation
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        != generation
+                {
+                    return;
+                }
+                let direct = tokio::select! { // determinism-ok: production durable-work scheduling
+                    job = receiver.recv() => job,
+                    _ = scan.tick() => None,
+                };
+                let jobs = match direct {
+                    Some(job) => vec![job],
+                    None => {
+                        let Some(store) = state
+                            .storage_stack
+                            .as_ref()
+                            .and_then(|stack| stack.schema_deployments.as_ref())
+                        else {
+                            return;
+                        };
+                        match store.list_incomplete_schema_migrations(128).await {
+                            Ok(jobs) => {
+                                let now = u64::try_from(sim_now().timestamp_millis()).unwrap_or(0);
+                                jobs.into_iter()
+                                    .filter(|job| {
+                                        job.status != SchemaMigrationStatus::Migrating
+                                            || job
+                                                .lease_expires_at
+                                                .is_some_and(|deadline| deadline <= now)
+                                    })
+                                    .collect()
+                            }
+                            Err(error) => {
+                                tracing::error!(%error, "schema migration recovery scan failed");
+                                Vec::new()
+                            }
+                        }
+                    }
+                };
+                for job in jobs {
+                    let job_id = job.command.job_id.clone();
+                    if let Err(error) =
+                        crate::schema_deployment::GovernedSchemaDeploymentService::new(&state)
+                            .drive_migration(job)
+                            .await
+                    {
+                        tracing::error!(job_id, error = %error.message(), "schema migration supervisor cycle failed");
+                    }
+                }
+            }
+        });
     }
 
     /// Return the durable query-plane capability for projection reads/writes.
@@ -706,6 +817,9 @@ impl ServerState {
             reaction_dispatcher: Arc::new(RwLock::new(None)),
             reaction_recovery_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             reaction_recovery_owner: Arc::new(()),
+            schema_migration_supervisor_tx: Arc::new(Mutex::new(None)),
+            schema_migration_supervisor_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            schema_migration_supervisor_owner: Arc::new(()),
             webhook_dispatcher: None,
             adapter_registry: Arc::new(AdapterRegistry::with_builtins()),
             wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
@@ -956,6 +1070,9 @@ impl ServerState {
             reaction_dispatcher: Arc::new(RwLock::new(None)),
             reaction_recovery_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             reaction_recovery_owner: Arc::new(()),
+            schema_migration_supervisor_tx: Arc::new(Mutex::new(None)),
+            schema_migration_supervisor_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            schema_migration_supervisor_owner: Arc::new(()),
             webhook_dispatcher: None,
             adapter_registry: Arc::new(AdapterRegistry::with_builtins()),
             wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),

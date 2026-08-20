@@ -77,6 +77,10 @@ pub fn build_router(state: ServerState) -> Router {
 
     let router = Router::new()
         .nest("/tdata", tdata)
+        .nest(
+            "/api/v1/schema-deployments",
+            crate::schema_deployment::router(),
+        )
         .nest("/_admin", crate::admin::build_admin_router())
         .route("/temper-client.js", get(serve_temper_client))
         .route("/static/temper-client.js", get(serve_temper_client))
@@ -128,6 +132,9 @@ pub fn build_router(state: ServerState) -> Router {
             HeaderName::from_static("x-temper-principal-kind"),
             HeaderName::from_static("x-temper-agent-role"),
             HeaderName::from_static("x-temper-agent-type"),
+            HeaderName::from_static("x-temper-schema-scope-kind"),
+            HeaderName::from_static("x-temper-schema-scope-id"),
+            HeaderName::from_static("x-temper-request-id"),
         ]);
 
     router

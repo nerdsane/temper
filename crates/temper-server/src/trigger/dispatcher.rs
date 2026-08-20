@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
+use temper_authz::SecurityContext;
+use temper_runtime::persistence::schema_deployment::SchemaExecutionPin;
 use temper_runtime::tenant::TenantId;
 
 use super::registry::ReactionRegistry;
@@ -10,7 +12,24 @@ use super::registry::ReactionRegistry;
 mod durable;
 mod fanout;
 
-pub(crate) use fanout::effective_trigger_security_context;
+pub(crate) fn effective_trigger_security_context(
+    agent_ctx: &crate::request_context::AgentContext,
+) -> SecurityContext {
+    if let Some(security_ctx) = &agent_ctx.security_ctx {
+        return security_ctx.clone();
+    }
+
+    let mut security_ctx = SecurityContext::from_headers(&[]).with_agent_context(
+        agent_ctx.agent_id.as_deref(),
+        agent_ctx.session_id.as_deref(),
+        agent_ctx.agent_type.as_deref(),
+    );
+    security_ctx.context_attrs.insert(
+        "triggerInheritedContextApproximate".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    security_ctx
+}
 
 /// Snapshot cross-entity guard inputs before a source transition commits.
 pub(crate) async fn resolve_rule_guard_inputs(
@@ -18,6 +37,7 @@ pub(crate) async fn resolve_rule_guard_inputs(
     tenant: &TenantId,
     rules: &[super::types::ReactionRule],
     source_fields: &serde_json::Value,
+    schema_pin: Option<&SchemaExecutionPin>,
 ) -> BTreeMap<String, crate::trigger::guard::CrossStatusMap> {
     let mut by_rule = BTreeMap::new();
     for rule in rules {
@@ -28,9 +48,23 @@ pub(crate) async fn resolve_rule_guard_inputs(
         crate::trigger::guard::collect_cross_entity_queries(guard, source_fields, &mut queries);
         let mut resolved = crate::trigger::guard::CrossStatusMap::new();
         for query in queries {
-            let status = state
-                .resolve_entity_status(tenant, &query.entity_type, &query.target_entity_id)
-                .await;
+            let status = match schema_pin {
+                Some(pin) => state
+                    .get_scoped_entity_state(
+                        tenant,
+                        &query.entity_type,
+                        &query.target_entity_id,
+                        pin.clone(),
+                    )
+                    .await
+                    .ok()
+                    .map(|response| response.state.status),
+                None => {
+                    state
+                        .resolve_entity_status(tenant, &query.entity_type, &query.target_entity_id)
+                        .await
+                }
+            };
             resolved.insert(
                 query.key(),
                 status.as_deref().is_some_and(|value| query.matches(value)),

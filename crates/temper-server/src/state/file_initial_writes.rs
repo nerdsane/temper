@@ -70,7 +70,14 @@ impl ServerState {
             .map_err(FileStreamContentError::ActionRejected)?;
         debug_assert_eq!(prepared_id.as_deref(), Some(file_id));
         let reference_evidence = self
-            .resolve_reference_evidence(tenant, "File", file_id, Some("Create"), &create_params)
+            .resolve_reference_evidence(
+                tenant,
+                "File",
+                file_id,
+                Some("Create"),
+                &create_params,
+                None,
+            )
             .await;
 
         // Reject a brand-new File whose target Workspace is not Active BEFORE

@@ -214,7 +214,7 @@ async fn required_empty_scalar_ref_fails_guard() {
         .expect("create Doc");
 
     let resolved = state
-        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit")
+        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit", None)
         .await;
 
     assert_eq!(
@@ -238,7 +238,7 @@ async fn required_empty_list_ref_fails_guard() {
         .expect("create Doc");
 
     let resolved = state
-        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit")
+        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit", None)
         .await;
 
     assert_eq!(
@@ -262,7 +262,7 @@ async fn optional_empty_list_ref_stays_vacuous_true() {
         .expect("create Doc");
 
     let resolved = state
-        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit")
+        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit", None)
         .await;
 
     assert_eq!(
@@ -291,7 +291,7 @@ async fn forbidden_status_missing_target_allows() {
         .expect("create Doc");
 
     let resolved = state
-        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit")
+        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit", None)
         .await;
 
     assert_eq!(
@@ -320,7 +320,7 @@ async fn forbidden_status_allowed_target_allows() {
         .expect("create Doc");
 
     let resolved = state
-        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit")
+        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit", None)
         .await;
 
     assert_eq!(
@@ -361,7 +361,7 @@ async fn forbidden_status_forbidden_target_rejects() {
         .expect("create Doc");
 
     let resolved = state
-        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit")
+        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit", None)
         .await;
 
     assert_eq!(
@@ -389,7 +389,7 @@ async fn forbidden_status_required_missing_target_rejects() {
         .expect("create Doc");
 
     let resolved = state
-        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit")
+        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit", None)
         .await;
 
     assert_eq!(

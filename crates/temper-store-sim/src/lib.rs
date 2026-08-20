@@ -18,6 +18,9 @@ use temper_runtime::persistence::{
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
+mod schema_deployment;
+pub use schema_deployment::SimSchemaFaultPoint;
+
 /// Fault injection configuration for simulation.
 ///
 /// Controls the probability of injected failures during event store operations.
@@ -117,6 +120,8 @@ pub struct SimEventStore {
 
 #[derive(Debug)]
 struct SimEventStoreInner {
+    /// Deterministic schema-deployment authority state.
+    schema_deployments: schema_deployment::SimSchemaDeploymentState,
     /// Event journals: persistence_id → Vec<PersistenceEnvelope>
     journals: BTreeMap<String, Vec<PersistenceEnvelope>>,
     /// Snapshots: persistence_id → (sequence_nr, snapshot_bytes)
@@ -129,6 +134,8 @@ struct SimEventStoreInner {
     rng: DeterministicRng,
     /// Fault injection configuration.
     faults: SimFaultConfig,
+    /// One-shot deterministic failures for schema lifecycle transactions.
+    pending_schema_failures: BTreeMap<SimSchemaFaultPoint, u64>,
     /// One-shot concurrency-violation injection counters per `persistence_id`.
     ///
     /// Each entry tells `append` to return a `ConcurrencyViolation` on the next
@@ -186,12 +193,14 @@ impl SimEventStore {
     pub fn new(seed: u64, faults: SimFaultConfig) -> Self {
         Self {
             inner: Arc::new(Mutex::new(SimEventStoreInner {
+                schema_deployments: schema_deployment::SimSchemaDeploymentState::default(),
                 journals: BTreeMap::new(),
                 snapshots: BTreeMap::new(),
                 snapshot_history: BTreeMap::new(),
                 event_segments: BTreeMap::new(),
                 rng: DeterministicRng::new(seed),
                 faults,
+                pending_schema_failures: BTreeMap::new(),
                 pending_concurrency_violations: BTreeMap::new(),
                 pending_read_failures: BTreeMap::new(),
                 pending_append_delays: BTreeMap::new(),
@@ -214,6 +223,7 @@ impl SimEventStore {
     /// retry replays back to the same spot.
     pub fn inject_concurrency_violations(&self, persistence_id: &str, count: u64) {
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+
         if count == 0 {
             inner.pending_concurrency_violations.remove(persistence_id);
         } else {
@@ -392,6 +402,17 @@ impl EventStore for SimEventStore {
         }
 
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+
+        if let Ok((tenant, _, entity_id)) = parse_persistence_id_parts(persistence_id)
+            && let Some((_, digest)) = entity_id.rsplit_once(":schema:")
+            && !inner
+                .schema_deployments
+                .permits_scoped_journal_write(tenant, digest)
+        {
+            return Err(PersistenceError::Storage(
+                "stale scoped schema write fence".into(),
+            ));
+        }
 
         // Deterministic one-shot injection (see `inject_concurrency_violations`).
         // Consumes one counter per call; falls back to normal flow once drained.
@@ -801,6 +822,16 @@ impl EventStore for SimEventStore {
         }
 
         for append in appends {
+            if let Ok((tenant, _, entity_id)) = parse_persistence_id_parts(&append.persistence_id)
+                && let Some((_, digest)) = entity_id.rsplit_once(":schema:")
+                && !inner
+                    .schema_deployments
+                    .permits_scoped_journal_write(tenant, digest)
+            {
+                return Err(PersistenceError::Storage(
+                    "stale scoped schema write fence".into(),
+                ));
+            }
             let pending_cv = inner
                 .pending_concurrency_violations
                 .get(&append.persistence_id)
@@ -1136,6 +1167,65 @@ impl EventStore for SimEventStore {
             .take(limit)
             .collect::<Vec<_>>();
         Ok(result)
+    }
+
+    async fn list_scoped_entity_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        bundle_digest: &str,
+        after_entity_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let suffix = format!(":schema:{bundle_digest}");
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        Ok(inner
+            .journals
+            .keys()
+            .filter_map(|persistence_id| {
+                parse_persistence_id_parts(persistence_id)
+                    .ok()
+                    .filter(|(found_tenant, found_type, _)| {
+                        *found_tenant == tenant && *found_type == entity_type
+                    })
+                    .and_then(|(_, _, journal_entity_id)| journal_entity_id.strip_suffix(&suffix))
+            })
+            .filter(|entity_id| after_entity_id.is_none_or(|after| *entity_id > after))
+            .take(limit)
+            .map(str::to_string)
+            .collect())
+    }
+
+    async fn scoped_bundle_write_version(
+        &self,
+        tenant: &str,
+        bundle_digest: &str,
+    ) -> Result<u64, PersistenceError> {
+        let suffix = format!(":schema:{bundle_digest}");
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        inner
+            .journals
+            .iter()
+            .filter_map(|(persistence_id, events)| {
+                parse_persistence_id_parts(persistence_id)
+                    .ok()
+                    .filter(|(found_tenant, _, entity_id)| {
+                        *found_tenant == tenant && entity_id.ends_with(&suffix)
+                    })
+                    .map(|_| events.len())
+            })
+            .try_fold(0_u64, |version, count| {
+                version
+                    .checked_add(u64::try_from(count).map_err(|_| {
+                        PersistenceError::Storage("schema write version exhausted".into())
+                    })?)
+                    .ok_or_else(|| {
+                        PersistenceError::Storage("schema write version exhausted".into())
+                    })
+            })
     }
 }
 

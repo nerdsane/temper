@@ -15,6 +15,7 @@ use tracing::instrument;
 
 use temper_jit::swap::SwapController;
 use temper_jit::table::TransitionTable;
+use temper_runtime::persistence::schema_deployment::SchemaScope;
 use temper_runtime::tenant::TenantId;
 use temper_spec::FieldInvariant;
 use temper_spec::automaton;
@@ -51,12 +52,229 @@ fn merge_reaction_rules(
 #[derive(Debug, Clone, Default)]
 pub struct SpecRegistry {
     tenants: BTreeMap<TenantId, TenantConfig>,
+    scoped_bundles: BTreeMap<(TenantId, SchemaScope, String), TenantConfig>,
+    active_scopes: BTreeMap<(TenantId, SchemaScope), String>,
+    global_compatible_scopes: std::collections::BTreeSet<(TenantId, SchemaScope)>,
 }
 
 impl SpecRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Stage one immutable scoped registry bundle without changing any reader.
+    pub fn stage_scoped_bundle(
+        &mut self,
+        tenant: TenantId,
+        scope: SchemaScope,
+        digest: String,
+        csdl: CsdlDocument,
+        csdl_xml: String,
+        ioa_sources: &[(&str, &str)],
+    ) -> Result<(), RegistryError> {
+        let key = (tenant.clone(), scope.clone(), digest.clone());
+        if let Some(existing) = self.scoped_bundles.get(&key) {
+            let identical = existing.csdl_xml.as_str() == csdl_xml
+                && existing.entities.len() == ioa_sources.len()
+                && ioa_sources.iter().all(|(entity, source)| {
+                    existing
+                        .entities
+                        .get(*entity)
+                        .is_some_and(|spec| spec.ioa_source == *source)
+                });
+            if identical {
+                return Ok(());
+            }
+            return Err(RegistryError::ScopedBundleConflict {
+                tenant: tenant.to_string(),
+                scope: scope.id,
+                digest,
+            });
+        }
+        let mut isolated = SpecRegistry::new();
+        isolated.try_register_tenant(tenant.clone(), csdl, csdl_xml, ioa_sources)?;
+        let config = isolated
+            .tenants
+            .remove(&tenant)
+            .expect("successful isolated registration must create tenant config");
+        self.scoped_bundles.insert(key, config);
+        Ok(())
+    }
+
+    /// Atomically select one already-staged immutable bundle for a scope.
+    pub fn activate_scoped_bundle(
+        &mut self,
+        tenant: &TenantId,
+        scope: &SchemaScope,
+        digest: &str,
+        expected_predecessor: Option<&str>,
+    ) -> Result<(), RegistryError> {
+        let scope_key = (tenant.clone(), scope.clone());
+        if self.active_scopes.get(&scope_key).map(String::as_str) != expected_predecessor {
+            return Err(RegistryError::ScopedPredecessorMismatch {
+                tenant: tenant.to_string(),
+                scope: scope.id.clone(),
+            });
+        }
+        if !self
+            .scoped_bundles
+            .contains_key(&(tenant.clone(), scope.clone(), digest.to_string()))
+        {
+            return Err(RegistryError::ScopedBundleMissing {
+                tenant: tenant.to_string(),
+                scope: scope.id.clone(),
+                digest: digest.to_string(),
+            });
+        }
+        self.active_scopes.insert(scope_key, digest.to_string());
+        Ok(())
+    }
+
+    /// Remove the active pointer only when it still names the expected digest.
+    pub fn retire_scoped_bundle(
+        &mut self,
+        tenant: &TenantId,
+        scope: &SchemaScope,
+        expected_digest: &str,
+    ) -> Result<(), RegistryError> {
+        let key = (tenant.clone(), scope.clone());
+        if self.active_scopes.get(&key).map(String::as_str) != Some(expected_digest) {
+            return Err(RegistryError::ScopedPredecessorMismatch {
+                tenant: tenant.to_string(),
+                scope: scope.id.clone(),
+            });
+        }
+        self.active_scopes.remove(&key);
+        Ok(())
+    }
+
+    /// Explicitly allow or deny tenant-global compatibility for an unactivated scope.
+    pub fn set_scope_global_compatibility(
+        &mut self,
+        tenant: TenantId,
+        scope: SchemaScope,
+        compatible: bool,
+    ) {
+        let key = (tenant, scope);
+        if compatible {
+            self.global_compatible_scopes.insert(key);
+        } else {
+            self.global_compatible_scopes.remove(&key);
+        }
+    }
+
+    /// Whether scope creation explicitly selected tenant-global compatibility.
+    pub fn scope_allows_global_compatibility(
+        &self,
+        tenant: &TenantId,
+        scope: &SchemaScope,
+    ) -> bool {
+        self.global_compatible_scopes
+            .contains(&(tenant.clone(), scope.clone()))
+    }
+
+    /// Current immutable digest for an exact scope, without global fallback.
+    pub fn active_scope_digest(&self, tenant: &TenantId, scope: &SchemaScope) -> Option<&str> {
+        self.active_scopes
+            .get(&(tenant.clone(), scope.clone()))
+            .map(String::as_str)
+    }
+
+    /// Exact active scoped config; malformed/missing scopes never fall back.
+    pub fn get_scoped_config(
+        &self,
+        tenant: &TenantId,
+        scope: &SchemaScope,
+    ) -> Option<&TenantConfig> {
+        let digest = self.active_scope_digest(tenant, scope)?;
+        self.scoped_bundles
+            .get(&(tenant.clone(), scope.clone(), digest.to_string()))
+    }
+
+    /// Exact immutable scoped config by digest, including retired predecessors.
+    pub fn get_scoped_config_at_digest(
+        &self,
+        tenant: &TenantId,
+        scope: &SchemaScope,
+        digest: &str,
+    ) -> Option<&TenantConfig> {
+        self.scoped_bundles
+            .get(&(tenant.clone(), scope.clone(), digest.to_string()))
+    }
+
+    /// Resolve one scoped entity set without consulting tenant-global metadata.
+    pub fn resolve_scoped_entity_type(
+        &self,
+        tenant: &TenantId,
+        scope: &SchemaScope,
+        entity_set: &str,
+    ) -> Option<String> {
+        self.get_scoped_config(tenant, scope)
+            .and_then(|config| config.entity_set_map.get(entity_set).cloned())
+    }
+
+    /// Snapshot one exact scoped transition table without global fallback.
+    pub fn get_scoped_table(
+        &self,
+        tenant: &TenantId,
+        scope: &SchemaScope,
+        entity_type: &str,
+    ) -> Option<Arc<TransitionTable>> {
+        self.get_scoped_config(tenant, scope)
+            .and_then(|config| config.entities.get(entity_type))
+            .map(EntitySpec::table)
+    }
+
+    /// Snapshot one exact immutable table without consulting the active pointer.
+    pub fn get_scoped_table_at_digest(
+        &self,
+        tenant: &TenantId,
+        scope: &SchemaScope,
+        digest: &str,
+        entity_type: &str,
+    ) -> Option<Arc<TransitionTable>> {
+        self.get_scoped_config_at_digest(tenant, scope, digest)
+            .and_then(|config| config.entities.get(entity_type))
+            .map(EntitySpec::table)
+    }
+
+    /// Snapshot reaction rules from one exact immutable scoped bundle.
+    pub fn scoped_reaction_candidates_at_digest(
+        &self,
+        tenant: &TenantId,
+        scope: &SchemaScope,
+        digest: &str,
+        entity_type: &str,
+        action: &str,
+    ) -> Vec<ReactionRule> {
+        self.get_scoped_config_at_digest(tenant, scope, digest)
+            .map(|config| {
+                let mut rules = config.reactions.clone();
+                for (source_entity_type, spec) in &config.entities {
+                    for source_action in &spec.automaton.actions {
+                        rules.extend(source_action.triggers.iter().filter_map(|trigger| {
+                            synthesize_action_trigger_reaction(
+                                source_entity_type,
+                                &source_action.name,
+                                trigger,
+                            )
+                        }));
+                    }
+                }
+                rules
+                    .into_iter()
+                    .filter(|rule| {
+                        rule.when.entity_type == entity_type
+                            && rule
+                                .when
+                                .action
+                                .as_deref()
+                                .is_none_or(|name| name == action)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Register a tenant with its CSDL document and IOA specs.
@@ -521,6 +739,7 @@ impl SpecRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use temper_runtime::persistence::schema_deployment::{SchemaScope, SchemaScopeKind};
     use temper_spec::csdl::parse_csdl;
 
     const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
@@ -666,6 +885,186 @@ mod tests {
           </edmx:DataServices>
         </edmx:Edmx>"#;
         (parse_csdl(xml).unwrap(), xml.to_string())
+    }
+
+    fn task_scope() -> SchemaScope {
+        SchemaScope {
+            kind: SchemaScopeKind::Task,
+            id: "task-42".into(),
+        }
+    }
+
+    #[test]
+    fn scoped_staging_is_invisible_until_atomic_activation() {
+        let mut registry = SpecRegistry::new();
+        let tenant = TenantId::new("alpha");
+        let (csdl, xml) = task_csdl();
+        registry
+            .stage_scoped_bundle(
+                tenant.clone(),
+                task_scope(),
+                "sha256:one".into(),
+                csdl,
+                xml,
+                &[("Task", ORDER_IOA)],
+            )
+            .unwrap();
+
+        assert!(registry.get_scoped_config(&tenant, &task_scope()).is_none());
+        assert!(registry.get_tenant(&tenant).is_none());
+        registry
+            .activate_scoped_bundle(&tenant, &task_scope(), "sha256:one", None)
+            .unwrap();
+        assert_eq!(
+            registry.resolve_scoped_entity_type(&tenant, &task_scope(), "Tasks"),
+            Some("Task".into())
+        );
+        assert!(
+            registry
+                .get_scoped_table(&tenant, &task_scope(), "Task")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn scoped_activation_rejects_stale_predecessor_without_changing_reader() {
+        let mut registry = SpecRegistry::new();
+        let tenant = TenantId::new("alpha");
+        for digest in ["sha256:one", "sha256:two"] {
+            let (csdl, xml) = task_csdl();
+            registry
+                .stage_scoped_bundle(
+                    tenant.clone(),
+                    task_scope(),
+                    digest.into(),
+                    csdl,
+                    xml,
+                    &[("Task", ORDER_IOA)],
+                )
+                .unwrap();
+        }
+        registry
+            .activate_scoped_bundle(&tenant, &task_scope(), "sha256:one", None)
+            .unwrap();
+        assert!(matches!(
+            registry.activate_scoped_bundle(
+                &tenant,
+                &task_scope(),
+                "sha256:two",
+                Some("sha256:stale")
+            ),
+            Err(RegistryError::ScopedPredecessorMismatch { .. })
+        ));
+        assert_eq!(
+            registry.active_scope_digest(&tenant, &task_scope()),
+            Some("sha256:one")
+        );
+    }
+
+    #[test]
+    fn scoped_retirement_blocks_new_resolution_but_preserves_exact_pinned_table() {
+        let tenant = TenantId::new("tenant-retire");
+        let mut registry = SpecRegistry::new();
+        let (csdl, csdl_xml) = task_csdl();
+        registry
+            .stage_scoped_bundle(
+                tenant.clone(),
+                task_scope(),
+                "sha256:retired".into(),
+                csdl,
+                csdl_xml,
+                &[("Task", ORDER_IOA)],
+            )
+            .unwrap();
+        registry
+            .activate_scoped_bundle(&tenant, &task_scope(), "sha256:retired", None)
+            .unwrap();
+        registry
+            .retire_scoped_bundle(&tenant, &task_scope(), "sha256:retired")
+            .unwrap();
+
+        assert!(registry.get_scoped_config(&tenant, &task_scope()).is_none());
+        assert!(
+            registry
+                .get_scoped_table_at_digest(&tenant, &task_scope(), "sha256:retired", "Task",)
+                .is_some(),
+            "retirement must retain immutable artifacts for existing pins"
+        );
+    }
+
+    #[test]
+    fn scoped_reaction_candidates_come_only_from_exact_bundle_digest() {
+        const SCOPED_REACTION_IOA: &str = r#"
+[automaton]
+name = "Task"
+states = ["Open"]
+initial = "Open"
+
+[[action]]
+name = "Advance"
+kind = "input"
+from = ["Open"]
+to = "Open"
+
+[[action.triggers]]
+name = "scoped_followup"
+kind = "entity"
+target_entity = "Task"
+target_action = "Advance"
+
+[action.triggers.resolve_target]
+type = "create"
+"#;
+        let tenant = TenantId::new("tenant-reactions");
+        let mut registry = SpecRegistry::new();
+        let (csdl, csdl_xml) = task_csdl();
+        registry
+            .stage_scoped_bundle(
+                tenant.clone(),
+                task_scope(),
+                "sha256:scoped-reactions".into(),
+                csdl,
+                csdl_xml,
+                &[("Task", SCOPED_REACTION_IOA)],
+            )
+            .unwrap();
+
+        let rules = registry.scoped_reaction_candidates_at_digest(
+            &tenant,
+            &task_scope(),
+            "sha256:scoped-reactions",
+            "Task",
+            "Advance",
+        );
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "Task:Advance:scoped_followup");
+        assert!(
+            registry
+                .scoped_reaction_candidates_at_digest(
+                    &tenant,
+                    &task_scope(),
+                    "sha256:other",
+                    "Task",
+                    "Advance",
+                )
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn global_compatibility_requires_explicit_scope_creation_choice() {
+        let mut registry = SpecRegistry::new();
+        let tenant = TenantId::new("alpha");
+        let (csdl, xml) = task_csdl();
+        registry.register_tenant(tenant.clone(), csdl, xml, &[("Task", ORDER_IOA)]);
+        assert!(!registry.scope_allows_global_compatibility(&tenant, &task_scope()));
+        assert!(
+            registry
+                .resolve_scoped_entity_type(&tenant, &task_scope(), "Tasks")
+                .is_none()
+        );
+        registry.set_scope_global_compatibility(tenant.clone(), task_scope(), true);
+        assert!(registry.scope_allows_global_compatibility(&tenant, &task_scope()));
     }
 
     #[test]

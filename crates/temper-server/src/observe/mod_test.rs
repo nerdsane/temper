@@ -105,6 +105,7 @@ async fn seed_reaction_delivery(
             "correlation_id": "private-correlation"
         }),
         created_at: sim_now(),
+        schema_pin: None,
     };
     let mut payload = serde_json::json!({"action": "SubmitOrder"});
     attach_intents(&mut payload, std::slice::from_ref(&intent)).expect("attach intent");

@@ -48,6 +48,10 @@ pub struct ScopedBundleBudgets {
     pub migration_entities_per_batch: u32,
     /// Maximum total entities transformed by one job.
     pub migration_total_entities: u64,
+    /// Maximum durable batches consumed by one migration job.
+    pub migration_total_batches: u64,
+    /// Maximum fenced worker claims across crash recovery.
+    pub migration_attempts: u32,
 }
 
 impl Default for ScopedBundleBudgets {
@@ -60,6 +64,8 @@ impl Default for ScopedBundleBudgets {
             migration_output_bytes: 1_048_576,
             migration_entities_per_batch: 100,
             migration_total_entities: 1_000_000,
+            migration_total_batches: 10_000,
+            migration_attempts: 100,
         }
     }
 }
@@ -160,6 +166,7 @@ impl ScopedSpecBundle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BundleErrorCode {
+    InvalidBundle,
     InvalidScope,
     InvalidPredecessor,
     InvalidCsdl,
@@ -175,6 +182,7 @@ impl BundleErrorCode {
     /// Stable snake-case code used by future API adapters.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::InvalidBundle => "invalid_bundle",
             Self::InvalidScope => "invalid_scope",
             Self::InvalidPredecessor => "invalid_predecessor",
             Self::InvalidCsdl => "invalid_csdl",

@@ -20,8 +20,9 @@ use super::authz::{
 };
 use super::bindings::dispatch_bound_action;
 use super::common::{
-    constraint_violation_response, extract_key, extract_tenant, load_entity_or_404,
-    resolve_entity_type, run_write_prechecks, verification_gate_response,
+    constraint_violation_response, extract_key, extract_schema_pin, extract_tenant,
+    load_entity_or_404, resolve_entity_type_for_pin, run_write_prechecks,
+    verification_gate_response,
 };
 use super::constraints::pre_delete_relation_checks;
 use super::rate_limit::{enforce_commons_write_rate_limit, owner_id_from_fields};
@@ -73,9 +74,10 @@ fn parse_json_body_or_400(body: &axum::body::Bytes) -> Result<serde_json::Value,
 fn resolve_entity_type_or_404(
     state: &ServerState,
     tenant: &TenantId,
+    schema_pin: Option<&temper_runtime::persistence::schema_deployment::SchemaExecutionPin>,
     set_name: &str,
 ) -> Result<String, ODataWriteError> {
-    resolve_entity_type(state, tenant, set_name).ok_or_else(|| {
+    resolve_entity_type_for_pin(state, tenant, schema_pin, set_name).ok_or_else(|| {
         tracing::warn!(tenant = %tenant, entity_set = %set_name, "entity set not found");
         Box::new(
             odata_error(
@@ -93,12 +95,13 @@ fn resolve_entity_type_or_404(
 fn resolve_entity_type_or_record_404(
     state: &ServerState,
     tenant: &TenantId,
+    schema_pin: Option<&temper_runtime::persistence::schema_deployment::SchemaExecutionPin>,
     set_name: &str,
     agent_ctx: &AgentContext,
     request_body: Option<serde_json::Value>,
     intent: Option<String>,
 ) -> Result<String, ODataWriteError> {
-    resolve_entity_type(state, tenant, set_name).ok_or_else(|| {
+    resolve_entity_type_for_pin(state, tenant, schema_pin, set_name).ok_or_else(|| {
         tracing::warn!(tenant = %tenant, entity_set = %set_name, "entity set not found");
         let entry = TrajectoryEntry {
             timestamp: sim_now().to_rfc3339(),
@@ -144,7 +147,11 @@ fn check_verification_gate_or_423(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
+    schema_pin: Option<&temper_runtime::persistence::schema_deployment::SchemaExecutionPin>,
 ) -> Result<(), ODataWriteError> {
+    if schema_pin.is_some() {
+        return Ok(());
+    }
     state
         .check_verification_gate(tenant, entity_type)
         .map_err(|e| Box::new(verification_gate_response(e)))
@@ -159,7 +166,11 @@ async fn authorize_collection_create(
     security_ctx: &temper_authz::SecurityContext,
     agent_ctx: &AgentContext,
 ) -> Result<(), ODataWriteError> {
-    let resource_attrs = resource_attrs_from_body(state, tenant, entity_type, entity_id, fields);
+    let mut resource_attrs =
+        resource_attrs_from_body(state, tenant, entity_type, entity_id, fields);
+    if agent_ctx.schema_pin.is_some() {
+        resource_attrs.insert("has_spec".into(), serde_json::Value::Bool(true));
+    }
     authorize_mutation(
         state,
         tenant,
@@ -176,14 +187,37 @@ async fn authorize_collection_create(
     .map_err(Box::new)
 }
 
-fn ensure_entity_exists_or_404(
+async fn ensure_entity_exists_or_404(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
     set_name: &str,
     key: &str,
+    schema_pin: Option<&temper_runtime::persistence::schema_deployment::SchemaExecutionPin>,
 ) -> Result<(), ODataWriteError> {
-    if state.entity_exists(tenant, entity_type, key) {
+    let exists = match schema_pin {
+        Some(pin) => {
+            let persistence_id =
+                format!("{tenant}:{entity_type}:{key}:schema:{}", pin.bundle_digest);
+            let loaded = state
+                .actor_registry
+                .read()
+                .map(|registry| registry.contains_key(&persistence_id))
+                .unwrap_or(false);
+            if loaded {
+                true
+            } else if let Some((journal, _)) = state.event_journal() {
+                journal
+                    .read_latest_events(&persistence_id, 1)
+                    .await
+                    .is_ok_and(|events| !events.is_empty())
+            } else {
+                false
+            }
+        }
+        None => state.entity_exists(tenant, entity_type, key),
+    };
+    if exists {
         Ok(())
     } else {
         Err(Box::new(
@@ -206,14 +240,46 @@ async fn authorize_existing_mutation(
     security_ctx: &temper_authz::SecurityContext,
     agent_ctx: &AgentContext,
 ) -> Result<(), ODataWriteError> {
-    let snapshot = state
-        .load_authz_resource_snapshot(tenant, entity_type, entity_id)
-        .await
-        .map_err(|error| {
-            Box::new(
-                odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &error).into_response(),
-            )
-        })?;
+    let resource_attrs = match agent_ctx.schema_pin.as_ref() {
+        Some(pin) => {
+            let response = state
+                .get_scoped_entity_state(tenant, entity_type, entity_id, pin.clone())
+                .await
+                .map_err(|error| {
+                    Box::new(
+                        odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &error)
+                            .into_response(),
+                    )
+                })?;
+            let mut attrs = response
+                .state
+                .fields
+                .as_object()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<std::collections::BTreeMap<_, _>>();
+            attrs.insert("id".into(), serde_json::Value::String(entity_id.into()));
+            attrs.insert(
+                "status".into(),
+                serde_json::Value::String(response.state.status),
+            );
+            attrs.insert("has_spec".into(), serde_json::Value::Bool(true));
+            attrs
+        }
+        None => {
+            state
+                .load_authz_resource_snapshot(tenant, entity_type, entity_id)
+                .await
+                .map_err(|error| {
+                    Box::new(
+                        odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &error)
+                            .into_response(),
+                    )
+                })?
+                .resource_attrs
+        }
+    };
     authorize_mutation(
         state,
         tenant,
@@ -223,7 +289,7 @@ async fn authorize_existing_mutation(
         MutationResource {
             entity_type,
             entity_id,
-            attrs: &snapshot.resource_attrs,
+            attrs: &resource_attrs,
         },
     )
     .await
@@ -245,6 +311,10 @@ pub async fn handle_odata_post(
         Err(e) => return e.into_response(),
     };
     let mut agent_ctx = extract_agent_context(&headers);
+    agent_ctx.schema_pin = match extract_schema_pin(&headers, &state, &tenant).await {
+        Ok(pin) => pin,
+        Err(error) => return error.into_response(),
+    };
     if let Some(remote_parent) = remote_parent_context(&agent_ctx) {
         tracing::Span::current().set_parent(remote_parent);
     }
@@ -274,6 +344,7 @@ pub async fn handle_odata_post(
             let entity_type = match resolve_entity_type_or_record_404(
                 &state,
                 &tenant,
+                agent_ctx.schema_pin.as_ref(),
                 &name,
                 &agent_ctx,
                 body_for_trajectory,
@@ -282,7 +353,12 @@ pub async fn handle_odata_post(
                 Ok(t) => t,
                 Err(resp) => return *resp,
             };
-            if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
+            if let Err(resp) = check_verification_gate_or_423(
+                &state,
+                &tenant,
+                &entity_type,
+                agent_ctx.schema_pin.as_ref(),
+            ) {
                 return *resp;
             }
 
@@ -296,15 +372,30 @@ pub async fn handle_odata_post(
                 .or_else(|| body_json.get("Id"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            let entity_id = match state
-                .prepare_reference_contract_create(
-                    &tenant,
-                    &entity_type,
-                    supplied_entity_id.as_deref(),
-                    &body_json,
-                )
-                .await
-            {
+            let prepared_id = match agent_ctx.schema_pin.as_ref() {
+                Some(pin) => {
+                    state
+                        .prepare_scoped_reference_contract_create(
+                            &tenant,
+                            &entity_type,
+                            supplied_entity_id.as_deref(),
+                            &body_json,
+                            pin,
+                        )
+                        .await
+                }
+                None => {
+                    state
+                        .prepare_reference_contract_create(
+                            &tenant,
+                            &entity_type,
+                            supplied_entity_id.as_deref(),
+                            &body_json,
+                        )
+                        .await
+                }
+            };
+            let entity_id = match prepared_id {
                 Ok(Some(entity_id)) => entity_id,
                 Ok(None) => {
                     let prefix = entity_type_prefix(&entity_type);
@@ -328,9 +419,9 @@ pub async fn handle_odata_post(
                 &tenant,
                 &entity_type,
                 &entity_id,
-                "Create",
-                "create",
+                ("Create", "create"),
                 &initial_fields,
+                agent_ctx.schema_pin.as_ref(),
             )
             .await
             {
@@ -520,10 +611,27 @@ pub async fn handle_odata_post(
                 }
             }
 
-            match crate::application_data::GovernedApplicationDataService::new(&state)
-                .create(&tenant, &entity_type, &entity_id, initial_fields)
-                .await
-            {
+            let application_data =
+                crate::application_data::GovernedApplicationDataService::new(&state);
+            let create_result = match agent_ctx.schema_pin.clone() {
+                Some(schema_pin) => {
+                    application_data
+                        .create_scoped(
+                            &tenant,
+                            &entity_type,
+                            &entity_id,
+                            initial_fields,
+                            schema_pin,
+                        )
+                        .await
+                }
+                None => {
+                    application_data
+                        .create(&tenant, &entity_type, &entity_id, initial_fields)
+                        .await
+                }
+            };
+            match create_result {
                 Ok(response) => {
                     if !response.success {
                         let error = response.error.as_deref().unwrap_or("Update failed");
@@ -571,6 +679,7 @@ pub async fn handle_odata_post(
             let entity_type = match resolve_entity_type_or_record_404(
                 &state,
                 &tenant,
+                agent_ctx.schema_pin.as_ref(),
                 &set_name,
                 &agent_ctx,
                 Some(body_json.clone()),
@@ -580,7 +689,12 @@ pub async fn handle_odata_post(
                 Err(resp) => return *resp,
             };
 
-            if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
+            if let Err(resp) = check_verification_gate_or_423(
+                &state,
+                &tenant,
+                &entity_type,
+                agent_ctx.schema_pin.as_ref(),
+            ) {
                 return *resp;
             }
 
@@ -727,6 +841,10 @@ pub async fn handle_odata_patch(
     };
     let resolved_identity = resolved_id.map(|Extension(identity)| identity);
     let mut agent_ctx = extract_agent_context(&headers);
+    agent_ctx.schema_pin = match extract_schema_pin(&headers, &state, &tenant).await {
+        Ok(pin) => pin,
+        Err(error) => return error.into_response(),
+    };
     if let Some(ref identity) = resolved_identity {
         agent_ctx.agent_id = Some(identity.agent_instance_id.clone());
         agent_ctx.agent_type = Some(identity.agent_type_name.clone());
@@ -734,17 +852,34 @@ pub async fn handle_odata_patch(
 
     match odata_path {
         ODataPath::Entity(set_name, key) => {
-            let entity_type = match resolve_entity_type_or_404(&state, &tenant, &set_name) {
+            let entity_type = match resolve_entity_type_or_404(
+                &state,
+                &tenant,
+                agent_ctx.schema_pin.as_ref(),
+                &set_name,
+            ) {
                 Ok(t) => t,
                 Err(resp) => return *resp,
             };
             let key_str = extract_key(&key);
 
-            if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
+            if let Err(resp) = check_verification_gate_or_423(
+                &state,
+                &tenant,
+                &entity_type,
+                agent_ctx.schema_pin.as_ref(),
+            ) {
                 return *resp;
             }
-            if let Err(resp) =
-                ensure_entity_exists_or_404(&state, &tenant, &entity_type, &set_name, &key_str)
+            if let Err(resp) = ensure_entity_exists_or_404(
+                &state,
+                &tenant,
+                &entity_type,
+                &set_name,
+                &key_str,
+                agent_ctx.schema_pin.as_ref(),
+            )
+            .await
             {
                 return *resp;
             }
@@ -774,6 +909,7 @@ pub async fn handle_odata_patch(
                 &entity_type,
                 &set_name,
                 &key_str,
+                agent_ctx.schema_pin.as_ref(),
             )
             .await
             {
@@ -799,9 +935,9 @@ pub async fn handle_odata_patch(
                 &tenant,
                 &entity_type,
                 &key_str,
-                "Patch",
-                "patch",
+                ("Patch", "patch"),
                 &prospective_fields,
+                agent_ctx.schema_pin.as_ref(),
             )
             .await
             {
@@ -845,10 +981,21 @@ pub async fn handle_odata_patch(
                 return resp;
             }
 
-            match crate::application_data::GovernedApplicationDataService::new(&state)
-                .patch(&tenant, &entity_type, &key_str, body_json, None)
-                .await
-            {
+            let application_data =
+                crate::application_data::GovernedApplicationDataService::new(&state);
+            let patch_result = match agent_ctx.schema_pin.clone() {
+                Some(schema_pin) => {
+                    application_data
+                        .patch_scoped(&tenant, &entity_type, &key_str, body_json, None, schema_pin)
+                        .await
+                }
+                None => {
+                    application_data
+                        .patch(&tenant, &entity_type, &key_str, body_json, None)
+                        .await
+                }
+            };
+            match patch_result {
                 Ok(response) => {
                     if !response.success {
                         let error = response.error.as_deref().unwrap_or("Update failed");
@@ -905,6 +1052,10 @@ pub async fn handle_odata_put(
     };
     let resolved_identity = resolved_id.map(|Extension(identity)| identity);
     let mut agent_ctx = extract_agent_context(&headers);
+    agent_ctx.schema_pin = match extract_schema_pin(&headers, &state, &tenant).await {
+        Ok(pin) => pin,
+        Err(error) => return error.into_response(),
+    };
     if let Some(ref identity) = resolved_identity {
         agent_ctx.agent_id = Some(identity.agent_instance_id.clone());
         agent_ctx.agent_type = Some(identity.agent_type_name.clone());
@@ -912,17 +1063,34 @@ pub async fn handle_odata_put(
 
     match odata_path {
         ODataPath::Entity(set_name, key) => {
-            let entity_type = match resolve_entity_type_or_404(&state, &tenant, &set_name) {
+            let entity_type = match resolve_entity_type_or_404(
+                &state,
+                &tenant,
+                agent_ctx.schema_pin.as_ref(),
+                &set_name,
+            ) {
                 Ok(t) => t,
                 Err(resp) => return *resp,
             };
             let key_str = extract_key(&key);
 
-            if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
+            if let Err(resp) = check_verification_gate_or_423(
+                &state,
+                &tenant,
+                &entity_type,
+                agent_ctx.schema_pin.as_ref(),
+            ) {
                 return *resp;
             }
-            if let Err(resp) =
-                ensure_entity_exists_or_404(&state, &tenant, &entity_type, &set_name, &key_str)
+            if let Err(resp) = ensure_entity_exists_or_404(
+                &state,
+                &tenant,
+                &entity_type,
+                &set_name,
+                &key_str,
+                agent_ctx.schema_pin.as_ref(),
+            )
+            .await
             {
                 return *resp;
             }
@@ -954,9 +1122,9 @@ pub async fn handle_odata_put(
                 &tenant,
                 &entity_type,
                 &key_str,
-                "Put",
-                "put",
+                ("Put", "put"),
                 &body_json,
+                agent_ctx.schema_pin.as_ref(),
             )
             .await
             {
@@ -1000,10 +1168,21 @@ pub async fn handle_odata_put(
                 return resp;
             }
 
-            match crate::application_data::GovernedApplicationDataService::new(&state)
-                .replace(&tenant, &entity_type, &key_str, body_json)
-                .await
-            {
+            let application_data =
+                crate::application_data::GovernedApplicationDataService::new(&state);
+            let replace_result = match agent_ctx.schema_pin.clone() {
+                Some(schema_pin) => {
+                    application_data
+                        .replace_scoped(&tenant, &entity_type, &key_str, body_json, schema_pin)
+                        .await
+                }
+                None => {
+                    application_data
+                        .replace(&tenant, &entity_type, &key_str, body_json)
+                        .await
+                }
+            };
+            match replace_result {
                 Ok(response) => {
                     if !response.success {
                         let error = response.error.as_deref().unwrap_or("Update failed");
@@ -1074,6 +1253,10 @@ pub async fn handle_odata_delete(
     };
     let resolved_identity = resolved_id.map(|Extension(identity)| identity);
     let mut agent_ctx = extract_agent_context(&headers);
+    agent_ctx.schema_pin = match extract_schema_pin(&headers, &state, &tenant).await {
+        Ok(pin) => pin,
+        Err(error) => return error.into_response(),
+    };
     if let Some(ref identity) = resolved_identity {
         agent_ctx.agent_id = Some(identity.agent_instance_id.clone());
         agent_ctx.agent_type = Some(identity.agent_type_name.clone());
@@ -1081,17 +1264,34 @@ pub async fn handle_odata_delete(
 
     match odata_path {
         ODataPath::Entity(set_name, key) => {
-            let entity_type = match resolve_entity_type_or_404(&state, &tenant, &set_name) {
+            let entity_type = match resolve_entity_type_or_404(
+                &state,
+                &tenant,
+                agent_ctx.schema_pin.as_ref(),
+                &set_name,
+            ) {
                 Ok(t) => t,
                 Err(resp) => return *resp,
             };
             let key_str = extract_key(&key);
 
-            if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
+            if let Err(resp) = check_verification_gate_or_423(
+                &state,
+                &tenant,
+                &entity_type,
+                agent_ctx.schema_pin.as_ref(),
+            ) {
                 return *resp;
             }
-            if let Err(resp) =
-                ensure_entity_exists_or_404(&state, &tenant, &entity_type, &set_name, &key_str)
+            if let Err(resp) = ensure_entity_exists_or_404(
+                &state,
+                &tenant,
+                &entity_type,
+                &set_name,
+                &key_str,
+                agent_ctx.schema_pin.as_ref(),
+            )
+            .await
             {
                 return *resp;
             }
@@ -1110,8 +1310,15 @@ pub async fn handle_odata_delete(
             {
                 return *resp;
             }
-            if let Err(v) =
-                pre_delete_relation_checks(&state, &tenant, &entity_type, &key_str, "delete").await
+            if let Err(v) = pre_delete_relation_checks(
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                "delete",
+                agent_ctx.schema_pin.as_ref(),
+            )
+            .await
             {
                 return constraint_violation_response(v);
             }
@@ -1121,6 +1328,7 @@ pub async fn handle_odata_delete(
                 &entity_type,
                 &set_name,
                 &key_str,
+                agent_ctx.schema_pin.as_ref(),
             )
             .await
             {
@@ -1132,9 +1340,9 @@ pub async fn handle_odata_delete(
                 &tenant,
                 &entity_type,
                 &key_str,
-                "Delete",
-                "delete",
+                ("Delete", "delete"),
                 &current_state.state.fields,
+                agent_ctx.schema_pin.as_ref(),
             )
             .await
             {
@@ -1166,10 +1374,19 @@ pub async fn handle_odata_delete(
                 return resp;
             }
 
-            match state
-                .delete_tenant_entity(&tenant, &entity_type, &key_str)
-                .await
-            {
+            let delete_result = match agent_ctx.schema_pin.clone() {
+                Some(schema_pin) => {
+                    state
+                        .delete_scoped_entity(&tenant, &entity_type, &key_str, schema_pin)
+                        .await
+                }
+                None => {
+                    state
+                        .delete_tenant_entity(&tenant, &entity_type, &key_str)
+                        .await
+                }
+            };
+            match delete_result {
                 Ok(_) => {
                     if entity_type == "RateLimit" {
                         state.clear_commons_rate_limit_cache();

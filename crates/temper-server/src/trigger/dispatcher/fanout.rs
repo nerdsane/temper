@@ -1,13 +1,12 @@
-//! Reaction rule evaluation, authorization, dispatch, and fanout telemetry.
+//! Reaction rule evaluation, authorization, dispatch, and telemetry.
 
 use crate::request_context::AgentContext;
 use crate::trigger::{guard, params, resolver};
-use temper_authz::SecurityContext;
 use temper_runtime::tenant::TenantId;
 use tracing::instrument;
 
 use super::super::types::{MAX_REACTION_DEPTH, ReactionResult, ReactionRule};
-use super::{BoundDelivery, ReactionDispatcher};
+use super::{BoundDelivery, ReactionDispatcher, effective_trigger_security_context};
 
 impl ReactionDispatcher {
     /// Dispatch reactions triggered by a successful entity action.
@@ -47,12 +46,33 @@ impl ReactionDispatcher {
         depth: u32,
         invoking_ctx: &AgentContext,
     ) -> Vec<ReactionResult> {
-        let rules: Vec<_> = self
-            .registry
-            .lookup(tenant, entity_type, action, to_state)
-            .into_iter()
-            .cloned()
-            .collect();
+        let rules: Vec<_> = if let Some(pin) = invoking_ctx.schema_pin.as_ref() {
+            state
+                .registry
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .scoped_reaction_candidates_at_digest(
+                    tenant,
+                    &pin.scope,
+                    &pin.bundle_digest,
+                    entity_type,
+                    action,
+                )
+                .into_iter()
+                .filter(|rule| {
+                    rule.when
+                        .to_state
+                        .as_deref()
+                        .is_none_or(|state| state == to_state)
+                })
+                .collect()
+        } else {
+            self.registry
+                .lookup(tenant, entity_type, action, to_state)
+                .into_iter()
+                .cloned()
+                .collect()
+        };
 
         self.dispatch_rules(
             state,
@@ -125,9 +145,23 @@ impl ReactionDispatcher {
                 guard::collect_cross_entity_queries(guard, fields, &mut queries);
                 let mut resolved = guard::CrossStatusMap::new();
                 for q in &queries {
-                    let status = state
-                        .resolve_entity_status(tenant, &q.entity_type, &q.target_entity_id)
-                        .await;
+                    let status = match invoking_ctx.schema_pin.as_ref() {
+                        Some(pin) => state
+                            .get_scoped_entity_state(
+                                tenant,
+                                &q.entity_type,
+                                &q.target_entity_id,
+                                pin.clone(),
+                            )
+                            .await
+                            .ok()
+                            .map(|response| response.state.status),
+                        None => {
+                            state
+                                .resolve_entity_status(tenant, &q.entity_type, &q.target_entity_id)
+                                .await
+                        }
+                    };
                     let matched = status.as_deref().map(|s| q.matches(s)).unwrap_or(false);
                     resolved.insert(q.key(), matched);
                 }
@@ -197,10 +231,41 @@ impl ReactionDispatcher {
                 dispatch_ctx.idempotency_key = Some(delivery.delivery_id.clone());
             }
 
-            let authz_snapshot = match state
-                .load_authz_resource_snapshot(tenant, &rule.then.entity_type, &target_entity_id)
-                .await
-            {
+            let authz_snapshot = match dispatch_ctx.schema_pin.as_ref() {
+                Some(pin) => state
+                    .get_scoped_entity_state(
+                        tenant,
+                        &rule.then.entity_type,
+                        &target_entity_id,
+                        pin.clone(),
+                    )
+                    .await
+                    .map(|response| {
+                        let mut attrs = response
+                            .state
+                            .fields
+                            .as_object()
+                            .cloned()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect::<std::collections::BTreeMap<_, _>>();
+                        attrs.insert(
+                            "id".into(),
+                            serde_json::Value::String(target_entity_id.clone()),
+                        );
+                        attrs.insert(
+                            "status".into(),
+                            serde_json::Value::String(response.state.status.clone()),
+                        );
+                        attrs.insert("has_spec".into(), serde_json::Value::Bool(true));
+                        (attrs, response.state.status)
+                    }),
+                None => state
+                    .load_authz_resource_snapshot(tenant, &rule.then.entity_type, &target_entity_id)
+                    .await
+                    .map(|snapshot| (snapshot.resource_attrs, snapshot.current_state.state.status)),
+            };
+            let (authz_resource_attrs, authz_status) = match authz_snapshot {
                 Ok(snapshot) => snapshot,
                 Err(e) => {
                     tracing::warn!(
@@ -226,7 +291,7 @@ impl ReactionDispatcher {
                 &security_ctx,
                 &rule.then.action,
                 &rule.then.entity_type,
-                &authz_snapshot.resource_attrs,
+                &authz_resource_attrs,
                 tenant.as_str(),
             ) {
                 let reason = denial.to_string();
@@ -243,7 +308,7 @@ impl ReactionDispatcher {
                 results.push(ReactionResult {
                     rule_name: rule.name.clone(),
                     success: false,
-                    target_status: Some(authz_snapshot.current_state.state.status.clone()),
+                    target_status: Some(authz_status),
                     error: Some(reason),
                     depth,
                 });
@@ -254,12 +319,36 @@ impl ReactionDispatcher {
             // to avoid infinite async recursion — we handle cascading ourselves).
             fired_count += 1;
             let reaction_context = if let Some(delivery) = bound_delivery.as_ref() {
-                let descendant_rules =
-                    self.candidate_rules(tenant, &rule.then.entity_type, &rule.then.action);
-                let guard_source = state
-                    .get_tenant_entity_state(tenant, &rule.then.entity_type, &target_entity_id)
-                    .await
-                    .ok();
+                let descendant_rules = if let Some(pin) = dispatch_ctx.schema_pin.as_ref() {
+                    state
+                        .registry
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .scoped_reaction_candidates_at_digest(
+                            tenant,
+                            &pin.scope,
+                            &pin.bundle_digest,
+                            &rule.then.entity_type,
+                            &rule.then.action,
+                        )
+                } else {
+                    self.candidate_rules(tenant, &rule.then.entity_type, &rule.then.action)
+                };
+                let guard_source = match dispatch_ctx.schema_pin.as_ref() {
+                    Some(pin) => state
+                        .get_scoped_entity_state(
+                            tenant,
+                            &rule.then.entity_type,
+                            &target_entity_id,
+                            pin.clone(),
+                        )
+                        .await
+                        .ok(),
+                    None => state
+                        .get_tenant_entity_state(tenant, &rule.then.entity_type, &target_entity_id)
+                        .await
+                        .ok(),
+                };
                 let expected_source_sequence = guard_source
                     .as_ref()
                     .map_or(0, |response| response.state.sequence_nr);
@@ -278,6 +367,7 @@ impl ReactionDispatcher {
                     tenant,
                     &descendant_rules,
                     &guard_fields,
+                    dispatch_ctx.schema_pin.as_ref(),
                 )
                 .await;
                 let authority =
@@ -295,6 +385,7 @@ impl ReactionDispatcher {
                             delivery_id: delivery.delivery_id.clone(),
                             fencing_token: delivery.fencing_token,
                             received_at: temper_runtime::scheduler::sim_now(),
+                            schema_pin: None,
                         }),
                     }),
                     Err(error) => {
@@ -335,6 +426,7 @@ impl ReactionDispatcher {
                                 &rule.then.entity_type,
                                 &target_entity_id,
                                 response.state.sequence_nr,
+                                dispatch_ctx.schema_pin.as_ref(),
                             )
                             .await
                         {
@@ -480,21 +572,4 @@ fn resolve_trigger_principal(
         }
         _ => invoking_ctx.clone(),
     }
-}
-
-pub(crate) fn effective_trigger_security_context(agent_ctx: &AgentContext) -> SecurityContext {
-    if let Some(security_ctx) = &agent_ctx.security_ctx {
-        return security_ctx.clone();
-    }
-
-    let mut security_ctx = SecurityContext::from_headers(&[]).with_agent_context(
-        agent_ctx.agent_id.as_deref(),
-        agent_ctx.session_id.as_deref(),
-        agent_ctx.agent_type.as_deref(),
-    );
-    security_ctx.context_attrs.insert(
-        "triggerInheritedContextApproximate".to_string(),
-        serde_json::Value::Bool(true),
-    );
-    security_ctx
 }

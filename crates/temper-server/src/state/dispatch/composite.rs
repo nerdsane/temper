@@ -6,6 +6,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use temper_authz::SecurityContext;
 use temper_jit::table::{CompositeActionMetadata, TransitionTable};
+use temper_runtime::persistence::schema_deployment::SchemaExecutionPin;
 use temper_runtime::persistence::{
     COMPOSITE_EVENT_TYPE, CompositeEvent, CompositeEventSubWrite, EventMetadata, PersistenceAppend,
     PersistenceEnvelope, PersistenceError,
@@ -77,14 +78,38 @@ struct AtomicCompositeStream {
     events: Vec<PersistenceEnvelope>,
 }
 
+fn composite_persistence_id(
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_id: &str,
+    schema_pin: Option<&SchemaExecutionPin>,
+) -> String {
+    match schema_pin {
+        Some(pin) => format!(
+            "{tenant}:{entity_type}:{entity_id}:schema:{}",
+            pin.bundle_digest
+        ),
+        None => format!("{tenant}:{entity_type}:{entity_id}"),
+    }
+}
+
 impl crate::state::ServerState {
     pub(super) fn composite_metadata_for(
         &self,
         tenant: &TenantId,
         entity_type: &str,
         action: &str,
+        schema_pin: Option<&SchemaExecutionPin>,
     ) -> Result<Option<CompositeActionMetadata>, DispatchError> {
-        let table = self.transition_table_for_dispatch(tenant, entity_type)?;
+        let table = match schema_pin {
+            Some(pin) => self
+                .registry
+                .read()
+                .map_err(|_| DispatchError::Internal("registry lock poisoned".into()))?
+                .get_scoped_table_at_digest(tenant, &pin.scope, &pin.bundle_digest, entity_type)
+                .ok_or_else(|| DispatchError::Ungoverned(entity_type.to_string()))?,
+            None => self.transition_table_for_dispatch(tenant, entity_type)?,
+        };
         Ok(table.composite_actions.get(action).cloned())
     }
 
@@ -117,7 +142,7 @@ impl crate::state::ServerState {
         }
 
         let metadata = self
-            .composite_metadata_for(tenant, entity_type, action)?
+            .composite_metadata_for(tenant, entity_type, action, agent_ctx.schema_pin.as_ref())?
             .ok_or_else(|| {
                 DispatchError::Internal(format!(
                     "Integration result for non-Composite action {entity_type}.{action} included sub_writes"
@@ -164,6 +189,7 @@ impl crate::state::ServerState {
                     record_event: metadata.record_parent_event,
                 },
                 &prepared_sub_writes,
+                agent_ctx.schema_pin.as_ref(),
             )
             .await?
         {
@@ -206,6 +232,7 @@ impl crate::state::ServerState {
         &self,
         parent: AtomicCompositeParent<'_>,
         prepared_sub_writes: &[PreparedCompositeSubWrite],
+        schema_pin: Option<&SchemaExecutionPin>,
     ) -> Result<bool, DispatchError> {
         let tenant = parent.tenant;
         let parent_entity_type = parent.entity_type;
@@ -223,7 +250,8 @@ impl crate::state::ServerState {
         let field_sync_mode = self.composite_batch_field_sync_mode(tenant, backend);
         let blob_store = self.blob_store_for_tenant(tenant).ok();
         let mut streams: BTreeMap<String, AtomicCompositeStream> = BTreeMap::new();
-        let parent_persistence_id = format!("{tenant}:{parent_entity_type}:{parent_entity_id}");
+        let parent_persistence_id =
+            composite_persistence_id(tenant, parent_entity_type, parent_entity_id, schema_pin);
         let timing_enabled = prepared_sub_writes.len() >= 10;
         let total_started_at = timing_enabled.then(std::time::Instant::now);
         let parent_started_at = timing_enabled.then(std::time::Instant::now);
@@ -244,6 +272,7 @@ impl crate::state::ServerState {
                 parent_entity_id,
                 None,
                 false,
+                schema_pin,
             )
             .await?;
             let event = build_composite_event(
@@ -277,7 +306,8 @@ impl crate::state::ServerState {
             .map(|write| (write.entity_type.clone(), write.entity_id.clone()))
             .collect::<std::collections::BTreeSet<_>>();
         for write in prepared_sub_writes {
-            let persistence_id = format!("{tenant}:{}:{}", write.entity_type, write.entity_id);
+            let persistence_id =
+                composite_persistence_id(tenant, &write.entity_type, &write.entity_id, schema_pin);
             self.ensure_atomic_composite_stream(
                 &mut streams,
                 tenant,
@@ -285,10 +315,12 @@ impl crate::state::ServerState {
                 &write.entity_id,
                 write.preflight_target.as_ref(),
                 write.uses_parent_gate && write.action == "Create",
+                schema_pin,
             )
             .await?;
 
-            let table = self.transition_table_for_dispatch(tenant, &write.entity_type)?;
+            let table =
+                self.transition_table_for_context(tenant, &write.entity_type, schema_pin)?;
             let mut cross_entity_booleans =
                 if table_has_cross_entity_guards_for_action(&table, &write.action) {
                     self.resolve_cross_entity_guards(
@@ -296,6 +328,7 @@ impl crate::state::ServerState {
                         &write.entity_type,
                         &write.entity_id,
                         &write.action,
+                        schema_pin,
                     )
                     .await
                 } else {
@@ -308,6 +341,7 @@ impl crate::state::ServerState {
                     &write.entity_id,
                     Some(&write.action),
                     &write.params,
+                    schema_pin,
                 )
                 .await,
             );
@@ -366,6 +400,11 @@ impl crate::state::ServerState {
                 || !result.scheduled_actions.is_empty()
                 || !result.spawn_requests.is_empty()
             {
+                if schema_pin.is_some() {
+                    return Err(DispatchError::Internal(format!(
+                        "scoped composite {parent_entity_type}.{parent_action} requires effects unsupported by atomic staging"
+                    )));
+                }
                 return Ok(false);
             }
             if !result.overflow_blobs.is_empty() {
@@ -416,8 +455,10 @@ impl crate::state::ServerState {
         let append_ms = append_started_at.map(|started| started.elapsed().as_millis() as u64);
 
         let projection_collect_started_at = timing_enabled.then(std::time::Instant::now);
-        self.update_composite_query_projections(tenant, &streams)
-            .await?;
+        if schema_pin.is_none() {
+            self.update_composite_query_projections(tenant, &streams)
+                .await?;
+        }
         let projection_collect_ms =
             projection_collect_started_at.map(|started| started.elapsed().as_millis() as u64);
 
@@ -433,18 +474,41 @@ impl crate::state::ServerState {
             if !stream.target_existed {
                 continue;
             }
-            self.stop_and_remove_entity(tenant, &stream.entity_type, &stream.entity_id);
+            if let Some(pin) = schema_pin {
+                self.stop_and_remove_scoped_entity(
+                    tenant,
+                    &stream.entity_type,
+                    &stream.entity_id,
+                    &pin.bundle_digest,
+                );
+            } else {
+                self.stop_and_remove_entity(tenant, &stream.entity_type, &stream.entity_id);
+            }
             if stream.state.status == "Deleted" {
                 continue;
             }
-            if !self
-                .ensure_entity_loaded(tenant, &stream.entity_type, &stream.entity_id)
-                .await
-            {
-                return Err(DispatchError::Internal(format!(
-                    "composite batch committed {}:{} but failed to reload it",
-                    stream.entity_type, stream.entity_id
-                )));
+            match schema_pin {
+                Some(pin) => {
+                    self.get_scoped_entity_state(
+                        tenant,
+                        &stream.entity_type,
+                        &stream.entity_id,
+                        pin.clone(),
+                    )
+                    .await
+                    .map_err(DispatchError::Internal)?;
+                }
+                None => {
+                    if !self
+                        .ensure_entity_loaded(tenant, &stream.entity_type, &stream.entity_id)
+                        .await
+                    {
+                        return Err(DispatchError::Internal(format!(
+                            "composite batch committed {}:{} but failed to reload it",
+                            stream.entity_type, stream.entity_id
+                        )));
+                    }
+                }
             }
         }
         let reload_ms = reload_started_at.map(|started| started.elapsed().as_millis() as u64);
@@ -470,6 +534,10 @@ impl crate::state::ServerState {
         Ok(true)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "atomic stream preparation binds an exact tenant, entity, and schema pin"
+    )]
     async fn ensure_atomic_composite_stream(
         &self,
         streams: &mut BTreeMap<String, AtomicCompositeStream>,
@@ -478,8 +546,9 @@ impl crate::state::ServerState {
         entity_id: &str,
         preflight_target: Option<&PreflightCompositeTarget>,
         suppress_bootstrap_event: bool,
+        schema_pin: Option<&SchemaExecutionPin>,
     ) -> Result<(), DispatchError> {
-        let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+        let persistence_id = composite_persistence_id(tenant, entity_type, entity_id, schema_pin);
         if streams.contains_key(&persistence_id) {
             return Ok(());
         }
@@ -487,17 +556,32 @@ impl crate::state::ServerState {
         let (target_exists, mut state) = if let Some(target) = preflight_target {
             (target.target_existed, target.state.clone())
         } else {
-            let table = self.transition_table_for_dispatch(tenant, entity_type)?;
-            let target_exists = self
-                .ensure_entity_loaded(tenant, entity_type, entity_id)
-                .await;
-            let state = if target_exists {
-                self.get_tenant_entity_state(tenant, entity_type, entity_id)
+            let table = self.transition_table_for_context(tenant, entity_type, schema_pin)?;
+            let scoped_state = match schema_pin {
+                Some(pin) => self
+                    .get_scoped_entity_state(tenant, entity_type, entity_id, pin.clone())
                     .await
-                    .map_err(DispatchError::Internal)?
-                    .state
-            } else {
-                synthetic_initial_state(entity_type, entity_id, &table)
+                    .ok(),
+                None => None,
+            };
+            let target_exists = match schema_pin {
+                Some(_) => scoped_state
+                    .as_ref()
+                    .is_some_and(|response| response.state.sequence_nr > 0),
+                None => {
+                    self.ensure_entity_loaded(tenant, entity_type, entity_id)
+                        .await
+                }
+            };
+            let state = match scoped_state {
+                Some(response) => response.state,
+                None if target_exists => {
+                    self.get_tenant_entity_state(tenant, entity_type, entity_id)
+                        .await
+                        .map_err(DispatchError::Internal)?
+                        .state
+                }
+                None => synthetic_initial_state(entity_type, entity_id, &table),
             };
             (target_exists, state)
         };
@@ -595,7 +679,11 @@ impl crate::state::ServerState {
             let sub_params = normalize_sub_write_params(sub_write);
 
             if sub_action == "Create" {
-                let table = self.transition_table_for_dispatch(tenant, &sub_entity_type)?;
+                let table = self.transition_table_for_context(
+                    tenant,
+                    &sub_entity_type,
+                    composite_agent_ctx.schema_pin.as_ref(),
+                )?;
                 let fields = sub_params.as_object().ok_or_else(|| {
                     DispatchError::Conflict(format!(
                         "composite {entity_type}.{action} sub-write {idx} create params must be an object"
@@ -618,8 +706,12 @@ impl crate::state::ServerState {
                 Some(governed) => *governed,
                 None => {
                     let governed = self
-                        .is_entity_type_governed(tenant, &sub_entity_type)
-                        .map_err(DispatchError::Internal)?;
+                        .transition_table_for_context(
+                            tenant,
+                            &sub_entity_type,
+                            composite_agent_ctx.schema_pin.as_ref(),
+                        )
+                        .is_ok();
                     governed_cache.insert(sub_entity_type.clone(), governed);
                     governed
                 }
@@ -636,7 +728,11 @@ impl crate::state::ServerState {
                 if !create_auth_defaults_cache.contains_key(&sub_entity_type) {
                     create_auth_defaults_cache.insert(
                         sub_entity_type.clone(),
-                        self.composite_create_auth_defaults(tenant, &sub_entity_type)?,
+                        self.composite_create_auth_defaults(
+                            tenant,
+                            &sub_entity_type,
+                            composite_agent_ctx.schema_pin.as_ref(),
+                        )?,
                     );
                 }
                 let defaults = create_auth_defaults_cache
@@ -655,6 +751,7 @@ impl crate::state::ServerState {
                         &sub_entity_id,
                         &sub_action,
                         &sub_params,
+                        composite_agent_ctx.schema_pin.as_ref(),
                     )
                     .await?,
                 )
@@ -689,9 +786,12 @@ impl crate::state::ServerState {
             });
         }
 
-        let known_absent_create_targets = self
-            .composite_known_absent_create_targets(tenant, &prepared)
-            .await?;
+        let known_absent_create_targets = if composite_agent_ctx.schema_pin.is_some() {
+            BTreeSet::new()
+        } else {
+            self.composite_known_absent_create_targets(tenant, &prepared)
+                .await?
+        };
 
         for write in &mut prepared {
             let known_absent_create = known_absent_create_targets
@@ -703,6 +803,7 @@ impl crate::state::ServerState {
                     action,
                     write,
                     known_absent_create,
+                    composite_agent_ctx.schema_pin.as_ref(),
                 )
                 .await?,
             );
@@ -800,19 +901,33 @@ impl crate::state::ServerState {
         parent_action: &str,
         write: &PreparedCompositeSubWrite,
         known_absent_create: bool,
+        schema_pin: Option<&SchemaExecutionPin>,
     ) -> Result<PreflightCompositeTarget, DispatchError> {
-        let table = self.transition_table_for_dispatch(tenant, &write.entity_type)?;
+        let table = self.transition_table_for_context(tenant, &write.entity_type, schema_pin)?;
         let known_absent_create = known_absent_create
             && write.action == "Create"
             && !self.entity_exists(tenant, &write.entity_type, &write.entity_id);
+        let scoped_target = match schema_pin {
+            Some(pin) => self
+                .get_scoped_entity_state(tenant, &write.entity_type, &write.entity_id, pin.clone())
+                .await
+                .ok(),
+            None => None,
+        };
         let target_exists = if known_absent_create {
             false
+        } else if schema_pin.is_some() {
+            scoped_target
+                .as_ref()
+                .is_some_and(|response| response.state.sequence_nr > 0)
         } else {
             self.ensure_entity_loaded(tenant, &write.entity_type, &write.entity_id)
                 .await
         };
         let target_state = if known_absent_create {
             synthetic_initial_state(&write.entity_type, &write.entity_id, &table)
+        } else if let Some(response) = scoped_target {
+            response.state
         } else if target_exists {
             self.get_tenant_entity_state(tenant, &write.entity_type, &write.entity_id)
                 .await
@@ -852,6 +967,7 @@ impl crate::state::ServerState {
                     &write.entity_type,
                     &write.entity_id,
                     &write.action,
+                    schema_pin,
                 )
                 .await
             } else {
@@ -878,11 +994,30 @@ impl crate::state::ServerState {
         entity_id: &str,
         action: &str,
         params: &Value,
+        schema_pin: Option<&SchemaExecutionPin>,
     ) -> Result<BTreeMap<String, Value>, DispatchError> {
         if action == "Create" {
             return self.composite_create_resource_attrs(tenant, entity_type, entity_id, params);
         }
 
+        if let Some(pin) = schema_pin {
+            let response = self
+                .get_scoped_entity_state(tenant, entity_type, entity_id, pin.clone())
+                .await
+                .map_err(DispatchError::Internal)?;
+            let mut attrs = response
+                .state
+                .fields
+                .as_object()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<BTreeMap<_, _>>();
+            attrs.insert("id".into(), Value::String(entity_id.into()));
+            attrs.insert("status".into(), Value::String(response.state.status));
+            attrs.insert("has_spec".into(), Value::Bool(true));
+            return Ok(attrs);
+        }
         if !self
             .ensure_entity_loaded(tenant, entity_type, entity_id)
             .await
@@ -902,11 +1037,15 @@ impl crate::state::ServerState {
         &self,
         tenant: &TenantId,
         entity_type: &str,
+        schema_pin: Option<&SchemaExecutionPin>,
     ) -> Result<CompositeCreateAuthDefaults, DispatchError> {
-        let table = self.transition_table_for_dispatch(tenant, entity_type)?;
-        let has_spec = self
-            .has_registered_spec(tenant, entity_type)
-            .map_err(DispatchError::Internal)?;
+        let table = self.transition_table_for_context(tenant, entity_type, schema_pin)?;
+        let has_spec = if schema_pin.is_some() {
+            true
+        } else {
+            self.has_registered_spec(tenant, entity_type)
+                .map_err(DispatchError::Internal)?
+        };
         Ok(CompositeCreateAuthDefaults {
             initial_state: table.initial_state.clone(),
             has_spec,
@@ -959,6 +1098,25 @@ impl crate::state::ServerState {
             .ok_or_else(|| DispatchError::Ungoverned(entity_type.to_string()))
     }
 
+    fn transition_table_for_context(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        schema_pin: Option<&SchemaExecutionPin>,
+    ) -> Result<Arc<TransitionTable>, DispatchError> {
+        match schema_pin {
+            Some(pin) => self
+                .registry
+                .read()
+                .map_err(|error| {
+                    DispatchError::Internal(format!("registry lock poisoned: {error}"))
+                })?
+                .get_scoped_table_at_digest(tenant, &pin.scope, &pin.bundle_digest, entity_type)
+                .ok_or_else(|| DispatchError::Ungoverned(entity_type.to_string())),
+            None => self.transition_table_for_dispatch(tenant, entity_type),
+        }
+    }
+
     #[allow(dead_code)]
     async fn ensure_composite_entry_transition_allowed(
         &self,
@@ -973,7 +1131,7 @@ impl crate::state::ServerState {
             .await
             .map_err(DispatchError::Internal)?;
         let cross_entity_booleans = self
-            .resolve_cross_entity_guards(tenant, entity_type, entity_id, action)
+            .resolve_cross_entity_guards(tenant, entity_type, entity_id, action, None)
             .await;
         let eval_ctx = build_eval_context_with_xref(&current.state, &cross_entity_booleans);
 
