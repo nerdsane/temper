@@ -394,12 +394,16 @@ pub async fn persist_agent_verification(
 ///
 /// When the platform boots with a `TEMPER_API_KEY` configured, this function
 /// ensures a corresponding `AgentType` ("operator") and `AgentCredential`
-/// exist in the default tenant so the bearer auth middleware can resolve
-/// the key resolves as a verified identity in that tenant. Registration in one
-/// tenant deliberately grants no authority in any other tenant.
+/// exist in the given tenant so the bearer auth middleware can resolve the
+/// key as a verified identity in that tenant. Registration in one tenant
+/// deliberately grants no authority in any other tenant.
 ///
-/// This is idempotent: if the entities already exist (e.g., from a previous
-/// boot), the actions are no-ops (entity already in target state).
+/// Also seeds a narrow Cedar permit so a verified operator can
+/// `manage_policies` on that tenant's `PolicySet` (ADR-0172). The permit is
+/// merged into live Cedar, persisted as a granular row, and is idempotent.
+///
+/// This is idempotent: if the entities and permit already exist (e.g., from a
+/// previous boot), the actions are no-ops.
 pub async fn bootstrap_operator_credential(state: &PlatformState, api_key: &str, tenant: &str) {
     use temper_server::identity::hash_token;
 
@@ -453,6 +457,8 @@ pub async fn bootstrap_operator_credential(state: &PlatformState, api_key: &str,
             &agent_ctx,
         )
         .await;
+
+    crate::operator_manage_policies::seed_operator_manage_policies(state, tenant).await;
 
     tracing::info!(
         "Operator credential bootstrapped for tenant '{tenant}' (key_hash={}...)",
