@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 // ── Create ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct CreateRunRequest {
     pub prompt: String,
     #[serde(default)]
@@ -33,7 +32,6 @@ pub struct CreateRunRequest {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct RepoSpec {
     pub url: String,
     #[serde(default = "default_ref")]
@@ -41,7 +39,6 @@ pub struct RepoSpec {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct BudgetSpec {
     #[serde(default = "default_max_turns")]
     pub max_turns: String,
@@ -58,7 +55,6 @@ pub struct CreateRunResponse {
 // ── Get ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
-#[allow(dead_code)]
 pub struct RunStatus {
     pub run_id: String,
     pub status: String,

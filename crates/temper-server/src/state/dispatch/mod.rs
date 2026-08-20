@@ -255,17 +255,6 @@ pub(super) fn record_workflow_span_attrs(
     if let Some(session_id) = agent_ctx.session_id.as_deref() {
         span.record("session.id", session_id);
     }
-
-    // Agent Runtime PoC: record agent-specific span attributes when
-    // dispatching actions on TemperAgent entities. These dimensions
-    // appear as tags in Datadog APM for filtering agent run traces.
-    if entity_type == "TemperAgent" {
-        span.record("agent.run_id", entity_id);
-        span.record("agent.entity_type", "TemperAgent");
-        if let Some(action) = action {
-            span.record("agent.action", action);
-        }
-    }
 }
 
 fn workflow_root_type(agent_ctx: &AgentContext, fallback: &str) -> String {
