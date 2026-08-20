@@ -90,6 +90,17 @@ pub struct CancelResponse {
     pub status: String,
 }
 
+// ── Delete ───────────────────────────────────────────────────────────
+
+/// Response returned after an agent-run deletion request is accepted.
+#[derive(Debug, Serialize)]
+pub struct DeleteRunResponse {
+    /// The logical agent-run identifier.
+    pub run_id: String,
+    /// Current deletion lifecycle status, usually `Deleting`.
+    pub status: String,
+}
+
 // ── Error ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]

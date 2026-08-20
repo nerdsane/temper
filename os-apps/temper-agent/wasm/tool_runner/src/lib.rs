@@ -385,10 +385,6 @@ fn execute_tool(
 ) -> Result<String, String> {
     let e2b = is_e2b_sandbox(sandbox_url);
     let tensorlake = is_tensorlake_sandbox(sandbox_url);
-    // E2B and Tensorlake both use /files?path=... for file operations.
-    let remote_files = e2b || tensorlake;
-    // E2B uses Connect protocol; Tensorlake and local use plain HTTP /processes/run.
-    let remote_connect = e2b;
     match tool_name {
         "read" => {
             let path = input
@@ -397,7 +393,9 @@ fn execute_tool(
                     .ok_or("read: missing 'path' parameter")?;
 
             let full_path = resolve_path(workdir, path);
-            if remote_files {
+            if tensorlake {
+                read_file_tensorlake(ctx, sandbox_url, &full_path)
+            } else if e2b {
                 read_file_e2b(ctx, sandbox_url, &full_path)
             } else {
                 read_file_local(ctx, sandbox_url, &full_path)
@@ -414,7 +412,9 @@ fn execute_tool(
                     .ok_or("write: missing 'content' parameter")?;
 
             let full_path = resolve_path(workdir, path);
-            if remote_files {
+            if tensorlake {
+                write_file_tensorlake(ctx, sandbox_url, &full_path, content)
+            } else if e2b {
                 write_file_e2b(ctx, sandbox_url, &full_path, content)
             } else {
                 write_file_local(ctx, sandbox_url, &full_path, content)
@@ -436,7 +436,9 @@ fn execute_tool(
 
             let full_path = resolve_path(workdir, path);
             // Read current file
-            let current = if remote_files {
+            let current = if tensorlake {
+                read_file_tensorlake(ctx, sandbox_url, &full_path)?
+            } else if e2b {
                 read_file_e2b(ctx, sandbox_url, &full_path)?
             } else {
                 read_file_local(ctx, sandbox_url, &full_path)?
@@ -448,7 +450,9 @@ fn execute_tool(
             let updated = current.replacen(old_string, new_string, 1);
 
             // Write updated file
-            if remote_files {
+            if tensorlake {
+                write_file_tensorlake(ctx, sandbox_url, &full_path, &updated)?;
+            } else if e2b {
                 write_file_e2b(ctx, sandbox_url, &full_path, &updated)?;
             } else {
                 write_file_local(ctx, sandbox_url, &full_path, &updated)?;
@@ -461,7 +465,9 @@ fn execute_tool(
                     .and_then(|v| v.as_str())
                     .ok_or("bash: missing 'command' parameter")?;
 
-            if remote_connect {
+            if tensorlake {
+                run_bash_tensorlake(ctx, sandbox_url, command, workdir)
+            } else if e2b {
                 run_bash_e2b(ctx, sandbox_url, command, workdir)
             } else {
                 run_bash_local(ctx, sandbox_url, command, workdir)
@@ -888,6 +894,167 @@ fn run_bash_local(
     }
 }
 
+// --- Tensorlake sandbox proxy API (verified via scripts/tl-probe.sh) ---
+//
+// The proxy lives at the sandbox's own `sandbox_url` (per-sandbox host,
+// e.g. https://{id}.sandbox.tensorlake.ai), NOT the shared control-plane
+// host, and every call requires `Authorization: Bearer {tensorlake_api_key}`
+// (the file/proxy management port always requires auth, per the docs).
+
+/// Read file via Tensorlake sandbox proxy: GET /api/v1/files?path=...
+fn read_file_tensorlake(ctx: &Context, sandbox_url: &str, full_path: &str) -> Result<String, String> {
+    let api_key = resolved_config(ctx, "tensorlake_api_key").unwrap_or_default();
+    let url = format!("{sandbox_url}/api/v1/files?path={}", url_encode(full_path));
+    let headers = vec![("authorization".to_string(), format!("Bearer {api_key}"))];
+    let resp = ctx.http_call("GET", &url, &headers, "")?;
+    if resp.status == 200 {
+        Ok(resp.body)
+    } else {
+        Err(format!(
+            "Tensorlake read failed (HTTP {}): {}",
+            resp.status,
+            &resp.body[..resp.body.len().min(200)]
+        ))
+    }
+}
+
+/// Write file via Tensorlake sandbox proxy: PUT /api/v1/files?path=... (raw
+/// body). Verified success status is 204 (No Content), not 200.
+fn write_file_tensorlake(
+    ctx: &Context,
+    sandbox_url: &str,
+    full_path: &str,
+    content: &str,
+) -> Result<String, String> {
+    let api_key = resolved_config(ctx, "tensorlake_api_key").unwrap_or_default();
+    let url = format!("{sandbox_url}/api/v1/files?path={}", url_encode(full_path));
+    let headers = vec![("authorization".to_string(), format!("Bearer {api_key}"))];
+    let resp = ctx.http_call("PUT", &url, &headers, content)?;
+    if resp.status >= 200 && resp.status < 300 {
+        Ok(format!("File written: {full_path}"))
+    } else {
+        Err(format!(
+            "Tensorlake write failed (HTTP {}): {}",
+            resp.status,
+            &resp.body[..resp.body.len().min(200)]
+        ))
+    }
+}
+
+/// Run a shell command via the Tensorlake sandbox proxy's foreground exec
+/// endpoint: POST /api/v1/processes/run.
+///
+/// `command` in the Tensorlake API is an EXECUTABLE, with a separate `args`
+/// array (SandboxRunProcessRequest) — it is not a shell line. To run a shell
+/// pipeline this must go through `{command:"bash", args:["-c", line]}`, and
+/// the response is a Server-Sent Events stream (see parse_tensorlake_sse),
+/// not one JSON object like the local/E2B paths.
+fn run_bash_tensorlake(
+    ctx: &Context,
+    sandbox_url: &str,
+    command: &str,
+    workdir: &str,
+) -> Result<String, String> {
+    let api_key = resolved_config(ctx, "tensorlake_api_key").unwrap_or_default();
+    let url = format!("{sandbox_url}/api/v1/processes/run");
+    let body = serde_json::to_string(&json!({
+        "command": "bash",
+        "args": ["-c", command],
+        "working_dir": workdir,
+    }))
+    .unwrap_or_default();
+    let headers = vec![
+        ("authorization".to_string(), format!("Bearer {api_key}")),
+        ("content-type".to_string(), "application/json".to_string()),
+    ];
+    let resp = ctx.http_call("POST", &url, &headers, &body)?;
+
+    if resp.status < 200 || resp.status >= 300 {
+        return Err(format!(
+            "Tensorlake exec failed (HTTP {}): {}",
+            resp.status,
+            &resp.body[..resp.body.len().min(300)]
+        ));
+    }
+
+    let (stdout, stderr, exit_code) = parse_tensorlake_sse(&resp.body);
+    let mut output = String::new();
+    if !stdout.is_empty() {
+        output.push_str(&stdout);
+    }
+    if !stderr.is_empty() {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str("STDERR: ");
+        output.push_str(&stderr);
+    }
+    if exit_code != 0 {
+        output.push_str(&format!("\n(exit code: {exit_code})"));
+    }
+    Ok(output)
+}
+
+/// Parse a Tensorlake `/api/v1/processes/run` Server-Sent Events response
+/// into `(stdout, stderr, exit_code)`.
+///
+/// Verified frame shapes (scripts/tl-probe.sh):
+///   data: {"handle":1,"pid":536,"started_at":...}            -- ignored
+///   data: {"line":"...","timestamp":...,"stream":"stdout"}   -- appended
+///   data: {"line":"...","timestamp":...,"stream":"stderr"}   -- appended
+///   data: {"exit_code":0}                                     -- terminal
+///
+/// If no exit frame is observed the exit code is reported as `-1` (unknown),
+/// matching the "parse failed" convention used for local/E2B exec.
+fn parse_tensorlake_sse(body: &str) -> (String, String, i64) {
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut exit_code: i64 = -1;
+
+    for raw_line in body.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Two different shapes can reach here depending on a layer this
+        // module has no control over: Temper's own WASM host
+        // (crates/temper-wasm/src/host_trait.rs) auto-detects SSE responses
+        // by Content-Type and, when it does, already strips the `data: `
+        // prefix and blank-line event framing before handing the body to
+        // this module — leaving bare JSON objects one per line. If that
+        // detection doesn't fire, the raw wire format (`data: {...}`, as
+        // seen directly via curl in scripts/tl-probe.sh, which never goes
+        // through that host layer) comes through unchanged. Assuming only
+        // one of these previously produced a *silent* empty result (exit
+        // code -1, no stdout/stderr) instead of a clear parse error — every
+        // line failed strip_prefix, nothing was ever extracted, and nothing
+        // said so.
+        let json_part = line.strip_prefix("data:").map(str::trim).unwrap_or(line);
+        if json_part.is_empty() {
+            continue;
+        }
+        let Ok(frame) = serde_json::from_str::<Value>(json_part) else {
+            continue;
+        };
+
+        if let Some(code) = frame.get("exit_code") {
+            exit_code = code.as_i64().unwrap_or(-1);
+            continue;
+        }
+        if let Some(text) = frame.get("line").and_then(|v| v.as_str()) {
+            let stream = frame.get("stream").and_then(|v| v.as_str()).unwrap_or("stdout");
+            let target = if stream == "stderr" { &mut stderr } else { &mut stdout };
+            if !target.is_empty() {
+                target.push('\n');
+            }
+            target.push_str(text);
+        }
+        // "handle"/"pid"/"started_at" start-of-process frames: ignored.
+    }
+
+    (stdout, stderr, exit_code)
+}
+
 // --- E2B envd API (plain HTTP for files, port 49983) ---
 
 /// Read file via E2B envd HTTP API: GET /files?path=...
@@ -945,12 +1112,17 @@ fn checkpoint_tensorlake(ctx: &Context, sandbox_id: &str) -> Result<String, Stri
     let api_url = resolved_config(ctx, "tensorlake_api_url")
         .unwrap_or_else(|| "https://api.tensorlake.ai".to_string());
 
-    let url = format!("{api_url}/v2/sandboxes/{sandbox_id}/snapshots");
+    // Verified path: POST /sandboxes/{id}/snapshot (no /v2, singular
+    // "snapshot"). Success is 202 Accepted with {snapshot_id, status:
+    // "in_progress"}, which the existing 200..300 status check already
+    // accepts.
+    let url = format!("{api_url}/sandboxes/{sandbox_id}/snapshot");
     let headers = vec![
         ("Authorization".to_string(), format!("Bearer {api_key}")),
         ("content-type".to_string(), "application/json".to_string()),
     ];
-    let body = json!({"checkpoint_type": "filesystem"}).to_string();
+    // Verified field name is "snapshot_type", not "checkpoint_type".
+    let body = json!({"snapshot_type": "filesystem"}).to_string();
 
     let resp = ctx.http_call("POST", &url, &headers, &body)?;
     if resp.status < 200 || resp.status >= 300 {
@@ -1159,9 +1331,13 @@ fn enumerate_sandbox_files(
 
     let command = format!("find {workdir} -type f -not -path '*/.*'{exclude_flags} {stat_fmt}");
 
-    // E2B uses Connect protocol; Tensorlake and local use plain HTTP /v1/processes/run.
-    let e2b_connect = is_e2b_sandbox(sandbox_url);
-    let output = if e2b_connect {
+    // Each provider has its own exec transport and command/args contract:
+    // E2B uses the Connect protocol; Tensorlake needs {command:"bash",
+    // args:["-c", line]} against its SSE endpoint; local uses plain HTTP
+    // /v1/processes/run with a single JSON response.
+    let output = if is_tensorlake_sandbox(sandbox_url) {
+        run_bash_tensorlake(ctx, sandbox_url, &command, workdir)?
+    } else if is_e2b_sandbox(sandbox_url) {
         run_bash_e2b(ctx, sandbox_url, &command, workdir)?
     } else {
         run_bash_local(ctx, sandbox_url, &command, workdir)?
@@ -1261,7 +1437,7 @@ fn sync_files_to_temperfs(
     exclude: &str,
 ) -> Result<usize, String> {
     // 1. Enumerate current sandbox files with stat metadata
-    let current_files = enumerate_sandbox_files(ctx, sandbox_url, workdir, exclude, remote_files)?;;;
+    let current_files = enumerate_sandbox_files(ctx, sandbox_url, workdir, exclude, remote_files)?;
     ctx.log(
         "info",
         &format!(
@@ -1301,8 +1477,13 @@ fn sync_files_to_temperfs(
             }
         }
 
-        // File is new or modified — read from sandbox
-        let content = if remote_files {
+        // File is new or modified — read from sandbox. Each provider has a
+        // different file-read transport; `remote_files` (used above for the
+        // find/stat command shape) is not specific enough here since it is
+        // true for both E2B and Tensorlake, which use different paths.
+        let content = if is_tensorlake_sandbox(sandbox_url) {
+            read_file_tensorlake(ctx, sandbox_url, path)
+        } else if remote_files {
             read_file_e2b(ctx, sandbox_url, path)
         } else {
             read_file_local(ctx, sandbox_url, path)

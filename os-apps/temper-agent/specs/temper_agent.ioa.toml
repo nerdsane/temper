@@ -19,7 +19,7 @@
 
 [automaton]
 name = "TemperAgent"
-states = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Recovering", "Completed", "Failed", "Cancelled"]
+states = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Recovering", "Completed", "Failed", "Cancelled", "Deleting", "DeletionFailed", "Deleted"]
 initial = "Created"
 
 # --- State Variables: Core ---
@@ -289,7 +289,7 @@ name = "Provision"
 kind = "input"
 from = ["Created"]
 to = "Provisioning"
-hint = "Start sandbox provisioning. Triggers provision_sandbox WASM integration."
+hint = "Start durable sandbox allocation before fallible bootstrap work."
 effect = [{ type = "trigger", name = "provision_sandbox" }]
 
 # ADR-0046: inline trigger — migrated from [[integration]] below.
@@ -308,15 +308,44 @@ e2b_api_key = "{secret:e2b_api_key}"
 tensorlake_api_key = "{secret:tensorlake_api_key}"
 tensorlake_api_url = "{secret:tensorlake_api_url}"
 github_token = "{secret:github_token}"
+# 120s default (WasmResourceLimits::max_duration) was too tight once the
+# module started polling for sandbox readiness (up to 60s) on top of TemperFS
+# bootstrap and the repo clone itself; 300s matches the headroom already used
+# by other network-bound triggers in this spec (e.g. llm_caller).
+timeout_secs = "300"
 
+
+# Persist the external provider resource before TemperFS bootstrap or a private
+# clone can fail. A failed bootstrap therefore retains a teardown target.
+[[action]]
+name = "SandboxAllocated"
+kind = "input"
+from = ["Provisioning"]
+params = ["sandbox_url", "sandbox_id", "sandbox_provider"]
+hint = "Persist a newly allocated sandbox and its actual provider before fallible bootstrap work."
+effect = [{ type = "trigger", name = "bootstrap_sandbox" }]
+
+[[action.triggers]]
+name = "bootstrap_sandbox"
+kind = "wasm"
+module = "sandbox_provisioner"
+on_failure = "Fail"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+e2b_api_key = "{secret:e2b_api_key}"
+tensorlake_api_key = "{secret:tensorlake_api_key}"
+tensorlake_api_url = "{secret:tensorlake_api_url}"
+github_token = "{secret:github_token}"
+timeout_secs = "300"
 
 [[action]]
 name = "SandboxReady"
 kind = "input"
 from = ["Provisioning"]
 to = "Thinking"
-params = ["sandbox_url", "sandbox_id", "workspace_id", "conversation_file_id", "file_manifest_id", "session_file_id", "session_leaf_id"]
-hint = "Callback from sandbox provisioner. Sets sandbox connection, TemperFS workspace/file/manifest/session, and starts think loop."
+params = ["sandbox_url", "sandbox_id", "workspace_id", "conversation_file_id", "file_manifest_id", "session_file_id", "session_leaf_id", "workdir"]
+hint = "Callback from sandbox bootstrapper. Sets sandbox connection, TemperFS workspace/file/manifest/session, and starts think loop."
 effect = [{ type = "trigger", name = "call_llm" }]
 
 # ADR-0046: inline trigger — migrated from [[integration]] below.
@@ -367,6 +396,7 @@ on_failure = "Fail"
 
 [action.triggers.config]
 temper_api_url = "{secret:temper_api_url}"
+tensorlake_api_key = "{secret:tensorlake_api_key}"
 max_sync_file_bytes = "61440"
 sync_exclude = "__pycache__,node_modules,.git"
 logfire_read_token = "{secret:logfire_read_token}"
@@ -539,6 +569,41 @@ to = "Cancelled"
 hint = "Cancel agent execution. Triggers sandbox teardown via destroy_sandbox WASM."
 effect = [{ type = "trigger", name = "destroy_sandbox" }]
 
+# Terminal-run deletion is teardown-gated: the run remains visible while its
+# provider sandbox is removed, then becomes logically Deleted only after the
+# sandbox_destroyer callback confirms success. This preserves an auditable,
+# retryable record if provider cleanup fails.
+[[action]]
+name = "RequestDeletion"
+kind = "input"
+from = ["Completed", "Failed", "Cancelled"]
+to = "Deleting"
+hint = "Begin teardown-gated deletion of a terminal agent run."
+effect = [{ type = "trigger", name = "delete_sandbox" }]
+
+[[action]]
+name = "RetryDeletion"
+kind = "input"
+from = ["DeletionFailed", "Deleting"]
+to = "Deleting"
+hint = "Retry provider sandbox teardown after a deletion failure or an interrupted callback."
+effect = [{ type = "trigger", name = "delete_sandbox" }]
+
+[[action]]
+name = "DeletionTeardownSucceeded"
+kind = "input"
+from = ["Deleting"]
+to = "Deleted"
+hint = "Sandbox teardown completed; hide the run from normal reads."
+
+[[action]]
+name = "DeletionTeardownFailed"
+kind = "input"
+from = ["Deleting"]
+to = "DeletionFailed"
+params = ["error_message"]
+hint = "Sandbox teardown failed; retain a visible record so deletion can be retried."
+
 [[action]]
 name = "Resume"
 kind = "input"
@@ -589,15 +654,34 @@ on_failure = "Fail"
 [action.triggers.config]
 temper_api_url = "{secret:temper_api_url}"
 
-# ADR-0046: inline trigger — Cancel action sandbox teardown.
+# ADR-0046: inline trigger — Cancel action sandbox teardown. Cancellation
+# remains best-effort, so an infrastructure failure is recorded but does not
+# drive an invalid callback from the already-Cancelled state.
 [[action.triggers]]
 name = "destroy_sandbox"
 kind = "wasm"
 module = "sandbox_destroyer"
-on_failure = "Fail"
 
 [action.triggers.config]
 temper_api_url = "{secret:temper_api_url}"
+e2b_api_key = "{secret:e2b_api_key}"
+e2b_api_url = "{secret:e2b_api_url}"
+tensorlake_api_key = "{secret:tensorlake_api_key}"
+tensorlake_api_url = "{secret:tensorlake_api_url}"
+
+# Terminal deletion is strict rather than best-effort. If the module cannot
+# run (including authorization, timeout, or provider-call failures), the
+# platform drives DeletionTeardownFailed so the record remains retryable.
+[[action.triggers]]
+name = "delete_sandbox"
+kind = "wasm"
+module = "sandbox_destroyer"
+on_failure = "DeletionTeardownFailed"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+e2b_api_key = "{secret:e2b_api_key}"
+e2b_api_url = "{secret:e2b_api_url}"
 tensorlake_api_key = "{secret:tensorlake_api_key}"
 tensorlake_api_url = "{secret:tensorlake_api_url}"
 
@@ -608,23 +692,13 @@ when = ["Completed"]
 assert = "has_result"
 
 [[invariant]]
-name = "CompletedIsFinal"
-when = ["Completed"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "FailedIsFinal"
-when = ["Failed"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "CancelledIsFinal"
-when = ["Cancelled"]
+name = "DeletedIsFinal"
+when = ["Deleted"]
 assert = "no_further_transitions"
 
 [[invariant]]
 name = "TurnCountNonNegative"
-when = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Recovering", "Completed", "Failed", "Cancelled"]
+when = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Recovering", "Completed", "Failed", "Cancelled", "Deleting", "DeletionFailed", "Deleted"]
 assert = "turn_count >= 0"
 
 # --- Integrations ---

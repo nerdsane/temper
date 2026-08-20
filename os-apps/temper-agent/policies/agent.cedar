@@ -44,6 +44,7 @@ permit(
 permit(
   principal,
   action in [
+    Action::"SandboxAllocated",
     Action::"SandboxReady",
     Action::"ProcessToolCalls",
     Action::"HandleToolResults",
@@ -57,7 +58,9 @@ permit(
     Action::"TimeoutFail",
     Action::"SandboxLost",
     Action::"SandboxRestored",
-    Action::"RestoreFailed"
+    Action::"RestoreFailed",
+    Action::"DeletionTeardownSucceeded",
+    Action::"DeletionTeardownFailed"
   ],
   resource is TemperAgent
 ) when {
@@ -87,7 +90,13 @@ permit(
 
 permit(
   principal,
-  action in [Action::"Fail", Action::"Cancel", Action::"SandboxLost"],
+  action in [
+    Action::"Fail",
+    Action::"Cancel",
+    Action::"SandboxLost",
+    Action::"RequestDeletion",
+    Action::"RetryDeletion"
+  ],
   resource is TemperAgent
 ) when {
   ["supervisor", "human", "system", "operator"].contains(principal.agent_type)
