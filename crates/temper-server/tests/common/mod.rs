@@ -8,6 +8,4 @@ pub use temper_dst::{
     build_single_tenant_state, build_single_tenant_state_with_store, build_two_tenant_state,
     dispatch,
 };
-pub use temper_dst::{
-    platform_harness, platform_invariants, workload_gen,
-};
+pub use temper_dst::{platform_harness, platform_invariants, workload_gen};

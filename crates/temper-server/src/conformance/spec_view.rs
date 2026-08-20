@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use temper_spec::automaton::{Action, Automaton, Guard};
 
-use super::{ViolationKind, KERNEL_PLATFORM_ACTIONS};
+use super::{KERNEL_PLATFORM_ACTIONS, ViolationKind};
 
 /// The source states an action may fire from.
 pub(super) enum SourceStates<'a> {
