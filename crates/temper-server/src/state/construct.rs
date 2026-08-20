@@ -83,6 +83,7 @@ impl ServerState {
             entity_observe_tx: Arc::new(entity_observe_tx),
             start_time: sim_now(),
             metrics: Arc::new(MetricsCollector::new()),
+            #[allow(deprecated)]
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,
             reaction_dispatcher: Arc::new(RwLock::new(None)),
@@ -346,6 +347,7 @@ impl ServerState {
             entity_observe_tx: Arc::new(entity_observe_tx),
             start_time: sim_now(),
             metrics: Arc::new(MetricsCollector::new()),
+            #[allow(deprecated)]
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,
             reaction_dispatcher: Arc::new(RwLock::new(None)),
