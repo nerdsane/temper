@@ -25,11 +25,21 @@ pub(crate) fn extract_tenant(
     headers: &HeaderMap,
     state: &ServerState,
 ) -> Result<TenantId, (StatusCode, String)> {
-    if let Some(val) = headers.get("x-tenant-id")
-        && let Ok(s) = val.to_str()
-        && !s.is_empty()
-    {
-        return Ok(TenantId::new(s));
+    if let Some(value) = headers.get("x-tenant-id") {
+        let tenant = value.to_str().map(str::trim).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Invalid X-Tenant-Id header encoding".to_string(),
+            )
+        })?;
+        if !tenant.is_empty() {
+            return TenantId::try_new(tenant).map_err(|error| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid X-Tenant-Id header: {error}"),
+                )
+            });
+        }
     }
 
     // Multi-tenant mode: require explicit tenant header.
@@ -415,6 +425,10 @@ pub(crate) async fn run_write_prechecks(
 ///
 /// Consolidates the repeated pattern of calling `get_tenant_entity_state`
 /// and mapping errors to OData error responses.
+#[expect(
+    dead_code,
+    reason = "shared by the next OData mutation call-site migration"
+)]
 pub(super) async fn load_entity_or_404(
     state: &ServerState,
     tenant: &TenantId,

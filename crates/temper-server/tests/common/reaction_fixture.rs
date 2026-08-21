@@ -135,6 +135,10 @@ pub fn build_state_without_storage(tenant: &str, reactions_toml: &str) -> Server
 
     let system = ActorSystem::new("reaction-e2e-prod");
     let state = ServerState::from_registry(system, registry);
+    state
+        .authz
+        .reload_tenant_policies(tenant, "permit(principal, action, resource);")
+        .expect("reaction fixture policy should parse");
     state.rebuild_reaction_dispatcher();
     state
 }

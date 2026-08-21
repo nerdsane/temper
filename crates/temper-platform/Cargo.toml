@@ -10,7 +10,7 @@ description = "Dogfooded hosting platform for Temper — verify-and-deploy pipel
 temper-spec = { workspace = true }
 temper-verify = { workspace = true }
 temper-jit = { workspace = true }
-temper-server = { workspace = true }
+temper-server = { workspace = true, features = ["observe"] }
 temper-store-turso = { workspace = true }
 temper-observe = { workspace = true }
 temper-runtime = { workspace = true }
@@ -34,10 +34,11 @@ sha2 = { workspace = true }
 toml = { workspace = true }
 async-trait = { workspace = true }
 base64 = "0.22"
+futures = { workspace = true }
+tempfile = "3.27.0"
 
 [dev-dependencies]
 tokio-test = { workspace = true }
 tower = { workspace = true }
 hyper = { workspace = true }
 wiremock = { workspace = true }
-tempfile = "3.27.0"

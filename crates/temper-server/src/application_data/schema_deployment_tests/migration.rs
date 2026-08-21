@@ -362,7 +362,7 @@ async fn governed_migration_materializes_shadow_and_atomically_cuts_over() {
         )
         .await
         .unwrap();
-    assert_eq!(migrated.status, "migrating");
+    assert_eq!(migrated.status, "migrating", "{migrated:?}");
     state
         .update_scoped_entity_fields_if_sequence(
             &TenantId::default(),

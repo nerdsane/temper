@@ -284,21 +284,13 @@ async fn delete_failure_does_not_remove_live_entity_from_index() {
         .await
         .expect("append external race event");
 
-    let response = state
+    let error = state
         .delete_tenant_entity(&tenant, entity_type, entity_id)
         .await
-        .expect("delete returns response");
+        .expect_err("delete should fail when tombstone append hits sequence race");
     assert!(
-        !response.success,
-        "delete should fail when tombstone append hits sequence race"
-    );
-    assert!(
-        response
-            .error
-            .as_deref()
-            .is_some_and(|e| e.contains("persistence failed")),
-        "expected persistence failure error, got: {:?}",
-        response.error
+        error.contains("persistence failed"),
+        "expected persistence failure error, got: {error}"
     );
 
     assert!(

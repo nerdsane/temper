@@ -85,7 +85,7 @@ mod tests {
     fn deterministic_ids_are_unique() {
         let id_gen = DeterministicIdGen::new(42);
         let ids: Vec<uuid::Uuid> = (0..100).map(|_| id_gen.next_uuid()).collect();
-        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        let unique: std::collections::HashSet<_> = ids.iter().collect(); // determinism-ok: test-local uniqueness count, never iterated
         assert_eq!(
             ids.len(),
             unique.len(),

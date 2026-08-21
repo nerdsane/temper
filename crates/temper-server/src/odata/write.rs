@@ -4,6 +4,7 @@ use axum::extract::Query;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use temper_authz::AuthenticatedRequestContext;
 use temper_odata::path::{ODataPath, parse_path};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
@@ -15,14 +16,13 @@ use axum::Extension;
 use super::account_verification::enforce_commons_account_verified_for_write;
 use super::app_uniqueness::enforce_commons_app_name_unique_for_write;
 use super::authz::{
-    CREATE_ACTION, DELETE_ACTION, MutationResource, UPDATE_ACTION, authorize_mutation,
-    request_security_context, resource_attrs_from_body,
+    CREATE_ACTION, DELETE_ACTION, MutationResource, UPDATE_ACTION, apply_authenticated_context,
+    authorize_mutation, require_authenticated_context, resource_attrs_from_body,
 };
 use super::bindings::dispatch_bound_action;
 use super::common::{
-    constraint_violation_response, extract_key, extract_schema_pin, extract_tenant,
-    load_entity_or_404, resolve_entity_type_for_pin, run_write_prechecks,
-    verification_gate_response,
+    constraint_violation_response, extract_key, extract_schema_pin, resolve_entity_type_for_pin,
+    run_write_prechecks, verification_gate_response,
 };
 use super::constraints::pre_delete_relation_checks;
 use super::rate_limit::{enforce_commons_write_rate_limit, owner_id_from_fields};
@@ -34,7 +34,6 @@ use super::schema_pin::{
 use super::storage_guardrails::enforce_commons_storage_cap;
 use super::stream_put::handle_stream_put;
 use crate::blobs::hydrate_blob_refs_for_tenant;
-use crate::identity::ResolvedIdentity;
 use crate::request_context::{AgentContext, extract_agent_context, remote_parent_context};
 use crate::response::{ODataResponse, odata_error};
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
@@ -73,6 +72,79 @@ fn parse_json_body_or_400(body: &axum::body::Bytes) -> Result<serde_json::Value,
             .into_response(),
         )
     })
+}
+
+fn invalid_create_body(message: &str) -> ODataWriteError {
+    Box::new(odata_error(StatusCode::BAD_REQUEST, "InvalidBody", message).into_response())
+}
+
+fn prepare_collection_create_fields(
+    body: serde_json::Value,
+    entity_type: &str,
+    initial_status: &str,
+) -> Result<(String, serde_json::Value), ODataWriteError> {
+    let mut fields = body
+        .as_object()
+        .cloned()
+        .ok_or_else(|| invalid_create_body("Entity create body must be a JSON object"))?;
+
+    let lower_id = match fields.get("id") {
+        Some(value) => Some(
+            value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| invalid_create_body("id must be a non-empty string"))?,
+        ),
+        None => None,
+    };
+    let upper_id = match fields.get("Id") {
+        Some(value) => Some(
+            value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| invalid_create_body("Id must be a non-empty string"))?,
+        ),
+        None => None,
+    };
+    if let (Some(lower), Some(upper)) = (lower_id, upper_id)
+        && lower != upper
+    {
+        return Err(invalid_create_body(
+            "id and Id must identify the same entity",
+        ));
+    }
+    let entity_id = lower_id
+        .or(upper_id)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            let prefix = entity_type_prefix(entity_type);
+            format!("{prefix}{}", temper_runtime::scheduler::sim_uuid())
+        });
+
+    for key in ["status", "Status"] {
+        if let Some(value) = fields.get(key)
+            && value.as_str() != Some(initial_status)
+        {
+            return Err(invalid_create_body(&format!(
+                "{key} must equal the spec-defined initial state '{initial_status}'"
+            )));
+        }
+    }
+
+    fields.retain(|key, _| !temper_spec::automaton::is_server_derived_field_name(key));
+    for key in ["id", "Id"] {
+        fields.insert(
+            key.to_string(),
+            serde_json::Value::String(entity_id.clone()),
+        );
+    }
+    for key in ["status", "Status"] {
+        fields.insert(
+            key.to_string(),
+            serde_json::Value::String(initial_status.to_string()),
+        );
+    }
+    Ok((entity_id, serde_json::Value::Object(fields)))
 }
 
 fn resolve_entity_type_or_404(
@@ -128,6 +200,7 @@ fn resolve_entity_type_or_record_404(
             request_body,
             intent,
             matched_policy_ids: None,
+            capture_seq: None,
         };
         if !state.enqueue_trajectory_entry(entry) {
             tracing::warn!(
@@ -170,11 +243,22 @@ async fn authorize_collection_create(
     security_ctx: &temper_authz::SecurityContext,
     agent_ctx: &AgentContext,
 ) -> Result<(), ODataWriteError> {
-    let mut resource_attrs =
-        resource_attrs_from_body(state, tenant, entity_type, entity_id, fields);
-    if agent_ctx.schema_pin.is_some() {
-        resource_attrs.insert("has_spec".into(), serde_json::Value::Bool(true));
-    }
+    let resource_attrs = match agent_ctx.schema_pin.as_ref() {
+        Some(_) => {
+            let mut attrs = resource_attrs_from_body(state, tenant, entity_type, entity_id, fields);
+            attrs.insert("has_spec".into(), serde_json::Value::Bool(true));
+            attrs
+        }
+        None => state
+            .build_create_authz_resource_attrs(tenant, entity_type, entity_id, fields)
+            .await
+            .map_err(|error| {
+                Box::new(
+                    odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &error)
+                        .into_response(),
+                )
+            })?,
+    };
     authorize_mutation(
         state,
         tenant,
@@ -245,8 +329,8 @@ async fn authorize_existing_mutation(
     action: &str,
     security_ctx: &temper_authz::SecurityContext,
     agent_ctx: &AgentContext,
-) -> Result<(), ODataWriteError> {
-    let resource_attrs = match agent_ctx.schema_pin.as_ref() {
+) -> Result<ExistingMutationResource, ODataWriteError> {
+    let (current_state, resource_attrs) = match agent_ctx.schema_pin.as_ref() {
         Some(pin) => {
             let response = state
                 .get_scoped_entity_state(tenant, entity_type, entity_id, pin.clone())
@@ -268,13 +352,13 @@ async fn authorize_existing_mutation(
             attrs.insert("id".into(), serde_json::Value::String(entity_id.into()));
             attrs.insert(
                 "status".into(),
-                serde_json::Value::String(response.state.status),
+                serde_json::Value::String(response.state.status.clone()),
             );
             attrs.insert("has_spec".into(), serde_json::Value::Bool(true));
-            attrs
+            (response, attrs)
         }
         None => {
-            state
+            let snapshot = state
                 .load_authz_resource_snapshot(tenant, entity_type, entity_id)
                 .await
                 .map_err(|error| {
@@ -282,8 +366,8 @@ async fn authorize_existing_mutation(
                         odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &error)
                             .into_response(),
                     )
-                })?
-                .resource_attrs
+                })?;
+            (snapshot.current_state, snapshot.resource_attrs)
         }
     };
     authorize_mutation(
@@ -299,6 +383,66 @@ async fn authorize_existing_mutation(
         },
     )
     .await
+    .map_err(Box::new)?;
+    let precondition =
+        crate::entity_actor::effects::entity_authorization_precondition(&current_state.state);
+    Ok(ExistingMutationResource {
+        status: current_state.state.status,
+        fields: current_state.state.fields,
+        precondition,
+    })
+}
+
+struct ExistingMutationResource {
+    status: String,
+    fields: serde_json::Value,
+    precondition: String,
+}
+
+struct ProspectiveMutationAuthorization<'a> {
+    tenant: &'a TenantId,
+    entity_type: &'a str,
+    entity_id: &'a str,
+    status: &'a str,
+    fields: &'a serde_json::Value,
+    security_ctx: &'a temper_authz::SecurityContext,
+    agent_ctx: &'a AgentContext,
+}
+
+async fn authorize_prospective_mutation(
+    state: &ServerState,
+    request: ProspectiveMutationAuthorization<'_>,
+) -> Result<(), ODataWriteError> {
+    let ProspectiveMutationAuthorization {
+        tenant,
+        entity_type,
+        entity_id,
+        status,
+        fields,
+        security_ctx,
+        agent_ctx,
+    } = request;
+    let attrs = state
+        .build_authz_resource_attrs(tenant, entity_type, entity_id, status, fields)
+        .await
+        .map_err(|error| {
+            Box::new(
+                odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &error).into_response(),
+            )
+        })?;
+    authorize_mutation(
+        state,
+        tenant,
+        security_ctx,
+        agent_ctx,
+        UPDATE_ACTION,
+        MutationResource {
+            entity_type,
+            entity_id,
+            attrs: &attrs,
+        },
+    )
+    .await
     .map_err(Box::new)
 }
 
@@ -306,29 +450,26 @@ async fn authorize_existing_mutation(
 #[instrument(skip_all, fields(otel.name = "POST /odata/{path}"))]
 pub async fn handle_odata_post(
     State(state): State<ServerState>,
-    resolved_id: Option<Extension<ResolvedIdentity>>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     headers: HeaderMap,
     axum::extract::Path(path): axum::extract::Path<String>,
     Query(query_params): Query<std::collections::BTreeMap<String, String>>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    let tenant = match extract_tenant(&headers, &state) {
-        Ok(t) => t,
-        Err(e) => return e.into_response(),
+    let authenticated = match require_authenticated_context(authenticated) {
+        Ok(context) => context,
+        Err(error) => return error.into_response(),
     };
+    let tenant = authenticated.tenant().clone();
+    let security_ctx = authenticated.security_context().clone();
     let mut agent_ctx = extract_agent_context(&headers);
+    apply_authenticated_context(&mut agent_ctx, &security_ctx);
     agent_ctx.schema_pin = match extract_schema_pin(&headers, &state, &tenant).await {
         Ok(pin) => pin,
         Err(error) => return schema_pin_extraction_error_response(error),
     };
     if let Some(remote_parent) = remote_parent_context(&agent_ctx) {
         tracing::Span::current().set_parent(remote_parent);
-    }
-    let resolved_identity = resolved_id.map(|Extension(id)| id);
-    // Enrich agent context with credential-resolved identity (ADR-0033).
-    if let Some(ref identity) = resolved_identity {
-        agent_ctx.agent_id = Some(identity.agent_instance_id.clone());
-        agent_ctx.agent_type = Some(identity.agent_type_name.clone());
     }
     let await_integration = query_params
         .get("await_integration")
@@ -385,6 +526,36 @@ pub async fn handle_odata_post(
                 return odata_error(StatusCode::BAD_REQUEST, "InvalidEntityId", &error)
                     .into_response();
             }
+            let initial_status = match agent_ctx.schema_pin.as_ref() {
+                Some(pin) => state
+                    .registry
+                    .read()
+                    .map_err(|error| format!("registry lock poisoned: {error}"))
+                    .and_then(|registry| {
+                        registry
+                            .get_scoped_table_at_digest(
+                                &tenant,
+                                &pin.scope,
+                                &pin.bundle_digest,
+                                &entity_type,
+                            )
+                            .map(|table| table.initial_state.clone())
+                            .ok_or_else(|| "scoped transition table is unavailable".to_string())
+                    }),
+                None => state.initial_entity_status(&tenant, &entity_type),
+            };
+            let initial_status = match initial_status {
+                Ok(status) => status,
+                Err(error) => {
+                    return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &error)
+                        .into_response();
+                }
+            };
+            let (_, mut initial_fields) =
+                match prepare_collection_create_fields(body_json, &entity_type, &initial_status) {
+                    Ok(prepared) => prepared,
+                    Err(response) => return *response,
+                };
             let prepared_id = match agent_ctx.schema_pin.as_ref() {
                 Some(pin) => {
                     state
@@ -392,7 +563,7 @@ pub async fn handle_odata_post(
                             &tenant,
                             &entity_type,
                             supplied_entity_id.as_deref(),
-                            &body_json,
+                            &initial_fields,
                             pin,
                         )
                         .await
@@ -403,7 +574,7 @@ pub async fn handle_odata_post(
                             &tenant,
                             &entity_type,
                             supplied_entity_id.as_deref(),
-                            &body_json,
+                            &initial_fields,
                         )
                         .await
                 }
@@ -423,8 +594,23 @@ pub async fn handle_odata_post(
                     return odata_error(status, "ConstraintViolation", &error).into_response();
                 }
             };
-
-            let initial_fields = body_json.clone();
+            if let Some(fields) = initial_fields.as_object_mut() {
+                fields.insert("id".to_string(), entity_id.clone().into());
+                fields.insert("Id".to_string(), entity_id.clone().into());
+            }
+            if let Err(resp) = authorize_collection_create(
+                &state,
+                &tenant,
+                &entity_type,
+                &entity_id,
+                &initial_fields,
+                &security_ctx,
+                &agent_ctx,
+            )
+            .await
+            {
+                return *resp;
+            }
             let _commons_guardrail_lock = state.acquire_commons_write_guardrail_lock(&tenant).await;
 
             if let Err(resp) = run_write_prechecks(
@@ -482,29 +668,11 @@ pub async fn handle_odata_post(
                 &tenant,
                 &entity_type,
                 owner_id_from_fields(&initial_fields),
-                &headers,
-                &agent_ctx,
-                resolved_identity.as_ref(),
+                &security_ctx,
             )
             .await
             {
                 return resp;
-            }
-
-            let security_ctx =
-                request_security_context(&headers, &agent_ctx, resolved_identity.as_ref());
-            if let Err(resp) = authorize_collection_create(
-                &state,
-                &tenant,
-                &entity_type,
-                &entity_id,
-                &initial_fields,
-                &security_ctx,
-                &agent_ctx,
-            )
-            .await
-            {
-                return *resp;
             }
 
             // ToolDefinition: forward tool metadata to the session's ToolRegistry.
@@ -767,8 +935,6 @@ pub async fn handle_odata_post(
                 });
                 let attrs =
                     resource_attrs_from_body(&state, &tenant, &entity_type, &key_str, &authz_body);
-                let security_ctx =
-                    request_security_context(&headers, &agent_ctx, resolved_identity.as_ref());
                 if let Err(response) = authorize_mutation(
                     &state,
                     &tenant,
@@ -839,10 +1005,9 @@ pub async fn handle_odata_post(
                 &action,
                 body_json,
                 &agent_ctx,
-                &headers,
                 await_integration,
                 idempotency_key.clone(),
-                resolved_identity.as_ref(),
+                &security_ctx,
             )
             .await
         }
@@ -860,29 +1025,27 @@ pub async fn handle_odata_post(
 #[instrument(skip_all, fields(otel.name = "PATCH /odata/{path}"))]
 pub async fn handle_odata_patch(
     State(state): State<ServerState>,
-    resolved_id: Option<Extension<ResolvedIdentity>>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     headers: HeaderMap,
     axum::extract::Path(path): axum::extract::Path<String>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    let tenant = match extract_tenant(&headers, &state) {
-        Ok(t) => t,
-        Err(e) => return e.into_response(),
+    let authenticated = match require_authenticated_context(authenticated) {
+        Ok(context) => context,
+        Err(error) => return error.into_response(),
     };
+    let tenant = authenticated.tenant().clone();
+    let security_ctx = authenticated.security_context().clone();
     let odata_path = match parse_odata_path_or_400(&path) {
         Ok(p) => p,
         Err(resp) => return *resp,
     };
-    let resolved_identity = resolved_id.map(|Extension(identity)| identity);
     let mut agent_ctx = extract_agent_context(&headers);
+    apply_authenticated_context(&mut agent_ctx, &security_ctx);
     agent_ctx.schema_pin = match extract_schema_pin(&headers, &state, &tenant).await {
         Ok(pin) => pin,
         Err(error) => return schema_pin_extraction_error_response(error),
     };
-    if let Some(ref identity) = resolved_identity {
-        agent_ctx.agent_id = Some(identity.agent_instance_id.clone());
-        agent_ctx.agent_type = Some(identity.agent_type_name.clone());
-    }
 
     match odata_path {
         ODataPath::Entity(set_name, key) => {
@@ -930,9 +1093,7 @@ pub async fn handle_odata_patch(
             {
                 return *resp;
             }
-            let security_ctx =
-                request_security_context(&headers, &agent_ctx, resolved_identity.as_ref());
-            if let Err(resp) = authorize_existing_mutation(
+            let existing = match authorize_existing_mutation(
                 &state,
                 &tenant,
                 &entity_type,
@@ -943,28 +1104,23 @@ pub async fn handle_odata_patch(
             )
             .await
             {
-                return *resp;
-            }
+                Ok(existing) => existing,
+                Err(resp) => return *resp,
+            };
 
             let body_json = match parse_json_body_or_400(&body) {
                 Ok(v) => v,
                 Err(resp) => return *resp,
             };
-            let current_state = match load_entity_or_404(
-                &state,
-                &tenant,
-                &entity_type,
-                &set_name,
-                &key_str,
-                agent_ctx.schema_pin.as_ref(),
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(resp) => return resp,
-            };
-
-            let mut prospective_fields = current_state.state.fields.clone();
+            if !body_json.is_object() {
+                return odata_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidBody",
+                    "PATCH body must be a JSON object",
+                )
+                .into_response();
+            }
+            let mut prospective_fields = existing.fields;
             if let (Some(dst), Some(src)) =
                 (prospective_fields.as_object_mut(), body_json.as_object())
             {
@@ -973,6 +1129,23 @@ pub async fn handle_odata_patch(
                 }
             } else {
                 prospective_fields = body_json.clone();
+            }
+
+            if let Err(response) = authorize_prospective_mutation(
+                &state,
+                ProspectiveMutationAuthorization {
+                    tenant: &tenant,
+                    entity_type: &entity_type,
+                    entity_id: &key_str,
+                    status: &existing.status,
+                    fields: &prospective_fields,
+                    security_ctx: &security_ctx,
+                    agent_ctx: &agent_ctx,
+                },
+            )
+            .await
+            {
+                return *response;
             }
 
             let _commons_guardrail_lock = state.acquire_commons_write_guardrail_lock(&tenant).await;
@@ -1019,37 +1192,42 @@ pub async fn handle_odata_patch(
                 &tenant,
                 &entity_type,
                 owner_id_from_fields(&prospective_fields),
-                &headers,
-                &agent_ctx,
-                resolved_identity.as_ref(),
+                &security_ctx,
             )
             .await
             {
                 return resp;
             }
 
-            let application_data =
-                crate::application_data::GovernedApplicationDataService::new(&state);
-            let patch_result = match agent_ctx.schema_pin.clone() {
-                Some(schema_pin) => {
-                    application_data
-                        .patch_scoped(&tenant, &entity_type, &key_str, body_json, None, schema_pin)
+            let update_result = match agent_ctx.schema_pin.clone() {
+                Some(pin) => {
+                    state
+                        .update_scoped_entity_fields_if_current(
+                            &tenant,
+                            &entity_type,
+                            &key_str,
+                            body_json,
+                            false,
+                            pin,
+                            existing.precondition,
+                        )
                         .await
                 }
                 None => {
-                    application_data
-                        .patch(&tenant, &entity_type, &key_str, body_json, None)
+                    state
+                        .update_tenant_entity_fields_if_current(
+                            &tenant,
+                            &entity_type,
+                            &key_str,
+                            body_json,
+                            false,
+                            existing.precondition,
+                        )
                         .await
                 }
             };
-            match patch_result {
-                Ok(response) => {
-                    if !response.success {
-                        let error = response.error.as_deref().unwrap_or("Update failed");
-                        return reference_contract_response(error).unwrap_or_else(|| {
-                            odata_error(StatusCode::CONFLICT, "UpdateFailed", error).into_response()
-                        });
-                    }
+            match update_result {
+                Ok(response) if response.success => {
                     if entity_type == "RateLimit" {
                         state.clear_commons_rate_limit_cache();
                     }
@@ -1067,8 +1245,19 @@ pub async fn handle_odata_patch(
                     }
                     .into_response()
                 }
-                Err(e) => odata_error(StatusCode::INTERNAL_SERVER_ERROR, "UpdateError", &e)
-                    .into_response(),
+                Ok(response) => {
+                    let error = response.error.as_deref().unwrap_or(
+                        "entity changed after authorization; retry against current state",
+                    );
+                    reference_contract_response(error).unwrap_or_else(|| {
+                        odata_error(StatusCode::CONFLICT, "ConcurrentModification", error)
+                            .into_response()
+                    })
+                }
+                Err(e) => reference_contract_response(&e).unwrap_or_else(|| {
+                    odata_error(StatusCode::INTERNAL_SERVER_ERROR, "UpdateError", &e)
+                        .into_response()
+                }),
             }
         }
         _ => odata_error(
@@ -1084,29 +1273,27 @@ pub async fn handle_odata_patch(
 #[instrument(skip_all, fields(otel.name = "PUT /odata/{path}"))]
 pub async fn handle_odata_put(
     State(state): State<ServerState>,
-    resolved_id: Option<Extension<ResolvedIdentity>>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     headers: HeaderMap,
     axum::extract::Path(path): axum::extract::Path<String>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    let tenant = match extract_tenant(&headers, &state) {
-        Ok(t) => t,
-        Err(e) => return e.into_response(),
+    let authenticated = match require_authenticated_context(authenticated) {
+        Ok(context) => context,
+        Err(error) => return error.into_response(),
     };
+    let tenant = authenticated.tenant().clone();
+    let security_ctx = authenticated.security_context().clone();
     let odata_path = match parse_odata_path_or_400(&path) {
         Ok(p) => p,
         Err(resp) => return *resp,
     };
-    let resolved_identity = resolved_id.map(|Extension(identity)| identity);
     let mut agent_ctx = extract_agent_context(&headers);
+    apply_authenticated_context(&mut agent_ctx, &security_ctx);
     agent_ctx.schema_pin = match extract_schema_pin(&headers, &state, &tenant).await {
         Ok(pin) => pin,
         Err(error) => return schema_pin_extraction_error_response(error),
     };
-    if let Some(ref identity) = resolved_identity {
-        agent_ctx.agent_id = Some(identity.agent_instance_id.clone());
-        agent_ctx.agent_type = Some(identity.agent_type_name.clone());
-    }
 
     match odata_path {
         ODataPath::Entity(set_name, key) => {
@@ -1154,9 +1341,7 @@ pub async fn handle_odata_put(
             {
                 return *resp;
             }
-            let security_ctx =
-                request_security_context(&headers, &agent_ctx, resolved_identity.as_ref());
-            if let Err(resp) = authorize_existing_mutation(
+            let existing = match authorize_existing_mutation(
                 &state,
                 &tenant,
                 &entity_type,
@@ -1167,13 +1352,39 @@ pub async fn handle_odata_put(
             )
             .await
             {
-                return *resp;
-            }
+                Ok(existing) => existing,
+                Err(resp) => return *resp,
+            };
 
             let body_json = match parse_json_body_or_400(&body) {
                 Ok(v) => v,
                 Err(resp) => return *resp,
             };
+            if !body_json.is_object() {
+                return odata_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidBody",
+                    "PUT body must be a JSON object",
+                )
+                .into_response();
+            }
+
+            if let Err(response) = authorize_prospective_mutation(
+                &state,
+                ProspectiveMutationAuthorization {
+                    tenant: &tenant,
+                    entity_type: &entity_type,
+                    entity_id: &key_str,
+                    status: &existing.status,
+                    fields: &body_json,
+                    security_ctx: &security_ctx,
+                    agent_ctx: &agent_ctx,
+                },
+            )
+            .await
+            {
+                return *response;
+            }
 
             let _commons_guardrail_lock = state.acquire_commons_write_guardrail_lock(&tenant).await;
 
@@ -1219,37 +1430,42 @@ pub async fn handle_odata_put(
                 &tenant,
                 &entity_type,
                 owner_id_from_fields(&body_json),
-                &headers,
-                &agent_ctx,
-                resolved_identity.as_ref(),
+                &security_ctx,
             )
             .await
             {
                 return resp;
             }
 
-            let application_data =
-                crate::application_data::GovernedApplicationDataService::new(&state);
-            let replace_result = match agent_ctx.schema_pin.clone() {
-                Some(schema_pin) => {
-                    application_data
-                        .replace_scoped(&tenant, &entity_type, &key_str, body_json, schema_pin)
+            let update_result = match agent_ctx.schema_pin.clone() {
+                Some(pin) => {
+                    state
+                        .update_scoped_entity_fields_if_current(
+                            &tenant,
+                            &entity_type,
+                            &key_str,
+                            body_json,
+                            true,
+                            pin,
+                            existing.precondition,
+                        )
                         .await
                 }
                 None => {
-                    application_data
-                        .replace(&tenant, &entity_type, &key_str, body_json)
+                    state
+                        .update_tenant_entity_fields_if_current(
+                            &tenant,
+                            &entity_type,
+                            &key_str,
+                            body_json,
+                            true,
+                            existing.precondition,
+                        )
                         .await
                 }
             };
-            match replace_result {
-                Ok(response) => {
-                    if !response.success {
-                        let error = response.error.as_deref().unwrap_or("Update failed");
-                        return reference_contract_response(error).unwrap_or_else(|| {
-                            odata_error(StatusCode::CONFLICT, "UpdateFailed", error).into_response()
-                        });
-                    }
+            match update_result {
+                Ok(response) if response.success => {
                     if entity_type == "RateLimit" {
                         state.clear_commons_rate_limit_cache();
                     }
@@ -1267,25 +1483,32 @@ pub async fn handle_odata_put(
                     }
                     .into_response()
                 }
-                Err(e) => odata_error(StatusCode::INTERNAL_SERVER_ERROR, "UpdateError", &e)
-                    .into_response(),
+                Ok(response) => {
+                    let error = response.error.as_deref().unwrap_or(
+                        "entity changed after authorization; retry against current state",
+                    );
+                    reference_contract_response(error).unwrap_or_else(|| {
+                        odata_error(StatusCode::CONFLICT, "ConcurrentModification", error)
+                            .into_response()
+                    })
+                }
+                Err(e) => reference_contract_response(&e).unwrap_or_else(|| {
+                    odata_error(StatusCode::INTERNAL_SERVER_ERROR, "UpdateError", &e)
+                        .into_response()
+                }),
             }
         }
-        ODataPath::Value { parent } => {
-            let security_ctx =
-                request_security_context(&headers, &agent_ctx, resolved_identity.as_ref());
-            handle_stream_put(
-                &state,
-                &tenant,
-                &parent,
-                &headers,
-                body,
-                &agent_ctx,
-                &security_ctx,
-            )
-            .await
-            .into_response()
-        }
+        ODataPath::Value { parent } => handle_stream_put(
+            &state,
+            &tenant,
+            &parent,
+            &headers,
+            body,
+            &agent_ctx,
+            &security_ctx,
+        )
+        .await
+        .into_response(),
         _ => odata_error(
             StatusCode::METHOD_NOT_ALLOWED,
             "MethodNotAllowed",
@@ -1299,28 +1522,26 @@ pub async fn handle_odata_put(
 #[instrument(skip_all, fields(otel.name = "DELETE /odata/{path}"))]
 pub async fn handle_odata_delete(
     State(state): State<ServerState>,
-    resolved_id: Option<Extension<ResolvedIdentity>>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     headers: HeaderMap,
     axum::extract::Path(path): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    let tenant = match extract_tenant(&headers, &state) {
-        Ok(t) => t,
-        Err(e) => return e.into_response(),
+    let authenticated = match require_authenticated_context(authenticated) {
+        Ok(context) => context,
+        Err(error) => return error.into_response(),
     };
+    let tenant = authenticated.tenant().clone();
+    let security_ctx = authenticated.security_context().clone();
     let odata_path = match parse_odata_path_or_400(&path) {
         Ok(p) => p,
         Err(resp) => return *resp,
     };
-    let resolved_identity = resolved_id.map(|Extension(identity)| identity);
     let mut agent_ctx = extract_agent_context(&headers);
+    apply_authenticated_context(&mut agent_ctx, &security_ctx);
     agent_ctx.schema_pin = match extract_schema_pin(&headers, &state, &tenant).await {
         Ok(pin) => pin,
         Err(error) => return schema_pin_extraction_error_response(error),
     };
-    if let Some(ref identity) = resolved_identity {
-        agent_ctx.agent_id = Some(identity.agent_instance_id.clone());
-        agent_ctx.agent_type = Some(identity.agent_type_name.clone());
-    }
 
     match odata_path {
         ODataPath::Entity(set_name, key) => {
@@ -1368,9 +1589,7 @@ pub async fn handle_odata_delete(
             {
                 return *resp;
             }
-            let security_ctx =
-                request_security_context(&headers, &agent_ctx, resolved_identity.as_ref());
-            if let Err(resp) = authorize_existing_mutation(
+            let existing = match authorize_existing_mutation(
                 &state,
                 &tenant,
                 &entity_type,
@@ -1381,8 +1600,9 @@ pub async fn handle_odata_delete(
             )
             .await
             {
-                return *resp;
-            }
+                Ok(existing) => existing,
+                Err(resp) => return *resp,
+            };
             if let Err(v) = pre_delete_relation_checks(
                 &state,
                 &tenant,
@@ -1395,26 +1615,13 @@ pub async fn handle_odata_delete(
             {
                 return constraint_violation_response(v);
             }
-            let current_state = match load_entity_or_404(
-                &state,
-                &tenant,
-                &entity_type,
-                &set_name,
-                &key_str,
-                agent_ctx.schema_pin.as_ref(),
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(resp) => return resp,
-            };
             if let Err(resp) = run_write_prechecks(
                 &state,
                 &tenant,
                 &entity_type,
                 &key_str,
                 ("Delete", "delete"),
-                &current_state.state.fields,
+                &existing.fields,
                 agent_ctx.schema_pin.as_ref(),
             )
             .await
@@ -1426,7 +1633,7 @@ pub async fn handle_odata_delete(
                 &state,
                 &tenant,
                 &entity_type,
-                &current_state.state.fields,
+                &existing.fields,
             )
             .await
             {
@@ -1437,10 +1644,8 @@ pub async fn handle_odata_delete(
                 &state,
                 &tenant,
                 &entity_type,
-                owner_id_from_fields(&current_state.state.fields),
-                &headers,
-                &agent_ctx,
-                resolved_identity.as_ref(),
+                owner_id_from_fields(&existing.fields),
+                &security_ctx,
             )
             .await
             {
@@ -1448,25 +1653,44 @@ pub async fn handle_odata_delete(
             }
 
             let delete_result = match agent_ctx.schema_pin.clone() {
-                Some(schema_pin) => {
+                Some(pin) => {
                     state
-                        .delete_scoped_entity(&tenant, &entity_type, &key_str, schema_pin)
+                        .delete_scoped_entity_if_current(
+                            &tenant,
+                            &entity_type,
+                            &key_str,
+                            pin,
+                            existing.precondition,
+                        )
                         .await
                 }
                 None => {
                     state
-                        .delete_tenant_entity(&tenant, &entity_type, &key_str)
+                        .delete_tenant_entity_if_current(
+                            &tenant,
+                            &entity_type,
+                            &key_str,
+                            existing.precondition,
+                        )
                         .await
                 }
             };
             match delete_result {
-                Ok(_) => {
+                Ok(response) if response.success => {
                     if entity_type == "RateLimit" {
                         state.clear_commons_rate_limit_cache();
                     }
                     state.clear_commons_storage_projection_cache_for_entity(&entity_type);
                     (StatusCode::NO_CONTENT, "").into_response()
                 }
+                Ok(response) => odata_error(
+                    StatusCode::CONFLICT,
+                    "ConcurrentModification",
+                    response.error.as_deref().unwrap_or(
+                        "entity changed after authorization; retry against current state",
+                    ),
+                )
+                .into_response(),
                 Err(e) => odata_error(StatusCode::INTERNAL_SERVER_ERROR, "DeleteError", &e)
                     .into_response(),
             }

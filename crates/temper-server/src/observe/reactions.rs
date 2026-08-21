@@ -1,12 +1,13 @@
 //! Read-only durable reaction delivery observation (ADR-0158).
 
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
+use temper_authz::AuthenticatedRequestContext;
 
-use crate::authz::require_observe_auth;
-use crate::odata::extract_tenant;
+use crate::authz::{observe_tenant_scope, require_authenticated_context, require_observe_auth};
 use crate::state::ServerState;
 use crate::trigger::delivery::{
     ReactionDeliveryRecord, ReactionDeliveryStatus, delivery_journal_id, find_delivery_record,
@@ -92,11 +93,12 @@ impl From<&ReactionDeliveryRecord> for ReactionDeliveryView {
 /// GET `/observe/reactions` — bounded tenant-scoped delivery list.
 pub(crate) async fn handle_list_reactions(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Query(query): Query<ReactionListQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_reactions", "ReactionDelivery")?;
-    let tenant = extract_tenant(&headers, &state).map_err(|(status, _)| status)?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_reactions", "ReactionDelivery")?;
+    let tenant = observe_tenant_scope(authenticated);
     let (store, _) = state
         .event_journal()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
@@ -137,11 +139,12 @@ pub(crate) async fn handle_list_reactions(
 /// GET `/observe/reactions/{delivery_id}` — redacted lifecycle detail.
 pub(crate) async fn handle_get_reaction(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path(delivery_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_reactions", "ReactionDelivery")?;
-    let tenant = extract_tenant(&headers, &state).map_err(|(status, _)| status)?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_reactions", "ReactionDelivery")?;
+    let tenant = observe_tenant_scope(authenticated);
     let (store, _) = state
         .event_journal()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;

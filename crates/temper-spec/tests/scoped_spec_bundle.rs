@@ -11,7 +11,7 @@ states = ["Draft", "Ready"]
 initial = "Draft"
 
 [[state]]
-name = "status"
+name = "lifecycle"
 type = "status"
 initial = "Draft"
 
@@ -29,7 +29,7 @@ states = ["Open"]
 initial = "Open"
 
 [[state]]
-name = "status"
+name = "lifecycle"
 type = "status"
 initial = "Open"
 "#;
@@ -117,7 +117,7 @@ fn canonical_bundle_identity_ignores_formatting_and_input_order() {
     assert_eq!(first.ioa_specs(), second.ioa_specs());
     assert_eq!(
         first.digest(),
-        "sha256:6b293f239f73fe84da171f8fbfe21daa60a6e3fa7bff7681cd5ea10980884603"
+        "sha256:1b6d8593187902e64156ff79c09b5738bbaae2f6170558a24b63d7106864fadb"
     );
 }
 

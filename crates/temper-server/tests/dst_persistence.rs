@@ -63,6 +63,7 @@ async fn dispatch_action(
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             Duration::from_secs(5),
         )
@@ -115,6 +116,7 @@ async fn dst_typed_reference_is_set_once_and_replays() {
                     idempotency_key: None,
                     expected_sequence: None,
                     reaction_context: None,
+                    expected_authorization_precondition: None,
                 },
                 Duration::from_secs(5),
             )
@@ -139,6 +141,7 @@ async fn dst_typed_reference_is_set_once_and_replays() {
                     idempotency_key: None,
                     expected_sequence: None,
                     reaction_context: None,
+                    expected_authorization_precondition: None,
                 },
                 Duration::from_secs(5),
             )
@@ -193,6 +196,7 @@ async fn dst_field_update_consumes_sequence_and_replays() {
                     replace: false,
                     reference_evidence: std::collections::BTreeMap::new(),
                     expected_sequence: Some(before),
+                    expected_precondition: None,
                 },
                 Duration::from_secs(5),
             )

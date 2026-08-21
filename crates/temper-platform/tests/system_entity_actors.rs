@@ -53,6 +53,7 @@ async fn actor_project_full_lifecycle() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -71,6 +72,7 @@ async fn actor_project_full_lifecycle() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -89,6 +91,7 @@ async fn actor_project_full_lifecycle() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -115,6 +118,7 @@ async fn actor_project_verify_requires_building_state() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -147,6 +151,7 @@ async fn actor_tenant_full_lifecycle() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -165,6 +170,7 @@ async fn actor_tenant_full_lifecycle() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -183,6 +189,7 @@ async fn actor_tenant_full_lifecycle() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -201,6 +208,7 @@ async fn actor_tenant_full_lifecycle() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -226,6 +234,7 @@ async fn actor_tenant_cannot_deploy_archived() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -240,6 +249,7 @@ async fn actor_tenant_cannot_deploy_archived() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -256,6 +266,7 @@ async fn actor_tenant_cannot_deploy_archived() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -293,6 +304,7 @@ async fn actor_catalog_publish_and_fork() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -311,6 +323,7 @@ async fn actor_catalog_publish_and_fork() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -329,6 +342,7 @@ async fn actor_catalog_publish_and_fork() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -365,6 +379,7 @@ async fn actor_collaborator_invite_accept_remove() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -383,6 +398,7 @@ async fn actor_collaborator_invite_accept_remove() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -400,6 +416,7 @@ async fn actor_collaborator_invite_accept_remove() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -431,6 +448,7 @@ async fn actor_version_lifecycle() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -448,6 +466,7 @@ async fn actor_version_lifecycle() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -503,6 +522,7 @@ async fn actor_multiple_system_entities_independent() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -517,6 +537,7 @@ async fn actor_multiple_system_entities_independent() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -531,6 +552,7 @@ async fn actor_multiple_system_entities_independent() {
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )

@@ -149,3 +149,51 @@ fn assert_example_container(schema: &Schema) {
     assert_eq!(orders_set.entity_type, "Temper.Example.Order");
     assert_eq!(orders_set.navigation_bindings.len(), 3);
 }
+
+#[test]
+fn test_parse_collection_annotation_preserved_across_quick_xml_bump() {
+    // Regression guard for the quick-xml 0.37 -> 0.41 bump (ARN-169): 0.41's
+    // read_text returns a raw BytesText rather than an owned String, so the
+    // Collection<String> path decodes it explicitly. Behavior is preserved:
+    // ordinary state-list strings parse, and — matching 0.37, whose read_text
+    // also did not unescape — an XML entity stays literal (the pre-existing
+    // entity-unescaping gap is out of scope for this dependency bump).
+    let xml = r#"<?xml version="1.0"?>
+    <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+      <edmx:DataServices>
+        <Schema Namespace="Test" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+          <EntityType Name="Widget">
+            <Key><PropertyRef Name="Id"/></Key>
+            <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+            <Annotation Term="Test.States">
+              <Collection>
+                <String>Draft</String>
+                <String>Active</String>
+                <String>A &amp; B</String>
+              </Collection>
+            </Annotation>
+          </EntityType>
+        </Schema>
+      </edmx:DataServices>
+    </edmx:Edmx>"#;
+    let doc = parse_csdl(xml).unwrap();
+    let widget = doc.schemas[0].entity_type("Widget").unwrap();
+    let ann = widget
+        .annotations
+        .iter()
+        .find(|a| a.term == "Test.States")
+        .expect("Test.States annotation present");
+    match &ann.value {
+        crate::csdl::types::AnnotationValue::Collection(items) => {
+            assert_eq!(
+                items,
+                &vec![
+                    "Draft".to_string(),
+                    "Active".to_string(),
+                    "A &amp; B".to_string(),
+                ]
+            );
+        }
+        other => panic!("expected Collection, got {other:?}"),
+    }
+}

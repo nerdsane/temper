@@ -70,6 +70,16 @@ pub struct TrajectoryEntry {
     /// Cedar policy IDs that contributed to the authorization decision (allow or deny).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matched_policy_ids: Option<Vec<String>>,
+    /// Position of this entry in the capturing process's capture order.
+    ///
+    /// Stamped by `ServerState::enqueue_trajectory_entry`, the one choke point
+    /// every capture site passes through; capture sites leave it `None`.
+    /// Persistence runs in independently spawned tasks, so the storage row id
+    /// records the order the writes landed rather than the order the kernel
+    /// captured them. The session read orders by this instead, so a replay
+    /// sees the run in the order it happened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_seq: Option<i64>,
 }
 
 /// Bounded, append-only trajectory log.

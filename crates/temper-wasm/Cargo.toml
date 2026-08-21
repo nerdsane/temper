@@ -34,6 +34,8 @@ test-helpers = []
 [dev-dependencies]
 base64 = "0.22"
 tokio-test = { workspace = true }
-opentelemetry_sdk = { workspace = true }
+# `testing` gives the in-memory span exporter used by the ARN-243 behavioral
+# redaction test. Dev-only: not built into any production artifact.
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tracing-subscriber = { workspace = true }
 axum = { workspace = true }

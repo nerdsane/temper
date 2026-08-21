@@ -146,3 +146,41 @@ to = "B"
     let result = parse_automaton(toml);
     assert!(result.is_err());
 }
+
+#[test]
+fn runtime_owned_state_field_is_rejected() {
+    let toml = r#"
+[automaton]
+name = "Bad"
+states = ["Draft"]
+initial = "Draft"
+
+[[state]]
+name = "Status"
+type = "string"
+initial = "forged"
+"#;
+    let error = parse_automaton(toml)
+        .expect_err("runtime-owned status cannot also be a mutable state variable");
+    assert!(error.to_string().contains("runtime-owned field name"));
+}
+
+#[test]
+fn runtime_owned_action_param_is_rejected() {
+    let toml = r#"
+[automaton]
+name = "Bad"
+states = ["Draft"]
+initial = "Draft"
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Draft"]
+to = "Draft"
+params = ["Id", "ctx_owner_status"]
+"#;
+    let error = parse_automaton(toml)
+        .expect_err("runtime-owned fields cannot be declared as action params");
+    assert!(error.to_string().contains("parameter 'Id'"));
+}

@@ -1,0 +1,76 @@
+{
+  "trajectory_id": "traj-pre-jcs-0001",
+  "version": "0.1.0",
+  "metadata": {
+    "task_description": "Refund the duplicate charge on invoice INV-42",
+    "domain": "customer_support",
+    "timestamp_start": "2026-04-28T10:00:00Z",
+    "timestamp_end": "2026-04-28T10:00:12Z",
+    "duration_ms": 12000.0,
+    "agent_id": "agent-support-1",
+    "framework": "temper",
+    "environment": "production",
+    "outcome": "success",
+    "feedback_score": 0.9,
+    "human_reviewed": false,
+    "tags": ["billing", "refund"],
+    "parent_trajectory_id": "traj-parent-0001"
+  },
+  "context": {
+    "user": {
+      "id": "user-7",
+      "handle": "alice"
+    }
+  },
+  "system_message": {
+    "content": "You are a billing support agent.",
+    "timestamp": "2026-04-28T10:00:00Z"
+  },
+  "turns": [
+    {
+      "turn_id": 1,
+      "span_id": "span-0001",
+      "timestamp": "2026-04-28T10:00:01Z",
+      "duration_ms": 4200.0,
+      "error": false,
+      "turn_reward": 0.8,
+      "messages": [
+        {
+          "message_id": "msg-0001",
+          "role": "user",
+          "timestamp": "2026-04-28T10:00:01Z",
+          "content": {
+            "type": "text",
+            "text": "I was charged twice for invoice INV-42."
+          }
+        }
+      ],
+      "decisions": [
+        {
+          "decision_id": "dec-0001",
+          "decision_type": "tool_selection",
+          "state": {
+            "context_summary": "Duplicate charge reported",
+            "available_actions": ["lookup_invoice", "issue_refund"]
+          },
+          "choice": {
+            "action": "lookup_invoice",
+            "arguments": {
+              "invoice_id": "INV-42"
+            },
+            "confidence": 0.95
+          },
+          "consequence": {
+            "success": true,
+            "result_summary": "Found two charges"
+          },
+          "credit_assignment": {
+            "impact": 0.6,
+            "pivotal": true
+          }
+        }
+      ]
+    }
+  ],
+  "final_reward": 0.95
+}

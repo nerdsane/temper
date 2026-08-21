@@ -53,6 +53,10 @@ pub struct TursoTrajectoryInsert<'a> {
     pub request_body: Option<&'a str>,
     pub intent: Option<&'a str>,
     pub matched_policy_ids: Option<&'a str>,
+    /// Monotonic capture order stamped by the recording process, so a session
+    /// reads back in the order the kernel captured it rather than the order
+    /// independent persistence tasks happened to land.
+    pub capture_seq: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -69,6 +73,42 @@ pub struct TursoWasmInvocationInsert<'a> {
     pub created_at: &'a str,
 }
 
+/// Values written atomically as one evolution record.
+#[derive(Clone, Copy, Debug)]
+pub struct TursoEvolutionRecordInsert<'a> {
+    /// Tenant that owns the record.
+    pub tenant: &'a str,
+    /// Stable evolution record identifier.
+    pub id: &'a str,
+    /// Evolution record kind.
+    pub record_type: &'a str,
+    /// Current record status.
+    pub status: &'a str,
+    /// Principal that created the record.
+    pub created_by: &'a str,
+    /// Optional predecessor record identifier.
+    pub derived_from: Option<&'a str>,
+    /// Serialized record payload.
+    pub data_json: &'a str,
+}
+
+/// Exact decision and policy values committed by one approval transaction.
+#[derive(Clone, Copy, Debug)]
+pub struct TursoPolicyApprovalCommit<'a> {
+    /// Tenant that owns both rows.
+    pub tenant: &'a str,
+    /// Pending decision to transition.
+    pub decision_id: &'a str,
+    /// Serialized approved decision.
+    pub approved_decision_json: &'a str,
+    /// Policy row created by the decision.
+    pub policy_id: &'a str,
+    /// Approved Cedar source.
+    pub cedar_text: &'a str,
+    /// Principal that approved the decision.
+    pub created_by: &'a str,
+}
+
 pub use metrics::init_metrics;
 pub use router::{TenantRegistryRow, TenantStoreRouter, TenantUserRow};
 pub use store::{
@@ -77,5 +117,5 @@ pub use store::{
     QueryProjectionUpsert, TursoBlobRow, TursoEventStore, TursoInstalledAppRow,
     TursoQueryProjectionRow, TursoSpecRow, TursoTenantConstraintRow, TursoTrajectoryRow,
     TursoWasmInvocationRow, TursoWasmModuleMetadataRow, TursoWasmModuleRow, UnmetIntentAggRow,
-    ots::{OtsQueuedTrajectoryRow, OtsTrajectoryParams, OtsTrajectoryRow},
+    ots::{OtsQueuedTrajectoryRow, OtsTrajectoryDocument, OtsTrajectoryParams, OtsTrajectoryRow},
 };

@@ -163,6 +163,8 @@ impl GovernedSchemaDeploymentService<'_> {
                 let mut migratable_fields = source_state.state.fields.clone();
                 if let Some(fields) = migratable_fields.as_object_mut() {
                     fields.remove(crate::entity_actor::SCHEMA_PIN_FIELD);
+                    collapse_runtime_alias(fields, "Id", "id")?;
+                    collapse_runtime_alias(fields, "Status", "status")?;
                 }
                 let canonical_state_json = canonical_json_object(&migratable_fields)?;
                 let input = SchemaMigrationInputV1 {
@@ -425,5 +427,26 @@ impl GovernedSchemaDeploymentService<'_> {
         }
         self.finish_migration(job, &tenant, &scope, &tenant_id)
             .await
+    }
+}
+
+pub(super) fn collapse_runtime_alias(
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+    canonical: &str,
+    generated: &str,
+) -> Result<(), ServiceError> {
+    match (fields.get(canonical), fields.get(generated)) {
+        (Some(canonical_value), Some(generated_value)) if canonical_value != generated_value => {
+            Err(ServiceError::new(
+                "migration_rejected",
+                format!("runtime-owned aliases '{canonical}' and '{generated}' disagree"),
+                false,
+            ))
+        }
+        (Some(_), Some(_)) => {
+            fields.remove(generated);
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }

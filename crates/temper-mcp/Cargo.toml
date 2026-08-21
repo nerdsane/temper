@@ -24,6 +24,7 @@ monty = { git = "https://github.com/pydantic/monty.git", package = "monty", rev 
 
 [dev-dependencies]
 axum = { workspace = true }
+temper-platform = { workspace = true }
 temper-server = { workspace = true, features = ["observe"] }
 temper-runtime = { workspace = true }
 temper-spec = { workspace = true }

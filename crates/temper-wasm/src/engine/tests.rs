@@ -35,13 +35,20 @@ const WAT_INFINITE_LOOP: &str = r#"
     )
 "#;
 
-// Tries to grow memory by 1000 pages (64 MB) — exceeds 16 MB default.
+// Tries to grow memory by 1000 pages (64 MB) — exceeds the budget. Traps
+// (`unreachable`) if the grow unexpectedly *succeeds* (result != -1), so a test
+// asserting the invocation is Ok proves the limiter actually denied the growth —
+// it is not vacuous.
 const WAT_MEMORY_GROW: &str = r#"
     (module
       (memory (export "memory") 1)
       (func (export "run") (param i32 i32) (result i32)
         (memory.grow (i32.const 1000))
-        drop
+        i32.const -1
+        i32.ne
+        if
+          unreachable
+        end
         i32.const 0
       )
     )
@@ -176,7 +183,7 @@ impl WasmHost for SlowHttpHost {
     fn log(&self, _level: &str, _message: &str) {}
 }
 
-fn make_context() -> WasmInvocationContext {
+pub(super) fn make_context() -> WasmInvocationContext {
     WasmInvocationContext {
         tenant: "test".into(),
         entity_type: "Order".into(),
@@ -196,11 +203,11 @@ fn make_context() -> WasmInvocationContext {
     }
 }
 
-fn make_host() -> Arc<dyn WasmHost> {
+pub(super) fn make_host() -> Arc<dyn WasmHost> {
     Arc::new(SimWasmHost::new())
 }
 
-fn make_streams() -> Arc<RwLock<StreamRegistry>> {
+pub(super) fn make_streams() -> Arc<RwLock<StreamRegistry>> {
     Arc::new(RwLock::new(StreamRegistry::default()))
 }
 
@@ -455,20 +462,14 @@ async fn memory_growth_denied_by_limiter() {
         .invoke(&hash, &make_context(), make_host(), &limits, make_streams())
         .await;
 
-    // Module returns normally (memory.grow returned -1 per spec — not a trap).
-    // The invocation itself succeeds (no crash), but the result is empty
-    // because the module didn't call host_set_result.
+    // The module traps (`unreachable`) if `memory.grow` returned anything other
+    // than -1, so a successful invocation proves the limiter actually denied the
+    // 1000-page growth (grow returned -1 per spec, not a crash). If the limiter
+    // had NOT fired, the grow would succeed and the module would trap — surfacing
+    // as an error, failing this assertion. Not vacuous.
     assert!(
-        result.is_ok() || matches!(result, Err(WasmError::Invocation(_))),
-        "memory denial should not cause fuel/timeout error, got: {result:?}"
-    );
-    // Critically: no panic, no FuelExhausted, no Timeout.
-    assert!(
-        !matches!(
-            result,
-            Err(WasmError::FuelExhausted) | Err(WasmError::Timeout(_))
-        ),
-        "memory denial should not be misclassified"
+        result.is_ok(),
+        "memory.grow must return -1 (limiter denied growth), got: {result:?}"
     );
 }
 
@@ -493,5 +494,231 @@ async fn noop_module_completes() {
                 | Err(WasmError::MemoryLimitExceeded { .. })
         ),
         "noop should not hit resource limits, got: {result:?}"
+    );
+}
+
+// ARN-169: WASI compatibility + sandbox-limit regressions across the
+// wasmtime 29 -> 36 bump. A module declaring more initial memory than the
+// budget must be rejected at instantiation, and a WASIp1 module must still
+// invoke end to end after the `wasmtime_wasi::p2` module reshuffle.
+
+const WAT_INITIAL_MEMORY_TWO_PAGES: &str = r#"
+    (module
+      (memory (export "memory") 2)
+      (func (export "run") (param i32 i32) (result i32)
+        i32.const 0
+      )
+    )
+"#;
+
+const WAT_WASI_STDERR: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "fd_write"
+        (func $fd_write (param i32 i32 i32 i32) (result i32)))
+      (memory (export "memory") 1)
+      (data (i32.const 32) "wasi stderr\n")
+      (func (export "run") (param i32 i32) (result i32)
+        i32.const 0
+        i32.const 32
+        i32.store
+        i32.const 4
+        i32.const 12
+        i32.store
+        i32.const 2
+        i32.const 0
+        i32.const 1
+        i32.const 16
+        call $fd_write
+        if
+          unreachable
+        end
+        i32.const 0
+      )
+    )
+"#;
+
+#[tokio::test]
+async fn initial_memory_over_budget_is_rejected() {
+    let engine = WasmEngine::new().unwrap();
+    let hash = engine
+        .compile_and_cache(WAT_INITIAL_MEMORY_TWO_PAGES.as_bytes())
+        .unwrap();
+    let limits = WasmResourceLimits {
+        max_memory: 64 * 1024, // 1 WASM page; the module declares 2
+        ..WasmResourceLimits::default()
+    };
+
+    let result = engine
+        .invoke(&hash, &make_context(), make_host(), &limits, make_streams())
+        .await;
+
+    assert!(
+        matches!(result, Err(WasmError::Instantiation(_))),
+        "oversized initial memory must fail at instantiation: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn wasi_preview1_module_invokes_end_to_end() {
+    let engine = WasmEngine::new().unwrap();
+    let hash = engine
+        .compile_and_cache(WAT_WASI_STDERR.as_bytes())
+        .unwrap();
+
+    let result = engine
+        .invoke(
+            &hash,
+            &make_context(),
+            make_host(),
+            &WasmResourceLimits::default(),
+            make_streams(),
+        )
+        .await;
+
+    assert!(result.is_ok(), "WASIp1 invocation failed: {result:?}");
+}
+
+// ARN-169: the wasmtime 36 feature surface is pinned to match the 29 sandbox —
+// memory64 and multiple memories are rejected at compile, and table growth is
+// bounded like linear memory.
+
+const WAT_MEMORY64: &str = r#"
+    (module
+      (memory i64 1)
+      (func (export "run") (param i32 i32) (result i32)
+        i32.const 0
+      )
+    )
+"#;
+
+const WAT_MULTI_MEMORY: &str = r#"
+    (module
+      (memory 1)
+      (memory 1)
+      (func (export "run") (param i32 i32) (result i32)
+        i32.const 0
+      )
+    )
+"#;
+
+const WAT_TABLE_GROW: &str = r#"
+    (module
+      (memory (export "memory") 1)
+      (table 1 funcref)
+      (func (export "run") (param i32 i32) (result i32)
+        (table.grow (ref.null func) (i32.const 2000000))
+        i32.const -1
+        i32.ne
+        if
+          unreachable
+        end
+        i32.const 0
+      )
+    )
+"#;
+
+#[test]
+fn memory64_module_is_rejected() {
+    let engine = WasmEngine::new().unwrap();
+    assert!(
+        engine.compile_and_cache(WAT_MEMORY64.as_bytes()).is_err(),
+        "memory64 must be rejected at compile — it widens the surface and was a \
+         RUSTSEC-2026-0096 prerequisite"
+    );
+}
+
+#[test]
+fn multi_memory_module_is_rejected() {
+    let engine = WasmEngine::new().unwrap();
+    assert!(
+        engine
+            .compile_and_cache(WAT_MULTI_MEMORY.as_bytes())
+            .is_err(),
+        "multiple memories must be rejected: the per-memory limiter does not sum them"
+    );
+}
+
+#[tokio::test]
+async fn table_growth_denied_past_cap() {
+    let engine = WasmEngine::new().unwrap();
+    let hash = engine.compile_and_cache(WAT_TABLE_GROW.as_bytes()).unwrap();
+
+    let result = engine
+        .invoke(
+            &hash,
+            &make_context(),
+            make_host(),
+            &WasmResourceLimits::default(),
+            make_streams(),
+        )
+        .await;
+
+    // The module traps if table.grow returned anything but -1, so a successful
+    // invocation proves the limiter denied the 2,000,000-element growth.
+    assert!(
+        result.is_ok(),
+        "table.grow past the cap must return -1 (limiter denied), got: {result:?}"
+    );
+}
+
+// A shared memory (threads proposal) must be rejected — the pin is load-bearing
+// because wasmtime does not invoke the memory limiter for shared memories.
+const WAT_SHARED_MEMORY: &str = r#"
+    (module
+      (memory 1 1 shared)
+      (func (export "run") (param i32 i32) (result i32)
+        i32.const 0
+      )
+    )
+"#;
+
+const WAT_MANY_TABLES: &str = r#"
+    (module
+      (memory (export "memory") 1)
+      (table $0 1 funcref)
+      (table $1 1 funcref)
+      (table $2 1 funcref)
+      (table $3 1 funcref)
+      (table $4 1 funcref)
+      (table $5 1 funcref)
+      (table $6 1 funcref)
+      (table $7 1 funcref)
+      (table $8 1 funcref)
+      (func (export "run") (param i32 i32) (result i32)
+        i32.const 0
+      )
+    )
+"#;
+#[test]
+fn shared_memory_module_is_rejected() {
+    let engine = WasmEngine::new().unwrap();
+    assert!(
+        engine
+            .compile_and_cache(WAT_SHARED_MEMORY.as_bytes())
+            .is_err(),
+        "shared memory must be rejected: the limiter is not consulted for it"
+    );
+}
+
+#[tokio::test]
+async fn too_many_tables_is_rejected() {
+    // MAX_TABLES tables is allowed; more must be denied at instantiation so the
+    // per-table element cap is a real store-wide budget, not per-table only.
+    let engine = WasmEngine::new().unwrap();
+    let hash = engine
+        .compile_and_cache(WAT_MANY_TABLES.as_bytes())
+        .unwrap();
+    let result = engine
+        .invoke(
+            &hash,
+            &make_context(),
+            make_host(),
+            &WasmResourceLimits::default(),
+            make_streams(),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(WasmError::Instantiation(_))),
+        "a module declaring more than MAX_TABLES tables must fail instantiation: {result:?}"
     );
 }

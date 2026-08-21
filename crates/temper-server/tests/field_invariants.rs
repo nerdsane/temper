@@ -50,6 +50,20 @@ require = { field = "Notes", absent = true }
 message = "USD orders cannot carry notes"
 "#;
 
+fn authenticate(mut request: Request<Body>) -> Request<Body> {
+    request
+        .extensions_mut()
+        .insert(temper_authz::AuthenticatedRequestContext::new(
+            TenantId::default(),
+            temper_authz::SecurityContext::from_resolved_identity(
+                "field-invariant-test",
+                "test-agent",
+                None,
+            ),
+        ));
+    request
+}
+
 fn build_state_with_field_invariant() -> ServerState {
     let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
     let mut registry = SpecRegistry::new();
@@ -82,16 +96,22 @@ fn build_state_with_field_invariant() -> ServerState {
         );
     }
     state
+        .authz
+        .reload_tenant_policies("default", "permit(principal, action, resource);")
+        .expect("field-invariant fixture policy should parse");
+    state
 }
 
 /// Send a POST `/tdata/Orders` with the given JSON body and return the
 /// status + parsed body.
 async fn post_order(state: &ServerState, body: &str) -> (StatusCode, serde_json::Value) {
     let router = build_router(state.clone());
-    let req = Request::post("/tdata/Orders")
-        .header("Content-Type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
+    let req = authenticate(
+        Request::post("/tdata/Orders")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    );
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
@@ -104,12 +124,14 @@ async fn post_order(state: &ServerState, body: &str) -> (StatusCode, serde_json:
 /// Send a PATCH `/tdata/Orders('<id>')` with the given JSON body.
 async fn patch_order(state: &ServerState, id: &str, body: &str) -> (StatusCode, serde_json::Value) {
     let router = build_router(state.clone());
-    let req = Request::builder()
-        .method(axum::http::Method::PATCH)
-        .uri(format!("/tdata/Orders('{id}')"))
-        .header("Content-Type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
+    let req = authenticate(
+        Request::builder()
+            .method(axum::http::Method::PATCH)
+            .uri(format!("/tdata/Orders('{id}')"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    );
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
@@ -269,8 +291,12 @@ async fn scoped_create_enforces_the_exact_bundle_field_invariant() {
         .activate_scoped_bundle(&TenantId::default(), &scope, &digest, None)
         .expect("scoped bundle should activate");
     let state = ServerState::from_registry(ActorSystem::new("scoped-field-invariant"), registry);
+    state
+        .authz
+        .reload_tenant_policies("default", "permit(principal, action, resource);")
+        .expect("scoped field-invariant fixture policy should parse");
     let response = build_router(state)
-        .oneshot(
+        .oneshot(authenticate(
             Request::post("/tdata/Orders")
                 .header("content-type", "application/json")
                 .header("x-temper-schema-scope-kind", "task")
@@ -279,7 +305,7 @@ async fn scoped_create_enforces_the_exact_bundle_field_invariant() {
                     r#"{"id":"scoped-invalid","Currency":"USD","Notes":"forbidden"}"#,
                 ))
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);

@@ -9,17 +9,28 @@
 //! - `GET    /api/tenants/:id/users`    — list users for a tenant
 //! - `GET    /api/genesis/apps/follow-updates` — list staged follow-latest rollout status
 
-use axum::extract::{Path, State};
-use axum::http::HeaderMap;
+use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Json, Router, routing};
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use temper_authz::AuthenticatedRequestContext;
 use temper_server::storage::TursoStoreProvider;
 
 use crate::state::PlatformState;
+
+mod apps;
+mod auth;
+pub(crate) use apps::{
+    get_genesis_app_bundle, get_os_app_guide, install_genesis_app, list_genesis_follow_updates,
+    list_os_apps,
+};
+use auth::{
+    PlatformResourceAuthorization, require_authenticated, require_control_plane,
+    require_resource_authorization, require_same_tenant, validate_tenant_id,
+};
 
 /// Request body for `POST /api/tenants`.
 #[derive(Debug, Deserialize)]
@@ -75,6 +86,19 @@ fn turso_provider(state: &PlatformState) -> Option<Arc<dyn TursoStoreProvider>> 
         .and_then(|stack| stack.turso.clone())
 }
 
+fn authorization_error(status: StatusCode) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": if status == StatusCode::UNAUTHORIZED {
+                "authentication required"
+            } else {
+                "authorization denied"
+            }
+        })),
+    )
+}
+
 /// Build the tenant management API router.
 pub fn tenant_api_router() -> Router<PlatformState> {
     Router::new()
@@ -104,8 +128,33 @@ pub fn tenant_api_router() -> Router<PlatformState> {
 /// `POST /api/tenants` — provision a new tenant database.
 async fn create_tenant(
     State(state): State<PlatformState>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Json(req): Json<CreateTenantRequest>,
 ) -> impl IntoResponse {
+    let authenticated = match require_authenticated(authenticated.as_deref()) {
+        Ok(authenticated) => authenticated,
+        Err(status) => return authorization_error(status),
+    };
+    if let Err(status) = validate_tenant_id(&req.tenant_id)
+        .and_then(|_| require_control_plane(authenticated))
+        .and_then(|_| {
+            require_resource_authorization(
+                &state,
+                authenticated,
+                PlatformResourceAuthorization {
+                    action: "create_tenant",
+                    resource_type: "Tenant",
+                    resource_id: &req.tenant_id,
+                    attrs: std::collections::BTreeMap::from([(
+                        "targetTenant".to_string(),
+                        serde_json::Value::String(req.tenant_id.clone()),
+                    )]),
+                },
+            )
+        })
+    {
+        return authorization_error(status);
+    }
     let Some(provider) = turso_provider(&state) else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -146,7 +195,28 @@ async fn create_tenant(
 }
 
 /// `GET /api/tenants` — list all registered tenants.
-async fn list_tenants(State(state): State<PlatformState>) -> impl IntoResponse {
+async fn list_tenants(
+    State(state): State<PlatformState>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
+) -> impl IntoResponse {
+    let authenticated = match require_authenticated(authenticated.as_deref()) {
+        Ok(authenticated) => authenticated,
+        Err(status) => return authorization_error(status),
+    };
+    if let Err(status) = require_control_plane(authenticated).and_then(|_| {
+        require_resource_authorization(
+            &state,
+            authenticated,
+            PlatformResourceAuthorization {
+                action: "list_tenants",
+                resource_type: "TenantCatalog",
+                resource_id: "all",
+                attrs: std::collections::BTreeMap::new(),
+            },
+        )
+    }) {
+        return authorization_error(status);
+    }
     let Some(provider) = turso_provider(&state) else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -185,8 +255,27 @@ async fn list_tenants(State(state): State<PlatformState>) -> impl IntoResponse {
 /// `DELETE /api/tenants/:id` — remove a tenant and its data.
 pub(crate) async fn delete_tenant(
     State(state): State<PlatformState>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     axum::extract::Path(tenant_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
+    let authenticated = match require_authenticated(authenticated.as_deref()) {
+        Ok(authenticated) => authenticated,
+        Err(status) => return authorization_error(status),
+    };
+    if let Err(status) = require_same_tenant(authenticated, &tenant_id).and_then(|_| {
+        require_resource_authorization(
+            &state,
+            authenticated,
+            PlatformResourceAuthorization {
+                action: "delete_tenant",
+                resource_type: "Tenant",
+                resource_id: &tenant_id,
+                attrs: std::collections::BTreeMap::new(),
+            },
+        )
+    }) {
+        return authorization_error(status);
+    }
     let Some(provider) = turso_provider(&state) else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -232,9 +321,42 @@ pub(crate) async fn delete_tenant(
 /// `POST /api/tenants/:id/users` — add a user to a tenant.
 async fn add_user(
     State(state): State<PlatformState>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     axum::extract::Path(tenant_id): axum::extract::Path<String>,
     Json(req): Json<AddUserRequest>,
 ) -> impl IntoResponse {
+    let authenticated = match require_authenticated(authenticated.as_deref()) {
+        Ok(authenticated) => authenticated,
+        Err(status) => return authorization_error(status),
+    };
+    let user_resource_id = format!("{tenant_id}/{}", req.user_id);
+    if let Err(status) = require_same_tenant(authenticated, &tenant_id).and_then(|_| {
+        require_resource_authorization(
+            &state,
+            authenticated,
+            PlatformResourceAuthorization {
+                action: "manage_tenant_users",
+                resource_type: "TenantUser",
+                resource_id: &user_resource_id,
+                attrs: std::collections::BTreeMap::from([
+                    (
+                        "targetTenant".to_string(),
+                        serde_json::Value::String(tenant_id.clone()),
+                    ),
+                    (
+                        "userId".to_string(),
+                        serde_json::Value::String(req.user_id.clone()),
+                    ),
+                    (
+                        "role".to_string(),
+                        serde_json::Value::String(req.role.clone()),
+                    ),
+                ]),
+            },
+        )
+    }) {
+        return authorization_error(status);
+    }
     let Some(provider) = turso_provider(&state) else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -271,8 +393,27 @@ async fn add_user(
 /// `GET /api/tenants/:id/users` — list users for a tenant.
 async fn list_users(
     State(state): State<PlatformState>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     axum::extract::Path(tenant_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
+    let authenticated = match require_authenticated(authenticated.as_deref()) {
+        Ok(authenticated) => authenticated,
+        Err(status) => return authorization_error(status),
+    };
+    if let Err(status) = require_same_tenant(authenticated, &tenant_id).and_then(|_| {
+        require_resource_authorization(
+            &state,
+            authenticated,
+            PlatformResourceAuthorization {
+                action: "read_tenant_users",
+                resource_type: "Tenant",
+                resource_id: &tenant_id,
+                attrs: std::collections::BTreeMap::new(),
+            },
+        )
+    }) {
+        return authorization_error(status);
+    }
     let Some(provider) = turso_provider(&state) else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -306,8 +447,37 @@ async fn list_users(
 /// `DELETE /api/tenants/:id/users/:user_id` — remove a user from a tenant.
 async fn remove_user(
     State(state): State<PlatformState>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     axum::extract::Path((tenant_id, user_id)): axum::extract::Path<(String, String)>,
-) -> impl IntoResponse {
+) -> StatusCode {
+    let authenticated = match require_authenticated(authenticated.as_deref()) {
+        Ok(authenticated) => authenticated,
+        Err(status) => return status,
+    };
+    let resource_id = format!("{tenant_id}/{user_id}");
+    if let Err(status) = require_same_tenant(authenticated, &tenant_id).and_then(|_| {
+        require_resource_authorization(
+            &state,
+            authenticated,
+            PlatformResourceAuthorization {
+                action: "manage_tenant_users",
+                resource_type: "TenantUser",
+                resource_id: &resource_id,
+                attrs: std::collections::BTreeMap::from([
+                    (
+                        "targetTenant".to_string(),
+                        serde_json::Value::String(tenant_id.clone()),
+                    ),
+                    (
+                        "userId".to_string(),
+                        serde_json::Value::String(user_id.clone()),
+                    ),
+                ]),
+            },
+        )
+    }) {
+        return status;
+    }
     let Some(provider) = turso_provider(&state) else {
         return StatusCode::SERVICE_UNAVAILABLE;
     };
@@ -322,92 +492,5 @@ async fn remove_user(
     }
 }
 
-// ── OS App Catalog Endpoints ──────────────────────────────────────
-
-/// `GET /api/os-apps` — list available OS apps.
-pub(crate) async fn list_os_apps() -> impl IntoResponse {
-    let apps = crate::os_apps::list_os_apps();
-    Json(serde_json::json!({ "apps": apps }))
-}
-
-/// `GET /api/os-apps/:name` — get app guide markdown.
-pub(crate) async fn get_os_app_guide(
-    axum::extract::Path(name): axum::extract::Path<String>,
-) -> impl IntoResponse {
-    match crate::os_apps::get_app_guide(&name) {
-        Some(guide) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "name": name,
-                "guide": guide,
-            })),
-        ),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": format!("No app guide found for '{name}'"),
-            })),
-        ),
-    }
-}
-
-/// `GET /api/genesis/apps/follow-updates` — read staged follow-latest status.
-pub(crate) async fn list_genesis_follow_updates(
-    State(state): State<PlatformState>,
-) -> impl IntoResponse {
-    let updates = crate::genesis_install::list_genesis_follow_latest_updates(&state).await;
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({ "value": updates })),
-    )
-}
-
-/// `POST /api/genesis/apps/install` — install a pinned Genesis app into this instance.
-pub(crate) async fn install_genesis_app(
-    State(state): State<PlatformState>,
-    Json(req): Json<crate::genesis_install::GenesisRegistryInstallRequest>,
-) -> impl IntoResponse {
-    match crate::genesis_install::install_genesis_app_from_registry(&state, req).await {
-        Ok(result) => (StatusCode::OK, Json(serde_json::json!(result))),
-        Err(error) if error.contains("not found") => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": error })),
-        ),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": error })),
-        ),
-    }
-}
-
-/// `GET /api/genesis/apps/:owner/:name/versions/:hash/bundle` — export a pinned app closure.
-pub(crate) async fn get_genesis_app_bundle(
-    State(state): State<PlatformState>,
-    headers: HeaderMap,
-    Path((owner, name, hash)): Path<(String, String, String)>,
-) -> impl IntoResponse {
-    let registry_tenant = headers
-        .get("x-tenant-id")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("default");
-    match crate::genesis_install::export_genesis_registry_bundle(
-        &state,
-        registry_tenant,
-        &owner,
-        &name,
-        &hash,
-    )
-    .await
-    {
-        Ok(bundle) => (StatusCode::OK, Json(serde_json::json!(bundle))),
-        Err(error) if error.contains("not found") => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": error })),
-        ),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": error })),
-        ),
-    }
-}
+#[cfg(test)]
+mod tests;

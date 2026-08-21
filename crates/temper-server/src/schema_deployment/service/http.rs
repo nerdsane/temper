@@ -1,33 +1,23 @@
 use super::*;
 
 fn http_context(
-    headers: &HeaderMap,
-    state: &ServerState,
-    resolved_identity: Option<&ResolvedIdentity>,
+    authenticated: Option<&AuthenticatedRequestContext>,
 ) -> Result<(String, SecurityContext), Box<Response>> {
-    let tenant = extract_tenant(headers, state)
+    let authenticated = require_authenticated_context(authenticated)
         .map_err(IntoResponse::into_response)
         .map_err(Box::new)?;
-    let security = resolved_identity.map_or_else(
-        || security_context_from_headers(headers, None, None, None),
-        |identity| {
-            SecurityContext::from_resolved_identity(
-                &identity.agent_instance_id,
-                &identity.agent_type_name,
-                None,
-            )
-        },
-    );
-    Ok((tenant.as_str().to_string(), security))
+    Ok((
+        authenticated.tenant().as_str().to_string(),
+        authenticated.security_context().clone(),
+    ))
 }
 
 pub(crate) async fn submit_http(
     State(state): State<ServerState>,
-    resolved_identity: Option<Extension<ResolvedIdentity>>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     axum::Json(request): axum::Json<SubmitSchemaBundleRequestV1>,
 ) -> Response {
-    let (tenant, security) = match http_context(&headers, &state, resolved_identity.as_deref()) {
+    let (tenant, security) = match http_context(authenticated.as_deref()) {
         Ok(value) => value,
         Err(response) => return *response,
     };
@@ -40,11 +30,10 @@ pub(crate) async fn submit_http(
 
 pub(crate) async fn get_http(
     State(state): State<ServerState>,
-    resolved_identity: Option<Extension<ResolvedIdentity>>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path((scope_id, digest)): Path<(String, String)>,
 ) -> Response {
-    let (tenant, security) = match http_context(&headers, &state, resolved_identity.as_deref()) {
+    let (tenant, security) = match http_context(authenticated.as_deref()) {
         Ok(value) => value,
         Err(response) => return *response,
     };
@@ -65,8 +54,7 @@ pub(crate) async fn get_http(
 
 pub(crate) async fn verify_http(
     State(state): State<ServerState>,
-    resolved_identity: Option<Extension<ResolvedIdentity>>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path((scope_id, digest)): Path<(String, String)>,
     axum::Json(mut request): axum::Json<VerifySchemaBundleRequestV1>,
 ) -> Response {
@@ -77,7 +65,7 @@ pub(crate) async fn verify_http(
             false,
         )));
     }
-    let (tenant, security) = match http_context(&headers, &state, resolved_identity.as_deref()) {
+    let (tenant, security) = match http_context(authenticated.as_deref()) {
         Ok(value) => value,
         Err(response) => return *response,
     };
@@ -91,8 +79,7 @@ pub(crate) async fn verify_http(
 
 pub(crate) async fn activate_http(
     State(state): State<ServerState>,
-    resolved_identity: Option<Extension<ResolvedIdentity>>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path((scope_id, digest)): Path<(String, String)>,
     axum::Json(mut request): axum::Json<ActivateSchemaBundleRequestV1>,
 ) -> Response {
@@ -103,7 +90,7 @@ pub(crate) async fn activate_http(
             false,
         )));
     }
-    let (tenant, security) = match http_context(&headers, &state, resolved_identity.as_deref()) {
+    let (tenant, security) = match http_context(authenticated.as_deref()) {
         Ok(value) => value,
         Err(response) => return *response,
     };
@@ -117,8 +104,7 @@ pub(crate) async fn activate_http(
 
 pub(crate) async fn retire_http(
     State(state): State<ServerState>,
-    resolved_identity: Option<Extension<ResolvedIdentity>>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path((scope_id, digest)): Path<(String, String)>,
     axum::Json(mut request): axum::Json<RetireSchemaBundleRequestV1>,
 ) -> Response {
@@ -129,7 +115,7 @@ pub(crate) async fn retire_http(
             false,
         )));
     }
-    let (tenant, security) = match http_context(&headers, &state, resolved_identity.as_deref()) {
+    let (tenant, security) = match http_context(authenticated.as_deref()) {
         Ok(value) => value,
         Err(response) => return *response,
     };
@@ -143,11 +129,10 @@ pub(crate) async fn retire_http(
 
 pub(crate) async fn start_migration_http(
     State(state): State<ServerState>,
-    resolved_identity: Option<Extension<ResolvedIdentity>>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     axum::Json(request): axum::Json<StartSchemaMigrationRequestV1>,
 ) -> Response {
-    let (tenant, security) = match http_context(&headers, &state, resolved_identity.as_deref()) {
+    let (tenant, security) = match http_context(authenticated.as_deref()) {
         Ok(value) => value,
         Err(response) => return *response,
     };
@@ -160,11 +145,11 @@ pub(crate) async fn start_migration_http(
 
 pub(crate) async fn get_migration_http(
     State(state): State<ServerState>,
-    resolved_identity: Option<Extension<ResolvedIdentity>>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     headers: HeaderMap,
     Path((scope_id, job_id)): Path<(String, String)>,
 ) -> Response {
-    let (tenant, security) = match http_context(&headers, &state, resolved_identity.as_deref()) {
+    let (tenant, security) = match http_context(authenticated.as_deref()) {
         Ok(value) => value,
         Err(response) => return *response,
     };
@@ -194,8 +179,7 @@ pub(crate) async fn get_migration_http(
 
 pub(crate) async fn retry_migration_http(
     State(state): State<ServerState>,
-    resolved_identity: Option<Extension<ResolvedIdentity>>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path((scope_id, job_id)): Path<(String, String)>,
     axum::Json(mut request): axum::Json<RetrySchemaMigrationRequestV1>,
 ) -> Response {
@@ -206,7 +190,7 @@ pub(crate) async fn retry_migration_http(
             false,
         )));
     }
-    let (tenant, security) = match http_context(&headers, &state, resolved_identity.as_deref()) {
+    let (tenant, security) = match http_context(authenticated.as_deref()) {
         Ok(value) => value,
         Err(response) => return *response,
     };

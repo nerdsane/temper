@@ -7,6 +7,7 @@
 use std::io::{self, Write};
 
 use anyhow::{Context, Result};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use temper_authz::{ActionScope, DurationScope, PolicyScopeMatrix, PrincipalScope, ResourceScope};
 
 /// Run the `temper decide` interactive loop.
@@ -14,7 +15,14 @@ use temper_authz::{ActionScope, DurationScope, PolicyScopeMatrix, PrincipalScope
 /// Polls the server for pending decisions and prompts the human to
 /// approve/deny each one with scope selection.
 pub async fn run(port: u16, tenant: &str) -> Result<()> {
-    let client = reqwest::Client::new();
+    let api_key = std::env::var("TEMPER_API_KEY")
+        .context("TEMPER_API_KEY is required to use `temper decide`")?;
+    let mut default_headers = HeaderMap::new();
+    default_headers.insert(AUTHORIZATION, authorization_header(&api_key)?);
+    let client = reqwest::Client::builder()
+        .default_headers(default_headers)
+        .build()
+        .context("Failed to configure the authenticated Temper client")?;
     let base_url = format!("http://127.0.0.1:{port}");
 
     println!("Temper Decide — Governance Terminal");
@@ -101,6 +109,11 @@ pub async fn run(port: u16, tenant: &str) -> Result<()> {
     }
 }
 
+fn authorization_header(api_key: &str) -> Result<HeaderValue> {
+    HeaderValue::from_str(&format!("Bearer {api_key}"))
+        .context("TEMPER_API_KEY is not valid as an HTTP bearer credential")
+}
+
 async fn fetch_pending_decisions(
     client: &reqwest::Client,
     base_url: &str,
@@ -182,4 +195,22 @@ async fn deny_decision(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::authorization_header;
+
+    #[test]
+    fn authorization_header_uses_bearer_scheme() {
+        assert_eq!(
+            authorization_header("tenant-key").unwrap(),
+            "Bearer tenant-key"
+        );
+    }
+
+    #[test]
+    fn authorization_header_rejects_header_injection() {
+        assert!(authorization_header("key\r\nx-forged: true").is_err());
+    }
 }

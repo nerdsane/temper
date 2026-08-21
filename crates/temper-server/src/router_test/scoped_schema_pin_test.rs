@@ -311,7 +311,7 @@ async fn volatile_actor_does_not_grant_durable_pin_authority() {
 #[tokio::test]
 async fn task_scoped_read_requires_a_durable_entity_pin() {
     let digest = format!("sha256:{}", "a".repeat(64));
-    let response = build_router(test_state_with_active_task_schema_and_ioa(
+    let response = authenticated_router(test_state_with_active_task_schema_and_ioa(
         SCOPED_CONTINUITY_IOA,
     ))
     .oneshot(
@@ -356,7 +356,7 @@ async fn task_scoped_action_continuity_survives_restart_with_exact_digest() {
             }))
             .unwrap()
     };
-    let app = build_router(state.clone());
+    let app = authenticated_router(state.clone());
     assert_eq!(
         app.clone().oneshot(request(None)).await.unwrap().status(),
         StatusCode::CREATED
@@ -381,7 +381,7 @@ async fn task_scoped_action_continuity_survives_restart_with_exact_digest() {
     let mut restarted = test_state_with_ioa();
     restarted.set_storage_stack(StorageStack::from_sim(store, None));
     assert_eq!(
-        build_router(restarted)
+        authenticated_router(restarted)
             .oneshot(request(Some("Simulate")))
             .await
             .unwrap()
@@ -419,7 +419,7 @@ async fn task_scoped_action_continuity_survives_turso_reopen() {
             }))
             .unwrap()
     };
-    let app = build_router(state.clone());
+    let app = authenticated_router(state.clone());
     assert_eq!(
         app.clone().oneshot(request(None)).await.unwrap().status(),
         StatusCode::CREATED
@@ -439,7 +439,7 @@ async fn task_scoped_action_continuity_survives_turso_reopen() {
     let mut restarted = test_state_with_ioa();
     restarted.set_storage_stack(StorageStack::from_turso(reopened));
     assert_eq!(
-        build_router(restarted)
+        authenticated_router(restarted)
             .oneshot(request(Some("Simulate")))
             .await
             .unwrap()
@@ -475,7 +475,7 @@ to = "Ready"
     let scoped_csdl = include_str!("../../../../test-fixtures/specs/model.csdl.xml")
         .replace("Temper.Example", "Temper.ScopedExample");
     let parsed = parse_csdl(&scoped_csdl).expect("scoped CSDL fixture");
-    let app = build_router(state.clone());
+    let app = authenticated_router(state.clone());
     let scoped = |request: axum::http::request::Builder| {
         request
             .header("Content-Type", "application/json")
@@ -600,7 +600,7 @@ to = "Ready"
     let mismatch_json: serde_json::Value = serde_json::from_slice(&mismatch_body).unwrap();
     assert_eq!(mismatch_json["error"]["code"], "SchemaPinMismatch");
 
-    let scope_only_existing = build_router(state.clone())
+    let scope_only_existing = authenticated_router(state.clone())
         .oneshot(
             Request::post("/tdata/Orders('pin-route-order')/Temper.ScopedExample.Simulate")
                 .header("Content-Type", "application/json")
@@ -620,7 +620,7 @@ to = "Ready"
         .expect("registry lock")
         .retire_scoped_bundle(&tenant, &scope, &replacement_digest)
         .expect("retire replacement bundle");
-    let retired_existing = build_router(state.clone())
+    let retired_existing = authenticated_router(state.clone())
         .oneshot(
             scoped(Request::post(
                 "/tdata/Orders('pin-route-order')/Temper.ScopedExample.Simulate",
@@ -631,7 +631,7 @@ to = "Ready"
         .await
         .unwrap();
     assert_eq!(retired_existing.status(), StatusCode::OK);
-    let retired_create = build_router(state)
+    let retired_create = authenticated_router(state)
         .oneshot(
             scoped(Request::post("/tdata/Orders"))
                 .body(Body::from(r#"{"Id":"retired-new-order"}"#))

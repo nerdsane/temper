@@ -333,6 +333,7 @@ impl ReactionDispatcher {
                     &dispatch_ctx,
                     false,
                     reaction_context,
+                    None,
                 )
                 .await;
 

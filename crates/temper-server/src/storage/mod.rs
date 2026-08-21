@@ -20,28 +20,36 @@ use sqlx::PgPool;
 use temper_runtime::persistence::{
     EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
 };
-use temper_store_postgres::{PostgresEventStore, PostgresTrajectoryInsert};
+use temper_store_postgres::{
+    PostgresEventStore, PostgresEvolutionRecordInsert, PostgresPolicyApprovalCommit,
+    PostgresTrajectoryInsert,
+};
 use temper_store_turso::{
     ActionStats, AgentSummary, DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow,
-    OtsQueuedTrajectoryRow, OtsTrajectoryParams, OtsTrajectoryRow, PolicyDenialPatternRow,
-    TenantStoreRouter, TenantUserRow, TursoEventStore, TursoTrajectoryInsert, TursoTrajectoryRow,
-    TursoWasmInvocationInsert, TursoWasmInvocationRow, TursoWasmModuleMetadataRow,
-    UnmetIntentAggRow, store::TrajectoryStats,
+    OtsQueuedTrajectoryRow, OtsTrajectoryDocument, OtsTrajectoryParams, OtsTrajectoryRow,
+    PolicyDenialPatternRow, TenantStoreRouter, TenantUserRow, TursoEventStore,
+    TursoEvolutionRecordInsert, TursoPolicyApprovalCommit, TursoTrajectoryInsert,
+    TursoTrajectoryRow, TursoWasmInvocationInsert, TursoWasmInvocationRow,
+    TursoWasmModuleMetadataRow, UnmetIntentAggRow, store::TrajectoryStats,
 };
 
 use crate::platform_store::PlatformStore;
 #[cfg(feature = "sim")]
 use crate::platform_store::SimPlatformStore;
-use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
+use crate::state::trajectory::TrajectoryEntry;
 
 mod backend_label;
+mod metadata_impls;
+mod observe_read;
 mod policy_store;
 mod published_artifacts;
 pub use backend_label::{BackendLabel, DataOnlyCreateRecord, DataOnlyCreateStore, PolicyStoreRow};
 pub use policy_store::{BackendNamedStore, PolicyStore, TrajectorySink};
 mod query_plane_impls;
 mod query_plane_read;
+mod redaction;
 mod schema_deployment;
+mod trajectory_row;
 pub use published_artifacts::{
     PublishedArtifactStore, PublishedArtifactStoreRow, PublishedArtifactStoreUpsert,
 };
@@ -908,13 +916,18 @@ impl BoxedEventStore {
 pub trait ObserveReadStore: Send + Sync {
     async fn load_recent_trajectories(
         &self,
+        tenant: &str,
         limit: i64,
     ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError>;
 
-    async fn load_unmet_intent_rows(&self) -> Result<Vec<UnmetIntentAggRow>, PersistenceError>;
+    async fn load_unmet_intent_rows(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<UnmetIntentAggRow>, PersistenceError>;
 
     async fn load_submit_spec_timestamps(
         &self,
+        tenant: &str,
     ) -> Result<BTreeMap<String, String>, PersistenceError>;
 
     async fn count_trajectories_by_tenant(&self)
@@ -922,6 +935,7 @@ pub trait ObserveReadStore: Send + Sync {
 
     async fn query_trajectory_stats(
         &self,
+        tenant: &str,
         entity_type: Option<&str>,
         action: Option<&str>,
         success_filter: Option<bool>,
@@ -936,6 +950,18 @@ pub trait ObserveReadStore: Send + Sync {
         limit: i64,
     ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError>;
 
+    /// One session's rows, oldest first, in the order the kernel wrote them.
+    ///
+    /// Conformance replays a session as a state-machine run, so the ordering
+    /// is part of the contract, not an implementation detail.
+    async fn query_trajectories_by_session(
+        &self,
+        session_id: &str,
+        tenant: Option<&str>,
+        entity_type: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError>;
+
     async fn query_agent_summaries(
         &self,
         tenant: Option<&str>,
@@ -943,11 +969,30 @@ pub trait ObserveReadStore: Send + Sync {
 }
 
 /// Evolution engine durable metadata capability.
+#[derive(Clone, Copy, Debug)]
+pub struct EvolutionRecordWrite<'a> {
+    /// Tenant that owns the record.
+    pub tenant: &'a str,
+    /// Stable evolution record identifier.
+    pub id: &'a str,
+    /// Evolution record kind.
+    pub record_type: &'a str,
+    /// Current record status.
+    pub status: &'a str,
+    /// Principal that created the record.
+    pub created_by: &'a str,
+    /// Optional predecessor record identifier.
+    pub derived_from: Option<&'a str>,
+    /// Serialized record payload.
+    pub data_json: &'a str,
+}
+
 #[async_trait::async_trait]
 pub trait EvolutionStore: Send + Sync {
     #[allow(clippy::too_many_arguments)]
     async fn upsert_feature_request(
         &self,
+        tenant: &str,
         id: &str,
         category: &str,
         description: &str,
@@ -959,11 +1004,13 @@ pub trait EvolutionStore: Send + Sync {
 
     async fn list_feature_requests(
         &self,
+        tenant: &str,
         disposition: Option<&str>,
     ) -> Result<Vec<FeatureRequestRow>, PersistenceError>;
 
     async fn update_feature_request(
         &self,
+        tenant: &str,
         id: &str,
         disposition: &str,
         developer_notes: Option<&str>,
@@ -971,26 +1018,26 @@ pub trait EvolutionStore: Send + Sync {
 
     async fn insert_evolution_record(
         &self,
-        id: &str,
-        record_type: &str,
-        status: &str,
-        created_by: &str,
-        derived_from: Option<&str>,
-        data_json: &str,
+        record: EvolutionRecordWrite<'_>,
     ) -> Result<(), PersistenceError>;
 
     async fn get_evolution_record(
         &self,
+        tenant: &str,
         id: &str,
     ) -> Result<Option<EvolutionRecordRow>, PersistenceError>;
 
     async fn list_evolution_records(
         &self,
+        tenant: &str,
         record_type: Option<&str>,
         status: Option<&str>,
     ) -> Result<Vec<EvolutionRecordRow>, PersistenceError>;
 
-    async fn list_ranked_insights(&self) -> Result<Vec<EvolutionRecordRow>, PersistenceError>;
+    async fn list_ranked_insights(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<EvolutionRecordRow>, PersistenceError>;
 }
 
 /// Design-time verification event capability.
@@ -1029,13 +1076,21 @@ pub trait OtsStore: Send + Sync {
         params: &OtsTrajectoryParams<'_>,
     ) -> Result<(), PersistenceError>;
 
+    /// Mark a queued trajectory as persisted.
+    ///
+    /// Addressed by `(tenant, trajectory_id)`, the identity the row is keyed
+    /// by: the id comes from the uploading harness, so two tenants can hold
+    /// the same one.
     async fn mark_ots_trajectory_persisted(
         &self,
+        tenant: &str,
         trajectory_id: &str,
     ) -> Result<(), PersistenceError>;
 
+    /// Mark a queued trajectory as failed, addressed the same way.
     async fn mark_ots_trajectory_failed(
         &self,
+        tenant: &str,
         trajectory_id: &str,
         error: &str,
     ) -> Result<(), PersistenceError>;
@@ -1053,10 +1108,15 @@ pub trait OtsStore: Send + Sync {
         limit: i64,
     ) -> Result<Vec<OtsTrajectoryRow>, PersistenceError>;
 
+    /// Load a full OTS trajectory by tenant and ID.
+    ///
+    /// Tenant is part of the lookup so a trajectory id taken from a request
+    /// path cannot read another tenant's trace out of a shared store.
     async fn get_ots_trajectory(
         &self,
+        tenant: &str,
         trajectory_id: &str,
-    ) -> Result<Option<String>, PersistenceError>;
+    ) -> Result<Option<OtsTrajectoryDocument>, PersistenceError>;
 }
 
 /// Legacy database-backed blob capability.
@@ -1074,6 +1134,14 @@ pub trait BlobStore: Send + Sync {
     async fn sweep_expired_blobs(&self, max_rows: u64) -> Result<u64, String>;
 
     async fn get_blob(&self, key: &str) -> Result<Option<Vec<u8>>, String>;
+
+    /// Read a legacy database blob only when its stored size is within the
+    /// caller's allocation budget. `None` means missing or over budget.
+    async fn get_blob_if_size_at_most(
+        &self,
+        key: &str,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, String>;
 }
 
 /// Authorization analytics capability.
@@ -1096,6 +1164,22 @@ pub trait AuthzAnalyticsStore: Send + Sync {
 }
 
 /// Pending decision query capability.
+#[derive(Clone, Copy, Debug)]
+pub struct PolicyApprovalCommit<'a> {
+    /// Tenant that owns both rows.
+    pub tenant: &'a str,
+    /// Pending decision to transition.
+    pub decision_id: &'a str,
+    /// Serialized approved decision.
+    pub approved_decision_json: &'a str,
+    /// Policy row created by the decision.
+    pub policy_id: &'a str,
+    /// Approved Cedar source.
+    pub cedar_text: &'a str,
+    /// Principal that approved the decision.
+    pub created_by: &'a str,
+}
+
 #[async_trait::async_trait]
 pub trait DecisionStore: Send + Sync {
     async fn query_decisions(
@@ -1109,7 +1193,24 @@ pub trait DecisionStore: Send + Sync {
         status: Option<&str>,
     ) -> Result<Vec<String>, PersistenceError>;
 
-    async fn get_pending_decision(&self, id: &str) -> Result<Option<String>, PersistenceError>;
+    async fn get_pending_decision(
+        &self,
+        tenant: &str,
+        id: &str,
+    ) -> Result<Option<String>, PersistenceError>;
+
+    async fn commit_policy_approval(
+        &self,
+        commit: PolicyApprovalCommit<'_>,
+    ) -> Result<(), PersistenceError>;
+
+    async fn rollback_policy_approval(
+        &self,
+        tenant: &str,
+        decision_id: &str,
+        pending_decision_json: &str,
+        policy_id: &str,
+    ) -> Result<(), PersistenceError>;
 }
 
 /// WASM module metadata capability.
@@ -1772,292 +1873,6 @@ impl PolicyStore for TenantStoreRouter {
     }
 }
 
-impl BackendNamedStore for PostgresEventStore {
-    fn backend_name(&self) -> &'static str {
-        "postgres"
-    }
-}
-
-impl BackendNamedStore for TursoEventStore {
-    fn backend_name(&self) -> &'static str {
-        "turso"
-    }
-}
-
-#[async_trait::async_trait]
-impl ObserveReadStore for PostgresEventStore {
-    async fn load_recent_trajectories(
-        &self,
-        limit: i64,
-    ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError> {
-        self.load_recent_trajectories(limit)
-            .await
-            .map(|rows| rows.into_iter().map(pg_trajectory_to_turso).collect())
-    }
-
-    async fn load_unmet_intent_rows(&self) -> Result<Vec<UnmetIntentAggRow>, PersistenceError> {
-        self.load_unmet_intent_rows()
-            .await
-            .map(|rows| rows.into_iter().map(pg_unmet_to_turso).collect())
-    }
-
-    async fn load_submit_spec_timestamps(
-        &self,
-    ) -> Result<BTreeMap<String, String>, PersistenceError> {
-        self.load_submit_spec_timestamps().await
-    }
-
-    async fn count_trajectories_by_tenant(
-        &self,
-    ) -> Result<BTreeMap<String, u64>, PersistenceError> {
-        self.count_trajectories_by_tenant().await
-    }
-
-    async fn query_trajectory_stats(
-        &self,
-        entity_type: Option<&str>,
-        action: Option<&str>,
-        success_filter: Option<bool>,
-        failed_limit: i64,
-    ) -> Result<TrajectoryStats, PersistenceError> {
-        self.query_trajectory_stats(entity_type, action, success_filter, failed_limit)
-            .await
-            .map(pg_stats_to_turso)
-    }
-
-    async fn query_trajectories_by_agent(
-        &self,
-        agent_id: &str,
-        tenant: Option<&str>,
-        entity_type: Option<&str>,
-        limit: i64,
-    ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError> {
-        self.query_trajectories_by_agent(agent_id, tenant, entity_type, limit)
-            .await
-            .map(|rows| rows.into_iter().map(pg_trajectory_to_turso).collect())
-    }
-
-    async fn query_agent_summaries(
-        &self,
-        tenant: Option<&str>,
-    ) -> Result<Vec<AgentSummary>, PersistenceError> {
-        self.query_agent_summaries(tenant)
-            .await
-            .map(|rows| rows.into_iter().map(pg_agent_summary_to_turso).collect())
-    }
-}
-
-#[async_trait::async_trait]
-impl ObserveReadStore for TursoEventStore {
-    async fn load_recent_trajectories(
-        &self,
-        limit: i64,
-    ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError> {
-        self.load_recent_trajectories(limit).await
-    }
-
-    async fn load_unmet_intent_rows(&self) -> Result<Vec<UnmetIntentAggRow>, PersistenceError> {
-        self.load_unmet_intent_rows().await
-    }
-
-    async fn load_submit_spec_timestamps(
-        &self,
-    ) -> Result<BTreeMap<String, String>, PersistenceError> {
-        self.load_submit_spec_timestamps().await
-    }
-
-    async fn count_trajectories_by_tenant(
-        &self,
-    ) -> Result<BTreeMap<String, u64>, PersistenceError> {
-        self.count_trajectories_by_tenant().await
-    }
-
-    async fn query_trajectory_stats(
-        &self,
-        entity_type: Option<&str>,
-        action: Option<&str>,
-        success_filter: Option<bool>,
-        failed_limit: i64,
-    ) -> Result<TrajectoryStats, PersistenceError> {
-        self.query_trajectory_stats(entity_type, action, success_filter, failed_limit)
-            .await
-    }
-
-    async fn query_trajectories_by_agent(
-        &self,
-        agent_id: &str,
-        tenant: Option<&str>,
-        entity_type: Option<&str>,
-        limit: i64,
-    ) -> Result<Vec<TursoTrajectoryRow>, PersistenceError> {
-        self.query_trajectories_by_agent(agent_id, tenant, entity_type, limit)
-            .await
-    }
-
-    async fn query_agent_summaries(
-        &self,
-        tenant: Option<&str>,
-    ) -> Result<Vec<AgentSummary>, PersistenceError> {
-        self.query_agent_summaries(tenant).await
-    }
-}
-
-#[async_trait::async_trait]
-impl EvolutionStore for PostgresEventStore {
-    async fn upsert_feature_request(
-        &self,
-        id: &str,
-        category: &str,
-        description: &str,
-        frequency: i64,
-        trajectory_refs_json: &str,
-        disposition: &str,
-        developer_notes: Option<&str>,
-    ) -> Result<(), PersistenceError> {
-        self.upsert_feature_request(
-            id,
-            category,
-            description,
-            frequency,
-            trajectory_refs_json,
-            disposition,
-            developer_notes,
-        )
-        .await
-    }
-
-    async fn list_feature_requests(
-        &self,
-        disposition: Option<&str>,
-    ) -> Result<Vec<FeatureRequestRow>, PersistenceError> {
-        self.list_feature_requests(disposition)
-            .await
-            .map(|rows| rows.into_iter().map(pg_feature_request_to_turso).collect())
-    }
-
-    async fn update_feature_request(
-        &self,
-        id: &str,
-        disposition: &str,
-        developer_notes: Option<&str>,
-    ) -> Result<bool, PersistenceError> {
-        self.update_feature_request(id, disposition, developer_notes)
-            .await
-    }
-
-    async fn insert_evolution_record(
-        &self,
-        id: &str,
-        record_type: &str,
-        status: &str,
-        created_by: &str,
-        derived_from: Option<&str>,
-        data_json: &str,
-    ) -> Result<(), PersistenceError> {
-        self.insert_evolution_record(id, record_type, status, created_by, derived_from, data_json)
-            .await
-    }
-
-    async fn get_evolution_record(
-        &self,
-        id: &str,
-    ) -> Result<Option<EvolutionRecordRow>, PersistenceError> {
-        self.get_evolution_record(id)
-            .await
-            .map(|row| row.map(pg_evolution_record_to_turso))
-    }
-
-    async fn list_evolution_records(
-        &self,
-        record_type: Option<&str>,
-        status: Option<&str>,
-    ) -> Result<Vec<EvolutionRecordRow>, PersistenceError> {
-        self.list_evolution_records(record_type, status)
-            .await
-            .map(|rows| rows.into_iter().map(pg_evolution_record_to_turso).collect())
-    }
-
-    async fn list_ranked_insights(&self) -> Result<Vec<EvolutionRecordRow>, PersistenceError> {
-        self.list_ranked_insights()
-            .await
-            .map(|rows| rows.into_iter().map(pg_evolution_record_to_turso).collect())
-    }
-}
-
-#[async_trait::async_trait]
-impl EvolutionStore for TursoEventStore {
-    async fn upsert_feature_request(
-        &self,
-        id: &str,
-        category: &str,
-        description: &str,
-        frequency: i64,
-        trajectory_refs_json: &str,
-        disposition: &str,
-        developer_notes: Option<&str>,
-    ) -> Result<(), PersistenceError> {
-        self.upsert_feature_request(
-            id,
-            category,
-            description,
-            frequency,
-            trajectory_refs_json,
-            disposition,
-            developer_notes,
-        )
-        .await
-    }
-
-    async fn list_feature_requests(
-        &self,
-        disposition: Option<&str>,
-    ) -> Result<Vec<FeatureRequestRow>, PersistenceError> {
-        self.list_feature_requests(disposition).await
-    }
-
-    async fn update_feature_request(
-        &self,
-        id: &str,
-        disposition: &str,
-        developer_notes: Option<&str>,
-    ) -> Result<bool, PersistenceError> {
-        self.update_feature_request(id, disposition, developer_notes)
-            .await
-    }
-
-    async fn insert_evolution_record(
-        &self,
-        id: &str,
-        record_type: &str,
-        status: &str,
-        created_by: &str,
-        derived_from: Option<&str>,
-        data_json: &str,
-    ) -> Result<(), PersistenceError> {
-        self.insert_evolution_record(id, record_type, status, created_by, derived_from, data_json)
-            .await
-    }
-
-    async fn get_evolution_record(
-        &self,
-        id: &str,
-    ) -> Result<Option<EvolutionRecordRow>, PersistenceError> {
-        self.get_evolution_record(id).await
-    }
-
-    async fn list_evolution_records(
-        &self,
-        record_type: Option<&str>,
-        status: Option<&str>,
-    ) -> Result<Vec<EvolutionRecordRow>, PersistenceError> {
-        self.list_evolution_records(record_type, status).await
-    }
-
-    async fn list_ranked_insights(&self) -> Result<Vec<EvolutionRecordRow>, PersistenceError> {
-        self.list_ranked_insights().await
-    }
-}
-
 #[async_trait::async_trait]
 impl DesignTimeEventStore for PostgresEventStore {
     async fn insert_design_time_event(
@@ -2170,17 +1985,21 @@ impl OtsStore for PostgresEventStore {
 
     async fn mark_ots_trajectory_persisted(
         &self,
+        tenant: &str,
         trajectory_id: &str,
     ) -> Result<(), PersistenceError> {
-        self.mark_ots_trajectory_persisted(trajectory_id).await
+        self.mark_ots_trajectory_persisted(tenant, trajectory_id)
+            .await
     }
 
     async fn mark_ots_trajectory_failed(
         &self,
+        tenant: &str,
         trajectory_id: &str,
         error: &str,
     ) -> Result<(), PersistenceError> {
-        self.mark_ots_trajectory_failed(trajectory_id, error).await
+        self.mark_ots_trajectory_failed(tenant, trajectory_id, error)
+            .await
     }
 
     async fn list_queued_ots_trajectories(
@@ -2206,9 +2025,12 @@ impl OtsStore for PostgresEventStore {
 
     async fn get_ots_trajectory(
         &self,
+        tenant: &str,
         trajectory_id: &str,
-    ) -> Result<Option<String>, PersistenceError> {
-        self.get_ots_trajectory(trajectory_id).await
+    ) -> Result<Option<OtsTrajectoryDocument>, PersistenceError> {
+        self.get_ots_trajectory(tenant, trajectory_id)
+            .await
+            .map(|document| document.map(pg_ots_document_to_turso))
     }
 }
 
@@ -2230,17 +2052,21 @@ impl OtsStore for TursoEventStore {
 
     async fn mark_ots_trajectory_persisted(
         &self,
+        tenant: &str,
         trajectory_id: &str,
     ) -> Result<(), PersistenceError> {
-        self.mark_ots_trajectory_persisted(trajectory_id).await
+        self.mark_ots_trajectory_persisted(tenant, trajectory_id)
+            .await
     }
 
     async fn mark_ots_trajectory_failed(
         &self,
+        tenant: &str,
         trajectory_id: &str,
         error: &str,
     ) -> Result<(), PersistenceError> {
-        self.mark_ots_trajectory_failed(trajectory_id, error).await
+        self.mark_ots_trajectory_failed(tenant, trajectory_id, error)
+            .await
     }
 
     async fn list_queued_ots_trajectories(
@@ -2263,9 +2089,10 @@ impl OtsStore for TursoEventStore {
 
     async fn get_ots_trajectory(
         &self,
+        tenant: &str,
         trajectory_id: &str,
-    ) -> Result<Option<String>, PersistenceError> {
-        self.get_ots_trajectory(trajectory_id).await
+    ) -> Result<Option<OtsTrajectoryDocument>, PersistenceError> {
+        self.get_ots_trajectory(tenant, trajectory_id).await
     }
 }
 
@@ -2291,6 +2118,14 @@ impl BlobStore for PostgresEventStore {
     async fn get_blob(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         self.get_blob(key).await
     }
+
+    async fn get_blob_if_size_at_most(
+        &self,
+        key: &str,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, String> {
+        self.get_blob_if_size_at_most(key, max_bytes).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -2314,6 +2149,14 @@ impl BlobStore for TursoEventStore {
 
     async fn get_blob(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         self.get_blob(key).await
+    }
+
+    async fn get_blob_if_size_at_most(
+        &self,
+        key: &str,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, String> {
+        self.get_blob_if_size_at_most(key, max_bytes).await
     }
 }
 
@@ -2396,8 +2239,38 @@ impl DecisionStore for PostgresEventStore {
         self.query_all_decisions(status).await
     }
 
-    async fn get_pending_decision(&self, id: &str) -> Result<Option<String>, PersistenceError> {
-        self.get_pending_decision(id).await
+    async fn get_pending_decision(
+        &self,
+        tenant: &str,
+        id: &str,
+    ) -> Result<Option<String>, PersistenceError> {
+        self.get_pending_decision(tenant, id).await
+    }
+
+    async fn commit_policy_approval(
+        &self,
+        commit: PolicyApprovalCommit<'_>,
+    ) -> Result<(), PersistenceError> {
+        self.commit_policy_approval(PostgresPolicyApprovalCommit {
+            tenant: commit.tenant,
+            decision_id: commit.decision_id,
+            approved_decision_json: commit.approved_decision_json,
+            policy_id: commit.policy_id,
+            cedar_text: commit.cedar_text,
+            created_by: commit.created_by,
+        })
+        .await
+    }
+
+    async fn rollback_policy_approval(
+        &self,
+        tenant: &str,
+        decision_id: &str,
+        pending_decision_json: &str,
+        policy_id: &str,
+    ) -> Result<(), PersistenceError> {
+        self.rollback_policy_approval(tenant, decision_id, pending_decision_json, policy_id)
+            .await
     }
 }
 
@@ -2418,8 +2291,38 @@ impl DecisionStore for TursoEventStore {
         self.query_all_decisions(status).await
     }
 
-    async fn get_pending_decision(&self, id: &str) -> Result<Option<String>, PersistenceError> {
-        self.get_pending_decision(id).await
+    async fn get_pending_decision(
+        &self,
+        tenant: &str,
+        id: &str,
+    ) -> Result<Option<String>, PersistenceError> {
+        self.get_pending_decision(tenant, id).await
+    }
+
+    async fn commit_policy_approval(
+        &self,
+        commit: PolicyApprovalCommit<'_>,
+    ) -> Result<(), PersistenceError> {
+        self.commit_policy_approval(TursoPolicyApprovalCommit {
+            tenant: commit.tenant,
+            decision_id: commit.decision_id,
+            approved_decision_json: commit.approved_decision_json,
+            policy_id: commit.policy_id,
+            cedar_text: commit.cedar_text,
+            created_by: commit.created_by,
+        })
+        .await
+    }
+
+    async fn rollback_policy_approval(
+        &self,
+        tenant: &str,
+        decision_id: &str,
+        pending_decision_json: &str,
+        policy_id: &str,
+    ) -> Result<(), PersistenceError> {
+        self.rollback_policy_approval(tenant, decision_id, pending_decision_json, policy_id)
+            .await
     }
 }
 
@@ -2528,6 +2431,7 @@ fn pg_trajectory_to_turso(row: temper_store_postgres::PostgresTrajectoryRow) -> 
         request_body: row.request_body,
         intent: row.intent,
         matched_policy_ids: row.matched_policy_ids,
+        capture_seq: row.capture_seq,
     }
 }
 
@@ -2587,6 +2491,7 @@ fn pg_feature_request_to_turso(
 ) -> FeatureRequestRow {
     FeatureRequestRow {
         id: row.id,
+        tenant: row.tenant,
         category: row.category,
         description: row.description,
         frequency: row.frequency,
@@ -2603,6 +2508,7 @@ fn pg_evolution_record_to_turso(
 ) -> EvolutionRecordRow {
     EvolutionRecordRow {
         id: row.id,
+        tenant: row.tenant,
         record_type: row.record_type,
         status: row.status,
         created_by: row.created_by,
@@ -2657,6 +2563,19 @@ fn pg_queued_ots_to_turso(
         turn_count: row.turn_count,
         data: row.data,
         persist_attempts: row.persist_attempts,
+    }
+}
+
+fn pg_ots_document_to_turso(
+    document: temper_store_postgres::PostgresOtsTrajectoryDocument,
+) -> OtsTrajectoryDocument {
+    OtsTrajectoryDocument {
+        trajectory_id: document.trajectory_id,
+        tenant: document.tenant,
+        agent_id: document.agent_id,
+        session_id: document.session_id,
+        outcome: document.outcome,
+        data: document.data,
     }
 }
 
@@ -2723,35 +2642,11 @@ impl DataOnlyCreateStore for PostgresEventStore {
     }
 }
 
-fn trajectory_source_label(source: &TrajectorySource) -> &'static str {
-    match source {
-        TrajectorySource::Entity => "Entity",
-        TrajectorySource::Platform => "Platform",
-        TrajectorySource::Authz => "Authz",
-    }
-}
-
-fn trajectory_request_body_json(entry: &TrajectoryEntry) -> Option<String> {
-    entry.request_body.as_ref().and_then(|value| {
-        let serialized = serde_json::to_string(value).ok()?;
-        Some(if serialized.len() > 4096 {
-            let mut end = 4096;
-            while !serialized.is_char_boundary(end) {
-                end -= 1;
-            }
-            serialized[..end].to_string()
-        } else {
-            serialized
-        })
-    })
-}
-
-fn trajectory_matched_policy_ids_json(entry: &TrajectoryEntry) -> Option<String> {
-    entry
-        .matched_policy_ids
-        .as_ref()
-        .and_then(|ids| serde_json::to_string(ids).ok())
-}
+pub(crate) use redaction::redact_secrets;
+pub(crate) use trajectory_row::bounded_request_body;
+use trajectory_row::{
+    trajectory_matched_policy_ids_json, trajectory_request_body_json, trajectory_source_label,
+};
 
 #[async_trait::async_trait]
 impl TrajectorySink for PostgresEventStore {
@@ -2780,6 +2675,7 @@ impl TrajectorySink for PostgresEventStore {
             request_body: request_body_json.as_deref(),
             intent: entry.intent.as_deref(),
             matched_policy_ids: matched_policy_ids_json.as_deref(),
+            capture_seq: entry.capture_seq,
         })
         .await
         .map_err(|e| {
@@ -2818,6 +2714,7 @@ impl TrajectorySink for TursoEventStore {
             request_body: request_body_json.as_deref(),
             intent: entry.intent.as_deref(),
             matched_policy_ids: matched_policy_ids_json.as_deref(),
+            capture_seq: entry.capture_seq,
         })
         .await
         .map_err(|e| {
@@ -2863,6 +2760,7 @@ impl TrajectorySink for TenantStoreRouter {
                 request_body: request_body_json.as_deref(),
                 intent: entry.intent.as_deref(),
                 matched_policy_ids: matched_policy_ids_json.as_deref(),
+                capture_seq: entry.capture_seq,
             })
             .await
             .map_err(|e| {
