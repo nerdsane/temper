@@ -264,7 +264,7 @@ async fn migration_batches_replay_and_cut_over_atomically() {
     assert!(
         temper_runtime::persistence::EventStore::read_events(
             &store,
-            &format!("tenant-a:Example.Task:task-1:schema:{target_digest}"),
+            &scoped_persistence_id("Example.Task", "task-1", &target_digest),
             0,
         )
         .await
@@ -293,7 +293,7 @@ async fn migration_batches_replay_and_cut_over_atomically() {
     assert_eq!(
         temper_runtime::persistence::EventStore::read_events(
             &store,
-            &format!("tenant-a:Example.Task:task-1:schema:{target_digest}"),
+            &scoped_persistence_id("Example.Task", "task-1", &target_digest),
             0,
         )
         .await
@@ -405,19 +405,18 @@ async fn migration_batches_replay_and_cut_over_atomically() {
             actor_id: "test".into(),
         },
     };
-    let stale_source_id = format!(
-        "tenant-a:Example.Task:task-1:schema:{}",
-        target_pointer.predecessor_digest.as_deref().unwrap()
+    let stale_source_id = scoped_persistence_id(
+        "Example.Task",
+        "task-1",
+        target_pointer.predecessor_digest.as_deref().unwrap(),
     );
     assert!(
         EventStore::append(&store, &stale_source_id, 0, std::slice::from_ref(&envelope))
             .await
             .is_err()
     );
-    let active_target_id = format!(
-        "tenant-a:Example.Task:task-1:schema:{}",
-        target_pointer.bundle_digest
-    );
+    let active_target_id =
+        scoped_persistence_id("Example.Task", "task-1", &target_pointer.bundle_digest);
     EventStore::append(&store, &active_target_id, 1, &[envelope])
         .await
         .unwrap();

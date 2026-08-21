@@ -66,8 +66,8 @@ pub struct AgentContext {
     pub expected_entity_sequence: Option<u64>,
     /// Host-resolved immutable task-scoped schema identity.
     ///
-    /// Callers cannot supply a bundle digest directly; HTTP and WASM adapters
-    /// resolve the current pointer once at the request boundary.
+    /// HTTP adapters validate explicit digests. Scope-only entity requests use
+    /// the entity's durable pin when present and the active pointer for creation.
     pub schema_pin: Option<SchemaExecutionPin>,
     /// Generic, client-supplied observability metadata.
     ///

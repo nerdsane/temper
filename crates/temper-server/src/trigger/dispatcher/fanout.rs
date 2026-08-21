@@ -153,7 +153,7 @@ impl ReactionDispatcher {
 
             let authz_snapshot = match dispatch_ctx.schema_pin.as_ref() {
                 Some(pin) => state
-                    .get_scoped_entity_state(
+                    .get_or_initialize_scoped_entity_state(
                         tenant,
                         &rule.then.entity_type,
                         &target_entity_id,
@@ -256,7 +256,7 @@ impl ReactionDispatcher {
                 };
                 let guard_source = match dispatch_ctx.schema_pin.as_ref() {
                     Some(pin) => state
-                        .get_scoped_entity_state(
+                        .get_or_initialize_scoped_entity_state(
                             tenant,
                             &rule.then.entity_type,
                             &target_entity_id,

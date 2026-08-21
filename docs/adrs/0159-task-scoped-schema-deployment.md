@@ -247,6 +247,45 @@ Existing entities retain their recorded global or scoped bundle identity.
 There is no implicit adoption of the newest active bundle and no in-place
 reinterpretation of durable state.
 
+The canonical scoped-journal entity-ID frame is an internal reserved form.
+Tenant-global IDs continue to support colons, but the global actor boundary
+rejects any ID that exactly parses as that frame. This narrow reservation keeps
+global persistence IDs compatible while making global and scoped actor and
+journal identities disjoint.
+
+### 9. Durable entity pins are authoritative during dispatch and recovery
+
+A scoped entity operation resolves exactly one `SchemaExecutionPin` before it
+selects an actor or transition table. The resolved pin is the common input for
+the actor-registry key, durable persistence identity, event/action pin, exact
+bundle configuration, and `TransitionTable`. Those identities must agree; the
+runtime must not independently derive any of them from the current registry
+contents after resolution.
+
+The active scope pointer authorizes new entity pins and identifies the committed
+side of a migration cutover. It does not reinterpret an entity that already has
+a durable pin. For entity-addressed reads, writes, and bound actions, recovery
+must inspect the durable entity identity before spawning an actor. A request may
+name an exact bundle digest. That digest must agree with both the authoritative
+active/cutover side and the entity's durable pin. A scope-only request uses the
+authoritative durable pin for an existing entity and the active pointer only for
+a new entity.
+
+Any missing, malformed, ambiguous, or inconsistent identity fails closed with a
+stable `schema_pin_mismatch` error (`SchemaPinMismatch` on OData). In particular,
+the server must not handle a mismatch by spawning a fresh actor in the bundle's
+initial state, by retrying under the active pointer, or by falling back to the
+tenant-global table. Exact artifacts for a retired bundle remain available for
+existing pins and recovery, but retirement prevents creation of a new pin.
+
+Migration preserves old-or-new visibility. Before cutover, the source entity pin
+is authoritative even if target shadow state exists. After the atomic cutover,
+the migrated target pin is authoritative. Passivation, process restart, active
+pointer recovery, and backend selection cannot change which side is visible.
+Tests must exercise transition followed by another action both before and after
+restart; checking only the projected target state is insufficient because a
+wrong table can replay the state while rejecting the next valid action.
+
 ## Rollout Plan
 
 1. **Deterministic foundation** — Land this ADR, pure bundle compiler,

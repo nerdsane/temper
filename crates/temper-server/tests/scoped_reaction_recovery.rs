@@ -176,7 +176,10 @@ async fn scoped_durable_reaction_materializes_and_reconciles_at_exact_pin() {
         .await
         .expect("scoped source action should dispatch");
 
-    let source_id = format!("{tenant}:Order:order-1:schema:{digest}");
+    let source_id = format!(
+        "{tenant}:Order:{}",
+        temper_runtime::persistence::schema_deployment::scoped_journal_entity_id("order-1", &pin,)
+    );
     let source = store.dump_journal(&source_id);
     let intent = extract_intents(
         &source
@@ -263,7 +266,10 @@ async fn scoped_durable_reaction_materializes_and_reconciles_at_exact_pin() {
         .await
         .expect("scoped receipt reconciliation should succeed");
 
-    let target_id = format!("{tenant}:Payment:order-1:schema:{digest}");
+    let target_id = format!(
+        "{tenant}:Payment:{}",
+        temper_runtime::persistence::schema_deployment::scoped_journal_entity_id("order-1", &pin,)
+    );
     assert_eq!(
         store
             .dump_journal(&target_id)

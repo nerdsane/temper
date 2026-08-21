@@ -22,12 +22,15 @@ mod query_projection_queue;
 pub(crate) mod rate_limit;
 mod reference_contract;
 mod runtime_metrics;
+mod schema_pin;
+pub(crate) use schema_pin::SCHEMA_PIN_MISMATCH_PREFIX;
 pub(crate) mod storage_caps;
 pub mod trajectory;
 pub mod wasm_invocation_log;
 
 pub use admission::{AdmissionController, AdmissionOutcome, AdmissionPermit};
 pub use dispatch::{DispatchCommand, DispatchError, DispatchExtOptions, StateTimeoutTracker};
+pub(crate) use entity_ops::validate_global_entity_id;
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
 pub use file_reads::{IndexedFileStreamRead, TextFileReadResult, TextFileVersionReadResult};
 pub(crate) use file_writes::FileStreamContentError;
@@ -71,7 +74,7 @@ use crate::registry::SpecRegistry;
 use crate::secrets::vault::SecretsVault;
 use crate::storage::{
     BackendLabel, BoxedEventStore, DataOnlyCreateStore, MetadataStore, PolicyStore,
-    QueryPlaneStore, StorageStack, TrajectorySink,
+    QueryPlaneStore, SchemaDeploymentStoreDyn, StorageStack, TrajectorySink,
 };
 use crate::trigger::ReactionDispatcher;
 use crate::wasm_registry::WasmModuleRegistry;
@@ -735,6 +738,13 @@ impl ServerState {
         self.storage_stack
             .as_ref()
             .map(|stack| (stack.events.clone(), stack.backend))
+    }
+
+    /// Return the durable schema-deployment capability when configured.
+    pub(crate) fn schema_deployment_store(&self) -> Option<Arc<dyn SchemaDeploymentStoreDyn>> {
+        self.storage_stack
+            .as_ref()
+            .and_then(|stack| stack.schema_deployments.clone())
     }
 
     /// Return the granular Cedar policy persistence capability.

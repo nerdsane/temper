@@ -301,11 +301,13 @@ impl ReactionDispatcher {
         if let Some(target_entity_id) = intent.target_entity_id.as_deref() {
             let target_persistence_id = match intent.schema_pin.as_ref() {
                 Some(pin) => format!(
-                    "{}:{}:{}:schema:{}",
+                    "{}:{}:{}",
                     intent.tenant,
                     rule.then.entity_type,
-                    target_entity_id,
-                    pin.execution.bundle_digest
+                    temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                        target_entity_id,
+                        &pin.execution,
+                    )
                 ),
                 None => format!(
                     "{}:{}:{}",

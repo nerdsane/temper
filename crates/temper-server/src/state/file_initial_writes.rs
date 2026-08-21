@@ -7,7 +7,7 @@ use crate::entity_actor::{EntityEvent, EntityResponse, EntityState, process_acti
 use crate::events::EntityStateChange;
 
 use super::file_writes::content_hash_and_native_blob_key;
-use super::{FileStreamContentError, ServerState};
+use super::{FileStreamContentError, ServerState, validate_global_entity_id};
 
 impl ServerState {
     /// Create a brand-new TemperFS `File` and persist its first stream bytes as
@@ -52,6 +52,7 @@ impl ServerState {
         mime_type: &str,
         agent_ctx: &crate::request_context::AgentContext,
     ) -> Result<crate::entity_actor::EntityResponse, FileStreamContentError> {
+        validate_global_entity_id(file_id).map_err(FileStreamContentError::ActionRejected)?;
         if self.ensure_entity_loaded(tenant, "File", file_id).await {
             return Err(FileStreamContentError::ActionRejected(format!(
                 "File('{file_id}') already exists; use File $value update for existing content"

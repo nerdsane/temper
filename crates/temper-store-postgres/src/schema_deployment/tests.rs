@@ -5,12 +5,12 @@ use temper_runtime::persistence::schema_deployment::{
     ActivateSchemaBundle, ActivateSchemaBundleOutcome, ClaimSchemaVerification,
     ClaimSchemaVerificationOutcome, CommitSchemaMigrationBatch, CreateSchemaMigration,
     ReserveSchemaMigrationRetry, SchemaActivePointer, SchemaBundleRecord, SchemaDeploymentRecord,
-    SchemaDeploymentStore, SchemaDeploymentStoreError, SchemaMigrationBatchReceipt,
-    SchemaMigrationBudgets, SchemaMigrationShadowRow, SchemaMigrationStatus,
-    SchemaMigrationValidationReceipt, SchemaOperationIdentity, SchemaScope, SchemaScopeKind,
-    SchemaVerificationReceipt, SubmitSchemaBundle,
+    SchemaDeploymentStore, SchemaDeploymentStoreError, SchemaExecutionPin,
+    SchemaMigrationBatchReceipt, SchemaMigrationBudgets, SchemaMigrationShadowRow,
+    SchemaMigrationStatus, SchemaMigrationValidationReceipt, SchemaOperationIdentity, SchemaScope,
+    SchemaScopeKind, SchemaVerificationReceipt, SubmitSchemaBundle,
 };
-use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope};
+use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
 
 use crate::{PostgresEventStore, migration::run_migrations};
 
@@ -165,6 +165,131 @@ fn postgres_schema_migration_contract() {
                 })
                 .await
                 .expect("activate source"),
+        );
+        let source_pin = SchemaExecutionPin {
+            scope: scope.clone(),
+            bundle_digest: source_digest.clone(),
+        };
+        let inactive_pin = SchemaExecutionPin {
+            scope: SchemaScope {
+                kind: SchemaScopeKind::Task,
+                id: format!("inactive-{suffix}"),
+            },
+            bundle_digest: source_digest.clone(),
+        };
+        let inactive_id = format!(
+            "{tenant}:Example.Task:{}",
+            temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                "cross-scope",
+                &inactive_pin,
+            )
+        );
+        assert!(
+            store
+                .append(
+                    &inactive_id,
+                    0,
+                    &[PersistenceEnvelope {
+                        sequence_nr: 1,
+                        event_type: "Configure".into(),
+                        payload: serde_json::json!({}),
+                        metadata: EventMetadata {
+                            event_id: temper_runtime::scheduler::sim_uuid(),
+                            causation_id: temper_runtime::scheduler::sim_uuid(),
+                            correlation_id: temper_runtime::scheduler::sim_uuid(),
+                            timestamp: temper_runtime::scheduler::sim_now(),
+                            actor_id: "cross-scope-fence-contract".into(),
+                        },
+                    }],
+                )
+                .await
+                .expect_err("same digest in an inactive scope must remain fenced")
+                .to_string()
+                .contains("stale scoped schema write fence")
+        );
+        let pinned_id = format!(
+            "{tenant}:Example.Task:{}",
+            temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                "entity-雪",
+                &source_pin,
+            )
+        );
+        store
+            .append(
+                &pinned_id,
+                0,
+                &[PersistenceEnvelope {
+                    sequence_nr: 1,
+                    event_type: "Configure".into(),
+                    payload: serde_json::json!({}),
+                    metadata: EventMetadata {
+                        event_id: temper_runtime::scheduler::sim_uuid(),
+                        causation_id: temper_runtime::scheduler::sim_uuid(),
+                        correlation_id: temper_runtime::scheduler::sim_uuid(),
+                        timestamp: temper_runtime::scheduler::sim_now(),
+                        actor_id: "pin-contract".into(),
+                    },
+                }],
+            )
+            .await
+            .expect("append pinned entity event");
+        let collision_base = "entity-collision";
+        let collision_entity =
+            temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                collision_base,
+                &source_pin,
+            );
+        store
+            .append(
+                &format!(
+                    "{tenant}:Example.Task:{}",
+                    temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                        &collision_entity,
+                        &source_pin,
+                    )
+                ),
+                0,
+                &[PersistenceEnvelope {
+                    sequence_nr: 1,
+                    event_type: "Configure".into(),
+                    payload: serde_json::json!({}),
+                    metadata: EventMetadata {
+                        event_id: temper_runtime::scheduler::sim_uuid(),
+                        causation_id: temper_runtime::scheduler::sim_uuid(),
+                        correlation_id: temper_runtime::scheduler::sim_uuid(),
+                        timestamp: temper_runtime::scheduler::sim_now(),
+                        actor_id: "pin-collision-contract".into(),
+                    },
+                }],
+            )
+            .await
+            .expect("append colon-bearing pinned entity event");
+        assert!(
+            store
+                .scoped_entity_bundle_digests(&tenant, "Example.Task", collision_base, &scope, 2,)
+                .await
+                .expect("reject colliding entity prefix")
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .scoped_entity_bundle_digests(
+                    &tenant,
+                    "Example.Task",
+                    &collision_entity,
+                    &scope,
+                    2,
+                )
+                .await
+                .expect("load colon-bearing entity pin"),
+            vec![source_digest.clone()]
+        );
+        assert_eq!(
+            store
+                .scoped_entity_bundle_digests(&tenant, "Example.Task", "entity-雪", &scope, 2,)
+                .await
+                .expect("load pinned entity digest"),
+            vec![source_digest.clone()]
         );
 
         let target_digest = format!("sha256:{}", "3".repeat(64));

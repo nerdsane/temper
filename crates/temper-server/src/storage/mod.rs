@@ -35,8 +35,10 @@ use crate::platform_store::SimPlatformStore;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 
 mod backend_label;
+mod policy_store;
 mod published_artifacts;
 pub use backend_label::{BackendLabel, DataOnlyCreateRecord, DataOnlyCreateStore, PolicyStoreRow};
+pub use policy_store::{BackendNamedStore, PolicyStore, TrajectorySink};
 mod query_plane_impls;
 mod query_plane_read;
 mod schema_deployment;
@@ -44,6 +46,8 @@ pub use published_artifacts::{
     PublishedArtifactStore, PublishedArtifactStoreRow, PublishedArtifactStoreUpsert,
 };
 pub use schema_deployment::SchemaDeploymentStoreDyn;
+mod turso_store_provider;
+pub use turso_store_provider::TursoStoreProvider;
 mod query_plane;
 pub use query_plane::{
     EntityCatalogRow, QueryFieldIndexOrder, QueryFieldIndexOrderDirection, QueryFieldIndexPage,
@@ -220,14 +224,25 @@ pub trait DynEventStore: Send + Sync {
         &'a self,
         tenant: &'a str,
         entity_type: &'a str,
+        scope: &'a temper_runtime::persistence::schema_deployment::SchemaScope,
         bundle_digest: &'a str,
         after_entity_id: Option<&'a str>,
+        limit: usize,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
+
+    fn scoped_entity_bundle_digests<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        entity_id: &'a str,
+        scope: &'a temper_runtime::persistence::schema_deployment::SchemaScope,
         limit: usize,
     ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
 
     fn scoped_bundle_write_version<'a>(
         &'a self,
         tenant: &'a str,
+        scope: &'a temper_runtime::persistence::schema_deployment::SchemaScope,
         bundle_digest: &'a str,
     ) -> EventStoreFuture<'a, Result<u64, PersistenceError>>;
 }
@@ -532,6 +547,7 @@ where
         &'a self,
         tenant: &'a str,
         entity_type: &'a str,
+        scope: &'a temper_runtime::persistence::schema_deployment::SchemaScope,
         bundle_digest: &'a str,
         after_entity_id: Option<&'a str>,
         limit: usize,
@@ -540,8 +556,27 @@ where
             self,
             tenant,
             entity_type,
+            scope,
             bundle_digest,
             after_entity_id,
+            limit,
+        ))
+    }
+
+    fn scoped_entity_bundle_digests<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        entity_id: &'a str,
+        scope: &'a temper_runtime::persistence::schema_deployment::SchemaScope,
+        limit: usize,
+    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>> {
+        Box::pin(EventStore::scoped_entity_bundle_digests(
+            self,
+            tenant,
+            entity_type,
+            entity_id,
+            scope,
             limit,
         ))
     }
@@ -549,11 +584,13 @@ where
     fn scoped_bundle_write_version<'a>(
         &'a self,
         tenant: &'a str,
+        scope: &'a temper_runtime::persistence::schema_deployment::SchemaScope,
         bundle_digest: &'a str,
     ) -> EventStoreFuture<'a, Result<u64, PersistenceError>> {
         Box::pin(EventStore::scoped_bundle_write_version(
             self,
             tenant,
+            scope,
             bundle_digest,
         ))
     }
@@ -823,68 +860,47 @@ impl BoxedEventStore {
         &self,
         tenant: &str,
         entity_type: &str,
+        scope: &temper_runtime::persistence::schema_deployment::SchemaScope,
         bundle_digest: &str,
         after_entity_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<String>, PersistenceError> {
         self.0
-            .list_scoped_entity_ids_page(tenant, entity_type, bundle_digest, after_entity_id, limit)
+            .list_scoped_entity_ids_page(
+                tenant,
+                entity_type,
+                scope,
+                bundle_digest,
+                after_entity_id,
+                limit,
+            )
+            .await
+    }
+
+    /// Return the bounded durable bundle identities for one scoped entity.
+    pub async fn scoped_entity_bundle_digests(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        scope: &temper_runtime::persistence::schema_deployment::SchemaScope,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        self.0
+            .scoped_entity_bundle_digests(tenant, entity_type, entity_id, scope, limit)
             .await
     }
 
     pub async fn scoped_bundle_write_version(
         &self,
         tenant: &str,
+        scope: &temper_runtime::persistence::schema_deployment::SchemaScope,
         bundle_digest: &str,
     ) -> Result<u64, PersistenceError> {
         self.0
-            .scoped_bundle_write_version(tenant, bundle_digest)
+            .scoped_bundle_write_version(tenant, scope, bundle_digest)
             .await
     }
-}
-
-/// Durable observe trajectory sink.
-#[async_trait::async_trait]
-pub trait TrajectorySink: Send + Sync {
-    async fn persist_trajectory_entry(&self, entry: &TrajectoryEntry) -> Result<(), String>;
-}
-
-/// Backend label for trait-object metadata stores.
-pub trait BackendNamedStore: Send + Sync {
-    fn backend_name(&self) -> &'static str;
-}
-
-/// Granular Cedar policy persistence capability.
-#[async_trait::async_trait]
-pub trait PolicyStore: Send + Sync {
-    async fn save_policy(
-        &self,
-        tenant: &str,
-        policy_id: &str,
-        cedar_text: &str,
-        created_by: &str,
-    ) -> Result<bool, String>;
-
-    async fn load_policies_for_tenant(&self, tenant: &str) -> Result<Vec<PolicyStoreRow>, String>;
-
-    async fn load_all_policies(&self) -> Result<Vec<PolicyStoreRow>, String>;
-
-    async fn toggle_policy_enabled(
-        &self,
-        tenant: &str,
-        policy_id: &str,
-        enabled: bool,
-    ) -> Result<bool, String>;
-
-    async fn update_policy_text(
-        &self,
-        tenant: &str,
-        policy_id: &str,
-        cedar_text: &str,
-        created_by: &str,
-    ) -> Result<bool, String>;
-
-    async fn delete_policy(&self, tenant: &str, policy_id: &str) -> Result<(), String>;
 }
 
 /// Observe/trajectory read capability.
@@ -1166,49 +1182,6 @@ pub trait MetadataStoreProvider: Send + Sync {
     async fn store_for_tenant(&self, tenant: &str) -> Option<Arc<dyn MetadataStore>>;
 
     async fn all_stores(&self) -> Vec<Arc<dyn MetadataStore>>;
-}
-
-/// Explicit Turso tenant-store access for transitional boot/recovery paths.
-#[async_trait::async_trait]
-pub trait TursoStoreProvider: Send + Sync {
-    fn supports_tenant_admin(&self) -> bool;
-
-    fn platform_store(&self) -> Option<TursoEventStore>;
-
-    async fn store_for_tenant(&self, tenant: &str) -> Option<TursoEventStore>;
-
-    async fn all_stores(&self) -> Vec<TursoEventStore>;
-
-    async fn connected_tenants(&self) -> Vec<String>;
-
-    async fn tenants_for_user(&self, user_id: &str)
-    -> Result<Vec<TenantUserRow>, PersistenceError>;
-
-    async fn register_tenant(&self, tenant_id: &str) -> Result<TursoEventStore, PersistenceError>;
-
-    async fn list_tenants(&self) -> Result<Vec<String>, PersistenceError>;
-
-    async fn remove_tenant(&self, tenant_id: &str) -> Result<bool, PersistenceError>;
-
-    async fn add_tenant_user(
-        &self,
-        tenant_id: &str,
-        user_id: &str,
-        role: &str,
-    ) -> Result<(), PersistenceError>;
-
-    async fn list_tenant_users(
-        &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TenantUserRow>, PersistenceError>;
-
-    async fn remove_tenant_user(
-        &self,
-        tenant_id: &str,
-        user_id: &str,
-    ) -> Result<(), PersistenceError>;
-
-    async fn ensure_tenant(&self, tenant_id: &str) -> Result<bool, PersistenceError>;
 }
 
 /// Composed storage capabilities selected at boot.

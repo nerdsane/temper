@@ -86,8 +86,10 @@ fn composite_persistence_id(
 ) -> String {
     match schema_pin {
         Some(pin) => format!(
-            "{tenant}:{entity_type}:{entity_id}:schema:{}",
-            pin.bundle_digest
+            "{tenant}:{entity_type}:{}",
+            temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                entity_id, pin,
+            )
         ),
         None => format!("{tenant}:{entity_type}:{entity_id}"),
     }
@@ -479,7 +481,7 @@ impl crate::state::ServerState {
                     tenant,
                     &stream.entity_type,
                     &stream.entity_id,
-                    &pin.bundle_digest,
+                    pin,
                 );
             } else {
                 self.stop_and_remove_entity(tenant, &stream.entity_type, &stream.entity_id);

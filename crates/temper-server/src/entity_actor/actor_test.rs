@@ -323,7 +323,10 @@ async fn scoped_actor_commits_immutable_schema_pin_to_state_and_events() {
         .expect("scoped action should execute");
     assert!(action.success);
 
-    let persistence_id = format!("default:Order:scoped-1:schema:{}", pin.bundle_digest);
+    let persistence_id = format!(
+        "default:Order:{}",
+        temper_runtime::persistence::schema_deployment::scoped_journal_entity_id("scoped-1", &pin,)
+    );
     let events = store
         .read_events(&persistence_id, 0)
         .await
@@ -356,7 +359,12 @@ async fn scoped_actor_recovery_rejects_mismatched_event_pin() {
     let expected = task_schema_pin(&format!("sha256:{}", "b".repeat(64)));
     let wrong = task_schema_pin(&format!("sha256:{}", "c".repeat(64)));
     activate_schema_pin(store.as_ref(), &expected).await;
-    let persistence_id = format!("default:Order:scoped-2:schema:{}", expected.bundle_digest);
+    let persistence_id = format!(
+        "default:Order:{}",
+        temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+            "scoped-2", &expected,
+        )
+    );
     let envelope = PersistenceEnvelope {
         sequence_nr: 0,
         event_type: "Created".to_string(),

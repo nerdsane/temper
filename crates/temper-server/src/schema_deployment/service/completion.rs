@@ -31,7 +31,7 @@ impl GovernedSchemaDeploymentService<'_> {
             for row in &rows {
                 let target = self
                     .state
-                    .get_scoped_entity_state(
+                    .get_scoped_migration_shadow_state(
                         tenant_id,
                         &row.entity_type,
                         &row.entity_id,
@@ -143,7 +143,10 @@ impl GovernedSchemaDeploymentService<'_> {
                     tenant_id,
                     &row.entity_type,
                     &row.entity_id,
-                    &job.command.source_bundle_digest,
+                    &SchemaExecutionPin {
+                        scope: job.command.scope.clone(),
+                        bundle_digest: job.command.source_bundle_digest.clone(),
+                    },
                 );
             }
             job = self

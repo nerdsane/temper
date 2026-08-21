@@ -4,7 +4,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use temper_odata::path::{KeyValue, ODataPath};
 use temper_runtime::persistence::schema_deployment::{
-    SchemaExecutionPin, SchemaScope, SchemaScopeKind,
+    SchemaExecutionPin, SchemaScope, SchemaScopeKind, is_canonical_sha256_digest,
 };
 use temper_runtime::tenant::TenantId;
 
@@ -12,6 +12,7 @@ use super::constraints::{
     ConstraintViolation, post_write_invariant_checks, pre_upsert_field_invariant_checks,
     pre_upsert_relation_checks,
 };
+use super::schema_pin::schema_pin_mismatch_response;
 use crate::state::{ServerState, VerificationGateError};
 
 /// Extract the tenant ID from request headers.
@@ -56,8 +57,15 @@ pub(crate) async fn extract_schema_pin(
 ) -> Result<Option<SchemaExecutionPin>, (StatusCode, String)> {
     let kind = headers.get("x-temper-schema-scope-kind");
     let id = headers.get("x-temper-schema-scope-id");
+    let requested_digest = headers.get("x-temper-schema-bundle-digest");
     let (kind, id) = match (kind, id) {
-        (None, None) => return Ok(None),
+        (None, None) if requested_digest.is_none() => return Ok(None),
+        (None, None) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Schema bundle digest requires schema scope kind and id".to_string(),
+            ));
+        }
         (Some(kind), Some(id)) => {
             let kind = kind.to_str().map(str::trim).map_err(|_| {
                 (
@@ -96,6 +104,57 @@ pub(crate) async fn extract_schema_pin(
         kind: SchemaScopeKind::Task,
         id: id.to_string(),
     };
+    let requested_digest = requested_digest
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::trim)
+                .map_err(|_| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "Schema bundle digest must be valid UTF-8".to_string(),
+                    )
+                })
+                .and_then(|digest| {
+                    if is_canonical_sha256_digest(digest) {
+                        Ok(digest.to_string())
+                    } else {
+                        Err((
+                            StatusCode::BAD_REQUEST,
+                            "Schema bundle digest must use canonical sha256:<64 lowercase hex> form"
+                                .to_string(),
+                        ))
+                    }
+                })
+        })
+        .transpose()?;
+    if let Some(bundle_digest) = requested_digest {
+        let exact_bundle_loaded = state
+            .registry
+            .read()
+            .expect("registry lock poisoned")
+            .get_scoped_config_at_digest(tenant, &scope, &bundle_digest)
+            .is_some();
+        if !exact_bundle_loaded {
+            crate::schema_deployment::GovernedSchemaDeploymentService::new(state)
+                .recover_registry_bundle(tenant.as_str(), &scope, &bundle_digest)
+                .await
+                .map_err(|error| {
+                    (
+                        StatusCode::CONFLICT,
+                        format!(
+                            "{} {}",
+                            crate::state::SCHEMA_PIN_MISMATCH_PREFIX,
+                            error.message()
+                        ),
+                    )
+                })?;
+        }
+        return Ok(Some(SchemaExecutionPin {
+            scope,
+            bundle_digest,
+        }));
+    }
     if state
         .registry
         .read()
@@ -376,13 +435,15 @@ pub(super) async fn load_entity_or_404(
                 .await
         }
     };
-    result.map_err(|e| {
-        crate::response::odata_error(
-            StatusCode::NOT_FOUND,
-            "ResourceNotFound",
-            &format!("Entity '{set_name}' with key '{key}' not found: {e}"),
-        )
-        .into_response()
+    result.map_err(|error| {
+        schema_pin_mismatch_response(&error).unwrap_or_else(|| {
+            crate::response::odata_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFound",
+                &format!("Entity '{set_name}' with key '{key}' not found: {error}"),
+            )
+            .into_response()
+        })
     })
 }
 

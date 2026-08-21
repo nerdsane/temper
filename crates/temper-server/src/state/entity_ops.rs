@@ -13,7 +13,7 @@ use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
 use super::dispatch::retry;
-use super::{ServerState, projection_backfill};
+use super::{SCHEMA_PIN_MISMATCH_PREFIX, ServerState, projection_backfill};
 use crate::entity_actor::{EntityActor, EntityEvent, EntityMsg, EntityResponse, EntityState};
 use crate::events::EntityStateChange;
 use crate::registry::{VerificationDetail, VerificationStatus};
@@ -40,6 +40,17 @@ fn is_deleted_envelope(event: &PersistenceEnvelope) -> bool {
         .get("action")
         .and_then(serde_json::Value::as_str)
         == Some("Deleted")
+}
+
+pub(crate) fn validate_global_entity_id(entity_id: &str) -> Result<(), String> {
+    if temper_runtime::persistence::schema_deployment::is_reserved_scoped_journal_entity_id(
+        entity_id,
+    ) {
+        return Err(format!(
+            "global entity ID '{entity_id}' uses the reserved scoped-journal identity form"
+        ));
+    }
+    Ok(())
 }
 
 fn record_projection_update_started(
@@ -729,10 +740,21 @@ impl ServerState {
         initial_reference_evidence: BTreeMap<String, bool>,
         schema_pin: Option<SchemaExecutionPin>,
     ) -> Option<ActorRef<EntityMsg>> {
+        if schema_pin.is_none() && validate_global_entity_id(entity_id).is_err() {
+            tracing::warn!(
+                tenant = %tenant,
+                entity_type,
+                entity_id,
+                "rejected global entity ID in reserved scoped-journal namespace"
+            );
+            return None;
+        }
         let key = match schema_pin.as_ref() {
             Some(pin) => format!(
-                "{tenant}:{entity_type}:{entity_id}:schema:{}",
-                pin.bundle_digest
+                "{tenant}:{entity_type}:{}",
+                temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                    entity_id, pin
+                )
             ),
             None => format!("{tenant}:{entity_type}:{entity_id}"),
         };
@@ -781,7 +803,7 @@ impl ServerState {
             .lock()
             .ok()
             .and_then(|slot| slot.clone());
-        let scoped_digest = schema_pin.as_ref().map(|pin| pin.bundle_digest.clone());
+        let scoped_pin = schema_pin.clone();
         let actor = match self.event_journal() {
             Some((store, backend)) => EntityActor::with_persistence(
                 entity_type,
@@ -822,8 +844,14 @@ impl ServerState {
 
         // Track in entity index for collection queries
         {
-            let index_key = match scoped_digest.as_deref() {
-                Some(digest) => format!("{tenant}:{entity_type}:schema:{digest}"),
+            let index_key = match scoped_pin.as_ref() {
+                Some(pin) => format!(
+                    "{tenant}:{entity_type}:{}",
+                    temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                        "__index__",
+                        pin,
+                    )
+                ),
                 None => format!("{tenant}:{entity_type}"),
             };
             let mut index = self.entity_index.write().unwrap();
@@ -843,9 +871,15 @@ impl ServerState {
         &self,
         tenant: &TenantId,
         entity_type: &str,
-        bundle_digest: &str,
+        schema_pin: &SchemaExecutionPin,
     ) -> Vec<String> {
-        let key = format!("{tenant}:{entity_type}:schema:{bundle_digest}");
+        let key = format!(
+            "{tenant}:{entity_type}:{}",
+            temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                "__index__",
+                schema_pin,
+            )
+        );
         self.entity_index
             .read()
             .ok()
@@ -860,7 +894,7 @@ impl ServerState {
         &self,
         tenant: &TenantId,
         entity_types: &[String],
-        bundle_digest: &str,
+        schema_pin: &SchemaExecutionPin,
         after: Option<(&str, &str)>,
         limit: usize,
     ) -> Result<Vec<(String, String)>, String> {
@@ -883,7 +917,8 @@ impl ServerState {
                     .list_scoped_entity_ids_page(
                         tenant.as_str(),
                         entity_type,
-                        bundle_digest,
+                        &schema_pin.scope,
+                        &schema_pin.bundle_digest,
                         after_entity_id,
                         remaining,
                     )
@@ -902,7 +937,13 @@ impl ServerState {
             .expect("entity index lock poisoned");
         let mut result = Vec::new();
         for entity_type in &sorted_types {
-            let key = format!("{tenant}:{entity_type}:schema:{bundle_digest}");
+            let key = format!(
+                "{tenant}:{entity_type}:{}",
+                temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                    "__index__",
+                    schema_pin,
+                )
+            );
             let Some(ids) = index.get(&key) else {
                 continue;
             };
@@ -926,9 +967,14 @@ impl ServerState {
         tenant: &TenantId,
         entity_type: &str,
         entity_id: &str,
-        bundle_digest: &str,
+        schema_pin: &SchemaExecutionPin,
     ) {
-        let actor_key = format!("{tenant}:{entity_type}:{entity_id}:schema:{bundle_digest}");
+        let actor_key = format!(
+            "{tenant}:{entity_type}:{}",
+            temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                entity_id, schema_pin,
+            )
+        );
         if let Ok(mut registry) = self.actor_registry.write()
             && let Some(actor_ref) = registry.remove(&actor_key)
         {
@@ -937,7 +983,13 @@ impl ServerState {
         if let Ok(mut last_accessed) = self.last_accessed.write() {
             last_accessed.remove(&actor_key);
         }
-        let index_key = format!("{tenant}:{entity_type}:schema:{bundle_digest}");
+        let index_key = format!(
+            "{tenant}:{entity_type}:{}",
+            temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                "__index__",
+                schema_pin,
+            )
+        );
         if let Ok(mut index) = self.entity_index.write()
             && let Some(ids) = index.get_mut(&index_key)
         {
@@ -1158,6 +1210,68 @@ impl ServerState {
         entity_id: &str,
         schema_pin: SchemaExecutionPin,
     ) -> Result<EntityResponse, String> {
+        let pin_exists = self
+            .scoped_entity_pin_matches(tenant, entity_type, entity_id, &schema_pin)
+            .await?;
+        if !pin_exists {
+            return Err(format!(
+                "{SCHEMA_PIN_MISMATCH_PREFIX} scoped entity '{entity_type}/{entity_id}' has no durable pin for {}",
+                schema_pin.bundle_digest
+            ));
+        }
+        self.query_scoped_entity_state(tenant, entity_type, entity_id, schema_pin)
+            .await
+    }
+
+    /// Read a scoped entity for dispatch, initializing it only at the active pin.
+    pub(crate) async fn get_or_initialize_scoped_entity_state(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: SchemaExecutionPin,
+    ) -> Result<EntityResponse, String> {
+        self.validate_scoped_entity_pin_for_dispatch(tenant, entity_type, entity_id, &schema_pin)
+            .await?;
+        self.query_scoped_entity_state(tenant, entity_type, entity_id, schema_pin)
+            .await
+    }
+
+    /// Validate the durable identity before any scoped dispatch selects a table or actor.
+    pub(crate) async fn validate_scoped_entity_pin_for_dispatch(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: &SchemaExecutionPin,
+    ) -> Result<(), String> {
+        let pin_exists = self
+            .scoped_entity_pin_matches(tenant, entity_type, entity_id, schema_pin)
+            .await?;
+        if !pin_exists {
+            let pin_is_active = self
+                .registry
+                .read()
+                .map_err(|_| "registry lock poisoned".to_string())?
+                .active_scope_digest(tenant, &schema_pin.scope)
+                == Some(schema_pin.bundle_digest.as_str());
+            if !pin_is_active {
+                return Err(format!(
+                    "{SCHEMA_PIN_MISMATCH_PREFIX} scoped entity '{entity_type}/{entity_id}' has no durable pin for {}",
+                    schema_pin.bundle_digest
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn query_scoped_entity_state(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: SchemaExecutionPin,
+    ) -> Result<EntityResponse, String> {
         let actor_ref = self
             .get_or_spawn_scoped_actor_with_fields(
                 tenant,
@@ -1178,6 +1292,18 @@ impl ServerState {
             .map_err(|error| format!("Scoped actor query failed: {error}"))
     }
 
+    /// Read an exact migration shadow journal without granting it dispatch authority.
+    pub(crate) async fn get_scoped_migration_shadow_state(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: SchemaExecutionPin,
+    ) -> Result<EntityResponse, String> {
+        self.query_scoped_entity_state(tenant, entity_type, entity_id, schema_pin)
+            .await
+    }
+
     /// Enumerate exact-digest entity IDs within a caller-supplied work budget.
     pub(crate) async fn list_scoped_entity_ids_bounded(
         &self,
@@ -1191,6 +1317,7 @@ impl ServerState {
                 .list_scoped_entity_ids_page(
                     tenant.as_str(),
                     entity_type,
+                    &schema_pin.scope,
                     &schema_pin.bundle_digest,
                     None,
                     limit,
@@ -1199,7 +1326,8 @@ impl ServerState {
                 .map_err(|error| error.to_string());
         }
         let prefix = format!("{tenant}:{entity_type}:");
-        let suffix = format!(":schema:{}", schema_pin.bundle_digest);
+        let suffix =
+            temper_runtime::persistence::schema_deployment::scoped_journal_pin_suffix(schema_pin);
         let mut ids = self
             .actor_registry
             .read()
@@ -1264,15 +1392,24 @@ impl ServerState {
     ) -> Result<EntityResponse, String> {
         let creating = match schema_pin.as_ref() {
             Some(pin) => {
-                let key = format!(
-                    "{tenant}:{entity_type}:{entity_id}:schema:{}",
-                    pin.bundle_digest
-                );
-                !self
-                    .actor_registry
-                    .read()
-                    .map(|registry| registry.contains_key(&key))
-                    .unwrap_or(false)
+                let exists = self
+                    .scoped_entity_pin_matches(tenant, entity_type, entity_id, pin)
+                    .await?;
+                if !exists {
+                    let active_digest = self
+                        .registry
+                        .read()
+                        .map_err(|_| "registry lock poisoned".to_string())?
+                        .active_scope_digest(tenant, &pin.scope)
+                        .map(str::to_string);
+                    if active_digest.as_deref() != Some(pin.bundle_digest.as_str()) {
+                        return Err(format!(
+                            "{SCHEMA_PIN_MISMATCH_PREFIX} bundle {} is not active for new entity '{entity_type}/{entity_id}'",
+                            pin.bundle_digest
+                        ));
+                    }
+                }
+                !exists
             }
             None => {
                 !self
@@ -1435,6 +1572,7 @@ impl ServerState {
         entity_id: &str,
         initial_fields: serde_json::Value,
     ) -> Result<Option<EntityResponse>, String> {
+        validate_global_entity_id(entity_id)?;
         if !initial_fields.is_object() {
             return Ok(None);
         }
@@ -2014,6 +2152,9 @@ impl ServerState {
         entity_type: &str,
         entity_id: &str,
     ) -> bool {
+        if validate_global_entity_id(entity_id).is_err() {
+            return false;
+        }
         let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
         let journal = self.event_journal();
 

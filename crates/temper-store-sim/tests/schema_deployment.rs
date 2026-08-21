@@ -33,12 +33,21 @@ fn scope() -> SchemaScope {
 }
 
 fn command(key: &str, request_digest: &str, digest: &str) -> SubmitSchemaBundle {
+    command_with_predecessor(key, request_digest, digest, None)
+}
+
+fn command_with_predecessor(
+    key: &str,
+    request_digest: &str,
+    digest: &str,
+    predecessor: Option<&str>,
+) -> SubmitSchemaBundle {
     SubmitSchemaBundle {
         bundle: SchemaBundleRecord {
             tenant: "tenant-a".into(),
             scope: scope(),
             digest: digest.into(),
-            predecessor_digest: None,
+            predecessor_digest: predecessor.map(str::to_string),
             canonical_csdl: "<canonical/>".into(),
             canonical_ioa: BTreeMap::from([("Example.Task".into(), "[automaton]".into())]),
             cedar_policies: BTreeMap::new(),
@@ -52,6 +61,43 @@ fn command(key: &str, request_digest: &str, digest: &str) -> SubmitSchemaBundle 
         request_digest: request_digest.into(),
         request_id: format!("request-{key}"),
     }
+}
+
+fn test_event(sequence_nr: u64) -> PersistenceEnvelope {
+    PersistenceEnvelope {
+        sequence_nr,
+        event_type: "Configure".into(),
+        payload: serde_json::json!({}),
+        metadata: EventMetadata {
+            event_id: sim_uuid(),
+            causation_id: sim_uuid(),
+            correlation_id: sim_uuid(),
+            timestamp: sim_now(),
+            actor_id: "pin-write-fence-contract".into(),
+        },
+    }
+}
+
+fn scoped_persistence_id(entity_type: &str, entity_id: &str, digest: &str) -> String {
+    scoped_persistence_id_in_scope(entity_type, entity_id, &scope(), digest)
+}
+
+fn scoped_persistence_id_in_scope(
+    entity_type: &str,
+    entity_id: &str,
+    pin_scope: &SchemaScope,
+    digest: &str,
+) -> String {
+    format!(
+        "tenant-a:{entity_type}:{}",
+        temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+            entity_id,
+            &temper_runtime::persistence::schema_deployment::SchemaExecutionPin {
+                scope: pin_scope.clone(),
+                bundle_digest: digest.to_string(),
+            },
+        )
+    )
 }
 
 fn operation(key: &str) -> SchemaOperationIdentity {
@@ -120,6 +166,131 @@ fn retired(outcome: RetireSchemaBundleOutcome) -> SchemaDeploymentRecord {
         RetireSchemaBundleOutcome::Retired(record)
         | RetireSchemaBundleOutcome::Replayed(record) => record,
     }
+}
+
+async fn verify_bundle(store: &SimEventStore, key: &str, digest: &str, logical_now: u64) -> u64 {
+    let claim = claimed(
+        store
+            .claim_schema_verification(claim_command(
+                &format!("{key}-verify"),
+                digest,
+                logical_now,
+                logical_now + 10,
+            ))
+            .await
+            .unwrap(),
+    );
+    store
+        .finish_schema_verification(
+            "tenant-a",
+            &scope(),
+            digest,
+            claim.fence,
+            SchemaVerificationReceipt {
+                id: format!("{key}-receipt"),
+                verifier_version: "v1".into(),
+                input_digest: format!("sha256:{}", "c".repeat(64)),
+                passed: true,
+            },
+        )
+        .await
+        .unwrap()
+        .fence
+}
+
+#[tokio::test]
+async fn active_pointer_change_preserves_existing_pin_writes_but_fences_new_old_pins() {
+    let store = SimEventStore::no_faults(8);
+    let original = format!("sha256:{}", "a".repeat(64));
+    let replacement = format!("sha256:{}", "b".repeat(64));
+    store
+        .submit_schema_bundle(command(
+            "original-submit",
+            &format!("sha256:{}", "1".repeat(64)),
+            &original,
+        ))
+        .await
+        .unwrap();
+    let original_fence = verify_bundle(&store, "original", &original, 1).await;
+    activated(
+        store
+            .activate_schema_bundle(activation_command(
+                "original-activate",
+                &original,
+                None,
+                original_fence,
+                "original-receipt",
+            ))
+            .await
+            .unwrap(),
+    );
+    let existing_id = scoped_persistence_id("Task", "existing", &original);
+    store
+        .append(&existing_id, 0, &[test_event(1)])
+        .await
+        .unwrap();
+    let inactive_scope = SchemaScope {
+        kind: SchemaScopeKind::Task,
+        id: "task-same-digest-inactive".into(),
+    };
+    let cross_scope_id =
+        scoped_persistence_id_in_scope("Task", "cross-scope", &inactive_scope, &original);
+    assert!(
+        store
+            .append(&cross_scope_id, 0, &[test_event(1)])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("stale scoped schema write fence")
+    );
+
+    store
+        .submit_schema_bundle(command_with_predecessor(
+            "replacement-submit",
+            &format!("sha256:{}", "2".repeat(64)),
+            &replacement,
+            Some(&original),
+        ))
+        .await
+        .unwrap();
+    let replacement_fence = verify_bundle(&store, "replacement", &replacement, 2).await;
+    activated(
+        store
+            .activate_schema_bundle(activation_command(
+                "replacement-activate",
+                &replacement,
+                Some(&original),
+                replacement_fence,
+                "replacement-receipt",
+            ))
+            .await
+            .unwrap(),
+    );
+
+    assert_eq!(
+        store
+            .append(&existing_id, 1, &[test_event(2)])
+            .await
+            .unwrap(),
+        2
+    );
+    let stale_new_id = scoped_persistence_id("Task", "new-old", &original);
+    assert!(
+        store
+            .append(&stale_new_id, 0, &[test_event(1)])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("stale scoped schema write fence")
+    );
+    let active_new_id = scoped_persistence_id("Task", "new-active", &replacement);
+    assert_eq!(
+        store
+            .append(&active_new_id, 0, &[test_event(1)])
+            .await
+            .unwrap(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -364,6 +535,74 @@ async fn activation_compares_receipt_predecessor_and_fence_atomically() {
             .await
             .unwrap(),
         Some(pointer.clone())
+    );
+    let pinned_id = scoped_persistence_id("Task", "entity-1", &digest);
+    store
+        .append(
+            &pinned_id,
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 1,
+                event_type: "Configure".into(),
+                payload: serde_json::json!({}),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: "pin-contract".into(),
+                },
+            }],
+        )
+        .await
+        .unwrap();
+    let collision_base = "entity-collision";
+    let collision_entity = temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+        collision_base,
+        &temper_runtime::persistence::schema_deployment::SchemaExecutionPin {
+            scope: scope(),
+            bundle_digest: digest.clone(),
+        },
+    );
+    store
+        .append(
+            &scoped_persistence_id("Task", &collision_entity, &digest),
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 1,
+                event_type: "Configure".into(),
+                payload: serde_json::json!({}),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: "pin-collision-contract".into(),
+                },
+            }],
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .scoped_entity_bundle_digests("tenant-a", "Task", collision_base, &scope(), 2)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .scoped_entity_bundle_digests("tenant-a", "Task", &collision_entity, &scope(), 2)
+            .await
+            .unwrap(),
+        vec![digest.clone()]
+    );
+    assert_eq!(
+        store
+            .scoped_entity_bundle_digests("tenant-a", "Task", "entity-1", &scope(), 2)
+            .await
+            .unwrap(),
+        vec![digest.clone()]
     );
     assert_eq!(
         store

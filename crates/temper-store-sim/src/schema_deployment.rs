@@ -81,20 +81,29 @@ pub(super) struct SimSchemaDeploymentState {
 }
 
 impl SimSchemaDeploymentState {
-    pub(super) fn permits_scoped_journal_write(&self, tenant: &str, digest: &str) -> bool {
-        self.active.iter().any(|((found_tenant, _), pointer)| {
-            found_tenant == tenant && pointer.bundle_digest == digest
-        }) || self.migrations.values().any(|job| {
-            job.command.tenant == tenant
-                && job.command.target_bundle_digest == digest
-                && matches!(
-                    job.status,
-                    SchemaMigrationStatus::Submitted
-                        | SchemaMigrationStatus::Migrating
-                        | SchemaMigrationStatus::Validating
-                        | SchemaMigrationStatus::Ready
-                )
-        })
+    pub(super) fn permits_scoped_journal_write(
+        &self,
+        tenant: &str,
+        scope: &SchemaScope,
+        digest: &str,
+    ) -> bool {
+        self.active
+            .iter()
+            .any(|((found_tenant, found_scope), pointer)| {
+                found_tenant == tenant && found_scope == scope && pointer.bundle_digest == digest
+            })
+            || self.migrations.values().any(|job| {
+                job.command.tenant == tenant
+                    && &job.command.scope == scope
+                    && job.command.target_bundle_digest == digest
+                    && matches!(
+                        job.status,
+                        SchemaMigrationStatus::Submitted
+                            | SchemaMigrationStatus::Migrating
+                            | SchemaMigrationStatus::Validating
+                            | SchemaMigrationStatus::Ready
+                    )
+            })
     }
 }
 

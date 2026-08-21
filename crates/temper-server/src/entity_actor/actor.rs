@@ -365,8 +365,13 @@ impl EntityActor {
     fn persistence_id(&self) -> String {
         match self.schema_pin.as_ref() {
             Some(pin) => format!(
-                "{}:{}:{}:schema:{}",
-                self.tenant, self.entity_type, self.entity_id, pin.bundle_digest
+                "{}:{}:{}",
+                self.tenant,
+                self.entity_type,
+                temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                    &self.entity_id,
+                    pin,
+                )
             ),
             None => format!("{}:{}:{}", self.tenant, self.entity_type, self.entity_id),
         }

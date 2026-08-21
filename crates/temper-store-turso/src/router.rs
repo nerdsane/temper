@@ -782,24 +782,47 @@ impl EventStore for TenantStoreRouter {
         &self,
         tenant: &str,
         entity_type: &str,
+        scope: &temper_runtime::persistence::schema_deployment::SchemaScope,
         bundle_digest: &str,
         after_entity_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<String>, PersistenceError> {
         let store = self.store_for_tenant(tenant).await?;
         store
-            .list_scoped_entity_ids_page(tenant, entity_type, bundle_digest, after_entity_id, limit)
+            .list_scoped_entity_ids_page(
+                tenant,
+                entity_type,
+                scope,
+                bundle_digest,
+                after_entity_id,
+                limit,
+            )
+            .await
+    }
+
+    async fn scoped_entity_bundle_digests(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        scope: &temper_runtime::persistence::schema_deployment::SchemaScope,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .scoped_entity_bundle_digests(tenant, entity_type, entity_id, scope, limit)
             .await
     }
 
     async fn scoped_bundle_write_version(
         &self,
         tenant: &str,
+        scope: &temper_runtime::persistence::schema_deployment::SchemaScope,
         bundle_digest: &str,
     ) -> Result<u64, PersistenceError> {
         let store = self.store_for_tenant(tenant).await?;
         store
-            .scoped_bundle_write_version(tenant, bundle_digest)
+            .scoped_bundle_write_version(tenant, scope, bundle_digest)
             .await
     }
 

@@ -151,8 +151,16 @@ impl GovernedSchemaDeploymentService<'_> {
             else {
                 continue;
             };
-            let persistence_id =
-                format!("{tenant}:{target_entity_type}:{target_id}:schema:{bundle_digest}");
+            let persistence_id = format!(
+                "{tenant}:{target_entity_type}:{}",
+                temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                    target_id,
+                    &SchemaExecutionPin {
+                        scope: scope.clone(),
+                        bundle_digest: bundle_digest.to_string(),
+                    },
+                )
+            );
             let exists = !journal
                 .read_latest_events(&persistence_id, 1)
                 .await

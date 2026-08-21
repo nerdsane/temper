@@ -356,8 +356,15 @@ macro_rules! impl_schema_migration_batch_methods {
             }
             for row in &command.rows {
                 let persistence_id = format!(
-                    "{tenant}:{}:{}:schema:{}",
-                    row.entity_type, row.entity_id, job.command.target_bundle_digest
+                    "{tenant}:{}:{}",
+                    row.entity_type,
+                    temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                        &row.entity_id,
+                        &temper_runtime::persistence::schema_deployment::SchemaExecutionPin {
+                            scope: job.command.scope.clone(),
+                            bundle_digest: job.command.target_bundle_digest.clone(),
+                        },
+                    )
                 );
                 let current_sequence = inner
                     .journals
@@ -370,8 +377,15 @@ macro_rules! impl_schema_migration_batch_methods {
             }
             for row in &command.rows {
                 let persistence_id = format!(
-                    "{tenant}:{}:{}:schema:{}",
-                    row.entity_type, row.entity_id, job.command.target_bundle_digest
+                    "{tenant}:{}:{}",
+                    row.entity_type,
+                    temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                        &row.entity_id,
+                        &temper_runtime::persistence::schema_deployment::SchemaExecutionPin {
+                            scope: job.command.scope.clone(),
+                            bundle_digest: job.command.target_bundle_digest.clone(),
+                        },
+                    )
                 );
                 inner
                     .journals
