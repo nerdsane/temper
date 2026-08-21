@@ -12,6 +12,7 @@ use super::constraints::{
     ConstraintViolation, post_write_invariant_checks, pre_upsert_field_invariant_checks,
     pre_upsert_relation_checks,
 };
+use super::schema_pin::schema_pin_mismatch_response;
 use crate::state::{ServerState, VerificationGateError};
 
 /// Extract the tenant ID from request headers.
@@ -351,22 +352,6 @@ pub(super) fn constraint_violation_response(err: ConstraintViolation) -> axum::r
         }
     });
     (StatusCode::CONFLICT, axum::Json(body)).into_response()
-}
-
-pub(super) fn schema_pin_mismatch_response(error: &str) -> Option<axum::response::Response> {
-    error
-        .strip_prefix(crate::state::SCHEMA_PIN_MISMATCH_PREFIX)
-        .map(str::trim)
-        .map(|message| {
-            crate::response::odata_error(StatusCode::CONFLICT, "SchemaPinMismatch", message)
-                .into_response()
-        })
-}
-
-pub(super) fn schema_pin_extraction_error_response(
-    error: (StatusCode, String),
-) -> axum::response::Response {
-    schema_pin_mismatch_response(&error.1).unwrap_or_else(|| error.into_response())
 }
 
 /// Run pre-upsert relation checks and post-write invariant checks.

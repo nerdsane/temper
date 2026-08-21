@@ -186,10 +186,14 @@ pub(super) async fn commit_batch(
                 return Err(SchemaDeploymentStoreError::MigrationRejected);
             }
         }
-        let target_entity_id = format!(
-            "{}:schema:{}",
-            row.entity_id, job.command.target_bundle_digest
-        );
+        let target_entity_id =
+            temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                &row.entity_id,
+                &temper_runtime::persistence::schema_deployment::SchemaExecutionPin {
+                    scope: job.command.scope.clone(),
+                    bundle_digest: job.command.target_bundle_digest.clone(),
+                },
+            );
         let current_sequence = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(MAX(sequence_nr), 0) FROM events
              WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
@@ -209,10 +213,14 @@ pub(super) async fn commit_batch(
         }
     }
     for row in &command.rows {
-        let target_entity_id = format!(
-            "{}:schema:{}",
-            row.entity_id, job.command.target_bundle_digest
-        );
+        let target_entity_id =
+            temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                &row.entity_id,
+                &temper_runtime::persistence::schema_deployment::SchemaExecutionPin {
+                    scope: job.command.scope.clone(),
+                    bundle_digest: job.command.target_bundle_digest.clone(),
+                },
+            );
         sqlx::query(
             "INSERT INTO events
              (tenant, entity_type, entity_id, sequence_nr, segment_index, event_type, payload, metadata)
@@ -334,7 +342,13 @@ pub(super) async fn cut_over(
     if source_pointer.fence != job.command.source_expected_fence {
         return Err(SchemaDeploymentStoreError::StaleFence);
     }
-    let source_pattern = format!("%:schema:{}", job.command.source_bundle_digest);
+    let source_suffix = temper_runtime::persistence::schema_deployment::scoped_journal_pin_suffix(
+        &temper_runtime::persistence::schema_deployment::SchemaExecutionPin {
+            scope: job.command.scope.clone(),
+            bundle_digest: job.command.source_bundle_digest.clone(),
+        },
+    );
+    let source_pattern = format!("%{source_suffix}");
     let current_write_version: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE tenant = $1 AND entity_id LIKE $2")
             .bind(tenant)

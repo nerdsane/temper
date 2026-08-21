@@ -2,6 +2,10 @@
 
 use libsql::{TransactionBehavior, Value, params, params_from_iter};
 use std::time::Duration;
+use temper_runtime::persistence::schema_deployment::{
+    SchemaExecutionPin, SchemaScope, scoped_journal_pin_prefix, scoped_journal_pin_suffix,
+    split_scoped_journal_entity_id,
+};
 use temper_runtime::persistence::{
     EntityVectorCandidate, EntityVectorRow, EventMetadata, EventStore, PersistenceAppend,
     PersistenceAppendResult, PersistenceEnvelope, PersistenceError, pack_f32_le, storage_error,
@@ -33,23 +37,40 @@ struct PreparedEventInsert {
 async fn assert_scoped_journal_write_fence(
     tx: &libsql::Transaction,
     tenant: &str,
+    entity_type: &str,
     entity_id: &str,
 ) -> Result<(), PersistenceError> {
-    let Some((_, digest)) = entity_id.rsplit_once(":schema:") else {
+    let Some((_, pin)) = split_scoped_journal_entity_id(entity_id) else {
         return Ok(());
     };
+    let mut existing_rows = tx
+        .query(
+            "SELECT 1 FROM events
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
+             LIMIT 1",
+            params![tenant, entity_type, entity_id],
+        )
+        .await
+        .map_err(storage_error)?;
+    if existing_rows.next().await.map_err(storage_error)?.is_some() {
+        return Ok(());
+    }
     let mut rows = tx
         .query(
             "SELECT 1 FROM schema_active_pointers
              WHERE tenant = ?1 AND json_extract(pointer_json, '$.bundle_digest') = ?2
+               AND json_extract(pointer_json, '$.scope.kind') = 'task'
+               AND json_extract(pointer_json, '$.scope.id') = ?3
              UNION ALL
              SELECT 1 FROM schema_migration_jobs
              WHERE tenant = ?1
                AND json_extract(job_json, '$.command.target_bundle_digest') = ?2
+               AND json_extract(job_json, '$.command.scope.kind') = 'task'
+               AND json_extract(job_json, '$.command.scope.id') = ?3
                AND json_extract(job_json, '$.status') IN
                    ('submitted', 'migrating', 'validating', 'ready')
              LIMIT 1",
-            params![tenant, digest],
+            params![tenant, pin.bundle_digest, pin.scope.id],
         )
         .await
         .map_err(storage_error)?;
@@ -933,6 +954,7 @@ impl EventStore for TursoEventStore {
         &self,
         tenant: &str,
         entity_type: &str,
+        scope: &SchemaScope,
         bundle_digest: &str,
         after_entity_id: Option<&str>,
         limit: usize,
@@ -941,7 +963,10 @@ impl EventStore for TursoEventStore {
             return Ok(Vec::new());
         }
         let conn = self.configured_connection().await?;
-        let suffix = format!(":schema:{bundle_digest}");
+        let suffix = scoped_journal_pin_suffix(&SchemaExecutionPin {
+            scope: scope.clone(),
+            bundle_digest: bundle_digest.to_string(),
+        });
         let pattern = format!("%{suffix}");
         let after = after_entity_id.unwrap_or("");
         let limit = limit.min(i64::MAX as usize) as i64;
@@ -968,33 +993,41 @@ impl EventStore for TursoEventStore {
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
+        scope: &SchemaScope,
         limit: usize,
     ) -> Result<Vec<String>, PersistenceError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         let conn = self.configured_connection().await?;
-        let prefix = format!("{entity_id}:schema:");
+        let prefix = scoped_journal_pin_prefix(entity_id, scope);
         let prefix_len = i64::try_from(prefix.chars().count())
             .map_err(|_| PersistenceError::Storage("scoped entity id is too long".to_string()))?;
-        let limit = limit.min(i64::MAX as usize) as i64;
+        let requested_limit = limit.min(i64::MAX as usize) as i64;
+        let canonical_digest_glob = format!("sha256:{}", "[0-9a-f]".repeat(64));
         let mut rows = conn
             .query(
                 "SELECT DISTINCT substr(entity_id, ?4 + 1) AS bundle_digest
                  FROM events
                  WHERE tenant = ?1 AND entity_type = ?2
                    AND substr(entity_id, 1, ?4) = ?3
+                   AND length(entity_id) = ?4 + 71
+                   AND substr(entity_id, ?4 + 1) GLOB ?6
                  ORDER BY bundle_digest LIMIT ?5",
-                params![tenant, entity_type, prefix, prefix_len, limit],
+                params![
+                    tenant,
+                    entity_type,
+                    prefix,
+                    prefix_len,
+                    requested_limit,
+                    canonical_digest_glob
+                ],
             )
             .await
             .map_err(storage_error)?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
-            let digest = row.get::<String>(0).map_err(storage_error)?;
-            if temper_runtime::persistence::schema_deployment::is_canonical_sha256_digest(&digest) {
-                out.push(digest);
-            }
+            out.push(row.get::<String>(0).map_err(storage_error)?);
         }
         Ok(out)
     }
@@ -1002,10 +1035,15 @@ impl EventStore for TursoEventStore {
     async fn scoped_bundle_write_version(
         &self,
         tenant: &str,
+        scope: &SchemaScope,
         bundle_digest: &str,
     ) -> Result<u64, PersistenceError> {
         let conn = self.configured_connection().await?;
-        let pattern = format!("%:schema:{bundle_digest}");
+        let suffix = scoped_journal_pin_suffix(&SchemaExecutionPin {
+            scope: scope.clone(),
+            bundle_digest: bundle_digest.to_string(),
+        });
+        let pattern = format!("%{suffix}");
         let mut rows = conn
             .query(
                 "SELECT COUNT(*) FROM events WHERE tenant = ?1 AND entity_id LIKE ?2",
@@ -1115,7 +1153,7 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
 
-        assert_scoped_journal_write_fence(&tx, tenant, entity_id).await?;
+        assert_scoped_journal_write_fence(&tx, tenant, entity_type, entity_id).await?;
 
         let select_start = std::time::Instant::now();
         let rows_result = tx
@@ -1299,7 +1337,7 @@ impl TursoEventStore {
             let (tenant, entity_type, entity_id) =
                 parse_persistence_id_parts(&append.persistence_id)
                     .map_err(PersistenceError::Storage)?;
-            assert_scoped_journal_write_fence(&tx, tenant, entity_id).await?;
+            assert_scoped_journal_write_fence(&tx, tenant, entity_type, entity_id).await?;
 
             if append.expected_sequence == 0 && !append.events.is_empty() {
                 parsed.push((

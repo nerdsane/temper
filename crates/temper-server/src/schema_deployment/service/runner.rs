@@ -81,7 +81,11 @@ impl GovernedSchemaDeploymentService<'_> {
             })?;
             let pass_write_version = if job.scan_cursor.is_none() {
                 journal
-                    .scoped_bundle_write_version(&tenant, &job.command.source_bundle_digest)
+                    .scoped_bundle_write_version(
+                        &tenant,
+                        &job.command.scope,
+                        &job.command.source_bundle_digest,
+                    )
                     .await
                     .map_err(|error| {
                         ServiceError::new("migration_failed", error.to_string(), true)
@@ -94,7 +98,10 @@ impl GovernedSchemaDeploymentService<'_> {
                 .page_scoped_entity_ids(
                     &tenant_id,
                     &source_entity_types,
-                    &job.command.source_bundle_digest,
+                    &SchemaExecutionPin {
+                        scope: job.command.scope.clone(),
+                        bundle_digest: job.command.source_bundle_digest.clone(),
+                    },
                     job.scan_cursor
                         .as_ref()
                         .map(|cursor| (cursor.0.as_str(), cursor.1.as_str())),
@@ -245,8 +252,11 @@ impl GovernedSchemaDeploymentService<'_> {
                     ));
                 }
                 let target_persistence_id = format!(
-                    "{tenant}:{entity_type}:{entity_id}:schema:{}",
-                    target_pin.bundle_digest
+                    "{tenant}:{entity_type}:{}",
+                    temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                        &entity_id,
+                        &target_pin,
+                    )
                 );
                 let target_sequence = journal
                     .read_latest_events(&target_persistence_id, 1)
@@ -319,7 +329,11 @@ impl GovernedSchemaDeploymentService<'_> {
             }
             let end_write_version = if scan_complete {
                 journal
-                    .scoped_bundle_write_version(&tenant, &job.command.source_bundle_digest)
+                    .scoped_bundle_write_version(
+                        &tenant,
+                        &job.command.scope,
+                        &job.command.source_bundle_digest,
+                    )
                     .await
                     .map_err(|error| {
                         ServiceError::new("migration_failed", error.to_string(), true)
@@ -399,7 +413,10 @@ impl GovernedSchemaDeploymentService<'_> {
                     &tenant_id,
                     &entity_type,
                     &entity_id,
-                    &job.command.target_bundle_digest,
+                    &SchemaExecutionPin {
+                        scope: job.command.scope.clone(),
+                        bundle_digest: job.command.target_bundle_digest.clone(),
+                    },
                 );
             }
             if !job.scan_complete {

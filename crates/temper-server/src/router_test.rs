@@ -16,7 +16,7 @@ use tower::ServiceExt;
 use crate::events::EntityStateChange;
 use crate::storage::StorageStack;
 
-#[path = "router_test/scoped_schema_pin.rs"]
+#[path = "router_test/scoped_schema_pin_test.rs"]
 mod scoped_schema_pin;
 
 fn test_state() -> ServerState {
@@ -89,11 +89,46 @@ async fn test_state_with_durable_active_task_schema_and_ioa(
 }
 
 async fn persist_active_task_schema(store: &impl SchemaDeploymentStore, order_ioa: &str) {
+    persist_task_schema_bundle(
+        store,
+        order_ioa,
+        &format!("sha256:{}", "a".repeat(64)),
+        None,
+        "initial",
+    )
+    .await;
+}
+
+async fn persist_task_schema_bundle(
+    store: &impl SchemaDeploymentStore,
+    order_ioa: &str,
+    digest: &str,
+    predecessor: Option<&str>,
+    operation_tag: &str,
+) {
     let scope = SchemaScope {
         kind: SchemaScopeKind::Task,
         id: "task-router".into(),
     };
-    let digest = format!("sha256:{}", "a".repeat(64));
+    persist_task_schema_bundle_in_scope(
+        store,
+        order_ioa,
+        digest,
+        predecessor,
+        operation_tag,
+        &scope,
+    )
+    .await;
+}
+
+async fn persist_task_schema_bundle_in_scope(
+    store: &impl SchemaDeploymentStore,
+    order_ioa: &str,
+    digest: &str,
+    predecessor: Option<&str>,
+    operation_tag: &str,
+    scope: &SchemaScope,
+) {
     let scoped_csdl = include_str!("../../../test-fixtures/specs/model.csdl.xml")
         .replace("Temper.Example", "Temper.ScopedExample");
     store
@@ -101,8 +136,8 @@ async fn persist_active_task_schema(store: &impl SchemaDeploymentStore, order_io
             bundle: SchemaBundleRecord {
                 tenant: TenantId::default().to_string(),
                 scope: scope.clone(),
-                digest: digest.clone(),
-                predecessor_digest: None,
+                digest: digest.to_string(),
+                predecessor_digest: predecessor.map(str::to_string),
                 canonical_csdl: scoped_csdl,
                 canonical_ioa: std::collections::BTreeMap::from([(
                     "Order".into(),
@@ -115,9 +150,9 @@ async fn persist_active_task_schema(store: &impl SchemaDeploymentStore, order_io
                 migration_abi_version: None,
                 canonical_budgets: "{}".into(),
             },
-            idempotency_key: "restart-submit".into(),
+            idempotency_key: format!("{operation_tag}-submit"),
             request_digest: format!("sha256:{}", "1".repeat(64)),
-            request_id: "restart-submit".into(),
+            request_id: format!("{operation_tag}-submit"),
         })
         .await
         .unwrap();
@@ -125,13 +160,13 @@ async fn persist_active_task_schema(store: &impl SchemaDeploymentStore, order_io
         .claim_schema_verification(ClaimSchemaVerification {
             tenant: TenantId::default().to_string(),
             scope: scope.clone(),
-            bundle_digest: digest.clone(),
+            bundle_digest: digest.to_string(),
             logical_now: 1,
             lease_expires_at: 2,
             operation: SchemaOperationIdentity {
-                idempotency_key: "restart-verify".into(),
+                idempotency_key: format!("{operation_tag}-verify"),
                 request_digest: format!("sha256:{}", "2".repeat(64)),
-                request_id: "restart-verify".into(),
+                request_id: format!("{operation_tag}-verify"),
             },
         })
         .await
@@ -143,11 +178,11 @@ async fn persist_active_task_schema(store: &impl SchemaDeploymentStore, order_io
     let verified = store
         .finish_schema_verification(
             TenantId::default().as_str(),
-            &scope,
-            &digest,
+            scope,
+            digest,
             fence,
             SchemaVerificationReceipt {
-                id: "restart-verification".into(),
+                id: format!("{operation_tag}-verification"),
                 verifier_version: "test/v1".into(),
                 input_digest: format!("sha256:{}", "3".repeat(64)),
                 passed: true,
@@ -158,15 +193,15 @@ async fn persist_active_task_schema(store: &impl SchemaDeploymentStore, order_io
     store
         .activate_schema_bundle(ActivateSchemaBundle {
             tenant: TenantId::default().to_string(),
-            scope,
-            bundle_digest: digest,
-            expected_predecessor: None,
+            scope: scope.clone(),
+            bundle_digest: digest.to_string(),
+            expected_predecessor: predecessor.map(str::to_string),
             expected_fence: verified.fence,
-            verification_receipt_id: "restart-verification".into(),
+            verification_receipt_id: format!("{operation_tag}-verification"),
             operation: SchemaOperationIdentity {
-                idempotency_key: "restart-activate".into(),
+                idempotency_key: format!("{operation_tag}-activate"),
                 request_digest: format!("sha256:{}", "4".repeat(64)),
-                request_id: "restart-activate".into(),
+                request_id: format!("{operation_tag}-activate"),
             },
         })
         .await
@@ -628,19 +663,7 @@ async fn git_receive_pack_bridge_response_uses_pkt_line_report() {
     );
 }
 
-async fn test_state_with_data_only_ioa_and_turso() -> ServerState {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let db_url = format!(
-        "file:/tmp/temper-data-only-fast-path-test-{}-{}.db",
-        std::process::id(),
-        id
-    );
-    let _ = std::fs::remove_file(db_url.strip_prefix("file:").unwrap_or(&db_url));
-    let turso = TursoEventStore::new(&db_url, None)
-        .await
-        .expect("create local turso db");
-    let csdl_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+const DATA_ONLY_CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
   <edmx:DataServices>
     <Schema Namespace="Temper.DataOnly" xmlns="http://docs.oasis-open.org/odata/ns/edm">
@@ -656,7 +679,8 @@ async fn test_state_with_data_only_ioa_and_turso() -> ServerState {
     </Schema>
   </edmx:DataServices>
 </edmx:Edmx>"#;
-    let log_entry_ioa = r#"
+
+const DATA_ONLY_IOA: &str = r#"
 [automaton]
 name = "LogEntry"
 states = ["Recorded"]
@@ -667,11 +691,36 @@ name = "Body"
 type = "string"
 initial = ""
 "#;
-    let csdl = parse_csdl(csdl_xml).unwrap();
+
+fn test_state_with_data_only_ioa() -> ServerState {
+    let csdl = parse_csdl(DATA_ONLY_CSDL).unwrap();
     let system = ActorSystem::new("test-data-only-fast-path");
     let mut specs = std::collections::BTreeMap::new();
-    specs.insert("LogEntry".to_string(), log_entry_ioa.to_string());
-    let mut state = ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap();
+    specs.insert("LogEntry".to_string(), DATA_ONLY_IOA.to_string());
+    ServerState::with_specs(system, csdl, DATA_ONLY_CSDL.to_string(), specs).unwrap()
+}
+
+async fn test_state_with_data_only_ioa_and_sim() -> (ServerState, SimEventStore) {
+    let mut state = test_state_with_data_only_ioa();
+    let store = SimEventStore::no_faults(1_115);
+    persist_active_task_schema(&store, DATA_ONLY_IOA).await;
+    state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
+    (state, store)
+}
+
+async fn test_state_with_data_only_ioa_and_turso() -> ServerState {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let db_url = format!(
+        "file:/tmp/temper-data-only-fast-path-test-{}-{}.db",
+        std::process::id(),
+        id
+    );
+    let _ = std::fs::remove_file(db_url.strip_prefix("file:").unwrap_or(&db_url));
+    let turso = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let mut state = test_state_with_data_only_ioa();
     state.set_storage_stack(StorageStack::from_turso(turso));
     state
 }
@@ -718,7 +767,8 @@ async fn test_metadata_endpoint() {
 
 #[tokio::test]
 async fn task_scoped_metadata_and_entity_io_use_the_same_immutable_pin() {
-    let app = build_router(test_state_with_active_task_schema());
+    let (state, _store) = test_state_with_durable_active_task_schema().await;
+    let app = build_router(state);
     let service_document = app
         .clone()
         .oneshot(

@@ -14,6 +14,7 @@ pub(crate) mod rate_limit;
 mod read;
 mod read_support;
 mod response;
+mod schema_pin;
 mod storage_guardrails;
 mod stream_fast_path;
 mod stream_put;

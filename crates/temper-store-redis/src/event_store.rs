@@ -15,11 +15,16 @@ use std::sync::Arc;
 use fred::prelude::*;
 use fred::types::scripts::Script;
 use serde::{Deserialize, Serialize};
+use temper_runtime::persistence::schema_deployment::{
+    SchemaScope, scoped_journal_pin_prefix, split_scoped_journal_entity_id,
+};
 use temper_runtime::persistence::{
     EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
     storage_error,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
+
+use crate::keys::{decode_lex_component, encode_lex_component};
 
 /// Lua script for atomic append: check expected sequence, append events, and index the journal.
 ///
@@ -659,6 +664,7 @@ impl EventStore for RedisEventStore {
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
+        scope: &SchemaScope,
         limit: usize,
     ) -> Result<Vec<String>, PersistenceError> {
         if limit == 0 {
@@ -666,9 +672,10 @@ impl EventStore for RedisEventStore {
         }
         let key = Self::tenant_journals_key(tenant);
         let type_prefix = encode_lex_component(entity_type);
-        let entity_prefix = encode_lex_component(&format!("{entity_id}:schema:"));
+        let entity_prefix = encode_lex_component(&scoped_journal_pin_prefix(entity_id, scope));
         let member_prefix = format!("{type_prefix}!{entity_prefix}");
-        let count = limit.min(i64::MAX as usize) as i64;
+        const PIN_SCAN_BUDGET: usize = 256;
+        let count = PIN_SCAN_BUDGET.min(i64::MAX as usize) as i64;
         let members: Vec<String> = self
             .client
             .zrangebylex(
@@ -679,55 +686,26 @@ impl EventStore for RedisEventStore {
             )
             .await
             .map_err(storage_error)?;
-        members
-            .into_iter()
-            .map(|member| {
-                let (_, scoped_id) = Self::parse_journal_member(&member)?;
-                scoped_id
-                    .strip_prefix(&format!("{entity_id}:schema:"))
-                    .map(str::to_string)
-                    .ok_or_else(|| {
-                        PersistenceError::Serialization(
-                            "invalid Redis scoped journal index member".to_string(),
-                        )
-                    })
-            })
-            .collect()
-    }
-}
-
-fn encode_lex_component(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(value.len().saturating_mul(2));
-    for byte in value.as_bytes() {
-        encoded.push(HEX[(byte >> 4) as usize] as char);
-        encoded.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    encoded
-}
-
-fn decode_lex_component(value: &str) -> Result<String, PersistenceError> {
-    if !value.len().is_multiple_of(2) {
-        return Err(PersistenceError::Serialization(
-            "invalid Redis journal index component".to_string(),
-        ));
-    }
-    let mut decoded = Vec::with_capacity(value.len() / 2);
-    for pair in value.as_bytes().chunks_exact(2) {
-        let high = decode_hex_digit(pair[0])?;
-        let low = decode_hex_digit(pair[1])?;
-        decoded.push((high << 4) | low);
-    }
-    String::from_utf8(decoded).map_err(|error| PersistenceError::Serialization(error.to_string()))
-}
-
-fn decode_hex_digit(digit: u8) -> Result<u8, PersistenceError> {
-    match digit {
-        b'0'..=b'9' => Ok(digit - b'0'),
-        b'a'..=b'f' => Ok(digit - b'a' + 10),
-        _ => Err(PersistenceError::Serialization(
-            "invalid Redis journal index component".to_string(),
-        )),
+        let scan_budget_exhausted = members.len() == PIN_SCAN_BUDGET;
+        let mut digests = Vec::new();
+        for member in members {
+            let (_, scoped_id) = Self::parse_journal_member(&member)?;
+            if let Some((found_entity_id, pin)) = split_scoped_journal_entity_id(&scoped_id)
+                && found_entity_id == entity_id
+                && &pin.scope == scope
+            {
+                digests.push(pin.bundle_digest);
+                if digests.len() == limit {
+                    break;
+                }
+            }
+        }
+        if scan_budget_exhausted && digests.len() < limit {
+            return Err(PersistenceError::Storage(
+                "scoped entity pin scan budget exhausted".to_string(),
+            ));
+        }
+        Ok(digests)
     }
 }
 
@@ -806,43 +784,8 @@ mod tests {
         assert_eq!(partial[0].event_type, "OrderApproved");
     }
 
-    #[tokio::test]
-    async fn scoped_entity_bundle_digest_lookup_is_exact_and_bounded() {
-        let Some(store) = make_store().await else {
-            eprintln!("REDIS_URL not set, skipping test");
-            return;
-        };
-        let suffix = uuid::Uuid::new_v4();
-        let tenant = format!("schema-pin-{suffix}");
-        let entity_id = format!("order-{suffix}");
-        let first = format!("sha256:{}", "a".repeat(64));
-        let second = format!("sha256:{}", "b".repeat(64));
-        for digest in [&first, &second] {
-            let persistence_id = format!("{tenant}:Order:{entity_id}:schema:{digest}");
-            store
-                .append(
-                    &persistence_id,
-                    0,
-                    &[test_envelope("OrderCreated", serde_json::json!({}))],
-                )
-                .await
-                .expect("append scoped event");
-        }
-        assert_eq!(
-            store
-                .scoped_entity_bundle_digests(&tenant, "Order", &entity_id, 1)
-                .await
-                .expect("lookup scoped pin"),
-            vec![first.clone()]
-        );
-        assert_eq!(
-            store
-                .scoped_entity_bundle_digests(&tenant, "Order", &entity_id, 2)
-                .await
-                .expect("lookup scoped pins"),
-            vec![first, second]
-        );
-    }
+    #[path = "scoped_schema_pin_test.rs"]
+    mod scoped_schema_pin;
 
     #[tokio::test]
     async fn append_with_wrong_sequence_fails() {

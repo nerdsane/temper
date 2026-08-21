@@ -48,8 +48,10 @@ impl crate::state::ServerState {
     ) -> bool {
         let Some((store, _)) = self.event_journal() else {
             let actor_key = format!(
-                "{tenant}:{entity_type}:{entity_id}:schema:{}",
-                pin.bundle_digest
+                "{tenant}:{entity_type}:{}",
+                temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                    entity_id, pin,
+                )
             );
             return self
                 .actor_registry
@@ -58,8 +60,10 @@ impl crate::state::ServerState {
                 .contains_key(&actor_key);
         };
         let persistence_id = format!(
-            "{tenant}:{entity_type}:{entity_id}:schema:{}",
-            pin.bundle_digest
+            "{tenant}:{entity_type}:{}",
+            temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                entity_id, pin
+            )
         );
         let Ok(events) = store.read_events(&persistence_id, 0).await else {
             return false;

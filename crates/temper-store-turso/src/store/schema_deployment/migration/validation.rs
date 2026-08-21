@@ -46,7 +46,13 @@ pub(crate) async fn validate(
     ) {
         return Err(SchemaDeploymentStoreError::InvalidLifecycleTransition);
     }
-    let source_pattern = format!("%:schema:{}", job.command.source_bundle_digest);
+    let source_suffix = temper_runtime::persistence::schema_deployment::scoped_journal_pin_suffix(
+        &temper_runtime::persistence::schema_deployment::SchemaExecutionPin {
+            scope: job.command.scope.clone(),
+            bundle_digest: job.command.source_bundle_digest.clone(),
+        },
+    );
+    let source_pattern = format!("%{source_suffix}");
     let mut version_rows = tx
         .query(
             "SELECT COUNT(*) FROM events WHERE tenant = ?1 AND entity_id LIKE ?2",

@@ -370,8 +370,10 @@ impl crate::state::ServerState {
         }
         let persistence_id = match schema_pin {
             Some(pin) => format!(
-                "{tenant}:{entity_type}:{entity_id}:schema:{}",
-                pin.bundle_digest
+                "{tenant}:{entity_type}:{}",
+                temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                    entity_id, pin,
+                )
             ),
             None => format!("{tenant}:{entity_type}:{entity_id}"),
         };
@@ -616,8 +618,10 @@ impl crate::state::ServerState {
             let registry_start = std::time::Instant::now(); // determinism-ok: wall-clock latency metric only, not on simulation path
             let actor_key = match agent_ctx.schema_pin.as_ref() {
                 Some(pin) => format!(
-                    "{tenant}:{entity_type}:{entity_id}:schema:{}",
-                    pin.bundle_digest
+                    "{tenant}:{entity_type}:{}",
+                    temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                        entity_id, pin,
+                    )
                 ),
                 None => format!("{tenant}:{entity_type}:{entity_id}"),
             };

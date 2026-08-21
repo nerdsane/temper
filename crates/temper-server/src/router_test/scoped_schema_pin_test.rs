@@ -1,3 +1,5 @@
+//! Regression coverage for task-scoped schema-pin routing and restart continuity.
+
 use super::*;
 use crate::request_context::AgentContext;
 
@@ -19,6 +21,292 @@ kind = "input"
 from = ["Ready"]
 to = "Ready"
 "#;
+
+#[tokio::test]
+async fn canonical_scoped_journal_id_is_reserved_from_global_actor_and_journal_use() {
+    use temper_runtime::persistence::EventStore;
+    use temper_runtime::persistence::schema_deployment::scoped_journal_entity_id;
+
+    let (state, store) =
+        test_state_with_durable_active_task_schema_and_ioa(SCOPED_CONTINUITY_IOA).await;
+    let tenant = TenantId::default();
+    let pin = SchemaExecutionPin {
+        scope: SchemaScope {
+            kind: SchemaScopeKind::Task,
+            id: "task-router".into(),
+        },
+        bundle_digest: format!("sha256:{}", "a".repeat(64)),
+    };
+    state
+        .get_or_create_scoped_entity(
+            &tenant,
+            "Order",
+            "foo",
+            serde_json::json!({"scope_marker": "scoped"}),
+            pin.clone(),
+        )
+        .await
+        .expect("create scoped entity");
+
+    let reserved_id = scoped_journal_entity_id("foo", &pin);
+    let persistence_id = format!("{tenant}:Order:{reserved_id}");
+    let actor_count_before = state.actor_registry.read().expect("actor registry").len();
+    let journal_before = store
+        .read_events(&persistence_id, 0)
+        .await
+        .expect("read scoped journal before collision attempt");
+
+    let error = state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            &reserved_id,
+            serde_json::json!({"scope_marker": "global"}),
+        )
+        .await
+        .expect_err("global entity must not occupy scoped-journal namespace");
+    assert!(error.contains("No transition table"));
+    assert_eq!(
+        state.actor_registry.read().expect("actor registry").len(),
+        actor_count_before,
+        "global collision attempt must not spawn or alias an actor"
+    );
+    assert_eq!(
+        store
+            .read_events(&persistence_id, 0)
+            .await
+            .expect("read scoped journal after collision attempt"),
+        journal_before,
+        "global collision attempt must not append to the scoped journal"
+    );
+    let scoped = state
+        .get_scoped_entity_state(&tenant, "Order", "foo", pin)
+        .await
+        .expect("scoped entity remains readable");
+    assert_eq!(scoped.state.fields["scope_marker"], "scoped");
+}
+
+#[tokio::test]
+async fn canonical_scoped_journal_id_is_reserved_from_data_only_direct_append() {
+    use temper_runtime::persistence::EventStore;
+    use temper_runtime::persistence::schema_deployment::scoped_journal_entity_id;
+
+    let (state, store) = test_state_with_data_only_ioa_and_sim().await;
+    let tenant = TenantId::default();
+    let pin = SchemaExecutionPin {
+        scope: SchemaScope {
+            kind: SchemaScopeKind::Task,
+            id: "task-router".into(),
+        },
+        bundle_digest: format!("sha256:{}", "a".repeat(64)),
+    };
+    let reserved_id = scoped_journal_entity_id("foo", &pin);
+    let persistence_id = format!("{tenant}:LogEntry:{reserved_id}");
+
+    let error = state
+        .try_create_data_only_tenant_entity(
+            &tenant,
+            "LogEntry",
+            &reserved_id,
+            serde_json::json!({"Id": reserved_id, "Body": "must not persist"}),
+        )
+        .await
+        .expect_err("data-only global entity must not occupy scoped-journal namespace");
+    assert!(error.contains("reserved scoped-journal identity form"));
+    assert!(
+        store
+            .read_events(&persistence_id, 0)
+            .await
+            .expect("read reserved journal after collision attempt")
+            .is_empty(),
+        "data-only collision attempt must not append to the scoped journal"
+    );
+    assert!(
+        !state.entity_exists(&tenant, "LogEntry", &reserved_id),
+        "data-only collision attempt must not update the global projection index"
+    );
+}
+
+#[tokio::test]
+async fn identical_digest_in_distinct_scopes_has_distinct_actor_and_journal_authority() {
+    use temper_runtime::persistence::EventStore;
+
+    let (state, store) =
+        test_state_with_durable_active_task_schema_and_ioa(SCOPED_CONTINUITY_IOA).await;
+    let tenant = TenantId::default();
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let scope_a = SchemaScope {
+        kind: SchemaScopeKind::Task,
+        id: "task-router".into(),
+    };
+    let scope_b = SchemaScope {
+        kind: SchemaScopeKind::Task,
+        id: "task-router-b".into(),
+    };
+    persist_task_schema_bundle_in_scope(
+        &store,
+        SCOPED_CONTINUITY_IOA,
+        &digest,
+        None,
+        "same-digest-scope-b",
+        &scope_b,
+    )
+    .await;
+    let scoped_csdl = include_str!("../../../../test-fixtures/specs/model.csdl.xml")
+        .replace("Temper.Example", "Temper.ScopedExample");
+    {
+        let mut registry = state.registry.write().expect("registry lock");
+        registry
+            .stage_scoped_bundle(
+                tenant.clone(),
+                scope_b.clone(),
+                digest.clone(),
+                parse_csdl(&scoped_csdl).expect("scope B CSDL"),
+                scoped_csdl,
+                &[("Order", SCOPED_CONTINUITY_IOA)],
+            )
+            .expect("stage same digest in scope B");
+        registry
+            .activate_scoped_bundle(&tenant, &scope_b, &digest, None)
+            .expect("activate same digest in scope B");
+    }
+    let pin_a = SchemaExecutionPin {
+        scope: scope_a.clone(),
+        bundle_digest: digest.clone(),
+    };
+    let pin_b = SchemaExecutionPin {
+        scope: scope_b.clone(),
+        bundle_digest: digest.clone(),
+    };
+    state
+        .get_or_create_scoped_entity(
+            &tenant,
+            "Order",
+            "same-id",
+            serde_json::json!({"scope_marker": "a"}),
+            pin_a.clone(),
+        )
+        .await
+        .expect("create scope A entity");
+    state
+        .get_or_create_scoped_entity(
+            &tenant,
+            "Order",
+            "same-id",
+            serde_json::json!({"scope_marker": "b"}),
+            pin_b.clone(),
+        )
+        .await
+        .expect("create scope B entity");
+
+    let state_a = state
+        .get_scoped_entity_state(&tenant, "Order", "same-id", pin_a)
+        .await
+        .expect("load scope A entity");
+    let state_b = state
+        .get_scoped_entity_state(&tenant, "Order", "same-id", pin_b)
+        .await
+        .expect("load scope B entity");
+    assert_eq!(state_a.state.fields["scope_marker"], "a");
+    assert_eq!(state_b.state.fields["scope_marker"], "b");
+    assert_eq!(
+        store
+            .scoped_entity_bundle_digests(tenant.as_str(), "Order", "same-id", &scope_a, 2,)
+            .await
+            .expect("scope A durable pin"),
+        vec![digest.clone()]
+    );
+    assert_eq!(
+        store
+            .scoped_entity_bundle_digests(tenant.as_str(), "Order", "same-id", &scope_b, 2,)
+            .await
+            .expect("scope B durable pin"),
+        vec![digest]
+    );
+}
+
+#[tokio::test]
+async fn colon_bearing_entity_pin_does_not_authorize_its_prefix_entity() {
+    let (state, _store) =
+        test_state_with_durable_active_task_schema_and_ioa(SCOPED_CONTINUITY_IOA).await;
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let pin = SchemaExecutionPin {
+        scope: SchemaScope {
+            kind: SchemaScopeKind::Task,
+            id: "task-router".into(),
+        },
+        bundle_digest: digest.clone(),
+    };
+    let base_id = "collision-base";
+    let colon_id = format!("{base_id}:schema:{digest}");
+    state
+        .get_or_create_scoped_entity(
+            &TenantId::default(),
+            "Order",
+            &colon_id,
+            serde_json::json!({"Id": colon_id}),
+            pin.clone(),
+        )
+        .await
+        .expect("create colon-bearing scoped entity");
+
+    let error = state
+        .get_scoped_entity_state(&TenantId::default(), "Order", base_id, pin)
+        .await
+        .expect_err("prefix entity must not inherit the colon-bearing entity pin");
+    assert!(error.contains("has no durable pin"));
+}
+
+#[tokio::test]
+async fn volatile_actor_does_not_grant_durable_pin_authority() {
+    let state = test_state_with_active_task_schema_and_ioa(SCOPED_CONTINUITY_IOA);
+    let tenant = TenantId::default();
+    let scope = SchemaScope {
+        kind: SchemaScopeKind::Task,
+        id: "task-router".into(),
+    };
+    let source = format!("sha256:{}", "a".repeat(64));
+    let replacement = format!("sha256:{}", "b".repeat(64));
+    let source_pin = SchemaExecutionPin {
+        scope: scope.clone(),
+        bundle_digest: source.clone(),
+    };
+    state
+        .get_or_create_scoped_entity(
+            &tenant,
+            "Order",
+            "volatile-only",
+            serde_json::json!({"Id": "volatile-only"}),
+            source_pin.clone(),
+        )
+        .await
+        .expect("spawn volatile scoped actor");
+    let scoped_csdl = include_str!("../../../../test-fixtures/specs/model.csdl.xml")
+        .replace("Temper.Example", "Temper.ScopedExample");
+    let parsed = parse_csdl(&scoped_csdl).expect("scoped CSDL fixture");
+    {
+        let mut registry = state.registry.write().expect("registry lock");
+        registry
+            .stage_scoped_bundle(
+                tenant.clone(),
+                scope.clone(),
+                replacement.clone(),
+                parsed,
+                scoped_csdl,
+                &[("Order", SCOPED_CONTINUITY_IOA)],
+            )
+            .expect("stage replacement bundle");
+        registry
+            .activate_scoped_bundle(&tenant, &scope, &replacement, Some(&source))
+            .expect("activate replacement bundle");
+    }
+
+    let error = state
+        .get_scoped_entity_state(&tenant, "Order", "volatile-only", source_pin)
+        .await
+        .expect_err("volatile actor must not establish durable authority");
+    assert!(error.contains("has no durable pin"));
+}
 
 #[tokio::test]
 async fn task_scoped_read_requires_a_durable_entity_pin() {
@@ -175,7 +463,8 @@ from = ["Draft"]
 to = "Ready"
 "#;
 
-    let state = test_state_with_ioa();
+    let (state, store) =
+        test_state_with_durable_active_task_schema_and_ioa(SCOPED_CONTINUITY_IOA).await;
     let tenant = TenantId::default();
     let scope = SchemaScope {
         kind: SchemaScopeKind::Task,
@@ -186,22 +475,6 @@ to = "Ready"
     let scoped_csdl = include_str!("../../../../test-fixtures/specs/model.csdl.xml")
         .replace("Temper.Example", "Temper.ScopedExample");
     let parsed = parse_csdl(&scoped_csdl).expect("scoped CSDL fixture");
-    {
-        let mut registry = state.registry.write().expect("registry lock");
-        registry
-            .stage_scoped_bundle(
-                tenant.clone(),
-                scope.clone(),
-                pinned_digest.clone(),
-                parsed.clone(),
-                scoped_csdl.clone(),
-                &[("Order", SCOPED_CONTINUITY_IOA)],
-            )
-            .expect("stage pinned bundle");
-        registry
-            .activate_scoped_bundle(&tenant, &scope, &pinned_digest, None)
-            .expect("activate pinned bundle");
-    }
     let app = build_router(state.clone());
     let scoped = |request: axum::http::request::Builder| {
         request
@@ -235,6 +508,15 @@ to = "Ready"
         .unwrap();
     assert_eq!(configure.status(), StatusCode::OK);
 
+    persist_task_schema_bundle(
+        &store,
+        REPLACEMENT_IOA,
+        &replacement_digest,
+        Some(&pinned_digest),
+        "replacement",
+    )
+    .await;
+
     {
         let mut registry = state.registry.write().expect("registry lock");
         registry
@@ -264,6 +546,20 @@ to = "Ready"
         .await
         .unwrap();
     assert_eq!(simulate.status(), StatusCode::OK);
+
+    let scope_only_navigation = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata/Orders('pin-route-order')/Payment")
+                .header("X-Temper-Principal-Kind", "admin")
+                .header("x-temper-schema-scope-kind", "task")
+                .header("x-temper-schema-scope-id", "task-router")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(scope_only_navigation.status(), StatusCode::OK);
 
     let internal_mismatch = state
         .dispatch_tenant_action(
@@ -304,9 +600,9 @@ to = "Ready"
     let mismatch_json: serde_json::Value = serde_json::from_slice(&mismatch_body).unwrap();
     assert_eq!(mismatch_json["error"]["code"], "SchemaPinMismatch");
 
-    let pointer_mismatch = build_router(state.clone())
+    let scope_only_existing = build_router(state.clone())
         .oneshot(
-            Request::post("/tdata/Orders('pin-route-order')/Temper.ScopedExample.Configure")
+            Request::post("/tdata/Orders('pin-route-order')/Temper.ScopedExample.Simulate")
                 .header("Content-Type", "application/json")
                 .header("X-Temper-Principal-Kind", "admin")
                 .header("x-temper-schema-scope-kind", "task")
@@ -316,12 +612,7 @@ to = "Ready"
         )
         .await
         .unwrap();
-    assert_eq!(pointer_mismatch.status(), StatusCode::CONFLICT);
-    let pointer_body = axum::body::to_bytes(pointer_mismatch.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    let pointer_json: serde_json::Value = serde_json::from_slice(&pointer_body).unwrap();
-    assert_eq!(pointer_json["error"]["code"], "SchemaPinMismatch");
+    assert_eq!(scope_only_existing.status(), StatusCode::OK);
 
     state
         .registry

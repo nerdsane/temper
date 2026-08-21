@@ -3,6 +3,9 @@ use axum::http::{Request, StatusCode};
 use sha2::{Digest, Sha256};
 use temper_runtime::ActorSystem;
 use temper_runtime::persistence::EventStore;
+use temper_runtime::persistence::schema_deployment::{
+    SchemaExecutionPin, SchemaScope, SchemaScopeKind, scoped_journal_entity_id,
+};
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::SpecRegistry;
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
@@ -301,6 +304,55 @@ async fn create_file_with_initial_stream_content_projects_only_ready_content() {
         }
     );
     assert_local_blob(data_dir.path(), &expected_hash, body).await;
+}
+
+#[tokio::test]
+async fn reserved_scoped_journal_id_rejects_initial_file_content_without_side_effects() {
+    let (mut state, store) = build_turso_file_state("reserved-initial-content").await;
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    state.data_dir = data_dir.path().to_path_buf();
+    let tenant = TenantId::default();
+    let pin = SchemaExecutionPin {
+        scope: SchemaScope {
+            kind: SchemaScopeKind::Task,
+            id: "task-file".to_string(),
+        },
+        bundle_digest: format!("sha256:{}", "a".repeat(64)),
+    };
+    let reserved_id = scoped_journal_entity_id("file-1", &pin);
+    let body = b"must not persist";
+    let content_hash = format!("sha256:{:x}", Sha256::digest(body));
+
+    let error = state
+        .create_file_with_initial_stream_content(
+            &tenant,
+            &reserved_id,
+            serde_json::json!({}),
+            body,
+            "text/plain",
+            &AgentContext::default(),
+        )
+        .await
+        .expect_err("reserved global File ID must fail before side effects");
+    assert!(error.contains("reserved scoped-journal identity form"));
+    assert!(
+        store
+            .read_events(&format!("{tenant}:File:{reserved_id}"), 0)
+            .await
+            .expect("read reserved File journal")
+            .is_empty(),
+        "reserved File create must not append journal events"
+    );
+    assert!(!state.entity_exists(&tenant, "File", &reserved_id));
+    let blob_path = data_dir
+        .path()
+        .join("blobs")
+        .join("temper-fs")
+        .join(content_hash);
+    assert!(
+        tokio::fs::metadata(blob_path).await.is_err(),
+        "reserved File create must reject before persisting blob bytes"
+    );
 }
 
 #[tokio::test]

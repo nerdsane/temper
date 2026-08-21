@@ -1,23 +1,16 @@
 //! Durable semantic contract for task-scoped schema deployment.
 
+mod journal_identity;
 mod operation;
 mod store;
 
+pub use journal_identity::*;
 pub use operation::*;
 pub use store::SchemaDeploymentStore;
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-
-/// Return whether a digest uses the canonical lowercase SHA-256 wire form.
-pub fn is_canonical_sha256_digest(value: &str) -> bool {
-    value.len() == 71
-        && value.strip_prefix("sha256:").is_some_and(|hex| {
-            hex.bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
-}
 
 /// V1 scope kinds accepted by schema deployment.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

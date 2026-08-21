@@ -22,19 +22,23 @@ use super::bindings::dispatch_bound_action;
 use super::common::{
     constraint_violation_response, extract_key, extract_schema_pin, extract_tenant,
     load_entity_or_404, resolve_entity_type_for_pin, run_write_prechecks,
-    schema_pin_extraction_error_response, schema_pin_mismatch_response, verification_gate_response,
+    verification_gate_response,
 };
 use super::constraints::pre_delete_relation_checks;
 use super::rate_limit::{enforce_commons_write_rate_limit, owner_id_from_fields};
 use super::response::annotate_entity;
+use super::schema_pin::{
+    resolve_scope_only_entity_pin, schema_pin_extraction_error_response,
+    schema_pin_mismatch_response,
+};
 use super::storage_guardrails::enforce_commons_storage_cap;
 use super::stream_put::handle_stream_put;
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::identity::ResolvedIdentity;
 use crate::request_context::{AgentContext, extract_agent_context, remote_parent_context};
 use crate::response::{ODataResponse, odata_error};
-use crate::state::ServerState;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
+use crate::state::{ServerState, validate_global_entity_id};
 
 type ODataWriteError = Box<axum::response::Response>;
 
@@ -197,8 +201,10 @@ async fn ensure_entity_exists_or_404(
 ) -> Result<(), ODataWriteError> {
     let exists = match schema_pin {
         Some(pin) => {
-            let persistence_id =
-                format!("{tenant}:{entity_type}:{key}:schema:{}", pin.bundle_digest);
+            let persistence_id = format!(
+                "{tenant}:{entity_type}:{}",
+                temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(key, pin)
+            );
             let loaded = state
                 .actor_registry
                 .read()
@@ -372,6 +378,13 @@ pub async fn handle_odata_post(
                 .or_else(|| body_json.get("Id"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
+            if agent_ctx.schema_pin.is_none()
+                && let Some(entity_id) = supplied_entity_id.as_deref()
+                && let Err(error) = validate_global_entity_id(entity_id)
+            {
+                return odata_error(StatusCode::BAD_REQUEST, "InvalidEntityId", &error)
+                    .into_response();
+            }
             let prepared_id = match agent_ctx.schema_pin.as_ref() {
                 Some(pin) => {
                     state
@@ -690,6 +703,25 @@ pub async fn handle_odata_post(
                 Ok(t) => t,
                 Err(resp) => return *resp,
             };
+            agent_ctx.schema_pin = match resolve_scope_only_entity_pin(
+                &headers,
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                agent_ctx.schema_pin.take(),
+            )
+            .await
+            {
+                Ok(pin) => pin,
+                Err(error) => return schema_pin_extraction_error_response(error),
+            };
+            if agent_ctx.schema_pin.is_none()
+                && let Err(error) = validate_global_entity_id(&key_str)
+            {
+                return odata_error(StatusCode::BAD_REQUEST, "InvalidEntityId", &error)
+                    .into_response();
+            }
 
             if let Err(resp) = check_verification_gate_or_423(
                 &state,
@@ -864,6 +896,19 @@ pub async fn handle_odata_patch(
                 Err(resp) => return *resp,
             };
             let key_str = extract_key(&key);
+            agent_ctx.schema_pin = match resolve_scope_only_entity_pin(
+                &headers,
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                agent_ctx.schema_pin.take(),
+            )
+            .await
+            {
+                Ok(pin) => pin,
+                Err(error) => return schema_pin_extraction_error_response(error),
+            };
 
             if let Err(resp) = check_verification_gate_or_423(
                 &state,
@@ -1075,6 +1120,19 @@ pub async fn handle_odata_put(
                 Err(resp) => return *resp,
             };
             let key_str = extract_key(&key);
+            agent_ctx.schema_pin = match resolve_scope_only_entity_pin(
+                &headers,
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                agent_ctx.schema_pin.take(),
+            )
+            .await
+            {
+                Ok(pin) => pin,
+                Err(error) => return schema_pin_extraction_error_response(error),
+            };
 
             if let Err(resp) = check_verification_gate_or_423(
                 &state,
@@ -1276,6 +1334,19 @@ pub async fn handle_odata_delete(
                 Err(resp) => return *resp,
             };
             let key_str = extract_key(&key);
+            agent_ctx.schema_pin = match resolve_scope_only_entity_pin(
+                &headers,
+                &state,
+                &tenant,
+                &entity_type,
+                &key_str,
+                agent_ctx.schema_pin.take(),
+            )
+            .await
+            {
+                Ok(pin) => pin,
+                Err(error) => return schema_pin_extraction_error_response(error),
+            };
 
             if let Err(resp) = check_verification_gate_or_423(
                 &state,

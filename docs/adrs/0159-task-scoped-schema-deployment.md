@@ -247,6 +247,12 @@ Existing entities retain their recorded global or scoped bundle identity.
 There is no implicit adoption of the newest active bundle and no in-place
 reinterpretation of durable state.
 
+The canonical scoped-journal entity-ID frame is an internal reserved form.
+Tenant-global IDs continue to support colons, but the global actor boundary
+rejects any ID that exactly parses as that frame. This narrow reservation keeps
+global persistence IDs compatible while making global and scoped actor and
+journal identities disjoint.
+
 ### 9. Durable entity pins are authoritative during dispatch and recovery
 
 A scoped entity operation resolves exactly one `SchemaExecutionPin` before it

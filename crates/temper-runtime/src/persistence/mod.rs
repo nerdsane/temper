@@ -1,165 +1,9 @@
-use serde::{Deserialize, Serialize};
-
 pub mod schema_deployment;
+mod types;
+pub use types::*;
 
-/// Event type used for the parent-journal record of a Composite action.
-///
-/// Concrete sub-write events remain the state-changing events on their target
-/// journals. This event records the composite intent and the exact sub-write
-/// journals/idempotency keys that were committed atomically with it.
-pub const COMPOSITE_EVENT_TYPE: &str = "CompositeEvent";
-
-/// Replay/audit record for one Composite action application.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CompositeEvent {
-    pub tenant: String,
-    pub parent_entity_type: String,
-    pub parent_entity_id: String,
-    pub parent_action: String,
-    pub composite_idempotency_key: String,
-    pub sub_writes: Vec<CompositeEventSubWrite>,
-}
-
-/// One concrete sub-write recorded in a [`CompositeEvent`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CompositeEventSubWrite {
-    pub index: usize,
-    pub entity_type: String,
-    pub entity_id: String,
-    pub action: String,
-    pub idempotency_key: String,
-}
-
-/// Marker trait for domain events.
-/// Events must be serializable (for persistence) and Send + 'static (for async).
-pub trait DomainEvent:
-    Send + Serialize + for<'de> Deserialize<'de> + std::fmt::Debug + 'static
-{
-}
-
-/// Metadata attached to every persisted event.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EventMetadata {
-    /// Unique ID of this event.
-    pub event_id: uuid::Uuid,
-    /// ID of the command/message that caused this event.
-    pub causation_id: uuid::Uuid,
-    /// Correlation ID for tracing across actor boundaries.
-    pub correlation_id: uuid::Uuid,
-    /// Timestamp of persistence.
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    /// Actor that produced this event.
-    pub actor_id: String,
-}
-
-/// Trait for event-sourced persistent actors.
-/// Extends the base Actor trait with event journal and snapshot capabilities.
-///
-/// The persistence protocol:
-/// 1. Actor receives command (message)
-/// 2. Handler validates command against current state
-/// 3. Handler produces events via ctx.persist(event)
-/// 4. Events are written to journal (Postgres)
-/// 5. Events are applied to state via apply_event()
-/// 6. Periodically, state is snapshotted for fast recovery
-///
-/// On restart:
-/// 1. Load latest snapshot (if any)
-/// 2. Replay events since snapshot
-/// 3. Actor state is rebuilt — ready to process messages
-pub trait PersistentActor: Send + 'static {
-    type Event: DomainEvent;
-    type State: Send + Serialize + for<'de> Deserialize<'de> + 'static;
-
-    /// The persistence ID. Must be unique across the system.
-    /// Typically: "{entity_type}:{entity_id}"
-    fn persistence_id(&self) -> &str;
-
-    /// Apply a single event to the state. Must be pure (no side effects).
-    /// This is called during replay and during live operation.
-    fn apply_event(state: &mut Self::State, event: &Self::Event);
-
-    /// How often to snapshot (every N events). Default: every 100 events.
-    fn snapshot_every(&self) -> u64 {
-        100
-    }
-}
-
-/// A declared-key row to co-commit with an append (ADR-0153). The entity claims
-/// `key_hash` for `key_name`; the store writes it into `entity_key_index` in the
-/// same transaction as the journal append, giving the read plane an `O(log n)`
-/// present/absent probe (the negative-existence access path, ARN-68).
-#[derive(Debug, Clone)]
-pub struct EntityKeyRow {
-    /// The declared key's identifier (the `[[key]]` block's `name`).
-    pub key_name: String,
-    /// The canonical, type-tagged hash of the key's values.
-    pub key_hash: String,
-}
-
-/// A derived vector-index row to co-commit with an append (ADR-0155). Parsed from
-/// the entity's post-transition state for one declared `[[vector]]` path: the
-/// float vector and the model tag that partitions its space. Stores that maintain
-/// `entity_vector_index` write one row per `(decl_name, model_tag, entity_id)`; the
-/// blob is packed little-endian f32. Unlike a key row this has no uniqueness
-/// constraint — it is derived, rebuildable ranking state.
-#[derive(Debug, Clone, PartialEq)]
-pub struct EntityVectorRow {
-    /// The declared vector path's identifier (the `[[vector]]` block's `name`).
-    pub decl_name: String,
-    /// The model tag that partitions this vector's space (only same-tag vectors
-    /// are ever compared).
-    pub model_tag: String,
-    /// The float vector, exactly `dims` long.
-    pub vector: Vec<f32>,
-}
-
-/// Pack an `f32` slice to little-endian bytes — the `entity_vector_index` blob
-/// encoding shared by every backend (ADR-0155). Kept here beside [`EntityVectorRow`]
-/// so the stores and the kernel ranking agree on the byte layout.
-pub fn pack_f32_le(vector: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(vector.len() * 4);
-    for value in vector {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    bytes
-}
-
-/// Unpack little-endian bytes back to `f32`. `None` if the byte length is not a
-/// multiple of 4, or if any component is not finite (both signal a corrupt blob),
-/// so a bad row is skipped rather than panicking or feeding a `NaN`/`inf` into the
-/// kNN ranking — where a `NaN` would sort ahead of every real score.
-pub fn unpack_f32_le(bytes: &[u8]) -> Option<Vec<f32>> {
-    if !bytes.len().is_multiple_of(4) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 4);
-    for chunk in bytes.chunks_exact(4) {
-        let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        if !value.is_finite() {
-            return None;
-        }
-        out.push(value);
-    }
-    Some(out)
-}
-
-/// One candidate row returned from the vector index for a kNN read (ADR-0155):
-/// an entity and its packed vector for one `(tenant, type, decl, model_tag)`
-/// partition. The kernel — not the store — computes the metric over these in the
-/// store-supplied (entity-id) order, so ranking is identical across backends.
-#[derive(Debug, Clone, PartialEq)]
-pub struct EntityVectorCandidate {
-    /// The entity holding this vector.
-    pub entity_id: String,
-    /// The float vector, exactly `dims` long.
-    pub vector: Vec<f32>,
-}
-
-/// Trait for the event store backend (implemented by temper-store-postgres).
-/// Uses desugared async-in-trait to enforce Send bounds on futures.
+/// Event-store backend contract.
 pub trait EventStore: Send + Sync + 'static {
-    /// Append events to the journal.
     fn append(
         &self,
         persistence_id: &str,
@@ -167,11 +11,7 @@ pub trait EventStore: Send + Sync + 'static {
         events: &[PersistenceEnvelope],
     ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send;
 
-    /// Append events and co-commit declared key-index rows (ADR-0153) in the
-    /// **same transaction** as the journal append. A thin forwarder to
-    /// [`EventStore::append_with_index_rows`] with no vector rows and no vector
-    /// reconcile, so callers that only maintain keys are unchanged. The co-commit
-    /// logic lives in `append_with_index_rows`, which query-plane backends override.
+    /// Append events and co-commit declared key-index rows (ADR-0153).
     fn append_with_keys(
         &self,
         persistence_id: &str,
@@ -527,14 +367,11 @@ pub trait EventStore: Send + Sync + 'static {
     }
 
     /// Page durable entity IDs for one immutable scoped-schema journal set.
-    ///
-    /// Scoped actors encode the bundle digest in the durable journal identity.
-    /// Implementations must apply `limit` before returning so migration and
-    /// query callers never need an unbounded journal scan.
     fn list_scoped_entity_ids_page(
         &self,
         tenant: &str,
         entity_type: &str,
+        scope: &schema_deployment::SchemaScope,
         bundle_digest: &str,
         after_entity_id: Option<&str>,
         limit: usize,
@@ -544,7 +381,12 @@ pub trait EventStore: Send + Sync + 'static {
                 return Ok(Vec::new());
             }
             const JOURNAL_PAGE_BUDGET: usize = 256;
-            let suffix = format!(":schema:{bundle_digest}");
+            let suffix = schema_deployment::scoped_journal_pin_suffix(
+                &schema_deployment::SchemaExecutionPin {
+                    scope: scope.clone(),
+                    bundle_digest: bundle_digest.to_string(),
+                },
+            );
             let mut cursor: Option<(String, String)> = None;
             let mut entity_ids = Vec::new();
             while entity_ids.len() < limit {
@@ -579,17 +421,13 @@ pub trait EventStore: Send + Sync + 'static {
         }
     }
 
-    /// Return the immutable bundle digests that have a durable journal for one
-    /// scoped entity identity.
-    ///
-    /// Implementations must apply `limit` in the backing store. Callers use a
-    /// budget of three so a valid two-sided cutover can be distinguished from
-    /// an invalid third durable identity.
+    /// Return bounded durable bundle digests for one scoped entity identity.
     fn scoped_entity_bundle_digests(
         &self,
         _tenant: &str,
         _entity_type: &str,
         _entity_id: &str,
+        _scope: &schema_deployment::SchemaScope,
         _limit: usize,
     ) -> impl std::future::Future<Output = Result<Vec<String>, PersistenceError>> + Send {
         async {
@@ -606,11 +444,17 @@ pub trait EventStore: Send + Sync + 'static {
     fn scoped_bundle_write_version(
         &self,
         tenant: &str,
+        scope: &schema_deployment::SchemaScope,
         bundle_digest: &str,
     ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send {
         async move {
             const JOURNAL_PAGE_BUDGET: usize = 256;
-            let suffix = format!(":schema:{bundle_digest}");
+            let suffix = schema_deployment::scoped_journal_pin_suffix(
+                &schema_deployment::SchemaExecutionPin {
+                    scope: scope.clone(),
+                    bundle_digest: bundle_digest.to_string(),
+                },
+            );
             let mut cursor: Option<(String, String)> = None;
             let mut version = 0_u64;
             loop {
@@ -649,58 +493,4 @@ pub trait EventStore: Send + Sync + 'static {
             Ok(version)
         }
     }
-}
-
-/// A persisted event with metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PersistenceEnvelope {
-    /// Monotonic sequence number within the entity's journal.
-    pub sequence_nr: u64,
-    /// Fully qualified event type name.
-    pub event_type: String,
-    /// Serialized event payload.
-    pub payload: serde_json::Value,
-    /// Event metadata (causation, correlation, timestamp).
-    pub metadata: EventMetadata,
-}
-
-/// One stream append inside an atomic multi-journal append.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PersistenceAppend {
-    /// Persistence ID in the form `{tenant}:{entity_type}:{entity_id}`.
-    pub persistence_id: String,
-    /// Optimistic-concurrency sequence expected before this append.
-    pub expected_sequence: u64,
-    /// Events to append to this journal.
-    pub events: Vec<PersistenceEnvelope>,
-}
-
-/// New sequence number for one stream after an atomic batch append.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PersistenceAppendResult {
-    /// Persistence ID that was appended.
-    pub persistence_id: String,
-    /// New highest sequence number for this journal.
-    pub sequence_nr: u64,
-}
-
-/// Errors that can occur during event persistence operations.
-#[derive(Debug, thiserror::Error)]
-pub enum PersistenceError {
-    /// Optimistic concurrency check failed (another writer appended first).
-    #[error("optimistic concurrency violation: expected sequence {expected}, got {actual}")]
-    ConcurrencyViolation { expected: u64, actual: u64 },
-
-    /// Event serialization or deserialization failed.
-    #[error("serialization error: {0}")]
-    Serialization(String),
-
-    /// Underlying storage backend returned an error.
-    #[error("storage error: {0}")]
-    Storage(String),
-}
-
-/// Convert backend-specific errors into [`PersistenceError::Storage`].
-pub fn storage_error(err: impl std::fmt::Display) -> PersistenceError {
-    PersistenceError::Storage(err.to_string())
 }

@@ -12,6 +12,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use temper_runtime::persistence::schema_deployment::{
+    SchemaExecutionPin, SchemaScope, scoped_journal_pin_suffix, split_scoped_journal_entity_id,
+};
 use temper_runtime::persistence::{
     EntityVectorCandidate, EntityVectorRow, EventStore, PersistenceAppend, PersistenceAppendResult,
     PersistenceEnvelope, PersistenceError,
@@ -404,10 +407,13 @@ impl EventStore for SimEventStore {
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
 
         if let Ok((tenant, _, entity_id)) = parse_persistence_id_parts(persistence_id)
-            && let Some((_, digest)) = entity_id.rsplit_once(":schema:")
-            && !inner
-                .schema_deployments
-                .permits_scoped_journal_write(tenant, digest)
+            && let Some((_, pin)) = split_scoped_journal_entity_id(entity_id)
+            && !inner.journals.contains_key(persistence_id)
+            && !inner.schema_deployments.permits_scoped_journal_write(
+                tenant,
+                &pin.scope,
+                &pin.bundle_digest,
+            )
         {
             return Err(PersistenceError::Storage(
                 "stale scoped schema write fence".into(),
@@ -823,10 +829,13 @@ impl EventStore for SimEventStore {
 
         for append in appends {
             if let Ok((tenant, _, entity_id)) = parse_persistence_id_parts(&append.persistence_id)
-                && let Some((_, digest)) = entity_id.rsplit_once(":schema:")
-                && !inner
-                    .schema_deployments
-                    .permits_scoped_journal_write(tenant, digest)
+                && let Some((_, pin)) = split_scoped_journal_entity_id(entity_id)
+                && !inner.journals.contains_key(&append.persistence_id)
+                && !inner.schema_deployments.permits_scoped_journal_write(
+                    tenant,
+                    &pin.scope,
+                    &pin.bundle_digest,
+                )
             {
                 return Err(PersistenceError::Storage(
                     "stale scoped schema write fence".into(),
@@ -1173,6 +1182,7 @@ impl EventStore for SimEventStore {
         &self,
         tenant: &str,
         entity_type: &str,
+        scope: &SchemaScope,
         bundle_digest: &str,
         after_entity_id: Option<&str>,
         limit: usize,
@@ -1180,7 +1190,10 @@ impl EventStore for SimEventStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let suffix = format!(":schema:{bundle_digest}");
+        let suffix = scoped_journal_pin_suffix(&SchemaExecutionPin {
+            scope: scope.clone(),
+            bundle_digest: bundle_digest.to_string(),
+        });
         let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
         Ok(inner
             .journals
@@ -1204,12 +1217,12 @@ impl EventStore for SimEventStore {
         tenant: &str,
         entity_type: &str,
         entity_id: &str,
+        scope: &SchemaScope,
         limit: usize,
     ) -> Result<Vec<String>, PersistenceError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let prefix = format!("{entity_id}:schema:");
         let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
         Ok(inner
             .journals
@@ -1220,24 +1233,28 @@ impl EventStore for SimEventStore {
                     .filter(|(found_tenant, found_type, _)| {
                         *found_tenant == tenant && *found_type == entity_type
                     })
-                    .and_then(|(_, _, journal_entity_id)| journal_entity_id.strip_prefix(&prefix))
-                    .filter(|digest| {
-                        temper_runtime::persistence::schema_deployment::is_canonical_sha256_digest(
-                            digest,
-                        )
+                    .and_then(|(_, _, journal_entity_id)| {
+                        split_scoped_journal_entity_id(journal_entity_id)
                     })
+                    .filter(|(found_entity_id, pin)| {
+                        *found_entity_id == entity_id && &pin.scope == scope
+                    })
+                    .map(|(_, pin)| pin.bundle_digest)
             })
             .take(limit)
-            .map(str::to_string)
             .collect())
     }
 
     async fn scoped_bundle_write_version(
         &self,
         tenant: &str,
+        scope: &SchemaScope,
         bundle_digest: &str,
     ) -> Result<u64, PersistenceError> {
-        let suffix = format!(":schema:{bundle_digest}");
+        let suffix = scoped_journal_pin_suffix(&SchemaExecutionPin {
+            scope: scope.clone(),
+            bundle_digest: bundle_digest.to_string(),
+        });
         let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
         inner
             .journals

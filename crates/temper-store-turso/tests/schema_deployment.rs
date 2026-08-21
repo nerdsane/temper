@@ -5,10 +5,10 @@ use temper_runtime::persistence::schema_deployment::{
     ClaimSchemaVerificationOutcome, CommitSchemaMigrationBatch, CreateSchemaMigration,
     ReserveSchemaMigrationRetry, RetireSchemaBundle, RetireSchemaBundleOutcome,
     SchemaActivePointer, SchemaBundleRecord, SchemaDeploymentRecord, SchemaDeploymentStatus,
-    SchemaDeploymentStore, SchemaDeploymentStoreError, SchemaMigrationBatchReceipt,
-    SchemaMigrationBudgets, SchemaMigrationShadowRow, SchemaMigrationStatus,
-    SchemaMigrationValidationReceipt, SchemaOperationIdentity, SchemaScope, SchemaScopeKind,
-    SchemaVerificationReceipt, SubmitSchemaBundle, SubmitSchemaBundleOutcome,
+    SchemaDeploymentStore, SchemaDeploymentStoreError, SchemaExecutionPin,
+    SchemaMigrationBatchReceipt, SchemaMigrationBudgets, SchemaMigrationShadowRow,
+    SchemaMigrationStatus, SchemaMigrationValidationReceipt, SchemaOperationIdentity, SchemaScope,
+    SchemaScopeKind, SchemaVerificationReceipt, SubmitSchemaBundle, SubmitSchemaBundleOutcome,
 };
 use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
 use temper_store_turso::TursoEventStore;
@@ -258,7 +258,51 @@ async fn turso_schema_deployment_core_contract() {
             .unwrap(),
         Some(pointer.clone())
     );
-    let pinned_id = format!("tenant-contract:Task:entity-雪:schema:{digest}");
+    let pin = SchemaExecutionPin {
+        scope: scope(),
+        bundle_digest: digest.clone(),
+    };
+    let inactive_pin = SchemaExecutionPin {
+        scope: SchemaScope {
+            kind: SchemaScopeKind::Task,
+            id: "inactive-same-digest".into(),
+        },
+        bundle_digest: digest.clone(),
+    };
+    let inactive_id = format!(
+        "tenant-contract:Task:{}",
+        temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+            "cross-scope",
+            &inactive_pin,
+        )
+    );
+    assert!(
+        store
+            .append(
+                &inactive_id,
+                0,
+                &[PersistenceEnvelope {
+                    sequence_nr: 1,
+                    event_type: "Configure".into(),
+                    payload: serde_json::json!({}),
+                    metadata: EventMetadata {
+                        event_id: temper_runtime::scheduler::sim_uuid(),
+                        causation_id: temper_runtime::scheduler::sim_uuid(),
+                        correlation_id: temper_runtime::scheduler::sim_uuid(),
+                        timestamp: temper_runtime::scheduler::sim_now(),
+                        actor_id: "cross-scope-fence-contract".into(),
+                    },
+                }],
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("stale scoped schema write fence")
+    );
+    let pinned_id = format!(
+        "tenant-contract:Task:{}",
+        temper_runtime::persistence::schema_deployment::scoped_journal_entity_id("entity-雪", &pin,)
+    );
     store
         .append(
             &pinned_id,
@@ -278,9 +322,59 @@ async fn turso_schema_deployment_core_contract() {
         )
         .await
         .unwrap();
+    let collision_base = "entity-collision";
+    let collision_entity = temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+        collision_base,
+        &pin,
+    );
+    store
+        .append(
+            &format!(
+                "tenant-contract:Task:{}",
+                temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                    &collision_entity,
+                    &pin,
+                )
+            ),
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 1,
+                event_type: "Configure".into(),
+                payload: serde_json::json!({}),
+                metadata: EventMetadata {
+                    event_id: temper_runtime::scheduler::sim_uuid(),
+                    causation_id: temper_runtime::scheduler::sim_uuid(),
+                    correlation_id: temper_runtime::scheduler::sim_uuid(),
+                    timestamp: temper_runtime::scheduler::sim_now(),
+                    actor_id: "pin-collision-contract".into(),
+                },
+            }],
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .scoped_entity_bundle_digests("tenant-contract", "Task", collision_base, &scope(), 2,)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         store
-            .scoped_entity_bundle_digests("tenant-contract", "Task", "entity-雪", 2)
+            .scoped_entity_bundle_digests(
+                "tenant-contract",
+                "Task",
+                &collision_entity,
+                &scope(),
+                2,
+            )
+            .await
+            .unwrap(),
+        vec![digest.clone()]
+    );
+    assert_eq!(
+        store
+            .scoped_entity_bundle_digests("tenant-contract", "Task", "entity-雪", &scope(), 2,)
             .await
             .unwrap(),
         vec![digest.clone()]

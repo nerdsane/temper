@@ -702,7 +702,7 @@ async fn expansion_entity_ids(
         .page_scoped_entity_ids(
             context.tenant,
             &types,
-            &pin.bundle_digest,
+            pin,
             None,
             SCOPED_EXPAND_SCAN_BUDGET + 1,
         )

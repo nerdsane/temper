@@ -1,6 +1,6 @@
 //! Entity lifecycle methods for ServerState (spawn, query, delete, index).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 
@@ -13,30 +13,12 @@ use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
 use super::dispatch::retry;
-use super::{ServerState, projection_backfill};
+use super::{SCHEMA_PIN_MISMATCH_PREFIX, ServerState, projection_backfill};
 use crate::entity_actor::{EntityActor, EntityEvent, EntityMsg, EntityResponse, EntityState};
 use crate::events::EntityStateChange;
 use crate::registry::{VerificationDetail, VerificationStatus};
 use crate::runtime_metrics;
 use crate::storage::DataOnlyCreateRecord;
-
-pub(crate) const SCHEMA_PIN_MISMATCH_PREFIX: &str = "SchemaPinMismatch:";
-
-fn authoritative_scoped_digest(
-    digests: &BTreeSet<String>,
-    active_digest: Option<&str>,
-) -> Result<Option<String>, &'static str> {
-    match digests.len() {
-        0 => Ok(None),
-        1 => Ok(digests.iter().next().cloned()),
-        2 => active_digest
-            .filter(|digest| digests.contains(*digest))
-            .map(str::to_string)
-            .map(Some)
-            .ok_or("durable pins do not agree with the committed cutover pointer"),
-        _ => Err("more than two durable pins exist"),
-    }
-}
 
 fn actor_idle_timeout_secs() -> i64 {
     static ACTOR_IDLE_TIMEOUT: OnceLock<i64> = OnceLock::new();
@@ -58,6 +40,17 @@ fn is_deleted_envelope(event: &PersistenceEnvelope) -> bool {
         .get("action")
         .and_then(serde_json::Value::as_str)
         == Some("Deleted")
+}
+
+pub(crate) fn validate_global_entity_id(entity_id: &str) -> Result<(), String> {
+    if temper_runtime::persistence::schema_deployment::is_reserved_scoped_journal_entity_id(
+        entity_id,
+    ) {
+        return Err(format!(
+            "global entity ID '{entity_id}' uses the reserved scoped-journal identity form"
+        ));
+    }
+    Ok(())
 }
 
 fn record_projection_update_started(
@@ -747,10 +740,21 @@ impl ServerState {
         initial_reference_evidence: BTreeMap<String, bool>,
         schema_pin: Option<SchemaExecutionPin>,
     ) -> Option<ActorRef<EntityMsg>> {
+        if schema_pin.is_none() && validate_global_entity_id(entity_id).is_err() {
+            tracing::warn!(
+                tenant = %tenant,
+                entity_type,
+                entity_id,
+                "rejected global entity ID in reserved scoped-journal namespace"
+            );
+            return None;
+        }
         let key = match schema_pin.as_ref() {
             Some(pin) => format!(
-                "{tenant}:{entity_type}:{entity_id}:schema:{}",
-                pin.bundle_digest
+                "{tenant}:{entity_type}:{}",
+                temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                    entity_id, pin
+                )
             ),
             None => format!("{tenant}:{entity_type}:{entity_id}"),
         };
@@ -799,7 +803,7 @@ impl ServerState {
             .lock()
             .ok()
             .and_then(|slot| slot.clone());
-        let scoped_digest = schema_pin.as_ref().map(|pin| pin.bundle_digest.clone());
+        let scoped_pin = schema_pin.clone();
         let actor = match self.event_journal() {
             Some((store, backend)) => EntityActor::with_persistence(
                 entity_type,
@@ -840,8 +844,14 @@ impl ServerState {
 
         // Track in entity index for collection queries
         {
-            let index_key = match scoped_digest.as_deref() {
-                Some(digest) => format!("{tenant}:{entity_type}:schema:{digest}"),
+            let index_key = match scoped_pin.as_ref() {
+                Some(pin) => format!(
+                    "{tenant}:{entity_type}:{}",
+                    temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                        "__index__",
+                        pin,
+                    )
+                ),
                 None => format!("{tenant}:{entity_type}"),
             };
             let mut index = self.entity_index.write().unwrap();
@@ -861,9 +871,15 @@ impl ServerState {
         &self,
         tenant: &TenantId,
         entity_type: &str,
-        bundle_digest: &str,
+        schema_pin: &SchemaExecutionPin,
     ) -> Vec<String> {
-        let key = format!("{tenant}:{entity_type}:schema:{bundle_digest}");
+        let key = format!(
+            "{tenant}:{entity_type}:{}",
+            temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                "__index__",
+                schema_pin,
+            )
+        );
         self.entity_index
             .read()
             .ok()
@@ -878,7 +894,7 @@ impl ServerState {
         &self,
         tenant: &TenantId,
         entity_types: &[String],
-        bundle_digest: &str,
+        schema_pin: &SchemaExecutionPin,
         after: Option<(&str, &str)>,
         limit: usize,
     ) -> Result<Vec<(String, String)>, String> {
@@ -901,7 +917,8 @@ impl ServerState {
                     .list_scoped_entity_ids_page(
                         tenant.as_str(),
                         entity_type,
-                        bundle_digest,
+                        &schema_pin.scope,
+                        &schema_pin.bundle_digest,
                         after_entity_id,
                         remaining,
                     )
@@ -920,7 +937,13 @@ impl ServerState {
             .expect("entity index lock poisoned");
         let mut result = Vec::new();
         for entity_type in &sorted_types {
-            let key = format!("{tenant}:{entity_type}:schema:{bundle_digest}");
+            let key = format!(
+                "{tenant}:{entity_type}:{}",
+                temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                    "__index__",
+                    schema_pin,
+                )
+            );
             let Some(ids) = index.get(&key) else {
                 continue;
             };
@@ -944,9 +967,14 @@ impl ServerState {
         tenant: &TenantId,
         entity_type: &str,
         entity_id: &str,
-        bundle_digest: &str,
+        schema_pin: &SchemaExecutionPin,
     ) {
-        let actor_key = format!("{tenant}:{entity_type}:{entity_id}:schema:{bundle_digest}");
+        let actor_key = format!(
+            "{tenant}:{entity_type}:{}",
+            temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                entity_id, schema_pin,
+            )
+        );
         if let Ok(mut registry) = self.actor_registry.write()
             && let Some(actor_ref) = registry.remove(&actor_key)
         {
@@ -955,7 +983,13 @@ impl ServerState {
         if let Ok(mut last_accessed) = self.last_accessed.write() {
             last_accessed.remove(&actor_key);
         }
-        let index_key = format!("{tenant}:{entity_type}:schema:{bundle_digest}");
+        let index_key = format!(
+            "{tenant}:{entity_type}:{}",
+            temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                "__index__",
+                schema_pin,
+            )
+        );
         if let Ok(mut index) = self.entity_index.write()
             && let Some(ids) = index.get_mut(&index_key)
         {
@@ -1270,70 +1304,6 @@ impl ServerState {
             .await
     }
 
-    async fn scoped_entity_pin_matches(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        requested_pin: &SchemaExecutionPin,
-    ) -> Result<bool, String> {
-        let prefix = format!("{tenant}:{entity_type}:{entity_id}:schema:");
-        let mut digests = self
-            .actor_registry
-            .read()
-            .map_err(|_| "actor registry lock poisoned".to_string())?
-            .keys()
-            .filter_map(|key| key.strip_prefix(&prefix))
-            .map(str::to_string)
-            .collect::<BTreeSet<_>>();
-        if let Some((store, _)) = self.event_journal() {
-            digests.extend(
-                store
-                    .scoped_entity_bundle_digests(tenant.as_str(), entity_type, entity_id, 3)
-                    .await
-                    .map_err(|error| error.to_string())?,
-            );
-        }
-        let active_digest = if digests.len() == 2 {
-            Some(
-                self
-                .schema_deployment_store()
-                .ok_or_else(|| {
-                    format!(
-                        "{SCHEMA_PIN_MISMATCH_PREFIX} scoped entity '{entity_type}/{entity_id}' has ambiguous durable pins and no cutover authority"
-                    )
-                })?
-                .active_schema_pointer(tenant.as_str(), &requested_pin.scope)
-                .await
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| {
-                    format!(
-                        "{SCHEMA_PIN_MISMATCH_PREFIX} scoped entity '{entity_type}/{entity_id}' has ambiguous durable pins and no active cutover pointer"
-                    )
-                })?
-                .bundle_digest,
-            )
-        } else {
-            None
-        };
-        let authoritative_digest = authoritative_scoped_digest(&digests, active_digest.as_deref())
-            .map_err(|reason| {
-                format!(
-                    "{SCHEMA_PIN_MISMATCH_PREFIX} scoped entity '{entity_type}/{entity_id}' {reason}"
-                )
-            })?;
-        let Some(authoritative_digest) = authoritative_digest else {
-            return Ok(false);
-        };
-        if authoritative_digest == requested_pin.bundle_digest {
-            return Ok(true);
-        }
-        Err(format!(
-            "{SCHEMA_PIN_MISMATCH_PREFIX} scoped entity '{entity_type}/{entity_id}' is pinned to {authoritative_digest}, not {}",
-            requested_pin.bundle_digest
-        ))
-    }
-
     /// Enumerate exact-digest entity IDs within a caller-supplied work budget.
     pub(crate) async fn list_scoped_entity_ids_bounded(
         &self,
@@ -1347,6 +1317,7 @@ impl ServerState {
                 .list_scoped_entity_ids_page(
                     tenant.as_str(),
                     entity_type,
+                    &schema_pin.scope,
                     &schema_pin.bundle_digest,
                     None,
                     limit,
@@ -1355,7 +1326,8 @@ impl ServerState {
                 .map_err(|error| error.to_string());
         }
         let prefix = format!("{tenant}:{entity_type}:");
-        let suffix = format!(":schema:{}", schema_pin.bundle_digest);
+        let suffix =
+            temper_runtime::persistence::schema_deployment::scoped_journal_pin_suffix(schema_pin);
         let mut ids = self
             .actor_registry
             .read()
@@ -1600,6 +1572,7 @@ impl ServerState {
         entity_id: &str,
         initial_fields: serde_json::Value,
     ) -> Result<Option<EntityResponse>, String> {
+        validate_global_entity_id(entity_id)?;
         if !initial_fields.is_object() {
             return Ok(None);
         }
@@ -2179,6 +2152,9 @@ impl ServerState {
         entity_type: &str,
         entity_id: &str,
     ) -> bool {
+        if validate_global_entity_id(entity_id).is_err() {
+            return false;
+        }
         let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
         let journal = self.event_journal();
 
@@ -2513,37 +2489,3 @@ impl ServerState {
 
 use temper_authz::{AuthzDecision, AuthzDenial, SecurityContext};
 use temper_runtime::actor::ActorRef;
-
-#[cfg(test)]
-mod schema_pin_authority_tests {
-    use super::*;
-
-    #[test]
-    fn committed_pointer_selects_one_side_of_shadow_cutover() {
-        let source = format!("sha256:{}", "a".repeat(64));
-        let target = format!("sha256:{}", "b".repeat(64));
-        let digests = BTreeSet::from([source.clone(), target.clone()]);
-
-        assert_eq!(
-            authoritative_scoped_digest(&digests, Some(&source)),
-            Ok(Some(source))
-        );
-        assert_eq!(
-            authoritative_scoped_digest(&digests, Some(&target)),
-            Ok(Some(target))
-        );
-        assert!(authoritative_scoped_digest(&digests, None).is_err());
-    }
-
-    #[test]
-    fn single_durable_pin_is_not_reinterpreted_by_pointer_change() {
-        let source = format!("sha256:{}", "a".repeat(64));
-        let replacement = format!("sha256:{}", "b".repeat(64));
-        let digests = BTreeSet::from([source.clone()]);
-
-        assert_eq!(
-            authoritative_scoped_digest(&digests, Some(&replacement)),
-            Ok(Some(source))
-        );
-    }
-}

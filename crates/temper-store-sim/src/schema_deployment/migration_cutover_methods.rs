@@ -36,7 +36,12 @@ macro_rules! impl_schema_migration_cutover_methods {
             if job_snapshot.fence != expected_fence {
                 return Err(SchemaDeploymentStoreError::StaleFence);
             }
-            let suffix = format!(":schema:{}", job_snapshot.command.source_bundle_digest);
+            let suffix = temper_runtime::persistence::schema_deployment::scoped_journal_pin_suffix(
+                &temper_runtime::persistence::schema_deployment::SchemaExecutionPin {
+                    scope: job_snapshot.command.scope.clone(),
+                    bundle_digest: job_snapshot.command.source_bundle_digest.clone(),
+                },
+            );
             let current_write_version = inner
                 .journals
                 .iter()
@@ -134,7 +139,12 @@ macro_rules! impl_schema_migration_cutover_methods {
             if job.fence != expected_fence {
                 return Err(SchemaDeploymentStoreError::StaleFence);
             }
-            let suffix = format!(":schema:{}", job.command.source_bundle_digest);
+            let suffix = temper_runtime::persistence::schema_deployment::scoped_journal_pin_suffix(
+                &temper_runtime::persistence::schema_deployment::SchemaExecutionPin {
+                    scope: job.command.scope.clone(),
+                    bundle_digest: job.command.source_bundle_digest.clone(),
+                },
+            );
             let current_write_version = inner
                 .journals
                 .iter()

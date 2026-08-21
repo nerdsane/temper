@@ -13,9 +13,9 @@ use temper_authz::SecurityContext;
 
 use super::account_verification::enforce_commons_account_verified_for_action;
 use super::common::run_write_prechecks;
-use super::common::schema_pin_mismatch_response;
 use super::rate_limit::{enforce_commons_write_rate_limit, owner_id_from_action};
 use super::response::annotate_entity;
+use super::schema_pin::schema_pin_mismatch_response;
 use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::identity::ResolvedIdentity;
@@ -31,8 +31,10 @@ fn idempotency_actor_key(
 ) -> String {
     match schema_pin {
         Some(pin) => format!(
-            "{tenant}:{entity_type}:{entity_id}:schema:{}",
-            pin.bundle_digest
+            "{tenant}:{entity_type}:{}",
+            temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                entity_id, pin,
+            )
         ),
         None => format!("{tenant}:{entity_type}:{entity_id}"),
     }
