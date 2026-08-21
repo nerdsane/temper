@@ -8,7 +8,7 @@ use temper_wasm_sdk::data::{
 };
 use tower::ServiceExt;
 
-use super::tests::{call, invocation, response_error};
+use super::tests::{authenticated_router, call, invocation, response_error};
 
 #[tokio::test]
 async fn sdk_and_odata_share_authoritative_semantics() {
@@ -35,7 +35,7 @@ async fn sdk_and_odata_share_authoritative_semantics() {
     .await;
     assert!(matches!(created.outcome, DataOutcomeV1::Ok { .. }));
     let path = format!("/tdata/Customers('{id}')");
-    let router = crate::build_router(invocation.state.clone());
+    let router = authenticated_router(invocation.state.clone(), SecurityContext::system());
     assert_eq!(
         router
             .clone()
@@ -91,7 +91,7 @@ async fn sdk_and_odata_share_authoritative_semantics() {
         matches!(action.outcome, DataOutcomeV1::Ok { .. }),
         "{action:?}"
     );
-    let odata_action = crate::build_router(invocation.state.clone())
+    let odata_action = authenticated_router(invocation.state.clone(), SecurityContext::system())
         .oneshot(
             Request::post(format!("{path}/Temper.Example.Rename"))
                 .header("content-type", "application/json")
@@ -116,7 +116,7 @@ async fn sdk_and_odata_share_authoritative_semantics() {
         response_error(guard).kind,
         ModuleDataErrorKind::GuardRejected
     );
-    let odata_guard = crate::build_router(invocation.state.clone())
+    let odata_guard = authenticated_router(invocation.state.clone(), SecurityContext::system())
         .oneshot(
             Request::post(format!("{path}/Temper.Example.Reject"))
                 .header("content-type", "application/json")
@@ -126,7 +126,7 @@ async fn sdk_and_odata_share_authoritative_semantics() {
         .await
         .unwrap();
     assert_eq!(odata_guard.status(), StatusCode::CONFLICT);
-    let missing = crate::build_router(invocation.state.clone())
+    let missing = authenticated_router(invocation.state.clone(), SecurityContext::system())
         .oneshot(
             Request::get("/tdata/Customers('018f1f80-7b2d-7000-8000-000000000099')")
                 .body(Body::empty())

@@ -17,6 +17,27 @@ use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
+async fn authenticate_test_request(
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    request
+        .extensions_mut()
+        .insert(temper_authz::AuthenticatedRequestContext::new(
+            TenantId::default(),
+            temper_authz::SecurityContext::from_resolved_identity(
+                "file-value-test",
+                "test-agent",
+                None,
+            ),
+        ));
+    next.run(request).await
+}
+
+fn authenticated_router(state: ServerState) -> axum::Router {
+    build_router(state).layer(axum::middleware::from_fn(authenticate_test_request))
+}
+
 const FILE_CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
   <edmx:DataServices>
@@ -218,6 +239,10 @@ async fn build_turso_file_state(test_name: &str) -> (ServerState, TursoEventStor
     );
     let mut state = ServerState::from_registry(ActorSystem::new(test_name), registry);
     state.set_storage_stack(StorageStack::from_turso(store.clone()));
+    state
+        .authz
+        .reload_tenant_policies("default", "permit(principal, action, resource);")
+        .expect("functional file-value tests should install an explicit policy");
     (state, store)
 }
 
@@ -401,7 +426,7 @@ async fn odata_file_value_put_uses_native_path_without_blob_adapter() {
         .await
         .expect("create File state");
 
-    let app = build_router(state.clone());
+    let app = authenticated_router(state.clone());
     let body = b"odata native File value write";
     let expected_hash = format!("sha256:{:x}", Sha256::digest(body));
     let response = app
@@ -451,7 +476,7 @@ async fn odata_file_value_put_applies_cedar_update_policy() {
         )
         .expect("install Cedar policy");
 
-    let response = build_router(state.clone())
+    let response = authenticated_router(state.clone())
         .oneshot(
             Request::put("/tdata/Files('fl-write-denied')/$value")
                 .header("content-type", "text/plain")
@@ -500,7 +525,7 @@ async fn odata_file_value_get_applies_cedar_read_policy() {
         )
         .expect("install Cedar policy");
 
-    let response = build_router(state)
+    let response = authenticated_router(state)
         .oneshot(
             Request::get("/tdata/Files('fl-read-denied')/$value")
                 .header("x-temper-principal-kind", "customer")
@@ -705,7 +730,7 @@ async fn put_value_on_new_file_is_one_atomic_append() {
 
     let body = b"brand new file value, one append";
 
-    let response = build_router(state.clone())
+    let response = authenticated_router(state.clone())
         .oneshot(
             Request::put("/tdata/Files('fl-new-atomic')/$value")
                 .header("content-type", "text/plain")
@@ -770,7 +795,7 @@ async fn new_file_value_put_is_read_after_write_consistent() {
     let body = b"read after write consistency";
     let expected_hash = format!("sha256:{:x}", Sha256::digest(body));
 
-    let response = build_router(state.clone())
+    let response = authenticated_router(state.clone())
         .oneshot(
             Request::put("/tdata/Files('fl-raw-consistent')/$value")
                 .header("content-type", "text/markdown")
@@ -820,7 +845,7 @@ async fn concurrent_new_file_value_puts_yield_one_204_one_409() {
     let body_a = b"writer A bytes";
     let body_b = b"writer B different bytes";
 
-    let app = build_router(state.clone());
+    let app = authenticated_router(state.clone());
     let put_a = app.clone().oneshot(
         Request::put("/tdata/Files('fl-race')/$value")
             .header("content-type", "text/plain")
@@ -876,7 +901,7 @@ async fn existing_file_value_put_routes_through_update_unchanged() {
     // First write: brand-new File via the atomic create-with-content path.
     let first = b"version one bytes";
     let first_hash = format!("sha256:{:x}", Sha256::digest(first));
-    let response = build_router(state.clone())
+    let response = authenticated_router(state.clone())
         .oneshot(
             Request::put("/tdata/Files('fl-update')/$value")
                 .header("content-type", "text/plain")
@@ -904,7 +929,7 @@ async fn existing_file_value_put_routes_through_update_unchanged() {
     let second = b"version two bytes, larger payload";
     let second_hash = format!("sha256:{:x}", Sha256::digest(second));
     assert_ne!(first_hash, second_hash);
-    let response = build_router(state.clone())
+    let response = authenticated_router(state.clone())
         .oneshot(
             Request::put("/tdata/Files('fl-update')/$value")
                 .header("content-type", "text/plain")

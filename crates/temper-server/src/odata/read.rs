@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use axum::extract::{Extension, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use temper_authz::SecurityContext;
+use temper_authz::{AuthenticatedRequestContext, SecurityContext};
 use temper_odata::path::{KeyValue, ODataPath, parse_path};
 use temper_odata::query::parse_query_options;
 use temper_odata::query::types::{
@@ -16,7 +16,8 @@ use temper_runtime::tenant::TenantId;
 use temper_wasm::{StreamRegistry, WasmInvocationContext};
 use tracing::instrument;
 
-use super::authz::{READ_ACTION, authorize_read, request_security_context};
+use super::authz::{READ_ACTION, authorize_read, require_authenticated_context};
+use super::blob_media::handle_blob_primitive_stream;
 use super::common::{
     check_has_stream_or_400, extract_key, extract_schema_pin, extract_tenant, has_expand_options,
     resolve_entity_type, resolve_entity_type_for_pin, resolve_value_parent, tenant_csdl_xml,
@@ -30,10 +31,8 @@ use super::read_support::{record_entity_set_not_found, try_load_entity_body_from
 use super::response::annotate_entity;
 use super::schema_pin::{schema_pin_extraction_error_response, schema_pin_mismatch_response};
 use super::stream_fast_path::try_file_stream_fast_path;
-use crate::blobs::hydrate_blob_refs_for_tenant;
-use crate::identity::ResolvedIdentity;
+use crate::blobs::{BlobHydrationBudget, hydrate_blob_refs_for_tenant_with_budget};
 use crate::query_eval::{apply_query_options, expand_entity, expand_scoped_entity, select_fields};
-use crate::request_context::extract_agent_context;
 use crate::response::{ODataResponse, ODataStreamResponse, ODataXmlResponse, odata_error};
 use crate::state::{ServerState, validate_global_entity_id};
 use crate::storage::{QueryFieldIndexOrder, QueryFieldIndexOrderDirection};
@@ -57,6 +56,7 @@ async fn resolve_parent_entity(
     security_ctx: &SecurityContext,
     schema_pin: Option<&SchemaExecutionPin>,
     resolve_durable_pin: bool,
+    hydration_budget: &BlobHydrationBudget,
 ) -> Result<ResolvedParentEntity, (StatusCode, String)> {
     match path {
         ODataPath::Entity(set_name, key) => {
@@ -101,6 +101,7 @@ async fn resolve_parent_entity(
                 security_ctx,
                 schema_pin,
                 resolve_durable_pin,
+                hydration_budget,
             ))
             .await?;
             let parent_type = resolved_parent.entity_type;
@@ -118,6 +119,7 @@ async fn resolve_parent_entity(
                 &parent_key,
                 security_ctx,
                 parent_pin.as_ref(),
+                hydration_budget,
             )
             .await
             .map_err(|_| {
@@ -139,6 +141,7 @@ async fn resolve_parent_entity(
                         state,
                         tenant,
                         security_ctx,
+                        hydration_budget,
                         pin,
                     )
                     .await
@@ -151,6 +154,7 @@ async fn resolve_parent_entity(
                         state,
                         tenant,
                         security_ctx,
+                        hydration_budget,
                     )
                     .await
                 }
@@ -235,6 +239,7 @@ async fn resolve_parent_entity(
                 security_ctx,
                 schema_pin,
                 resolve_durable_pin,
+                hydration_budget,
             ))
             .await?;
             let parent_type = resolved_parent.entity_type;
@@ -348,7 +353,7 @@ fn service_document_body(state: &ServerState, tenant: &TenantId) -> serde_json::
         .expect("tenant-global service document is always available")
 }
 
-async fn entity_set_not_found_response(
+pub(super) async fn entity_set_not_found_response(
     state: &ServerState,
     tenant: &TenantId,
     set_name: &str,
@@ -371,20 +376,7 @@ fn resource_not_found_response(set_name: &str, key: &str) -> Response {
     .into_response()
 }
 
-/// Load a single entity body for OData read handlers.
-///
-/// Tries the durable `entity_catalog` projection first when a query-plane
-/// store is configured or the `TEMPER_ODATA_CATALOG_FAST_READ` flag is on. On
-/// a hit, returns a body whose shape matches the actor's serialized
-/// `EntityState` — blob refs already hydrated. On miss (no catalog row,
-/// catalog disabled, or backend error), falls back to the actor path: validate
-/// the entity exists in the in-memory index, then load via
-/// `get_tenant_entity_state`.
-///
-/// The catalog-first path bypasses the in-memory index, so it survives
-/// cold starts and bulk-imported entities (data on disk but not yet
-/// indexed in the running process). See ADR-0077.
-async fn load_existing_entity_body(
+pub(super) async fn load_existing_entity_descriptor_body(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
@@ -398,24 +390,16 @@ async fn load_existing_entity_body(
     {
         return Ok(body);
     }
-
-    if !state.entity_exists(tenant, entity_type, key) {
+    if !state.entity_exists(tenant, entity_type, key)
+        && !state.ensure_entity_loaded(tenant, entity_type, key).await
+    {
         return Err(resource_not_found_response(set_name, key));
     }
-
-    let response = crate::application_data::GovernedApplicationDataService::new(state)
+    crate::application_data::GovernedApplicationDataService::new(state)
         .get(tenant, entity_type, key)
         .await
-        .map_err(|_| resource_not_found_response(set_name, key))?;
-    let mut body = serde_json::to_value(&response.state).unwrap_or_default();
-    hydrate_blob_refs_for_tenant(state, tenant, &mut body).await;
-    if let Some(obj) = body.as_object_mut() {
-        obj.insert(
-            "@odata.id".into(),
-            serde_json::json!(format!("{set_name}('{key}')")),
-        );
-    }
-    Ok(body)
+        .map(|response| serde_json::to_value(&response.state).unwrap_or_default())
+        .map_err(|_| resource_not_found_response(set_name, key))
 }
 
 async fn load_authorized_entity_body(
@@ -425,8 +409,13 @@ async fn load_authorized_entity_body(
     set_name: &str,
     key: &str,
     security_ctx: &SecurityContext,
+    hydration_budget: &BlobHydrationBudget,
 ) -> Result<serde_json::Value, Response> {
-    let body = load_existing_entity_body(state, tenant, entity_type, set_name, key).await?;
+    // Authorization precedes object-store reads. Overflow descriptors contain
+    // the inline ownership/relationship metadata Cedar needs without granting
+    // an unauthorized caller a storage-I/O amplification primitive.
+    let mut body =
+        load_existing_entity_descriptor_body(state, tenant, entity_type, set_name, key).await?;
     authorize_read(
         state,
         tenant,
@@ -437,9 +426,20 @@ async fn load_authorized_entity_body(
         &body,
     )
     .map_err(|response| *response)?;
+    hydrate_blob_refs_for_tenant_with_budget(state, tenant, &mut body, hydration_budget).await;
+    if let Some(object) = body.as_object_mut() {
+        object.insert(
+            "@odata.id".into(),
+            serde_json::json!(format!("{set_name}('{key}')")),
+        );
+    }
     Ok(body)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the scoped read boundary keeps authority, schema pin, and hydration budget explicit"
+)]
 async fn load_authorized_entity_body_for_pin(
     state: &ServerState,
     tenant: &TenantId,
@@ -448,6 +448,7 @@ async fn load_authorized_entity_body_for_pin(
     key: &str,
     security_ctx: &SecurityContext,
     schema_pin: Option<&SchemaExecutionPin>,
+    hydration_budget: &BlobHydrationBudget,
 ) -> Result<serde_json::Value, Response> {
     let Some(pin) = schema_pin else {
         return load_authorized_entity_body(
@@ -457,6 +458,7 @@ async fn load_authorized_entity_body_for_pin(
             set_name,
             key,
             security_ctx,
+            hydration_budget,
         )
         .await;
     };
@@ -478,7 +480,7 @@ async fn load_authorized_entity_body_for_pin(
         &body,
     )
     .map_err(|response| *response)?;
-    hydrate_blob_refs_for_tenant(state, tenant, &mut body).await;
+    hydrate_blob_refs_for_tenant_with_budget(state, tenant, &mut body, hydration_budget).await;
     Ok(body)
 }
 
@@ -597,12 +599,34 @@ async fn resolve_entity_request_key(
     }
 }
 
+#[derive(Clone, Copy)]
+struct ReadContext<'a> {
+    state: &'a ServerState,
+    tenant: &'a TenantId,
+    security: &'a SecurityContext,
+    hydration: &'a BlobHydrationBudget,
+}
+
+impl<'a> ReadContext<'a> {
+    fn new(
+        state: &'a ServerState,
+        tenant: &'a TenantId,
+        security: &'a SecurityContext,
+        hydration: &'a BlobHydrationBudget,
+    ) -> Self {
+        Self {
+            state,
+            tenant,
+            security,
+            hydration,
+        }
+    }
+}
+
 async fn apply_entity_query_options(
     mut body: serde_json::Value,
     entity_type: &str,
-    state: &ServerState,
-    tenant: &TenantId,
-    security_ctx: &SecurityContext,
+    context: ReadContext<'_>,
     query_options: &QueryOptions,
     select_before_expand: bool,
 ) -> Result<serde_json::Value, Response> {
@@ -615,9 +639,10 @@ async fn apply_entity_query_options(
             &mut body,
             expand_items,
             entity_type,
-            state,
-            tenant,
-            security_ctx,
+            context.state,
+            context.tenant,
+            context.security,
+            context.hydration,
         )
         .await?;
     }
@@ -639,24 +664,36 @@ struct EntityBodyOptions<'a> {
 }
 
 async fn build_entity_body(
-    state: &ServerState,
-    tenant: &TenantId,
+    context: ReadContext<'_>,
     entity_type: &str,
     set_name: &str,
     key: &str,
-    security_ctx: &SecurityContext,
     options: EntityBodyOptions<'_>,
 ) -> Result<serde_json::Value, Response> {
-    let mut state_json =
-        load_authorized_entity_body(state, tenant, entity_type, set_name, key, security_ctx)
-            .await?;
+    let mut state_json = load_authorized_entity_body(
+        context.state,
+        context.tenant,
+        entity_type,
+        set_name,
+        key,
+        context.security,
+        context.hydration,
+    )
+    .await?;
     if let Some(obj) = state_json.as_object_mut() {
         obj.remove("@odata.id");
     }
     let mut body = annotate_entity(state_json, options.context, options.odata_id);
 
     if options.enrich {
-        enrich_entity_response(&mut body, entity_type, set_name, key, state, tenant);
+        enrich_entity_response(
+            &mut body,
+            entity_type,
+            set_name,
+            key,
+            context.state,
+            context.tenant,
+        );
     }
 
     if let Some(name) = options.function
@@ -668,9 +705,7 @@ async fn build_entity_body(
     apply_entity_query_options(
         body,
         entity_type,
-        state,
-        tenant,
-        security_ctx,
+        context,
         options.query_options,
         options.select_before_expand,
     )
@@ -797,6 +832,7 @@ pub(super) async fn handle_odata_get_for_tenant(
                 .into_response();
         }
     };
+    let hydration_budget = BlobHydrationBudget::generic_response();
 
     match odata_path {
         ODataPath::Metadata if schema_pin.is_some() => {
@@ -837,6 +873,7 @@ pub(super) async fn handle_odata_get_for_tenant(
                 schema_pin.as_ref().expect("guarded above"),
                 &name,
                 &query_options,
+                &hydration_budget,
             )
             .await
         }
@@ -853,6 +890,7 @@ pub(super) async fn handle_odata_get_for_tenant(
                 &set_name,
                 &key,
                 &query_options,
+                &hydration_budget,
             )
             .await
         }
@@ -872,6 +910,7 @@ pub(super) async fn handle_odata_get_for_tenant(
                 parent,
                 property,
                 &query_options,
+                &hydration_budget,
             )
             .await
         }
@@ -892,6 +931,7 @@ pub(super) async fn handle_odata_get_for_tenant(
                 parent,
                 NavigationEntityTarget { property, key },
                 &query_options,
+                &hydration_budget,
             )
             .await
         }
@@ -922,6 +962,7 @@ pub(super) async fn handle_odata_get_for_tenant(
                 &name,
                 &query_options,
                 &query_params,
+                &hydration_budget,
             )
             .await
         }
@@ -934,6 +975,7 @@ pub(super) async fn handle_odata_get_for_tenant(
                 &set_name,
                 &key,
                 &query_options,
+                &hydration_budget,
             )
             .await
         }
@@ -953,6 +995,7 @@ pub(super) async fn handle_odata_get_for_tenant(
                 parent,
                 property,
                 &query_options,
+                &hydration_budget,
             )
             .await
         }
@@ -973,6 +1016,7 @@ pub(super) async fn handle_odata_get_for_tenant(
                 parent,
                 NavigationEntityTarget { property, key },
                 &query_options,
+                &hydration_budget,
             )
             .await
         }
@@ -1003,13 +1047,14 @@ pub(super) async fn handle_odata_get_for_tenant(
                     &parent,
                     &function,
                     &query_options,
+                    &hydration_budget,
                 )
                 .await
             }
         }
 
         ODataPath::Value { ref parent } => {
-            handle_stream_get(&state, &tenant, &security_ctx, parent).await
+            handle_stream_get(&state, &tenant, &security_ctx, parent, &hydration_budget).await
         }
 
         _ => odata_error(
@@ -1026,6 +1071,10 @@ struct ScopedReadPin<'a> {
     resolve_durable: bool,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the scoped read boundary keeps authority, schema pin, and hydration budget explicit"
+)]
 async fn handle_scoped_entity(
     state: &ServerState,
     tenant: &TenantId,
@@ -1034,6 +1083,7 @@ async fn handle_scoped_entity(
     set_name: &str,
     key: &KeyValue,
     query_options: &QueryOptions,
+    hydration_budget: &BlobHydrationBudget,
 ) -> Response {
     let Some(entity_type) =
         resolve_entity_type_for_pin(state, tenant, Some(requested_pin.pin), set_name)
@@ -1085,7 +1135,7 @@ async fn handle_scoped_entity(
     ) {
         return *response;
     }
-    hydrate_blob_refs_for_tenant(state, tenant, &mut body).await;
+    hydrate_blob_refs_for_tenant_with_budget(state, tenant, &mut body, hydration_budget).await;
     if let Some(expand) = query_options.expand.as_ref()
         && let Err(response) = expand_scoped_entity(
             &mut body,
@@ -1094,6 +1144,7 @@ async fn handle_scoped_entity(
             state,
             tenant,
             security_ctx,
+            hydration_budget,
             &schema_pin,
         )
         .await
@@ -1122,6 +1173,7 @@ async fn handle_scoped_entity_set(
     schema_pin: &SchemaExecutionPin,
     set_name: &str,
     query_options: &QueryOptions,
+    hydration_budget: &BlobHydrationBudget,
 ) -> Response {
     let Some(entity_type) = resolve_entity_type_for_pin(state, tenant, Some(schema_pin), set_name)
     else {
@@ -1189,7 +1241,7 @@ async fn handle_scoped_entity_set(
         {
             continue;
         }
-        hydrate_blob_refs_for_tenant(state, tenant, &mut body).await;
+        hydrate_blob_refs_for_tenant_with_budget(state, tenant, &mut body, hydration_budget).await;
         entities.push(body);
     }
     let bounded_options = QueryOptions {
@@ -1212,6 +1264,7 @@ async fn handle_scoped_entity_set(
                 state,
                 tenant,
                 security_ctx,
+                hydration_budget,
                 schema_pin,
             )
             .await
@@ -1278,6 +1331,7 @@ async fn handle_entity_set(
     name: &str,
     query_options: &QueryOptions,
     query_params: &std::collections::BTreeMap<String, String>,
+    hydration_budget: &BlobHydrationBudget,
 ) -> axum::response::Response {
     tracing::debug!(name = %name, tenant = %tenant, "handle_entity_set");
     let entity_type = match resolve_entity_type(state, tenant, name) {
@@ -1306,6 +1360,9 @@ async fn handle_entity_set(
     read_result.telemetry.record(&span);
 
     let mut result = read_result.entities;
+    for entity in &mut result {
+        hydrate_blob_refs_for_tenant_with_budget(state, tenant, entity, hydration_budget).await;
+    }
     if let Some(ref expand_items) = query_options.expand {
         for entity in &mut result {
             if let Err(response) = expand_entity(
@@ -1315,6 +1372,7 @@ async fn handle_entity_set(
                 state,
                 tenant,
                 security_ctx,
+                hydration_budget,
             )
             .await
             {
@@ -1390,6 +1448,7 @@ async fn handle_entity(
     set_name: &str,
     key: &temper_odata::path::KeyValue,
     query_options: &QueryOptions,
+    hydration_budget: &BlobHydrationBudget,
 ) -> axum::response::Response {
     let entity_type = match resolve_entity_type(state, tenant, set_name) {
         Some(t) => t,
@@ -1452,12 +1511,10 @@ async fn handle_entity(
     }
 
     match build_entity_body(
-        state,
-        tenant,
+        ReadContext::new(state, tenant, security_ctx, hydration_budget),
         &entity_type,
         set_name,
         &key_str,
-        security_ctx,
         EntityBodyOptions {
             context: format!("$metadata#{set_name}/$entity"),
             odata_id: Some(format!("{set_name}('{key_str}')")),
@@ -1484,6 +1541,10 @@ struct NavigationReadPin<'a> {
     resolve_durable: bool,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "navigation resolution keeps authority, schema pin, query, and hydration budget explicit"
+)]
 async fn handle_navigation_property(
     state: &ServerState,
     tenant: &TenantId,
@@ -1492,6 +1553,7 @@ async fn handle_navigation_property(
     parent: &ODataPath,
     property: &str,
     query_options: &QueryOptions,
+    hydration_budget: &BlobHydrationBudget,
 ) -> axum::response::Response {
     let NavigationReadPin {
         pin: schema_pin,
@@ -1504,6 +1566,7 @@ async fn handle_navigation_property(
         security_ctx,
         schema_pin,
         resolve_durable_pin,
+        hydration_budget,
     )
     .await
     {
@@ -1525,6 +1588,7 @@ async fn handle_navigation_property(
         &parent_key,
         security_ctx,
         parent_pin.as_ref(),
+        hydration_budget,
     )
     .await
     {
@@ -1559,6 +1623,7 @@ async fn handle_navigation_property(
                 state,
                 tenant,
                 security_ctx,
+                hydration_budget,
                 pin,
             )
             .await
@@ -1571,6 +1636,7 @@ async fn handle_navigation_property(
                 state,
                 tenant,
                 security_ctx,
+                hydration_budget,
             )
             .await
         }
@@ -1627,6 +1693,10 @@ struct NavigationEntityTarget<'a> {
     key: &'a temper_odata::path::KeyValue,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "navigation resolution keeps authority, schema pin, query, and hydration budget explicit"
+)]
 async fn handle_navigation_entity(
     state: &ServerState,
     tenant: &TenantId,
@@ -1635,6 +1705,7 @@ async fn handle_navigation_entity(
     parent: &ODataPath,
     target: NavigationEntityTarget<'_>,
     query_options: &QueryOptions,
+    hydration_budget: &BlobHydrationBudget,
 ) -> axum::response::Response {
     let NavigationReadPin {
         pin: schema_pin,
@@ -1648,6 +1719,7 @@ async fn handle_navigation_entity(
         security_ctx,
         schema_pin,
         resolve_durable_pin,
+        hydration_budget,
     )
     .await
     {
@@ -1668,6 +1740,7 @@ async fn handle_navigation_entity(
         &parent_key,
         security_ctx,
         parent_pin.as_ref(),
+        hydration_budget,
     )
     .await
     {
@@ -1718,17 +1791,18 @@ async fn handle_navigation_entity(
             &target_set,
             key,
             query_options,
+            hydration_budget,
         )
         .await;
     }
 
+    let context = ReadContext::new(state, tenant, security_ctx, hydration_budget);
+
     match build_entity_body(
-        state,
-        tenant,
+        context,
         &target_type,
         &target_set,
         &key_str,
-        security_ctx,
         EntityBodyOptions {
             context: format!("$metadata#{target_set}/$entity"),
             odata_id: Some(format!("{target_set}('{key_str}')")),
@@ -1757,6 +1831,7 @@ async fn handle_bound_function(
     parent: &ODataPath,
     function: &str,
     query_options: &QueryOptions,
+    hydration_budget: &BlobHydrationBudget,
 ) -> axum::response::Response {
     let (parent_set, parent_key) = match parent {
         ODataPath::Entity(set_name, key) => (set_name.clone(), extract_key(key)),
@@ -1783,12 +1858,10 @@ async fn handle_bound_function(
     };
 
     match build_entity_body(
-        state,
-        tenant,
+        ReadContext::new(state, tenant, security_ctx, hydration_budget),
         &entity_type,
         &parent_set,
         &parent_key,
-        security_ctx,
         EntityBodyOptions {
             context: format!("$metadata#{entity_type}"),
             odata_id: None,
@@ -1813,22 +1886,21 @@ async fn handle_bound_function(
 #[instrument(skip_all, fields(otel.name = "GET /odata/{path}"))]
 pub async fn handle_odata_get(
     State(state): State<ServerState>,
-    resolved_id: Option<Extension<ResolvedIdentity>>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     headers: HeaderMap,
     axum::extract::Path(path): axum::extract::Path<String>,
     Query(query_params): Query<std::collections::BTreeMap<String, String>>,
 ) -> impl IntoResponse {
-    let tenant = match extract_tenant(&headers, &state) {
-        Ok(t) => t,
-        Err(e) => return e.into_response(),
+    let authenticated = match require_authenticated_context(authenticated) {
+        Ok(context) => context,
+        Err(error) => return error.into_response(),
     };
+    let tenant = authenticated.tenant().clone();
+    let security_ctx = authenticated.security_context().clone();
     let schema_pin = match extract_schema_pin(&headers, &state, &tenant).await {
         Ok(pin) => pin,
         Err(error) => return schema_pin_extraction_error_response(error),
     };
-    let agent_ctx = extract_agent_context(&headers);
-    let resolved_identity = resolved_id.map(|Extension(identity)| identity);
-    let security_ctx = request_security_context(&headers, &agent_ctx, resolved_identity.as_ref());
     let scope_only_schema_pin =
         schema_pin.is_some() && !headers.contains_key("x-temper-schema-bundle-digest");
     handle_odata_get_for_tenant(
@@ -1884,16 +1956,26 @@ pub async fn handle_metadata(
 }
 
 #[instrument(skip_all, fields(otel.name = "GET /odata/hints"))]
-pub async fn handle_hints(State(state): State<ServerState>) -> impl IntoResponse {
+pub async fn handle_hints(
+    State(state): State<ServerState>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
+) -> impl IntoResponse {
+    let authenticated = match require_authenticated_context(authenticated) {
+        Ok(context) => context,
+        Err(error) => return error.into_response(),
+    };
     let hints = state
         .agent_hints
         .read()
         .expect("agent hints lock should not be poisoned")
-        .clone();
+        .get(authenticated.tenant())
+        .cloned()
+        .unwrap_or_default();
     ODataResponse {
         status: StatusCode::OK,
         body: serde_json::to_value(&hints).unwrap_or_default(),
     }
+    .into_response()
 }
 
 /// Handle GET on `$value` — return binary content for stream-backed entities.
@@ -1911,7 +1993,20 @@ async fn handle_stream_get(
     tenant: &TenantId,
     security_ctx: &SecurityContext,
     parent: &ODataPath,
+    hydration_budget: &BlobHydrationBudget,
 ) -> axum::response::Response {
+    if let Some((set_name, key, property)) = resolve_blob_primitive_value_parent(parent) {
+        return handle_blob_primitive_stream(
+            state,
+            tenant,
+            security_ctx,
+            &set_name,
+            &key,
+            &property,
+        )
+        .await;
+    }
+
     // 1. Resolve parent to (set_name, entity_id)
     let (set_name, key) = match resolve_value_parent(parent) {
         Ok(pair) => pair,
@@ -1935,6 +2030,7 @@ async fn handle_stream_get(
         &set_name,
         &key,
         security_ctx,
+        hydration_budget,
     )
     .await
     {
@@ -1995,7 +2091,13 @@ async fn handle_stream_get(
     };
 
     let wasm_result = match state
-        .invoke_wasm_direct(tenant, "blob_adapter", inv_ctx, streams.clone())
+        .invoke_wasm_direct(
+            tenant,
+            "blob_adapter",
+            inv_ctx,
+            streams.clone(),
+            security_ctx,
+        )
         .await
     {
         Ok(r) => r,
@@ -2049,6 +2151,16 @@ async fn handle_stream_get(
         etag,
     }
     .into_response()
+}
+
+fn resolve_blob_primitive_value_parent(parent: &ODataPath) -> Option<(String, String, String)> {
+    let ODataPath::NavigationProperty { parent, property } = parent else {
+        return None;
+    };
+    let ODataPath::Entity(set_name, key) = parent.as_ref() else {
+        return None;
+    };
+    Some((set_name.clone(), extract_key(key), property.clone()))
 }
 
 #[cfg(test)]

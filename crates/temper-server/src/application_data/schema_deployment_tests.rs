@@ -141,16 +141,17 @@ async fn wasm_and_http_submit_share_receipt_and_host_bound_tenant() {
         panic!("typed WASM submit should succeed")
     };
 
-    let response = crate::build_router(invocation.state.clone())
-        .oneshot(
-            Request::post("/api/v1/schema-deployments")
-                .header("content-type", "application/json")
-                .header("x-tenant-id", "default")
-                .body(Body::from(serde_json::to_vec(&submit).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let response =
+        super::tests::authenticated_router(invocation.state.clone(), SecurityContext::system())
+            .oneshot(
+                Request::post("/api/v1/schema-deployments")
+                    .header("content-type", "application/json")
+                    .header("x-tenant-id", "default")
+                    .body(Body::from(serde_json::to_vec(&submit).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), 1_048_576).await.unwrap();
     let http: SchemaDeploymentResponseV1 = serde_json::from_slice(&body).unwrap();

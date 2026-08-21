@@ -22,6 +22,64 @@ use super::reference_contract::{
 };
 use super::types::{EntityEvent, EntityState, MAX_EVENTS_SINCE_SNAPSHOT};
 
+/// Journal event type for a PATCH-style field merge (ARN-189).
+pub(crate) const FIELDS_UPDATED_EVENT: &str = "FieldsUpdated";
+/// Journal event type for a PUT-style field replacement (ARN-189).
+pub(crate) const FIELDS_REPLACED_EVENT: &str = "FieldsReplaced";
+
+/// Apply a PATCH/PUT field update to entity state (ARN-189).
+///
+/// The single source of truth for field-update semantics, called by BOTH the
+/// live `EntityMsg::UpdateFields` handler and journal replay, so a rehydrated
+/// entity reaches exactly the state the live update produced.
+///
+/// - `replace == false` (PATCH): merge `fields` into the existing object.
+///   A non-object existing/incoming value leaves state unchanged, matching
+///   the historical live behavior.
+/// - `replace == true` (PUT): replace all fields, preserving `Id` and
+///   `Status` from the entity itself.
+#[must_use = "a field update that did not apply is a dropped update; count or refuse it"]
+pub(crate) fn apply_field_update(
+    state: &mut EntityState,
+    fields: &serde_json::Value,
+    replace: bool,
+) -> bool {
+    // One helper for both the live `UpdateFields` arm and journal replay
+    // (ARN-189). Replay must reproduce the live result exactly, so every
+    // transformation belongs here — a step applied only on the live path would
+    // silently rewrite the entity on the next rehydration.
+    //
+    // `canonicalize_entity_fields` is the single enforcement point for
+    // runtime-owned fields: it both strips the keys a caller must not set
+    // (`has_spec`, `ctx_owner_status`, ...) and restores the authoritative
+    // `Id`/`Status` (and their lowercase aliases). The live arm additionally
+    // sanitizes the *event payload* before journaling (see
+    // `field_updates::commit_field_update`) so the journal never records a forged
+    // key, which canonicalizing `state.fields` alone would not prevent.
+    //
+    // Guard here, not only at the live arm: replay feeds this the `params` of
+    // whatever is in the journal, including events written by a build that
+    // predates the live guard. A `FieldsReplaced` carrying `[1,2,3]` would set
+    // `fields` to an array, after which `canonicalize_entity_fields` cannot
+    // restore `Id`/`Status` — there is no object to insert into. Refusing in the
+    // shared helper is what makes live and replay agree on every input, not just
+    // the ones the live path screens.
+    if !fields.is_object() {
+        return false;
+    }
+    if replace {
+        state.fields = fields.clone();
+    } else if let (Some(existing), Some(updates)) =
+        (state.fields.as_object_mut(), fields.as_object())
+    {
+        for (k, v) in updates {
+            existing.insert(k.clone(), v.clone());
+        }
+    }
+    canonicalize_entity_fields(&mut state.fields, &state.entity_id, &state.status);
+    true
+}
+
 /// A scheduled action to fire after a delay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledAction {
@@ -75,24 +133,6 @@ pub const MAX_SPAWNS_PER_TRANSITION: usize = 8;
 /// that call `TransitionTable::evaluate_ctx()` MUST use this function.
 pub fn build_eval_context(state: &EntityState) -> EvalContext {
     build_eval_context_with_xref(state, &std::collections::BTreeMap::new())
-}
-
-/// Apply the transport-neutral PUT/PATCH field mutation used by production,
-/// replay, and deterministic simulation.
-pub fn apply_field_update(state: &mut EntityState, fields: &serde_json::Value, replace: bool) {
-    if replace {
-        let id = state.entity_id.clone();
-        let status = state.status.clone();
-        state.fields = fields.clone();
-        if let Some(object) = state.fields.as_object_mut() {
-            object.insert("Id".into(), serde_json::Value::String(id));
-            object.insert("Status".into(), serde_json::Value::String(status));
-        }
-    } else if let (Some(existing), Some(updates)) =
-        (state.fields.as_object_mut(), fields.as_object())
-    {
-        existing.extend(updates.clone());
-    }
 }
 
 /// Build an [`EvalContext`] with pre-resolved cross-entity booleans.
@@ -297,7 +337,8 @@ pub fn process_action_with_xref_and_field_mode(
             }
 
             let effective_params = normalize_ref_action_params(state, action, params);
-            let params = effective_params.as_ref();
+            let sanitized_params = sanitize_action_params(effective_params.as_ref());
+            let params = sanitized_params.as_ref();
 
             // ADR-0156: evaluate every mutation against an isolated prospective
             // state. Nothing becomes visible, durable, or dispatchable until the
@@ -406,6 +447,91 @@ fn failed_process(error: String) -> ProcessResult {
         overflow_blobs: vec![],
         error: Some(error),
     }
+}
+
+/// Remove caller fields whose values are derived authoritatively by the runtime.
+///
+/// The returned value borrows the input when no reserved keys are present and
+/// clones only when sanitization is required. Persisted events therefore never
+/// acquire a second mutable identity, lifecycle, or context-status truth.
+pub(crate) fn sanitize_action_params(
+    params: &serde_json::Value,
+) -> std::borrow::Cow<'_, serde_json::Value> {
+    let Some(fields) = params.as_object() else {
+        return std::borrow::Cow::Borrowed(params);
+    };
+    if !fields
+        .keys()
+        .any(|key| temper_spec::automaton::is_server_derived_field_name(key))
+    {
+        return std::borrow::Cow::Borrowed(params);
+    }
+    let mut sanitized = fields.clone();
+    sanitized.retain(|key, _| !temper_spec::automaton::is_server_derived_field_name(key));
+    std::borrow::Cow::Owned(serde_json::Value::Object(sanitized))
+}
+
+/// Compute the exact actor-state precondition bound to an external field-update
+/// authorization decision.
+///
+/// The digest includes the durable sequence and the authorization-visible local
+/// lifecycle/field state. Recursive canonical JSON hashing keeps the result
+/// deterministic even when callers construct object keys in different orders.
+pub(crate) fn entity_authorization_precondition(state: &EntityState) -> String {
+    fn update_bytes(hasher: &mut Sha256, bytes: &[u8]) {
+        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        hasher.update(len.to_be_bytes());
+        hasher.update(bytes);
+    }
+
+    fn update_json(hasher: &mut Sha256, value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Null => hasher.update([0]),
+            serde_json::Value::Bool(value) => hasher.update([1, u8::from(*value)]),
+            serde_json::Value::Number(value) => {
+                hasher.update([2]);
+                update_bytes(hasher, value.to_string().as_bytes());
+            }
+            serde_json::Value::String(value) => {
+                hasher.update([3]);
+                update_bytes(hasher, value.as_bytes());
+            }
+            serde_json::Value::Array(values) => {
+                hasher.update([4]);
+                hasher.update(
+                    u64::try_from(values.len())
+                        .unwrap_or(u64::MAX)
+                        .to_be_bytes(),
+                );
+                for value in values {
+                    update_json(hasher, value);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                hasher.update([5]);
+                hasher.update(
+                    u64::try_from(values.len())
+                        .unwrap_or(u64::MAX)
+                        .to_be_bytes(),
+                );
+                let mut keys = values.keys().collect::<Vec<_>>();
+                keys.sort_unstable();
+                for key in keys {
+                    update_bytes(hasher, key.as_bytes());
+                    if let Some(value) = values.get(key) {
+                        update_json(hasher, value);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"temper-entity-authorization-precondition-v1");
+    hasher.update(state.sequence_nr.to_be_bytes());
+    update_bytes(&mut hasher, state.status.as_bytes());
+    update_json(&mut hasher, &state.fields);
+    format!("{:x}", hasher.finalize())
 }
 
 fn validate_ref_action_contract(
@@ -846,15 +972,14 @@ pub fn sync_fields_with_metadata(
     let entity_type = state.entity_type.clone();
     let entity_id = state.entity_id.clone();
     if let Some(obj) = state.fields.as_object_mut() {
-        obj.insert(
-            "Status".to_string(),
-            serde_json::Value::String(state.status.clone()),
-        );
+        canonicalize_entity_field_map(obj, &entity_id, &state.status);
         prune_transient_action_fields(&entity_type, obj);
         // Project action params into fields
         if let Some(p) = params.as_object() {
             for (k, v) in p {
-                if is_transient_action_field(&entity_type, k) {
+                if is_transient_action_field(&entity_type, k)
+                    || temper_spec::automaton::is_server_derived_field_name(k)
+                {
                     continue;
                 }
                 let canonical_name = state_var_metadata
@@ -882,14 +1007,23 @@ pub fn sync_fields_with_metadata(
         }
         // Sync counters into fields
         for (k, v) in &state.counters {
+            if temper_spec::automaton::is_server_derived_field_name(k) {
+                continue;
+            }
             obj.insert(k.clone(), serde_json::Value::Number((*v as u64).into()));
         }
         // Sync booleans into fields
         for (k, v) in &state.booleans {
+            if temper_spec::automaton::is_server_derived_field_name(k) {
+                continue;
+            }
             obj.insert(k.clone(), serde_json::Value::Bool(*v));
         }
         // Sync lists into fields
         for (k, v) in &state.lists {
+            if temper_spec::automaton::is_server_derived_field_name(k) {
+                continue;
+            }
             let arr: Vec<serde_json::Value> = v
                 .iter()
                 .map(|s| serde_json::Value::String(s.clone()))
@@ -910,6 +1044,38 @@ pub fn sync_fields_with_metadata(
         }
     }
     overflow_blobs
+}
+
+/// Remove mutable aliases of runtime-owned fields and publish canonical identity/status.
+pub(crate) fn canonicalize_entity_fields(
+    fields: &mut serde_json::Value,
+    entity_id: &str,
+    status: &str,
+) {
+    let Some(fields) = fields.as_object_mut() else {
+        return;
+    };
+    canonicalize_entity_field_map(fields, entity_id, status);
+}
+
+fn canonicalize_entity_field_map(
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+    entity_id: &str,
+    status: &str,
+) {
+    fields.retain(|key, _| !temper_spec::automaton::is_server_derived_field_name(key));
+    for key in ["id", "Id"] {
+        fields.insert(
+            key.to_string(),
+            serde_json::Value::String(entity_id.to_string()),
+        );
+    }
+    for key in ["status", "Status"] {
+        fields.insert(
+            key.to_string(),
+            serde_json::Value::String(status.to_string()),
+        );
+    }
 }
 
 fn prune_transient_action_fields(
@@ -1995,5 +2161,58 @@ params = ["NewCommitSha"]
         let overflow = sync_fields(&mut state, &params, FieldSyncMode::blob_refs_default());
 
         assert_eq!(overflow.len(), 1, "dedupe by content hash");
+    }
+
+    #[test]
+    fn action_processing_strips_runtime_owned_fields_from_state_and_event() {
+        let _guard = temper_runtime::scheduler::install_deterministic_context(42);
+        let table = temper_jit::table::TransitionTable::from_ioa_source(
+            r#"
+[automaton]
+name = "Document"
+states = ["Initial", "Approved"]
+initial = "Initial"
+
+[[action]]
+name = "Approve"
+kind = "input"
+from = ["Initial"]
+to = "Approved"
+params = ["Title"]
+"#,
+        );
+        let mut state = make_state("Document", "doc-1");
+        state.fields = serde_json::json!({
+            "Id": "forged-before",
+            "Status": "forged-before",
+            "ctx_owner_status": "Privileged"
+        });
+        let result = process_action(
+            &mut state,
+            &table,
+            "Approve",
+            &serde_json::json!({
+                "Id": "forged-after",
+                "id": "forged-after",
+                "Status": "Rejected",
+                "status": "Rejected",
+                "has_spec": false,
+                "HasSpec": false,
+                "ctx_owner_status": "Privileged",
+                "Title": "Trusted title"
+            }),
+        );
+
+        assert!(result.success);
+        assert_eq!(state.fields["id"], "doc-1");
+        assert_eq!(state.fields["Id"], "doc-1");
+        assert_eq!(state.fields["status"], "Approved");
+        assert_eq!(state.fields["Status"], "Approved");
+        assert_eq!(state.fields["Title"], "Trusted title");
+        for reserved in ["has_spec", "HasSpec", "ctx_owner_status"] {
+            assert!(state.fields.get(reserved).is_none(), "persisted {reserved}");
+        }
+        let event = result.event.expect("successful action event");
+        assert_eq!(event.params, serde_json::json!({"Title": "Trusted title"}));
     }
 }

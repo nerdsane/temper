@@ -1,6 +1,6 @@
 //! Bound action helpers for OData write handlers.
 
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use opentelemetry::KeyValue as OtelKeyValue;
 use opentelemetry::trace::{Span, Status, Tracer};
@@ -16,12 +16,11 @@ use super::common::run_write_prechecks;
 use super::rate_limit::{enforce_commons_write_rate_limit, owner_id_from_action};
 use super::response::annotate_entity;
 use super::schema_pin::schema_pin_mismatch_response;
-use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
+use crate::authz::{DenialInput, record_authz_denial};
 use crate::blobs::hydrate_blob_refs_for_tenant;
-use crate::identity::ResolvedIdentity;
 use crate::request_context::AgentContext;
 use crate::response::{ODataResponse, odata_error};
-use crate::state::{BoundActionHookContext, DispatchError, ServerState};
+use crate::state::{BoundActionHookContext, DispatchCommand, DispatchError, ServerState};
 
 fn idempotency_actor_key(
     tenant: &TenantId,
@@ -50,10 +49,9 @@ pub(super) async fn dispatch_bound_action(
     action: &str,
     body_json: serde_json::Value,
     agent_ctx: &AgentContext,
-    headers: &HeaderMap,
     await_integration: bool,
     idempotency_key: Option<String>,
-    resolved_identity: Option<&ResolvedIdentity>,
+    security_ctx: &SecurityContext,
 ) -> axum::response::Response {
     let http_start = sim_now();
     let tracer = opentelemetry::global::tracer("temper");
@@ -87,33 +85,6 @@ pub(super) async fn dispatch_bound_action(
         ));
     }
 
-    // Build SecurityContext — credential-resolved identity (ADR-0033) or
-    // operator identity for global API key access.
-    let security_ctx = if let Some(identity) = resolved_identity {
-        http_span.set_attribute(OtelKeyValue::new(
-            "agent.id",
-            identity.agent_instance_id.clone(),
-        ));
-        http_span.set_attribute(OtelKeyValue::new(
-            "agent.type",
-            identity.agent_type_name.clone(),
-        ));
-        SecurityContext::from_resolved_identity(
-            &identity.agent_instance_id,
-            &identity.agent_type_name,
-            agent_ctx.session_id.as_deref(),
-        )
-    } else {
-        // No credential resolved — operator/admin access via global API key.
-        // Build SecurityContext from X-Temper-Principal-Kind header (admin/system)
-        // without trusting self-declared identity fields.
-        security_context_from_headers(
-            headers,
-            None, // No self-declared agent_id
-            agent_ctx.session_id.as_deref(),
-            None, // No self-declared agent_type
-        )
-    };
     let mut dispatch_agent_ctx = agent_ctx.clone();
     dispatch_agent_ctx.security_ctx = Some(security_ctx.clone());
 
@@ -210,6 +181,51 @@ pub(super) async fn dispatch_bound_action(
         }
     };
     let (current_state, resource_attrs) = authz_snapshot;
+    let expected_authorization_precondition =
+        crate::entity_actor::effects::entity_authorization_precondition(&current_state.state);
+
+    let authz_result = state.authorize_with_context(
+        security_ctx,
+        action,
+        entity_type,
+        &resource_attrs,
+        tenant.as_str(),
+    );
+    if let Err(denial) = authz_result {
+        let reason = denial.to_string();
+        let pd = record_authz_denial(
+            state,
+            DenialInput {
+                tenant: tenant.as_str(),
+                security_ctx,
+                agent_id_override: agent_ctx.agent_id.as_deref(),
+                action,
+                resource_type: entity_type,
+                resource_id: key_str,
+                resource_attrs: serde_json::to_value(&resource_attrs).unwrap_or_default(),
+                reason: &reason,
+                module_name: None,
+                from_status: Some(current_state.state.status.clone()),
+                intent: agent_ctx.intent.clone(),
+                session_id: agent_ctx.session_id.clone(),
+                // A genuine attempted dispatch of a registered action: walked by
+                // conformance, matching both parents' behavior.
+                spec_governed: None,
+            },
+        )
+        .await;
+
+        http_span.set_status(Status::error(reason.clone()));
+        let end_time: std::time::SystemTime = sim_now().into();
+        http_span.end_with_timestamp(end_time);
+        let reason_with_id = format!("{reason} (decision: {})", pd.id);
+        return odata_error(
+            StatusCode::FORBIDDEN,
+            "AuthorizationDenied",
+            &reason_with_id,
+        )
+        .into_response();
+    }
 
     if let Err(resp) = enforce_commons_account_verified_for_action(
         state,
@@ -232,9 +248,7 @@ pub(super) async fn dispatch_bound_action(
         tenant,
         entity_type,
         owner_id_from_action(&current_state.state.fields, &body_json),
-        headers,
-        agent_ctx,
-        resolved_identity,
+        security_ctx,
     )
     .await
     {
@@ -243,39 +257,6 @@ pub(super) async fn dispatch_bound_action(
         let end_time: std::time::SystemTime = sim_now().into();
         http_span.end_with_timestamp(end_time);
         return resp;
-    }
-
-    let authz_result = crate::application_data::GovernedApplicationDataService::new(state)
-        .authorize(tenant, &security_ctx, action, entity_type, &resource_attrs);
-    if let Err(denial) = authz_result {
-        let reason = denial.to_string();
-        let pd = record_authz_denial(
-            state,
-            DenialInput {
-                tenant: tenant.as_str(),
-                security_ctx: &security_ctx,
-                agent_id_override: agent_ctx.agent_id.as_deref(),
-                action,
-                resource_type: entity_type,
-                resource_id: key_str,
-                resource_attrs: serde_json::to_value(&resource_attrs).unwrap_or_default(),
-                reason: &reason,
-                module_name: None,
-                from_status: Some(current_state.state.status.clone()),
-            },
-        )
-        .await;
-
-        http_span.set_status(Status::error(reason.clone()));
-        let end_time: std::time::SystemTime = sim_now().into();
-        http_span.end_with_timestamp(end_time);
-        let reason_with_id = format!("{reason} (decision: {})", pd.id);
-        return odata_error(
-            StatusCode::FORBIDDEN,
-            "AuthorizationDenied",
-            &reason_with_id,
-        )
-        .into_response();
     }
 
     let current_fields = current_state.state.fields.clone();
@@ -322,15 +303,19 @@ pub(super) async fn dispatch_bound_action(
         .into_response();
     }
 
-    let result = crate::application_data::GovernedApplicationDataService::new(state)
-        .action_with_options(
-            tenant,
-            entity_type,
-            key_str,
-            action,
-            body_json.clone(),
-            &dispatch_agent_ctx,
-            await_integration,
+    let result = state
+        .dispatch_tenant_action_ext_typed_if_current(
+            DispatchCommand {
+                tenant,
+                entity_type,
+                entity_id: key_str,
+                action,
+                params: body_json.clone(),
+                agent_ctx: &dispatch_agent_ctx,
+                await_integration,
+                await_reactions: true,
+            },
+            expected_authorization_precondition,
         )
         .await;
 

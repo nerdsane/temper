@@ -1,14 +1,151 @@
+use std::collections::BTreeMap;
+use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
+use std::time::Duration;
+
+use futures_util::FutureExt;
+use sha2::{Digest, Sha256};
+use tokio::spawn as spawn_external_adapter_task; // determinism-ok: external adapter side effects
 use tracing::{Instrument, instrument};
 
-use crate::adapters::{AdapterAgentContext, AdapterContext, AdapterResult};
-use crate::entity_actor::{EntityResponse, EntityState};
+use crate::adapters::{
+    AdapterAgentContext, AdapterContext, AdapterError, AdapterResult, AgentAdapter,
+};
+use crate::entity_actor::{EntityMsg, EntityResponse, EntityState};
 use crate::identity::hash_token;
 use crate::request_context::AgentContext;
 use crate::secrets::template::resolve_secret_templates;
-use temper_runtime::scheduler::sim_uuid;
+use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
-use super::{WasmDispatchMode, WasmDispatchRequest, WasmEntityRef, record_workflow_span_attrs};
+use super::{
+    WasmDispatchMode, WasmDispatchRequest, WasmEntityRef, record_workflow_span_attrs, retry,
+};
+
+const ADAPTER_INVOCATION_BUDGET_SECS: u64 = 60 * 60;
+const ADAPTER_CREDENTIAL_TTL_SECS: i64 = 61 * 60;
+const ADAPTER_CREDENTIAL_REVOKE_ATTEMPTS: usize = 3;
+
+struct MintedAdapterCredential {
+    plaintext: String,
+    key_hash: String,
+}
+
+const REDACTED_ADAPTER_CREDENTIAL: &str = "[REDACTED_ADAPTER_CREDENTIAL]";
+const REDACTED_ADAPTER_SECRET: &str = "[REDACTED_ADAPTER_SECRET]";
+
+fn derive_adapter_credential_plaintext(first: uuid::Uuid, second: uuid::Uuid) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"temper-adapter-credential-v1\0");
+    digest.update(first.as_bytes());
+    digest.update(second.as_bytes());
+    format!("tmpr_{:x}", digest.finalize())
+}
+
+fn adapter_redactions(ctx: &AdapterContext) -> Vec<(String, &'static str)> {
+    let mut by_value = BTreeMap::new();
+    for secret in ctx.secrets.values().filter(|secret| !secret.is_empty()) {
+        by_value.insert(secret.clone(), REDACTED_ADAPTER_SECRET);
+    }
+    if let Some(credential) = ctx
+        .agent_ctx
+        .agent_api_key
+        .as_ref()
+        .filter(|credential| !credential.is_empty())
+    {
+        by_value.insert(credential.clone(), REDACTED_ADAPTER_CREDENTIAL);
+    }
+    let mut redactions = by_value.into_iter().collect::<Vec<_>>();
+    redactions.sort_by(|left, right| {
+        right
+            .0
+            .len()
+            .cmp(&left.0.len())
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    redactions
+}
+
+fn redact_adapter_text(mut text: String, redactions: &[(String, &'static str)]) -> String {
+    for (secret, replacement) in redactions {
+        text = text.replace(secret, replacement);
+    }
+    text
+}
+
+fn redact_adapter_json(value: &mut serde_json::Value, redactions: &[(String, &'static str)]) {
+    match value {
+        serde_json::Value::String(text) => {
+            *text = redact_adapter_text(std::mem::take(text), redactions);
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_adapter_json(value, redactions);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            let prior = std::mem::take(fields);
+            for (key, mut value) in prior {
+                redact_adapter_json(&mut value, redactions);
+                fields.insert(redact_adapter_text(key, redactions), value);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+fn redact_adapter_execution(
+    execution: Result<AdapterResult, AdapterError>,
+    redactions: &[(String, &'static str)],
+) -> Result<AdapterResult, AdapterError> {
+    if redactions.is_empty() {
+        return execution;
+    }
+    match execution {
+        Ok(mut result) => {
+            if let Some(action) = result.callback_action.take() {
+                result.callback_action = Some(redact_adapter_text(action, redactions));
+            }
+            if let Some(error) = result.error.take() {
+                result.error = Some(redact_adapter_text(error, redactions));
+            }
+            redact_adapter_json(&mut result.callback_params, redactions);
+            Ok(result)
+        }
+        Err(AdapterError::Invocation(error)) => Err(AdapterError::Invocation(redact_adapter_text(
+            error, redactions,
+        ))),
+        Err(AdapterError::Execution(error)) => Err(AdapterError::Execution(redact_adapter_text(
+            error, redactions,
+        ))),
+        Err(AdapterError::Parse(error)) => {
+            Err(AdapterError::Parse(redact_adapter_text(error, redactions)))
+        }
+    }
+}
+
+async fn execute_adapter_with_budget(
+    adapter: Arc<dyn AgentAdapter>,
+    adapter_ctx: AdapterContext,
+) -> Result<AdapterResult, AdapterError> {
+    let redactions = adapter_redactions(&adapter_ctx);
+    let execution = AssertUnwindSafe(tokio::time::timeout(
+        Duration::from_secs(ADAPTER_INVOCATION_BUDGET_SECS),
+        adapter.execute(adapter_ctx),
+    ))
+    .catch_unwind()
+    .await;
+    let execution = match execution {
+        Ok(Ok(result)) => result,
+        Ok(Err(_elapsed)) => Err(AdapterError::Execution(format!(
+            "adapter invocation exceeded its {ADAPTER_INVOCATION_BUDGET_SECS}-second budget"
+        ))),
+        Err(_) => Err(AdapterError::Execution(
+            "adapter invocation panicked".to_string(),
+        )),
+    };
+    redact_adapter_execution(execution, &redactions)
+}
 
 struct AdapterDispatchCtx<'a> {
     entity_ref: WasmEntityRef<'a>,
@@ -62,7 +199,7 @@ impl crate::state::ServerState {
             entity_id = %entity_id,
         );
 
-        tokio::spawn(
+        spawn_external_adapter_task(
             async move {
                 // determinism-ok: async integration side-effects run outside simulation core
                 let req = WasmDispatchRequest {
@@ -215,9 +352,16 @@ impl crate::state::ServerState {
 
         // Mint a platform credential if the entity references an AgentType (ADR-0033).
         // The plaintext key is passed to the adapter and never persisted.
-        let agent_api_key = self
-            .mint_agent_credential_if_needed(ctx.entity_ref.tenant, entity_state, ctx.agent_ctx)
-            .await;
+        let minted_credential = if adapter.requires_platform_credential() {
+            self.mint_agent_credential_if_needed(ctx.entity_ref.tenant, entity_state, ctx.agent_ctx)
+                .await?
+        } else {
+            None
+        };
+        let (agent_api_key, credential_key_hash) = match minted_credential {
+            Some(credential) => (Some(credential.plaintext), Some(credential.key_hash)),
+            None => (None, None),
+        };
 
         let adapter_ctx = AdapterContext {
             tenant,
@@ -236,7 +380,15 @@ impl crate::state::ServerState {
             secrets,
         };
 
-        let result = match adapter.execute(adapter_ctx).await {
+        let result = match self
+            .execute_adapter_with_credential_cleanup(
+                adapter,
+                adapter_ctx,
+                ctx.entity_ref.tenant,
+                credential_key_hash,
+            )
+            .await
+        {
             Ok(result) => result,
             Err(e) => {
                 return self
@@ -271,6 +423,101 @@ impl crate::state::ServerState {
             .unwrap_or_else(|| "adapter returned unsuccessful result".to_string());
         self.handle_adapter_failure(ctx, integration, error, result.duration_ms)
             .await
+    }
+
+    async fn execute_adapter_with_credential_cleanup(
+        &self,
+        adapter: Arc<dyn AgentAdapter>,
+        adapter_ctx: AdapterContext,
+        tenant: &TenantId,
+        credential_key_hash: Option<String>,
+    ) -> Result<AdapterResult, AdapterError> {
+        let Some(credential_key_hash) = credential_key_hash else {
+            return execute_adapter_with_budget(adapter, adapter_ctx).await;
+        };
+        let state = self.clone();
+        let tenant = tenant.clone();
+        let span = tracing::Span::current();
+
+        // This task owns both execution and cleanup. Dropping the caller's
+        // JoinHandle detaches rather than cancels it, so request cancellation
+        // cannot skip durable credential revocation.
+        let cleanup_task = spawn_external_adapter_task(
+            async move {
+                // determinism-ok: native adapter execution is an external side effect
+                let execution = execute_adapter_with_budget(adapter, adapter_ctx).await;
+                if let Err(error) = state
+                    .revoke_minted_adapter_credential(&tenant, &credential_key_hash)
+                    .await
+                {
+                    tracing::error!(
+                        tenant = %tenant,
+                        adapter_execution_completed = execution.is_ok(),
+                        credential_ttl_secs = ADAPTER_CREDENTIAL_TTL_SECS,
+                        error = %error,
+                        "adapter credential cleanup exhausted its retry budget; preserving the adapter execution outcome"
+                    );
+                }
+                execution
+            }
+            .instrument(span),
+        );
+
+        cleanup_task.await.map_err(|error| {
+            AdapterError::Execution(format!("adapter cleanup task failed: {error}"))
+        })?
+    }
+
+    async fn revoke_minted_adapter_credential(
+        &self,
+        tenant: &TenantId,
+        key_hash: &str,
+    ) -> Result<(), String> {
+        let actor = self
+            .get_or_spawn_tenant_actor(tenant, "AgentCredential", key_hash)
+            .ok_or_else(|| "AgentCredential transition table is unavailable".to_string())?;
+        let policy = self.dispatch_retry_policy();
+        let idempotency_key = format!("adapter-credential-revoke:{key_hash}");
+        let mut last_error = "credential remained Active".to_string();
+
+        for attempt in 1..=ADAPTER_CREDENTIAL_REVOKE_ATTEMPTS {
+            let outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
+                &actor,
+                || EntityMsg::Action {
+                    name: "Revoke".to_string(),
+                    params: serde_json::json!({}),
+                    cross_entity_booleans: BTreeMap::new(),
+                    idempotency_key: Some(idempotency_key.clone()),
+                    expected_sequence: None,
+                    reaction_context: None,
+                    expected_authorization_precondition: None,
+                },
+                &policy,
+            )
+            .await;
+            match outcome.result {
+                Ok(response) if response.success || response.state.status != "Active" => {
+                    return Ok(());
+                }
+                Ok(response) => {
+                    last_error = response
+                        .error
+                        .unwrap_or_else(|| "credential remained Active".to_string());
+                }
+                Err(error) => {
+                    last_error = error.to_string();
+                }
+            }
+            tracing::warn!(
+                tenant = %tenant,
+                attempt,
+                max_attempts = ADAPTER_CREDENTIAL_REVOKE_ATTEMPTS,
+                error = %last_error,
+                "adapter credential revocation attempt failed"
+            );
+        }
+
+        Err(last_error)
     }
 
     #[instrument(skip_all, fields(otel.name = "dispatch.handle_adapter_failure", integration = %integration.name))]
@@ -335,6 +582,7 @@ impl crate::state::ServerState {
                         agent_ctx,
                         false,
                         None,
+                        None,
                     )
                     .await
                     .map_err(|e| e.to_string())?;
@@ -366,8 +614,9 @@ impl crate::state::ServerState {
     /// Mint a platform credential for adapter execution if the entity has an `agent_type_id`.
     ///
     /// Generates a random API key, hashes it, creates an `AgentCredential` entity
-    /// via the `Issue` action, and returns the plaintext key. The key is never
-    /// persisted — it exists only for the lifetime of this adapter invocation.
+    /// via the `Issue` action, and returns the plaintext key. The full key is
+    /// never persisted or logged; only its hash and prefix are durable. The
+    /// credential has a bounded expiry and is revoked after execution.
     ///
     /// See ADR-0033: Platform-Assigned Agent Identity.
     async fn mint_agent_credential_if_needed(
@@ -375,30 +624,72 @@ impl crate::state::ServerState {
         tenant: &TenantId,
         entity_state: &EntityState,
         agent_ctx: &AgentContext,
-    ) -> Option<String> {
+    ) -> Result<Option<MintedAdapterCredential>, String> {
         let agent_type_id = entity_state
             .fields
             .get("agent_type_id")
             .and_then(|v| v.as_str())
             .map(str::trim)
-            .filter(|v| !v.is_empty())?;
+            .filter(|v| !v.is_empty());
+        let Some(agent_type_id) = agent_type_id else {
+            return Ok(None);
+        };
 
-        // Generate a random API key from a UUIDv7 (deterministic in simulation).
-        let key_uuid = sim_uuid();
-        let plaintext_key = format!("tmpr_{key_uuid}");
+        // UUIDv7 contains only 74 random bits. Derive the opaque credential
+        // from two independent scheduler-provided UUIDs so production exceeds
+        // the 128-bit entropy bar while DST retains deterministic sources.
+        let plaintext_key = derive_adapter_credential_plaintext(sim_uuid(), sim_uuid());
         let key_hash = hash_token(&plaintext_key);
-        let key_prefix = &plaintext_key[..9]; // "tmpr_" + first 4 chars of UUID
+        let key_prefix = &plaintext_key[..9]; // "tmpr_" + first four digest characters
         let agent_instance_id = sim_uuid().to_string();
+        let expires_at = sim_now()
+            .checked_add_signed(chrono::Duration::seconds(ADAPTER_CREDENTIAL_TTL_SECS))
+            .ok_or_else(|| "adapter credential expiry overflowed".to_string())?
+            .to_rfc3339();
 
         let issue_params = serde_json::json!({
             "agent_type_id": agent_type_id,
             "agent_instance_id": agent_instance_id,
             "key_hash": key_hash,
             "key_prefix": key_prefix,
-            "description": format!("Auto-minted for adapter invocation"),
+            "description": "Auto-minted for adapter invocation",
             "created_by": "platform",
-            "expires_at": "",
+            "expires_at": expires_at,
         });
+
+        // Credential issuance is a separate authority from permission to run
+        // the source entity action. Re-evaluate the exact invoking principal
+        // against the credential resource so a low-privilege action cannot use
+        // the platform as a deputy to mint a more privileged AgentType token.
+        let security_ctx = agent_ctx.security_ctx.as_ref().ok_or_else(|| {
+            "adapter credential mint requires an explicit security context".to_string()
+        })?;
+        let credential_attrs = BTreeMap::from([
+            (
+                "id".to_string(),
+                serde_json::Value::String(key_hash.clone()),
+            ),
+            (
+                "agent_type_id".to_string(),
+                serde_json::Value::String(agent_type_id.to_string()),
+            ),
+            (
+                "agent_instance_id".to_string(),
+                serde_json::Value::String(agent_instance_id.clone()),
+            ),
+            (
+                "expires_at".to_string(),
+                serde_json::Value::String(expires_at.clone()),
+            ),
+        ]);
+        self.authorize_with_context(
+            security_ctx,
+            "Issue",
+            "AgentCredential",
+            &credential_attrs,
+            tenant.as_str(),
+        )
+        .map_err(|denial| format!("adapter credential delegation denied: {denial}"))?;
 
         // Create the AgentCredential entity using key_hash as entity ID for O(1) lookup.
         let dispatch_ctx = AgentContext::for_service_inheriting("platform-dispatch", agent_ctx);
@@ -422,24 +713,19 @@ impl crate::state::ServerState {
                     key_prefix = key_prefix,
                     "minted agent credential for adapter execution"
                 );
-                Some(plaintext_key)
+                Ok(Some(MintedAdapterCredential {
+                    plaintext: plaintext_key,
+                    key_hash,
+                }))
             }
-            Ok(resp) => {
-                tracing::warn!(
-                    tenant = %tenant,
-                    error = ?resp.error,
-                    "failed to mint agent credential — adapter will run without credential"
-                );
-                None
-            }
-            Err(e) => {
-                tracing::warn!(
-                    tenant = %tenant,
-                    error = %e,
-                    "failed to mint agent credential — adapter will run without credential"
-                );
-                None
-            }
+            Ok(resp) => Err(format!(
+                "failed to mint required adapter credential: {}",
+                resp.error
+                    .unwrap_or_else(|| "Issue action was rejected".to_string())
+            )),
+            Err(error) => Err(format!(
+                "failed to mint required adapter credential: {error}"
+            )),
         }
     }
 }
@@ -462,3 +748,7 @@ fn normalize_success_params(result: AdapterResult) -> serde_json::Value {
         }),
     }
 }
+
+#[cfg(test)]
+#[path = "adapter_credential_test.rs"]
+mod credential_tests;

@@ -113,6 +113,14 @@ impl WasmHost for AuthorizedWasmHost {
         self.inner.temper_file_stream_try_write(handle, bytes)
     }
 
+    /// Forward the wrapped host's per-tenant content decision (ADR-0166). This
+    /// wrapper is what dispatch hands to the engine, so without forwarding the
+    /// engine would read the trait default and redact even for a tenant that
+    /// opted in — safe, but silently useless.
+    fn exports_llm_content(&self) -> bool {
+        self.inner.exports_llm_content()
+    }
+
     async fn http_call(
         &self,
         method: &str,
@@ -497,3 +505,7 @@ mod tests {
 #[cfg(test)]
 #[path = "authorized_host_data_test.rs"]
 mod data_test;
+
+#[cfg(test)]
+#[path = "authorized_host_test.rs"]
+mod security_tests;

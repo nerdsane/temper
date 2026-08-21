@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use temper_authz::SecurityContext;
+use axum::{Extension, Router};
+use temper_authz::{AuthenticatedRequestContext, SecurityContext};
 use temper_runtime::{ActorSystem, tenant::TenantId};
 use temper_spec::csdl::parse_csdl;
 use temper_wasm_sdk::data::{
@@ -14,6 +15,13 @@ use tower::ServiceExt;
 
 use super::{ApplicationDataInvocation, ModuleInvocationAuthority};
 use crate::state::ServerState;
+
+pub(super) fn authenticated_router(state: ServerState, security: SecurityContext) -> Router {
+    crate::build_router(state).layer(Extension(AuthenticatedRequestContext::new(
+        TenantId::default(),
+        security,
+    )))
+}
 
 pub(super) fn invocation(
     operations: BTreeSet<DataOperationKind>,
@@ -283,11 +291,11 @@ async fn schema_validation_rejects_noncanonical_guid_before_dispatch() {
 
 #[tokio::test]
 async fn cedar_still_denies_after_capability_and_schema_accept() {
-    let security = SecurityContext::from_headers(&[
-        ("x-temper-principal-id".into(), "user-1".into()),
-        ("x-temper-principal-kind".into(), "user".into()),
-    ]);
-    let invocation = invocation(BTreeSet::from([DataOperationKind::EntityCreate]), security);
+    let security = SecurityContext::from_resolved_identity("user-1", "test-agent", None);
+    let invocation = invocation(
+        BTreeSet::from([DataOperationKind::EntityCreate]),
+        security.clone(),
+    );
     invocation
         .state
         .authz
@@ -313,12 +321,10 @@ async fn cedar_still_denies_after_capability_and_schema_accept() {
         ModuleDataErrorKind::AuthorizationDenied,
         "{error:?}"
     );
-    let odata = crate::build_router(invocation.state.clone())
+    let odata = authenticated_router(invocation.state.clone(), security)
         .oneshot(
             Request::post("/tdata/Customers")
                 .header("content-type", "application/json")
-                .header("x-temper-principal-id", "user-1")
-                .header("x-temper-principal-kind", "user")
                 .body(Body::from(
                     r#"{"Id":"018f1f80-7b2d-7000-8000-000000000002"}"#,
                 ))

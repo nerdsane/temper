@@ -12,11 +12,14 @@ use crate::entity_actor::{EntityResponse, EntityState};
 use crate::request_context::AgentContext;
 use crate::secrets::template::resolve_secret_templates;
 use crate::state::sim_now;
+use temper_authz::{AuthenticatedRequestContext, PrincipalKind, SecurityContext};
 use temper_runtime::tenant::TenantId;
+use temper_wasm::host_trait::clamp_redacted_metadata_value;
 use temper_wasm::{
-    AuthorizedWasmHost, BinaryHttpInterceptorFn, ProductionWasmHost, ProgressEmitterFn,
-    StreamRegistry, TemperDataCallFn, TemperFileReadFn, TemperFileWriteFn, TextHttpInterceptorFn,
-    WasmAuthzContext, WasmAuthzGate, WasmHost, WasmInvocationContext, WasmResourceLimits,
+    AuthorizedWasmHost, BinaryHttpInterceptorFn, InternalHttpCapability,
+    InternalHttpCapabilityIssuerFn, ProductionWasmHost, ProgressEmitterFn, StreamRegistry,
+    TemperDataCallFn, TemperFileReadFn, TemperFileWriteFn, TextHttpInterceptorFn, WasmAuthzContext,
+    WasmAuthzGate, WasmHost, WasmInvocationContext, WasmResourceLimits,
 };
 
 use super::{
@@ -25,11 +28,115 @@ use super::{
 };
 use replay_inputs::{extract_trajectory_actions_from_ots, has_replay_trajectory_input};
 
+mod boxed;
 mod invocation_artifacts;
 mod local_tdata_host;
 mod replay_inputs;
 
+pub(super) use boxed::{
+    dispatch_tenant_action_core_boxed, dispatch_wasm_callback_boxed,
+    dispatch_wasm_integrations_boxed,
+};
+use boxed::{handle_wasm_failure_boxed, invoke_and_handle_result_boxed};
 use local_tdata_host::LocalTDataWasmHost;
+
+/// Build a request-bound internal HTTP capability issuer for a non-System caller.
+pub(crate) fn internal_http_capability_issuer(
+    state: &crate::state::ServerState,
+    tenant: &TenantId,
+    security_context: Option<&SecurityContext>,
+) -> Option<InternalHttpCapabilityIssuerFn> {
+    let security_context = security_context?;
+    if security_context.principal.kind == PrincipalKind::System {
+        return None;
+    }
+    let authenticated = AuthenticatedRequestContext::new(tenant.clone(), security_context.clone());
+    let tenant = tenant.clone();
+    let store = state.internal_invocation_credentials.clone();
+    Some(Arc::new(move |method, url| {
+        let bearer = store
+            .issue_for_url(authenticated.clone(), method, url)
+            .map_err(|error| error.to_string())?;
+        InternalHttpCapability::new(bearer, tenant.to_string())
+    }))
+}
+
+/// Build the same Cedar-gated host chain for an inbound `HttpEndpoint` guest
+/// that ordinary action-triggered WASM integrations receive.
+///
+/// The shared HTTP stream registry is the only endpoint-specific transport
+/// detail. Secret access, outbound HTTP, local TData calls, and internal HTTP
+/// re-entry all use the canonical authorization components.
+pub(crate) fn authorized_http_endpoint_host(
+    state: &crate::state::ServerState,
+    tenant: &TenantId,
+    module_name: &str,
+    invocation_context: &WasmInvocationContext,
+    http_streams: Arc<temper_wasm::http_stream::HttpStreamRegistry>,
+    security_context: &SecurityContext,
+) -> Result<Arc<dyn WasmHost>, String> {
+    let gate = state.wasm_authz_gate();
+    let authz_context = WasmAuthzContext {
+        tenant: tenant.to_string(),
+        module_name: module_name.to_string(),
+        agent_id: invocation_context.agent_id.clone(),
+        session_id: invocation_context.session_id.clone(),
+        entity_type: invocation_context.entity_type.clone(),
+        trigger_action: invocation_context.trigger_action.clone(),
+    };
+    let bootstrap_secrets =
+        state.get_authorized_wasm_host_bootstrap_secrets(tenant, &*gate, &authz_context);
+    let gate = crate::authz::wasm_gate::bind_local_blob_endpoint(
+        gate,
+        bootstrap_secrets.get("blob_endpoint").map(String::as_str),
+    );
+    let secret_resolver =
+        state.authorized_wasm_secret_resolver(tenant, Arc::clone(&gate), authz_context.clone());
+    let capability_issuer = internal_http_capability_issuer(state, tenant, Some(security_context))
+        .ok_or_else(|| "HttpEndpoint caller authority cannot be delegated".to_string())?;
+    let internal_api_url = internal_api_base_url(state);
+    let local_blob_interceptor = local_blob_binary_interceptor(
+        state.clone(),
+        tenant.clone(),
+        bootstrap_secrets.get("blob_endpoint").cloned(),
+    );
+    let progress_emitter = progress_emitter_fn(
+        state.clone(),
+        tenant.to_string(),
+        invocation_context.entity_type.clone(),
+        invocation_context.entity_id.clone(),
+        module_name.to_string(),
+    );
+
+    let mut base_host = ProductionWasmHost::with_shared_streams(bootstrap_secrets, http_streams)
+        .with_spec_evaluator(spec_evaluator_fn())
+        .with_progress_emitter(progress_emitter)
+        .with_internal_api_base_url(internal_api_url)
+        .with_internal_capability_issuer(capability_issuer)
+        .with_invocation_context(invocation_context.clone())
+        // ARN-243: the HttpEndpoint path honours the same per-tenant LLM content
+        // export decision as the integration path above.
+        .with_llm_content_export(state.export_llm_content(tenant.as_str()));
+    if let Some(resolver) = secret_resolver {
+        base_host = base_host.with_secret_resolver(resolver);
+    }
+    if let Some(interceptor) = local_blob_interceptor {
+        base_host = base_host.with_binary_http_interceptor(interceptor);
+    }
+
+    let production_host: Arc<dyn WasmHost> = Arc::new(base_host);
+    let local_host: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
+        state.clone(),
+        tenant.clone(),
+        Some(security_context),
+        production_host,
+    ));
+    Ok(Arc::new(AuthorizedWasmHost::new(
+        local_host,
+        gate,
+        authz_context,
+    )))
+}
 
 /// Shared context threaded through the WASM dispatch call chain.
 ///
@@ -189,20 +296,13 @@ fn local_blob_binary_interceptor(
     tenant: TenantId,
     blob_endpoint: Option<String>,
 ) -> Option<BinaryHttpInterceptorFn> {
-    let endpoint = blob_endpoint?;
-    if !crate::blob_store::is_local_internal_blob_endpoint(&endpoint) {
-        return None;
-    }
-
-    let endpoint = endpoint.trim_end_matches('/').to_string();
+    let endpoint = crate::blob_store::LocalInternalBlobEndpoint::parse(&blob_endpoint?)?;
     Some(Arc::new(move |method, url, _headers, body| {
         let state = state.clone();
         let tenant = tenant.clone();
         let endpoint = endpoint.clone();
         Box::pin(async move {
-            let prefix = format!("{endpoint}/");
-            let blob_key = url.strip_prefix(&prefix)?;
-            let blob_key = blob_key.to_string();
+            let blob_key = endpoint.object_key(&url)?;
             crate::runtime_metrics::record_blob_local_fast_path_request(&method);
             tracing::info!(
                 method = %method,
@@ -210,7 +310,7 @@ fn local_blob_binary_interceptor(
                 "handling local blob request without loopback HTTP"
             );
 
-            let result = match method.as_str() {
+            let result = match method.to_ascii_uppercase().as_str() {
                 "PUT" => state
                     .put_blob_object(&tenant, &blob_key, &body, None)
                     .await
@@ -230,7 +330,7 @@ fn local_blob_binary_interceptor(
     }))
 }
 
-fn internal_api_base_url(state: &crate::state::ServerState) -> Option<String> {
+pub(crate) fn internal_api_base_url(state: &crate::state::ServerState) -> Option<String> {
     std::env::var("TEMPER_API_URL") // determinism-ok: production host loopback config
         .ok()
         .map(|value| value.trim_end_matches('/').to_string())
@@ -552,16 +652,17 @@ impl crate::state::ServerState {
         // ADR-0046: inline-hydrate blob refs below the 128KB ceiling; defer
         // oversize refs into a blob_cache the WASM guest can read via
         // host_read_field_stream. No-op on tenants without a Turso store.
+        let blob_hydration_budget = crate::blobs::BlobHydrationBudget::wasm_dispatch();
         let blob_cache = instrument_wasm_dispatch_phase(
             active_parent_span.clone(),
             ctx,
             &module_name,
             WASM_DISPATCH_PHASE_BLOB_REF_HYDRATION,
-            crate::blobs::hydrate_blob_refs_for_tenant_with_ceiling(
+            crate::blobs::hydrate_blob_refs_for_tenant_with_budget(
                 self,
                 ctx.entity_ref.tenant,
                 &mut inv_ctx.entity_state,
-                crate::entity_actor::effects::DEFAULT_FIELD_INLINE_MAX,
+                &blob_hydration_budget,
             ),
         )
         .await;
@@ -583,6 +684,10 @@ impl crate::state::ServerState {
                 )
             },
         );
+        let gate = crate::authz::wasm_gate::bind_local_blob_endpoint(
+            gate,
+            tenant_secrets.get("blob_endpoint").map(String::as_str),
+        );
         let secret_resolver = self.authorized_wasm_secret_resolver(
             ctx.entity_ref.tenant,
             Arc::clone(&gate),
@@ -594,6 +699,7 @@ impl crate::state::ServerState {
             &module_name,
             WASM_DISPATCH_PHASE_HOST_CHAIN_BUILD,
             || {
+                let internal_api_url = internal_api_base_url(self);
                 let local_blob_interceptor = local_blob_binary_interceptor(
                     self.clone(),
                     ctx.entity_ref.tenant.clone(),
@@ -603,7 +709,7 @@ impl crate::state::ServerState {
                     self.clone(),
                     ctx.entity_ref.tenant.clone(),
                     ctx.agent_ctx.clone(),
-                    tenant_secrets.get("temper_api_url").cloned(),
+                    internal_api_url.clone(),
                 );
                 // Use integration config timeout for both WASM execution and HTTP client.
                 //
@@ -653,8 +759,11 @@ impl crate::state::ServerState {
                     module_name.clone(),
                 );
                 let host_invocation_context = inv_ctx.clone();
-                let internal_api_key = std::env::var("TEMPER_API_KEY").ok(); // determinism-ok: production host loopback config
-                let internal_api_url = internal_api_base_url(self);
+                let internal_capability_issuer = internal_http_capability_issuer(
+                    self,
+                    ctx.entity_ref.tenant,
+                    ctx.agent_ctx.security_ctx.as_ref(),
+                );
                 let mut production_host_builder =
                     ProductionWasmHost::with_timeout(tenant_secrets, http_timeout)
                         .with_binary_http_interceptor(
@@ -664,8 +773,10 @@ impl crate::state::ServerState {
                         .with_spec_evaluator(spec_evaluator_fn())
                         .with_progress_emitter(progress_emitter)
                         .with_internal_api_base_url(internal_api_url)
-                        .with_internal_api_key(internal_api_key)
                         .with_invocation_context(host_invocation_context)
+                        .with_llm_content_export(
+                            self.export_llm_content(ctx.entity_ref.tenant.as_str()),
+                        )
                         .with_text_http_interceptor(
                             local_file_interceptor
                                 .unwrap_or_else(|| Arc::new(|_, _, _, _| Box::pin(async { None }))),
@@ -674,6 +785,10 @@ impl crate::state::ServerState {
                             current_otel_trace_id(active_span)
                                 .or_else(|| ctx.agent_ctx.trace_id.clone()),
                         );
+                if let Some(issuer) = internal_capability_issuer {
+                    production_host_builder =
+                        production_host_builder.with_internal_capability_issuer(issuer);
+                }
                 if let Some(resolver) = secret_resolver.clone() {
                     production_host_builder =
                         production_host_builder.with_secret_resolver(resolver);
@@ -796,7 +911,8 @@ impl crate::state::ServerState {
             ctx,
             &module_name,
             WASM_DISPATCH_PHASE_ENGINE_INVOKE_AND_HANDLE,
-            self.invoke_and_handle_result(
+            invoke_and_handle_result_boxed(
+                self,
                 ctx,
                 integration,
                 &module_name,
@@ -911,12 +1027,12 @@ impl crate::state::ServerState {
 
         for row in rows {
             let data = match store
-                .get_ots_trajectory(&row.trajectory_id)
+                .get_ots_trajectory(&row.tenant, &row.trajectory_id)
                 .await
                 .ok()
                 .flatten()
             {
-                Some(d) => d,
+                Some(document) => document.data,
                 None => continue,
             };
             let trajectory = match serde_json::from_str::<Value>(&data) {
@@ -1028,6 +1144,17 @@ impl crate::state::ServerState {
                     );
                 }
 
+                // ARN-243: redact LLM content (prompt/completion/system/tool)
+                // from the callback params unless this tenant opted into content
+                // export. Stripping here covers every downstream telemetry sink
+                // — the span record below, `llm_call_wide_event`,
+                // `submit_llmobs_llm_span`, and `submit_llmobs_tool_spans` — all
+                // of which read from these params. Metadata (tokens, model,
+                // provider, finish reason, trace ids) is preserved. See ADR-0166.
+                redact_llm_content_params(
+                    &mut result.callback_params,
+                    self.export_llm_content(ctx.entity_ref.tenant.as_str()),
+                );
                 let callback_params = &result.callback_params;
 
                 if should_record_gen_ai_span_attrs(integration.llm, callback_params) {
@@ -1110,16 +1237,16 @@ impl crate::state::ServerState {
                 if let Some(reason) = denial_tracker.take_denial() {
                     let error_str = http_call_authz_denied_error(&reason);
                     record_wasm_error_on_current_span(&error_str);
-                    return self
-                        .handle_wasm_failure(
-                            ctx,
-                            &integration.name,
-                            module_name,
-                            &integration.on_failure,
-                            error_str,
-                            result.duration_ms,
-                        )
-                        .await;
+                    return handle_wasm_failure_boxed(
+                        self,
+                        ctx,
+                        &integration.name,
+                        module_name,
+                        &integration.on_failure,
+                        error_str,
+                        result.duration_ms,
+                    )
+                    .await;
                 }
 
                 if integration.llm {
@@ -1278,7 +1405,8 @@ impl crate::state::ServerState {
                 // `on_failure` recovery or — when none is declared — returns
                 // `Err` so the failure is never silently treated as success
                 // (ADR-0152).
-                self.handle_wasm_failure(
+                handle_wasm_failure_boxed(
+                    self,
                     ctx,
                     &integration.name,
                     module_name,
@@ -1329,7 +1457,8 @@ impl crate::state::ServerState {
                 // exhaustion, or panic also leaves the integration's effect
                 // unrealized. `handle_wasm_failure` records it and propagates
                 // `Err` when no `on_failure` is declared (ADR-0152).
-                self.handle_wasm_failure(
+                handle_wasm_failure_boxed(
+                    self,
                     ctx,
                     &integration.name,
                     module_name,
@@ -1342,11 +1471,27 @@ impl crate::state::ServerState {
         }
     }
 
-    /// Invoke a WASM module directly (not triggered by an entity action).
+    /// In-process `/tdata` host for `$value` / `blob_adapter`.
     ///
-    /// Used by `$value` handlers for blob operations. The WASM module controls
-    /// the entire blob lifecycle (auth, hashing, caching, upload/download) via
-    /// streaming host functions. Bytes never enter WASM memory.
+    /// Uses the HTTP caller. System is dropped so the guest cannot inherit
+    /// `system-platform:broad-permit`.
+    pub(crate) fn local_tdata_direct_host(
+        &self,
+        tenant: &TenantId,
+        production_host: Arc<dyn WasmHost>,
+        security_ctx: &SecurityContext,
+    ) -> Arc<dyn WasmHost> {
+        let loopback_ctx =
+            (security_ctx.principal.kind != PrincipalKind::System).then_some(security_ctx);
+        Arc::new(LocalTDataWasmHost::new(
+            self.clone(),
+            tenant.clone(),
+            loopback_ctx,
+            production_host,
+        ))
+    }
+
+    /// Invoke a WASM module directly (not triggered by an entity action).
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn invoke_wasm_direct(
         &self,
@@ -1354,6 +1499,7 @@ impl crate::state::ServerState {
         module_name: &str,
         mut context: WasmInvocationContext,
         streams: Arc<std::sync::RwLock<StreamRegistry>>,
+        security_ctx: &SecurityContext,
     ) -> Result<temper_wasm::WasmInvocationResult, String> {
         if context.wasm_module.is_none() {
             context.wasm_module = Some(module_name.to_string());
@@ -1383,6 +1529,10 @@ impl crate::state::ServerState {
         };
         let tenant_secrets =
             self.get_authorized_wasm_host_bootstrap_secrets(tenant, &*base_gate, &authz_ctx);
+        let base_gate = crate::authz::wasm_gate::bind_local_blob_endpoint(
+            base_gate,
+            tenant_secrets.get("blob_endpoint").map(String::as_str),
+        );
         let secret_resolver =
             self.authorized_wasm_secret_resolver(tenant, Arc::clone(&base_gate), authz_ctx.clone());
         let local_blob_interceptor = local_blob_binary_interceptor(
@@ -1401,8 +1551,8 @@ impl crate::state::ServerState {
             .with_spec_evaluator(spec_evaluator_fn())
             .with_progress_emitter(progress_emitter)
             .with_internal_api_base_url(internal_api_base_url(self))
-            .with_internal_api_key(std::env::var("TEMPER_API_KEY").ok()) // determinism-ok: production host loopback config
-            .with_invocation_context(context.clone());
+            .with_invocation_context(context.clone())
+            .with_llm_content_export(self.export_llm_content(tenant.as_str()));
         if let Some(resolver) = secret_resolver {
             base_host = base_host.with_secret_resolver(resolver);
         }
@@ -1410,12 +1560,7 @@ impl crate::state::ServerState {
             base_host = base_host.with_binary_http_interceptor(interceptor);
         }
         let production_host: Arc<dyn WasmHost> = Arc::new(base_host);
-        let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
-            self.clone(),
-            tenant.clone(),
-            None,
-            production_host,
-        ));
+        let inner = self.local_tdata_direct_host(tenant, production_host, security_ctx);
         let host: Arc<dyn WasmHost> =
             Arc::new(AuthorizedWasmHost::new(inner, base_gate, authz_ctx));
         let limits = WasmResourceLimits::default();
@@ -1972,6 +2117,83 @@ fn strip_private_observability_params(mut params: Value) -> Value {
     params
 }
 
+/// Callback-param keys that carry LLM *content* (prompt, completion, system
+/// prompt, and tool arguments/results) rather than safe metadata. These are the
+/// keys the telemetry sinks read — the span record, [`llm_call_wide_event`],
+/// [`submit_llmobs_llm_span`], and [`submit_llmobs_tool_spans`] — so stripping
+/// them from `callback_params` redacts content across every sink at once.
+/// The gate is an allowlist over [`is_private_llm_observability_param`], so these
+/// are not what enforces redaction — they are the explicit statement of which
+/// params are content, used by the test that proves the allowlist drops each one.
+/// See ADR-0166.
+#[cfg(test)]
+const LLM_CONTENT_PARAM_KEYS: [&str; 4] = [
+    "_gen_ai_input_messages",
+    "_gen_ai_output_messages",
+    "_gen_ai_system_instructions",
+    "_dd_llmobs_tool_spans",
+];
+
+/// Callback-param keys the sinks record under `gen_ai.*` semantic-convention
+/// names. Their values come from the guest, so a key name cannot establish that
+/// the value is metadata: a module for a non-opted-in tenant that returns
+/// `{"_gen_ai_model": "<the whole prompt>"}` would otherwise reach LLM
+/// Observability as `gen_ai.request.model`. They are kept, but bounded — the same
+/// rule the other three channels apply. See ADR-0166.
+const LLM_METADATA_PARAM_KEYS: [&str; 8] = [
+    "_gen_ai_provider",
+    "_gen_ai_model",
+    "_gen_ai_finish_reason",
+    "_gen_ai_parent_trace_id",
+    "_gen_ai_parent_span_id",
+    "_gen_ai_llm_parent_span_id",
+    "_gen_ai_llmobs_agent_span_id",
+    "_gen_ai_llmobs_workflow_span_id",
+];
+
+/// Redact LLM content params from `callback_params` unless the tenant has opted
+/// into LLM content export. Removes only the content keys in
+/// [`LLM_CONTENT_PARAM_KEYS`]; metadata is preserved. No-op when
+/// `export_content` is true. See ADR-0166.
+/// Whether a callback param is a private LLM-observability channel (the `_gen_ai_`
+/// and `_dd_llmobs_` prefixes the telemetry sinks read) rather than ordinary
+/// action output. Prefix-based so a param added later is governed by default
+/// instead of silently exempt.
+fn is_private_llm_observability_param(key: &str) -> bool {
+    // Case-insensitive, matching the normalization the other channels apply.
+    // Today's sinks look these up with exact lowercase names, so `_GEN_AI_prompt`
+    // is not exported — but it would sit in the map looking governed, waiting for
+    // the first sink that folds case. Cheaper to normalize than to rely on that.
+    let key = key.to_ascii_lowercase();
+    key.starts_with("_gen_ai_") || key.starts_with("_dd_llmobs_")
+}
+
+fn redact_llm_content_params(callback_params: &mut Value, export_content: bool) {
+    if export_content {
+        return;
+    }
+    let Some(object) = callback_params.as_object_mut() else {
+        return;
+    };
+    // Allowlist, not denylist. Removing four known content keys leaves any *other*
+    // observability param — `_gen_ai_completion`, say — in the map for a sink
+    // added later to pick up. The other channels were switched to an allowlist for
+    // exactly this reason; this one is now consistent with them: a private
+    // observability param survives only if it is recognised metadata.
+    object.retain(|key, _| {
+        !is_private_llm_observability_param(key)
+            || LLM_METADATA_PARAM_KEYS.contains(&key.to_ascii_lowercase().as_str())
+    });
+    for key in LLM_METADATA_PARAM_KEYS {
+        let Some(Value::String(text)) = object.get_mut(key) else {
+            continue;
+        };
+        if let Some(clamped) = clamp_redacted_metadata_value(text) {
+            *text = clamped;
+        }
+    }
+}
+
 fn integration_error_type(error: &str) -> String {
     let normalized = error.to_ascii_lowercase();
     if normalized.contains("rate limit") {
@@ -2077,431 +2299,8 @@ fn progress_emitter_fn(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn composite_wasm_result_inherits_generated_dispatch_idempotency() {
-        let agent = AgentContext::for_service("version-publisher");
-
-        let composite_agent = agent_ctx_for_composite_wasm_result(
-            &agent,
-            Some("dispatch:default:App:app:PublishNewVersion:one"),
-        );
-
-        assert_eq!(
-            composite_agent.idempotency_key.as_deref(),
-            Some("dispatch:default:App:app:PublishNewVersion:one"),
-            "composite sub-writes need the parent dispatch idempotency so repeated app version updates get distinct sub-write keys"
-        );
-    }
-
-    #[test]
-    fn composite_wasm_result_preserves_caller_supplied_idempotency() {
-        let mut agent = AgentContext::for_service("version-publisher");
-        agent.idempotency_key = Some("caller-key".to_string());
-
-        let composite_agent = agent_ctx_for_composite_wasm_result(&agent, Some("generated-key"));
-
-        assert_eq!(
-            composite_agent.idempotency_key.as_deref(),
-            Some("caller-key"),
-            "caller idempotency remains authoritative for retries"
-        );
-    }
-
-    #[test]
-    fn strips_private_llm_observability_params_before_callback_dispatch() {
-        let params = json!({
-            "provider_response_file_id": "file-123",
-            "input_tokens": 10,
-            "_gen_ai_input_messages": "[{\"role\":\"user\"}]",
-            "_gen_ai_output_messages": "[{\"role\":\"assistant\"}]",
-            "_gen_ai_system_instructions": "system",
-            "_gen_ai_provider": "anthropic",
-            "_gen_ai_model": "claude-sonnet-4-6",
-            "_gen_ai_finish_reason": "end_turn",
-            "_gen_ai_llm_parent_span_id": "parent-span-private",
-            "_dd_llmobs_tool_spans": "[]",
-            "gen_ai_parent_trace_id": "trace-public",
-            "gen_ai_llm_parent_span_id": "parent-span-public",
-        });
-
-        let stripped = strip_private_observability_params(params);
-
-        assert_eq!(stripped["provider_response_file_id"], "file-123");
-        assert_eq!(stripped["input_tokens"], 10);
-        assert_eq!(stripped["gen_ai_parent_trace_id"], "trace-public");
-        assert_eq!(stripped["gen_ai_llm_parent_span_id"], "parent-span-public");
-        assert!(stripped.get("_gen_ai_input_messages").is_none());
-        assert!(stripped.get("_gen_ai_output_messages").is_none());
-        assert!(stripped.get("_gen_ai_system_instructions").is_none());
-        assert!(stripped.get("_gen_ai_provider").is_none());
-        assert!(stripped.get("_gen_ai_model").is_none());
-        assert!(stripped.get("_gen_ai_finish_reason").is_none());
-        assert!(stripped.get("_gen_ai_llm_parent_span_id").is_none());
-        assert!(stripped.get("_dd_llmobs_tool_spans").is_none());
-    }
-
-    #[test]
-    fn gen_ai_span_attrs_are_recorded_only_for_llm_integrations() {
-        let params = json!({
-            "input_tokens": 10,
-            "output_tokens": 20,
-            "_gen_ai_input_messages": "[{\"role\":\"user\"}]",
-            "_gen_ai_output_messages": "[{\"role\":\"assistant\"}]",
-            "_gen_ai_provider": "openai",
-            "_gen_ai_model": "gpt-5.4",
-        });
-
-        assert!(should_record_gen_ai_span_attrs(true, &params));
-        assert!(!should_record_gen_ai_span_attrs(false, &params));
-    }
-
-    #[test]
-    fn llmobs_service_name_prefers_runtime_service_identity() {
-        unsafe {
-            std::env::set_var("DD_SERVICE", "temperpaw");
-            std::env::remove_var("OTEL_SERVICE_NAME");
-        }
-        assert_eq!(llmobs_service_name(), "temperpaw");
-
-        unsafe {
-            std::env::remove_var("DD_SERVICE");
-            std::env::set_var("OTEL_SERVICE_NAME", "temper-agent");
-        }
-        assert_eq!(llmobs_service_name(), "temper-agent");
-
-        unsafe {
-            std::env::remove_var("DD_SERVICE");
-            std::env::remove_var("OTEL_SERVICE_NAME");
-        }
-        assert_eq!(llmobs_service_name(), "temper-platform");
-    }
-
-    #[test]
-    fn llm_model_for_observability_prefers_callback_model() {
-        let entity_state = EntityState {
-            entity_type: "Session".to_string(),
-            entity_id: "session-1".to_string(),
-            status: "CallingProvider".to_string(),
-            item_count: 0,
-            counters: std::collections::BTreeMap::new(),
-            booleans: std::collections::BTreeMap::new(),
-            lists: std::collections::BTreeMap::new(),
-            fields: json!({"model": "claude-sonnet-4-6"}),
-            events: std::collections::VecDeque::new(),
-            total_event_count: 0,
-            events_since_snapshot: 0,
-            last_snapshot_sequence_nr: 0,
-            sequence_nr: 0,
-            processed_idempotency_keys: std::collections::BTreeMap::new(),
-        };
-        let callback_params = json!({
-            "_gen_ai_model": "gpt-5.4",
-        });
-
-        assert_eq!(
-            llm_model_for_observability(&entity_state, &callback_params),
-            "gpt-5.4"
-        );
-    }
-
-    #[test]
-    fn parse_internal_file_value_request_matches_only_value_paths() {
-        assert_eq!(
-            parse_internal_file_value_request(
-                "http://127.0.0.1:3467",
-                "http://127.0.0.1:3467/tdata/Files('fl-123')/$value"
-            )
-            .as_deref(),
-            Some("fl-123")
-        );
-        assert!(
-            parse_internal_file_value_request(
-                "http://127.0.0.1:3467",
-                "http://127.0.0.1:3467/tdata/Files('fl-123')"
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn llm_root_span_stays_on_active_trace() {
-        use opentelemetry::trace::TracerProvider as _;
-        use opentelemetry_sdk::trace::SdkTracerProvider;
-        use tracing_subscriber::prelude::*;
-
-        let tracer_provider = SdkTracerProvider::builder().build();
-        let subscriber = tracing_subscriber::registry().with(
-            tracing_opentelemetry::layer()
-                .with_tracer(tracer_provider.tracer("temper-server-llm-root-test")),
-        );
-        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
-
-        let tenant = TenantId::default();
-        let entity_state = EntityState {
-            entity_type: "Session".to_string(),
-            entity_id: "ss-1".to_string(),
-            status: "CallingProvider".to_string(),
-            item_count: 0,
-            counters: std::collections::BTreeMap::new(),
-            booleans: std::collections::BTreeMap::new(),
-            lists: std::collections::BTreeMap::new(),
-            fields: json!({"provider": "openai", "model": "gpt-5.4"}),
-            events: std::collections::VecDeque::new(),
-            total_event_count: 0,
-            events_since_snapshot: 0,
-            last_snapshot_sequence_nr: 0,
-            sequence_nr: 0,
-            processed_idempotency_keys: std::collections::BTreeMap::new(),
-        };
-        let integration = temper_spec::automaton::Integration {
-            name: "provider_caller".to_string(),
-            trigger: "call_provider".to_string(),
-            integration_type: "wasm".to_string(),
-            module: Some("provider_caller".to_string()),
-            config: std::collections::BTreeMap::new(),
-            on_success: None,
-            on_failure: None,
-            llm: true,
-        };
-        let agent_ctx = AgentContext {
-            session_id: Some("ss-1".to_string()),
-            ..AgentContext::default()
-        };
-
-        let parent = tracing::info_span!("dispatch.dispatch_tenant_action_core");
-        let expected_trace_id = parent.in_scope(|| {
-            tracing::Span::current()
-                .context()
-                .span()
-                .span_context()
-                .trace_id()
-                .to_string()
-        });
-        let (llm_trace_id, has_llmobs_auto_conversion_opt_out) = parent.in_scope(|| {
-            let ctx = WasmDispatchCtx {
-                entity_ref: WasmEntityRef {
-                    tenant: &tenant,
-                    entity_type: "Session",
-                    entity_id: "ss-1",
-                },
-                action: "ContextReady",
-                agent_ctx: &agent_ctx,
-                dispatch_idempotency_key: None,
-                mode: WasmDispatchMode::Inline,
-            };
-            let span = build_llm_root_span(&ctx, &integration, &entity_state, "provider_caller");
-            let has_opt_out = span
-                .metadata()
-                .map(|metadata| {
-                    metadata
-                        .fields()
-                        .iter()
-                        .any(|field| field.name() == "dd_llmobs_enabled")
-                })
-                .unwrap_or(false);
-            (
-                span.context().span().span_context().trace_id().to_string(),
-                has_opt_out,
-            )
-        });
-
-        assert_eq!(llm_trace_id, expected_trace_id);
-        assert!(
-            has_llmobs_auto_conversion_opt_out,
-            "root LLM OTel span must opt out of Datadog auto LLMObs conversion"
-        );
-    }
-
-    #[test]
-    fn llm_parent_context_records_llm_span_and_dispatch_parent_ids() {
-        use opentelemetry::trace::TracerProvider as _;
-        use opentelemetry_sdk::trace::SdkTracerProvider;
-        use tracing_subscriber::prelude::*;
-
-        let tracer_provider = SdkTracerProvider::builder().build();
-        let subscriber = tracing_subscriber::registry().with(
-            tracing_opentelemetry::layer()
-                .with_tracer(tracer_provider.tracer("temper-server-llm-parent-test")),
-        );
-        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
-
-        let dispatch_parent = tracing::info_span!("dispatch.dispatch_tenant_action_core");
-        let (expected_trace_id, expected_parent_span_id) = dispatch_parent.in_scope(|| {
-            let span_context = tracing::Span::current()
-                .context()
-                .span()
-                .span_context()
-                .clone();
-            (
-                span_context.trace_id().to_string(),
-                span_context.span_id().to_string(),
-            )
-        });
-
-        let mut callback_params = json!({});
-        let entity_state = EntityState {
-            entity_type: "Session".to_string(),
-            entity_id: "session-1".to_string(),
-            status: "CallingProvider".to_string(),
-            item_count: 0,
-            counters: std::collections::BTreeMap::new(),
-            booleans: std::collections::BTreeMap::new(),
-            lists: std::collections::BTreeMap::new(),
-            fields: json!({}),
-            events: std::collections::VecDeque::new(),
-            total_event_count: 0,
-            events_since_snapshot: 0,
-            last_snapshot_sequence_nr: 0,
-            sequence_nr: 0,
-            processed_idempotency_keys: std::collections::BTreeMap::new(),
-        };
-        let (llm_trace_id, llm_span_id) = dispatch_parent.in_scope(|| {
-            let llm_span = tracing::info_span!("llm_caller.trace");
-            let span_context = llm_span.context().span().span_context().clone();
-            attach_llm_parent_context(
-                &llm_span,
-                Some(&expected_parent_span_id),
-                &entity_state,
-                "session-1",
-                1_234,
-                &mut callback_params,
-            );
-            (
-                span_context.trace_id().to_string(),
-                span_context.span_id().to_string(),
-            )
-        });
-
-        assert_eq!(llm_trace_id, expected_trace_id);
-        assert_ne!(llm_span_id, expected_parent_span_id);
-        assert_eq!(
-            callback_params["_gen_ai_parent_trace_id"],
-            expected_trace_id
-        );
-        assert_eq!(callback_params["_gen_ai_parent_span_id"], llm_span_id);
-        assert_eq!(
-            callback_params["_gen_ai_llm_parent_span_id"],
-            expected_parent_span_id
-        );
-        assert_eq!(
-            callback_params["gen_ai_llm_parent_span_id"],
-            expected_parent_span_id
-        );
-        let expected_agent_span_id = temper_observe::llmobs_api::derive_span_id(&format!(
-            "{expected_trace_id}:session-1:agent"
-        ));
-        assert_eq!(
-            callback_params["_gen_ai_llmobs_agent_span_id"],
-            expected_agent_span_id
-        );
-        assert_eq!(
-            callback_params["llmobs_agent_span_id"],
-            expected_agent_span_id
-        );
-        assert_ne!(
-            callback_params["_gen_ai_llmobs_agent_span_id"],
-            expected_parent_span_id
-        );
-        assert!(
-            callback_params["_gen_ai_llmobs_workflow_span_id"]
-                .as_str()
-                .is_some_and(|workflow_span_id| !workflow_span_id.is_empty()
-                    && workflow_span_id != expected_parent_span_id
-                    && workflow_span_id != llm_span_id)
-        );
-        assert_eq!(
-            callback_params["llmobs_workflow_span_id"],
-            callback_params["_gen_ai_llmobs_workflow_span_id"]
-        );
-        assert!(
-            callback_params["llmobs_agent_start_ns"]
-                .as_u64()
-                .is_some_and(|start_ns| start_ns > 0)
-        );
-    }
-
-    #[test]
-    fn llm_parent_context_reuses_existing_llmobs_agent_root() {
-        use opentelemetry::trace::TracerProvider as _;
-        use opentelemetry_sdk::trace::SdkTracerProvider;
-        use tracing_subscriber::prelude::*;
-
-        let tracer_provider = SdkTracerProvider::builder().build();
-        let subscriber = tracing_subscriber::registry().with(
-            tracing_opentelemetry::layer()
-                .with_tracer(tracer_provider.tracer("temper-server-llm-parent-reuse-test")),
-        );
-        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
-
-        let entity_state = EntityState {
-            entity_type: "Session".to_string(),
-            entity_id: "session-1".to_string(),
-            status: "CallingProvider".to_string(),
-            item_count: 0,
-            counters: std::collections::BTreeMap::new(),
-            booleans: std::collections::BTreeMap::new(),
-            lists: std::collections::BTreeMap::new(),
-            fields: json!({
-                "llmobs_agent_span_id": "stable-agent-root",
-                "llmobs_agent_start_ns": 12345_u64,
-            }),
-            events: std::collections::VecDeque::new(),
-            total_event_count: 0,
-            events_since_snapshot: 0,
-            last_snapshot_sequence_nr: 0,
-            sequence_nr: 0,
-            processed_idempotency_keys: std::collections::BTreeMap::new(),
-        };
-
-        let mut callback_params = json!({});
-        let llm_span = tracing::info_span!("llm_caller.trace");
-        attach_llm_parent_context(
-            &llm_span,
-            Some("turn-parent-span"),
-            &entity_state,
-            "session-1",
-            99,
-            &mut callback_params,
-        );
-
-        assert_eq!(
-            callback_params["_gen_ai_llmobs_agent_span_id"],
-            "stable-agent-root"
-        );
-        assert_eq!(callback_params["llmobs_agent_span_id"], "stable-agent-root");
-        assert_eq!(callback_params["_gen_ai_llmobs_agent_start_ns"], 12345_u64);
-        assert_eq!(callback_params["llmobs_agent_start_ns"], 12345_u64);
-    }
-
-    #[test]
-    fn llmobs_tool_parent_prefers_workflow_span_id() {
-        let entity_state = EntityState {
-            entity_type: "Session".to_string(),
-            entity_id: "ss-1".to_string(),
-            status: "CallingTools".to_string(),
-            item_count: 0,
-            counters: std::collections::BTreeMap::new(),
-            booleans: std::collections::BTreeMap::new(),
-            lists: std::collections::BTreeMap::new(),
-            fields: json!({
-                "gen_ai_parent_trace_id": "trace-1",
-                "gen_ai_parent_span_id": "legacy-llm-parent",
-                "llmobs_workflow_span_id": "workflow-parent",
-            }),
-            events: std::collections::VecDeque::new(),
-            total_event_count: 0,
-            events_since_snapshot: 0,
-            last_snapshot_sequence_nr: 0,
-            sequence_nr: 0,
-            processed_idempotency_keys: std::collections::BTreeMap::new(),
-        };
-
-        assert_eq!(
-            llmobs_tool_trace_and_parent(&entity_state, &json!({})),
-            Some(("trace-1".to_string(), "workflow-parent".to_string()))
-        );
-    }
-}
+#[path = "wasm/llm_redaction_test.rs"]
+mod llm_redaction_test;
+#[cfg(test)]
+#[path = "wasm/wasm_test.rs"]
+mod tests;

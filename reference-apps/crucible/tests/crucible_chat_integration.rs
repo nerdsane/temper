@@ -25,7 +25,10 @@
 //!
 //! No network, no API key, no secrets. Everything runs in-process.
 
+use axum::extract::Request;
 use axum::http::StatusCode;
+use axum::middleware::Next;
+use axum::response::Response;
 use crucible_reference::chat::anthropic::MockModel;
 use crucible_reference::chat::responder::{RespondRequest, respond};
 use crucible_reference::chat::seed::{CallableAgentSeedSpec, SeedOptions, seed};
@@ -59,6 +62,41 @@ const CALLABLE_AGENT_IOA: &str = include_str!("../specs/callable_agent.ioa.toml"
 const SESSION_THREAD_IOA: &str = include_str!("../specs/session_thread.ioa.toml");
 const CROSS_INVARIANTS_TOML: &str = include_str!("../specs/cross-invariants.toml");
 const MODEL_CSDL: &str = include_str!("../specs/model.csdl.xml");
+const CRUCIBLE_CHAT_INTEGRATION_POLICY: &str = r#"
+permit(principal, action in [Action::"list", Action::"read", Action::"create", Action::"update", Action::"delete"], resource is Environment);
+permit(principal, action in [Action::"list", Action::"read", Action::"create", Action::"update", Action::"delete"], resource is ManagedAgent);
+permit(principal, action in [Action::"list", Action::"read", Action::"create", Action::"update", Action::"delete"], resource is AgentTool);
+permit(
+    principal,
+    action in [
+        Action::"list",
+        Action::"read",
+        Action::"create",
+        Action::"update",
+        Action::"delete",
+        Action::"StartSession",
+        Action::"IdleSession",
+        Action::"ResumeSession"
+    ],
+    resource is Session
+);
+permit(principal, action in [Action::"list", Action::"read", Action::"create", Action::"update", Action::"delete"], resource is SessionEvent);
+permit(principal, action in [Action::"list", Action::"read", Action::"create", Action::"update", Action::"delete"], resource is CallableAgent);
+permit(
+    principal,
+    action in [
+        Action::"list",
+        Action::"read",
+        Action::"create",
+        Action::"update",
+        Action::"delete",
+        Action::"IdleThread",
+        Action::"ResumeThread",
+        Action::"TerminateThread"
+    ],
+    resource is SessionThread
+);
+"#;
 
 /// Build a fully-loaded Crucible `ServerState` with every entity type
 /// marked as verified. Same pattern as `crucible_sessions_validation.rs`.
@@ -127,12 +165,41 @@ fn build_crucible_state() -> ServerState {
         }
     }
     state
+        .authz
+        .reload_tenant_policies(
+            TenantId::default().as_str(),
+            CRUCIBLE_CHAT_INTEGRATION_POLICY,
+        )
+        .expect("install Crucible chat integration policy");
+    state
+}
+
+async fn authenticate_test_request(mut request: Request, next: Next) -> Response {
+    let security_context = temper_authz::SecurityContext {
+        principal: temper_authz::Principal {
+            id: "crucible-chat-integration".to_string(),
+            kind: temper_authz::PrincipalKind::Customer,
+            role: None,
+            acting_for: None,
+            agent_type: None,
+            attributes: Default::default(),
+        },
+        context_attrs: Default::default(),
+        correlation_id: "crucible-chat-integration".to_string(),
+    };
+    request
+        .extensions_mut()
+        .insert(temper_authz::AuthenticatedRequestContext::new(
+            TenantId::default(),
+            security_context,
+        ));
+    next.run(request).await
 }
 
 /// Spawn a real axum::serve on an ephemeral port and return its
 /// bound address. The task runs until the test exits.
 async fn spawn_server(state: ServerState) -> SocketAddr {
-    let router = build_router(state);
+    let router = build_router(state).layer(axum::middleware::from_fn(authenticate_test_request));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("ephemeral bind should succeed");

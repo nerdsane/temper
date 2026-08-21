@@ -114,7 +114,7 @@ impl AgentContext {
     /// `docs/adrs/0046-unified-action-triggers.md`.
     pub fn for_service(service_name: &str) -> Self {
         let service_id = format!("service:{service_name}");
-        let mut security_ctx = SecurityContext::from_headers(&[]).with_agent_context(
+        let mut security_ctx = SecurityContext::anonymous().with_agent_context(
             Some(&service_id),
             None,
             Some(service_name),
@@ -217,6 +217,22 @@ fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// Extract the caller-supplied session id from observability headers.
+///
+/// Accepts `X-Temper-Observe-Session-Id` and the shorter `X-Session-Id` alias.
+/// Single source of truth so every entrypoint honours both spellings.
+pub fn session_id_from_headers(headers: &HeaderMap) -> Option<String> {
+    header_string(headers, "x-temper-observe-session-id")
+        .or_else(|| header_string(headers, "x-session-id"))
+}
+
+/// Extract the caller-supplied intent from observability headers.
+///
+/// Accepts `X-Temper-Observe-Intent` and the shorter `X-Intent` alias.
+pub fn intent_from_headers(headers: &HeaderMap) -> Option<String> {
+    header_string(headers, "x-temper-observe-intent").or_else(|| header_string(headers, "x-intent"))
+}
+
 /// Extract observability context from request headers.
 ///
 /// Reads generic session, intent, and observation metadata headers for
@@ -225,10 +241,8 @@ fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
 /// self-declared headers — they come from credential resolution (ADR-0033)
 /// or are set to `None` for anonymous/operator access.
 pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
-    let session_id = header_string(headers, "x-temper-observe-session-id")
-        .or_else(|| header_string(headers, "x-session-id"));
-    let intent = header_string(headers, "x-temper-observe-intent")
-        .or_else(|| header_string(headers, "x-intent"));
+    let session_id = session_id_from_headers(headers);
+    let intent = intent_from_headers(headers);
     // Extract W3C traceparent: "00-{trace_id}-{parent_span_id}-{flags}"
     let (trace_id, parent_span_id) = headers
         .get("traceparent")
@@ -301,4 +315,8 @@ pub(crate) fn remote_parent_context(agent_ctx: &AgentContext) -> Option<opentele
 
 #[cfg(test)]
 #[path = "request_context_test.rs"]
+mod legacy_tests;
+
+#[cfg(test)]
+#[path = "request_context/mod_test.rs"]
 mod tests;

@@ -6,6 +6,8 @@
 use temper_store_turso::EvolutionRecordRow;
 use tracing::instrument;
 
+use crate::storage::EvolutionRecordWrite;
+
 use super::ServerState;
 
 impl ServerState {
@@ -13,12 +15,13 @@ impl ServerState {
     #[instrument(skip_all, fields(otel.name = "evolution.list_records", record_type, status))]
     pub async fn list_evolution_records(
         &self,
+        tenant: &str,
         record_type: Option<&str>,
         status: Option<&str>,
     ) -> Result<Vec<EvolutionRecordRow>, String> {
-        if let Some(store) = self.platform_metadata_store() {
+        if let Some(store) = self.metadata_store_for_tenant(tenant).await {
             let rows = store
-                .list_evolution_records(record_type, status)
+                .list_evolution_records(tenant, record_type, status)
                 .await
                 .map_err(|e| {
                     tracing::warn!(
@@ -43,7 +46,7 @@ impl ServerState {
         // Fall through to Postgres.
         if let Some(pg) = &self.pg_record_store {
             let rows = pg
-                .list_records_generic(record_type, status)
+                .list_records_generic(tenant, record_type, status)
                 .await
                 .map_err(|e| {
                     tracing::warn!(
@@ -74,11 +77,12 @@ impl ServerState {
     #[instrument(skip_all, fields(otel.name = "evolution.get_record", id))]
     pub async fn get_evolution_record(
         &self,
+        tenant: &str,
         id: &str,
     ) -> Result<Option<EvolutionRecordRow>, String> {
-        if let Some(store) = self.platform_metadata_store() {
+        if let Some(store) = self.metadata_store_for_tenant(tenant).await {
             let row = store
-                .get_evolution_record(id)
+                .get_evolution_record(tenant, id)
                 .await
                 .map_err(|e| {
                     tracing::warn!(backend = store.backend_name(), record_id = id, error = %e, "evolution.store.read");
@@ -94,7 +98,7 @@ impl ServerState {
         }
 
         if let Some(pg) = &self.pg_record_store {
-            let row = pg.get_record_generic(id).await.map_err(|e| {
+            let row = pg.get_record_generic(tenant, id).await.map_err(|e| {
                 tracing::warn!(backend = "postgres", record_id = id, error = %e, "evolution.store.read");
                 e.to_string()
             })?;
@@ -114,9 +118,12 @@ impl ServerState {
 
     /// List ranked insights (I-Records) from the first available backend.
     #[instrument(skip_all, fields(otel.name = "evolution.list_ranked_insights"))]
-    pub async fn list_ranked_insights(&self) -> Result<Vec<EvolutionRecordRow>, String> {
-        if let Some(store) = self.platform_metadata_store() {
-            let rows = store.list_ranked_insights().await.map_err(|e| {
+    pub async fn list_ranked_insights(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<EvolutionRecordRow>, String> {
+        if let Some(store) = self.metadata_store_for_tenant(tenant).await {
+            let rows = store.list_ranked_insights(tenant).await.map_err(|e| {
                 tracing::warn!(backend = store.backend_name(), error = %e, "evolution.store.read");
                 e.to_string()
             })?;
@@ -129,7 +136,7 @@ impl ServerState {
         }
 
         if let Some(pg) = &self.pg_record_store {
-            let rows = pg.list_ranked_insights_generic().await.map_err(|e| {
+            let rows = pg.list_ranked_insights_generic(tenant).await.map_err(|e| {
                 tracing::warn!(backend = "postgres", error = %e, "evolution.store.read");
                 e.to_string()
             })?;
@@ -147,26 +154,31 @@ impl ServerState {
     }
 
     /// Insert a generic evolution record into the first available backend.
-    #[instrument(skip_all, fields(otel.name = "evolution.insert_record", id, record_type, status))]
+    #[instrument(skip_all, fields(otel.name = "evolution.insert_record"))]
     pub async fn insert_evolution_record(
         &self,
-        id: &str,
-        record_type: &str,
-        status: &str,
-        created_by: &str,
-        derived_from: Option<&str>,
-        data_json: &str,
+        record: EvolutionRecordWrite<'_>,
     ) -> Result<(), String> {
-        if let Some(store) = self.platform_metadata_store() {
+        let EvolutionRecordWrite {
+            tenant,
+            id,
+            record_type,
+            status,
+            created_by,
+            derived_from,
+            data_json,
+        } = record;
+        if let Some(store) = self.metadata_store_for_tenant(tenant).await {
             store
-                .insert_evolution_record(
+                .insert_evolution_record(EvolutionRecordWrite {
+                    tenant,
                     id,
                     record_type,
                     status,
                     created_by,
                     derived_from,
                     data_json,
-                )
+                })
                 .await
                 .map_err(|e| {
                     tracing::warn!(
@@ -192,19 +204,27 @@ impl ServerState {
         }
 
         if let Some(pg) = &self.pg_record_store {
-            pg.insert_record_generic(id, record_type, status, created_by, derived_from, data_json)
-                .await
-                .map_err(|e| {
-                    tracing::warn!(
-                        backend = "postgres",
-                        record_id = id,
-                        record_type,
-                        status,
-                        error = %e,
-                        "evolution.store.write"
-                    );
-                    e.to_string()
-                })?;
+            pg.insert_record_generic(temper_evolution::GenericEvolutionRecordInsert {
+                tenant,
+                id,
+                record_type,
+                status,
+                created_by,
+                derived_from,
+                data_json,
+            })
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    backend = "postgres",
+                    record_id = id,
+                    record_type,
+                    status,
+                    error = %e,
+                    "evolution.store.write"
+                );
+                e.to_string()
+            })?;
             tracing::info!(
                 backend = "postgres",
                 record_id = id,
@@ -231,6 +251,7 @@ impl ServerState {
 fn pg_row_to_turso(row: temper_evolution::GenericEvolutionRow) -> EvolutionRecordRow {
     EvolutionRecordRow {
         id: row.id,
+        tenant: row.tenant,
         record_type: row.record_type,
         status: row.status,
         created_by: row.created_by,

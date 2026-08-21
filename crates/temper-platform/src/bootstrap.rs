@@ -390,16 +390,20 @@ pub async fn persist_agent_verification(
     .await;
 }
 
-/// Auto-register an `AgentCredential` for the global API key on bootstrap.
+/// Register the bootstrap key as a normal operator credential in one tenant.
 ///
 /// When the platform boots with a `TEMPER_API_KEY` configured, this function
 /// ensures a corresponding `AgentType` ("operator") and `AgentCredential`
-/// exist in the default tenant so the bearer auth middleware can resolve
-/// the global key as a verified identity instead of falling back to
-/// unverified/anonymous access.
+/// exist in the given tenant so the bearer auth middleware can resolve the
+/// key as a verified identity in that tenant. Registration in one tenant
+/// deliberately grants no authority in any other tenant.
 ///
-/// This is idempotent: if the entities already exist (e.g., from a previous
-/// boot), the actions are no-ops (entity already in target state).
+/// Also seeds a narrow Cedar permit so a verified operator can
+/// `manage_policies` on that tenant's `PolicySet` (ADR-0172). The permit is
+/// merged into live Cedar, persisted as a granular row, and is idempotent.
+///
+/// This is idempotent: if the entities and permit already exist (e.g., from a
+/// previous boot), the actions are no-ops.
 pub async fn bootstrap_operator_credential(state: &PlatformState, api_key: &str, tenant: &str) {
     use temper_server::identity::hash_token;
 
@@ -419,7 +423,7 @@ pub async fn bootstrap_operator_credential(state: &PlatformState, api_key: &str,
             "Define",
             serde_json::json!({
                 "name": "operator",
-                "system_prompt": "Platform operator — global API key access",
+                "system_prompt": "Tenant-scoped platform operator",
                 "tool_set": "local",
                 "model": "none",
                 "max_turns": "0",
@@ -432,11 +436,7 @@ pub async fn bootstrap_operator_credential(state: &PlatformState, api_key: &str,
 
     // Step 2: Create and issue AgentCredential for the API key hash.
     let key_hash = hash_token(api_key);
-    let key_prefix = if api_key.len() >= 8 {
-        &api_key[..8]
-    } else {
-        api_key
-    };
+    let key_prefix = api_key.chars().take(8).collect::<String>();
 
     let _ = state
         .server
@@ -450,13 +450,15 @@ pub async fn bootstrap_operator_credential(state: &PlatformState, api_key: &str,
                 "agent_instance_id": instance_id,
                 "key_hash": key_hash,
                 "key_prefix": key_prefix,
-                "description": "Auto-registered credential for global TEMPER_API_KEY",
+                "description": "Tenant-scoped operator bootstrap credential",
                 "created_by": "bootstrap",
                 "expires_at": ""
             }),
             &agent_ctx,
         )
         .await;
+
+    crate::operator_manage_policies::seed_operator_manage_policies(state, tenant).await;
 
     tracing::info!(
         "Operator credential bootstrapped for tenant '{tenant}' (key_hash={}...)",

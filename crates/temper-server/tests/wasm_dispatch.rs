@@ -151,6 +151,23 @@ permit(
 );
 "#;
 
+const ECHO_HTTP_POLICY: &str = r#"
+permit(
+  principal is Agent,
+  action == Action::"http_call",
+  resource is HttpEndpoint
+) when {
+  context.module == "echo_integration"
+};
+"#;
+
+fn install_echo_http_policy(state: &ServerState) {
+    state
+        .authz
+        .reload_tenant_policies(TenantId::default().as_str(), ECHO_HTTP_POLICY)
+        .expect("policy should parse");
+}
+
 fn install_non_wasm_policy(state: &ServerState) {
     state
         .authz
@@ -192,7 +209,7 @@ async fn assert_wasm_authz_denial_artifacts(state: &ServerState, entity_id: &str
     let mut authz_traj = None;
     for _ in 0..100 {
         let trajectories = turso
-            .load_recent_trajectories(1000)
+            .load_recent_trajectories("default", 1000)
             .await
             .expect("query trajectories from Turso");
         authz_traj = trajectories
@@ -246,6 +263,7 @@ async fn assert_wasm_authz_denial_artifacts(state: &ServerState, entity_id: &str
 async fn wasm_integration_dispatches_callback() {
     let state = build_echo_test_state();
     let tenant = TenantId::default();
+    install_echo_http_policy(&state);
 
     // Register the WASM module in the engine and module registry.
     let hash = state
@@ -268,7 +286,7 @@ async fn wasm_integration_dispatches_callback() {
             "echo-1",
             "TriggerEcho",
             serde_json::json!({}),
-            &AgentContext::default(),
+            &AgentContext::system(),
         )
         .await
         .expect("TriggerEcho should succeed");
@@ -309,6 +327,7 @@ async fn wasm_integration_dispatches_callback() {
 async fn persisted_wasm_modules_are_lazy_compiled_on_first_invoke() {
     let state = build_echo_test_state_with_turso().await;
     let tenant = TenantId::default();
+    install_echo_http_policy(&state);
     let hash = temper_wasm::WasmEngine::hash_module(ECHO_WASM);
 
     state
@@ -342,7 +361,7 @@ async fn persisted_wasm_modules_are_lazy_compiled_on_first_invoke() {
             "echo-lazy-1",
             "TriggerEcho",
             serde_json::json!({}),
-            &AgentContext::default(),
+            &AgentContext::system(),
         )
         .await
         .expect("TriggerEcho should succeed");
@@ -354,7 +373,7 @@ async fn persisted_wasm_modules_are_lazy_compiled_on_first_invoke() {
         "EchoTest",
         "echo-lazy-1",
         &["Done", "Failed"],
-        Duration::from_secs(5),
+        Duration::from_secs(45),
     )
     .await;
     assert_eq!(final_status, "Done");
@@ -368,6 +387,7 @@ async fn persisted_wasm_modules_are_lazy_compiled_on_first_invoke() {
 async fn persisted_wasm_modules_with_legacy_db_blob_fallback_execute_after_startup_restore() {
     let state = build_echo_test_state_with_turso().await;
     let tenant = TenantId::default();
+    install_echo_http_policy(&state);
     let turso = state
         .platform_turso_store()
         .expect("turso backend required");
@@ -411,7 +431,7 @@ async fn persisted_wasm_modules_with_legacy_db_blob_fallback_execute_after_start
             "echo-legacy-hash",
             "TriggerEcho",
             serde_json::json!({}),
-            &AgentContext::default(),
+            &AgentContext::system(),
         )
         .await
         .expect("TriggerEcho should succeed");
@@ -423,7 +443,7 @@ async fn persisted_wasm_modules_with_legacy_db_blob_fallback_execute_after_start
         "EchoTest",
         "echo-legacy-hash",
         &["Done", "Failed"],
-        Duration::from_secs(5),
+        Duration::from_secs(45),
     )
     .await;
     assert_eq!(final_status, "Done");

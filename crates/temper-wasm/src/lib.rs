@@ -17,9 +17,10 @@ mod workflow_headers;
 pub use authorized_host::{AuthorizedWasmHost, WasmAuthzDecision, WasmAuthzGate, extract_domain};
 pub use engine::{PureMigrationError, PureMigrationLimits, WasmEngine, WasmError};
 pub use host_trait::{
-    BinaryHttpInterceptorFn, ProductionWasmHost, ProgressEmitterFn, SecretResolverFn, SimWasmHost,
-    SpecEvaluatorFn, TemperDataCallFn, TemperFileReadFn, TemperFileWriteFn, TextHttpInterceptorFn,
-    WasmHost, parse_connect_frames,
+    BinaryHttpInterceptorFn, InternalHttpCapability, InternalHttpCapabilityIssuerFn,
+    ProductionWasmHost, ProgressEmitterFn, SecretResolverFn, SimWasmHost, SpecEvaluatorFn,
+    TemperDataCallFn, TemperFileReadFn, TemperFileWriteFn, TextHttpInterceptorFn, WasmHost,
+    parse_connect_frames,
 };
 pub use stream::{StreamRegistry, StreamRegistryConfig};
 pub use types::{

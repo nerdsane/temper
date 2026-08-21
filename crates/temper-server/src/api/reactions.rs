@@ -2,28 +2,29 @@
 
 use std::collections::BTreeMap;
 
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use temper_authz::PrincipalKind;
+use temper_authz::{AuthenticatedRequestContext, PrincipalKind};
 
-use crate::authz::security_context_from_headers;
-use crate::odata::extract_tenant;
+use crate::authz::require_authenticated_context;
 use crate::state::ServerState;
 use crate::trigger::delivery::{append_delivery_record, find_delivery_record};
 
 /// POST `/api/reactions/{delivery_id}/retry` — request one bounded retry.
 pub(crate) async fn handle_retry_reaction(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path(delivery_id): Path<String>,
 ) -> Response {
-    let tenant = match extract_tenant(&headers, &state) {
-        Ok(tenant) => tenant,
-        Err(response) => return response.into_response(),
+    let authenticated = match require_authenticated_context(authenticated.as_deref()) {
+        Ok(context) => context,
+        Err(status) => return status.into_response(),
     };
-    let operator = security_context_from_headers(&headers, None, None, None);
+    let tenant = authenticated.tenant();
+    let operator = authenticated.security_context();
     let is_explicit_human = matches!(
         operator.principal.kind,
         PrincipalKind::Customer | PrincipalKind::Admin
@@ -63,7 +64,7 @@ pub(crate) async fn handle_retry_reaction(
     ]);
     if state
         .authorize_with_context(
-            &operator,
+            operator,
             "retry_reaction",
             "ReactionDelivery",
             &resource_attrs,
@@ -99,7 +100,7 @@ pub(crate) async fn handle_retry_reaction(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     if let Some(dispatcher) = dispatcher {
-        dispatcher.notify_recovery(&tenant);
+        dispatcher.notify_recovery(tenant);
         let state_for_retry = state.clone();
         let intent = record.intent.clone();
         tokio::spawn(async move {

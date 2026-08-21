@@ -73,6 +73,7 @@ async fn source_event_atomically_contains_bound_reaction_intent() {
                     resolved_guards: BTreeMap::new(),
                     receipt: None,
                 })),
+                expected_authorization_precondition: None,
             },
             Duration::from_secs(5),
         )

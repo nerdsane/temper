@@ -29,11 +29,17 @@ pub async fn verify_in_subprocess(
     bin: &Path,
     ioa_source: &str,
 ) -> Result<temper_verify::CascadeResult, String> {
-    let mut child = tokio::process::Command::new(bin)
+    let mut command = tokio::process::Command::new(bin);
+    command
         .arg("verify-ioa")
+        // Verification processes parse untrusted specs and need no server
+        // credentials. Do not inherit deployment, database, or provider keys.
+        .env_clear()
+        .kill_on_drop(true)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command
         .spawn()
         .map_err(|e| format!("failed to spawn verification subprocess: {e}"))?;
 
@@ -62,3 +68,7 @@ pub async fn verify_in_subprocess(
     serde_json::from_slice::<temper_verify::CascadeResult>(&output.stdout)
         .map_err(|e| format!("failed to parse verification subprocess output: {e}"))
 }
+
+#[cfg(all(test, unix))]
+#[path = "subprocess_verify_test.rs"]
+mod tests;

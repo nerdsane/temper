@@ -24,7 +24,7 @@ use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use sha2::{Digest, Sha256};
-use temper_authz::SecurityContext;
+use temper_authz::{AuthenticatedRequestContext, SecurityContext};
 use temper_runtime::persistence::schema_deployment::{
     ActivateSchemaBundle, ActivateSchemaBundleOutcome, ClaimSchemaVerification,
     ClaimSchemaVerificationOutcome, CommitSchemaMigrationBatch, CreateSchemaMigration,
@@ -51,10 +51,8 @@ use temper_wasm_sdk::schema_deployment::{
     StartSchemaMigrationRequestV1, SubmitSchemaBundleRequestV1, VerifySchemaBundleRequestV1,
 };
 
-use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
+use crate::authz::{DenialInput, record_authz_denial, require_authenticated_context};
 use crate::entity_actor::EntityEvent;
-use crate::identity::ResolvedIdentity;
-use crate::odata::common::extract_tenant;
 use crate::state::ServerState;
 
 const BUNDLE_CONTRACT: &str = temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V1;
@@ -126,6 +124,9 @@ impl<'a> GovernedSchemaDeploymentService<'a> {
                     reason: &denial.to_string(),
                     module_name: None,
                     from_status: None,
+                    intent: None,
+                    session_id: None,
+                    spec_governed: None,
                 },
             )
             .await;

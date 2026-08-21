@@ -542,7 +542,29 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
         )));
     }
 
-    // 2. All `from` and `to` states in actions must be declared states.
+    // 2. Runtime-owned fields cannot also be mutable spec variables or action
+    //    params. That would create a second identity/lifecycle/context truth.
+    for state_var in &automaton.state {
+        if super::types::is_server_derived_field_name(&state_var.name) {
+            return Err(AutomatonParseError::Validation(format!(
+                "state variable '{}' uses a runtime-owned field name",
+                state_var.name
+            )));
+        }
+    }
+    for action in &automaton.actions {
+        for param in &action.params {
+            if super::types::is_server_derived_field_name(param.name()) {
+                return Err(AutomatonParseError::Validation(format!(
+                    "action '{}' parameter '{}' uses a runtime-owned field name",
+                    action.name,
+                    param.name()
+                )));
+            }
+        }
+    }
+
+    // 3. All `from` and `to` states in actions must be declared states.
     for action in &automaton.actions {
         for from in &action.from {
             if !automaton.automaton.states.contains(from) {
@@ -564,7 +586,7 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
 
     super::reference_contract::validate_reference_declarations(automaton)?;
 
-    // 3. Validate WASM integrations.
+    // 4. Validate WASM integrations.
     let action_names: Vec<&str> = automaton.actions.iter().map(|a| a.name.as_str()).collect();
     for ig in &automaton.integrations {
         if ig.integration_type == "wasm" {
@@ -593,7 +615,7 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
         }
     }
 
-    // 4. Validate [[state_timeout]] declarations (ADR-0049).
+    // 5. Validate [[state_timeout]] declarations (ADR-0049).
     //    - `state` must be a declared state.
     //    - `on_timeout` must be a declared action.
     //    - each `reset_on` entry must be a declared action.
@@ -642,7 +664,7 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
         }
     }
 
-    // 5. Validate allow_indefinite_states entries are declared states
+    // 6. Validate allow_indefinite_states entries are declared states
     //    (ADR-0050 support).
     for state in &automaton.automaton.allow_indefinite_states {
         if !automaton.automaton.states.contains(state) {
@@ -652,7 +674,7 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
         }
     }
 
-    // 6. Validate [[action.triggers]] declarations (ADR-0046).
+    // 7. Validate [[action.triggers]] declarations (ADR-0046).
     validate_action_triggers(automaton, &action_names)?;
 
     // 7. Validate [[vector]] access-path declarations (ADR-0155).

@@ -15,6 +15,8 @@ pub mod blob_store;
 pub mod blob_sweeper;
 mod blob_transport_observability;
 pub mod blobs;
+/// Deterministic conformance checking of a recorded run against its IOA spec.
+pub mod conformance;
 pub mod entity_actor;
 pub mod event_budget_metrics;
 pub mod events;
@@ -22,6 +24,7 @@ pub mod eventual_invariants;
 pub mod http_endpoint;
 pub mod idempotency;
 pub mod identity;
+pub mod internal_invocation;
 /// ADR-0153: declared composite-key index hashing (the negative-existence access path).
 pub mod key_index;
 #[cfg(feature = "observe")]

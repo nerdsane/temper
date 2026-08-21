@@ -3,12 +3,15 @@
 //! Provides per-agent action history and summary statistics derived from the
 //! configured durable metadata backend.
 
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
+use temper_authz::AuthenticatedRequestContext;
 
-use crate::authz::{observe_tenant_scope, require_observe_auth};
+use crate::authz::{
+    observe_tenant_scope, require_authenticated_context, require_observe_auth, require_tenant_match,
+};
 use crate::state::ServerState;
 
 /// Summary of a single agent's activity.
@@ -82,28 +85,25 @@ pub struct AgentHistoryParams {
 /// GET /observe/agents -- list agents with action/denial counts.
 pub(crate) async fn handle_list_agents(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Query(params): Query<ListAgentsParams>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_agents", "AgentAudit")?;
-    let tenant_scope = observe_tenant_scope(&state, &headers)?;
-    let tenant_filter = tenant_scope
-        .as_ref()
-        .map(|t| t.as_str().to_string())
-        .or(params.tenant);
-    let stores = if let Some(ref tf) = tenant_filter {
-        match state.metadata_store_for_tenant(tf).await {
-            Some(store) => vec![store],
-            None => Vec::new(),
-        }
-    } else {
-        state.collect_all_metadata_stores().await
-    };
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_agents", "AgentAudit")?;
+    if let Some(requested_tenant) = params.tenant.as_deref() {
+        require_tenant_match(authenticated, requested_tenant)?;
+    }
+    let tenant_filter = observe_tenant_scope(authenticated).as_str().to_string();
+    let stores = state
+        .metadata_store_for_tenant(&tenant_filter)
+        .await
+        .into_iter()
+        .collect::<Vec<_>>();
 
     if !stores.is_empty() {
         let mut all_agents: Vec<AgentSummary> = Vec::new();
         for store in &stores {
-            match store.query_agent_summaries(tenant_filter.as_deref()).await {
+            match store.query_agent_summaries(Some(&tenant_filter)).await {
                 Ok(summaries) => {
                     all_agents.extend(summaries.into_iter().map(|s| AgentSummary {
                         agent_id: s.agent_id,
@@ -173,33 +173,30 @@ pub(crate) async fn handle_list_agents(
 /// GET /observe/agents/{agent_id}/history -- full action timeline for one agent.
 pub(crate) async fn handle_get_agent_history(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path(agent_id): Path<String>,
     Query(params): Query<AgentHistoryParams>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_agents", "AgentAudit")?;
-    let tenant_scope = observe_tenant_scope(&state, &headers)?;
-    let tenant_filter = tenant_scope
-        .as_ref()
-        .map(|t| t.as_str().to_string())
-        .or(params.tenant);
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_agents", "AgentAudit")?;
+    if let Some(requested_tenant) = params.tenant.as_deref() {
+        require_tenant_match(authenticated, requested_tenant)?;
+    }
+    let tenant_filter = observe_tenant_scope(authenticated).as_str().to_string();
     let limit = params.limit.unwrap_or(100).min(500);
 
-    let stores = if let Some(ref tf) = tenant_filter {
-        match state.metadata_store_for_tenant(tf).await {
-            Some(store) => vec![store],
-            None => Vec::new(),
-        }
-    } else {
-        state.collect_all_metadata_stores().await
-    };
+    let stores = state
+        .metadata_store_for_tenant(&tenant_filter)
+        .await
+        .into_iter()
+        .collect::<Vec<_>>();
 
     let mut all_history: Vec<AgentHistoryEntry> = Vec::new();
     for store in &stores {
         match store
             .query_trajectories_by_agent(
                 &agent_id,
-                tenant_filter.as_deref(),
+                Some(&tenant_filter),
                 params.entity_type.as_deref(),
                 limit as i64,
             )

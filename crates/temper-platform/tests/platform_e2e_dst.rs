@@ -355,7 +355,7 @@ async fn e2e_full_platform_scenario() {
 /// Full Project lifecycle through HTTP: POST create → POST UpdateSpecs → POST Verify → GET state.
 #[tokio::test]
 async fn e2e_http_project_lifecycle() {
-    let app = bootstrapped_router();
+    let app = bootstrapped_router().await;
 
     // POST /tdata/Projects → 201, creates a new Project entity
     let response = app
@@ -363,7 +363,7 @@ async fn e2e_http_project_lifecycle() {
         .oneshot(
             Request::post("/tdata/Projects")
                 .header("Content-Type", "application/json")
-                .header("X-Temper-Principal-Kind", "admin")
+                .header("Authorization", "Bearer test-operator-key")
                 .header("X-Tenant-Id", SYSTEM_TENANT)
                 .body(Body::from(r#"{"name": "test-project"}"#))
                 .unwrap(),
@@ -391,7 +391,7 @@ async fn e2e_http_project_lifecycle() {
                 "/tdata/Projects('{entity_id}')/Temper.System.UpdateSpecs"
             ))
             .header("Content-Type", "application/json")
-            .header("X-Temper-Principal-Kind", "admin")
+            .header("Authorization", "Bearer test-operator-key")
             .header("X-Tenant-Id", SYSTEM_TENANT)
             .body(Body::from("{}"))
             .unwrap(),
@@ -410,7 +410,7 @@ async fn e2e_http_project_lifecycle() {
                 "/tdata/Projects('{entity_id}')/Temper.System.Verify"
             ))
             .header("Content-Type", "application/json")
-            .header("X-Temper-Principal-Kind", "admin")
+            .header("Authorization", "Bearer test-operator-key")
             .header("X-Tenant-Id", SYSTEM_TENANT)
             .body(Body::from("{}"))
             .unwrap(),
@@ -426,6 +426,7 @@ async fn e2e_http_project_lifecycle() {
         .clone()
         .oneshot(
             Request::get("/tdata/$metadata")
+                .header("Authorization", "Bearer test-operator-key")
                 .header("X-Tenant-Id", SYSTEM_TENANT)
                 .body(Body::empty())
                 .unwrap(),
@@ -444,7 +445,7 @@ async fn e2e_http_project_lifecycle() {
         .clone()
         .oneshot(
             Request::get(format!("/tdata/Projects('{entity_id}')"))
-                .header("X-Temper-Principal-Kind", "admin")
+                .header("Authorization", "Bearer test-operator-key")
                 .header("X-Tenant-Id", SYSTEM_TENANT)
                 .body(Body::empty())
                 .unwrap(),
@@ -459,13 +460,14 @@ async fn e2e_http_project_lifecycle() {
 /// Metadata and service document show all system entity types after bootstrap.
 #[tokio::test]
 async fn e2e_http_metadata_shows_system_entities() {
-    let app = bootstrapped_router();
+    let app = bootstrapped_router().await;
 
     // GET /tdata/$metadata → body contains all 5 entity types
     let response = app
         .clone()
         .oneshot(
             Request::get("/tdata/$metadata")
+                .header("Authorization", "Bearer test-operator-key")
                 .header("X-Tenant-Id", SYSTEM_TENANT)
                 .body(Body::empty())
                 .unwrap(),
@@ -492,6 +494,7 @@ async fn e2e_http_metadata_shows_system_entities() {
         .clone()
         .oneshot(
             Request::get("/tdata")
+                .header("Authorization", "Bearer test-operator-key")
                 .header("X-Tenant-Id", SYSTEM_TENANT)
                 .body(Body::empty())
                 .unwrap(),

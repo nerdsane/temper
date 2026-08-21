@@ -301,16 +301,36 @@ pub const ALTER_TRAJECTORIES_ADD_REQUEST_BODY: &str =
 pub const ALTER_TRAJECTORIES_ADD_INTENT: &str = "ALTER TABLE trajectories ADD COLUMN intent TEXT";
 pub const ALTER_TRAJECTORIES_ADD_MATCHED_POLICY_IDS: &str =
     "ALTER TABLE trajectories ADD COLUMN matched_policy_ids TEXT";
+/// Capture order within the writing process.
+///
+/// Rows are written by independently spawned persistence tasks, so the
+/// autoincrement `id` records the order the writes *landed*, not the order the
+/// kernel *captured* them. The conformance checker replays a session as a
+/// state-machine walk and needs capture order, so the capturing process stamps
+/// a monotonic sequence on the entry before it is queued and the read orders
+/// by it. Null on rows written before this column existed.
+pub const ALTER_TRAJECTORIES_ADD_CAPTURE_SEQ: &str =
+    "ALTER TABLE trajectories ADD COLUMN capture_seq INTEGER";
 
 /// Index on agent_id for agent-scoped trajectory queries.
 pub const CREATE_TRAJECTORIES_AGENT_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_trajectories_agent
     ON trajectories(agent_id);";
 
+/// Index on session_id for session-scoped trajectory replay.
+///
+/// Conformance checking reads one session's rows in capture order, so the
+/// index covers every ordering column and the read is a range scan rather
+/// than a table scan.
+pub const CREATE_TRAJECTORIES_SESSION_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_trajectories_session_capture
+    ON trajectories(session_id, created_at, capture_seq, id);";
+
 /// Feature request records generated from trajectory analysis.
 pub const CREATE_FEATURE_REQUESTS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS feature_requests (
     id TEXT PRIMARY KEY,
+    tenant TEXT NOT NULL DEFAULT 'default',
     category TEXT NOT NULL,
     description TEXT NOT NULL,
     frequency INTEGER NOT NULL DEFAULT 0,
@@ -325,6 +345,7 @@ CREATE TABLE IF NOT EXISTS feature_requests (
 pub const CREATE_EVOLUTION_RECORDS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS evolution_records (
     id TEXT PRIMARY KEY,
+    tenant TEXT NOT NULL DEFAULT 'default',
     record_type TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'Open',
     created_by TEXT NOT NULL,
@@ -332,6 +353,26 @@ CREATE TABLE IF NOT EXISTS evolution_records (
     data TEXT NOT NULL,
     timestamp TEXT NOT NULL DEFAULT (datetime('now'))
 );";
+
+/// Idempotent-at-runner migration for feature-request tenant ownership.
+pub const ALTER_FEATURE_REQUESTS_ADD_TENANT: &str =
+    "ALTER TABLE feature_requests ADD COLUMN tenant TEXT NOT NULL DEFAULT 'default'";
+
+/// Idempotent-at-runner migration for evolution-record tenant ownership.
+pub const ALTER_EVOLUTION_RECORDS_ADD_TENANT: &str =
+    "ALTER TABLE evolution_records ADD COLUMN tenant TEXT NOT NULL DEFAULT 'default'";
+
+pub const CREATE_FEATURE_REQUESTS_TENANT_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_feature_requests_tenant_disposition
+    ON feature_requests(tenant, disposition, frequency DESC, created_at DESC);";
+
+pub const CREATE_EVOLUTION_RECORDS_TENANT_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_evolution_records_tenant_type_status
+    ON evolution_records(tenant, record_type, status, timestamp DESC);";
+
+pub const CREATE_EVOLUTION_RECORDS_TENANT_PARENT_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_evolution_records_tenant_parent
+    ON evolution_records(tenant, derived_from);";
 
 pub const CREATE_EVOLUTION_RECORDS_TYPE_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_evolution_records_type
@@ -440,59 +481,8 @@ ALTER TABLE blobs ADD COLUMN expires_at TEXT;";
 pub const CREATE_BLOBS_EXPIRES_AT_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_blobs_expires_at ON blobs(expires_at) WHERE expires_at IS NOT NULL;";
 
-// ---------------------------------------------------------------------------
-// OTS trajectory storage (full agent execution traces)
-// ---------------------------------------------------------------------------
-
-/// Full OTS trajectory storage for GEPA self-improvement loop.
-///
-/// Stores complete agent execution traces (tool calls, decisions, reasoning)
-/// captured by the MCP server during agent sessions. The `data` column holds
-/// the full OTS JSON blob; indexed columns enable efficient filtering.
-pub const CREATE_OTS_TRAJECTORIES_TABLE: &str = "\
-CREATE TABLE IF NOT EXISTS ots_trajectories (
-    trajectory_id TEXT PRIMARY KEY,
-    tenant TEXT NOT NULL,
-    agent_id TEXT NOT NULL,
-    session_id TEXT,
-    outcome TEXT NOT NULL DEFAULT 'unknown',
-    entity_type TEXT,
-    turn_count INTEGER NOT NULL DEFAULT 0,
-    data TEXT NOT NULL,
-    persistence_status TEXT NOT NULL DEFAULT 'persisted',
-    persist_attempts INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);";
-
-pub const ALTER_OTS_TRAJECTORIES_ADD_PERSISTENCE_STATUS: &str = "\
-ALTER TABLE ots_trajectories ADD COLUMN persistence_status TEXT NOT NULL DEFAULT 'persisted';";
-
-pub const ALTER_OTS_TRAJECTORIES_ADD_PERSIST_ATTEMPTS: &str = "\
-ALTER TABLE ots_trajectories ADD COLUMN persist_attempts INTEGER NOT NULL DEFAULT 0;";
-
-pub const ALTER_OTS_TRAJECTORIES_ADD_LAST_ERROR: &str = "\
-ALTER TABLE ots_trajectories ADD COLUMN last_error TEXT;";
-
-pub const ALTER_OTS_TRAJECTORIES_ADD_UPDATED_AT: &str = "\
-ALTER TABLE ots_trajectories ADD COLUMN updated_at TEXT NOT NULL DEFAULT (datetime('now'));";
-
-pub const CREATE_OTS_TRAJECTORIES_AGENT_INDEX: &str = "\
-CREATE INDEX IF NOT EXISTS idx_ots_trajectories_agent
-    ON ots_trajectories(agent_id);";
-
-pub const CREATE_OTS_TRAJECTORIES_TENANT_INDEX: &str = "\
-CREATE INDEX IF NOT EXISTS idx_ots_trajectories_tenant
-    ON ots_trajectories(tenant);";
-
-pub const CREATE_OTS_TRAJECTORIES_OUTCOME_INDEX: &str = "\
-CREATE INDEX IF NOT EXISTS idx_ots_trajectories_outcome
-    ON ots_trajectories(outcome);";
-
-pub const CREATE_OTS_TRAJECTORIES_STATUS_INDEX: &str = "\
-CREATE INDEX IF NOT EXISTS idx_ots_trajectories_status
-    ON ots_trajectories(persistence_status, updated_at);";
+mod ots;
+pub use ots::*;
 
 #[cfg(test)]
 #[path = "schema_test.rs"]

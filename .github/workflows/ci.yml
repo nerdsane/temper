@@ -295,6 +295,20 @@ jobs:
           TEMPER_REQUIRE_BACKEND_PARITY: "1"
         run: cargo test -p temper-server --test reaction_backend_parity
 
+      # spec_validate_endpoint declares required-features = ["observe"]. The
+      # workspace run above usually still covers it via feature unification
+      # (temper-cli/temper-mcp enable temper-server's observe feature), but
+      # that coverage is incidental — it evaporates if those edges change.
+      # Run the observe-gated tests explicitly so coverage is guaranteed.
+      - name: cargo test observe-gated tests
+        run: |
+          cargo test -p temper-server --features observe --test spec_validate_endpoint
+          cargo test -p temper-server --features observe --lib observe::
+          # api::repl tests (incl. server_repl_config_never_allows_host_ops,
+          # the ARN-166 host-op isolation guard) compile only under `observe`;
+          # run them explicitly so coverage never depends on feature unification.
+          cargo test -p temper-server --features observe --lib api::repl::
+
   # ─────────────────────────────────────────────────────
   # Gate 3b: DST/platform coverage (matrixed)
   # ─────────────────────────────────────────────────────

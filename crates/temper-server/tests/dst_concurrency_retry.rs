@@ -47,6 +47,7 @@ async fn dispatch_action(
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             Duration::from_secs(5),
         )
@@ -68,6 +69,7 @@ async fn dispatch_action_with_preconditions(
                 idempotency_key: Some(idempotency_key.into()),
                 expected_sequence: Some(expected_sequence),
                 reaction_context: None,
+                expected_authorization_precondition: None,
             },
             Duration::from_secs(5),
         )

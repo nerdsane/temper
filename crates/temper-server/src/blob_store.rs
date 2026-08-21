@@ -3,33 +3,41 @@
 //! New blob writes go through this boundary. The Turso `blobs` table remains a
 //! legacy read fallback for installations that already wrote blob bytes there.
 
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use reqwest::header::HeaderMap;
 use reqwest::{Method, StatusCode};
-use temper_runtime::tenant::TenantId;
-use tokio::sync::Semaphore;
 use tracing::Instrument;
 
 use crate::aws_sigv4;
 use crate::blob_transport_observability::{
     BlobTransportError, BlobTransportFinish, blob_transport_span, finish_blob_transport,
 };
-use crate::state::ServerState;
-
-const DEFAULT_BLOB_IO_MAX_CONCURRENCY: usize = 32;
-pub(crate) const DEFAULT_BLOB_BUCKET: &str = "temper-fs";
-pub(crate) const WASM_ARTIFACT_PREFIX: &str = "wasm-modules/";
-
-pub(crate) fn wasm_artifact_key(sha256_hash: &str) -> String {
-    format!("{WASM_ARTIFACT_PREFIX}{sha256_hash}")
-}
+mod endpoint;
+mod keys;
+mod limits;
+mod local;
+mod raw_ingest;
+mod state;
+mod streaming;
+pub(crate) use endpoint::{LocalInternalBlobEndpoint, is_local_internal_blob_endpoint};
+pub(crate) use keys::{DEFAULT_BLOB_BUCKET, hex_lower, wasm_artifact_key};
+use limits::{BLOB_BUFFERED_OPERATION_TIMEOUT, BLOB_IO_QUEUE_TIMEOUT, blob_io_semaphore};
+use local::{get_local_blob_observed, local_blob_path, put_local_blob_observed};
+pub use raw_ingest::BlobByteStream;
+#[cfg(test)]
+pub(crate) use raw_ingest::BlobIngestProgressPolicy;
+pub(crate) use raw_ingest::{
+    BlobIngestAdmissionError, BlobIngestBudget, BlobStageError, MAX_RAW_BLOB_BYTES,
+};
+pub(crate) use streaming::BlobReadBounded;
+pub use streaming::{BlobObjectStream, BlobStreamRead, decode_json_base64_stream};
 
 #[derive(Clone, Debug)]
 pub(crate) struct BlobStore {
     backend: BlobStoreBackend,
+    staging_root: PathBuf,
 }
 
 #[derive(Clone, Debug)]
@@ -42,27 +50,18 @@ enum BlobStoreBackend {
 struct S3BlobStore {
     endpoint: String,
     bucket: String,
+    key_prefix: Option<String>,
     access_key: Option<String>,
     secret_key: Option<String>,
     client: reqwest::Client,
 }
 
-fn blob_io_semaphore() -> &'static Semaphore {
-    static SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
-    SEMAPHORE.get_or_init(|| {
-        let limit = std::env::var("TEMPER_BLOB_IO_MAX_CONCURRENCY") // determinism-ok: startup-only tuning knob
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(DEFAULT_BLOB_IO_MAX_CONCURRENCY);
-        Semaphore::new(limit)
-    })
-}
-
 impl BlobStore {
     pub(crate) fn local_fs(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
         Self {
-            backend: BlobStoreBackend::LocalFs { root: root.into() },
+            staging_root: root.join(".ingest-staging"),
+            backend: BlobStoreBackend::LocalFs { root },
         }
     }
 
@@ -71,14 +70,21 @@ impl BlobStore {
         bucket: impl Into<String>,
         access_key: Option<String>,
         secret_key: Option<String>,
+        staging_root: impl Into<PathBuf>,
+        key_prefix: Option<String>,
     ) -> Self {
         Self {
+            staging_root: staging_root.into(),
             backend: BlobStoreBackend::S3(S3BlobStore {
                 endpoint: endpoint.into().trim_end_matches('/').to_string(),
                 bucket: bucket.into().trim_matches('/').to_string(),
+                key_prefix,
                 access_key,
                 secret_key,
-                client: reqwest::Client::new(),
+                client: reqwest::Client::builder()
+                    .connect_timeout(std::time::Duration::from_secs(10))
+                    .build()
+                    .expect("static blob HTTP client configuration must be valid"), // ci-ok: static reqwest builder options
             }),
         }
     }
@@ -90,10 +96,11 @@ impl BlobStore {
         ttl: Option<Duration>,
     ) -> Result<(), String> {
         let queued_at = Instant::now(); // determinism-ok: production blob I/O queue metric only
-        let _permit = blob_io_semaphore()
-            .acquire()
-            .await
-            .expect("blob semaphore closed"); // ci-ok: process-global and never closed
+        let _permit =
+            tokio::time::timeout(BLOB_IO_QUEUE_TIMEOUT, blob_io_semaphore().acquire_owned())
+                .await
+                .map_err(|_| "blob put queue deadline exceeded".to_string())?
+                .expect("blob semaphore closed"); // ci-ok: process-global and never closed
         let wait_duration = queued_at.elapsed();
         crate::runtime_metrics::record_blob_io_wait_duration(wait_duration, "put");
         if wait_duration.as_millis() > 0 {
@@ -107,12 +114,16 @@ impl BlobStore {
             );
         }
 
-        match &self.backend {
-            BlobStoreBackend::LocalFs { root } => {
-                put_local_blob_observed(root, key, body, "put").await
+        tokio::time::timeout(BLOB_BUFFERED_OPERATION_TIMEOUT, async {
+            match &self.backend {
+                BlobStoreBackend::LocalFs { root } => {
+                    put_local_blob_observed(root, key, body, "put").await
+                }
+                BlobStoreBackend::S3(store) => store.put_if_absent(key, body).await,
             }
-            BlobStoreBackend::S3(store) => store.put_if_absent(key, body).await,
-        }
+        })
+        .await
+        .map_err(|_| format!("blob put timed out for '{key}'"))?
     }
 
     /// Write bytes to a content-addressed key.
@@ -127,10 +138,11 @@ impl BlobStore {
         ttl: Option<Duration>,
     ) -> Result<(), String> {
         let queued_at = Instant::now(); // determinism-ok: production blob I/O queue metric only
-        let _permit = blob_io_semaphore()
-            .acquire()
-            .await
-            .expect("blob semaphore closed"); // ci-ok: process-global and never closed
+        let _permit =
+            tokio::time::timeout(BLOB_IO_QUEUE_TIMEOUT, blob_io_semaphore().acquire_owned())
+                .await
+                .map_err(|_| "content-addressed blob put queue deadline exceeded".to_string())?
+                .expect("blob semaphore closed"); // ci-ok: process-global and never closed
         let wait_duration = queued_at.elapsed();
         crate::runtime_metrics::record_blob_io_wait_duration(wait_duration, "put_content");
         if wait_duration.as_millis() > 0 {
@@ -144,138 +156,41 @@ impl BlobStore {
             );
         }
 
-        match &self.backend {
-            BlobStoreBackend::LocalFs { root } => {
-                put_local_blob_observed(root, key, body, "put_content").await
+        tokio::time::timeout(BLOB_BUFFERED_OPERATION_TIMEOUT, async {
+            match &self.backend {
+                BlobStoreBackend::LocalFs { root } => {
+                    local::put_local_blob_replace_observed(root, key, body, "put_content").await
+                }
+                BlobStoreBackend::S3(store) => {
+                    store.put_with_operation("put_content", key, body).await
+                }
             }
-            BlobStoreBackend::S3(store) => store.put_with_operation("put_content", key, body).await,
-        }
+        })
+        .await
+        .map_err(|_| format!("content-addressed blob put timed out for '{key}'"))?
     }
 
     pub(crate) async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         let queued_at = Instant::now(); // determinism-ok: production blob I/O queue metric only
-        let _permit = blob_io_semaphore()
-            .acquire()
-            .await
-            .expect("blob semaphore closed"); // ci-ok: process-global and never closed
+        let _permit =
+            tokio::time::timeout(BLOB_IO_QUEUE_TIMEOUT, blob_io_semaphore().acquire_owned())
+                .await
+                .map_err(|_| "blob get queue deadline exceeded".to_string())?
+                .expect("blob semaphore closed"); // ci-ok: process-global and never closed
         let wait_duration = queued_at.elapsed();
         crate::runtime_metrics::record_blob_io_wait_duration(wait_duration, "get");
         if wait_duration.as_millis() > 0 {
             tracing::info!(path = %key, wait_ms = wait_duration.as_millis() as u64, "blob get queued");
         }
 
-        match &self.backend {
-            BlobStoreBackend::LocalFs { root } => get_local_blob_observed(root, key).await,
-            BlobStoreBackend::S3(store) => store.get(key).await,
-        }
-    }
-}
-
-impl ServerState {
-    pub(crate) fn blob_store_for_tenant(&self, tenant: &TenantId) -> Result<BlobStore, String> {
-        if let Some(vault) = self.secrets_vault.as_ref()
-            && let Some(endpoint) = vault.get_secret(tenant.as_str(), "blob_endpoint")
-            && !endpoint.trim().is_empty()
-        {
-            if is_local_internal_blob_endpoint(&endpoint) {
-                return self.local_blob_store().ok_or_else(|| {
-                    "internal DB-backed blob endpoint is disabled; set TEMPER_LOCAL_BLOB_DIR or configure BLOB_ENDPOINT for R2/S3"
-                        .to_string()
-                });
+        tokio::time::timeout(BLOB_BUFFERED_OPERATION_TIMEOUT, async {
+            match &self.backend {
+                BlobStoreBackend::LocalFs { root } => get_local_blob_observed(root, key).await,
+                BlobStoreBackend::S3(store) => store.get(key).await,
             }
-
-            let bucket = vault
-                .get_secret(tenant.as_str(), "blob_bucket")
-                .unwrap_or_else(|| DEFAULT_BLOB_BUCKET.to_string());
-            let access_key = vault.get_secret(tenant.as_str(), "blob_access_key");
-            let secret_key = vault.get_secret(tenant.as_str(), "blob_secret_key");
-            return Ok(BlobStore::s3(endpoint, bucket, access_key, secret_key));
-        }
-
-        self.local_blob_store().ok_or_else(|| {
-            "blob object store is not configured; set BLOB_ENDPOINT/BLOB_BUCKET/BLOB_ACCESS_KEY/BLOB_SECRET_KEY or TEMPER_LOCAL_BLOB_DIR"
-                .to_string()
         })
-    }
-
-    pub(crate) async fn put_blob_object(
-        &self,
-        tenant: &TenantId,
-        key: &str,
-        body: &[u8],
-        ttl: Option<Duration>,
-    ) -> Result<(), String> {
-        let store = self.blob_store_for_tenant(tenant)?;
-        store.put_if_absent(key, body, ttl).await?;
-        self.put_metadata_blob_shadow(tenant, key, body, ttl).await
-    }
-
-    /// Write bytes to a tenant-scoped content-addressed blob key.
-    pub(crate) async fn put_content_addressed_blob(
-        &self,
-        tenant: &TenantId,
-        key: &str,
-        body: &[u8],
-        ttl: Option<Duration>,
-    ) -> Result<(), String> {
-        let store = self.blob_store_for_tenant(tenant)?;
-        store.put_content_addressed(key, body, ttl).await?;
-        self.put_metadata_blob_shadow(tenant, key, body, ttl).await
-    }
-
-    pub async fn get_blob_with_legacy_fallback(
-        &self,
-        tenant: &TenantId,
-        key: &str,
-    ) -> Result<Option<Vec<u8>>, String> {
-        match self.blob_store_for_tenant(tenant) {
-            Ok(store) => match store.get(key).await {
-                Ok(Some(bytes)) => return Ok(Some(bytes)),
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::warn!(%key, %error, "object blob store read failed; trying legacy DB blob fallback");
-                }
-            },
-            Err(error) => {
-                tracing::debug!(%key, %error, "object blob store unavailable; trying legacy DB blob fallback");
-            }
-        }
-
-        let Some(store) = self.metadata_store_for_tenant(tenant.as_str()).await else {
-            return Ok(None);
-        };
-        store
-            .get_blob(key)
-            .await
-            .map_err(|e| format!("legacy DB blob read failed for '{key}': {e}"))
-    }
-
-    fn local_blob_store(&self) -> Option<BlobStore> {
-        if let Ok(root) = std::env::var("TEMPER_LOCAL_BLOB_DIR") // determinism-ok: deployment config read
-            && !root.trim().is_empty()
-        {
-            return Some(BlobStore::local_fs(root));
-        }
-        if !self.data_dir.as_os_str().is_empty() {
-            return Some(BlobStore::local_fs(self.data_dir.join("blobs")));
-        }
-        None
-    }
-
-    async fn put_metadata_blob_shadow(
-        &self,
-        tenant: &TenantId,
-        key: &str,
-        body: &[u8],
-        ttl: Option<Duration>,
-    ) -> Result<(), String> {
-        let Some(store) = self.metadata_store_for_tenant(tenant.as_str()).await else {
-            return Ok(());
-        };
-        store
-            .put_blob_with_ttl(key, body, ttl)
-            .await
-            .map_err(|error| format!("metadata blob shadow write failed for '{key}': {error}"))
+        .await
+        .map_err(|_| format!("blob get timed out for '{key}'"))?
     }
 }
 
@@ -345,6 +260,77 @@ impl S3BlobStore {
                     outcome: "error",
                     status: error.status,
                     request_bytes,
+                    response_bytes: 0,
+                });
+                Err(error.message)
+            }
+        }
+    }
+
+    async fn put_stream_with_operation(
+        &self,
+        operation: &'static str,
+        key: &str,
+        stream: BlobByteStream,
+        content_len: u64,
+    ) -> Result<(), String> {
+        let started_at = Instant::now(); // determinism-ok: production blob transport metric only
+        let span = blob_transport_span(operation, "s3", content_len);
+        let result = async {
+            let url = self.object_url(key);
+            let mut request = self
+                .client
+                .put(&url)
+                .header(reqwest::header::CONTENT_LENGTH, content_len)
+                .timeout(raw_ingest::BLOB_BACKEND_OPERATION_TIMEOUT)
+                .body(reqwest::Body::wrap_stream(stream));
+            let headers = self
+                .signed_headers(Method::PUT, &url)
+                .map_err(BlobTransportError::message)?;
+            for (header_name, header_value) in &headers {
+                request = request.header(header_name, header_value);
+            }
+
+            let response = request.send().await.map_err(|error| {
+                BlobTransportError::message(format!(
+                    "streaming blob PUT request failed for '{key}': {error}"
+                ))
+            })?;
+            let status = response.status();
+            if status.is_success() {
+                return Ok(status);
+            }
+            Err(BlobTransportError::status(
+                format!("streaming blob PUT failed for '{key}' with HTTP {status}"),
+                status,
+            ))
+        }
+        .instrument(span.clone())
+        .await;
+
+        match result {
+            Ok(status) => {
+                finish_blob_transport(BlobTransportFinish {
+                    started_at,
+                    span: &span,
+                    operation,
+                    backend: "s3",
+                    outcome: "ok",
+                    status: Some(status),
+                    request_bytes: content_len,
+                    response_bytes: 0,
+                });
+                Ok(())
+            }
+            Err(error) => {
+                finish_blob_transport(BlobTransportFinish {
+                    started_at,
+                    span: &span,
+                    operation,
+                    backend: "s3",
+                    outcome: "error",
+                    status: error.status,
+                    request_bytes: content_len,
                     response_bytes: 0,
                 });
                 Err(error.message)
@@ -481,12 +467,12 @@ impl S3BlobStore {
     }
 
     fn object_url(&self, key: &str) -> String {
-        format!(
-            "{}/{}/{}",
-            self.endpoint,
-            self.bucket,
-            key.trim_start_matches('/')
-        )
+        let key = key.trim_start_matches('/');
+        let object_path = self
+            .key_prefix
+            .as_deref()
+            .map_or_else(|| key.to_string(), |prefix| format!("{prefix}/{key}"));
+        format!("{}/{}/{}", self.endpoint, self.bucket, object_path)
     }
 
     fn signed_headers(&self, method: Method, url: &str) -> Result<HeaderMap, String> {
@@ -510,154 +496,5 @@ impl S3BlobStore {
             extra_signed_headers: &[],
             error_context: "blob",
         })
-    }
-}
-
-async fn put_local_blob(root: &Path, key: &str, body: &[u8]) -> Result<(), String> {
-    let path = local_blob_path(root, key)?;
-    if tokio::fs::try_exists(&path)
-        .await
-        .map_err(|e| format!("failed to check local blob '{}': {e}", path.display()))?
-    {
-        return Ok(());
-    }
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            format!(
-                "failed to create local blob dir '{}': {e}",
-                parent.display()
-            )
-        })?;
-    }
-    tokio::fs::write(&path, body)
-        .await
-        .map_err(|e| format!("failed to write local blob '{}': {e}", path.display()))
-}
-
-async fn put_local_blob_observed(
-    root: &Path,
-    key: &str,
-    body: &[u8],
-    operation: &'static str,
-) -> Result<(), String> {
-    let request_bytes = body.len() as u64;
-    let started_at = Instant::now(); // determinism-ok: production blob transport metric only
-    let span = blob_transport_span(operation, "local_fs", request_bytes);
-    let result = put_local_blob(root, key, body)
-        .instrument(span.clone())
-        .await;
-    let outcome = if result.is_ok() { "ok" } else { "error" };
-    finish_blob_transport(BlobTransportFinish {
-        started_at,
-        span: &span,
-        operation,
-        backend: "local_fs",
-        outcome,
-        status: None,
-        request_bytes,
-        response_bytes: 0,
-    });
-    result
-}
-
-async fn get_local_blob(root: &Path, key: &str) -> Result<Option<Vec<u8>>, String> {
-    let path = local_blob_path(root, key)?;
-    if !tokio::fs::try_exists(&path)
-        .await
-        .map_err(|e| format!("failed to check local blob '{}': {e}", path.display()))?
-    {
-        return Ok(None);
-    }
-    tokio::fs::read(&path)
-        .await
-        .map(Some)
-        .map_err(|e| format!("failed to read local blob '{}': {e}", path.display()))
-}
-
-async fn get_local_blob_observed(root: &Path, key: &str) -> Result<Option<Vec<u8>>, String> {
-    let started_at = Instant::now(); // determinism-ok: production blob transport metric only
-    let span = blob_transport_span("get", "local_fs", 0);
-    let result = get_local_blob(root, key).instrument(span.clone()).await;
-    let (outcome, response_bytes) = match &result {
-        Ok(Some(bytes)) => ("ok", bytes.len() as u64),
-        Ok(None) => ("not_found", 0),
-        Err(_) => ("error", 0),
-    };
-    finish_blob_transport(BlobTransportFinish {
-        started_at,
-        span: &span,
-        operation: "get",
-        backend: "local_fs",
-        outcome,
-        status: None,
-        request_bytes: 0,
-        response_bytes,
-    });
-    result
-}
-
-fn local_blob_path(root: &Path, key: &str) -> Result<PathBuf, String> {
-    let mut path = root.to_path_buf();
-    let mut saw_component = false;
-    for component in key.split('/') {
-        if component.is_empty()
-            || component == "."
-            || component == ".."
-            || component.contains('\\')
-            || component.starts_with(std::path::MAIN_SEPARATOR)
-        {
-            return Err(format!("invalid blob key '{key}'"));
-        }
-        saw_component = true;
-        path.push(component);
-    }
-    if !saw_component {
-        return Err("invalid empty blob key".to_string());
-    }
-    Ok(path)
-}
-
-pub(crate) fn is_local_internal_blob_endpoint(endpoint: &str) -> bool {
-    let normalized = endpoint.trim_end_matches('/');
-    (normalized.starts_with("http://127.0.0.1:") || normalized.starts_with("http://localhost:"))
-        && normalized.contains("/_internal/blobs")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn local_blob_store_round_trips_without_database() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = BlobStore::local_fs(dir.path());
-
-        store
-            .put_if_absent("wasm-modules/hash-a", b"hello", None)
-            .await
-            .expect("put");
-
-        let bytes = store
-            .get("wasm-modules/hash-a")
-            .await
-            .expect("get")
-            .expect("present");
-        assert_eq!(bytes, b"hello");
-        assert!(
-            dir.path().join("wasm-modules").join("hash-a").is_file(),
-            "blob is stored in the filesystem object store"
-        );
-    }
-
-    #[tokio::test]
-    async fn local_blob_store_rejects_path_traversal_keys() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = BlobStore::local_fs(dir.path());
-
-        let err = store
-            .put_if_absent("../escape", b"nope", None)
-            .await
-            .expect_err("path traversal rejected");
-        assert!(err.contains("invalid blob key"));
     }
 }

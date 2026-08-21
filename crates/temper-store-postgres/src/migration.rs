@@ -1,12 +1,39 @@
 //! Versioned schema migration runner.
 //!
 //! Postgres is the canonical schema source. The migration files under
-//! `crates/temper-store-postgres/migrations/` are executed through
-//! `sqlx::migrate!()` so production cutovers can reason about schema version,
-//! not just a bag of startup-time `CREATE TABLE IF NOT EXISTS` statements.
+//! `crates/temper-store-postgres/migrations/` preserve the fork lineage,
+//! `migrations-upstream/` preserve upstream's divergent versions, and
+//! `migrations-convergence/` contain the shared sequence beginning at `0016`.
+//! ADR-0173 defines the fail-closed classifier that selects a legacy stream
+//! before applying the shared sequence.
 
-use sqlx::PgPool;
+use sqlx::migrate::{Migrate, Migrator};
+use sqlx::{PgConnection, PgPool, Row};
 use temper_runtime::persistence::PersistenceError;
+
+mod lineage;
+
+#[cfg(test)]
+use lineage::migration_at;
+use lineage::{AppliedMigrationRow, MigrationLineage, classify_migration_lineage};
+
+static FORK_MIGRATOR: Migrator = {
+    let mut migrator = sqlx::migrate!("./migrations");
+    migrator.ignore_missing = true;
+    migrator
+};
+
+static UPSTREAM_MIGRATOR: Migrator = {
+    let mut migrator = sqlx::migrate!("./migrations-upstream");
+    migrator.ignore_missing = true;
+    migrator
+};
+
+static CONVERGENCE_MIGRATOR: Migrator = {
+    let mut migrator = sqlx::migrate!("./migrations-convergence");
+    migrator.ignore_missing = true;
+    migrator
+};
 
 /// Run all schema migrations.
 ///
@@ -15,160 +42,94 @@ use temper_runtime::persistence::PersistenceError;
 /// been created by the pre-ADR-0065 bootstrap runner before `_sqlx_migrations`
 /// existed.
 pub async fn run_migrations(pool: &PgPool) -> Result<(), PersistenceError> {
-    static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
-    MIGRATOR
-        .run(pool)
+    let mut connection = pool.acquire().await.map_err(|error| {
+        PersistenceError::Storage(format!(
+            "failed to acquire Postgres migration connection: {error}"
+        ))
+    })?;
+    // A failed nested migrator can retain a re-entrant advisory lock. Closing
+    // this dedicated connection on drop guarantees every lock is released.
+    connection.close_on_drop();
+    Migrate::lock(&mut *connection)
         .await
-        .map_err(|e| PersistenceError::Storage(format!("failed to run Postgres migrations: {e}")))
+        .map_err(migration_error)?;
+
+    let result = run_migrations_locked(&mut connection).await;
+    let unlock_result = Migrate::unlock(&mut *connection)
+        .await
+        .map_err(migration_error);
+    match (result, unlock_result) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+async fn run_migrations_locked(connection: &mut PgConnection) -> Result<(), PersistenceError> {
+    let applied = load_applied_migrations(connection).await?;
+    let lineage = classify_migration_lineage(&applied).map_err(PersistenceError::Storage)?;
+
+    match lineage {
+        MigrationLineage::Fork => FORK_MIGRATOR
+            .run_direct(connection)
+            .await
+            .map_err(migration_error)?,
+        MigrationLineage::Upstream => UPSTREAM_MIGRATOR
+            .run_direct(connection)
+            .await
+            .map_err(migration_error)?,
+    }
+    CONVERGENCE_MIGRATOR
+        .run_direct(connection)
+        .await
+        .map_err(migration_error)
+}
+
+async fn load_applied_migrations(
+    connection: &mut PgConnection,
+) -> Result<Vec<AppliedMigrationRow>, PersistenceError> {
+    let table_exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|error| {
+                PersistenceError::Storage(format!(
+                    "failed to inspect Postgres migration history: {error}"
+                ))
+            })?;
+    if !table_exists {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query("SELECT version, checksum, success FROM _sqlx_migrations ORDER BY version")
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(|error| {
+            PersistenceError::Storage(format!(
+                "failed to read Postgres migration history: {error}"
+            ))
+        })?
+        .into_iter()
+        .map(|row| {
+            Ok(AppliedMigrationRow {
+                version: row.try_get("version").map_err(history_decode_error)?,
+                checksum: row.try_get("checksum").map_err(history_decode_error)?,
+                success: row.try_get("success").map_err(history_decode_error)?,
+            })
+        })
+        .collect()
+}
+
+fn history_decode_error(error: sqlx::Error) -> PersistenceError {
+    PersistenceError::Storage(format!(
+        "failed to decode Postgres migration history: {error}"
+    ))
+}
+
+fn migration_error(error: sqlx::migrate::MigrateError) -> PersistenceError {
+    PersistenceError::Storage(format!("failed to run Postgres migrations: {error}"))
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::schema;
-
-    #[test]
-    fn versioned_migration_is_the_schema_source() {
-        let migration = [
-            include_str!("../migrations/0001_initial.sql"),
-            include_str!("../migrations/0002_wasm_modules_source.sql"),
-            include_str!("../migrations/0003_published_artifacts.sql"),
-            include_str!("../migrations/0004_entity_catalog_state.sql"),
-            include_str!("../migrations/0005_installed_app_genesis_provenance.sql"),
-            include_str!("../migrations/0006_segmented_event_history.sql"),
-            include_str!("../migrations/0007_installed_app_follow_policy.sql"),
-            include_str!("../migrations/0008_ots_trajectory_outbox_status.sql"),
-        ]
-        .join("\n")
-        .to_lowercase();
-        for table in [
-            "events",
-            "snapshots",
-            "specs",
-            "trajectories",
-            "entity_catalog",
-            "entity_field_index",
-            "tenant_secrets",
-            "blobs",
-            "published_artifacts",
-            "event_segments",
-            "snapshot_history",
-            "ots_trajectories",
-        ] {
-            assert!(
-                migration.contains(&format!("create table if not exists {table}")),
-                "versioned migration missing table: {table}"
-            );
-        }
-        assert!(
-            migration.contains("enable row level security"),
-            "versioned migration must carry tenant RLS setup"
-        );
-        assert!(
-            migration.contains("segment_index"),
-            "versioned migration must add event segment metadata"
-        );
-        assert!(
-            migration.contains("add column if not exists state jsonb"),
-            "versioned migration must add entity catalog state metadata"
-        );
-        assert!(
-            migration.contains("persistence_status"),
-            "versioned migration must add OTS outbox status metadata"
-        );
-    }
-
-    #[test]
-    fn migration_four_keeps_historical_entity_catalog_state() {
-        let migration_four = include_str!("../migrations/0004_entity_catalog_state.sql");
-        assert!(
-            migration_four.contains("ADD COLUMN IF NOT EXISTS state JSONB"),
-            "migration 0004 is already applied in production and must stay entity_catalog_state"
-        );
-        assert!(
-            !migration_four.contains("event_segments"),
-            "segmented event history must not reuse migration version 0004"
-        );
-    }
-
-    #[test]
-    fn migration_six_keeps_historical_segmented_event_history() {
-        let migration_six = include_str!("../migrations/0006_segmented_event_history.sql");
-        assert!(
-            migration_six.contains("CREATE TABLE IF NOT EXISTS event_segments"),
-            "migration 0006 is already applied in production and must stay segmented_event_history"
-        );
-        assert!(
-            !migration_six.contains("entity_catalog"),
-            "entity_catalog state must not reuse migration version 0006"
-        );
-    }
-
-    #[test]
-    fn migration_sql_is_idempotent() {
-        // Both schemas must use IF NOT EXISTS so repeated execution is safe.
-        assert!(
-            schema::CREATE_EVENTS_TABLE.contains("IF NOT EXISTS"),
-            "events DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_EVENTS_TABLE.contains("segment_index"),
-            "events rows must carry segment metadata"
-        );
-        assert!(
-            schema::ALTER_EVENTS_ADD_SEGMENT_INDEX.contains("ADD COLUMN IF NOT EXISTS"),
-            "events segment migration must be idempotent"
-        );
-        assert!(
-            schema::CREATE_EVENT_SEGMENTS_TABLE.contains("IF NOT EXISTS"),
-            "event segment DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_SNAPSHOT_HISTORY_TABLE.contains("IF NOT EXISTS"),
-            "snapshot history DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_SNAPSHOTS_TABLE.contains("IF NOT EXISTS"),
-            "snapshots DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_SPECS_TABLE.contains("IF NOT EXISTS"),
-            "specs DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_TRAJECTORIES_TABLE.contains("IF NOT EXISTS"),
-            "trajectories DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_DESIGN_TIME_EVENTS_TABLE.contains("IF NOT EXISTS"),
-            "design_time_events DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_TENANT_CONSTRAINTS_TABLE.contains("IF NOT EXISTS"),
-            "tenant_constraints DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_ENTITY_LISTING_INDEX.contains("IF NOT EXISTS"),
-            "entity listing index DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_WASM_MODULES_TABLE.contains("IF NOT EXISTS"),
-            "wasm_modules DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_WASM_INVOCATION_LOGS_TABLE.contains("IF NOT EXISTS"),
-            "wasm_invocation_logs DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_PENDING_DECISIONS_TABLE.contains("IF NOT EXISTS"),
-            "pending_decisions DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_ENTITY_CATALOG_TABLE.contains("IF NOT EXISTS"),
-            "entity_catalog DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_PUBLISHED_ARTIFACTS_TABLE.contains("IF NOT EXISTS"),
-            "published_artifacts DDL must be idempotent"
-        );
-    }
-}
+#[path = "migration/tests.rs"]
+mod tests;

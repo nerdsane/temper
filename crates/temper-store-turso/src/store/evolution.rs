@@ -5,6 +5,7 @@ use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
 use super::{DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow, TursoEventStore};
+use crate::TursoEvolutionRecordInsert;
 use crate::metrics::TursoQueryTimer;
 
 // -----------------------------------------------------------------------
@@ -14,9 +15,10 @@ use crate::metrics::TursoQueryTimer;
 impl TursoEventStore {
     /// Upsert a feature request.
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip_all, fields(id, otel.name = "turso.upsert_feature_request"))]
+    #[instrument(skip_all, fields(tenant, id, otel.name = "turso.upsert_feature_request"))]
     pub async fn upsert_feature_request(
         &self,
+        tenant: &str,
         id: &str,
         category: &str,
         description: &str,
@@ -27,34 +29,43 @@ impl TursoEventStore {
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.upsert_feature_request");
         let conn = self.configured_connection().await?;
-        conn.execute(
-            "INSERT INTO feature_requests (id, category, description, frequency, trajectory_refs, disposition, developer_notes, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now')) \
+        let affected = conn.execute(
+            "INSERT INTO feature_requests (id, tenant, category, description, frequency, trajectory_refs, disposition, developer_notes, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now')) \
              ON CONFLICT(id) DO UPDATE SET \
-                 category = ?2, description = ?3, frequency = ?4, trajectory_refs = ?5, \
-                 disposition = ?6, developer_notes = ?7, updated_at = datetime('now')",
-            params![id, category, description, frequency, trajectory_refs_json, disposition, developer_notes],
+                 category = excluded.category, description = excluded.description, \
+                 frequency = excluded.frequency, trajectory_refs = excluded.trajectory_refs, \
+                 disposition = excluded.disposition, developer_notes = excluded.developer_notes, \
+                 updated_at = datetime('now') \
+             WHERE feature_requests.tenant = excluded.tenant",
+            params![id, tenant, category, description, frequency, trajectory_refs_json, disposition, developer_notes],
         )
         .await
         .map_err(storage_error)?;
+        if affected == 0 {
+            return Err(PersistenceError::Storage(format!(
+                "feature request '{id}' is owned by another tenant"
+            )));
+        }
         Ok(())
     }
 
     /// List feature requests with optional disposition filter.
-    #[instrument(skip_all, fields(otel.name = "turso.list_feature_requests"))]
+    #[instrument(skip_all, fields(tenant, otel.name = "turso.list_feature_requests"))]
     pub async fn list_feature_requests(
         &self,
+        tenant: &str,
         disposition: Option<&str>,
     ) -> Result<Vec<FeatureRequestRow>, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.list_feature_requests");
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT id, category, description, frequency, trajectory_refs, disposition, developer_notes, created_at, updated_at \
+                "SELECT id, tenant, category, description, frequency, trajectory_refs, disposition, developer_notes, created_at, updated_at \
                  FROM feature_requests \
-                 WHERE (?1 IS NULL OR disposition = ?1) \
+                 WHERE tenant = ?1 AND (?2 IS NULL OR disposition = ?2) \
                  ORDER BY frequency DESC, created_at DESC",
-                params![disposition],
+                params![tenant, disposition],
             )
             .await
             .map_err(storage_error)?;
@@ -63,23 +74,25 @@ impl TursoEventStore {
         while let Some(row) = rows.next().await.map_err(storage_error)? {
             out.push(FeatureRequestRow {
                 id: row.get::<String>(0).map_err(storage_error)?,
-                category: row.get::<String>(1).map_err(storage_error)?,
-                description: row.get::<String>(2).map_err(storage_error)?,
-                frequency: row.get::<i64>(3).map_err(storage_error)?,
-                trajectory_refs: row.get::<String>(4).map_err(storage_error)?,
-                disposition: row.get::<String>(5).map_err(storage_error)?,
-                developer_notes: row.get::<Option<String>>(6).map_err(storage_error)?,
-                created_at: row.get::<String>(7).map_err(storage_error)?,
-                updated_at: row.get::<String>(8).map_err(storage_error)?,
+                tenant: row.get::<String>(1).map_err(storage_error)?,
+                category: row.get::<String>(2).map_err(storage_error)?,
+                description: row.get::<String>(3).map_err(storage_error)?,
+                frequency: row.get::<i64>(4).map_err(storage_error)?,
+                trajectory_refs: row.get::<String>(5).map_err(storage_error)?,
+                disposition: row.get::<String>(6).map_err(storage_error)?,
+                developer_notes: row.get::<Option<String>>(7).map_err(storage_error)?,
+                created_at: row.get::<String>(8).map_err(storage_error)?,
+                updated_at: row.get::<String>(9).map_err(storage_error)?,
             });
         }
         Ok(out)
     }
 
     /// Update a feature request's disposition and developer notes.
-    #[instrument(skip_all, fields(id, otel.name = "turso.update_feature_request"))]
+    #[instrument(skip_all, fields(tenant, id, otel.name = "turso.update_feature_request"))]
     pub async fn update_feature_request(
         &self,
+        tenant: &str,
         id: &str,
         disposition: &str,
         developer_notes: Option<&str>,
@@ -88,9 +101,9 @@ impl TursoEventStore {
         let conn = self.configured_connection().await?;
         let affected = conn
             .execute(
-                "UPDATE feature_requests SET disposition = ?2, developer_notes = ?3, updated_at = datetime('now') \
-                 WHERE id = ?1",
-                params![id, disposition, developer_notes],
+                "UPDATE feature_requests SET disposition = ?3, developer_notes = ?4, updated_at = datetime('now') \
+                 WHERE tenant = ?1 AND id = ?2",
+                params![tenant, id, disposition, developer_notes],
             )
             .await
             .map_err(storage_error)?;
@@ -102,23 +115,35 @@ impl TursoEventStore {
     // -----------------------------------------------------------------------
 
     /// Insert an evolution record.
-    #[instrument(skip_all, fields(id, record_type, otel.name = "turso.insert_evolution_record"))]
+    #[instrument(
+        skip_all,
+        fields(
+            tenant = record.tenant,
+            id = record.id,
+            record_type = record.record_type,
+            otel.name = "turso.insert_evolution_record"
+        )
+    )]
     pub async fn insert_evolution_record(
         &self,
-        id: &str,
-        record_type: &str,
-        status: &str,
-        created_by: &str,
-        derived_from: Option<&str>,
-        data_json: &str,
+        record: TursoEvolutionRecordInsert<'_>,
     ) -> Result<(), PersistenceError> {
+        let TursoEvolutionRecordInsert {
+            tenant,
+            id,
+            record_type,
+            status,
+            created_by,
+            derived_from,
+            data_json,
+        } = record;
         let _query_timer = TursoQueryTimer::start("turso.insert_evolution_record");
         let conn = self.configured_connection().await?;
         let execute_res = conn
             .execute(
-            "INSERT INTO evolution_records (id, record_type, status, created_by, derived_from, data, timestamp) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))",
-            params![id, record_type, status, created_by, derived_from, data_json],
+            "INSERT INTO evolution_records (id, tenant, record_type, status, created_by, derived_from, data, timestamp) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))",
+            params![id, tenant, record_type, status, created_by, derived_from, data_json],
         )
         .await
         .map_err(storage_error);
@@ -146,18 +171,19 @@ impl TursoEventStore {
     }
 
     /// Get a single evolution record by ID.
-    #[instrument(skip_all, fields(id, otel.name = "turso.get_evolution_record"))]
+    #[instrument(skip_all, fields(tenant, id, otel.name = "turso.get_evolution_record"))]
     pub async fn get_evolution_record(
         &self,
+        tenant: &str,
         id: &str,
     ) -> Result<Option<EvolutionRecordRow>, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.get_evolution_record");
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT id, record_type, status, created_by, derived_from, data, timestamp \
-                 FROM evolution_records WHERE id = ?1",
-                params![id],
+                "SELECT id, tenant, record_type, status, created_by, derived_from, data, timestamp \
+                 FROM evolution_records WHERE tenant = ?1 AND id = ?2",
+                params![tenant, id],
             )
             .await
             .map_err(storage_error)?;
@@ -178,9 +204,10 @@ impl TursoEventStore {
     }
 
     /// List evolution records with optional type and status filters.
-    #[instrument(skip_all, fields(otel.name = "turso.list_evolution_records"))]
+    #[instrument(skip_all, fields(tenant, otel.name = "turso.list_evolution_records"))]
     pub async fn list_evolution_records(
         &self,
+        tenant: &str,
         record_type: Option<&str>,
         status: Option<&str>,
     ) -> Result<Vec<EvolutionRecordRow>, PersistenceError> {
@@ -188,12 +215,13 @@ impl TursoEventStore {
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT id, record_type, status, created_by, derived_from, data, timestamp \
+                "SELECT id, tenant, record_type, status, created_by, derived_from, data, timestamp \
                  FROM evolution_records \
-                 WHERE (?1 IS NULL OR record_type = ?1) \
-                   AND (?2 IS NULL OR status = ?2) \
+                 WHERE tenant = ?1 \
+                   AND (?2 IS NULL OR record_type = ?2) \
+                   AND (?3 IS NULL OR status = ?3) \
                  ORDER BY timestamp DESC",
-                params![record_type, status],
+                params![tenant, record_type, status],
             )
             .await
             .map_err(storage_error)?;
@@ -212,25 +240,15 @@ impl TursoEventStore {
     }
 
     /// List ranked insights (Insight type, sorted by priority_score in data).
-    #[instrument(skip_all, fields(otel.name = "turso.list_ranked_insights"))]
-    pub async fn list_ranked_insights(&self) -> Result<Vec<EvolutionRecordRow>, PersistenceError> {
+    #[instrument(skip_all, fields(tenant, otel.name = "turso.list_ranked_insights"))]
+    pub async fn list_ranked_insights(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<EvolutionRecordRow>, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.list_ranked_insights");
-        let conn = self.configured_connection().await?;
-        let mut rows = conn
-            .query(
-                "SELECT id, record_type, status, created_by, derived_from, data, timestamp \
-                 FROM evolution_records \
-                 WHERE record_type = 'Insight' \
-                 ORDER BY timestamp DESC",
-                (),
-            )
-            .await
-            .map_err(storage_error)?;
-
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
-            out.push(Self::row_to_evolution_record(&row)?);
-        }
+        let mut out = self
+            .list_evolution_records(tenant, Some("Insight"), None)
+            .await?;
         // Sort by priority_score descending (extracted from JSON data).
         out.sort_by(|a, b| {
             let score_a = serde_json::from_str::<serde_json::Value>(&a.data)
@@ -255,12 +273,13 @@ impl TursoEventStore {
     ) -> Result<EvolutionRecordRow, PersistenceError> {
         Ok(EvolutionRecordRow {
             id: row.get::<String>(0).map_err(storage_error)?,
-            record_type: row.get::<String>(1).map_err(storage_error)?,
-            status: row.get::<String>(2).map_err(storage_error)?,
-            created_by: row.get::<String>(3).map_err(storage_error)?,
-            derived_from: row.get::<Option<String>>(4).map_err(storage_error)?,
-            data: row.get::<String>(5).map_err(storage_error)?,
-            timestamp: row.get::<String>(6).map_err(storage_error)?,
+            tenant: row.get::<String>(1).map_err(storage_error)?,
+            record_type: row.get::<String>(2).map_err(storage_error)?,
+            status: row.get::<String>(3).map_err(storage_error)?,
+            created_by: row.get::<String>(4).map_err(storage_error)?,
+            derived_from: row.get::<Option<String>>(5).map_err(storage_error)?,
+            data: row.get::<String>(6).map_err(storage_error)?,
+            timestamp: row.get::<String>(7).map_err(storage_error)?,
         })
     }
 

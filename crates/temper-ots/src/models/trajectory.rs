@@ -60,6 +60,30 @@ pub struct OTSMetadata {
     /// Parent trajectory ID (for hierarchical traces)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_trajectory_id: Option<String>,
+
+    /// Hash or version of the actor spec this run executed under.
+    ///
+    /// Lets a consumer replay or score a trajectory against the exact
+    /// governing spec instead of whatever version is current.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_version: Option<String>,
+
+    /// Harness that produced this trajectory (e.g. "temperpaw", "claude-code").
+    ///
+    /// Distinct from `framework`: `framework` names the agent library, while
+    /// `harness` names the runner that drove the loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+
+    /// Release identifier of the agent system itself (e.g. "temperpaw 3.2").
+    ///
+    /// The build that ran, not the spec it ran under. Two runs of the same
+    /// build under different specs share this value; one build upgraded under
+    /// an unchanged spec changes it. `spec_version` answers the other
+    /// question, and the two are never interchangeable — a consumer grouping
+    /// runs by agent release must not be handed a spec hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_version: Option<String>,
 }
 
 impl OTSMetadata {
@@ -86,6 +110,9 @@ impl OTSMetadata {
             human_reviewed: false,
             tags: Vec::new(),
             parent_trajectory_id: None,
+            spec_version: None,
+            harness: None,
+            agent_version: None,
         }
     }
 
@@ -157,6 +184,24 @@ impl OTSMetadata {
     /// Set parent trajectory ID
     pub fn with_parent_trajectory_id(mut self, parent_trajectory_id: impl Into<String>) -> Self {
         self.parent_trajectory_id = Some(parent_trajectory_id.into());
+        self
+    }
+
+    /// Set the spec version (hash or version of the governing actor spec)
+    pub fn with_spec_version(mut self, spec_version: impl Into<String>) -> Self {
+        self.spec_version = Some(spec_version.into());
+        self
+    }
+
+    /// Set the harness that produced this trajectory
+    pub fn with_harness(mut self, harness: impl Into<String>) -> Self {
+        self.harness = Some(harness.into());
+        self
+    }
+
+    /// Set the release identifier of the agent system that ran
+    pub fn with_agent_version(mut self, agent_version: impl Into<String>) -> Self {
+        self.agent_version = Some(agent_version.into());
         self
     }
 }

@@ -21,13 +21,21 @@ use crate::workflow_headers::add_workflow_observability_headers;
 use temper_observe::wide_event::{self, EventKind, WideEvent};
 
 mod guest_progress;
-mod span_hints;
+mod internal_http;
+pub(crate) mod span_hints;
 
+pub use internal_http::{InternalHttpCapability, InternalHttpCapabilityIssuerFn};
+
+/// Re-exported so every channel that records guest-supplied `gen_ai.*` metadata
+/// bounds it the same way, including the dispatch callback path in
+/// `temper-server`. A second copy of the bound would drift. See ADR-0166.
+pub use span_hints::{MAX_REDACTED_LLM_METADATA_VALUE_BYTES, clamp_redacted_metadata_value};
 #[cfg(test)]
 pub(crate) use span_hints::{MAX_RESPONSE_CAPTURE_BYTES, SpanHints};
 pub(crate) use span_hints::{
-    apply_response_captures, apply_span_hints, datadog_visible_span_hint_field,
-    span_hint_otel_name, split_span_hint_headers, truncate_for_span_attr,
+    apply_response_captures, apply_span_hints, clamp_llm_metadata_json,
+    datadog_visible_span_hint_field, is_llm_namespace_key, llm_namespace_attr_allowed,
+    redact_llm_content_hints, span_hint_otel_name, split_span_hint_headers, truncate_for_span_attr,
 };
 
 /// Host capabilities provided to WASM modules.
@@ -73,6 +81,14 @@ pub trait WasmHost: Send + Sync {
     /// Try to write a bounded chunk to an invocation-scoped File stream.
     fn temper_file_stream_try_write(&self, _handle: u32, _bytes: &[u8]) -> Result<usize, i32> {
         Err(-3)
+    }
+
+    /// Whether this invocation's tenant opted into exporting raw LLM content to
+    /// telemetry (ADR-0166). Defaults to `false` so a host that does not answer
+    /// redacts: the guest-facing telemetry APIs read this, and the only safe
+    /// default for a channel fed by an untrusted module is to withhold content.
+    fn exports_llm_content(&self) -> bool {
+        false
     }
 
     /// Make an HTTP request. Returns (status_code, response_body).
@@ -367,14 +383,16 @@ pub type TemperFileWriteFn = Arc<dyn Fn(u32, Vec<u8>) -> Result<usize, i32> + Se
 pub struct ProductionWasmHost {
     /// HTTP client for making real requests.
     client: reqwest::Client,
+    /// Separate client whose redirect policy is disabled for capabilities.
+    internal_client: reqwest::Client,
     /// Secrets from env vars or a secret store.
     secrets: BTreeMap<String, String>,
     /// Optional lazy secret resolver authoritative for guest secret lookups.
     secret_resolver: Option<SecretResolverFn>,
     /// Canonical base URL for the local Temper API when known directly by the server.
     internal_api_base_url: Option<String>,
-    /// Ambient platform bearer token for internal loopback calls.
-    internal_api_key: Option<String>,
+    /// Trusted callback that issues one request-bound internal capability.
+    internal_capability_issuer: Option<InternalHttpCapabilityIssuerFn>,
     /// Optional spec evaluator (provided by temper-server at construction).
     spec_evaluator: Option<SpecEvaluatorFn>,
     /// Optional progress emitter (provided by temper-server at construction).
@@ -394,6 +412,11 @@ pub struct ProductionWasmHost {
     data_response_handle_budget: usize,
     /// Invocation context for auto-enriching guest telemetry.
     invocation_context: Option<WasmInvocationContext>,
+    /// Whether this invocation's tenant may export raw LLM content (prompts,
+    /// completions, system instructions, tool arguments/results) captured from
+    /// guest HTTP calls to the telemetry backend. Defaults to `false` (redact);
+    /// the server sets it per tenant. See ADR-0166.
+    export_llm_content: bool,
     /// Registry of active streaming HTTP exchanges (ADR-0057).
     /// One per host instance; handle IDs are unique within the host.
     http_streams: Arc<crate::http_stream::HttpStreamRegistry>,
@@ -487,6 +510,39 @@ fn blob_transport_semaphore() -> &'static Semaphore {
     SEMAPHORE.get_or_init(|| Semaphore::new(blob_transport_max_concurrency()))
 }
 
+fn build_production_http_client(
+    secrets: &BTreeMap<String, String>,
+    timeout: std::time::Duration,
+    disable_redirects: bool,
+) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(timeout);
+    if disable_redirects {
+        builder = builder
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy();
+    }
+
+    for (key, pem) in secrets {
+        if !key.starts_with("ca_cert:") {
+            continue;
+        }
+        match reqwest::Certificate::from_pem(pem.as_bytes()) {
+            Ok(cert) => {
+                builder = builder.add_root_certificate(cert);
+            }
+            Err(error) => {
+                tracing::warn!(key, error = %error, "failed to parse CA certificate from secret");
+            }
+        }
+    }
+
+    builder
+        .build()
+        .expect("production HTTP client configuration must be valid")
+}
+
 fn remote_blob_backend<'a>(secrets: &'a BTreeMap<String, String>, url: &str) -> Option<&'a str> {
     let endpoint = secrets.get("blob_endpoint")?.trim_end_matches('/');
     if endpoint.is_empty() || !url.starts_with(endpoint) {
@@ -505,6 +561,53 @@ fn remote_blob_backend<'a>(secrets: &'a BTreeMap<String, String>, url: &str) -> 
         "custom"
     };
     Some(backend)
+}
+
+/// Apply ADR-0166 to a map of guest-supplied string tags. Shared by guest wide
+/// events and guest metrics: both let an untrusted module choose tag names *and*
+/// string values, so both are the same channel as the span APIs.
+fn redact_guest_string_tags(tags: &mut BTreeMap<String, String>, export_llm_content: bool) {
+    if export_llm_content {
+        return;
+    }
+    tags.retain(|key, _| llm_namespace_attr_allowed(key));
+    for (key, value) in tags.iter_mut() {
+        if is_llm_namespace_key(key)
+            && let Some(clamped) = clamp_redacted_metadata_value(value)
+        {
+            *value = clamped;
+        }
+    }
+}
+
+/// Apply ADR-0166 to the guest-supplied half of a wide event. Inside the
+/// `gen_ai.*` namespace a non-opted-in tenant keeps only recognised, bounded
+/// metadata; keys outside it are the module's own application telemetry and are
+/// left alone, matching the guest-span boundary.
+fn redact_guest_wide_event_fields(
+    tags: &mut BTreeMap<String, String>,
+    attributes: &mut BTreeMap<String, Value>,
+    export_llm_content: bool,
+) {
+    if export_llm_content {
+        return;
+    }
+    redact_guest_string_tags(tags, export_llm_content);
+    attributes.retain(|key, value| {
+        if !llm_namespace_attr_allowed(key) {
+            return false;
+        }
+        // A structured value under a recognised metadata key is dropped, not
+        // clamped: see `clamp_llm_metadata_json`.
+        !is_llm_namespace_key(key) || clamp_llm_metadata_json(value).is_some()
+    });
+    for (key, value) in attributes.iter_mut() {
+        if is_llm_namespace_key(key)
+            && let Some(clamped) = clamp_llm_metadata_json(value)
+        {
+            *value = clamped;
+        }
+    }
 }
 
 impl ProductionWasmHost {
@@ -542,31 +645,16 @@ impl ProductionWasmHost {
     /// lets operators provision private CA trust via the same secret store
     /// that WASM modules already use, with no filesystem or env var coupling.
     pub fn with_timeout(secrets: BTreeMap<String, String>, timeout: std::time::Duration) -> Self {
-        let mut builder = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(timeout);
-
-        for (key, pem) in &secrets {
-            if !key.starts_with("ca_cert:") {
-                continue;
-            }
-            match reqwest::Certificate::from_pem(pem.as_bytes()) {
-                Ok(cert) => {
-                    tracing::info!(key, "loaded CA certificate from secret store");
-                    builder = builder.add_root_certificate(cert);
-                }
-                Err(e) => {
-                    tracing::warn!(key, error = %e, "failed to parse CA certificate from secret");
-                }
-            }
-        }
+        let client = build_production_http_client(&secrets, timeout, false);
+        let internal_client = build_production_http_client(&secrets, timeout, true);
 
         Self {
-            client: builder.build().unwrap_or_default(),
+            client,
+            internal_client,
             secrets,
             secret_resolver: None,
             internal_api_base_url: None,
-            internal_api_key: None,
+            internal_capability_issuer: None,
             spec_evaluator: None,
             progress_emitter: None,
             trace_id: None,
@@ -578,6 +666,7 @@ impl ProductionWasmHost {
             data_request_budget: 0,
             data_response_handle_budget: 0,
             invocation_context: None,
+            export_llm_content: false,
             http_streams: Arc::new(crate::http_stream::HttpStreamRegistry::new()),
         }
     }
@@ -612,6 +701,13 @@ impl ProductionWasmHost {
         self
     }
 
+    /// Set whether this invocation's tenant may export raw LLM content captured
+    /// from guest HTTP calls. Defaults to `false` (redact). See ADR-0166.
+    pub fn with_llm_content_export(mut self, export_content: bool) -> Self {
+        self.export_llm_content = export_content;
+        self
+    }
+
     /// Attach the canonical local Temper API base URL for internal call detection.
     pub fn with_internal_api_base_url(mut self, api_url: Option<String>) -> Self {
         self.internal_api_base_url = api_url
@@ -620,9 +716,12 @@ impl ProductionWasmHost {
         self
     }
 
-    /// Attach the platform API token used for internal loopback calls.
-    pub fn with_internal_api_key(mut self, api_key: Option<String>) -> Self {
-        self.internal_api_key = api_key.filter(|s| !s.is_empty());
+    /// Attach the trusted issuer for request-bound internal capabilities.
+    pub fn with_internal_capability_issuer(
+        mut self,
+        issuer: InternalHttpCapabilityIssuerFn,
+    ) -> Self {
+        self.internal_capability_issuer = Some(issuer);
         self
     }
 
@@ -655,74 +754,54 @@ impl ProductionWasmHost {
     }
 
     fn is_internal_temper_url(&self, url: &str) -> bool {
-        self.internal_api_base_url
-            .as_ref()
-            .is_some_and(|api_url| url.starts_with(api_url.trim_end_matches('/')))
-            || self
-                .secrets
-                .get("temper_api_url")
-                .is_some_and(|api_url| url.starts_with(api_url.trim_end_matches('/')))
+        // Only the server-owned configuration can classify a target as
+        // internal. A tenant secret or guest integration value must never
+        // redirect a request-bound capability to an attacker-controlled host.
+        let configured = self.internal_api_base_url.iter().map(String::as_str);
+        internal_http::is_internal_url(url, configured)
     }
 
     fn add_internal_temper_headers(
         &self,
         mut builder: reqwest::RequestBuilder,
+        method: &str,
         url: &str,
         headers: &[(String, String)],
-    ) -> reqwest::RequestBuilder {
+    ) -> Result<reqwest::RequestBuilder, String> {
         if !self.is_internal_temper_url(url) {
-            return builder;
+            return Ok(builder);
         }
 
-        let Some(ref inv_ctx) = self.invocation_context else {
-            return builder;
+        let issuer = self.internal_capability_issuer.as_ref().ok_or_else(|| {
+            "internal Temper HTTP call has no authenticated capability issuer".to_string()
+        })?;
+        let canonical_method = method.to_ascii_uppercase();
+        let capability = issuer(&canonical_method, url)?;
+        builder = builder
+            .header(
+                "authorization",
+                format!("Bearer {}", capability.bearer_token()),
+            )
+            .header("x-tenant-id", capability.tenant());
+
+        if let Some(invocation_context) = &self.invocation_context {
+            builder = add_workflow_observability_headers(builder, headers, invocation_context);
+        }
+        Ok(builder)
+    }
+
+    fn outbound_headers(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+    ) -> (bool, Vec<(String, String)>) {
+        let is_internal = self.is_internal_temper_url(url);
+        let headers = if is_internal {
+            internal_http::sanitize_internal_headers(headers)
+        } else {
+            headers.to_vec()
         };
-
-        let has_tenant = headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("x-tenant-id"));
-        let has_principal = headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("x-temper-principal-kind"));
-        let has_authorization = headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"));
-
-        if !has_tenant {
-            builder = builder.header("x-tenant-id", inv_ctx.tenant.as_str());
-        }
-
-        if !has_principal {
-            let agent_type = if inv_ctx.entity_type.eq_ignore_ascii_case("Session") {
-                "agent"
-            } else {
-                "system"
-            };
-            let principal_id = inv_ctx
-                .agent_id
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(inv_ctx.entity_id.as_str());
-            builder = builder
-                .header("x-temper-principal-kind", "agent")
-                .header("x-temper-principal-id", principal_id)
-                .header("x-temper-agent-type", agent_type);
-            if let Some(ref sid) = inv_ctx.session_id {
-                builder = builder.header("x-temper-ctx-sessionid", sid.as_str());
-            }
-        }
-
-        if !has_authorization
-            && let Some(key) = self
-                .internal_api_key
-                .as_ref()
-                .or_else(|| self.secrets.get("temper_api_key"))
-                .filter(|k| !k.is_empty())
-        {
-            builder = builder.header("authorization", format!("Bearer {key}"));
-        }
-
-        add_workflow_observability_headers(builder, headers, inv_ctx)
+        (is_internal, headers)
     }
 
     fn build_guest_wide_event(&self, event_json: &str) -> Result<WideEvent, String> {
@@ -732,6 +811,13 @@ impl ProductionWasmHost {
         let mut tags = payload.tags;
         let mut attributes = payload.attributes;
         let measurements = payload.measurements;
+
+        // ADR-0166: a wide event is a guest-authored telemetry record with
+        // guest-chosen tag and attribute names, so it is the same untrusted
+        // channel as the span APIs and takes the same per-tenant decision. Applied
+        // before any host-derived field is merged in below, so only guest input is
+        // judged.
+        redact_guest_wide_event_fields(&mut tags, &mut attributes, self.export_llm_content);
 
         let entity_type = self
             .invocation_context
@@ -847,6 +933,10 @@ impl WasmHost for ProductionWasmHost {
         self.file_write.as_ref().ok_or(-3)?(handle, bytes.to_vec())
     }
 
+    fn exports_llm_content(&self) -> bool {
+        self.export_llm_content
+    }
+
     async fn http_call(
         &self,
         method: &str,
@@ -855,31 +945,34 @@ impl WasmHost for ProductionWasmHost {
         body: &str,
     ) -> Result<(u16, String), String> {
         let started = Instant::now();
-        if let Some(interceptor) = &self.text_http_interceptor
-            && let Some(result) = interceptor(
-                method.to_string(),
-                url.to_string(),
-                headers.to_vec(),
-                body.to_string(),
-            )
-            .await
-        {
-            return result;
-        }
         // Strip Temper span hint headers (X-Temper-Span-*) before the request
         // is built, and capture them for the local tracing span. See
         // ADR-0037: WASM guests annotate outgoing calls with
         // `X-Temper-Span-Name` / `X-Temper-Span-Attr-*` so the resulting
         // span has a semantically meaningful name (e.g., `tool.llm_call`)
         // and attributes (e.g., `gen_ai.request.model`).
-        let (filtered_headers, span_hints) = split_span_hint_headers(headers);
+        let (filtered_headers, mut span_hints) = split_span_hint_headers(headers);
+        // ARN-243: drop LLM content from span hints unless this tenant opted in.
+        redact_llm_content_hints(&mut span_hints, self.export_llm_content);
+        let (is_internal, outbound_headers) = self.outbound_headers(url, &filtered_headers);
+        if let Some(interceptor) = &self.text_http_interceptor
+            && let Some(result) = interceptor(
+                method.to_string(),
+                url.to_string(),
+                outbound_headers.clone(),
+                body.to_string(),
+            )
+            .await
+        {
+            return result;
+        }
         let span = tracing::info_span!(
             "wasm.host.http_call",
             otel.name = %span_hint_otel_name(&span_hints, "wasm.host.http_call"),
             http.method = %method,
             http.url = %telemetry_url(url),
             request_bytes = body.len() as u64,
-            header_count = filtered_headers.len() as u64,
+            header_count = outbound_headers.len() as u64,
             status_code = tracing::field::Empty,
             response_bytes = tracing::field::Empty,
             duration_ms = tracing::field::Empty,
@@ -927,26 +1020,30 @@ impl WasmHost for ProductionWasmHost {
         apply_span_hints(&span, &span_hints);
         let _guard = span.enter();
 
+        let client = if is_internal {
+            &self.internal_client
+        } else {
+            &self.client
+        };
         let mut builder = match method.to_uppercase().as_str() {
-            "GET" => self.client.get(url),
-            "POST" => self.client.post(url),
-            "PUT" => self.client.put(url),
-            "DELETE" => self.client.delete(url),
-            "PATCH" => self.client.patch(url),
+            "GET" => client.get(url),
+            "POST" => client.post(url),
+            "PUT" => client.put(url),
+            "DELETE" => client.delete(url),
+            "PATCH" => client.patch(url),
             other => return Err(format!("unsupported HTTP method: {other}")),
         };
 
-        for (k, v) in &filtered_headers {
+        for (k, v) in &outbound_headers {
             builder = builder.header(k.as_str(), v.as_str());
         }
 
-        let is_internal = self.is_internal_temper_url(url);
-        builder = self.add_internal_temper_headers(builder, url, &filtered_headers);
+        builder = self.add_internal_temper_headers(builder, method, url, &outbound_headers)?;
         // determinism-ok: is_internal check uses non-deterministic URL comparison,
         // but this runs in WasmHost (not simulation), so wall-clock/network access is fine.
 
         // Auto-inject traceparent for cross-request trace correlation.
-        if !filtered_headers
+        if !outbound_headers
             .iter()
             .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
             && let Some(traceparent) =
@@ -1100,14 +1197,17 @@ impl WasmHost for ProductionWasmHost {
     ) -> Result<(u16, Vec<u8>), String> {
         let started = Instant::now();
         // See http_call for the span-hint-header rationale (ADR-0037).
-        let (filtered_headers, span_hints) = split_span_hint_headers(headers);
+        let (filtered_headers, mut span_hints) = split_span_hint_headers(headers);
+        // ARN-243: drop LLM content from span hints unless this tenant opted in.
+        redact_llm_content_hints(&mut span_hints, self.export_llm_content);
+        let (is_internal, outbound_headers) = self.outbound_headers(url, &filtered_headers);
         let span = tracing::info_span!(
             "wasm.host.http_call_binary",
             otel.name = %span_hint_otel_name(&span_hints, "wasm.host.http_call_binary"),
             http.method = %method,
             http.url = %telemetry_url(url),
             request_bytes = body.len() as u64,
-            header_count = filtered_headers.len() as u64,
+            header_count = outbound_headers.len() as u64,
             status_code = tracing::field::Empty,
             response_bytes = tracing::field::Empty,
             duration_ms = tracing::field::Empty,
@@ -1163,7 +1263,7 @@ impl WasmHost for ProductionWasmHost {
             && let Some(result) = interceptor(
                 method.to_string(),
                 url.to_string(),
-                filtered_headers.clone(),
+                outbound_headers.clone(),
                 body.to_vec(),
             )
             .await
@@ -1224,25 +1324,27 @@ impl WasmHost for ProductionWasmHost {
             None
         };
 
+        let client = if is_internal {
+            &self.internal_client
+        } else {
+            &self.client
+        };
         let mut builder = match method.to_uppercase().as_str() {
-            "GET" => self.client.get(url),
-            "POST" => self.client.post(url),
-            "PUT" => self.client.put(url),
-            "DELETE" => self.client.delete(url),
-            "PATCH" => self.client.patch(url),
+            "GET" => client.get(url),
+            "POST" => client.post(url),
+            "PUT" => client.put(url),
+            "DELETE" => client.delete(url),
+            "PATCH" => client.patch(url),
             other => return Err(format!("unsupported HTTP method: {other}")),
         };
 
-        for (k, v) in &filtered_headers {
+        for (k, v) in &outbound_headers {
             builder = builder.header(k.as_str(), v.as_str());
         }
 
-        let is_internal = self.is_internal_temper_url(url);
-        if is_internal && let Some(ref inv_ctx) = self.invocation_context {
-            builder = add_workflow_observability_headers(builder, &filtered_headers, inv_ctx);
-        }
+        builder = self.add_internal_temper_headers(builder, method, url, &outbound_headers)?;
 
-        if !filtered_headers
+        if !outbound_headers
             .iter()
             .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
             && let Some(traceparent) =
@@ -1296,14 +1398,17 @@ impl WasmHost for ProductionWasmHost {
         body: &str,
     ) -> Result<Vec<String>, String> {
         let started = Instant::now();
-        let (filtered_headers, span_hints) = split_span_hint_headers(headers);
+        let (filtered_headers, mut span_hints) = split_span_hint_headers(headers);
+        // ARN-243: drop LLM content from span hints unless this tenant opted in.
+        redact_llm_content_hints(&mut span_hints, self.export_llm_content);
+        let (is_internal, outbound_headers) = self.outbound_headers(url, &filtered_headers);
         let span = tracing::info_span!(
             "wasm.host.connect_call",
             otel.name = %span_hint_otel_name(&span_hints, "wasm.host.connect_call"),
             http.method = "POST",
             http.url = %telemetry_url(url),
             request_bytes = body.len() as u64,
-            header_count = filtered_headers.len() as u64,
+            header_count = outbound_headers.len() as u64,
             status_code = tracing::field::Empty,
             response_frames = tracing::field::Empty,
             response_bytes = tracing::field::Empty,
@@ -1326,7 +1431,12 @@ impl WasmHost for ProductionWasmHost {
         apply_span_hints(&span, &span_hints);
         let _guard = span.enter();
 
-        let mut builder = self.client.post(url);
+        let client = if is_internal {
+            &self.internal_client
+        } else {
+            &self.client
+        };
+        let mut builder = client.post(url);
 
         // Set Connect protocol headers.
         // Use application/connect+json for envd-compatible services (E2B, etc.)
@@ -1334,10 +1444,11 @@ impl WasmHost for ProductionWasmHost {
             .header("content-type", "application/connect+json")
             .header("connect-protocol-version", "1");
 
-        for (k, v) in &filtered_headers {
+        for (k, v) in &outbound_headers {
             builder = builder.header(k.as_str(), v.as_str());
         }
-        if !filtered_headers
+        builder = self.add_internal_temper_headers(builder, "POST", url, &outbound_headers)?;
+        if !outbound_headers
             .iter()
             .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
             && let Some(traceparent) =
@@ -1410,16 +1521,19 @@ impl WasmHost for ProductionWasmHost {
         );
         record_invocation_context_on_span(&span, self.invocation_context.as_ref(), "secret_lookup");
         let _guard = span.enter();
-        let result = self
-            .secret_resolver
-            .as_ref()
-            .map(|resolver| resolver(key))
-            .unwrap_or_else(|| {
-                self.secrets
-                    .get(key)
-                    .cloned()
-                    .ok_or_else(|| format!("secret not found: {key}"))
-            });
+        let result = if key.eq_ignore_ascii_case("temper_api_key") {
+            Err("secret 'temper_api_key' is reserved and unavailable to WASM guests".to_string())
+        } else {
+            self.secret_resolver
+                .as_ref()
+                .map(|resolver| resolver(key))
+                .unwrap_or_else(|| {
+                    self.secrets
+                        .get(key)
+                        .cloned()
+                        .ok_or_else(|| format!("secret not found: {key}"))
+                })
+        };
         tracing::Span::current().record("success", result.is_ok());
         tracing::Span::current().record("duration_ms", started.elapsed().as_millis() as u64);
         if let Err(error) = &result {
@@ -1616,8 +1730,12 @@ impl WasmHost for ProductionWasmHost {
     }
 
     fn emit_metric(&self, metric_json: &str) -> Result<(), String> {
-        let payload: GuestMetricInput = serde_json::from_str(metric_json)
+        let mut payload: GuestMetricInput = serde_json::from_str(metric_json)
             .map_err(|e| format!("invalid guest metric payload: {e}"))?;
+        // ADR-0166: guest metric tags are guest-named *and* guest-valued strings,
+        // and they reach two sinks below — the span event and the OTel meter.
+        // Redact before either reads them, so neither can observe the raw tags.
+        redact_guest_string_tags(&mut payload.tags, self.export_llm_content);
         record_guest_metric_span_event(&payload, self.invocation_context.as_ref());
         let meter = opentelemetry::global::meter("temper");
         let mut attrs: Vec<opentelemetry::KeyValue> = payload
@@ -1685,14 +1803,22 @@ impl WasmHost for ProductionWasmHost {
         let bridge_resp = exchange.bridge_response_body;
         let head_tx = exchange.bridge_head_sender;
         let streams = self.http_streams.clone();
-        let client = self.client.clone();
-        let (filtered_headers, span_hints) = split_span_hint_headers(&request.headers);
+        let (filtered_headers, mut span_hints) = split_span_hint_headers(&request.headers);
+        // ARN-243: drop LLM content from span hints unless this tenant opted in.
+        redact_llm_content_hints(&mut span_hints, self.export_llm_content);
+        let (is_internal, outbound_headers) =
+            self.outbound_headers(&request.url, &filtered_headers);
+        let client = if is_internal {
+            self.internal_client.clone()
+        } else {
+            self.client.clone()
+        };
         let span = tracing::info_span!(
             "wasm.host.http_stream",
             otel.name = %span_hint_otel_name(&span_hints, "wasm.host.http_stream"),
             http.method = %request.method,
             http.url = %telemetry_url(&request.url),
-            header_count = filtered_headers.len() as u64,
+            header_count = outbound_headers.len() as u64,
             status_code = tracing::field::Empty,
             response_bytes = tracing::field::Empty,
             duration_ms = tracing::field::Empty,
@@ -1750,11 +1876,16 @@ impl WasmHost for ProductionWasmHost {
             other => return Err(format!("unsupported HTTP method: {other}")),
         };
         let mut builder = builder;
-        for (k, v) in &filtered_headers {
+        for (k, v) in &outbound_headers {
             builder = builder.header(k.as_str(), v.as_str());
         }
-        builder = self.add_internal_temper_headers(builder, &request.url, &filtered_headers);
-        if !filtered_headers
+        builder = self.add_internal_temper_headers(
+            builder,
+            &request.method,
+            &request.url,
+            &outbound_headers,
+        )?;
+        if !outbound_headers
             .iter()
             .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
             && let Some(traceparent) = current_traceparent_header(&span, self.trace_id.as_deref())

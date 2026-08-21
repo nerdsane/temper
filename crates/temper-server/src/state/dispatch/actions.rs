@@ -32,6 +32,25 @@ fn background_reaction_semaphore() -> Arc<Semaphore> {
     )
 }
 
+/// Maximum request-body length, in bytes, echoed into the dispatch-failure log.
+const LOG_REQUEST_BODY_MAX_BYTES: usize = 4096;
+
+/// Bound a serialized request body for the failure log line.
+///
+/// Slicing at a fixed byte offset panics when the cap lands inside a multi-byte
+/// character, which turns a logged dispatch failure into a second failure. The
+/// cut walks back to the nearest character boundary instead.
+fn truncate_request_body_for_log(serialized: &str) -> String {
+    if serialized.len() <= LOG_REQUEST_BODY_MAX_BYTES {
+        return serialized.to_string();
+    }
+    let mut end = LOG_REQUEST_BODY_MAX_BYTES;
+    while end > 0 && !serialized.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}[truncated]", &serialized[..end])
+}
+
 impl crate::state::ServerState {
     /// Dispatch an action using the unified command object.
     ///
@@ -144,9 +163,35 @@ impl crate::state::ServerState {
         .await
     }
 
+    /// Dispatch an externally authorized action only if the target actor still
+    /// matches the exact local state used for the Cedar decision.
+    #[instrument(skip_all, fields(
+        otel.name = %format_args!("{}.{}", cmd.entity_type, cmd.action),
+        tenant = %cmd.tenant,
+        entity_type = cmd.entity_type,
+        entity_id = cmd.entity_id,
+        action_name = cmd.action,
+    ))]
+    pub(crate) async fn dispatch_tenant_action_ext_typed_if_current(
+        &self,
+        cmd: DispatchCommand<'_>,
+        expected_authorization_precondition: String,
+    ) -> Result<EntityResponse, DispatchError> {
+        self.dispatch_typed_checked(cmd, Some(expected_authorization_precondition))
+            .await
+    }
+
     async fn dispatch_typed(
         &self,
         cmd: DispatchCommand<'_>,
+    ) -> Result<EntityResponse, DispatchError> {
+        self.dispatch_typed_checked(cmd, None).await
+    }
+
+    async fn dispatch_typed_checked(
+        &self,
+        cmd: DispatchCommand<'_>,
+        expected_authorization_precondition: Option<String>,
     ) -> Result<EntityResponse, DispatchError> {
         let DispatchCommand {
             tenant,
@@ -255,6 +300,7 @@ impl crate::state::ServerState {
                 agent_ctx,
                 await_integration,
                 reaction_context,
+                expected_authorization_precondition,
             )
             .await?;
 
@@ -524,6 +570,7 @@ impl crate::state::ServerState {
         agent_ctx: &AgentContext,
         await_integration: bool,
         reaction_context: Option<crate::trigger::delivery::ReactionCommitContext>,
+        expected_authorization_precondition: Option<String>,
     ) -> Result<EntityResponse, DispatchError> {
         let explicit_workflow_context = agent_ctx.workflow_run_id.is_some()
             || agent_ctx.workflow_root_entity_type.is_some()
@@ -745,7 +792,10 @@ impl crate::state::ServerState {
         let _ = admission_was_capped; // reserved for active-permits gauge
         // ADR-0048: wrap the ask in a bounded retry that classifies
         // transient (AskTimeout / MailboxFull) vs permanent failures.
-        let policy = self.dispatch_retry_policy();
+        let mut policy = self.dispatch_retry_policy();
+        if expected_authorization_precondition.is_some() {
+            policy.max_attempts = 1;
+        }
         let action_name = action.to_string();
         let params_for_retry = params;
         let cross_for_retry = cross_entity_booleans;
@@ -753,6 +803,7 @@ impl crate::state::ServerState {
         let reaction_expected_sequence = reactions_for_retry
             .as_ref()
             .map(|context| context.expected_source_sequence);
+        let authorization_precondition_for_retry = expected_authorization_precondition;
         let idempotency_key = Some(agent_ctx.idempotency_key.clone().unwrap_or_else(|| {
             format!(
                 "dispatch:{tenant}:{entity_type}:{entity_id}:{action}:{}",
@@ -780,6 +831,8 @@ impl crate::state::ServerState {
                         .expected_entity_sequence
                         .or(reaction_expected_sequence),
                     reaction_context: reactions_for_retry.clone().map(Box::new),
+                    expected_authorization_precondition: authorization_precondition_for_retry
+                        .clone(),
                 },
                 &policy,
             )
@@ -868,15 +921,9 @@ impl crate::state::ServerState {
                     request_body: Some(action_params.clone()),
                     intent: agent_ctx.intent.clone(),
                     matched_policy_ids: None,
+                    capture_seq: None,
                 };
-                let request_body_str = {
-                    let s = action_params.to_string();
-                    if s.len() > 4096 {
-                        format!("{}[truncated]", &s[..4096])
-                    } else {
-                        s
-                    }
-                };
+                let request_body_str = truncate_request_body_for_log(&action_params.to_string());
                 let from_status = entry.from_status.as_deref().unwrap_or("unknown");
                 let to_status = entry.to_status.as_deref().unwrap_or("unknown");
                 let observation_metadata =
@@ -964,5 +1011,37 @@ impl crate::state::ServerState {
         }
 
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod log_truncation_tests {
+    use super::{LOG_REQUEST_BODY_MAX_BYTES, truncate_request_body_for_log};
+
+    #[test]
+    fn short_body_is_logged_verbatim() {
+        let body = r#"{"ProductId":"p-1"}"#;
+        assert_eq!(truncate_request_body_for_log(body), body);
+    }
+
+    #[test]
+    fn oversized_ascii_body_is_marked_truncated() {
+        let body = "a".repeat(LOG_REQUEST_BODY_MAX_BYTES + 100);
+        let truncated = truncate_request_body_for_log(&body);
+        assert!(truncated.ends_with("[truncated]"));
+        assert_eq!(
+            truncated.len(),
+            LOG_REQUEST_BODY_MAX_BYTES + "[truncated]".len()
+        );
+    }
+
+    #[test]
+    fn oversized_multibyte_body_does_not_panic_at_the_cap() {
+        // 3-byte characters: the cap at 4096 falls mid-character (4096 % 3 != 0),
+        // which a raw byte slice would panic on.
+        let body = "\u{4e16}".repeat(LOG_REQUEST_BODY_MAX_BYTES);
+        let truncated = truncate_request_body_for_log(&body);
+        assert!(truncated.ends_with("[truncated]"));
+        assert!(truncated.len() <= LOG_REQUEST_BODY_MAX_BYTES + "[truncated]".len());
     }
 }

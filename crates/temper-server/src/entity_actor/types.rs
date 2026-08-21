@@ -57,6 +57,9 @@ pub enum EntityMsg {
         expected_sequence: Option<u64>,
         /// ADR-0158 rule and authority snapshot to co-commit with the event.
         reaction_context: Option<Box<crate::trigger::delivery::ReactionCommitContext>>,
+        /// Digest of the exact local state used for an external Cedar
+        /// decision. Internal dispatches omit it.
+        expected_authorization_precondition: Option<String>,
     },
     /// Get the current entity state.
     GetState,
@@ -70,9 +73,17 @@ pub enum EntityMsg {
         reference_evidence: BTreeMap<String, bool>,
         /// Optional sequence precondition checked before mutation.
         expected_sequence: Option<u64>,
+        /// Digest of the exact state used for an external authorization
+        /// decision. The actor rejects the update if that state changed before
+        /// this message reached its mailbox.
+        expected_precondition: Option<String>,
     },
     /// Delete this entity.
-    Delete,
+    Delete {
+        /// Digest of the exact local state used for an external Cedar
+        /// decision. Internal dispatches omit it.
+        expected_authorization_precondition: Option<String>,
+    },
 }
 
 impl Message for EntityMsg {}

@@ -13,16 +13,21 @@ mod policies;
 mod reactions;
 mod repl;
 mod secrets;
+mod spec_pin;
+mod trajectory_analysis;
 
 use axum::Router;
 use axum::extract::{FromRequestParts, Path, State};
+use axum::http::StatusCode;
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, patch, post, put};
-use temper_authz::PrincipalKind;
+use temper_authz::{AuthenticatedRequestContext, SecurityContext};
+use temper_runtime::tenant::TenantId;
 
-use crate::authz::{DenialInput, record_authz_denial, security_context_from_headers};
+use crate::authz::{
+    DenialInput, record_authz_denial, require_authenticated_context, require_tenant_match,
+};
 use crate::state::ServerState;
 
 /// Build the management API router (mounted at /api).
@@ -41,6 +46,8 @@ use crate::state::ServerState;
 /// - POST   /api/files/read-text-batch                  -> batch current-file text reads via projections + blobs
 /// - POST   /api/files/read-version-text-batch          -> batch immutable file-version text reads
 /// - POST   /api/files/publish-artifact                 -> promote a governed file to a public immutable artifact
+/// - GET    /api/ots/trajectories/{id}/atif             -> export an OTS trajectory as ATIF v1.7
+/// - POST   /api/conformance/check                      -> check a session against its actor spec
 pub fn build_api_router() -> Router<ServerState> {
     Router::new()
         .route(
@@ -97,6 +104,15 @@ pub fn build_api_router() -> Router<ServerState> {
             "/ots/trajectories",
             post(crate::observe::evolution::handle_post_ots_trajectory)
                 .get(crate::observe::evolution::handle_get_ots_trajectories),
+        )
+        .route(
+            "/ots/trajectories/{trajectory_id}/atif",
+            get(trajectory_analysis::handle_get_ots_trajectory_atif),
+        )
+        // Deterministic conformance checking of a recorded run against its spec
+        .route(
+            "/conformance/check",
+            post(trajectory_analysis::handle_conformance_check),
         )
         .route(
             "/tenants/{tenant}/secrets/{key_name}",
@@ -179,24 +195,27 @@ pub fn build_api_router() -> Router<ServerState> {
 /// Authorize a policy management request against Cedar policies.
 ///
 /// Returns `Some(response)` if authorization is denied, `None` if allowed.
-/// Admin principals always bypass Cedar for policy management.
 pub(crate) async fn require_policy_auth(
     state: &ServerState,
-    headers: &HeaderMap,
-    tenant: &str,
+    authenticated: &AuthenticatedRequestContext,
 ) -> Option<axum::response::Response> {
-    let security_ctx = security_context_from_headers(headers, None, None, None);
-    if matches!(security_ctx.principal.kind, PrincipalKind::Admin) {
-        // Admin principals (e.g. Observe UI) always bypass Cedar for policy
-        // management. Without this, approving the first policy would lock out
-        // the admin from managing subsequent decisions.
-        return None;
-    }
+    let security_ctx = authenticated.security_context();
+    let tenant = authenticated.tenant().as_str();
+    let resource_attrs = std::collections::BTreeMap::from([
+        (
+            "id".to_string(),
+            serde_json::Value::String(tenant.to_string()),
+        ),
+        (
+            "tenant".to_string(),
+            serde_json::Value::String(tenant.to_string()),
+        ),
+    ]);
     if let Err(denial) = state.authorize_with_context(
-        &security_ctx,
+        security_ctx,
         "manage_policies",
         "PolicySet",
-        &std::collections::BTreeMap::new(),
+        &resource_attrs,
         tenant,
     ) {
         let reason = denial.to_string();
@@ -204,7 +223,7 @@ pub(crate) async fn require_policy_auth(
             state,
             DenialInput {
                 tenant,
-                security_ctx: &security_ctx,
+                security_ctx,
                 agent_id_override: None,
                 action: "manage_policies",
                 resource_type: "PolicySet",
@@ -213,6 +232,10 @@ pub(crate) async fn require_policy_auth(
                 reason: &reason,
                 module_name: None,
                 from_status: None,
+                intent: authenticated.intent().map(str::to_string),
+                session_id: authenticated.session_id().map(str::to_string),
+                // Management-plane denial, not a spec-governed dispatch.
+                spec_governed: Some(false),
             },
         )
         .await;
@@ -239,7 +262,19 @@ pub(crate) async fn require_policy_auth(
 /// produces (403 + `AuthorizationDenied` JSON including the decision id).
 /// The tenant is read from the request parts by name, so handlers keep their
 /// own `Path<String>` / `Path<(String, String)>` extractors untouched.
-pub(crate) struct PolicyAuthed;
+pub(crate) struct PolicyAuthed(AuthenticatedRequestContext);
+
+impl PolicyAuthed {
+    /// Credential-bound tenant authorized for this policy operation.
+    pub(crate) fn tenant(&self) -> &TenantId {
+        self.0.tenant()
+    }
+
+    /// Credential-derived Cedar principal authorized for this operation.
+    pub(crate) fn security_context(&self) -> &SecurityContext {
+        self.0.security_context()
+    }
+}
 
 impl FromRequestParts<ServerState> for PolicyAuthed {
     type Rejection = axum::response::Response;
@@ -257,9 +292,13 @@ impl FromRequestParts<ServerState> for PolicyAuthed {
             // {tenant} path parameter; reaching this branch is a routing bug.
             return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         };
-        match require_policy_auth(state, &parts.headers, tenant).await {
+        let authenticated =
+            require_authenticated_context(parts.extensions.get::<AuthenticatedRequestContext>())
+                .map_err(IntoResponse::into_response)?;
+        require_tenant_match(authenticated, tenant).map_err(IntoResponse::into_response)?;
+        match require_policy_auth(state, authenticated).await {
             Some(resp) => Err(resp),
-            None => Ok(Self),
+            None => Ok(Self(authenticated.clone())),
         }
     }
 }
@@ -267,11 +306,12 @@ impl FromRequestParts<ServerState> for PolicyAuthed {
 /// GET /api/tenants/{tenant}/policies/suggestions — suggested policies from denial patterns.
 async fn handle_policy_suggestions(
     State(state): State<ServerState>,
-    Path(tenant): Path<String>,
-    _auth: PolicyAuthed,
+    Path(_tenant): Path<String>,
+    auth: PolicyAuthed,
 ) -> impl IntoResponse {
-    let suggestions = if let Some(store) = state.metadata_store_for_tenant(&tenant).await {
-        match store.load_policy_denial_patterns(&tenant).await {
+    let tenant = auth.tenant().as_str();
+    let suggestions = if let Some(store) = state.metadata_store_for_tenant(tenant).await {
+        match store.load_policy_denial_patterns(tenant).await {
             Ok(rows) if !rows.is_empty() => {
                 let mut engine = crate::state::policy_suggestions::PolicySuggestionEngine::new();
                 for row in rows {

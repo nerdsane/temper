@@ -276,3 +276,125 @@ fn test_find_fk_resolution_no_edge() {
     let result = find_fk_resolution(&graph, "Foo", "Bar", "Bars", true);
     assert!(result.is_none());
 }
+
+#[tokio::test]
+async fn expand_authorizes_related_rows_before_blob_hydration() {
+    use temper_authz::{Principal, PrincipalKind, SecurityContext};
+    use temper_odata::query::types::ExpandItem;
+    use temper_runtime::ActorSystem;
+    use temper_runtime::tenant::TenantId;
+    use temper_spec::csdl::parse_csdl;
+
+    let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
+    let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml");
+    let mut specs = std::collections::BTreeMap::new();
+    specs.insert("Customer".to_string(), order_ioa.to_string());
+    specs.insert("Order".to_string(), order_ioa.to_string());
+    let state = crate::state::ServerState::with_specs(
+        ActorSystem::new("expand-auth-before-hydration"),
+        parse_csdl(csdl_xml).expect("test CSDL"),
+        csdl_xml.to_string(),
+        specs,
+    )
+    .expect("test state");
+    let tenant = TenantId::default();
+    state
+        .get_or_create_tenant_entity(&tenant, "Customer", "customer-1", serde_json::json!({}))
+        .await
+        .expect("create customer");
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            "order-1",
+            serde_json::json!({
+                "CustomerId": "customer-1",
+                "PrivatePayload": crate::blobs::blob_ref_value(
+                    "field-overflow/sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+                    128,
+                ),
+            }),
+        )
+        .await
+        .expect("create order");
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            r#"
+                permit(principal, action == Action::"list", resource is Order);
+                permit(principal, action == Action::"read", resource is Order);
+            "#,
+        )
+        .expect("install list-and-read policy");
+    let security = SecurityContext {
+        principal: Principal {
+            id: "reader-1".to_string(),
+            kind: PrincipalKind::Customer,
+            role: None,
+            acting_for: None,
+            agent_type: None,
+            attributes: Default::default(),
+        },
+        context_attrs: Default::default(),
+        correlation_id: "expand-auth-before-hydration".to_string(),
+    };
+    let budget = BlobHydrationBudget::new(1024, 1024, 0, 0);
+    let attempts_before = budget.read_attempts_remaining();
+    let mut customer = serde_json::json!({
+        "entity_id": "customer-1",
+        "fields": {},
+    });
+
+    expand_entity(
+        &mut customer,
+        &[ExpandItem {
+            property: "Orders".to_string(),
+            options: None,
+        }],
+        "Customer",
+        &state,
+        &tenant,
+        &security,
+        &budget,
+    )
+    .await
+    .expect("expand list authorization");
+
+    assert_eq!(customer["Orders"].as_array().map(Vec::len), Some(1));
+    assert_eq!(budget.read_attempts_remaining(), attempts_before - 1);
+
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            r#"permit(principal, action == Action::"list", resource is Order);"#,
+        )
+        .expect("install list-only policy");
+    let denied_budget = BlobHydrationBudget::new(1024, 1024, 0, 0);
+    let denied_attempts_before = denied_budget.read_attempts_remaining();
+    let mut customer = serde_json::json!({
+        "entity_id": "customer-1",
+        "fields": {},
+    });
+    expand_entity(
+        &mut customer,
+        &[ExpandItem {
+            property: "Orders".to_string(),
+            options: None,
+        }],
+        "Customer",
+        &state,
+        &tenant,
+        &security,
+        &denied_budget,
+    )
+    .await
+    .expect("expand list authorization");
+
+    assert_eq!(customer["Orders"], serde_json::json!([]));
+    assert_eq!(
+        denied_budget.read_attempts_remaining(),
+        denied_attempts_before
+    );
+}

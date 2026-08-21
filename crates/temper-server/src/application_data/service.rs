@@ -202,6 +202,7 @@ impl<'a> GovernedApplicationDataService<'a> {
     }
 
     /// Patch through one immutable task-scoped actor.
+    #[expect(dead_code, reason = "reserved for the typed scoped-data adapter")]
     pub(crate) async fn patch_scoped(
         &self,
         tenant: &TenantId,
@@ -225,6 +226,7 @@ impl<'a> GovernedApplicationDataService<'a> {
     }
 
     /// Replace through the common actor path used by the OData adapter.
+    #[expect(dead_code, reason = "reserved for the typed module-data adapter")]
     pub(crate) async fn replace(
         &self,
         tenant: &TenantId,
@@ -237,6 +239,7 @@ impl<'a> GovernedApplicationDataService<'a> {
     }
 
     /// Replace through one immutable task-scoped actor.
+    #[expect(dead_code, reason = "reserved for the typed scoped-data adapter")]
     pub(crate) async fn replace_scoped(
         &self,
         tenant: &TenantId,

@@ -45,6 +45,8 @@ impl GovernedSchemaDeploymentService<'_> {
                 let mut durable_fields = target.state.fields;
                 if let Some(fields) = durable_fields.as_object_mut() {
                     fields.remove(crate::entity_actor::SCHEMA_PIN_FIELD);
+                    super::runner::collapse_runtime_alias(fields, "Id", "id")?;
+                    super::runner::collapse_runtime_alias(fields, "Status", "status")?;
                 }
                 if target.state.sequence_nr != row.target_event.sequence_nr
                     || canonical_json_object(&durable_fields)? != row.canonical_state_json

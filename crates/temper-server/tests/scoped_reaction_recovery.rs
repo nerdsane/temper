@@ -53,6 +53,10 @@ fn scoped_state(
         .activate_scoped_bundle(tenant, scope, digest, None)
         .expect("scoped bundle should activate");
     let mut state = ServerState::from_registry(ActorSystem::new("scoped-reaction"), registry);
+    state
+        .authz
+        .reload_tenant_policies(tenant.as_str(), "permit(principal, action, resource);")
+        .expect("scoped reaction fixture policy should parse");
     state.set_storage_stack(StorageStack::from_sim(store, None));
     state.rebuild_reaction_dispatcher();
     state

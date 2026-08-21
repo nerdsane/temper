@@ -186,19 +186,12 @@ impl ApplicationDataInvocation {
         operation: &str,
         fields: &serde_json::Value,
     ) -> Result<(), ModuleDataError> {
-        let agent = crate::request_context::AgentContext {
-            security_ctx: Some(self.authority.security.clone()),
-            agent_id: Some(self.authority.security.principal.id.clone()),
-            ..crate::request_context::AgentContext::default()
-        };
         crate::odata::rate_limit::enforce_commons_write_rate_limit(
             &self.state,
             &self.authority.tenant,
             short_type(entity_type),
             crate::odata::rate_limit::owner_id_from_fields(fields),
-            &axum::http::HeaderMap::new(),
-            &agent,
-            None,
+            &self.authority.security,
         )
         .await
         .map_err(|response| {

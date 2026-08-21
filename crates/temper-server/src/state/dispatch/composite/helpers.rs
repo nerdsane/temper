@@ -380,7 +380,10 @@ pub(super) fn composite_batch_persistence_error(error: PersistenceError) -> Disp
 
 pub(super) fn composite_storage_cap_error(error: CommonsStorageCapError) -> DispatchError {
     match error {
-        CommonsStorageCapError::Exceeded(_) => DispatchError::QuotaExceeded(error.to_string()),
+        CommonsStorageCapError::Exceeded(_)
+        | CommonsStorageCapError::ReservationCapacityExhausted => {
+            DispatchError::QuotaExceeded(error.to_string())
+        }
         CommonsStorageCapError::OwnerSuspended(_) => DispatchError::AuthzDenied(error.to_string()),
         CommonsStorageCapError::MissingAttribution(_) | CommonsStorageCapError::Internal(_) => {
             DispatchError::Internal(error.to_string())

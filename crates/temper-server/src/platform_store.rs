@@ -203,6 +203,17 @@ pub trait PlatformStore: Send + Sync {
     /// Load all pending decisions (newest first, up to `limit`).
     async fn load_pending_decisions(&self, limit: usize) -> Result<Vec<String>, String>;
 
+    /// Load approved decisions whose approved scope names `session_id`.
+    ///
+    /// Backs session-grant validation (ADR-0157): a caller-asserted session id
+    /// becomes a Cedar input only when an approved decision binds that session
+    /// to the asserting principal.
+    async fn load_approved_session_decisions(
+        &self,
+        tenant: &str,
+        session_id: &str,
+    ) -> Result<Vec<String>, String>;
+
     // ── WASM modules ─────────────────────────────────────────────────
 
     /// Load all WASM modules for a tenant.
@@ -440,6 +451,16 @@ impl PlatformStore for TursoEventStore {
 
     async fn load_pending_decisions(&self, limit: usize) -> Result<Vec<String>, String> {
         self.load_pending_decisions(limit as i64)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn load_approved_session_decisions(
+        &self,
+        tenant: &str,
+        session_id: &str,
+    ) -> Result<Vec<String>, String> {
+        self.load_approved_session_decisions(tenant, session_id)
             .await
             .map_err(|e| e.to_string())
     }
@@ -700,6 +721,16 @@ impl PlatformStore for PostgresEventStore {
 
     async fn load_pending_decisions(&self, limit: usize) -> Result<Vec<String>, String> {
         self.load_pending_decisions(limit as i64)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn load_approved_session_decisions(
+        &self,
+        tenant: &str,
+        session_id: &str,
+    ) -> Result<Vec<String>, String> {
+        self.load_approved_session_decisions(tenant, session_id)
             .await
             .map_err(|e| e.to_string())
     }
@@ -1233,6 +1264,36 @@ mod sim_platform_store {
                 .values()
                 .rev()
                 .take(limit)
+                .map(|(_, _, data)| data.clone())
+                .collect())
+        }
+
+        async fn load_approved_session_decisions(
+            &self,
+            tenant: &str,
+            session_id: &str,
+        ) -> Result<Vec<String>, String> {
+            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+
+            let prob = inner.faults.decision_read_failure_prob;
+            if inner.rng.chance(prob) {
+                return Err("SimPlatformStore: injected decision read failure".into());
+            }
+
+            Ok(inner
+                .pending_decisions
+                .values()
+                .filter(|(row_tenant, status, _)| row_tenant == tenant && status == "approved")
+                .filter(|(_, _, data)| {
+                    serde_json::from_str::<serde_json::Value>(data)
+                        .ok()
+                        .and_then(|v| {
+                            v.pointer("/approved_scope/session_id")
+                                .and_then(|s| s.as_str())
+                                .map(|s| s == session_id)
+                        })
+                        .unwrap_or(false)
+                })
                 .map(|(_, _, data)| data.clone())
                 .collect())
         }

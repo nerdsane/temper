@@ -155,8 +155,14 @@ async fn capture_profile_body(
         }
     };
 
+    // `encode` is prost's serializer (pprof's `prost-codec` feature); it emits the
+    // same pprof protobuf wire format that protobuf-rs `write_to_vec` did — both
+    // codecs are generated from the same `profile.proto`, so the upload stays
+    // wire-compatible (ARN-169). Not byte-identical: pprof builds its string table
+    // from a HashSet, so output ordering already varies run to run under either
+    // codec.
     let mut body = Vec::new();
-    if let Err(e) = profile.write_to_vec(&mut body) {
+    if let Err(e) = profile.encode(&mut body) {
         record_capture_error(profile_type, mode, "pprof_serialize");
         return Err(format!("pprof serialize failed: {e}"));
     }
@@ -174,7 +180,7 @@ async fn capture_profile_body(
 }
 
 fn non_empty_env(var_name: &str) -> Option<String> {
-    std::env::var(var_name)
+    std::env::var(var_name) // determinism-ok: observability config, read outside simulation
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())

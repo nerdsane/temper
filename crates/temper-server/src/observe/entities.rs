@@ -3,19 +3,19 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use serde::Deserialize;
+use temper_authz::AuthenticatedRequestContext;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::instrument;
 
-use crate::authz::{observe_tenant_scope, require_observe_auth};
+use crate::authz::{observe_tenant_scope, require_authenticated_context, require_observe_auth};
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::entity_actor::{EntityEvent, EntityMsg, EntityResponse};
-use crate::odata::extract_tenant;
 use crate::state::ServerState;
 
 use super::{EntityInstanceSummary, EventStreamParams};
@@ -25,10 +25,11 @@ use super::{EntityInstanceSummary, EventStreamParams};
 /// Returns deduplicated entities with their current state, sorted newest first.
 pub(crate) async fn handle_list_entities(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_entities", "Entity")?;
-    let tenant_scope = observe_tenant_scope(&state, &headers)?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_entities", "Entity")?;
+    let tenant_scope = observe_tenant_scope(authenticated);
     let registry = state.actor_registry.read().unwrap(); // ci-ok: infallible lock
     let cache = state.entity_state_cache.lock().unwrap(); // ci-ok: infallible lock
     let mut entities: Vec<EntityInstanceSummary> = registry
@@ -36,9 +37,7 @@ pub(crate) async fn handle_list_entities(
         .filter_map(|key| {
             // Actor keys are formatted as "{tenant}:{entity_type}:{entity_id}"
             let parts: Vec<&str> = key.splitn(3, ':').collect();
-            if let Some(ref scope) = tenant_scope
-                && parts.first() != Some(&scope.as_str())
-            {
+            if parts.first() != Some(&tenant_scope.as_str()) {
                 return None;
             }
             // Use peek() to avoid updating LRU order during a bulk listing.
@@ -71,11 +70,12 @@ pub(crate) async fn handle_list_entities(
 /// 2. Postgres event store (if configured, for inactive entities).
 pub(crate) async fn handle_get_entity_history(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path((entity_type, entity_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read", &entity_type)?;
-    let tenant = extract_tenant(&headers, &state).map_err(|(code, _)| code)?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read", &entity_type)?;
+    let tenant = authenticated.tenant().clone();
 
     // Path 1: If the actor is loaded, read events from in-memory state.
     let actor_key = format!("{tenant}:{entity_type}:{entity_id}");
@@ -179,12 +179,13 @@ pub(crate) struct EntityEventStreamParams {
 )]
 pub(crate) async fn handle_wait_for_entity_state(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path((entity_type, entity_id)): Path<(String, String)>,
     Query(params): Query<WaitForEntityStateParams>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read", &entity_type)?;
-    let tenant = extract_tenant(&headers, &state).map_err(|(code, _)| code)?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read", &entity_type)?;
+    let tenant = authenticated.tenant().clone();
     record_wait_span_identity(&tenant, &entity_type, &entity_id);
 
     let target_statuses: std::collections::BTreeSet<String> = params
@@ -303,12 +304,14 @@ async fn wait_entity_response(
 /// GET /observe/entities/{entity_type}/{entity_id}/events -- replayable SSE stream for one entity.
 pub(crate) async fn handle_entity_event_stream(
     State(state): State<ServerState>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     headers: HeaderMap,
     Path((entity_type, entity_id)): Path<(String, String)>,
     Query(params): Query<EntityEventStreamParams>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    require_observe_auth(&state, &headers, "read", &entity_type)?;
-    let tenant = extract_tenant(&headers, &state).map_err(|(code, _)| code)?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read", &entity_type)?;
+    let tenant = authenticated.tenant().clone();
     let since = headers
         .get("last-event-id")
         .and_then(|value| value.to_str().ok())
@@ -393,23 +396,21 @@ fn format_history_response(
 /// as a JSON SSE event. Supports optional `?entity_type=X&entity_id=Y` filters.
 pub(crate) async fn handle_event_stream(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Query(params): Query<EventStreamParams>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_events", "Entity")?;
-    let tenant_scope = observe_tenant_scope(&state, &headers)?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_events", "Entity")?;
+    let filter_tenant = observe_tenant_scope(authenticated).as_str().to_string();
     let rx = state.event_tx.subscribe();
     let filter_type = params.entity_type;
     let filter_id = params.entity_id;
-    let filter_tenant = tenant_scope.map(|t| t.as_str().to_string());
 
     let stream = BroadcastStream::new(rx).filter_map(move |result| {
         match result {
             Ok(change) => {
                 // Apply tenant filter.
-                if let Some(ref ft) = filter_tenant
-                    && change.tenant != *ft
-                {
+                if change.tenant != filter_tenant {
                     return None;
                 }
                 // Apply entity type/id filters.

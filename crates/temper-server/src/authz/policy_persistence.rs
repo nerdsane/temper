@@ -64,42 +64,46 @@ pub async fn persist_and_activate_policy(
     };
 
     if changed {
-        // Log a trajectory entry so the policy change is observable in the
-        // Evolution Engine dashboard and trajectory analytics.
-        let now = sim_now().to_rfc3339();
-        let entry = TrajectoryEntry {
-            timestamp: now,
-            tenant: tenant.to_string(),
-            entity_type: "_cedar".to_string(),
-            entity_id: tenant.to_string(),
-            action: "policy_saved".to_string(),
-            success: true,
-            from_status: None,
-            to_status: None,
-            error: None,
-            agent_id: Some(created_by.to_string()),
-            session_id: None,
-            authz_denied: None,
-            denied_resource: None,
-            denied_module: None,
-            source: Some(TrajectorySource::Platform),
-            spec_governed: Some(false),
-            agent_type: None,
-            request_body: None,
-            intent: None,
-            matched_policy_ids: None,
-        };
-        if !state.enqueue_trajectory_entry(entry) {
-            tracing::warn!(
-                tenant,
-                policy_id,
-                "failed to enqueue policy_saved trajectory entry"
-            );
-        }
-        tracing::info!(tenant, policy_id, created_by, "Cedar policy change logged");
+        record_policy_change(state, tenant, policy_id, created_by);
     }
 
     changed
+}
+
+/// Emit the standard trajectory record after a policy is durably committed
+/// and activated.
+pub fn record_policy_change(state: &ServerState, tenant: &str, policy_id: &str, created_by: &str) {
+    let entry = TrajectoryEntry {
+        timestamp: sim_now().to_rfc3339(),
+        tenant: tenant.to_string(),
+        entity_type: "_cedar".to_string(),
+        entity_id: tenant.to_string(),
+        action: "policy_saved".to_string(),
+        success: true,
+        from_status: None,
+        to_status: None,
+        error: None,
+        agent_id: Some(created_by.to_string()),
+        session_id: None,
+        authz_denied: None,
+        denied_resource: None,
+        denied_module: None,
+        source: Some(TrajectorySource::Platform),
+        spec_governed: Some(false),
+        agent_type: None,
+        request_body: None,
+        intent: None,
+        matched_policy_ids: None,
+        capture_seq: None,
+    };
+    if !state.enqueue_trajectory_entry(entry) {
+        tracing::warn!(
+            tenant,
+            policy_id,
+            "failed to enqueue policy_saved trajectory entry"
+        );
+    }
+    tracing::info!(tenant, policy_id, created_by, "Cedar policy change logged");
 }
 
 /// Load all persisted Cedar policies for a tenant and activate them.

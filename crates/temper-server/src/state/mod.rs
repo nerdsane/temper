@@ -29,9 +29,14 @@ pub mod trajectory;
 pub mod wasm_invocation_log;
 
 pub use admission::{AdmissionController, AdmissionOutcome, AdmissionPermit};
+pub(crate) use dispatch::authorized_http_endpoint_host;
+#[cfg(feature = "observe")]
+pub(crate) use dispatch::internal_http_capability_issuer;
 pub use dispatch::{DispatchCommand, DispatchError, DispatchExtOptions, StateTimeoutTracker};
 pub(crate) use entity_ops::validate_global_entity_id;
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
+#[cfg(feature = "observe")]
+pub(crate) use file_reads::{BatchTextReadError, validate_batch_text_ids};
 pub use file_reads::{IndexedFileStreamRead, TextFileReadResult, TextFileVersionReadResult};
 pub(crate) use file_writes::FileStreamContentError;
 pub use metrics::MetricsCollector;
@@ -42,6 +47,10 @@ pub use pending_decisions::{
 pub use persistence::WasmModuleSource;
 pub use policy_suggestions::PolicySuggestionEngine;
 pub use published_artifacts::PublishFileArtifactRequest;
+#[cfg(feature = "observe")]
+pub(crate) use published_artifacts::{
+    PUBLISH_ARTIFACT_STALE_AUTHORIZATION, PublishArtifactAuthorization,
+};
 pub(crate) use query_projection_queue::{ProjectionEnqueueOutcome, QueryProjectionWriteQueue};
 pub use trajectory::{TrajectoryEntry, TrajectorySource};
 pub use wasm_invocation_log::WasmInvocationEntry;
@@ -69,6 +78,7 @@ use crate::adapters::AdapterRegistry;
 use crate::entity_actor::{EntityMsg, SnapshotWriteQueue};
 use crate::events::EntityStateChange;
 use crate::idempotency::IdempotencyCache;
+use crate::internal_invocation::InternalInvocationCredentialStore;
 use crate::ots_trajectory_outbox::OtsTrajectoryOutbox;
 use crate::registry::SpecRegistry;
 use crate::secrets::vault::SecretsVault;
@@ -291,6 +301,33 @@ fn env_local_tdata_hosts() -> BTreeSet<String> {
     hosts
 }
 
+/// Tenants that have opted into exporting raw LLM content to telemetry, loaded
+/// once at startup from `TEMPER_LLM_CONTENT_EXPORT_TENANTS` (comma-separated
+/// tenant ids; the literal `*` opts in every tenant). Empty by default, so
+/// content is redacted for every tenant unless explicitly opted in. See
+/// ADR-0166.
+fn env_llm_content_export_tenants() -> BTreeSet<String> {
+    let configured = std::env::var("TEMPER_LLM_CONTENT_EXPORT_TENANTS"); // determinism-ok: read once at startup
+    parse_llm_content_export_tenants(configured.as_deref().unwrap_or(""))
+}
+
+/// Parse the opt-in list. Split out from the env read so the policy is testable
+/// without mutating process environment (which races across parallel tests).
+fn parse_llm_content_export_tenants(raw: &str) -> BTreeSet<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether `tenant` is opted into raw LLM content export. Redact-by-default: an
+/// empty set exports for nobody. Split out from [`ServerState::export_llm_content`]
+/// so the decision can be tested without building a whole server state.
+fn tenant_exports_llm_content(opted_in: &BTreeSet<String>, tenant: &str) -> bool {
+    opted_in.contains("*") || opted_in.contains(tenant)
+}
+
 fn state_cache_budget() -> usize {
     static STATE_CACHE_BUDGET: OnceLock<usize> = OnceLock::new();
     *STATE_CACHE_BUDGET.get_or_init(|| env_usize("TEMPER_STATE_CACHE_BUDGET", 10_000))
@@ -353,6 +390,13 @@ pub struct QueryProjectionReplayParityDrift {
 #[derive(Clone)]
 // ADR-0025 Phase 4: remove record_store field after IOA entity migration complete
 pub struct ServerState {
+    /// Capture losses this server could not record against any session.
+    ///
+    /// Read by conformance checking: a non-zero count means some stored
+    /// session is missing rows and nothing durable says which, so no report
+    /// from this server can claim to have seen a whole run.
+    pub(crate) capture_health: crate::trajectory_outbox::CaptureHealth,
+
     /// The actor system for spawning and managing legacy in-memory entity actors.
     pub actor_system: Arc<ActorSystem>,
     /// Optional PG-backed actor system. When configured and an entity type is in
@@ -387,7 +431,7 @@ pub struct ServerState {
     /// Runtime data directory for persisted local metadata (e.g. specs registry).
     pub data_dir: std::path::PathBuf,
     /// Agent hints learned from trajectory analysis, keyed by action name.
-    pub agent_hints: Arc<RwLock<BTreeMap<String, String>>>,
+    pub agent_hints: Arc<RwLock<BTreeMap<TenantId, BTreeMap<String, String>>>>,
     /// Cedar ABAC authorization engine.
     pub authz: Arc<AuthzEngine>,
     /// Multi-tenant specification registry (shared, mutable for live registration).
@@ -475,11 +519,17 @@ pub struct ServerState {
     pub eventual_tracker: Arc<RwLock<crate::eventual_invariants::EventualInvariantTracker>>,
     /// Idempotency cache for deduplicating agent retries.
     pub idempotency_cache: Arc<IdempotencyCache>,
+    /// Bounded, single-use credentials for authenticated internal HTTP re-entry.
+    pub internal_invocation_credentials: InternalInvocationCredentialStore,
     /// Optional encrypted secrets vault for per-tenant secret management.
     /// Broadcast channel for new pending decisions (SSE subscriptions).
     pub pending_decision_tx: Arc<tokio::sync::broadcast::Sender<PendingDecision>>,
     /// Per-tenant Cedar policy text (tenant -> policy text).
     pub tenant_policies: Arc<RwLock<BTreeMap<String, String>>>,
+    /// Serializes approval commit/activation so concurrent approvals cannot
+    /// replace one another with policy text derived from a stale cache.
+    #[cfg(feature = "observe")]
+    pub(crate) policy_approval_lock: Arc<tokio::sync::Mutex<()>>,
     /// Tenants installed in commons mode. Collection creates for these tenants
     /// must pass Cedar so commons guardrail forbids apply to direct OData
     /// writes as well as bound actions and composite sub-writes.
@@ -496,6 +546,9 @@ pub struct ServerState {
     /// writes; storage cap enforcement prefers freshness over narrow retention.
     pub(crate) commons_storage_projection_cache:
         Arc<Mutex<BTreeMap<String, storage_caps::CommonsStorageProjection>>>,
+    /// Pending owner-byte reservations held by admitted raw Blob uploads.
+    commons_storage_reservations:
+        Arc<Mutex<BTreeMap<String, storage_caps::CommonsStorageReservationEntry>>>,
     /// Coarse commons-mode write guardrail lock.
     ///
     /// Held from preflight through persistence for commons writes so exact
@@ -503,6 +556,9 @@ pub struct ServerState {
     /// between "check" and "write" while cross-actor transactions are still
     /// being built out.
     pub(crate) commons_write_guardrail_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Weighted declared-byte admission for disk-backed raw Blob ingest.
+    /// State ownership permits deterministic capacity injection in simulation.
+    pub(crate) raw_blob_ingest_budget: crate::blob_store::BlobIngestBudget,
     pub secrets_vault: Option<Arc<SecretsVault>>,
     /// Broadcast channel for agent progress events (SSE subscriptions).
     /// // determinism-ok: broadcast channel for external observation only
@@ -554,6 +610,12 @@ pub struct ServerState {
     /// Public hostnames owned by this process that may use in-process TData
     /// dispatch from WASM guests instead of leaving through the public edge.
     pub(crate) local_tdata_hosts: Arc<BTreeSet<String>>,
+    /// Tenants that have opted into exporting raw LLM content (prompts,
+    /// completions, system instructions, tool arguments/results) to the
+    /// telemetry backend. Loaded once from `TEMPER_LLM_CONTENT_EXPORT_TENANTS`.
+    /// Empty by default: every tenant is redacted unless explicitly opted in.
+    /// See ADR-0166.
+    pub(crate) llm_content_export_tenants: Arc<BTreeSet<String>>,
 }
 
 /// Install a one-time hook so liveness violations surfaced by temper-spec
@@ -575,6 +637,16 @@ impl ServerState {
         if let Ok(mut tenants) = self.commons_guardrail_tenants.write() {
             tenants.insert(tenant.to_string());
         }
+    }
+
+    /// Whether `tenant` may export raw LLM content (prompts, completions,
+    /// system instructions, tool arguments/results) to the telemetry backend.
+    ///
+    /// Redact-by-default: content is only exported for tenants listed in
+    /// `TEMPER_LLM_CONTENT_EXPORT_TENANTS` (or when it contains the wildcard
+    /// `*`). Every other tenant is redacted. See ADR-0166.
+    pub fn export_llm_content(&self, tenant: &str) -> bool {
+        tenant_exports_llm_content(&self.llm_content_export_tenants, tenant)
     }
 
     /// Whether commons-mode write guardrails are active for a tenant.
@@ -797,6 +869,7 @@ impl ServerState {
         let (agent_progress_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
         let (observe_refresh_tx, _) = tokio::sync::broadcast::channel(64); // determinism-ok: broadcast for external observation
         let state = Self {
+            capture_health: crate::trajectory_outbox::CaptureHealth::default(),
             actor_system: Arc::new(system),
             pg_actor_system: None,
             actor_backed_types: BTreeSet::new(),
@@ -812,7 +885,10 @@ impl ServerState {
             ots_trajectory_outbox: Arc::new(Mutex::new(None)),
             data_dir: std::path::PathBuf::new(),
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
-            authz: Arc::new(AuthzEngine::permissive()),
+            // Network and tenant-scoped authorization starts fail-closed.
+            // Tests/development that intentionally need a permissive tenant
+            // must install that tenant policy explicitly (ARN-230).
+            authz: Arc::new(AuthzEngine::empty()),
             registry: Arc::new(RwLock::new(SpecRegistry::new())),
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
             entity_index_hydrated: Arc::new(RwLock::new(BTreeSet::new())),
@@ -847,12 +923,17 @@ impl ServerState {
                 crate::eventual_invariants::EventualInvariantTracker::new(),
             )),
             idempotency_cache: Arc::new(IdempotencyCache::new()),
+            internal_invocation_credentials: InternalInvocationCredentialStore::runtime(),
             pending_decision_tx: Arc::new(pending_decision_tx),
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
+            #[cfg(feature = "observe")]
+            policy_approval_lock: Arc::new(tokio::sync::Mutex::new(())),
             commons_guardrail_tenants: Arc::new(RwLock::new(BTreeSet::new())),
             commons_rate_limit_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             commons_storage_projection_cache: Arc::new(Mutex::new(BTreeMap::new())),
+            commons_storage_reservations: Arc::new(Mutex::new(BTreeMap::new())),
             commons_write_guardrail_lock: Arc::new(tokio::sync::Mutex::new(())),
+            raw_blob_ingest_budget: crate::blob_store::BlobIngestBudget::runtime(),
             secrets_vault: None,
             agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
             entity_event_sequences: Arc::new(Mutex::new(BTreeMap::new())),
@@ -868,6 +949,7 @@ impl ServerState {
             http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
             workflow_spans: Arc::new(crate::workflow_tracing::WorkflowSpanRegistry::default()),
             local_tdata_hosts: Arc::new(env_local_tdata_hosts()),
+            llm_content_export_tenants: Arc::new(env_llm_content_export_tenants()),
         };
 
         // Pre-register built-in WASM modules (http_fetch for generic HTTP integrations).
@@ -1047,6 +1129,7 @@ impl ServerState {
         let (agent_progress_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
         let (observe_refresh_tx, _) = tokio::sync::broadcast::channel(64); // determinism-ok: broadcast for external observation
         let state = Self {
+            capture_health: crate::trajectory_outbox::CaptureHealth::default(),
             actor_system: Arc::new(system),
             pg_actor_system: None,
             actor_backed_types: BTreeSet::new(),
@@ -1065,7 +1148,9 @@ impl ServerState {
             ots_trajectory_outbox: Arc::new(Mutex::new(None)),
             data_dir: std::path::PathBuf::new(),
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
-            authz: Arc::new(AuthzEngine::permissive()),
+            // Missing tenant policy state is never an implicit permit-all
+            // compatibility mode (ARN-230).
+            authz: Arc::new(AuthzEngine::empty()),
             registry,
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
             entity_index_hydrated: Arc::new(RwLock::new(BTreeSet::new())),
@@ -1100,12 +1185,17 @@ impl ServerState {
                 crate::eventual_invariants::EventualInvariantTracker::new(),
             )),
             idempotency_cache: Arc::new(IdempotencyCache::new()),
+            internal_invocation_credentials: InternalInvocationCredentialStore::runtime(),
             pending_decision_tx: Arc::new(pending_decision_tx),
             tenant_policies: Arc::new(RwLock::new(BTreeMap::new())),
+            #[cfg(feature = "observe")]
+            policy_approval_lock: Arc::new(tokio::sync::Mutex::new(())),
             commons_guardrail_tenants: Arc::new(RwLock::new(BTreeSet::new())),
             commons_rate_limit_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             commons_storage_projection_cache: Arc::new(Mutex::new(BTreeMap::new())),
+            commons_storage_reservations: Arc::new(Mutex::new(BTreeMap::new())),
             commons_write_guardrail_lock: Arc::new(tokio::sync::Mutex::new(())),
+            raw_blob_ingest_budget: crate::blob_store::BlobIngestBudget::runtime(),
             secrets_vault: None,
             agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
             entity_event_sequences: Arc::new(Mutex::new(BTreeMap::new())),
@@ -1121,6 +1211,7 @@ impl ServerState {
             http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
             workflow_spans: Arc::new(crate::workflow_tracing::WorkflowSpanRegistry::default()),
             local_tdata_hosts: Arc::new(env_local_tdata_hosts()),
+            llm_content_export_tenants: Arc::new(env_llm_content_export_tenants()),
         };
         state.register_builtin_wasm_modules();
         state
@@ -1532,8 +1623,17 @@ impl ServerState {
             http_request: None,
         };
 
+        let security_ctx = agent_ctx.security_ctx.as_ref().ok_or_else(|| {
+            "blob_adapter requires the caller's authenticated security context".to_string()
+        })?;
         let wasm_result = self
-            .invoke_wasm_direct(tenant, "blob_adapter", inv_ctx, streams.clone())
+            .invoke_wasm_direct(
+                tenant,
+                "blob_adapter",
+                inv_ctx,
+                streams.clone(),
+                security_ctx,
+            )
             .await
             .map_err(|e| format!("blob_adapter download failed: {e}"))?;
 
@@ -1569,36 +1669,31 @@ impl ServerState {
         None
     }
 
-    /// Load aggregated unmet-intent failure groups from durable metadata stores.
-    ///
-    /// Uses fan-out across all tenant stores in TenantRouted mode.
-    /// Returns an empty vec when Turso is not configured.
+    /// Load aggregated unmet-intent failure groups for one tenant.
     pub async fn load_unmet_intent_rows_aggregated(
         &self,
+        tenant: &str,
     ) -> (
         Vec<temper_store_turso::UnmetIntentAggRow>,
         std::collections::BTreeMap<String, String>,
     ) {
-        let stores = self.collect_all_metadata_stores().await;
-        if stores.is_empty() {
+        let Some(store) = self.metadata_store_for_tenant(tenant).await else {
             return (Vec::new(), std::collections::BTreeMap::new());
-        }
+        };
 
         let mut failures = Vec::new();
         let mut submitted_specs = std::collections::BTreeMap::new();
 
-        for store in &stores {
-            match store.load_unmet_intent_rows().await {
-                Ok(rows) => failures.extend(rows),
-                Err(e) => {
-                    tracing::warn!(error = %e, backend = store.backend_name(), "failed to load unmet intent rows");
-                }
+        match store.load_unmet_intent_rows(tenant).await {
+            Ok(rows) => failures.extend(rows),
+            Err(e) => {
+                tracing::warn!(error = %e, backend = store.backend_name(), tenant, "failed to load unmet intent rows");
             }
-            match store.load_submit_spec_timestamps().await {
-                Ok(map) => submitted_specs.extend(map),
-                Err(e) => {
-                    tracing::warn!(error = %e, backend = store.backend_name(), "failed to load submit-spec timestamps");
-                }
+        }
+        match store.load_submit_spec_timestamps(tenant).await {
+            Ok(map) => submitted_specs.extend(map),
+            Err(e) => {
+                tracing::warn!(error = %e, backend = store.backend_name(), tenant, "failed to load submit-spec timestamps");
             }
         }
         (failures, submitted_specs)
@@ -1629,50 +1724,46 @@ impl ServerState {
         counts
     }
 
-    /// Load trajectory entries from durable metadata stores.
-    ///
-    /// Uses fan-out across all tenant stores in TenantRouted mode.
-    pub async fn load_trajectory_entries(&self, limit: i64) -> Vec<TrajectoryEntry> {
-        let stores = self.collect_all_metadata_stores().await;
-        if stores.is_empty() {
+    /// Load trajectory entries owned by one tenant.
+    pub async fn load_trajectory_entries(&self, tenant: &str, limit: i64) -> Vec<TrajectoryEntry> {
+        let Some(store) = self.metadata_store_for_tenant(tenant).await else {
             return Vec::new();
-        }
+        };
 
         let mut all_entries = Vec::new();
-        for store in &stores {
-            match store.load_recent_trajectories(limit).await {
-                Ok(rows) => {
-                    all_entries.extend(rows.into_iter().map(|r| TrajectoryEntry {
-                        timestamp: r.created_at,
-                        tenant: r.tenant,
-                        entity_type: r.entity_type,
-                        entity_id: r.entity_id,
-                        action: r.action,
-                        success: r.success,
-                        from_status: r.from_status,
-                        to_status: r.to_status,
-                        error: r.error,
-                        agent_id: r.agent_id,
-                        session_id: r.session_id,
-                        authz_denied: r.authz_denied,
-                        denied_resource: r.denied_resource,
-                        denied_module: r.denied_module,
-                        source: r.source.as_deref().and_then(|s| match s {
-                            "Entity" => Some(TrajectorySource::Entity),
-                            "Platform" => Some(TrajectorySource::Platform),
-                            "Authz" => Some(TrajectorySource::Authz),
-                            _ => None,
-                        }),
-                        spec_governed: r.spec_governed,
-                        agent_type: None,
-                        request_body: r.request_body.and_then(|s| serde_json::from_str(&s).ok()),
-                        intent: r.intent,
-                        matched_policy_ids: r.matched_policy_ids,
-                    }));
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, backend = store.backend_name(), "failed to load trajectories");
-                }
+        match store.load_recent_trajectories(tenant, limit).await {
+            Ok(rows) => {
+                all_entries.extend(rows.into_iter().map(|r| TrajectoryEntry {
+                    timestamp: r.created_at,
+                    tenant: r.tenant,
+                    entity_type: r.entity_type,
+                    entity_id: r.entity_id,
+                    action: r.action,
+                    success: r.success,
+                    from_status: r.from_status,
+                    to_status: r.to_status,
+                    error: r.error,
+                    agent_id: r.agent_id,
+                    session_id: r.session_id,
+                    authz_denied: r.authz_denied,
+                    denied_resource: r.denied_resource,
+                    denied_module: r.denied_module,
+                    source: r.source.as_deref().and_then(|s| match s {
+                        "Entity" => Some(TrajectorySource::Entity),
+                        "Platform" => Some(TrajectorySource::Platform),
+                        "Authz" => Some(TrajectorySource::Authz),
+                        _ => None,
+                    }),
+                    spec_governed: r.spec_governed,
+                    agent_type: None,
+                    request_body: r.request_body.and_then(|s| serde_json::from_str(&s).ok()),
+                    intent: r.intent,
+                    matched_policy_ids: r.matched_policy_ids,
+                    capture_seq: r.capture_seq,
+                }));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, backend = store.backend_name(), tenant, "failed to load trajectories");
             }
         }
         // Sort by timestamp descending and limit
@@ -1712,7 +1803,58 @@ impl ServerState {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_local_tdata_host;
+    use super::{
+        normalize_local_tdata_host, parse_llm_content_export_tenants, tenant_exports_llm_content,
+    };
+
+    /// The redaction gate is only as good as the policy that opens it. An empty
+    /// or unset opt-in list must export for nobody — a bug that flipped this to
+    /// default-allow would leak every tenant's prompts while every redaction unit
+    /// test stayed green.
+    #[test]
+    fn llm_content_export_is_deny_by_default() {
+        let unset = parse_llm_content_export_tenants("");
+        assert!(unset.is_empty());
+        assert!(!tenant_exports_llm_content(&unset, "acme"));
+        assert!(!tenant_exports_llm_content(&unset, ""));
+
+        // Whitespace/empty entries must not be read as a tenant that opts in.
+        let blank = parse_llm_content_export_tenants(" , ,\t,");
+        assert!(blank.is_empty(), "got {blank:?}");
+        assert!(!tenant_exports_llm_content(&blank, "acme"));
+    }
+
+    #[test]
+    fn llm_content_export_opts_in_only_listed_tenants() {
+        let set = parse_llm_content_export_tenants(" acme , globex ");
+        assert!(
+            tenant_exports_llm_content(&set, "acme"),
+            "trimmed entry opts in"
+        );
+        assert!(tenant_exports_llm_content(&set, "globex"));
+        assert!(
+            !tenant_exports_llm_content(&set, "initech"),
+            "an unlisted tenant must stay redacted"
+        );
+        // Not a prefix/substring match: neighbours of a listed tenant stay out.
+        assert!(!tenant_exports_llm_content(&set, "acme2"));
+        assert!(!tenant_exports_llm_content(&set, "acm"));
+        assert!(
+            !tenant_exports_llm_content(&set, "ACME"),
+            "match is case-sensitive"
+        );
+    }
+
+    #[test]
+    fn llm_content_export_wildcard_opts_in_every_tenant() {
+        let all = parse_llm_content_export_tenants("*");
+        assert!(tenant_exports_llm_content(&all, "acme"));
+        assert!(tenant_exports_llm_content(&all, "anything-else"));
+
+        // The wildcard still applies when it arrives alongside named tenants.
+        let mixed = parse_llm_content_export_tenants("acme,*");
+        assert!(tenant_exports_llm_content(&mixed, "initech"));
+    }
 
     #[test]
     fn normalize_local_tdata_host_accepts_urls_domains_and_ports() {

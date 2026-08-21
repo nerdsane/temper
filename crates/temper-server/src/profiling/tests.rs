@@ -149,3 +149,31 @@ fn datadog_profile_event_uses_agent_intake_envelope() {
         std::env::remove_var("DD_PROFILING_ENABLED");
     }
 }
+
+#[test]
+fn pprof_profile_encodes_to_decodable_protobuf() {
+    // ARN-169: profile serialization runs through pprof's `prost-codec` feature
+    // (rather than `protobuf-codec`, which pinned the vulnerable protobuf 2.x).
+    // Both codecs are generated from the same `profile.proto`, so the emitted
+    // bytes stay valid pprof protobuf. This guards the codec itself: if a future
+    // pprof bump silently reverted the feature, `encode`/`decode` would no longer
+    // resolve to prost's trait methods and this stops compiling — and if the
+    // encoding ever produced something undecodable, it fails.
+    use pprof::protos::{Profile, ValueType};
+
+    let profile = Profile {
+        string_table: vec![String::new(), "samples".to_string(), "count".to_string()],
+        sample_type: vec![ValueType { ty: 1, unit: 2 }],
+        period: 10_000_000,
+        ..Default::default()
+    };
+
+    let mut body = Vec::new();
+    profile.encode(&mut body).expect("profile must encode");
+    assert!(!body.is_empty(), "encoded pprof profile must not be empty");
+
+    let decoded = Profile::decode(&body[..]).expect("encoded bytes must be valid pprof protobuf");
+    assert_eq!(decoded.period, 10_000_000);
+    assert_eq!(decoded.sample_type.len(), 1);
+    assert_eq!(decoded.string_table[1], "samples");
+}
