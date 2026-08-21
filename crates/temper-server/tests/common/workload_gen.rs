@@ -36,6 +36,9 @@ const TENANTS: &[&str] = &["t-alpha", "t-beta"];
 
 const APPS: &[&str] = &["project-management", "temper-fs", "agent-orchestration"];
 
+/// Maximum number of distinct tenant/app installations in one workload.
+pub const MAX_UNIQUE_INSTALLS: usize = TENANTS.len() * APPS.len();
+
 /// Entity types provided by each OS app.
 fn app_entity_types(app: &str) -> &'static [&'static str] {
     match app {
@@ -155,9 +158,30 @@ impl WorkloadGenerator {
     }
 
     fn gen_install_app(&mut self) -> WorkloadOp {
-        let tenant = self.pick(TENANTS).to_string();
-        let app = self.pick(APPS).to_string();
-        WorkloadOp::InstallApp { tenant, app }
+        let remaining: Vec<(&str, &str)> = TENANTS
+            .iter()
+            .flat_map(|tenant| APPS.iter().map(move |app| (*tenant, *app)))
+            .filter(|(tenant, app)| {
+                !self
+                    .installed_apps
+                    .get(*tenant)
+                    .is_some_and(|installed| installed.iter().any(|name| name == app))
+            })
+            .collect();
+
+        if remaining.is_empty() {
+            // Reinstall idempotence has dedicated platform/bootstrap coverage.
+            // Spend this randomized workload's bounded budget on stateful
+            // dispatches once every tenant/app pair has been installed.
+            return self.gen_dispatch();
+        }
+
+        let idx = (self.rng.next_u64() as usize) % remaining.len();
+        let (tenant, app) = remaining[idx];
+        WorkloadOp::InstallApp {
+            tenant: tenant.to_string(),
+            app: app.to_string(),
+        }
     }
 
     fn gen_dispatch(&mut self) -> WorkloadOp {
