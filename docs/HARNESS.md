@@ -577,6 +577,19 @@ most four workers, then requires a timing report from every lane. See
 [Validation lanes](validation.md) for the full coverage contract, backend
 parity setup, budgets, and profiling commands.
 
+## Local Disk Pressure
+
+Multiple build-heavy worktrees can fill a developer disk with independent
+Cargo targets. Run the dry-run-first cleanup command to inventory exact
+top-level worktree targets:
+
+```bash
+scripts/cleanup-build-artifacts.sh
+```
+
+See [Local build artifact retention](local-build-artifact-retention.md) for the
+classification rules, explicit apply options, and local/CI retention policy.
+
 ## Bypassing (Emergencies Only)
 
 ```bash
