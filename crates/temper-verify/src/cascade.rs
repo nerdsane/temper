@@ -720,13 +720,21 @@ mod tests {
 
     #[test]
     fn test_cascade_warnings_for_unverifiable_invariants() {
-        let cascade = VerificationCascade::from_ioa(ORDER_IOA)
+        const UNVERIFIABLE_IOA: &str = r#"
+[automaton]
+name = "UnverifiableEvidence"
+states = ["Open"]
+initial = "Open"
+
+[[invariant]]
+name = "RequiresUndeclaredEvidence"
+assert = "undeclared_flag"
+"#;
+        let cascade = VerificationCascade::from_ioa(UNVERIFIABLE_IOA)
             .with_sim_seeds(3)
             .with_prop_test_cases(50);
 
         let result = cascade.run();
-        // Order spec has "payment_captured" which is not a declared bool,
-        // so ShipRequiresPayment becomes Unverifiable.
         assert!(
             !result.warnings.is_empty(),
             "Should have warnings for unverifiable invariants"
@@ -735,8 +743,8 @@ mod tests {
             result
                 .warnings
                 .iter()
-                .any(|w| w.contains("ShipRequiresPayment")),
-            "Should warn about ShipRequiresPayment, got: {:?}",
+                .any(|w| w.contains("RequiresUndeclaredEvidence")),
+            "Should warn about RequiresUndeclaredEvidence, got: {:?}",
             result.warnings,
         );
     }

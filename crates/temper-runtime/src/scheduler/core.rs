@@ -32,6 +32,8 @@ pub struct SimScheduler {
     delivered: Vec<SimMessage>,
     /// Total ticks executed.
     ticks: u64,
+    /// Actors that crossed from crashed to running during the latest ticks.
+    restarted: Vec<String>,
 }
 
 impl SimScheduler {
@@ -48,6 +50,7 @@ impl SimScheduler {
             dropped: Vec::new(),
             delivered: Vec::new(),
             ticks: 0,
+            restarted: Vec::new(),
         }
     }
 
@@ -56,6 +59,30 @@ impl SimScheduler {
         self.actor_states
             .insert(actor_id.to_string(), SimActorState::Running);
         self.mailboxes.entry(actor_id.to_string()).or_default();
+    }
+
+    /// Crash one registered actor at an explicit deterministic fault point.
+    pub fn crash_actor(&mut self, actor_id: &str) {
+        let state = self
+            .actor_states
+            .get_mut(actor_id)
+            .unwrap_or_else(|| panic!("cannot crash unknown actor '{actor_id}'"));
+        *state = SimActorState::Crashed;
+    }
+
+    /// Restart one crashed actor and report the recovery edge to the harness.
+    pub fn restart_actor(&mut self, actor_id: &str) {
+        let state = self
+            .actor_states
+            .get_mut(actor_id)
+            .unwrap_or_else(|| panic!("cannot restart unknown actor '{actor_id}'"));
+        assert_eq!(
+            *state,
+            SimActorState::Crashed,
+            "actor must be crashed first"
+        );
+        *state = SimActorState::Running;
+        self.restarted.push(actor_id.to_string());
     }
 
     /// Send a message. It enters the pending queue and may be subject to faults.
@@ -162,7 +189,8 @@ impl SimScheduler {
 
                         // Maybe restart the actor
                         if self.rng.chance(self.fault_config.actor_restart_prob) {
-                            self.actor_states.insert(to, SimActorState::Running);
+                            self.actor_states.insert(to.clone(), SimActorState::Running);
+                            self.restarted.push(to);
                         }
                     }
                     None => {
@@ -227,6 +255,11 @@ impl SimScheduler {
     /// Get total messages dropped.
     pub fn total_dropped(&self) -> usize {
         self.dropped.len()
+    }
+
+    /// Drain actor IDs that restarted since the previous observation.
+    pub fn take_restarted_actors(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.restarted)
     }
 
     /// Get the delivered messages log (for assertions).

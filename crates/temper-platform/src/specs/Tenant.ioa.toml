@@ -16,6 +16,18 @@ to = "Active"
 kind = "internal"
 
 [[action]]
+name = "BeginDeployment"
+from = ["Pending", "Suspended"]
+to = "Deploying"
+kind = "internal"
+
+[[action]]
+name = "CompleteDeployment"
+from = ["Deploying"]
+to = "Active"
+kind = "internal"
+
+[[action]]
 name = "Suspend"
 from = ["Active"]
 to = "Suspended"

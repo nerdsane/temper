@@ -1,10 +1,8 @@
 //! Simulation handler for entity actors.
 //!
-//! [`EntityActorHandler`] wraps a real [`TransitionTable`] and [`EntityState`],
-//! implementing [`SimActorHandler`] for deterministic simulation. The
-//! `handle_message()` method is the synchronous subset of the production
-//! `EntityActor::handle()`: same `evaluate()` call, same effect application,
-//! same event recording. No async, no persistence, no telemetry.
+//! [`EntityActorHandler`] wraps a real [`TransitionTable`] and [`EntityState`].
+//! Its [`SimActorHandler`] path shares production evaluation, effects, and event
+//! recording without async persistence or telemetry.
 
 use std::sync::Arc;
 
@@ -15,11 +13,14 @@ use temper_spec::automaton::StateVar;
 use super::effects::ScheduledAction;
 use super::types::EntityState;
 
+mod replay;
+
 /// Simulation handler wrapping a real TransitionTable.
 ///
 /// This is the bridge that lets [`SimActorSystem`] exercise the identical
 /// `TransitionTable::evaluate()` path used in production, with deterministic
 /// clock and ID generation.
+#[derive(Clone)]
 pub struct EntityActorHandler {
     table: Arc<TransitionTable>,
     state: EntityState,
@@ -28,21 +29,32 @@ pub struct EntityActorHandler {
     last_custom_effects: Vec<String>,
     /// Scheduled actions from the last successful action (timer requests).
     last_scheduled_actions: Vec<ScheduledAction>,
+    /// Deterministic durable journal used to reconstruct volatile state.
+    journal: Vec<super::types::EntityEvent>,
+    /// Counter declarations whose absent map entry denotes the spec's zero initial value.
+    declared_counters: std::collections::BTreeSet<String>,
+    /// Boolean declarations whose absent map entry denotes the spec's false initial value.
+    declared_bools: std::collections::BTreeSet<String>,
 }
 
 impl EntityActorHandler {
-    /// Create a new simulation handler for an entity.
-    pub fn new(
-        entity_type: impl Into<String>,
-        entity_id: impl Into<String>,
-        table: Arc<TransitionTable>,
-    ) -> Self {
-        let entity_type = entity_type.into();
-        let entity_id = entity_id.into();
+    /// Stable fingerprint of simulation-visible derived state, excluding journal history.
+    pub fn state_fingerprint(&self) -> String {
+        serde_json::to_string(&(
+            &self.state.status,
+            self.state.item_count,
+            &self.state.counters,
+            &self.state.booleans,
+            &self.state.lists,
+            &self.state.fields,
+        ))
+        .expect("entity simulation state must serialize")
+    }
+    fn fresh_state(entity_type: String, entity_id: String, table: &TransitionTable) -> EntityState {
         let mut fields = serde_json::json!({});
         super::effects::canonicalize_entity_fields(&mut fields, &entity_id, &table.initial_state);
 
-        let state = EntityState {
+        EntityState {
             entity_type,
             entity_id,
             status: table.initial_state.clone(),
@@ -57,7 +69,18 @@ impl EntityActorHandler {
             last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
-        };
+        }
+    }
+
+    /// Create a new simulation handler for an entity.
+    pub fn new(
+        entity_type: impl Into<String>,
+        entity_id: impl Into<String>,
+        table: Arc<TransitionTable>,
+    ) -> Self {
+        let entity_type = entity_type.into();
+        let entity_id = entity_id.into();
+        let state = Self::fresh_state(entity_type, entity_id, &table);
 
         Self {
             table,
@@ -65,7 +88,21 @@ impl EntityActorHandler {
             invariants: Vec::new(),
             last_custom_effects: Vec::new(),
             last_scheduled_actions: Vec::new(),
+            journal: Vec::new(),
+            declared_counters: std::collections::BTreeSet::new(),
+            declared_bools: std::collections::BTreeSet::new(),
         }
+    }
+
+    fn record_committed_event(&mut self, event: super::types::EntityEvent) {
+        assert!(
+            self.journal.len() < super::types::MAX_EVENTS_SINCE_SNAPSHOT,
+            "simulation journal budget exhausted"
+        );
+        let sequence_nr = self.state.sequence_nr.saturating_add(1);
+        self.journal.push(event.clone());
+        self.state.record_committed_event(event, sequence_nr);
+        assert_eq!(self.journal.len(), self.state.total_event_count);
     }
 
     /// Build an [`EvalContext`] from the current entity state.
@@ -86,17 +123,30 @@ impl EntityActorHandler {
             .filter(|state| is_declared_bool(state))
             .map(|state| state.name.clone())
             .collect();
+        self.declared_counters = automaton
+            .state
+            .iter()
+            .filter(|state| state.var_type == "counter")
+            .map(|state| state.name.clone())
+            .collect();
+        self.declared_bools = declared_bools.clone();
 
         self.invariants = automaton
             .invariants
             .iter()
-            .filter_map(|inv| {
-                let assert_kind = parse_assert_expr(&inv.assert, &declared_bools)?;
-                Some(SpecInvariant {
+            .map(|inv| {
+                let assert_kind =
+                    parse_assert_expr(&inv.assert, &declared_bools).unwrap_or_else(|| {
+                        panic!(
+                            "invariant '{}' expression {:?} is not simulation-checkable",
+                            inv.name, inv.assert
+                        )
+                    });
+                SpecInvariant {
                     name: inv.name.clone(),
                     when: inv.when.clone(),
                     assert: assert_kind,
-                })
+                }
             })
             .collect();
 
@@ -161,8 +211,7 @@ impl EntityActorHandler {
             return false;
         }
         self.state = prospective;
-        self.state.sequence_nr = self.state.sequence_nr.saturating_add(1);
-        self.state.push_event_bounded(event);
+        self.record_committed_event(event);
         true
     }
 
@@ -181,8 +230,7 @@ impl EntityActorHandler {
             reference_evidence,
         );
         if let Some(event) = result.event {
-            self.state.sequence_nr = self.state.sequence_nr.saturating_add(1);
-            self.state.push_event_bounded(event);
+            self.record_committed_event(event);
         }
         result.success
     }
@@ -197,6 +245,42 @@ fn parse_assert_expr(
     expr: &str,
     declared_bools: &std::collections::BTreeSet<String>,
 ) -> Option<SpecAssert> {
+    if let Some(var) = expr.trim().strip_prefix("is_true ") {
+        return declared_bools
+            .contains(var)
+            .then(|| SpecAssert::BoolRequired {
+                var: var.to_string(),
+                expect: true,
+            });
+    }
+    if let Some(var) = expr
+        .trim()
+        .strip_suffix(" != ''")
+        .or_else(|| expr.trim().strip_suffix(" != \"\""))
+        .or_else(|| expr.trim().strip_suffix(" !="))
+    {
+        return Some(SpecAssert::StringNonEmpty {
+            var: var.trim().to_string(),
+        });
+    }
+    let parts: Vec<_> = expr.split_whitespace().collect();
+    if let [left, op, right] = parts.as_slice()
+        && right.parse::<usize>().is_err()
+    {
+        let op = match *op {
+            ">" => CompareOp::Gt,
+            ">=" => CompareOp::Gte,
+            "<" => CompareOp::Lt,
+            "<=" => CompareOp::Lte,
+            "==" => CompareOp::Eq,
+            _ => return None,
+        };
+        return Some(SpecAssert::CounterCompareCounter {
+            left: (*left).to_string(),
+            op,
+            right: (*right).to_string(),
+        });
+    }
     use temper_spec::automaton::parse_assert_expr as parse;
     translate_parsed(parse(expr)?, declared_bools)
 }
@@ -254,22 +338,28 @@ fn is_declared_bool(state: &StateVar) -> bool {
 
 impl SimActorHandler for EntityActorHandler {
     fn init(&mut self) -> Result<serde_json::Value, String> {
-        // Reset to initial state
-        self.state.status = self.table.initial_state.clone();
-        self.state.item_count = 0;
-        self.state.counters.clear();
-        self.state.booleans.clear();
-        self.state.lists.clear();
-        self.state.events.clear();
-        self.state.total_event_count = 0;
-        self.state.events_since_snapshot = 0;
-        self.state.last_snapshot_sequence_nr = 0;
-        self.state.sequence_nr = 0;
-        self.state.fields = serde_json::json!({
-            "Id": self.state.entity_id,
-            "Status": self.state.status,
-        });
+        self.state = Self::fresh_state(
+            self.state.entity_type.clone(),
+            self.state.entity_id.clone(),
+            &self.table,
+        );
+        self.journal.clear();
 
+        Ok(serde_json::to_value(&self.state).unwrap_or_default())
+    }
+
+    fn restart(&mut self) -> Result<serde_json::Value, String> {
+        let journal = self.journal.clone();
+        let total_event_count = journal.len();
+        self.state = Self::fresh_state(
+            self.state.entity_type.clone(),
+            self.state.entity_id.clone(),
+            &self.table,
+        );
+        replay::rebuild(&mut self.state, &self.table, journal)?;
+        self.last_custom_effects.clear();
+        self.last_scheduled_actions.clear();
+        assert_eq!(self.state.total_event_count, total_event_count);
         Ok(serde_json::to_value(&self.state).unwrap_or_default())
     }
 
@@ -287,7 +377,7 @@ impl SimActorHandler for EntityActorHandler {
             self.last_custom_effects = result.custom_effects;
             self.last_scheduled_actions = result.scheduled_actions;
             if let Some(event) = result.event {
-                self.state.push_event_bounded(event);
+                self.record_committed_event(event);
             }
             Ok(serde_json::to_value(&self.state).unwrap_or_default())
         } else {
@@ -307,6 +397,10 @@ impl SimActorHandler for EntityActorHandler {
 
     fn event_count(&self) -> usize {
         self.state.total_event_count
+    }
+
+    fn event_sequence(&self) -> u64 {
+        self.state.sequence_nr
     }
 
     fn valid_actions(&self) -> Vec<String> {
@@ -335,7 +429,32 @@ impl SimActorHandler for EntityActorHandler {
     }
 
     fn bool_field(&self, var: &str) -> Option<bool> {
-        self.state.booleans.get(var).copied()
+        self.state
+            .booleans
+            .get(var)
+            .copied()
+            .or_else(|| self.declared_bools.contains(var).then_some(false))
+    }
+
+    fn counter_value(&self, var: &str) -> Option<usize> {
+        if var == "items" {
+            Some(self.state.item_count)
+        } else {
+            self.state
+                .counters
+                .get(var)
+                .copied()
+                .or_else(|| self.declared_counters.contains(var).then_some(0))
+        }
+    }
+
+    fn string_value(&self, var: &str) -> Option<String> {
+        self.state
+            .fields
+            .get(var)
+            .or_else(|| self.state.fields.get(to_pascal_case(var)))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
     }
 
     fn pending_callbacks(&self) -> Vec<String> {
@@ -343,145 +462,21 @@ impl SimActorHandler for EntityActorHandler {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use temper_runtime::scheduler::install_deterministic_context;
-
-    const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
-
-    fn order_table() -> Arc<TransitionTable> {
-        Arc::new(TransitionTable::from_ioa_source(ORDER_IOA))
+fn to_pascal_case(name: &str) -> String {
+    let mut result = String::with_capacity(name.len());
+    let mut uppercase = true;
+    for character in name.chars() {
+        if character == '_' {
+            uppercase = true;
+        } else if uppercase {
+            result.extend(character.to_uppercase());
+            uppercase = false;
+        } else {
+            result.push(character);
+        }
     }
-
-    #[test]
-    fn handler_starts_in_draft() {
-        let (_guard, _clock, _id_gen) = install_deterministic_context(42);
-        let mut handler = EntityActorHandler::new("Order", "o1", order_table());
-        handler.init().unwrap();
-        assert_eq!(handler.current_status(), "Draft");
-        assert_eq!(handler.current_item_count(), 0);
-        assert_eq!(handler.event_count(), 0);
-    }
-
-    #[test]
-    fn handler_add_item_then_submit() {
-        let (_guard, clock, _id_gen) = install_deterministic_context(42);
-        let mut handler = EntityActorHandler::new("Order", "o1", order_table());
-        handler.init().unwrap();
-
-        // AddItem
-        clock.advance();
-        let result = handler.handle_message("AddItem", r#"{"ProductId":"laptop"}"#);
-        assert!(result.is_ok());
-        assert_eq!(handler.current_status(), "Draft");
-        assert_eq!(handler.current_item_count(), 1);
-        assert_eq!(handler.event_count(), 1);
-
-        // SubmitOrder
-        clock.advance();
-        let result = handler.handle_message("SubmitOrder", "{}");
-        assert!(result.is_ok());
-        assert_eq!(handler.current_status(), "Submitted");
-        assert_eq!(handler.event_count(), 2);
-    }
-
-    #[test]
-    fn handler_cannot_submit_empty() {
-        let (_guard, _clock, _id_gen) = install_deterministic_context(42);
-        let mut handler = EntityActorHandler::new("Order", "o1", order_table());
-        handler.init().unwrap();
-
-        let result = handler.handle_message("SubmitOrder", "{}");
-        assert!(result.is_err());
-        assert_eq!(handler.current_status(), "Draft");
-    }
-
-    #[test]
-    fn handler_valid_actions_from_draft() {
-        let (_guard, _clock, _id_gen) = install_deterministic_context(42);
-        let mut handler = EntityActorHandler::new("Order", "o1", order_table());
-        handler.init().unwrap();
-
-        let actions = handler.valid_actions();
-        assert!(actions.contains(&"AddItem".to_string()), "got: {actions:?}");
-        assert!(
-            actions.contains(&"CancelOrder".to_string()),
-            "got: {actions:?}"
-        );
-        // SubmitOrder requires items > 0, so not valid with 0 items
-        assert!(
-            !actions.contains(&"SubmitOrder".to_string()),
-            "got: {actions:?}"
-        );
-    }
-
-    #[test]
-    fn handler_valid_actions_after_add_item() {
-        let (_guard, clock, _id_gen) = install_deterministic_context(42);
-        let mut handler = EntityActorHandler::new("Order", "o1", order_table());
-        handler.init().unwrap();
-
-        clock.advance();
-        handler.handle_message("AddItem", "{}").unwrap();
-
-        let actions = handler.valid_actions();
-        assert!(actions.contains(&"AddItem".to_string()));
-        assert!(
-            actions.contains(&"SubmitOrder".to_string()),
-            "got: {actions:?}"
-        );
-        assert!(
-            actions.contains(&"RemoveItem".to_string()),
-            "got: {actions:?}"
-        );
-    }
-
-    #[test]
-    fn handler_with_ioa_invariants_parses_spec() {
-        let (_guard, _clock, _id_gen) = install_deterministic_context(42);
-        let handler =
-            EntityActorHandler::new("Order", "o1", order_table()).with_ioa_invariants(ORDER_IOA);
-
-        let invariants = handler.spec_invariants();
-        assert!(
-            !invariants.is_empty(),
-            "should have parsed invariants from IOA spec"
-        );
-
-        let names: Vec<&str> = invariants.iter().map(|i| i.name.as_str()).collect();
-        assert!(
-            names.contains(&"SubmitRequiresItems"),
-            "should have SubmitRequiresItems, got: {names:?}"
-        );
-        assert!(
-            names.contains(&"CancelledIsFinal"),
-            "should have CancelledIsFinal, got: {names:?}"
-        );
-        assert!(
-            !names.contains(&"ShipRequiresPayment"),
-            "undeclared bool invariants should be skipped in simulation, got: {names:?}"
-        );
-    }
-
-    #[test]
-    fn handler_without_ioa_invariants_returns_empty() {
-        let (_guard, _clock, _id_gen) = install_deterministic_context(42);
-        let handler = EntityActorHandler::new("Order", "o1", order_table());
-
-        assert!(handler.spec_invariants().is_empty());
-    }
-
-    #[test]
-    fn field_updates_consume_exact_sequence_in_simulation() {
-        let (_guard, _clock, _id_gen) = install_deterministic_context(42);
-        let mut handler = EntityActorHandler::new("Order", "o1", order_table());
-        handler.init().unwrap();
-
-        assert!(handler.update_fields(serde_json::json!({"Name": "first"}), false, Some(0)));
-        assert_eq!(handler.state.sequence_nr, 1);
-        assert_eq!(handler.state.fields["Name"], "first");
-        assert!(!handler.update_fields(serde_json::json!({"Name": "stale"}), false, Some(0)));
-        assert_eq!(handler.state.fields["Name"], "first");
-    }
+    result
 }
+
+#[cfg(test)]
+mod tests;

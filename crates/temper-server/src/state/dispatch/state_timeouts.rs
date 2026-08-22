@@ -36,7 +36,7 @@
 //! longer-term direction; hydration re-arm is the 80%-value prefix
 //! that makes timeouts reliable across the common failure modes.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -87,7 +87,7 @@ fn compute_state_clock_reset_ts(
 }
 
 /// Composite key identifying an entity instance inside the arm-seq tracker.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct EntityKey {
     tenant: String,
     entity_type: String,
@@ -110,10 +110,10 @@ impl EntityKey {
 /// against current and drop the fire when they diverge.
 #[derive(Default, Debug)]
 pub struct StateTimeoutTracker {
-    seqs: Mutex<HashMap<EntityKey, u64>>,
+    seqs: Mutex<BTreeMap<EntityKey, u64>>,
     /// ADR-0049: per-entity-type count of armed-but-unfired timers.
     /// Emitted as `temper_scheduler_pending_timers` by the canary loop.
-    pending_by_type: Mutex<HashMap<String, u64>>,
+    pending_by_type: Mutex<BTreeMap<String, u64>>,
 }
 
 impl StateTimeoutTracker {
@@ -683,7 +683,7 @@ queue_timeout_seconds = 10
 
         let barrier = Arc::new(tokio::sync::Barrier::new(N));
         let mut handles = Vec::with_capacity(N);
-        let wall_start = Instant::now();
+        let wall_start = Instant::now(); // determinism-ok: test-only concurrency latency measurement
         for i in 0..N {
             let state = state.clone();
             let tenant = tenant.clone();
@@ -697,7 +697,7 @@ queue_timeout_seconds = 10
             let barrier = barrier.clone();
             handles.push(tokio::spawn(async move {
                 barrier.wait().await; // fire all at once
-                let call_start = Instant::now();
+                let call_start = Instant::now(); // determinism-ok: test-only concurrency latency measurement
                 in_flight.fetch_add(1, Ordering::AcqRel);
                 // Record peak in-flight count.
                 let cur = in_flight.load(Ordering::Acquire);
@@ -877,7 +877,7 @@ queue_timeout_seconds = 0
         // Prime a synchronization barrier so ALL 300 fire at the same instant.
         let barrier = Arc::new(tokio::sync::Barrier::new(N));
         let mut handles = Vec::with_capacity(N);
-        let wall_start = std::time::Instant::now();
+        let wall_start = std::time::Instant::now(); // determinism-ok: test-only admission latency measurement
         for _i in 0..N {
             let state = state.clone();
             let tenant = tenant.clone();
@@ -890,7 +890,7 @@ queue_timeout_seconds = 0
             let barrier = barrier.clone();
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
-                let call_start = std::time::Instant::now();
+                let call_start = std::time::Instant::now(); // determinism-ok: test-only admission latency measurement
                 let res = state
                     .dispatch_tenant_action_ext_typed(
                         &tenant,
@@ -1045,7 +1045,7 @@ queue_timeout_seconds = 30
         let barrier = Arc::new(tokio::sync::Barrier::new(N));
 
         let mut handles = Vec::with_capacity(N);
-        let wall_start = Instant::now();
+        let wall_start = Instant::now(); // determinism-ok: test-only reaction latency measurement
         for i in 0..N {
             let state = state.clone();
             let tenant = tenant.clone();
@@ -1056,7 +1056,7 @@ queue_timeout_seconds = 30
             let barrier = barrier.clone();
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
-                let start = Instant::now();
+                let start = Instant::now(); // determinism-ok: test-only reaction latency measurement
                 let res = state
                     .dispatch_tenant_action_ext_typed(
                         &tenant,

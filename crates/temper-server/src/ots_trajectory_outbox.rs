@@ -327,7 +327,7 @@ async fn persist_with_retries(
     async move {
         let mut attempt = 1;
         loop {
-            let started_at = Instant::now();
+            let started_at = Instant::now(); // determinism-ok: production outbox latency metric only
             match queued
                 .store
                 .mark_ots_trajectory_persisted(&queued.item.tenant, &queued.item.trajectory_id)

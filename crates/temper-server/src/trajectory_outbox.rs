@@ -269,7 +269,7 @@ async fn persist_drained(item: QueuedTrajectory) {
     );
 
     async move {
-        let started_at = Instant::now();
+        let started_at = Instant::now(); // determinism-ok: production trajectory sink latency only
         match sink.persist_trajectory_entry(&entry).await {
             Ok(()) => {
                 record_persist_latency(&entry, backend, "ok", started_at.elapsed());

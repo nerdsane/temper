@@ -44,10 +44,18 @@ pub enum SpecAssert {
         op: CompareOp,
         value: usize,
     },
+    /// Compare one named counter with another named counter.
+    CounterCompareCounter {
+        left: String,
+        op: CompareOp,
+        right: String,
+    },
     /// A boolean state variable must match an expected value.
     ///
     /// `expect = true` for `flag`; `expect = false` for `!flag`.
     BoolRequired { var: String, expect: bool },
+    /// A string field must be present and non-empty.
+    StringNonEmpty { var: String },
     /// All subexpressions must hold.
     And(Vec<SpecAssert>),
     /// At least one subexpression must hold.
@@ -77,6 +85,15 @@ pub trait SimActorHandler: Send {
     /// Initialize the actor and return its initial state as JSON.
     fn init(&mut self) -> Result<serde_json::Value, String>;
 
+    /// Reconstruct volatile handler state after a simulated actor restart.
+    ///
+    /// Implementations with durable state must rebuild from their simulated
+    /// journal rather than retaining the pre-crash state. Stateless handlers
+    /// may use the default fresh initialization.
+    fn restart(&mut self) -> Result<serde_json::Value, String> {
+        self.init()
+    }
+
     /// Handle a message (action + params) and return the resulting state.
     fn handle_message(&mut self, action: &str, params: &str) -> Result<serde_json::Value, String>;
 
@@ -88,6 +105,11 @@ pub trait SimActorHandler: Send {
 
     /// Total number of events recorded by this actor.
     fn event_count(&self) -> usize;
+
+    /// Current committed event sequence.
+    fn event_sequence(&self) -> u64 {
+        self.event_count() as u64
+    }
 
     /// Actions enabled from the current status.
     fn valid_actions(&self) -> Vec<String>;
@@ -110,6 +132,19 @@ pub trait SimActorHandler: Send {
     /// `BoolRequired` evaluators). Override this to expose booleans
     /// from the underlying entity state. Default: no boolean state.
     fn bool_field(&self, _var: &str) -> Option<bool> {
+        None
+    }
+
+    /// Read a named counter for invariant evaluation.
+    ///
+    /// `None` means the declared counter is unavailable and must not be
+    /// interpreted as a passing invariant.
+    fn counter_value(&self, _var: &str) -> Option<usize> {
+        None
+    }
+
+    /// Read a string field for invariant evaluation.
+    fn string_value(&self, _var: &str) -> Option<String> {
         None
     }
 

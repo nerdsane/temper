@@ -165,7 +165,10 @@ pub(super) async fn commit_field_update(
         }
     }
 
-    state.push_event_bounded(event);
+    let committed_sequence = state
+        .sequence_nr
+        .max(previous_state.sequence_nr.saturating_add(1));
+    state.record_committed_event(event, committed_sequence);
 
     let persistence_id = actor.persistence_id();
     if let Err(e) = EntityActor::maybe_save_snapshot(

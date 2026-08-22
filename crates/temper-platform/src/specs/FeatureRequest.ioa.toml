@@ -35,6 +35,6 @@ to = "Resolved"
 kind = "input"
 
 [[invariant]]
-name = "ResolvedIsTerminal"
+name = "ResolvedFollowsPlanned"
 when = ["Resolved"]
-assert = "true"
+assert = "ordering(Planned, Resolved)"

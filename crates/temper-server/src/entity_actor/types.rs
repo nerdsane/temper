@@ -154,6 +154,23 @@ impl EntityState {
         }
     }
 
+    /// Record an event only after its sequence is committed.
+    ///
+    /// Production passes the sequence returned by the event store. Simulation
+    /// and in-memory operation pass the deterministic next sequence. Keeping
+    /// this bookkeeping in one helper prevents event counts, idempotency
+    /// records, and sequence numbers from diverging between execution modes.
+    pub fn record_committed_event(&mut self, event: EntityEvent, sequence_nr: u64) {
+        assert!(
+            sequence_nr >= self.sequence_nr,
+            "committed event sequence must not move backward"
+        );
+        assert!(sequence_nr > 0, "committed event sequence must be positive");
+        self.sequence_nr = sequence_nr;
+        self.push_event_bounded(event);
+        debug_assert!(self.total_event_count > 0);
+    }
+
     pub fn has_processed_idempotency_key(&self, key: &str) -> bool {
         self.processed_idempotency_keys.contains_key(key)
     }

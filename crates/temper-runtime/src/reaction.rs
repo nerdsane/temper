@@ -14,7 +14,7 @@
 //! resolve_target = { type = "SameId" }
 //! ```
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -78,7 +78,7 @@ pub enum TargetResolver {
 #[derive(Debug, Clone, Default)]
 pub struct ReactionRegistry {
     /// Index: key = "ActorType:EmitName" or "ActorType:*"
-    index: HashMap<String, Vec<ReactionRule>>,
+    index: BTreeMap<String, Vec<ReactionRule>>,
 }
 
 impl ReactionRegistry {

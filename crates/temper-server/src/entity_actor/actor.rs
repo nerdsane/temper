@@ -842,8 +842,7 @@ impl EntityActor {
                                 serde_json::Value::String(state.status.clone()),
                             );
                         }
-                        state.push_event_bounded(tombstone);
-                        state.sequence_nr = env.sequence_nr;
+                        state.record_committed_event(tombstone, env.sequence_nr);
                         if replay_policy.strict_event_validation() && index + 1 != envelopes.len() {
                             return Err(ActorError::custom(format!(
                                 "journal for {}:{} contains events after terminal tombstone at sequence {}",
@@ -899,7 +898,7 @@ impl EntityActor {
                                         })?,
                                     );
                                 }
-                                state.push_event_bounded(event);
+                                state.record_committed_event(event, env.sequence_nr);
                             }
                             Err(e) => {
                                 // Honor the replay policy, like the tombstone and
@@ -929,7 +928,9 @@ impl EntityActor {
                                 );
                             }
                         }
-                        state.sequence_nr = env.sequence_nr;
+                        if state.sequence_nr < env.sequence_nr {
+                            state.sequence_nr = env.sequence_nr;
+                        }
                         continue;
                     }
 
@@ -978,8 +979,7 @@ impl EntityActor {
                                         })?,
                                     );
                                 }
-                                state.push_event_bounded(event);
-                                state.sequence_nr = env.sequence_nr;
+                                state.record_committed_event(event, env.sequence_nr);
                                 continue;
                             }
                             // A persisted event is a historical fact: its guard
@@ -1047,7 +1047,7 @@ impl EntityActor {
                                 );
                             }
 
-                            state.push_event_bounded(event);
+                            state.record_committed_event(event, env.sequence_nr);
                         }
                         Err(e) => {
                             if replay_policy.strict_event_validation() {
@@ -1070,7 +1070,9 @@ impl EntityActor {
                             tracing::warn!(tenant = %tenant, entity_type = %state.entity_type, "event replay error");
                         }
                     }
-                    state.sequence_nr = env.sequence_nr;
+                    if state.sequence_nr < env.sequence_nr {
+                        state.sequence_nr = env.sequence_nr;
+                    }
                 }
                 if !envelopes.is_empty() {
                     let replayed_tail = state
@@ -1338,7 +1340,8 @@ impl Actor for EntityActor {
                     ))
                 })?;
             }
-            state.push_event_bounded(created);
+            let committed_sequence = state.sequence_nr.max(1);
+            state.record_committed_event(created, committed_sequence);
         }
 
         Ok(state)
@@ -1883,7 +1886,12 @@ impl Actor for EntityActor {
                     wide_event::emit_span(&wide);
                     wide_event::emit_metrics(&wide);
 
-                    state.push_event_bounded(event);
+                    let committed_sequence = if self.event_journal.is_some() {
+                        state.sequence_nr
+                    } else {
+                        state.sequence_nr.saturating_add(1)
+                    };
+                    state.record_committed_event(event, committed_sequence);
 
                     let persistence_id = self.persistence_id();
                     if let Some(ref store) = self.event_journal
@@ -2108,7 +2116,12 @@ impl Actor for EntityActor {
                         serde_json::Value::String(state.status.clone()),
                     );
                 }
-                state.push_event_bounded(deleted);
+                let committed_sequence = if self.event_journal.is_some() {
+                    state.sequence_nr
+                } else {
+                    state.sequence_nr.saturating_add(1)
+                };
+                state.record_committed_event(deleted, committed_sequence);
 
                 ctx.reply(EntityResponse {
                     success: true,

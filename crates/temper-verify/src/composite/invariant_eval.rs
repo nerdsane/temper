@@ -5,14 +5,11 @@
 //! [`super::model::CompositeTemperModel::properties`] for each entity in
 //! the composition on every BFS-visited state.
 //!
-//! This is a minimum-viable port of the single-entity evaluator used in
-//! [`crate::model::stateright_impl`]. It handles the invariant kinds
-//! that are directly checkable on a single-entity `TemperModelState`:
-//! `StatusInSet`, `CounterPositive`, `NeverState`, `BoolRequired`,
-//! `NoReachingState`, `NoFurtherTransitions`. `Unverifiable` invariants
-//! are treated as true (the single-entity cascade issues a warning;
-//! the composite checker inherits that warning via the plan's
-//! warnings vector).
+//! This mirrors the single-entity evaluator in
+//! [`crate::model::stateright_impl`] for every invariant represented by
+//! [`InvariantKind`]. Expressions classified as `Unverifiable` remain an
+//! explicit verification warning because `TemperModelState` does not carry the
+//! history or arbitrary data fields needed to prove them.
 
 use crate::model::{InvariantKind, TemperModel, TemperModelState};
 
@@ -23,7 +20,7 @@ pub(super) fn all_local_invariants_hold(model: &TemperModel, state: &TemperModel
         if !triggers_on(&inv.trigger_states, &state.status) {
             continue;
         }
-        if !evaluate_one(&inv.kind, state) {
+        if !evaluate_one(model, &inv.kind, &inv.required_states, state) {
             return false;
         }
     }
@@ -34,38 +31,50 @@ fn triggers_on(trigger_states: &[String], current: &str) -> bool {
     trigger_states.is_empty() || trigger_states.iter().any(|s| s == current)
 }
 
-fn evaluate_one(kind: &InvariantKind, state: &TemperModelState) -> bool {
+fn evaluate_one(
+    model: &TemperModel,
+    kind: &InvariantKind,
+    required_states: &[String],
+    state: &TemperModelState,
+) -> bool {
     match kind {
         InvariantKind::StatusInSet => {
             // Status validity is an inherent property of the per-entity
             // model (its transitions only produce declared statuses).
             true
         }
-        InvariantKind::CounterPositive { var } => {
-            // `usize` is always >= 0; the invariant encodes a soft
-            // check but the type enforces it.
-            let _ = state.counters.get(var);
-            true
-        }
+        InvariantKind::CounterPositive { var } => state.counters.get(var).copied().unwrap_or(0) > 0,
         InvariantKind::NeverState { state: forbidden } => state.status != *forbidden,
         InvariantKind::BoolRequired { var, expect } => {
-            state.booleans.get(var).copied().unwrap_or(false) == *expect
+            state.booleans.get(var).copied() == Some(*expect)
         }
-        InvariantKind::NoFurtherTransitions => {
-            // Structural — BFS naturally surfaces if a state has no
-            // enabled actions. Not a per-state evaluation here.
-            true
+        InvariantKind::NoFurtherTransitions => !model.transitions.iter().any(|transition| {
+            let status_matches = transition.from_states.is_empty()
+                || transition
+                    .from_states
+                    .iter()
+                    .any(|from| from == &state.status);
+            status_matches && crate::model::semantics::evaluate_guard(&transition.guard, state)
+        }),
+        InvariantKind::Implication => {
+            required_states.is_empty() || required_states.contains(&state.status)
         }
-        InvariantKind::Implication => true, // handled by StatusInSet + transitions
-        InvariantKind::CounterCompare { .. } => {
-            // Generalised counter comparison — single-entity checker
-            // interprets the expression; composite inherits the
-            // per-entity decision (non-violating here means the
-            // single-entity cascade was not asked to reject it).
-            true
+        InvariantKind::CounterCompare { var, op, value } => {
+            let counter = state.counters.get(var).copied().unwrap_or(0);
+            match op {
+                temper_spec::automaton::AssertCompareOp::Gt => counter > *value,
+                temper_spec::automaton::AssertCompareOp::Gte => counter >= *value,
+                temper_spec::automaton::AssertCompareOp::Lt => counter < *value,
+                temper_spec::automaton::AssertCompareOp::Lte => counter <= *value,
+                temper_spec::automaton::AssertCompareOp::Eq => counter == *value,
+            }
         }
-        InvariantKind::And(kinds) => kinds.iter().all(|k| evaluate_one(k, state)),
-        InvariantKind::Or(kinds) => kinds.iter().any(|k| evaluate_one(k, state)),
+        InvariantKind::And(kinds) => kinds
+            .iter()
+            .all(|kind| evaluate_one(model, kind, required_states, state)),
+        InvariantKind::Or(kinds) => kinds
+            .iter()
+            .any(|kind| evaluate_one(model, kind, required_states, state)),
         InvariantKind::Unverifiable { .. } => true, // warning issued elsewhere
     }
 }
@@ -128,5 +137,71 @@ to = "B"
         let model = build(spec);
         assert!(all_local_invariants_hold(&model, &state("A")));
         assert!(all_local_invariants_hold(&model, &state("B")));
+    }
+
+    #[test]
+    fn counter_and_boolean_invariants_require_real_evidence() {
+        let spec = r#"
+[automaton]
+name = "Evidence"
+states = ["Open", "Done"]
+initial = "Open"
+
+[[state]]
+name = "attempts"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "approved"
+type = "bool"
+initial = "false"
+
+[[invariant]]
+name = "Attempted"
+when = ["Done"]
+assert = "attempts > 0"
+
+[[invariant]]
+name = "Approved"
+when = ["Done"]
+assert = "approved"
+"#;
+        let model = build(spec);
+        let mut done = state("Done");
+        assert!(!all_local_invariants_hold(&model, &done));
+        done.counters.insert("attempts".to_string(), 1);
+        assert!(!all_local_invariants_hold(&model, &done));
+        done.booleans.insert("approved".to_string(), true);
+        assert!(all_local_invariants_hold(&model, &done));
+    }
+
+    #[test]
+    fn terminal_invariant_checks_enabled_transitions() {
+        let terminal_spec = r#"
+[automaton]
+name = "Terminal"
+states = ["Open", "Done"]
+initial = "Open"
+
+[[action]]
+name = "Finish"
+from = ["Open"]
+to = "Done"
+
+[[invariant]]
+name = "DoneIsTerminal"
+when = ["Done"]
+assert = "no_further_transitions"
+"#;
+        let terminal = build(terminal_spec);
+        assert!(all_local_invariants_hold(&terminal, &state("Done")));
+
+        let reopenable_spec = terminal_spec.replace(
+            "[[invariant]]",
+            "[[action]]\nname = \"Reopen\"\nfrom = [\"Done\"]\nto = \"Open\"\n\n[[invariant]]",
+        );
+        let reopenable = build(&reopenable_spec);
+        assert!(!all_local_invariants_hold(&reopenable, &state("Done")));
     }
 }
