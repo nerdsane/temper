@@ -561,6 +561,19 @@ scripts/setup-hooks.sh
 # No manual setup needed — hooks fire on edit, commit, push, and exit
 ```
 
+## Local Disk Pressure
+
+Multiple build-heavy worktrees can fill a developer disk with independent
+Cargo targets. Run the dry-run-first cleanup command to inventory exact
+top-level worktree targets:
+
+```bash
+scripts/cleanup-build-artifacts.sh
+```
+
+See [Local build artifact retention](local-build-artifact-retention.md) for the
+classification rules, explicit apply options, and local/CI retention policy.
+
 ## Bypassing (Emergencies Only)
 
 ```bash
