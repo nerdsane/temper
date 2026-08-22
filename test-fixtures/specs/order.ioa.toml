@@ -30,6 +30,11 @@ name = "has_address"
 type = "bool"
 initial = "false"
 
+[[state]]
+name = "payment_captured"
+type = "bool"
+initial = "false"
+
 # --- Actions: Order Lifecycle ---
 
 [[action]]
@@ -60,6 +65,7 @@ name = "ConfirmOrder"
 kind = "internal"
 from = ["Submitted"]
 to = "Confirmed"
+effect = [{ type = "set_bool", var = "payment_captured", value = true }]
 hint = "System action: confirms after payment authorization."
 
 [[action]]

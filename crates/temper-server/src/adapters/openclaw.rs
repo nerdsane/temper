@@ -21,7 +21,7 @@ impl AgentAdapter for OpenClawAdapter {
     }
 
     async fn execute(&self, ctx: AdapterContext) -> Result<AdapterResult, AdapterError> {
-        let started = Instant::now();
+        let started = Instant::now(); // determinism-ok: external WebSocket adapter latency only
 
         let gateway_url = ctx
             .integration_config

@@ -1,6 +1,6 @@
 # ADR-0174: Faithful deterministic actor recovery and fault delivery
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-21
 - Deciders: Temper core maintainers
 - Related:
@@ -108,3 +108,10 @@ Coverage tests will parse every in-scope platform, ecommerce, and on-call spec, 
 ## Rollback Policy
 
 The simulation APIs and tests can be reverted independently of production storage formats. The shared committed-event helper may be inlined back into callers if necessary; no persisted schema or event payload migration is introduced.
+
+## Validation
+
+- Generated exploration loads all 28 maintained platform, ecommerce, and on-call specs and requires exact equality with every declared state, non-output action, and invariant evaluator.
+- The focused recovery suite covers journal reconstruction, heavy-fault actor messaging across 64 seeds, actor-local skew, forward time jumps, and non-vacuous counter and terminal invariants.
+- The counted DST suites contain 31 generated/random tests and 3 scripted aggregation tests (91% generated/random).
+- `scripts/check-determinism.sh` reports zero unsuppressed findings after each production-only exception was narrowly documented.

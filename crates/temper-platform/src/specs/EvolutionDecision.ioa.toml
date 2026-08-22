@@ -30,11 +30,11 @@ to = "Deferred"
 kind = "input"
 
 [[invariant]]
-name = "ApprovedIsTerminal"
+name = "ApprovedFollowsOpen"
 when = ["Approved"]
-assert = "true"
+assert = "ordering(Open, Approved)"
 
 [[invariant]]
-name = "RejectedIsTerminal"
+name = "RejectedFollowsOpen"
 when = ["Rejected"]
-assert = "true"
+assert = "ordering(Open, Rejected)"

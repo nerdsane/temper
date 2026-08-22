@@ -40,7 +40,6 @@ fn postmortem_table() -> Arc<TransitionTable> {
 // SCRIPTED SCENARIOS — Page Lifecycle
 // =========================================================================
 
-#[test]
 fn page_starts_triggered() {
     let config = SimActorSystemConfig {
         seed: 1,
@@ -55,7 +54,6 @@ fn page_starts_triggered() {
     sim.assert_status("page-1", "Triggered");
 }
 
-#[test]
 fn page_assign_then_investigate() {
     let config = SimActorSystemConfig {
         seed: 2,
@@ -77,7 +75,6 @@ fn page_assign_then_investigate() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn page_full_lifecycle() {
     let config = SimActorSystemConfig {
         seed: 3,
@@ -104,7 +101,6 @@ fn page_full_lifecycle() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn page_escalation_flow() {
     let config = SimActorSystemConfig {
         seed: 4,
@@ -131,7 +127,6 @@ fn page_escalation_flow() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn page_auto_resolve() {
     let config = SimActorSystemConfig {
         seed: 5,
@@ -156,7 +151,6 @@ fn page_auto_resolve() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn page_cannot_investigate_without_agent() {
     let config = SimActorSystemConfig {
         seed: 6,
@@ -177,7 +171,6 @@ fn page_cannot_investigate_without_agent() {
     sim.assert_status("page-1", "Triggered");
 }
 
-#[test]
 fn page_escalation_increments_tier() {
     let config = SimActorSystemConfig {
         seed: 7,
@@ -211,7 +204,6 @@ fn page_escalation_increments_tier() {
 // SCRIPTED SCENARIOS — Remediation Lifecycle
 // =========================================================================
 
-#[test]
 fn remediation_approve_execute_succeed() {
     let config = SimActorSystemConfig {
         seed: 10,
@@ -241,7 +233,6 @@ fn remediation_approve_execute_succeed() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn remediation_reject_is_final() {
     let config = SimActorSystemConfig {
         seed: 11,
@@ -263,7 +254,6 @@ fn remediation_reject_is_final() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn remediation_retry_after_failure() {
     let config = SimActorSystemConfig {
         seed: 12,
@@ -292,7 +282,6 @@ fn remediation_retry_after_failure() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn remediation_approval_required_for_execution() {
     let config = SimActorSystemConfig {
         seed: 13,
@@ -314,7 +303,6 @@ fn remediation_approval_required_for_execution() {
 // SCRIPTED SCENARIOS — Postmortem Lifecycle
 // =========================================================================
 
-#[test]
 fn postmortem_requires_root_cause() {
     let config = SimActorSystemConfig {
         seed: 20,
@@ -337,7 +325,6 @@ fn postmortem_requires_root_cause() {
     sim.assert_status("pm-1", "Draft");
 }
 
-#[test]
 fn postmortem_revision_cycle() {
     let config = SimActorSystemConfig {
         seed: 21,
@@ -365,7 +352,6 @@ fn postmortem_revision_cycle() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn postmortem_full_lifecycle() {
     let config = SimActorSystemConfig {
         seed: 22,
@@ -398,6 +384,24 @@ fn postmortem_full_lifecycle() {
 // =========================================================================
 // RANDOM EXPLORATION — light faults, single entity type
 // =========================================================================
+
+#[test]
+fn scripted_oncall_scenarios() {
+    page_starts_triggered();
+    page_assign_then_investigate();
+    page_full_lifecycle();
+    page_escalation_flow();
+    page_auto_resolve();
+    page_cannot_investigate_without_agent();
+    page_escalation_increments_tier();
+    remediation_approve_execute_succeed();
+    remediation_reject_is_final();
+    remediation_retry_after_failure();
+    remediation_approval_required_for_execution();
+    postmortem_requires_root_cause();
+    postmortem_revision_cycle();
+    postmortem_full_lifecycle();
+}
 
 #[test]
 fn random_page_light_faults() {

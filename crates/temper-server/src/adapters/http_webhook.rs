@@ -17,7 +17,7 @@ impl AgentAdapter for HttpWebhookAdapter {
     }
 
     async fn execute(&self, ctx: AdapterContext) -> Result<AdapterResult, AdapterError> {
-        let started = Instant::now();
+        let started = Instant::now(); // determinism-ok: external HTTP adapter latency only
 
         let url = ctx
             .integration_config

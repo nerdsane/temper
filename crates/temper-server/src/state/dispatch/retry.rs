@@ -137,7 +137,7 @@ where
     R: Send + 'static,
     F: FnMut() -> M,
 {
-    let start = Instant::now();
+    let start = Instant::now(); // determinism-ok: production actor deadline and backoff only
     let max_attempts = policy.max_attempts.max(1);
     let mut last_err: Option<ActorError> = None;
     let mut saw_transient = false;

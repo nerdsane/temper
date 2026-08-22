@@ -391,7 +391,7 @@ mod session_grant_tests {
         let mut path = std::env::temp_dir();
         path.push(format!(
             "temper-session-grant-{test_name}-{}.db",
-            uuid::Uuid::new_v4()
+            uuid::Uuid::new_v4() // determinism-ok: test-only temporary database filename
         ));
         let turso =
             temper_store_turso::TursoEventStore::new(&format!("file:{}", path.display()), None)

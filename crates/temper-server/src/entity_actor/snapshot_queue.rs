@@ -106,7 +106,7 @@ impl SnapshotWriteQueue {
                 persistence_id,
                 sequence_nr,
                 snapshot,
-                enqueued_at: Instant::now(),
+                enqueued_at: Instant::now(), // determinism-ok: production snapshot queue metric only
             },
         );
         crate::runtime_metrics::record_snapshot_write_queue_depth(pending.writes.len() as u64);
@@ -176,7 +176,7 @@ impl SnapshotWriteQueue {
         );
 
         async move {
-            let started_at = Instant::now();
+            let started_at = Instant::now(); // determinism-ok: production snapshot latency metric only
             crate::runtime_metrics::record_snapshot_write_started();
             crate::runtime_metrics::record_snapshot_write_queue_wait(
                 started_at.duration_since(write.enqueued_at),

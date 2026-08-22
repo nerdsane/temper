@@ -139,7 +139,7 @@ impl QueryProjectionWriteQueue {
                 state,
             },
             sequence_nr,
-            enqueued_at: Instant::now(),
+            enqueued_at: Instant::now(), // determinism-ok: production queue wait metric only
             source,
         })
     }
@@ -160,7 +160,7 @@ impl QueryProjectionWriteQueue {
             },
             operation: ProjectionOperation::Remove,
             sequence_nr,
-            enqueued_at: Instant::now(),
+            enqueued_at: Instant::now(), // determinism-ok: production queue wait metric only
             source,
         })
     }
@@ -281,7 +281,7 @@ impl QueryProjectionWriteQueue {
         async move {
             let mut attempt = 1;
             loop {
-                let started_at = Instant::now();
+                let started_at = Instant::now(); // determinism-ok: production projection latency metric only
                 crate::query_projection_metrics::record_update_started(
                     &update.key.tenant,
                     &update.key.entity_type,

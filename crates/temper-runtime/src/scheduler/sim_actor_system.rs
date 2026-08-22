@@ -162,6 +162,8 @@ pub struct SimActorSystem {
     integration_responses: SimIntegrationResponses,
     /// Pending integration callbacks to deliver: (actor_id, callback_action).
     pending_integration_callbacks: Vec<(String, String)>,
+    /// Actor-local wall-clock offsets applied only while that actor handles a message.
+    actor_clock_skew_ms: BTreeMap<String, i64>,
 }
 
 impl SimActorSystem {
@@ -190,6 +192,7 @@ impl SimActorSystem {
             recorded_invariants: Vec::new(),
             integration_responses: SimIntegrationResponses::new(),
             pending_integration_callbacks: Vec::new(),
+            actor_clock_skew_ms: BTreeMap::new(),
         }
     }
 
@@ -241,7 +244,10 @@ impl SimActorSystem {
         self.clock.advance();
         self.total_messages += 1;
 
+        let skew_ms = self.actor_clock_skew_ms.get(actor_id).copied().unwrap_or(0);
+        self.clock.set_skew_ms(skew_ms);
         let result = handler.handle_message(action, params);
+        self.clock.set_skew_ms(0);
 
         match &result {
             Ok(_) => {
@@ -333,12 +339,73 @@ impl SimActorSystem {
             .unwrap_or(serde_json::Value::Null)
     }
 
+    /// Return the actor's committed event sequence.
+    pub fn event_sequence(&self, actor_id: &str) -> u64 {
+        self.actors
+            .get(actor_id)
+            .map(|handler| handler.event_sequence())
+            .unwrap_or(0)
+    }
+
+    /// Return the number of messages dropped by deterministic fault injection.
+    pub fn dropped_messages(&self) -> usize {
+        self.scheduler.total_dropped()
+    }
+
     /// Get an actor's current status.
     pub fn status(&self, actor_id: &str) -> String {
         self.actors
             .get(actor_id)
             .map(|h| h.current_status())
             .unwrap_or_default()
+    }
+
+    /// Configure a deterministic clock offset for one actor.
+    pub fn set_actor_clock_skew_ms(&mut self, actor_id: &str, skew_ms: i64) {
+        assert!(
+            self.actors.contains_key(actor_id),
+            "clock skew actor must exist"
+        );
+        self.actor_clock_skew_ms
+            .insert(actor_id.to_string(), skew_ms);
+    }
+
+    /// Advance logical time by a deterministic forward jump.
+    pub fn jump_clock_by(&self, ticks: u64) {
+        assert!(ticks > 0, "clock jump must consume at least one tick");
+        self.clock.advance_by(ticks);
+    }
+
+    /// Inject a crash/restart edge and reconstruct the actor immediately.
+    pub fn crash_and_restart_actor(&mut self, actor_id: &str) {
+        self.scheduler.crash_actor(actor_id);
+        self.scheduler.restart_actor(actor_id);
+        self.reconstruct_restarted_actors();
+    }
+
+    /// Queue an actor-to-actor message through the fault-injecting scheduler.
+    pub fn send_actor_message(&mut self, from: &str, to: &str, action: &str, params: &str) {
+        assert!(self.actors.contains_key(from), "source actor must exist");
+        assert!(self.actors.contains_key(to), "target actor must exist");
+        self.scheduler.send(from, to, action, params);
+        self.total_messages = self.total_messages.saturating_add(1);
+    }
+
+    /// Run queued actor messages for a bounded number of ticks.
+    pub fn run_queued(&mut self, tick_budget: u64) -> u64 {
+        assert!(
+            tick_budget > 0,
+            "queued delivery requires a positive tick budget"
+        );
+        let mut consumed = 0;
+        while consumed < tick_budget && !self.scheduler.is_quiescent() {
+            let delivered = self.scheduler.tick();
+            self.clock.advance();
+            consumed += 1;
+            self.reconstruct_restarted_actors();
+            self.process_delivered_messages(&delivered);
+        }
+        consumed
     }
 
     /// Whether there are any violations.
@@ -397,46 +464,8 @@ impl SimActorSystem {
             let delivered = self.scheduler.tick();
             self.clock.advance();
 
-            // Process delivered messages
-            for msg in &delivered {
-                if let Some(handler) = self.actors.get_mut(&msg.to) {
-                    let status_before = handler.current_status();
-
-                    match handler.handle_message(&msg.msg_type, &msg.payload) {
-                        Ok(_) => {
-                            let status_after = handler.current_status();
-                            let item_count = handler.current_item_count();
-                            let tick = self.clock.tick();
-                            *self.action_counts.get_mut(&msg.to).unwrap() += 1; // ci-ok: actor always in action_counts
-                            self.total_transitions += 1;
-
-                            // Record the transition
-                            self.recorded_transitions.push((
-                                tick,
-                                msg.to.clone(),
-                                msg.msg_type.clone(),
-                                status_before.clone(),
-                                status_after.clone(),
-                            ));
-
-                            self.check_invariants(
-                                &msg.to,
-                                &msg.msg_type,
-                                &status_before,
-                                &status_after,
-                                item_count,
-                                tick,
-                            );
-
-                            // Schedule integration callbacks for any custom effects
-                            self.schedule_integration_callbacks(&msg.to);
-                        }
-                        Err(_) => {
-                            // Action failed — expected for invalid transitions
-                        }
-                    }
-                }
-            }
+            self.reconstruct_restarted_actors();
+            self.process_delivered_messages(&delivered);
 
             // Deliver any pending integration callbacks
             if !self.pending_integration_callbacks.is_empty() {
@@ -445,6 +474,7 @@ impl SimActorSystem {
 
             // Drain any remaining scheduled messages
             self.scheduler.tick();
+            self.reconstruct_restarted_actors();
         }
 
         let actor_states: Vec<_> = self
@@ -578,6 +608,58 @@ impl SimActorSystem {
         }
     }
 
+    fn reconstruct_restarted_actors(&mut self) {
+        for actor_id in self.scheduler.take_restarted_actors() {
+            let handler = self
+                .actors
+                .get_mut(&actor_id)
+                .unwrap_or_else(|| panic!("restarted actor '{actor_id}' must be registered"));
+            handler
+                .restart()
+                .unwrap_or_else(|error| panic!("actor '{actor_id}' restart failed: {error}"));
+        }
+    }
+
+    fn process_delivered_messages(&mut self, delivered: &[super::SimMessage]) {
+        for msg in delivered {
+            let Some(handler) = self.actors.get_mut(&msg.to) else {
+                continue;
+            };
+            let status_before = handler.current_status();
+            let skew_ms = self.actor_clock_skew_ms.get(&msg.to).copied().unwrap_or(0);
+            self.clock.set_skew_ms(skew_ms);
+            let outcome = handler.handle_message(&msg.msg_type, &msg.payload);
+            self.clock.set_skew_ms(0);
+
+            if outcome.is_ok() {
+                let status_after = handler.current_status();
+                let item_count = handler.current_item_count();
+                let tick = self.clock.tick();
+                let action_count = self.action_counts.get_mut(&msg.to).unwrap_or_else(|| {
+                    panic!("delivered actor '{}' must have an action count", msg.to)
+                });
+                *action_count += 1;
+                self.total_transitions += 1;
+                self.recorded_transitions.push((
+                    tick,
+                    msg.to.clone(),
+                    msg.msg_type.clone(),
+                    status_before.clone(),
+                    status_after.clone(),
+                ));
+                self.check_invariants(
+                    &msg.to,
+                    &msg.msg_type,
+                    &status_before,
+                    &status_after,
+                    item_count,
+                    tick,
+                );
+                self.schedule_integration_callbacks(&msg.to);
+            }
+        }
+    }
+
     // ===================================================================
     // Invariant checking
     // ===================================================================
@@ -603,10 +685,8 @@ impl SimActorSystem {
                 let passed = evaluate_spec_assert(
                     &inv.assert,
                     handler.as_ref(),
-                    &inv.when,
                     status_before,
                     status_after,
-                    item_count,
                 );
                 let violated = !passed;
 
@@ -647,34 +727,28 @@ impl SimActorSystem {
 fn evaluate_spec_assert(
     assert: &super::sim_handler::SpecAssert,
     handler: &dyn super::sim_handler::SimActorHandler,
-    when: &[String],
     status_before: &str,
     status_after: &str,
-    item_count: usize,
 ) -> bool {
     use super::sim_handler::{CompareOp, SpecAssert};
 
     match assert {
         SpecAssert::CounterPositive { var } => {
-            if var == "items" {
-                item_count > 0
-            } else {
-                true // Unknown counter: not in scope for invariant checking here.
-            }
+            handler.counter_value(var).is_some_and(|value| value > 0)
         }
-        SpecAssert::NoFurtherTransitions => {
-            // Holds unless status_before was a terminal state in `when`.
-            !when.iter().any(|s| s == status_before)
-        }
+        SpecAssert::NoFurtherTransitions => handler.valid_actions().is_empty(),
         SpecAssert::OrderingConstraint { before, after } => {
             if status_after == after.as_str() {
+                if status_before == before.as_str() {
+                    return true;
+                }
                 let events = handler.events_json();
                 if let Some(arr) = events.as_array() {
                     arr.iter().any(|e| {
                         e.get("to_status").and_then(|s| s.as_str()) == Some(before.as_str())
                     })
                 } else {
-                    true
+                    false
                 }
             } else {
                 true
@@ -682,7 +756,9 @@ fn evaluate_spec_assert(
         }
         SpecAssert::NeverState { state } => status_after != state.as_str(),
         SpecAssert::CounterCompare { var, op, value } => {
-            let counter_val = if var == "items" { item_count } else { 0 };
+            let Some(counter_val) = handler.counter_value(var) else {
+                return false;
+            };
             match op {
                 CompareOp::Gt => counter_val > *value,
                 CompareOp::Gte => counter_val >= *value,
@@ -691,15 +767,30 @@ fn evaluate_spec_assert(
                 CompareOp::Eq => counter_val == *value,
             }
         }
-        SpecAssert::BoolRequired { var, expect } => {
-            handler.bool_field(var).unwrap_or(false) == *expect
+        SpecAssert::CounterCompareCounter { left, op, right } => {
+            let (Some(left), Some(right)) =
+                (handler.counter_value(left), handler.counter_value(right))
+            else {
+                return false;
+            };
+            match op {
+                CompareOp::Gt => left > right,
+                CompareOp::Gte => left >= right,
+                CompareOp::Lt => left < right,
+                CompareOp::Lte => left <= right,
+                CompareOp::Eq => left == right,
+            }
         }
-        SpecAssert::And(parts) => parts.iter().all(|p| {
-            evaluate_spec_assert(p, handler, when, status_before, status_after, item_count)
-        }),
-        SpecAssert::Or(parts) => parts.iter().any(|p| {
-            evaluate_spec_assert(p, handler, when, status_before, status_after, item_count)
-        }),
+        SpecAssert::BoolRequired { var, expect } => handler.bool_field(var) == Some(*expect),
+        SpecAssert::StringNonEmpty { var } => handler
+            .string_value(var)
+            .is_some_and(|value| !value.is_empty()),
+        SpecAssert::And(parts) => parts
+            .iter()
+            .all(|p| evaluate_spec_assert(p, handler, status_before, status_after)),
+        SpecAssert::Or(parts) => parts
+            .iter()
+            .any(|p| evaluate_spec_assert(p, handler, status_before, status_after)),
     }
 }
 

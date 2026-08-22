@@ -124,16 +124,16 @@ kind = "internal"
 # --- Invariants ---
 
 [[invariant]]
-name = "ApprovedIsTerminal"
+name = "ApprovedFollowsPending"
 when = ["Approved"]
-assert = "true"
+assert = "ordering(Pending, Approved)"
 
 [[invariant]]
-name = "DeniedIsTerminal"
+name = "DeniedFollowsPending"
 when = ["Denied"]
-assert = "true"
+assert = "ordering(Pending, Denied)"
 
 [[invariant]]
-name = "ExpiredIsTerminal"
+name = "ExpiredFollowsPending"
 when = ["Expired"]
-assert = "true"
+assert = "ordering(Pending, Expired)"

@@ -35,7 +35,6 @@ fn shipment_table() -> Arc<TransitionTable> {
 // SCRIPTED SCENARIOS — Order Lifecycle
 // =========================================================================
 
-#[test]
 fn scripted_order_starts_in_draft() {
     let config = SimActorSystemConfig {
         seed: 1,
@@ -50,7 +49,6 @@ fn scripted_order_starts_in_draft() {
     sim.assert_status("ord-1", "Draft");
 }
 
-#[test]
 fn scripted_order_add_item_then_submit() {
     let config = SimActorSystemConfig {
         seed: 2,
@@ -74,7 +72,6 @@ fn scripted_order_add_item_then_submit() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn scripted_order_full_lifecycle() {
     let config = SimActorSystemConfig {
         seed: 3,
@@ -107,7 +104,6 @@ fn scripted_order_full_lifecycle() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn scripted_order_cancel_from_draft() {
     let config = SimActorSystemConfig {
         seed: 4,
@@ -124,7 +120,6 @@ fn scripted_order_cancel_from_draft() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn scripted_order_cancel_from_submitted() {
     let config = SimActorSystemConfig {
         seed: 5,
@@ -145,7 +140,6 @@ fn scripted_order_cancel_from_submitted() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn scripted_order_cannot_submit_empty() {
     let config = SimActorSystemConfig {
         seed: 6,
@@ -163,7 +157,6 @@ fn scripted_order_cannot_submit_empty() {
     sim.assert_status("ord-1", "Draft");
 }
 
-#[test]
 fn scripted_order_return_flow() {
     let config = SimActorSystemConfig {
         seed: 7,
@@ -201,7 +194,6 @@ fn scripted_order_return_flow() {
 // SCRIPTED SCENARIOS — Payment Lifecycle
 // =========================================================================
 
-#[test]
 fn scripted_payment_full_lifecycle() {
     let config = SimActorSystemConfig {
         seed: 10,
@@ -225,7 +217,6 @@ fn scripted_payment_full_lifecycle() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn scripted_payment_failure() {
     let config = SimActorSystemConfig {
         seed: 11,
@@ -251,7 +242,6 @@ fn scripted_payment_failure() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn scripted_payment_refund() {
     let config = SimActorSystemConfig {
         seed: 12,
@@ -282,7 +272,6 @@ fn scripted_payment_refund() {
 // SCRIPTED SCENARIOS — Shipment Lifecycle
 // =========================================================================
 
-#[test]
 fn scripted_shipment_full_delivery() {
     let config = SimActorSystemConfig {
         seed: 20,
@@ -312,7 +301,6 @@ fn scripted_shipment_full_delivery() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn scripted_shipment_failure_and_return() {
     let config = SimActorSystemConfig {
         seed: 21,
@@ -345,7 +333,6 @@ fn scripted_shipment_failure_and_return() {
 // MULTI-ENTITY SCENARIO — Full e-commerce flow
 // =========================================================================
 
-#[test]
 fn scripted_ecommerce_full_scenario() {
     let config = SimActorSystemConfig {
         seed: 100,
@@ -399,6 +386,23 @@ fn scripted_ecommerce_full_scenario() {
 // =========================================================================
 // RANDOM EXPLORATION — No-fault
 // =========================================================================
+
+#[test]
+fn scripted_ecommerce_scenarios() {
+    scripted_order_starts_in_draft();
+    scripted_order_add_item_then_submit();
+    scripted_order_full_lifecycle();
+    scripted_order_cancel_from_draft();
+    scripted_order_cancel_from_submitted();
+    scripted_order_cannot_submit_empty();
+    scripted_order_return_flow();
+    scripted_payment_full_lifecycle();
+    scripted_payment_failure();
+    scripted_payment_refund();
+    scripted_shipment_full_delivery();
+    scripted_shipment_failure_and_return();
+    scripted_ecommerce_full_scenario();
+}
 
 #[test]
 fn random_order_no_faults() {

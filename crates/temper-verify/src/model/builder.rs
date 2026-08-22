@@ -285,19 +285,27 @@ guard = [{ type = "cross_entity_state", entity_type = "Child", entity_id_source 
 
     #[test]
     fn test_undeclared_bool_invariant_falls_back_to_unverifiable() {
-        // payment_captured is NOT declared as a [[state]] bool var in the spec,
-        // so "ShipRequiresPayment" falls back to Unverifiable (we can't model it).
-        let model = build_order_model();
-        let ship_inv = model
+        const UNVERIFIABLE_IOA: &str = r#"
+[automaton]
+name = "UnverifiableEvidence"
+states = ["Open"]
+initial = "Open"
+
+[[invariant]]
+name = "RequiresUndeclaredEvidence"
+assert = "undeclared_flag"
+"#;
+        let model = build_model_from_ioa(UNVERIFIABLE_IOA, 2).expect("test spec parses");
+        let invariant = model
             .invariants
             .iter()
-            .find(|i| i.name == "ShipRequiresPayment");
+            .find(|i| i.name == "RequiresUndeclaredEvidence");
         assert!(
-            ship_inv.is_some(),
-            "Should have ShipRequiresPayment invariant"
+            invariant.is_some(),
+            "Should retain the unverifiable invariant"
         );
         assert!(
-            matches!(ship_inv.unwrap().kind, InvariantKind::Unverifiable { .. }),
+            matches!(invariant.unwrap().kind, InvariantKind::Unverifiable { .. }),
             "Undeclared bool should fall back to Unverifiable"
         );
     }

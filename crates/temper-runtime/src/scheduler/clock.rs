@@ -39,6 +39,8 @@ pub struct LogicalClock {
     epoch: DateTime<Utc>,
     /// Duration per tick in milliseconds.
     delta_ms: u64,
+    /// Temporary observer-local offset used while one actor handles a message.
+    skew_ms: std::sync::atomic::AtomicI64,
 }
 
 impl LogicalClock {
@@ -49,6 +51,7 @@ impl LogicalClock {
             // Fixed epoch: 2024-01-01T00:00:00Z
             epoch: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
             delta_ms: 100,
+            skew_ms: std::sync::atomic::AtomicI64::new(0),
         }
     }
 
@@ -58,6 +61,7 @@ impl LogicalClock {
             tick: std::sync::atomic::AtomicU64::new(0),
             epoch: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
             delta_ms,
+            skew_ms: std::sync::atomic::AtomicI64::new(0),
         }
     }
 
@@ -70,6 +74,12 @@ impl LogicalClock {
     pub fn advance_by(&self, n: u64) {
         self.tick.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
     }
+
+    /// Set a signed observer-local clock skew in milliseconds.
+    pub fn set_skew_ms(&self, skew_ms: i64) {
+        self.skew_ms
+            .store(skew_ms, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl Default for LogicalClock {
@@ -80,8 +90,10 @@ impl Default for LogicalClock {
 
 impl SimClock for LogicalClock {
     fn now(&self) -> DateTime<Utc> {
-        let offset_ms = self.tick.load(std::sync::atomic::Ordering::Relaxed) * self.delta_ms;
-        self.epoch + chrono::Duration::milliseconds(offset_ms as i64)
+        let tick = self.tick.load(std::sync::atomic::Ordering::Relaxed);
+        let base_ms = tick.saturating_mul(self.delta_ms).min(i64::MAX as u64) as i64;
+        let skew_ms = self.skew_ms.load(std::sync::atomic::Ordering::Relaxed);
+        self.epoch + chrono::Duration::milliseconds(base_ms.saturating_add(skew_ms))
     }
 
     fn tick(&self) -> u64 {

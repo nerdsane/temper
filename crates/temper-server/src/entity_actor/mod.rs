@@ -5,6 +5,8 @@
 //! processes action messages by evaluating transitions through the table.
 
 mod actor;
+/// Generated deterministic coverage exploration for IOA specs.
+pub mod dst_coverage;
 pub mod effects;
 mod field_updates;
 pub mod reference_contract;

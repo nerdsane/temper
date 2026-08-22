@@ -53,7 +53,6 @@ fn version_table() -> Arc<TransitionTable> {
 // SCRIPTED SCENARIOS — Project Lifecycle
 // =========================================================================
 
-#[test]
 fn scripted_project_starts_in_created() {
     let config = SimActorSystemConfig {
         seed: 1,
@@ -68,7 +67,6 @@ fn scripted_project_starts_in_created() {
     sim.assert_status("proj-1", "Created");
 }
 
-#[test]
 fn scripted_project_full_lifecycle() {
     let config = SimActorSystemConfig {
         seed: 1,
@@ -96,7 +94,6 @@ fn scripted_project_full_lifecycle() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn scripted_project_cannot_verify_without_specs() {
     let config = SimActorSystemConfig {
         seed: 1,
@@ -115,7 +112,6 @@ fn scripted_project_cannot_verify_without_specs() {
     sim.assert_status("proj-1", "Created");
 }
 
-#[test]
 fn scripted_project_archive_from_any_state() {
     let config = SimActorSystemConfig {
         seed: 2,
@@ -151,7 +147,6 @@ fn scripted_project_archive_from_any_state() {
 // SCRIPTED SCENARIOS — Tenant Lifecycle
 // =========================================================================
 
-#[test]
 fn scripted_tenant_full_lifecycle() {
     let config = SimActorSystemConfig {
         seed: 10,
@@ -184,7 +179,6 @@ fn scripted_tenant_full_lifecycle() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn scripted_tenant_suspend_resume_cycle() {
     let config = SimActorSystemConfig {
         seed: 11,
@@ -209,7 +203,6 @@ fn scripted_tenant_suspend_resume_cycle() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn scripted_tenant_cannot_suspend_pending() {
     let config = SimActorSystemConfig {
         seed: 12,
@@ -229,7 +222,6 @@ fn scripted_tenant_cannot_suspend_pending() {
 // SCRIPTED SCENARIOS — CatalogEntry Lifecycle
 // =========================================================================
 
-#[test]
 fn scripted_catalog_publish_and_deprecate() {
     let config = SimActorSystemConfig {
         seed: 20,
@@ -251,7 +243,6 @@ fn scripted_catalog_publish_and_deprecate() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn scripted_catalog_fork_stays_published() {
     let config = SimActorSystemConfig {
         seed: 21,
@@ -272,7 +263,6 @@ fn scripted_catalog_fork_stays_published() {
 // SCRIPTED SCENARIOS — Collaborator Lifecycle
 // =========================================================================
 
-#[test]
 fn scripted_collaborator_invite_accept_remove() {
     let config = SimActorSystemConfig {
         seed: 30,
@@ -298,7 +288,6 @@ fn scripted_collaborator_invite_accept_remove() {
     assert!(!sim.has_violations());
 }
 
-#[test]
 fn scripted_collaborator_remove_before_accept() {
     let config = SimActorSystemConfig {
         seed: 31,
@@ -318,7 +307,6 @@ fn scripted_collaborator_remove_before_accept() {
 // SCRIPTED SCENARIOS — Version Lifecycle
 // =========================================================================
 
-#[test]
 fn scripted_version_full_lifecycle() {
     let config = SimActorSystemConfig {
         seed: 40,
@@ -345,7 +333,6 @@ fn scripted_version_full_lifecycle() {
 // MULTI-ENTITY SCENARIO — Platform control plane
 // =========================================================================
 
-#[test]
 fn scripted_platform_control_plane_scenario() {
     let config = SimActorSystemConfig {
         seed: 100,
@@ -391,6 +378,23 @@ fn scripted_platform_control_plane_scenario() {
 // =========================================================================
 // RANDOM EXPLORATION — No-fault
 // =========================================================================
+
+#[test]
+fn scripted_system_entity_scenarios() {
+    scripted_project_starts_in_created();
+    scripted_project_full_lifecycle();
+    scripted_project_cannot_verify_without_specs();
+    scripted_project_archive_from_any_state();
+    scripted_tenant_full_lifecycle();
+    scripted_tenant_suspend_resume_cycle();
+    scripted_tenant_cannot_suspend_pending();
+    scripted_catalog_publish_and_deprecate();
+    scripted_catalog_fork_stays_published();
+    scripted_collaborator_invite_accept_remove();
+    scripted_collaborator_remove_before_accept();
+    scripted_version_full_lifecycle();
+    scripted_platform_control_plane_scenario();
+}
 
 #[test]
 fn random_project_no_faults_seed_42() {
