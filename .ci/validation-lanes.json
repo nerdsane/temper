@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "max_ci_workers": 4,
+  "lanes": [
+    {
+      "id": "fmt",
+      "category": "format",
+      "budget_seconds": 30,
+      "required_pr": true,
+      "commands": [["cargo", "fmt", "--check"]]
+    },
+    {
+      "id": "check",
+      "category": "compile",
+      "budget_seconds": 300,
+      "required_pr": true,
+      "cargo_timings": true,
+      "commands": [["cargo", "check", "--workspace", "--timings"]]
+    },
+    {
+      "id": "clippy",
+      "category": "lint",
+      "budget_seconds": 600,
+      "required_pr": true,
+      "cargo_timings": true,
+      "commands": [["cargo", "clippy", "--workspace", "--all-targets", "--timings", "--", "-D", "warnings"]]
+    },
+    {
+      "id": "integrity",
+      "category": "integrity",
+      "budget_seconds": 60,
+      "required_pr": true,
+      "commands": [["bash", "scripts/ci-integrity.sh"]]
+    },
+    {
+      "id": "test-foundations",
+      "category": "ordinary-test",
+      "budget_seconds": 900,
+      "required_pr": true,
+      "cargo_timings": true,
+      "packages": ["temper-macros", "temper-runtime", "temper-spec", "temper-codegen", "temper-wasm-sdk", "temper-odata", "temper-authz", "temper-observe"],
+      "commands": [["cargo", "test", "-p", "temper-macros", "-p", "temper-runtime", "-p", "temper-spec", "-p", "temper-codegen", "-p", "temper-wasm-sdk", "-p", "temper-odata", "-p", "temper-authz", "-p", "temper-observe", "--timings", "--", "--skip", "dst_"]]
+    },
+    {
+      "id": "test-storage-verification",
+      "category": "ordinary-test",
+      "budget_seconds": 1200,
+      "required_pr": true,
+      "cargo_timings": true,
+      "packages": ["temper-verify", "temper-store-postgres", "temper-store-turso", "temper-store-redis", "temper-store-sim", "temper-actor-runtime", "temper-jit", "temper-evolution", "temper-ots"],
+      "commands": [["cargo", "test", "-p", "temper-verify", "-p", "temper-store-postgres", "-p", "temper-store-turso", "-p", "temper-store-redis", "-p", "temper-store-sim", "-p", "temper-actor-runtime", "-p", "temper-jit", "-p", "temper-evolution", "-p", "temper-ots", "--timings", "--", "--skip", "dst_"]]
+    },
+    {
+      "id": "test-platform-apps",
+      "category": "ordinary-test",
+      "budget_seconds": 1200,
+      "required_pr": true,
+      "cargo_timings": true,
+      "packages": ["temper-sandbox", "temper-wasm", "temper-platform", "temper-optimize", "temper-cli", "temper-mcp", "temper-sdk", "temper-transport", "temper-agents", "crucible-reference", "ecommerce-reference", "oncall-reference", "readers-writers-reference"],
+      "commands": [["cargo", "test", "-p", "temper-sandbox", "-p", "temper-wasm", "-p", "temper-platform", "-p", "temper-optimize", "-p", "temper-cli", "-p", "temper-mcp", "-p", "temper-sdk", "-p", "temper-transport", "-p", "temper-agents", "-p", "crucible-reference", "-p", "ecommerce-reference", "-p", "oncall-reference", "-p", "readers-writers-reference", "--timings", "--", "--skip", "dst_"]]
+    },
+    {
+      "id": "test-server",
+      "category": "ordinary-test",
+      "budget_seconds": 1200,
+      "required_pr": true,
+      "cargo_timings": true,
+      "packages": ["temper-server"],
+      "commands": [
+        ["bash", "scripts/build-gepa-test-modules.sh"],
+        ["cargo", "test", "-p", "temper-server", "--timings", "--", "--skip", "dst_"]
+      ]
+    },
+    {
+      "id": "backend-parity",
+      "category": "backend-parity",
+      "budget_seconds": 300,
+      "required_pr": true,
+      "environment": {"TEMPER_REQUIRE_BACKEND_PARITY": "1"},
+      "commands": [["cargo", "test", "-p", "temper-server", "--test", "reaction_backend_parity"]]
+    },
+    {
+      "id": "observe-tests",
+      "category": "feature-test",
+      "budget_seconds": 300,
+      "required_pr": true,
+      "commands": [
+        ["cargo", "test", "-p", "temper-server", "--features", "observe", "--test", "spec_validate_endpoint"],
+        ["cargo", "test", "-p", "temper-server", "--features", "observe", "--lib", "observe::"],
+        ["cargo", "test", "-p", "temper-server", "--features", "observe", "--lib", "api::repl::"]
+      ]
+    },
+    {
+      "id": "dst-core",
+      "category": "dst",
+      "budget_seconds": 600,
+      "required_pr": true,
+      "commands": [["cargo", "test", "-p", "temper-server", "--test", "dst_concurrency_retry", "--test", "dst_hotswap", "--test", "dst_lifecycle", "--test", "dst_multi_tenant", "--test", "dst_persistence"]]
+    },
+    {
+      "id": "dst-spec-coverage",
+      "category": "dst",
+      "budget_seconds": 300,
+      "required_pr": true,
+      "commands": [["cargo", "test", "-p", "temper-platform", "--test", "dst_spec_coverage"]]
+    },
+    {
+      "id": "dst-platform-boot",
+      "category": "dst",
+      "budget_seconds": 900,
+      "required_pr": true,
+      "commands": [["cargo", "test", "-p", "temper-server", "--test", "dst_platform_boot"]]
+    },
+    {
+      "id": "dst-platform-cedar",
+      "category": "dst",
+      "budget_seconds": 600,
+      "required_pr": true,
+      "commands": [["cargo", "test", "-p", "temper-server", "--test", "dst_platform_cedar"]]
+    },
+    {
+      "id": "dst-platform-index",
+      "category": "dst",
+      "budget_seconds": 600,
+      "required_pr": true,
+      "commands": [["cargo", "test", "-p", "temper-server", "--test", "dst_platform_index"]]
+    },
+    {
+      "id": "dst-platform-rollback",
+      "category": "dst",
+      "budget_seconds": 600,
+      "required_pr": true,
+      "commands": [["cargo", "test", "-p", "temper-server", "--test", "dst_platform_rollback"]]
+    },
+    {
+      "id": "dst-random-contract",
+      "category": "dst",
+      "budget_seconds": 120,
+      "required_pr": true,
+      "environment": {"TEMPER_DST_RANDOM_MODE": "full"},
+      "commands": [
+        ["cargo", "test", "-p", "temper-server", "--test", "dst_platform_random", "random_mode_defaults_to_smoke_and_keeps_full_explicit", "--", "--exact"],
+        ["cargo", "test", "-p", "temper-server", "--test", "dst_platform_random", "successful_install_pairs_are_not_generated_twice", "--", "--exact"]
+      ]
+    },
+    {
+      "id": "dst-random-no-faults",
+      "category": "dst",
+      "budget_seconds": 1200,
+      "required_pr": true,
+      "environment": {"TEMPER_DST_RANDOM_MODE": "full"},
+      "commands": [["cargo", "test", "-p", "temper-server", "--test", "dst_platform_random", "dst_random_workload_no_faults", "--", "--exact"]]
+    },
+    {
+      "id": "dst-random-event-faults",
+      "category": "dst",
+      "budget_seconds": 900,
+      "required_pr": true,
+      "environment": {"TEMPER_DST_RANDOM_MODE": "full"},
+      "commands": [["cargo", "test", "-p", "temper-server", "--test", "dst_platform_random", "dst_random_workload_event_faults", "--", "--exact"]]
+    },
+    {
+      "id": "dst-random-platform-faults",
+      "category": "dst",
+      "budget_seconds": 900,
+      "required_pr": true,
+      "environment": {"TEMPER_DST_RANDOM_MODE": "full"},
+      "commands": [["cargo", "test", "-p", "temper-server", "--test", "dst_platform_random", "dst_random_workload_platform_faults", "--", "--exact"]]
+    },
+    {
+      "id": "dst-random-combined-faults",
+      "category": "dst",
+      "budget_seconds": 900,
+      "required_pr": true,
+      "environment": {"TEMPER_DST_RANDOM_MODE": "full"},
+      "commands": [["cargo", "test", "-p", "temper-server", "--test", "dst_platform_random", "dst_random_workload_combined_faults", "--", "--exact"]]
+    },
+    {
+      "id": "dst-random-determinism",
+      "category": "dst",
+      "budget_seconds": 600,
+      "required_pr": true,
+      "environment": {"TEMPER_DST_RANDOM_MODE": "full"},
+      "commands": [["cargo", "test", "-p", "temper-server", "--test", "dst_platform_random", "dst_random_workload_determinism", "--", "--exact"]]
+    },
+    {
+      "id": "spec-verification",
+      "category": "spec-verification",
+      "budget_seconds": 600,
+      "required_pr": true,
+      "commands": [["bash", "scripts/verify-spec-directories.sh"]]
+    },
+    {
+      "id": "instrumentation-hygiene",
+      "category": "instrumentation",
+      "budget_seconds": 600,
+      "required_pr": true,
+      "commands": [["cargo", "run", "-q", "-p", "temper-server", "--bin", "check_instrumentation"]]
+    },
+    {
+      "id": "prepush-workspace",
+      "category": "local-full",
+      "budget_seconds": 1800,
+      "required_pr": false,
+      "cargo_timings": true,
+      "commands": [["cargo", "test", "--workspace", "--timings"]]
+    },
+    {
+      "id": "bench-build",
+      "category": "bench",
+      "budget_seconds": 2400,
+      "required_pr": false,
+      "cargo_timings": true,
+      "commands": [["cargo", "bench", "--workspace", "--no-run", "--timings"]]
+    }
+  ]
+}
