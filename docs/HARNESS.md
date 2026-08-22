@@ -561,6 +561,22 @@ scripts/setup-hooks.sh
 # No manual setup needed — hooks fire on edit, commit, push, and exit
 ```
 
+## Validation Feedback Lanes
+
+The pre-push hook still runs the complete workspace suite. For faster
+iteration, use the canonical `fast` or `affected` modes; neither replaces the
+pre-push or CI merge gate:
+
+```bash
+python3 scripts/validation.py mode fast --base fork/main
+python3 scripts/validation.py affected --base fork/main
+```
+
+CI partitions ordinary tests and deterministic-simulation targets across at
+most four workers, then requires a timing report from every lane. See
+[Validation lanes](validation.md) for the full coverage contract, backend
+parity setup, budgets, and profiling commands.
+
 ## Bypassing (Emergencies Only)
 
 ```bash

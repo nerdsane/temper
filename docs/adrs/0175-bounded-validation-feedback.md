@@ -60,7 +60,9 @@ Validation has four named modes:
    selection to the complete ordinary-test lanes.
 3. `backend-parity` runs the real PostgreSQL and Redis durability contract and
    is never inferred from an in-memory backend result.
-4. `full` runs every required lane and remains the pre-push and merge contract.
+4. `full` runs every required lane and mirrors the merge contract locally. The
+   pre-push hook retains its existing complete workspace test suite, expressed
+   as a canonical lane; neither fast nor affected results can replace it.
 
 Change awareness is advisory acceleration only. It cannot skip `full` on push,
 on protected branches, or in the merge gate.

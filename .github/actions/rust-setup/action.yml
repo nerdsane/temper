@@ -1,0 +1,50 @@
+name: Temper Rust setup
+description: Install the pinned toolchain, fast linker, and compatible Cargo cache
+inputs:
+  cache-suffix:
+    description: Lane-specific cache suffix; compatible lanes share a restore prefix
+    required: true
+  components:
+    description: Comma-separated rustup components
+    required: false
+    default: ""
+  wasm-target:
+    description: Install wasm32-unknown-unknown
+    required: false
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - name: Install system dependencies and mold linker
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y clang libz3-dev mold
+
+    - name: Install pinned Rust toolchain
+      uses: dtolnay/rust-toolchain@nightly
+      with:
+        toolchain: ${{ env.RUST_TOOLCHAIN }}
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.wasm-target == 'true' && 'wasm32-unknown-unknown' || '' }}
+
+    - name: Configure clang and mold for CI linking
+      shell: bash
+      run: |
+        echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang" >> "$GITHUB_ENV"
+        echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
+
+    - name: Restore compatible Cargo artifacts
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target/
+        key: ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.github/actions/rust-setup/action.yml', '**/Cargo.toml', '**/build.rs') }}-${{ inputs.cache-suffix }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.github/actions/rust-setup/action.yml', '**/Cargo.toml', '**/build.rs') }}-${{ inputs.cache-suffix }}-
+          ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.github/actions/rust-setup/action.yml', '**/Cargo.toml', '**/build.rs') }}-
+          ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-
+
+    - name: Reset generated validation evidence
+      shell: bash
+      run: rm -rf target/validation-reports target/cargo-timings

@@ -19,18 +19,24 @@ env:
   RUST_TOOLCHAIN: nightly-2026-02-08
 
 jobs:
-  # ─────────────────────────────────────────────────────
-  # Gate 0: Verification contract (seconds)
-  # ─────────────────────────────────────────────────────
   verification-contract:
     name: Verification Contract (verification.v1)
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ordinary-matrix: ${{ steps.validation-matrices.outputs.ordinary }}
+      dst-matrix: ${{ steps.validation-matrices.outputs.dst }}
     steps:
       - uses: actions/checkout@v4
-
+      - name: Validate canonical lane contract
+        run: python3 scripts/validation.py check
+      - name: Generate validation matrices
+        id: validation-matrices
+        run: |
+          echo "ordinary=$(python3 scripts/validation.py list --category ordinary-test --required-pr)" >> "$GITHUB_OUTPUT"
+          echo "dst=$(python3 scripts/validation.py list --category dst --required-pr)" >> "$GITHUB_OUTPUT"
       - name: Install git hook wrappers
         run: bash scripts/setup-hooks.sh
-
       - name: Generate verification.v1 report
         env:
           VERIFICATION_AGENT_PROVIDER: github-actions
@@ -40,10 +46,8 @@ jobs:
             --session "${{ github.run_id }}" \
             --out verification.v1.json \
             --pretty
-
       - name: Validate verification.v1 contract
         run: bash scripts/verification-v1-validate.sh verification.v1.json
-
       - name: Enforce verification policy
         run: |
           jq -e '
@@ -51,7 +55,6 @@ jobs:
             .summary.checks_failed == 0
           ' verification.v1.json >/dev/null
           jq '{summary: .summary}' verification.v1.json
-
       - name: Upload verification artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -59,178 +62,64 @@ jobs:
           name: verification-v1
           path: verification.v1.json
 
-  # ─────────────────────────────────────────────────────
-  # Gate 1: Fast checks (seconds)
-  # ─────────────────────────────────────────────────────
   check:
     name: Compile & Lint
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libz3-dev
-
-      - name: Free disk space for full workspace tests
+      - name: Free disk space for full workspace builds
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL || true
           df -h
-
-      - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+      - uses: ./.github/actions/rust-setup
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: clippy, rustfmt
-
-      - name: cargo fmt --check
-        run: cargo fmt --check
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+          cache-suffix: check
+          components: clippy,rustfmt
+      - name: Run formatting lane
+        run: python3 scripts/validation.py run fmt
+      - name: Run workspace check lane
+        run: python3 scripts/validation.py run check
+      - name: Run clippy lane
+        run: python3 scripts/validation.py run clippy
+      - name: Upload compile and lane timings
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
+          name: validation-check-${{ github.run_attempt }}
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-check-
+            target/validation-reports/*.json
+            target/cargo-timings/
+          if-no-files-found: ignore
 
-      - name: cargo check --workspace
-        run: cargo check --workspace
-
-      - name: cargo clippy --workspace --all-targets
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-  # ─────────────────────────────────────────────────────
-  # Gate 1b: Bench compile (non-PR events only)
-  # ─────────────────────────────────────────────────────
-  bench-build:
-    name: Bench Build
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libz3-dev
-
-      - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-bench-
-
-      - name: cargo bench --workspace --no-run
-        run: cargo bench --workspace --no-run
-
-  # ─────────────────────────────────────────────────────
-  # Gate 2: Integrity checks (seconds)
-  # ─────────────────────────────────────────────────────
   integrity:
     name: Integrity & DST Patterns
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+      - uses: ./.github/actions/rust-setup
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+          cache-suffix: integrity
+      - name: Run integrity lane
+        run: python3 scripts/validation.py run integrity
+      - name: Upload lane timing
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-integrity-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-integrity-
+          name: validation-integrity-${{ github.run_attempt }}
+          path: target/validation-reports/*.json
+          if-no-files-found: ignore
 
-      - name: No TODO/FIXME/HACK in production code
-        run: |
-          # Strip #[cfg(test)] blocks and proc macro crates before scanning
-          FOUND=false
-          for f in $(find crates -name '*.rs' -not -path '*/tests/*' -not -name '*_test.rs' -not -name '*_tests.rs' -not -name 'tests.rs' -not -path '*/temper-macros/*'); do
-            # Extract only production code (stop at #[cfg(test)])
-            PROD_CODE="$(awk '/^#\[cfg\(test\)\]/{exit} {print}' "$f")"
-            if echo "$PROD_CODE" | grep -E '(TODO|FIXME|XXX|HACK)\b' | grep -v '// ci-ok' | grep -qv '^[[:space:]]*//' 2>/dev/null; then
-              echo "FAIL: $f contains TODO/FIXME/HACK"
-              echo "$PROD_CODE" | grep -nE '(TODO|FIXME|XXX|HACK)\b' | grep -v '// ci-ok' | grep -v '^[[:space:]]*//'
-              FOUND=true
-            fi
-          done
-          if [ "$FOUND" = true ]; then exit 1; fi
-          echo "Integrity check: OK"
-
-      - name: No unwrap() in production code
-        run: |
-          # Strip #[cfg(test)] blocks and proc macro crates before scanning.
-          # Exclude safe unwrap patterns:
-          #   - .read().unwrap() / .write().unwrap() / .lock().unwrap() — RwLock/Mutex
-          #     (poisoned lock = prior panic, TigerStyle fail-fast is correct)
-          #   - .with_ymd_and_hms(...).unwrap() — chrono infallible for valid dates
-          FOUND=false
-          for f in $(find crates -name '*.rs' -not -path '*/tests/*' -not -name '*_test.rs' -not -name '*_tests.rs' -not -name 'tests.rs' -not -path '*/temper-macros/*' -not -path '*/benches/*'); do
-            PROD_CODE="$(awk '/^#\[cfg\(test\)\]/{exit} {print}' "$f")"
-            FILTERED="$(echo "$PROD_CODE" | grep '\.unwrap()' | grep -v '// ci-ok' | grep -v '^[[:space:]]*//' | grep -v '\.read()\.unwrap()' | grep -v '\.write()\.unwrap()' | grep -v '\.lock()\.unwrap()' | grep -v 'with_ymd_and_hms.*\.unwrap()' || true)"
-            if [ -n "$FILTERED" ]; then
-              echo "FAIL: $f contains .unwrap()"
-              echo "$FILTERED"
-              FOUND=true
-            fi
-          done
-          if [ "$FOUND" = true ]; then exit 1; fi
-          echo "No unwrap: OK"
-
-      - name: Readability ratchet
-        run: bash scripts/readability-ratchet.sh check .ci/readability-baseline.env
-
-      - name: Storage dispatch boundary ratchet
-        run: bash scripts/check-storage-dispatch-boundary.sh
-
-      # DST pattern scan DISABLED (2026-02-17)
-      # Reason: Grep-based pattern matching is too brittle and caused 5+ consecutive
-      # CI failures from false positives. The DST reviewer agent (.claude/agents/dst-reviewer.md)
-      # performs semantic analysis which is strictly superior to regex scanning.
-      # The pattern scan will be re-evaluated once the DST architecture refactor
-      # (shared effect application) is complete.
-      # See: .progress/012_20260217_dst_architecture_fix.md
-
-      - name: Dependency isolation
-        run: |
-          # Check temper-jit has no production dep on temper-verify
-          if cargo tree --no-dev -p temper-jit 2>/dev/null | grep -q temper-verify; then
-            echo "FAIL: temper-jit has production dependency on temper-verify"
-            exit 1
-          fi
-          # Check no stateright/proptest in production crates
-          for crate in temper-jit temper-server temper-runtime; do
-            if cargo tree --no-dev -p "$crate" 2>/dev/null | grep -qE 'stateright|proptest'; then
-              echo "FAIL: $crate production binary includes stateright or proptest"
-              exit 1
-            fi
-          done
-          echo "Dependency isolation: OK"
-
-  # ─────────────────────────────────────────────────────
-  # Gate 3: Full test suite (minutes)
-  # ─────────────────────────────────────────────────────
-  test:
-    name: Tests
+  ordinary-tests:
+    name: Tests (${{ matrix.lane }})
+    needs: verification-contract
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.verification-contract.outputs.ordinary-matrix) }}
     services:
       postgres:
         image: postgres:17
@@ -258,180 +147,206 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libz3-dev
-
-      - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Free disk space for test artifacts
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL || true
+      - uses: ./.github/actions/rust-setup
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+          cache-suffix: ${{ matrix.lane }}
+          wasm-target: ${{ matrix.lane == 'test-server' && 'true' || 'false' }}
+      - name: Run ordinary test lane
+        run: python3 scripts/validation.py run "${{ matrix.lane }}"
+      - name: Upload compile and lane timings
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
+          name: validation-${{ matrix.lane }}-${{ github.run_attempt }}
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-test-
+            target/validation-reports/*.json
+            target/cargo-timings/
+          if-no-files-found: ignore
 
-      - name: Install wasm target for GEPA test modules
-        run: rustup target add wasm32-unknown-unknown
-
-      - name: Build GEPA test WASM modules
-        run: |
-          for module in gepa-replay gepa-reflective gepa-score gepa-pareto gepa-verify; do
-            (cd "wasm-modules/$module" && cargo build --target wasm32-unknown-unknown --release)
-          done
-
-      - name: cargo test --workspace -- --skip dst_
-        run: cargo test --workspace -- --skip dst_
-
-      - name: Verify durable reaction backend parity
+  backend-parity:
+    name: Backend Parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: temper
+          POSTGRES_PASSWORD: temper
+          POSTGRES_DB: temper_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U temper -d temper_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-setup
+        with:
+          cache-suffix: backend-parity
+      - name: Run durable reaction backend parity lane
         env:
           DATABASE_URL: postgres://temper:temper@localhost:5432/temper_test
           REDIS_URL: redis://localhost:6379/0
-          TEMPER_REQUIRE_BACKEND_PARITY: "1"
-        run: cargo test -p temper-server --test reaction_backend_parity
+        run: python3 scripts/validation.py run backend-parity
+      - name: Upload lane timing
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-backend-parity-${{ github.run_attempt }}
+          path: target/validation-reports/*.json
+          if-no-files-found: ignore
 
-      # spec_validate_endpoint declares required-features = ["observe"]. The
-      # workspace run above usually still covers it via feature unification
-      # (temper-cli/temper-mcp enable temper-server's observe feature), but
-      # that coverage is incidental — it evaporates if those edges change.
-      # Run the observe-gated tests explicitly so coverage is guaranteed.
-      - name: cargo test observe-gated tests
-        run: |
-          cargo test -p temper-server --features observe --test spec_validate_endpoint
-          cargo test -p temper-server --features observe --lib observe::
-          # api::repl tests (incl. server_repl_config_never_allows_host_ops,
-          # the ARN-166 host-op isolation guard) compile only under `observe`;
-          # run them explicitly so coverage never depends on feature unification.
-          cargo test -p temper-server --features observe --lib api::repl::
-
-  # ─────────────────────────────────────────────────────
-  # Gate 3b: DST/platform coverage (matrixed)
-  # ─────────────────────────────────────────────────────
-  dst-platform-tests:
-    name: DST/Platform Tests (${{ matrix.suite }})
+  observe-tests:
+    name: Observe Feature Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - suite: core
-            command: cargo test -p temper-server --test dst_concurrency_retry --test dst_hotswap --test dst_lifecycle --test dst_multi_tenant --test dst_persistence
-          - suite: platform-boot
-            command: cargo test -p temper-server --test dst_platform_boot
-          - suite: platform-consistency
-            command: cargo test -p temper-server --test dst_platform_cedar --test dst_platform_index --test dst_platform_rollback
-          - suite: platform-random
-            command: cargo test -p temper-server --test dst_platform_random
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libz3-dev
-
-      - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+      - uses: ./.github/actions/rust-setup
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+          cache-suffix: observe-tests
+      - name: Run observe-gated test lane
+        run: python3 scripts/validation.py run observe-tests
+      - name: Upload lane timing
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-dst-${{ matrix.suite }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-dst-${{ matrix.suite }}-
+          name: validation-observe-tests-${{ github.run_attempt }}
+          path: target/validation-reports/*.json
+          if-no-files-found: ignore
 
-      - name: cargo test DST/platform suite
-        env:
-          TEMPER_DST_RANDOM_MODE: ${{ matrix.suite == 'platform-random' && github.event_name == 'pull_request' && 'smoke' || 'full' }}
-        run: ${{ matrix.command }}
+  dst-platform-tests:
+    name: DST/Platform Tests (${{ matrix.lane }})
+    needs: verification-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.verification-contract.outputs.dst-matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-setup
+        with:
+          cache-suffix: ${{ matrix.lane }}
+      - name: Run deterministic simulation lane
+        run: python3 scripts/validation.py run "${{ matrix.lane }}"
+      - name: Upload lane timing
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-${{ matrix.lane }}-${{ github.run_attempt }}
+          path: target/validation-reports/*.json
+          if-no-files-found: ignore
 
-  # ─────────────────────────────────────────────────────
-  # Gate 4: Spec verification (minutes)
-  # ─────────────────────────────────────────────────────
   verify-specs:
     name: Spec Verification (L0-L3)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libz3-dev
-
-      - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+      - uses: ./.github/actions/rust-setup
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+          cache-suffix: spec-verification
+      - name: Run spec verification lane
+        run: python3 scripts/validation.py run spec-verification
+      - name: Upload lane timing
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-verify-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-verify-
+          name: validation-spec-verification-${{ github.run_attempt }}
+          path: target/validation-reports/*.json
+          if-no-files-found: ignore
 
-      - name: Build temper-cli
-        run: cargo build -p temper-cli
-
-      - name: Verify all spec directories
-        run: |
-          # Find all directories containing .ioa.toml files
-          SPEC_DIRS=$(find . -name '*.ioa.toml' -exec dirname {} \; | sort -u)
-          if [ -z "$SPEC_DIRS" ]; then
-            echo "No spec directories found — skipping verification"
-            exit 0
-          fi
-          ALL_PASSED=true
-          for dir in $SPEC_DIRS; do
-            # Only verify dirs that also have a CSDL model
-            if [ -f "$dir/model.csdl.xml" ]; then
-              echo "Verifying specs in $dir..."
-              if ! cargo run -p temper-cli -- verify --specs-dir "$dir"; then
-                echo "FAIL: Spec verification failed for $dir"
-                ALL_PASSED=false
-              fi
-            fi
-          done
-          if [ "$ALL_PASSED" = false ]; then exit 1; fi
-          echo "All specs verified: OK"
-
-
-  # ─────────────────────────────────────────────────────
-  # Gate N: Instrumentation hygiene (ADR-0052)
-  # Fails when a metric registration has no emission site.
-  # ─────────────────────────────────────────────────────
   instrumentation-hygiene:
     name: Instrumentation Hygiene (ADR-0052)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install rust toolchain
-        uses: dtolnay/rust-toolchain@master
+      - uses: ./.github/actions/rust-setup
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-
-      - uses: actions/cache@v4
+          cache-suffix: instrumentation-hygiene
+      - name: Run instrumentation lane
+        run: python3 scripts/validation.py run instrumentation-hygiene
+      - name: Upload lane timing
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
+          name: validation-instrumentation-${{ github.run_attempt }}
+          path: target/validation-reports/*.json
+          if-no-files-found: ignore
+
+  bench-build:
+    name: Bench Build
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-setup
+        with:
+          cache-suffix: bench-build
+      - name: Run bench compilation lane
+        run: python3 scripts/validation.py run bench-build
+      - name: Upload compile and lane timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-bench-build-${{ github.run_attempt }}
           path: |
-            ~/.cargo/bin
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-instrumentation-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-instrumentation-
+            target/validation-reports/*.json
+            target/cargo-timings/
+          if-no-files-found: ignore
 
-      - name: Run check_instrumentation
-        run: cargo run -q -p temper-server --bin check_instrumentation
+  validation-summary:
+    name: Validation Timing & Coverage Summary
+    if: always()
+    needs:
+      - verification-contract
+      - check
+      - integrity
+      - ordinary-tests
+      - backend-parity
+      - observe-tests
+      - dst-platform-tests
+      - verify-specs
+      - instrumentation-hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download lane reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: validation-*
+          path: target/downloaded-validation-reports
+      - name: Build timing and coverage summary
+        run: |
+          python3 scripts/validation.py \
+            --report-dir target/downloaded-validation-reports \
+            summary --require-complete | tee validation-summary.md
+          cat validation-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload combined timing report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-summary-${{ github.run_attempt }}
+          path: |
+            target/downloaded-validation-reports/summary.json
+            validation-summary.md
+          if-no-files-found: error

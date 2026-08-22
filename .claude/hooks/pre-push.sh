@@ -55,7 +55,7 @@ fi
 # --- Gate 4: Full test suite ---
 echo "" >&2
 echo "Gate 4/4: Full test suite..." >&2
-if ! (cd "$WORKSPACE_ROOT" && cargo test --workspace 2>&1 >&2); then
+if ! (cd "$WORKSPACE_ROOT" && python3 scripts/validation.py run prepush-workspace 2>&1 >&2); then
     echo "" >&2
     echo "BLOCKED: Test suite failed! Push rejected." >&2
     echo "Fix failing tests before pushing." >&2
