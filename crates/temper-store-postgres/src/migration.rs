@@ -40,7 +40,7 @@ mod tests {
             include_str!("../migrations/0009_entity_key_index.sql"),
             include_str!("../migrations/0010_key_index_backfill_watermark.sql"),
             include_str!("../migrations/0011_key_index_watermark_key_set.sql"),
-            include_str!("../migrations/0012_evolution_tenant_ownership.sql"),
+            include_str!("../migrations/0016_evolution_tenant_ownership.sql"),
         ]
         .join("\n")
         .to_lowercase();
@@ -219,5 +219,30 @@ mod tests {
             schema::CREATE_PUBLISHED_ARTIFACTS_TABLE.contains("IF NOT EXISTS"),
             "published_artifacts DDL must be idempotent"
         );
+    }
+}
+
+#[cfg(test)]
+mod version_uniqueness {
+    /// Two files sharing a version prefix both embed via `sqlx::migrate!`,
+    /// and every persistent database then fails checksum validation on boot
+    /// no matter which content it has applied (observed in production with
+    /// duplicate 0012 files). Guard the invariant at the source.
+    #[test]
+    fn migration_versions_are_unique() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations");
+        let mut versions = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(dir).expect("migrations dir") {
+            let name = entry.expect("dir entry").file_name();
+            let name = name.to_string_lossy().into_owned();
+            if !name.ends_with(".sql") {
+                continue;
+            }
+            let prefix: String = name.chars().take_while(|c| c.is_ascii_digit()).collect();
+            assert!(!prefix.is_empty(), "migration lacks numeric prefix: {name}");
+            if let Some(previous) = versions.insert(prefix.clone(), name.clone()) {
+                panic!("duplicate migration version {prefix}: {previous} and {name}");
+            }
+        }
     }
 }
