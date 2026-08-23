@@ -58,6 +58,13 @@ impl PendingClientRequests {
         };
         tx.send(response).is_ok()
     }
+
+    /// Drop every in-flight request so its awaiter fails immediately with
+    /// `Closed` instead of waiting out the timeout. Called when the client
+    /// stream ends mid-elicitation.
+    pub(crate) fn fail_all(&self) {
+        self.inner.lock().expect("pending map lock").clear();
+    }
 }
 
 /// A JSON-RPC message from the client is a *response* to a server→client

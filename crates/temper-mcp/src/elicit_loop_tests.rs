@@ -416,3 +416,34 @@ async fn denial_with_elicitation_human_declines_leaves_pending() {
     );
     assert!(backend.deny.lock().expect("deny lock").is_none());
 }
+
+#[tokio::test]
+async fn client_disconnect_mid_elicitation_ends_promptly_without_resolution() {
+    let (port, backend) = start_mock_backend().await;
+    let (server, mut client) = wire_session(port);
+
+    let script = async move {
+        client.initialize(true).await;
+        client.call_denied_action().await;
+
+        let elicitation = client.recv().await;
+        assert_eq!(elicitation["method"], "elicitation/create");
+        // The client goes away without answering.
+        drop(client);
+    };
+
+    // The session must end well before the 120s elicitation timeout: the
+    // reader fails the pending request on EOF instead of waiting it out.
+    let (server_result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(server, script)
+    })
+    .await
+    .expect("session ends promptly after client disconnect");
+    server_result.expect("server loop");
+
+    assert!(
+        backend.approve.lock().expect("approve lock").is_none(),
+        "a disconnect must never resolve the decision"
+    );
+    assert!(backend.deny.lock().expect("deny lock").is_none());
+}

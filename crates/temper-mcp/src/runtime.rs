@@ -1057,6 +1057,11 @@ async fn read_inbound<R: AsyncBufRead + Unpin>(
             break;
         }
     }
+
+    // The client stream ended: fail any in-flight server→client request so
+    // a pending elicitation returns immediately (decision left pending)
+    // instead of waiting out its timeout.
+    pending.fail_all();
 }
 
 /// Serialize outbound JSON-RPC messages as newline-delimited frames.
