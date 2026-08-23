@@ -2,8 +2,10 @@
 //!
 //! Postgres is the canonical schema source. The migration files under
 //! `crates/temper-store-postgres/migrations/` preserve the fork lineage,
-//! `migrations-upstream/` preserve upstream's divergent versions, and
-//! `migrations-convergence/` contain the shared sequence beginning at `0016`.
+//! `migrations-upstream/` preserve the original upstream divergence,
+//! `migrations-upstream-fixed/` preserve upstream's corrected stream,
+//! `migrations-convergence/` preserve the fork's historical `0016`, and
+//! `migrations-shared/` contain the shared sequence beginning at `0017`.
 //! ADR-0173 defines the fail-closed classifier that selects a legacy stream
 //! before applying the shared sequence.
 
@@ -23,14 +25,26 @@ static FORK_MIGRATOR: Migrator = {
     migrator
 };
 
-static UPSTREAM_MIGRATOR: Migrator = {
+static LEGACY_UPSTREAM_MIGRATOR: Migrator = {
     let mut migrator = sqlx::migrate!("./migrations-upstream");
     migrator.ignore_missing = true;
     migrator
 };
 
-static CONVERGENCE_MIGRATOR: Migrator = {
+static FIXED_UPSTREAM_MIGRATOR: Migrator = {
+    let mut migrator = sqlx::migrate!("./migrations-upstream-fixed");
+    migrator.ignore_missing = true;
+    migrator
+};
+
+static HISTORICAL_CONVERGENCE_MIGRATOR: Migrator = {
     let mut migrator = sqlx::migrate!("./migrations-convergence");
+    migrator.ignore_missing = true;
+    migrator
+};
+
+static SHARED_MIGRATOR: Migrator = {
+    let mut migrator = sqlx::migrate!("./migrations-shared");
     migrator.ignore_missing = true;
     migrator
 };
@@ -74,12 +88,22 @@ async fn run_migrations_locked(connection: &mut PgConnection) -> Result<(), Pers
             .run_direct(connection)
             .await
             .map_err(migration_error)?,
-        MigrationLineage::Upstream => UPSTREAM_MIGRATOR
+        MigrationLineage::LegacyUpstream => LEGACY_UPSTREAM_MIGRATOR
+            .run_direct(connection)
+            .await
+            .map_err(migration_error)?,
+        MigrationLineage::FixedUpstream => FIXED_UPSTREAM_MIGRATOR
             .run_direct(connection)
             .await
             .map_err(migration_error)?,
     }
-    CONVERGENCE_MIGRATOR
+    if lineage != MigrationLineage::FixedUpstream {
+        HISTORICAL_CONVERGENCE_MIGRATOR
+            .run_direct(connection)
+            .await
+            .map_err(migration_error)?;
+    }
+    SHARED_MIGRATOR
         .run_direct(connection)
         .await
         .map_err(migration_error)
