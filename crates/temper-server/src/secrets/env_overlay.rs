@@ -72,14 +72,16 @@ pub fn overlay_datadog_values(
     overlay_declared(config, "dd_app_key", app_key);
 }
 
-/// Overlay TensorLake bearer. Inserts the key even when it was absent.
+/// Overlay TensorLake bearer only when the trigger already declared the key.
 ///
-/// Never logs the value. Empty and unresolved `{secret:...}` are replaced.
+/// Same rule as Datadog: undeclared guests do not receive the process-wide
+/// bearer. Never logs the value. Empty and unresolved `{secret:...}` are
+/// replaced; already-resolved values are kept.
 pub fn overlay_tensorlake_values(config: &mut BTreeMap<String, String>, api_key: Option<&str>) {
-    overlay_key(config, TENSORLAKE_API_KEY_KEY, api_key);
+    overlay_declared(config, TENSORLAKE_API_KEY_KEY, api_key);
 }
 
-/// Copy `TENSORLAKE_API_KEY` from the process env into `tensorlake_api_key`.
+/// Copy `TENSORLAKE_API_KEY` from the process env into a declared `tensorlake_api_key`.
 pub fn overlay_tensorlake_env(config: &mut BTreeMap<String, String>) {
     let api_key = std::env::var("TENSORLAKE_API_KEY") // determinism-ok: production TensorLake auth, not entity state
         .ok();
@@ -194,17 +196,25 @@ mod tests {
     }
 
     #[test]
-    fn tensorlake_overlay_inserts_and_replaces_unresolved() {
+    fn tensorlake_overlay_skips_undeclared_key() {
         let mut config = BTreeMap::new();
         overlay_tensorlake_values(&mut config, Some("unit-test-key"));
-        assert_eq!(config[TENSORLAKE_API_KEY_KEY], "unit-test-key");
+        assert!(config.is_empty());
+    }
 
+    #[test]
+    fn tensorlake_overlay_replaces_declared_unresolved_or_empty() {
+        let mut config = BTreeMap::new();
         config.insert(
             TENSORLAKE_API_KEY_KEY.to_string(),
             "{secret:tensorlake_api_key}".to_string(),
         );
         overlay_tensorlake_values(&mut config, Some("replaced-key"));
         assert_eq!(config[TENSORLAKE_API_KEY_KEY], "replaced-key");
+
+        config.insert(TENSORLAKE_API_KEY_KEY.to_string(), String::new());
+        overlay_tensorlake_values(&mut config, Some("empty-replaced"));
+        assert_eq!(config[TENSORLAKE_API_KEY_KEY], "empty-replaced");
     }
 
     #[test]

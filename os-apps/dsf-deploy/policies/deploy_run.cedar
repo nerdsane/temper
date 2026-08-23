@@ -5,13 +5,14 @@
 
 permit(
   principal,
-  action in [Action::"create", Action::"read", Action::"list"],
+  action in [Action::"read", Action::"list"],
   resource is DeployRun
 );
 
 permit(
-  principal,
+  principal is Agent,
   action in [
+    Action::"create",
     Action::"Arm",
     Action::"ProbeHealth",
     Action::"MarkReady",

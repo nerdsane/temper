@@ -147,8 +147,10 @@ proxy APIs and a Bearer from `tensorlake_api_key` /
 Empty name keeps the existing E2B / local path. There is still no
 TensorLake create client. Resume is TensorLake's (`tl sbx resume dsf`).
 
-Host overlay copies `TENSORLAKE_API_KEY` into `tensorlake_api_key`. The
-value is never logged.
+Host overlay copies `TENSORLAKE_API_KEY` into `tensorlake_api_key` only
+when that key is already declared on the trigger (same as Datadog).
+Named-sandbox name/url may still insert if absent; those are not a
+bearer. The value is never logged.
 
 ### Sub-Decision 6: Non-goals stay out
 
