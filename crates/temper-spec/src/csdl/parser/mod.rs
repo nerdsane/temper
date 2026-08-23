@@ -13,6 +13,16 @@ use xml::{attr_str, local_name};
 pub enum CsdlParseError {
     #[error("XML parse error: {0}")]
     Xml(#[from] quick_xml::Error),
+    /// An XML attribute could not be tokenized.
+    #[error("XML attribute parse error: {0}")]
+    Attribute(#[from] quick_xml::events::attributes::AttrError),
+    /// A present XML attribute contained invalid entity syntax.
+    #[error("invalid value for attribute '{attr}' on element '{element}': {source}")]
+    InvalidAttributeValue {
+        element: String,
+        attr: String,
+        source: quick_xml::Error,
+    },
     #[error("missing required attribute '{attr}' on element '{element}'")]
     MissingAttribute { element: String, attr: String },
     #[error("unexpected element: {0}")]
@@ -33,13 +43,13 @@ pub fn parse_csdl(xml: &str) -> Result<CsdlDocument, CsdlParseError> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => match local_name(e).as_str() {
-                "Edmx" => doc.version = attr_str(e, "Version").unwrap_or_default(),
+                "Edmx" => doc.version = attr_str(e, "Version")?.unwrap_or_default(),
                 "Schema" => doc.schemas.push(parse_schema(&mut reader, e)?),
                 _ => {}
             },
             Ok(Event::Empty(ref e)) => {
                 if local_name(e) == "Edmx" {
-                    doc.version = attr_str(e, "Version").unwrap_or_default();
+                    doc.version = attr_str(e, "Version")?.unwrap_or_default();
                 }
             }
             Ok(Event::Eof) => break,
