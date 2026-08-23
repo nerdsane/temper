@@ -85,6 +85,8 @@ fn app(state: PlatformState) -> Router {
         .with_state(state)
 }
 
+mod outer_context;
+
 #[tokio::test]
 async fn no_key_mode_rejects_protected_requests() {
     let response = app(PlatformState::new(None))
@@ -214,65 +216,6 @@ async fn registered_credential_is_tenant_bound_and_headers_cannot_replace_it() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn declared_public_http_endpoint_gets_anonymous_typed_context() {
-    let state = PlatformState::new(None);
-    state
-        .server
-        .http_endpoint_tables
-        .table_for(&TenantId::default())
-        .await
-        .replace(vec![protocol_route(false)])
-        .await;
-
-    let response = app(state)
-        .oneshot(
-            HttpRequest::get("/repo.git/info/refs")
-                .header("authorization", "Basic malformed")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    assert_eq!(
-        String::from_utf8(body.to_vec()).unwrap(),
-        "default:Customer:anonymous:false"
-    );
-}
-
-#[tokio::test]
-async fn private_http_endpoint_challenges_basic_credentials_before_guest_dispatch() {
-    let state = PlatformState::new(None);
-    state
-        .server
-        .http_endpoint_tables
-        .table_for(&TenantId::default())
-        .await
-        .replace(vec![protocol_route(true)])
-        .await;
-
-    let response = app(state)
-        .oneshot(
-            HttpRequest::get("/repo.git/info/refs")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        response
-            .headers()
-            .get("www-authenticate")
-            .and_then(|value| value.to_str().ok()),
-        Some("Basic realm=\"Temper\"")
-    );
 }
 
 #[test]

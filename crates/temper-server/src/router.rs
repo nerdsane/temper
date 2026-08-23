@@ -425,7 +425,6 @@ async fn dispatch_matched_route(
         &route.route.integration_module,
         &ctx,
         streams.clone(),
-        authenticated.security_context(),
     ) {
         Ok(host) => host,
         Err(error) => {

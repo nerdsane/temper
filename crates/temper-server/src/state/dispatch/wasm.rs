@@ -61,6 +61,22 @@ pub(crate) fn internal_http_capability_issuer(
     }))
 }
 
+/// Build an internal HTTP capability issuer bound to the immutable WASM
+/// module identity already admitted by the host-function Cedar gate.
+pub(crate) fn internal_wasm_http_capability_issuer(
+    state: &crate::state::ServerState,
+    tenant: &TenantId,
+    wasm: &WasmAuthzContext,
+) -> InternalHttpCapabilityIssuerFn {
+    let security = crate::authz::wasm_gate::build_wasm_security_context(wasm);
+    match internal_http_capability_issuer(state, tenant, Some(&security)) {
+        Some(issuer) => issuer,
+        None => Arc::new(|_, _| {
+            Err("WASM module authority cannot issue an internal HTTP capability".to_string())
+        }),
+    }
+}
+
 /// Build the same Cedar-gated host chain for an inbound `HttpEndpoint` guest
 /// that ordinary action-triggered WASM integrations receive.
 ///
@@ -73,7 +89,6 @@ pub(crate) fn authorized_http_endpoint_host(
     module_name: &str,
     invocation_context: &WasmInvocationContext,
     http_streams: Arc<temper_wasm::http_stream::HttpStreamRegistry>,
-    security_context: &SecurityContext,
 ) -> Result<Arc<dyn WasmHost>, String> {
     let gate = state.wasm_authz_gate();
     let authz_context = WasmAuthzContext {
@@ -92,8 +107,7 @@ pub(crate) fn authorized_http_endpoint_host(
     );
     let secret_resolver =
         state.authorized_wasm_secret_resolver(tenant, Arc::clone(&gate), authz_context.clone());
-    let capability_issuer = internal_http_capability_issuer(state, tenant, Some(security_context))
-        .ok_or_else(|| "HttpEndpoint caller authority cannot be delegated".to_string())?;
+    let capability_issuer = internal_wasm_http_capability_issuer(state, tenant, &authz_context);
     let internal_api_url = internal_api_base_url(state);
     let local_blob_interceptor = local_blob_binary_interceptor(
         state.clone(),
@@ -125,10 +139,10 @@ pub(crate) fn authorized_http_endpoint_host(
     }
 
     let production_host: Arc<dyn WasmHost> = Arc::new(base_host);
-    let local_host: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
+    let local_host: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new_for_wasm(
         state.clone(),
         tenant.clone(),
-        Some(security_context),
+        &authz_context,
         production_host,
     ));
     Ok(Arc::new(AuthorizedWasmHost::new(
@@ -456,9 +470,16 @@ impl crate::state::ServerState {
         );
         let integrations = {
             let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
-            registry
-                .get_spec(req.tenant, req.entity_type)
-                .map(|spec| spec.integrations.clone())
+            let spec = match req.agent_ctx.schema_pin.as_ref() {
+                Some(pin) => registry.get_scoped_spec_at_digest(
+                    req.tenant,
+                    &pin.scope,
+                    &pin.bundle_digest,
+                    req.entity_type,
+                ),
+                None => registry.get_spec(req.tenant, req.entity_type),
+            };
+            spec.map(|spec| spec.integrations.clone())
                 .unwrap_or_default()
         };
         let base_gate = self.wasm_authz_gate();
@@ -759,11 +780,8 @@ impl crate::state::ServerState {
                     module_name.clone(),
                 );
                 let host_invocation_context = inv_ctx.clone();
-                let internal_capability_issuer = internal_http_capability_issuer(
-                    self,
-                    ctx.entity_ref.tenant,
-                    ctx.agent_ctx.security_ctx.as_ref(),
-                );
+                let internal_capability_issuer =
+                    internal_wasm_http_capability_issuer(self, ctx.entity_ref.tenant, &authz_ctx);
                 let mut production_host_builder =
                     ProductionWasmHost::with_timeout(tenant_secrets, http_timeout)
                         .with_binary_http_interceptor(
@@ -785,10 +803,8 @@ impl crate::state::ServerState {
                             current_otel_trace_id(active_span)
                                 .or_else(|| ctx.agent_ctx.trace_id.clone()),
                         );
-                if let Some(issuer) = internal_capability_issuer {
-                    production_host_builder =
-                        production_host_builder.with_internal_capability_issuer(issuer);
-                }
+                production_host_builder = production_host_builder
+                    .with_internal_capability_issuer(internal_capability_issuer);
                 if let Some(resolver) = secret_resolver.clone() {
                     production_host_builder =
                         production_host_builder.with_secret_resolver(resolver);
@@ -836,10 +852,10 @@ impl crate::state::ServerState {
                         .with_temper_data_service(data, read, write, &budgets);
                 }
                 let production_host: Arc<dyn WasmHost> = Arc::new(production_host_builder);
-                let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
+                let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new_for_wasm(
                     self.clone(),
                     ctx.entity_ref.tenant.clone(),
-                    ctx.agent_ctx.security_ctx.as_ref(),
+                    &authz_ctx,
                     production_host,
                 ));
                 let host: Arc<dyn WasmHost> =

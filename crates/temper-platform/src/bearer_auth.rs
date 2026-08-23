@@ -23,10 +23,19 @@ pub async fn bearer_auth_check(
 ) -> Result<Response, StatusCode> {
     let bearer = bearer_credential(&req);
     let tenant = requested_tenant(&req)?;
+    let has_outer_context = match req
+        .extensions()
+        .get::<temper_authz::AuthenticatedRequestContext>()
+    {
+        Some(authenticated) if authenticated.tenant() == &tenant => true,
+        Some(_) => return Err(StatusCode::UNAUTHORIZED),
+        None => false,
+    };
 
-    if bearer
-        .as_deref()
-        .is_some_and(temper_server::internal_invocation::is_internal_invocation_bearer)
+    if !has_outer_context
+        && bearer
+            .as_deref()
+            .is_some_and(temper_server::internal_invocation::is_internal_invocation_bearer)
     {
         let token = bearer.as_deref().ok_or(StatusCode::UNAUTHORIZED)?;
         let authenticated = state
@@ -42,7 +51,7 @@ pub async fn bearer_auth_check(
     }
 
     if is_public_request(&req) {
-        if !req.uri().path().starts_with("/webhooks/") {
+        if has_outer_context || !req.uri().path().starts_with("/webhooks/") {
             req.headers_mut().remove("authorization");
         }
         return Ok(next.run(req).await);
@@ -58,6 +67,20 @@ pub async fn bearer_auth_check(
     };
     let request_method = req.method().as_str().to_string();
     let request_path = req.uri().path().to_string();
+
+    if has_outer_context {
+        if let Some(matched) = matched_endpoint {
+            req.extensions_mut()
+                .insert(temper_server::http_endpoint::AdmittedHttpEndpoint::new(
+                    tenant.clone(),
+                    &request_method,
+                    &request_path,
+                    matched,
+                ));
+        }
+        req.headers_mut().remove("authorization");
+        return Ok(next.run(req).await);
+    }
 
     if let Some(token) = request_credential(&req)
         && let Some(identity) = temper_server::identity::IdentityResolver::new()

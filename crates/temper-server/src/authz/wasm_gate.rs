@@ -183,7 +183,7 @@ impl WasmAuthzGate for PermissiveWasmAuthzGate {
 /// Build a `SecurityContext` from a `WasmAuthzContext`.
 ///
 /// The principal is the WASM module (kind=Agent, role=wasm_module).
-fn build_wasm_security_context(ctx: &WasmAuthzContext) -> SecurityContext {
+pub(crate) fn build_wasm_security_context(ctx: &WasmAuthzContext) -> SecurityContext {
     let mut context_attrs = std::collections::HashMap::new(); // determinism-ok: SecurityContext uses HashMap
     context_attrs.insert(
         "tenant".into(),

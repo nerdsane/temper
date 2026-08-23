@@ -239,6 +239,18 @@ impl SpecRegistry {
             .map(EntitySpec::table)
     }
 
+    /// Exact immutable scoped entity spec, including its integration metadata.
+    pub fn get_scoped_spec_at_digest(
+        &self,
+        tenant: &TenantId,
+        scope: &SchemaScope,
+        digest: &str,
+        entity_type: &str,
+    ) -> Option<&EntitySpec> {
+        self.get_scoped_config_at_digest(tenant, scope, digest)
+            .and_then(|config| config.entities.get(entity_type))
+    }
+
     /// Snapshot reaction rules from one exact immutable scoped bundle.
     pub fn scoped_reaction_candidates_at_digest(
         &self,

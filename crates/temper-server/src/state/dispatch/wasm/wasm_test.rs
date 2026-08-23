@@ -18,6 +18,53 @@ fn internal_http_issuer_refuses_system_and_accepts_resolved_agents() {
 }
 
 #[test]
+fn internal_wasm_http_issuer_preserves_the_module_identity() {
+    let state = crate::state::ServerState::from_registry(
+        temper_runtime::ActorSystem::new("internal-wasm-capability-issuer-test"),
+        crate::registry::SpecRegistry::new(),
+    );
+    let tenant = TenantId::new("tenant-a");
+    let wasm = WasmAuthzContext {
+        tenant: tenant.to_string(),
+        module_name: "advance_arc_task_synthesis".to_string(),
+        agent_id: Some("service:wasm-runtime".to_string()),
+        session_id: None,
+        entity_type: "ArcTaskSynthesis".to_string(),
+        trigger_action: "RecordInitialSubmitted".to_string(),
+    };
+    let issuer = internal_wasm_http_capability_issuer(&state, &tenant, &wasm);
+    let capability = issuer(
+        "POST",
+        "http://127.0.0.1:3000/api/v1/schema-deployments/scope/digest/verify",
+    )
+    .expect("module-bound capability should issue");
+    let authenticated = state
+        .internal_invocation_credentials
+        .consume_for_request(
+            capability.bearer_token(),
+            &tenant,
+            &axum::http::Method::POST,
+            &"/api/v1/schema-deployments/scope/digest/verify"
+                .parse()
+                .expect("request target should parse"),
+        )
+        .expect("module-bound capability should resolve");
+
+    assert_eq!(
+        authenticated.security_context().principal.id,
+        "advance_arc_task_synthesis"
+    );
+    assert_eq!(
+        authenticated.security_context().principal.role.as_deref(),
+        Some("wasm_module")
+    );
+    assert_eq!(
+        authenticated.security_context().context_attrs.get("module"),
+        Some(&json!("advance_arc_task_synthesis"))
+    );
+}
+
+#[test]
 fn composite_wasm_result_inherits_generated_dispatch_idempotency() {
     let agent = AgentContext::for_service("version-publisher");
 

@@ -96,3 +96,131 @@ async fn test_install_os_app_directed_evolution_registers_entities() {
     assert!(registry.get_table(&tenant, "WorkItem").is_some());
     assert!(registry.get_table(&tenant, "BrainRun").is_some());
 }
+
+#[tokio::test]
+async fn test_directed_evolution_policy_admits_only_packaged_wasm_modules() {
+    let state = PlatformState::new(None);
+    let tenant = "test-directed-evolution-wasm-policy";
+    install_os_app(&state, tenant, "directed-evolution")
+        .await
+        .expect("directed-evolution app installs");
+
+    let module_context = |module_name: &str, role: &str| temper_authz::SecurityContext {
+        principal: temper_authz::Principal {
+            id: module_name.to_string(),
+            kind: temper_authz::PrincipalKind::Agent,
+            role: Some(role.to_string()),
+            acting_for: None,
+            agent_type: None,
+            attributes: std::collections::HashMap::new(),
+        },
+        context_attrs: std::collections::HashMap::new(),
+        correlation_id: "directed-evolution-wasm-policy-test".to_string(),
+    };
+    let attrs = std::collections::BTreeMap::new();
+
+    assert!(
+        state
+            .server
+            .authorize_with_context(
+                &module_context("signal_observer", "wasm_module"),
+                "create",
+                "WorkItem",
+                &attrs,
+                tenant,
+            )
+            .is_ok(),
+        "a packaged WASM module should receive the app's action/resource permits"
+    );
+    assert!(
+        state
+            .server
+            .authorize_with_context(
+                &module_context("signal_observer", "wasm_module"),
+                "create",
+                "Episode",
+                &attrs,
+                tenant,
+            )
+            .is_err(),
+        "signal_observer must not create entities outside its WorkItem contract"
+    );
+    assert!(
+        state
+            .server
+            .authorize_with_context(
+                &module_context("signal_observer", "wasm_module"),
+                "PromoteWinner",
+                "Promotion",
+                &attrs,
+                tenant,
+            )
+            .is_err(),
+        "signal_observer must not inherit another module's action grants"
+    );
+    assert!(
+        state
+            .server
+            .authorize_with_context(
+                &module_context("episode_orchestrator", "wasm_module"),
+                "create",
+                "Generation",
+                &attrs,
+                tenant,
+            )
+            .is_ok(),
+        "episode_orchestrator should create generations"
+    );
+    assert!(
+        state
+            .server
+            .authorize_with_context(
+                &module_context("episode_orchestrator", "wasm_module"),
+                "create",
+                "Project",
+                &attrs,
+                tenant,
+            )
+            .is_err(),
+        "a Directed Evolution module must not create cross-app entities"
+    );
+    assert!(
+        state
+            .server
+            .authorize_with_context(
+                &module_context("work_item_result_router", "wasm_module"),
+                "PromoteWinner",
+                "Promotion",
+                &attrs,
+                tenant,
+            )
+            .is_ok(),
+        "work_item_result_router should retain its promotion contract"
+    );
+    assert!(
+        state
+            .server
+            .authorize_with_context(
+                &module_context("unregistered_module", "wasm_module"),
+                "create",
+                "WorkItem",
+                &attrs,
+                tenant,
+            )
+            .is_err(),
+        "an unknown WASM module must remain denied"
+    );
+    assert!(
+        state
+            .server
+            .authorize_with_context(
+                &module_context("signal_observer", "operator"),
+                "create",
+                "WorkItem",
+                &attrs,
+                tenant,
+            )
+            .is_err(),
+        "a known module id without the host-derived role must remain denied"
+    );
+}

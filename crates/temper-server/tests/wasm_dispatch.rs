@@ -7,6 +7,11 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use temper_runtime::ActorSystem;
+use temper_runtime::persistence::schema_deployment::{
+    ActivateSchemaBundle, ClaimSchemaVerification, ClaimSchemaVerificationOutcome,
+    SchemaBundleRecord, SchemaDeploymentStore, SchemaExecutionPin, SchemaOperationIdentity,
+    SchemaScope, SchemaScopeKind, SchemaVerificationReceipt, SubmitSchemaBundle,
+};
 use temper_runtime::tenant::TenantId;
 use temper_server::ServerState;
 use temper_server::registry::SpecRegistry;
@@ -19,6 +24,8 @@ use temper_store_turso::TursoEventStore;
 /// Pre-built echo integration WASM binary.
 const ECHO_WASM: &[u8] =
     include_bytes!("../../../crates/temper-wasm/tests/fixtures/echo_integration.wasm");
+const LOCAL_TDATA_WASM: &[u8] =
+    include_bytes!("../../../crates/temper-wasm/tests/fixtures/local_tdata_integration.wasm");
 
 /// IOA spec with a `trigger echo_call` effect and WASM integration.
 const ECHO_IOA: &str = r#"
@@ -87,6 +94,89 @@ fn build_echo_test_state() -> ServerState {
 
     let system = ActorSystem::new("wasm-dispatch-test");
     ServerState::from_registry(system, registry)
+}
+
+async fn persist_active_scoped_echo_bundle(
+    store: &impl SchemaDeploymentStore,
+    tenant: &TenantId,
+    scope: &SchemaScope,
+    digest: &str,
+) {
+    store
+        .submit_schema_bundle(SubmitSchemaBundle {
+            bundle: SchemaBundleRecord {
+                tenant: tenant.to_string(),
+                scope: scope.clone(),
+                digest: digest.to_string(),
+                predecessor_digest: None,
+                canonical_csdl: ECHO_CSDL_XML.to_string(),
+                canonical_ioa: std::collections::BTreeMap::from([(
+                    "EchoTest".to_string(),
+                    ECHO_IOA.to_string(),
+                )]),
+                cedar_policies: std::collections::BTreeMap::new(),
+                wasm_module_digests: std::collections::BTreeMap::new(),
+                migration_module_name: None,
+                migration_module_digest: None,
+                migration_abi_version: None,
+                canonical_budgets: "{}".to_string(),
+            },
+            idempotency_key: "scoped-echo-submit".to_string(),
+            request_digest: format!("sha256:{}", "1".repeat(64)),
+            request_id: "scoped-echo-submit".to_string(),
+        })
+        .await
+        .expect("submit scoped echo bundle");
+    let claim = store
+        .claim_schema_verification(ClaimSchemaVerification {
+            tenant: tenant.to_string(),
+            scope: scope.clone(),
+            bundle_digest: digest.to_string(),
+            logical_now: 1,
+            lease_expires_at: 2,
+            operation: SchemaOperationIdentity {
+                idempotency_key: "scoped-echo-verify".to_string(),
+                request_digest: format!("sha256:{}", "2".repeat(64)),
+                request_id: "scoped-echo-verify".to_string(),
+            },
+        })
+        .await
+        .expect("claim scoped echo verification");
+    let fence = match claim {
+        ClaimSchemaVerificationOutcome::Claimed(record)
+        | ClaimSchemaVerificationOutcome::Replayed(record) => record.fence,
+    };
+    let verified = store
+        .finish_schema_verification(
+            tenant.as_str(),
+            scope,
+            digest,
+            fence,
+            SchemaVerificationReceipt {
+                id: "scoped-echo-verification".to_string(),
+                verifier_version: "test/v1".to_string(),
+                input_digest: format!("sha256:{}", "3".repeat(64)),
+                passed: true,
+            },
+        )
+        .await
+        .expect("finish scoped echo verification");
+    store
+        .activate_schema_bundle(ActivateSchemaBundle {
+            tenant: tenant.to_string(),
+            scope: scope.clone(),
+            bundle_digest: digest.to_string(),
+            expected_predecessor: None,
+            expected_fence: verified.fence,
+            verification_receipt_id: "scoped-echo-verification".to_string(),
+            operation: SchemaOperationIdentity {
+                idempotency_key: "scoped-echo-activate".to_string(),
+                request_digest: format!("sha256:{}", "4".repeat(64)),
+                request_id: "scoped-echo-activate".to_string(),
+            },
+        })
+        .await
+        .expect("activate scoped echo bundle in store");
 }
 
 /// Build a test state with a local Turso (SQLite) backend so that
@@ -321,6 +411,203 @@ async fn wasm_integration_dispatches_callback() {
         final_status, "Done",
         "entity should transition to Done after WASM callback (echo module returns success even on HTTP failure)"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scoped_wasm_integration_uses_the_pinned_bundle_spec() {
+    let tenant = TenantId::default();
+    let scope = SchemaScope {
+        kind: SchemaScopeKind::Task,
+        id: "scoped-wasm-dispatch".to_string(),
+    };
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let mut registry = SpecRegistry::new();
+    registry
+        .stage_scoped_bundle(
+            tenant.clone(),
+            scope.clone(),
+            digest.clone(),
+            parse_csdl(ECHO_CSDL_XML).expect("CSDL should parse"),
+            ECHO_CSDL_XML.to_string(),
+            &[("EchoTest", ECHO_IOA)],
+        )
+        .expect("scoped echo bundle should stage");
+    registry
+        .activate_scoped_bundle(&tenant, &scope, &digest, None)
+        .expect("scoped echo bundle should activate");
+    let mut state =
+        ServerState::from_registry(ActorSystem::new("scoped-wasm-dispatch-test"), registry);
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after UNIX epoch")
+        .as_nanos();
+    let db_url = format!(
+        "file:/tmp/temper-scoped-wasm-dispatch-test-{}-{ts}.db",
+        std::process::id()
+    );
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create scoped test store");
+    persist_active_scoped_echo_bundle(&store, &tenant, &scope, &digest).await;
+    state.set_storage_stack(StorageStack::from_turso(store));
+    install_echo_http_policy(&state);
+    let hash = state
+        .wasm_engine
+        .compile_and_cache(ECHO_WASM)
+        .expect("echo module should compile");
+    state
+        .wasm_module_registry
+        .write()
+        .expect("wasm registry lock")
+        .register(&tenant, "echo_integration", &hash);
+    let pin = SchemaExecutionPin {
+        scope,
+        bundle_digest: digest,
+    };
+    state
+        .get_or_create_scoped_entity(
+            &tenant,
+            "EchoTest",
+            "scoped-echo",
+            serde_json::json!({}),
+            pin.clone(),
+        )
+        .await
+        .expect("scoped echo entity should be created");
+    let successor_digest = format!("sha256:{}", "b".repeat(64));
+    let successor_ioa = ECHO_IOA.replace(
+        "module = \"echo_integration\"",
+        "module = \"missing_scoped_integration\"",
+    );
+    {
+        let mut registry = state.registry.write().expect("registry lock");
+        registry
+            .stage_scoped_bundle(
+                tenant.clone(),
+                pin.scope.clone(),
+                successor_digest.clone(),
+                parse_csdl(ECHO_CSDL_XML).expect("CSDL should parse"),
+                ECHO_CSDL_XML.to_string(),
+                &[("EchoTest", successor_ioa.as_str())],
+            )
+            .expect("successor bundle with different integration should stage");
+        registry
+            .activate_scoped_bundle(
+                &tenant,
+                &pin.scope,
+                &successor_digest,
+                Some(&pin.bundle_digest),
+            )
+            .expect("successor bundle should become active");
+    }
+    let response = state
+        .dispatch_tenant_action_ext(
+            &tenant,
+            "EchoTest",
+            "scoped-echo",
+            "TriggerEcho",
+            serde_json::json!({}),
+            DispatchExtOptions {
+                agent_ctx: &AgentContext {
+                    schema_pin: Some(pin),
+                    ..AgentContext::system()
+                },
+                await_integration: true,
+                await_reactions: true,
+            },
+        )
+        .await
+        .expect("scoped trigger should dispatch");
+
+    assert_eq!(response.state.status, "Done");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn triggered_wasm_local_tdata_uses_module_not_ambient_authority() {
+    let state = build_echo_test_state();
+    let tenant = TenantId::default();
+    let hash = state
+        .wasm_engine
+        .compile_and_cache(LOCAL_TDATA_WASM)
+        .expect("local TData module should compile");
+    state
+        .wasm_module_registry
+        .write()
+        .expect("wasm registry lock")
+        .register(&tenant, "echo_integration", &hash);
+
+    let module_http_permit = r#"
+        permit(principal is Agent, action == Action::"http_call", resource is HttpEndpoint) when {
+            principal has role && principal.id == "echo_integration" && principal.role == "wasm_module"
+        };
+    "#;
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            &format!(
+                r#"{module_http_permit}
+                permit(principal is Agent, action == Action::"list", resource is EchoTest) when {{
+                    principal.id == "ambient-operator"
+                }};"#
+            ),
+        )
+        .expect("ambient-only local TData policy should parse");
+    let ambient = AgentContext {
+        agent_id: Some("ambient-operator".to_string()),
+        agent_type: Some("operator".to_string()),
+        security_ctx: Some(temper_authz::SecurityContext::from_resolved_identity(
+            "ambient-operator",
+            "operator",
+            None,
+        )),
+        ..AgentContext::default()
+    };
+    let denied = state
+        .dispatch_tenant_action_ext(
+            &tenant,
+            "EchoTest",
+            "triggered-local-denied",
+            "TriggerEcho",
+            serde_json::json!({}),
+            DispatchExtOptions {
+                agent_ctx: &ambient,
+                await_integration: true,
+                await_reactions: true,
+            },
+        )
+        .await
+        .expect("triggered integration should report local denial");
+    assert_eq!(denied.state.status, "Failed");
+
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            &format!(
+                r#"{module_http_permit}
+                permit(principal is Agent, action == Action::"list", resource is EchoTest) when {{
+                    principal has role && principal.id == "echo_integration" && principal.role == "wasm_module"
+                }};"#
+            ),
+        )
+        .expect("module-only local TData policy should parse");
+    let allowed = state
+        .dispatch_tenant_action_ext(
+            &tenant,
+            "EchoTest",
+            "triggered-local-allowed",
+            "TriggerEcho",
+            serde_json::json!({}),
+            DispatchExtOptions {
+                agent_ctx: &ambient,
+                await_integration: true,
+                await_reactions: true,
+            },
+        )
+        .await
+        .expect("triggered integration should use module authority");
+    assert_eq!(allowed.state.status, "Done");
 }
 
 #[tokio::test(flavor = "multi_thread")]

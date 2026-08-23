@@ -9,10 +9,10 @@ use axum::response::IntoResponse;
 use reqwest::Url;
 use temper_authz::{AuthenticatedRequestContext, SecurityContext};
 use temper_runtime::tenant::TenantId;
-use temper_wasm::WasmHost;
 use temper_wasm::http_stream::{
     HttpRequestHead, HttpResponseHead, HttpStreamHandles, StreamError, StreamHandle,
 };
+use temper_wasm::{WasmAuthzContext, WasmHost};
 use tracing::Instrument;
 
 use crate::state::ServerState;
@@ -30,6 +30,18 @@ pub(super) struct LocalTDataWasmHost {
 }
 
 impl LocalTDataWasmHost {
+    /// Bind local TData re-entry to the immutable module identity admitted by
+    /// the WASM host gate, never to the ambient action caller or relay service.
+    pub(super) fn new_for_wasm(
+        state: ServerState,
+        tenant: TenantId,
+        wasm: &WasmAuthzContext,
+        delegate: Arc<dyn WasmHost>,
+    ) -> Self {
+        let security = crate::authz::wasm_gate::build_wasm_security_context(wasm);
+        Self::new(state, tenant, Some(&security), delegate)
+    }
+
     /// Create a local-TData wrapper around an existing host implementation.
     pub(super) fn new(
         state: ServerState,
