@@ -1,0 +1,3 @@
+name = "dsf-deploy"
+description = "Shared Deep Sci-Fi deploy sequence. Howl and TemperPaw both drive this. Hands run on TensorLake sandbox dsf."
+version = "0.1.0"

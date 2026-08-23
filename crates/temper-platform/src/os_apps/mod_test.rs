@@ -153,6 +153,10 @@ fn test_list_os_apps_returns_catalog() {
         names.contains(&"directed-evolution"),
         "missing directed-evolution: {names:?}"
     );
+    assert!(
+        names.contains(&"dsf-deploy"),
+        "missing dsf-deploy: {names:?}"
+    );
 
     let pm = apps
         .iter()
@@ -188,6 +192,17 @@ fn test_list_os_apps_returns_catalog() {
     assert!(
         directed.app_guide.is_some(),
         "directed-evolution should have an app guide"
+    );
+    let dsf = apps.iter().find(|e| e.name == "dsf-deploy").unwrap();
+    assert_eq!(
+        dsf.entity_types.as_slice(),
+        ["DeployRun"],
+        "dsf-deploy entity types: {:?}",
+        dsf.entity_types
+    );
+    assert!(
+        dsf.app_guide.is_some(),
+        "dsf-deploy should have an app guide"
     );
 }
 
@@ -893,6 +908,56 @@ fn test_intent_discovery_specs_verify() {
             result.all_passed,
             "IntentDiscovery spec {} failed verification",
             entity_type
+        );
+    }
+}
+
+#[test]
+fn test_dsf_deploy_bundle_loads() {
+    let bundle = get_os_app("dsf-deploy").expect("dsf-deploy app not found");
+    assert_eq!(bundle.specs.len(), 1);
+    assert!(bundle.csdl.is_some());
+    assert!(!bundle.csdl.as_ref().unwrap().is_empty());
+    assert!(!bundle.cedar_policies.is_empty());
+}
+
+#[test]
+fn test_dsf_deploy_specs_parse() {
+    let bundle = get_os_app("dsf-deploy").expect("dsf-deploy app not found");
+    for (entity_type, ioa_source) in &bundle.specs {
+        let result = automaton::parse_automaton(ioa_source);
+        assert!(
+            result.is_ok(),
+            "dsf-deploy spec {entity_type} failed to parse: {:?}",
+            result.err()
+        );
+        let parsed = result.expect("parsed after ok check");
+        assert_eq!(parsed.automaton.name, *entity_type);
+    }
+}
+
+#[test]
+fn test_dsf_deploy_csdl_parses() {
+    let bundle = get_os_app("dsf-deploy").expect("dsf-deploy app not found");
+    let result = parse_csdl(bundle.csdl.as_ref().expect("dsf-deploy should have CSDL"));
+    assert!(
+        result.is_ok(),
+        "dsf-deploy CSDL failed to parse: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_dsf_deploy_specs_verify() {
+    let bundle = get_os_app("dsf-deploy").expect("dsf-deploy app not found");
+    for (entity_type, ioa_source) in &bundle.specs {
+        let cascade = VerificationCascade::from_ioa(ioa_source)
+            .with_sim_seeds(3)
+            .with_prop_test_cases(40);
+        let result = cascade.run();
+        assert!(
+            result.all_passed,
+            "dsf-deploy spec {entity_type} failed verification"
         );
     }
 }

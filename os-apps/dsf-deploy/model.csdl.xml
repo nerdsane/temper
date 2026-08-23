@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Temper DSF Deploy OS App
+  OData v4 data model for the shared Deep Sci-Fi deploy sequence.
+-->
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.DsfDeploy" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+
+      <EntityType Name="DeployRun">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Service" Type="Edm.String"/>
+        <Property Name="Environment" Type="Edm.String"/>
+        <Property Name="ComputerName" Type="Edm.String"/>
+        <Property Name="DeployId" Type="Edm.String"/>
+        <Property Name="HasTarget" Type="Edm.Boolean"/>
+        <Property Name="HealthOk" Type="Edm.Boolean"/>
+        <Property Name="DeployRecorded" Type="Edm.Boolean"/>
+      </EntityType>
+
+      <Action Name="Arm" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DsfDeploy.DeployRun"/>
+        <Parameter Name="Service" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Environment" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ComputerName" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.DsfDeploy.DeployRun"/>
+      </Action>
+
+      <Action Name="ProbeHealth" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DsfDeploy.DeployRun"/>
+        <ReturnType Type="Temper.DsfDeploy.DeployRun"/>
+      </Action>
+
+      <Action Name="MarkReady" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DsfDeploy.DeployRun"/>
+        <ReturnType Type="Temper.DsfDeploy.DeployRun"/>
+      </Action>
+
+      <Action Name="StartDeploy" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DsfDeploy.DeployRun"/>
+        <ReturnType Type="Temper.DsfDeploy.DeployRun"/>
+      </Action>
+
+      <Action Name="RecordDeploy" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DsfDeploy.DeployRun"/>
+        <Parameter Name="DeployId" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.DsfDeploy.DeployRun"/>
+      </Action>
+
+      <Action Name="StartVerify" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DsfDeploy.DeployRun"/>
+        <ReturnType Type="Temper.DsfDeploy.DeployRun"/>
+      </Action>
+
+      <Action Name="MarkHealthy" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DsfDeploy.DeployRun"/>
+        <ReturnType Type="Temper.DsfDeploy.DeployRun"/>
+      </Action>
+
+      <Action Name="MarkFailed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DsfDeploy.DeployRun"/>
+        <ReturnType Type="Temper.DsfDeploy.DeployRun"/>
+      </Action>
+
+      <Action Name="Cancel" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DsfDeploy.DeployRun"/>
+        <ReturnType Type="Temper.DsfDeploy.DeployRun"/>
+      </Action>
+
+      <Action Name="ResumeOnComputer" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DsfDeploy.DeployRun"/>
+        <ReturnType Type="Temper.DsfDeploy.DeployRun"/>
+      </Action>
+
+      <EntityContainer Name="Service">
+        <EntitySet Name="DeployRuns" EntityType="Temper.DsfDeploy.DeployRun"/>
+      </EntityContainer>
+
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

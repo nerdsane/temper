@@ -1,0 +1,123 @@
+# DeployRun Entity — I/O Automaton Specification
+#
+# Shared Deep Sci-Fi deploy walk. Howl and TemperPaw both drive this.
+# Hands run on TensorLake sandbox dsf. This machine records the walk;
+# it does not provision the sandbox.
+
+[automaton]
+name = "DeployRun"
+states = ["Idle", "Checking", "Ready", "Deploying", "Verifying", "Healthy", "Failed", "Cancelled"]
+initial = "Idle"
+
+# --- State Variables ---
+
+[[state]]
+name = "has_target"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "health_ok"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "deploy_recorded"
+type = "bool"
+initial = "false"
+
+# --- Actions ---
+
+[[action]]
+name = "Arm"
+kind = "input"
+from = ["Idle"]
+to = "Idle"
+effect = "set has_target true"
+params = ["Service", "Environment", "ComputerName"]
+hint = "Name the deploy target. Stays Idle until ProbeHealth."
+
+[[action]]
+name = "ProbeHealth"
+kind = "input"
+from = ["Idle", "Checking", "Failed"]
+to = "Checking"
+guard = "has_target"
+hint = "Probe the armed target. Requires Arm first."
+
+[[action]]
+name = "MarkReady"
+kind = "input"
+from = ["Checking"]
+to = "Ready"
+effect = "set health_ok true"
+hint = "Health probe passed. Target is ready to deploy."
+
+[[action]]
+name = "StartDeploy"
+kind = "input"
+from = ["Ready"]
+to = "Deploying"
+hint = "Begin the deploy against the armed target."
+
+[[action]]
+name = "RecordDeploy"
+kind = "input"
+from = ["Deploying"]
+to = "Deploying"
+effect = "set deploy_recorded true"
+params = ["DeployId"]
+hint = "Record the external deploy id. Stays Deploying until StartVerify."
+
+[[action]]
+name = "StartVerify"
+kind = "input"
+from = ["Deploying"]
+to = "Verifying"
+guard = "deploy_recorded"
+hint = "Start post-deploy verification. Requires RecordDeploy."
+
+[[action]]
+name = "MarkHealthy"
+kind = "input"
+from = ["Verifying"]
+to = "Healthy"
+hint = "Verification passed. Terminal success."
+
+[[action]]
+name = "MarkFailed"
+kind = "input"
+from = ["Checking", "Deploying", "Verifying"]
+to = "Failed"
+hint = "Probe, deploy, or verify failed. ResumeOnComputer can retry."
+
+[[action]]
+name = "Cancel"
+kind = "input"
+from = ["Idle", "Checking", "Ready", "Deploying", "Verifying"]
+to = "Cancelled"
+hint = "Abandon the run. Terminal."
+
+[[action]]
+name = "ResumeOnComputer"
+kind = "input"
+from = ["Failed"]
+to = "Checking"
+hint = "Resume a failed run on the armed computer. Re-enters Checking."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "CancelledIsFinal"
+when = ["Cancelled"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "HealthyIsFinal"
+when = ["Healthy"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "WorkRequiresTarget"
+when = ["Checking", "Ready", "Deploying", "Verifying", "Healthy"]
+assert = "has_target"
