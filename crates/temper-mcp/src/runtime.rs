@@ -10,10 +10,15 @@ use temper_ots::{
     OTSMessageContent, OTSMetadata, OutcomeType, TrajectoryBuilder,
 };
 use temper_runtime::scheduler::sim_now;
-use tokio::io::{self, AsyncWriteExt, BufReader};
+use tokio::io::{self, AsyncBufRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::sync::mpsc;
 
 use super::McpConfig;
-use super::protocol::dispatch_json_line;
+use super::protocol::{dispatch_json_value, json_rpc_error};
+use crate::elicit::{
+    ClientRequester, DeniedDecision, PendingClientRequests, denial_from_dispatch_value,
+    elicit_flag_enabled, is_client_response,
+};
 use crate::trajectory_bounds::{
     MAX_STDIO_LINE_BYTES, MAX_TRAJECTORY_TOTAL_BYTES, MAX_TRAJECTORY_TURNS, StdioFrame,
     TRAJECTORY_TURN_ENVELOPE_BYTES, bounded_trajectory_actions, bump_seen, floor_char_boundary,
@@ -74,6 +79,14 @@ pub(crate) struct RuntimeContext {
     /// Whether the turn/byte cap has already been reported for this trajectory,
     /// so hitting the cap warns once rather than on every subsequent turn.
     capped_warned: bool,
+    /// Whether the MCP client declared the `elicitation` capability at
+    /// initialize. Without it, denials pass through untouched (ADR-0173).
+    pub(crate) client_supports_elicitation: bool,
+    /// Config gate for elicitation approvals (`TEMPER_MCP_ELICIT_APPROVALS`).
+    pub(crate) elicit_approvals_enabled: bool,
+    /// Handle for server→client requests; present only when running inside
+    /// the stdio loop (unit tests dispatching directly have none).
+    pub(crate) requester: Option<ClientRequester>,
 }
 
 impl RuntimeContext {
@@ -106,7 +119,23 @@ impl RuntimeContext {
             turns_recorded: 0,
             trajectory_bytes: 0,
             capped_warned: false,
+            client_supports_elicitation: false,
+            elicit_approvals_enabled: elicit_flag_enabled(
+                std::env::var("TEMPER_MCP_ELICIT_APPROVALS").ok().as_deref(),
+            ), // determinism-ok: startup config
+            requester: None,
         })
+    }
+
+    /// Whether a Cedar denial can be put to the human via elicitation:
+    /// the feature is enabled, the client declared the capability, the stdio
+    /// loop provided a requester, and an operator credential is configured to
+    /// resolve the decision with.
+    pub(crate) fn elicitation_available(&self) -> bool {
+        self.elicit_approvals_enabled
+            && self.client_supports_elicitation
+            && self.requester.is_some()
+            && self.api_key.is_some()
     }
 
     /// Apply MCP `clientInfo` from the `initialize` handshake.
@@ -461,14 +490,23 @@ impl RuntimeContext {
         }
     }
 
-    pub(crate) async fn run_execute(&mut self, code: &str) -> Result<String> {
+    /// Execute code in the sandbox. Returns the result together with any
+    /// Cedar denials observed on `temper.*` calls, so the caller can offer
+    /// them to the human via elicitation (ADR-0173).
+    pub(crate) async fn run_execute(
+        &mut self,
+        code: &str,
+    ) -> (Result<String>, Vec<DeniedDecision>) {
         let http = self.http.clone();
         let base_url = self.base_url.clone();
         let agent_id = self.agent_id.clone();
         let session_id = self.session_id.clone();
         let api_key = self.api_key.clone();
+        let denials: std::sync::Arc<std::sync::Mutex<Vec<DeniedDecision>>> = Default::default();
+        let denial_sink = denials.clone();
 
-        self.sandbox
+        let result = self
+            .sandbox
             .execute(
                 code,
                 |function_name: String,
@@ -479,6 +517,7 @@ impl RuntimeContext {
                     let agent_id = agent_id.clone();
                     let session_id = session_id.clone();
                     let api_key = api_key.clone();
+                    let denial_sink = denial_sink.clone();
                     async move {
                         if !kwargs.is_empty() {
                             return Err(format!(
@@ -517,17 +556,30 @@ impl RuntimeContext {
                             // are legitimate developer ops (ARN-166).
                             allow_host_ops: true,
                         };
-                        temper_sandbox::dispatch::dispatch_temper_method(
+                        let result = temper_sandbox::dispatch::dispatch_temper_method(
                             &ctx,
                             &function_name,
                             remaining,
                             &kwargs,
                         )
-                        .await
+                        .await;
+                        // A structured Cedar denial passing through here is
+                        // the interception point for elicitation approvals
+                        // (ADR-0173): record it, never mutate the value the
+                        // sandbox code sees.
+                        if let Ok(ref value) = result
+                            && let Some(denial) = denial_from_dispatch_value(&tenant, value)
+                        {
+                            denial_sink.lock().expect("denial sink lock").push(denial);
+                        }
+                        result
                     }
                 },
             )
-            .await
+            .await;
+
+        let denials = std::mem::take(&mut *denials.lock().expect("denial sink lock"));
+        (result, denials)
     }
 }
 
@@ -900,26 +952,77 @@ fn normalize_pythonish_json(input: &str) -> String {
 }
 
 /// Run the MCP server on stdio with JSON-RPC over newline-delimited JSON.
+pub async fn run_stdio_server(config: McpConfig) -> Result<()> {
+    let ctx = RuntimeContext::from_config(&config)?;
+    run_loop(ctx, BufReader::new(io::stdin()), io::stdout()).await
+}
+
+/// Run the MCP server loop over an arbitrary transport.
+///
+/// The transport is split into a reader task and a writer task connected by
+/// channels so the server can send correlated requests to the client (MCP
+/// elicitation) while a `tools/call` is still being handled: the reader
+/// routes JSON-RPC *responses* to the pending server→client request map and
+/// queues client *requests* for the sequential dispatch loop. That queue also
+/// guarantees at most one elicitation is in flight per session.
 ///
 /// Frames are read through [`read_stdio_frame`], which bounds each frame to
-/// `MAX_STDIO_LINE_BYTES`; oversized frames are dropped and invalid UTF-8 frames
-/// are skipped rather than aborting the session.
-pub async fn run_stdio_server(config: McpConfig) -> Result<()> {
-    let mut ctx = RuntimeContext::from_config(&config)?;
-    let mut stdin = BufReader::new(io::stdin());
-    let mut stdout = io::stdout();
+/// `MAX_STDIO_LINE_BYTES`; oversized frames are dropped and invalid UTF-8
+/// frames are skipped rather than aborting the session.
+pub(crate) async fn run_loop<R, W>(mut ctx: RuntimeContext, reader: R, writer: W) -> Result<()>
+where
+    R: AsyncBufRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let (out_tx, out_rx) = mpsc::unbounded_channel::<Value>();
+    let writer_task = tokio::spawn(write_outbound(out_rx, writer));
 
+    let pending = PendingClientRequests::default();
+    ctx.requester = Some(ClientRequester::new(out_tx.clone(), pending.clone()));
+
+    let (in_tx, mut in_rx) = mpsc::unbounded_channel::<Value>();
+    let reader_task = tokio::spawn(read_inbound(reader, in_tx, pending, out_tx.clone()));
+
+    while let Some(message) = in_rx.recv().await {
+        if let Some(response) = dispatch_json_value(&mut ctx, message).await
+            && out_tx.send(response).is_err()
+        {
+            break;
+        }
+    }
+
+    // Finalize and upload OTS trajectory on session close.
+    ctx.finalize_trajectory().await;
+
+    // Drop every outbound sender (the requester holds one) so the writer
+    // drains remaining output and exits, then stop the reader.
+    ctx.requester = None;
+    drop(out_tx);
+    let _ = writer_task.await;
+    reader_task.abort();
+
+    Ok(())
+}
+
+/// Read frames from the client, routing responses to pending server→client
+/// requests and forwarding requests/notifications to the dispatch loop.
+async fn read_inbound<R: AsyncBufRead + Unpin>(
+    mut reader: R,
+    inbound: mpsc::UnboundedSender<Value>,
+    pending: PendingClientRequests,
+    outbound: mpsc::UnboundedSender<Value>,
+) {
     loop {
-        let buf = match read_stdio_frame(&mut stdin).await? {
-            StdioFrame::Eof => break,
-            StdioFrame::TooLarge => {
+        let buf = match read_stdio_frame(&mut reader).await {
+            Ok(StdioFrame::Eof) | Err(_) => break,
+            Ok(StdioFrame::TooLarge) => {
                 tracing::warn!(
                     limit = MAX_STDIO_LINE_BYTES,
                     "mcp.stdio.frame_too_large: dropped oversized frame"
                 );
                 continue;
             }
-            StdioFrame::Line(buf) => buf,
+            Ok(StdioFrame::Line(buf)) => buf,
         };
         let line = match std::str::from_utf8(&buf) {
             Ok(text) => text.trim(),
@@ -932,18 +1035,50 @@ pub async fn run_stdio_server(config: McpConfig) -> Result<()> {
             continue;
         }
 
-        if let Some(response) = dispatch_json_line(&mut ctx, line).await {
-            let encoded = serde_json::to_string(&response)?;
-            stdout.write_all(encoded.as_bytes()).await?;
-            stdout.write_all(b"\n").await?;
-            stdout.flush().await?;
+        let message: Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = outbound.send(json_rpc_error(
+                    None,
+                    -32700,
+                    format!("parse error: {error}"),
+                ));
+                continue;
+            }
+        };
+
+        if is_client_response(&message) {
+            if !pending.resolve(message) {
+                tracing::warn!("mcp.stdio.unmatched_response: dropped");
+            }
+            continue;
+        }
+        if inbound.send(message).is_err() {
+            break;
         }
     }
+}
 
-    // Finalize and upload OTS trajectory on session close.
-    ctx.finalize_trajectory().await;
-
-    Ok(())
+/// Serialize outbound JSON-RPC messages as newline-delimited frames.
+async fn write_outbound<W: AsyncWrite + Unpin>(
+    mut rx: mpsc::UnboundedReceiver<Value>,
+    mut writer: W,
+) {
+    while let Some(message) = rx.recv().await {
+        let encoded = match serde_json::to_string(&message) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                tracing::warn!(%error, "mcp.stdio.encode_failed: dropped message");
+                continue;
+            }
+        };
+        if writer.write_all(encoded.as_bytes()).await.is_err()
+            || writer.write_all(b"\n").await.is_err()
+            || writer.flush().await.is_err()
+        {
+            break;
+        }
+    }
 }
 
 #[cfg(test)]

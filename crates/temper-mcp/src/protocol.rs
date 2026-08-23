@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::runtime::ClientInfo;
-use super::{MCP_PROTOCOL_VERSION, MCP_SERVER_NAME, RuntimeContext};
+use super::{
+    MCP_LATEST_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION, MCP_SERVER_NAME, RuntimeContext,
+    SUPPORTED_PROTOCOL_VERSIONS,
+};
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
@@ -28,21 +31,6 @@ struct ToolCallParams {
     name: String,
     #[serde(default)]
     arguments: Value,
-}
-
-pub(super) async fn dispatch_json_line(ctx: &mut RuntimeContext, line: &str) -> Option<Value> {
-    let raw: Value = match serde_json::from_str(line) {
-        Ok(value) => value,
-        Err(error) => {
-            return Some(json_rpc_error(
-                None,
-                -32700,
-                format!("parse error: {error}"),
-            ));
-        }
-    };
-
-    dispatch_json_value(ctx, raw).await
 }
 
 pub(super) async fn dispatch_json_value(ctx: &mut RuntimeContext, raw: Value) -> Option<Value> {
@@ -76,11 +64,22 @@ pub(super) async fn dispatch_json_value(ctx: &mut RuntimeContext, raw: Value) ->
                 }
             }
 
+            // Capture the client's declared elicitation capability; without
+            // it, Cedar denials pass through untouched (ADR-0173).
+            ctx.client_supports_elicitation = request
+                .params
+                .pointer("/capabilities/elicitation")
+                .is_some_and(|value| !value.is_null());
+
             // Initialize OTS trajectory capture after handshake.
             ctx.init_trajectory();
 
+            let requested_version = request
+                .params
+                .get("protocolVersion")
+                .and_then(Value::as_str);
             Ok(json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "protocolVersion": negotiate_protocol_version(requested_version),
                 "capabilities": {
                     "tools": {
                         "listChanged": false
@@ -95,7 +94,9 @@ pub(super) async fn dispatch_json_value(ctx: &mut RuntimeContext, raw: Value) ->
             that declares [[integration]] sections for external APIs, then submit it via \
             the execute tool. Use execute to start the server, submit specs, create entities, \
             and invoke actions — all governed by Cedar policies. If an action is denied, the \
-            decision surfaces to the human developer for approval."
+            decision surfaces to the human developer for approval. When the tool result \
+            carries an `approval` annotation, a human already resolved the decision inline: \
+            if granted, re-invoke the original action; if denied, do not retry it."
             }))
         }
         "tools/list" => Ok(json!({ "tools": tool_definitions() })),
@@ -122,25 +123,31 @@ pub(super) async fn dispatch_json_value(ctx: &mut RuntimeContext, raw: Value) ->
                 }
             };
 
-            let tool_result = match params.name.as_str() {
+            let (tool_result, denials) = match params.name.as_str() {
                 "execute" => {
                     if is_flush_trajectory_request(code) {
-                        ctx.flush_trajectory().await.map(|trajectory_id| {
+                        let flushed = ctx.flush_trajectory().await.map(|trajectory_id| {
                             json!({
                                 "trajectory_id": trajectory_id,
                                 "status": "flushed",
                             })
                             .to_string()
-                        })
+                        });
+                        (flushed, Vec::new())
                     } else {
                         ctx.run_execute(code).await
                     }
                 }
-                other => Err(anyhow!(format!("unknown tool '{other}'"))),
+                other => (Err(anyhow!(format!("unknown tool '{other}'"))), Vec::new()),
             };
 
             // Record the execute call as an OTS trajectory turn.
             ctx.record_execute_turn(code, &tool_result);
+
+            // If Cedar denied a call and the client supports elicitation,
+            // offer the decision to the human before returning (ADR-0173).
+            let tool_result =
+                crate::elicit::apply_denial_elicitation(ctx, tool_result, denials).await;
 
             Ok(match tool_result {
                 Ok(text) => json!({
@@ -181,7 +188,20 @@ pub(super) async fn dispatch_json_value(ctx: &mut RuntimeContext, raw: Value) ->
     })
 }
 
-fn json_rpc_error(id: Option<Value>, code: i64, message: String) -> Value {
+/// Echo a supported requested protocol revision; otherwise answer with the
+/// latest revision this server implements (MCP lifecycle spec).
+fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
+    match requested {
+        Some(version) => SUPPORTED_PROTOCOL_VERSIONS
+            .iter()
+            .find(|supported| **supported == version)
+            .copied()
+            .unwrap_or(MCP_LATEST_PROTOCOL_VERSION),
+        None => MCP_PROTOCOL_VERSION,
+    }
+}
+
+pub(crate) fn json_rpc_error(id: Option<Value>, code: i64, message: String) -> Value {
     let error = JsonRpcError { code, message };
     json!({
         "jsonrpc": "2.0",

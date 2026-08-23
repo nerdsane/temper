@@ -119,6 +119,9 @@ fn trajectory_test_ctx(identity: &str) -> RuntimeContext {
         turns_recorded: 0,
         trajectory_bytes: 0,
         capped_warned: false,
+        client_supports_elicitation: false,
+        elicit_approvals_enabled: true,
+        requester: None,
     }
 }
 
@@ -320,6 +323,9 @@ async fn finalize_trajectory_retries_retryable_ots_upload_failure() {
         turns_recorded: 0,
         trajectory_bytes: 0,
         capped_warned: false,
+        client_supports_elicitation: false,
+        elicit_approvals_enabled: true,
+        requester: None,
     };
     ctx.init_trajectory();
 
