@@ -74,7 +74,23 @@ Priority after this change:
 WASM cannot read host env. The Temper host overlays
 `TEMPER_SANDBOX_NAME` and `TEMPER_SANDBOX_URL` into provisioner config
 after secret resolution. There is still no TensorLake create client;
-connect means "use this URL".
+connect means "use this URL". Resume is TensorLake's
+(`tl sbx resume dsf`).
+
+Hands go through `tool_runner`, not E2B envd. When
+`TEMPER_SANDBOX_NAME` is set (expected `dsf`) or `sandbox_url` is
+`*.sandbox.tensorlake.ai`, the guest uses:
+
+- `POST {url}/api/v1/processes` then poll `GET .../processes/{pid}`
+  plus stdout/stderr
+- `GET`/`PUT` `{url}/api/v1/files?path=`
+- `Authorization: Bearer` from `tensorlake_api_key` / `TENSORLAKE_API_KEY`
+  (value never logged)
+
+Empty name keeps E2B / local. Known `dsf` URLs (not secrets):
+`https://dsf.sandbox.tensorlake.ai` and
+`https://053bmlgkq8a2zf3o4hcut.sandbox.tensorlake.ai`. Management
+traffic is authenticated (docs: port 9501).
 
 Do not bounce Railway. Do not publish Galley.
 
@@ -113,6 +129,7 @@ Temper connect (host that runs Provision, not secret values):
 
 - `TEMPER_SANDBOX_NAME` — expected `dsf`
 - `TEMPER_SANDBOX_URL` — URL of the named TensorLake sandbox
+- `TENSORLAKE_API_KEY` — Bearer for the sandbox proxy (overlaid as `tensorlake_api_key`; never printed)
 
 Deploy guest (Temper trigger / secrets, not printed):
 

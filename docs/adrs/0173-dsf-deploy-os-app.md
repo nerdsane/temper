@@ -126,11 +126,34 @@ Env names (values never printed):
 - or `DD_API_KEY` + `DD_APP_KEY`
 - optional: `PUP_TRUST_SITE`, `DD_ORG`, `DD_TOKEN_STORAGE`
 - Temper connect: `TEMPER_SANDBOX_NAME` (expected `dsf`), `TEMPER_SANDBOX_URL`
+- TensorLake proxy: `TENSORLAKE_API_KEY` (never printed)
 
-### Sub-Decision 5: Non-goals stay out
+### Sub-Decision 5: `tool_runner` speaks TensorLake process+fs when named
+
+Storing `sandbox_url` is not enough. The live TemperPaw door is
+`os-apps/temper-agent/wasm/tool_runner`. It still spoke E2B
+(`/v1/processes/run`, `/v1/fs/file`, envd `/files`) after the URL was
+saved. TensorLake named sandbox `dsf` does not.
+
+When `TEMPER_SANDBOX_NAME` is set or the URL host is
+`*.sandbox.tensorlake.ai`, `tool_runner` uses the official TensorLake
+proxy APIs and a Bearer from `tensorlake_api_key` /
+`TENSORLAKE_API_KEY`:
+
+- Exec: `POST {url}/api/v1/processes` with `{command, args, env, working_dir}`,
+  then poll `GET .../processes/{pid}` and stdout/stderr
+- Files: `GET`/`PUT` `{url}/api/v1/files?path=`
+
+Empty name keeps the existing E2B / local path. There is still no
+TensorLake create client. Resume is TensorLake's (`tl sbx resume dsf`).
+
+Host overlay copies `TENSORLAKE_API_KEY` into `tensorlake_api_key`. The
+value is never logged.
+
+### Sub-Decision 6: Non-goals stay out
 
 Do not bounce Railway. Do not publish Galley. Do not dump secrets. Do
-not rewrite other OS apps beyond the two Provision config keys.
+not invent a TensorLake create/resume client.
 
 ## Consequences
 

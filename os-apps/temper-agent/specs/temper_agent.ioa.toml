@@ -333,6 +333,8 @@ max_sync_file_bytes = "61440"
 sync_exclude = "__pycache__,node_modules,.git"
 logfire_read_token = "{secret:logfire_read_token}"
 logfire_api_base = "https://logfire-us.pydantic.dev"
+tensorlake_api_key = "{secret:tensorlake_api_key}"
+temper_sandbox_name = "{secret:temper_sandbox_name}"
 
 
 [[action]]

@@ -125,10 +125,24 @@ check_temper_connect() {
         miss "TEMPER_SANDBOX_NAME (expected dsf)"
     fi
 
+    local url_ok=0
+    local key_ok=0
+
     if present TEMPER_SANDBOX_URL; then
+        url_ok=1
+    else
+        info "TEMPER_SANDBOX_URL is required on the Temper host to connect dsf"
+    fi
+
+    if present TENSORLAKE_API_KEY; then
+        key_ok=1
+    else
+        info "TENSORLAKE_API_KEY is required on the Temper host for the dsf proxy"
+    fi
+
+    if [ "$url_ok" -eq 1 ] && [ "$key_ok" -eq 1 ]; then
         return 0
     fi
-    info "TEMPER_SANDBOX_URL is required on the Temper host to connect dsf"
     return 1
 }
 

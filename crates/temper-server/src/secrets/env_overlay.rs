@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 pub const TEMPER_SANDBOX_NAME_KEY: &str = "temper_sandbox_name";
 /// Config key for the named sandbox URL.
 pub const TEMPER_SANDBOX_URL_KEY: &str = "temper_sandbox_url";
+/// Config key for the TensorLake proxy bearer (never log the value).
+pub const TENSORLAKE_API_KEY_KEY: &str = "tensorlake_api_key";
 
 const SECRET_MARKER: &str = "{secret:";
 
@@ -68,6 +70,20 @@ pub fn overlay_datadog_values(
     overlay_declared(config, "dd_access_token", access_token);
     overlay_declared(config, "dd_api_key", api_key);
     overlay_declared(config, "dd_app_key", app_key);
+}
+
+/// Overlay TensorLake bearer. Inserts the key even when it was absent.
+///
+/// Never logs the value. Empty and unresolved `{secret:...}` are replaced.
+pub fn overlay_tensorlake_values(config: &mut BTreeMap<String, String>, api_key: Option<&str>) {
+    overlay_key(config, TENSORLAKE_API_KEY_KEY, api_key);
+}
+
+/// Copy `TENSORLAKE_API_KEY` from the process env into `tensorlake_api_key`.
+pub fn overlay_tensorlake_env(config: &mut BTreeMap<String, String>) {
+    let api_key = std::env::var("TENSORLAKE_API_KEY") // determinism-ok: production TensorLake auth, not entity state
+        .ok();
+    overlay_tensorlake_values(config, api_key.as_deref());
 }
 
 /// Copy `TEMPER_SANDBOX_NAME` / `TEMPER_SANDBOX_URL` from the process env.
@@ -175,5 +191,27 @@ mod tests {
         assert_eq!(config["dd_api_key"], "api-from-env");
         assert!(!config.contains_key("dd_access_token"));
         assert!(!config.contains_key("dd_app_key"));
+    }
+
+    #[test]
+    fn tensorlake_overlay_inserts_and_replaces_unresolved() {
+        let mut config = BTreeMap::new();
+        overlay_tensorlake_values(&mut config, Some("unit-test-key"));
+        assert_eq!(config[TENSORLAKE_API_KEY_KEY], "unit-test-key");
+
+        config.insert(
+            TENSORLAKE_API_KEY_KEY.to_string(),
+            "{secret:tensorlake_api_key}".to_string(),
+        );
+        overlay_tensorlake_values(&mut config, Some("replaced-key"));
+        assert_eq!(config[TENSORLAKE_API_KEY_KEY], "replaced-key");
+    }
+
+    #[test]
+    fn tensorlake_overlay_does_not_overwrite_resolved() {
+        let mut config = BTreeMap::new();
+        config.insert(TENSORLAKE_API_KEY_KEY.to_string(), "kept".to_string());
+        overlay_tensorlake_values(&mut config, Some("incoming"));
+        assert_eq!(config[TENSORLAKE_API_KEY_KEY], "kept");
     }
 }
