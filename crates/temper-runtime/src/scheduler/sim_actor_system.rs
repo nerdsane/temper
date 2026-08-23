@@ -160,8 +160,6 @@ pub struct SimActorSystem {
     recorded_invariants: Vec<(String, String, bool)>,
     /// Integration callback configuration for WASM trigger simulation.
     integration_responses: SimIntegrationResponses,
-    /// Pending integration callbacks to deliver: (actor_id, callback_action).
-    pending_integration_callbacks: Vec<(String, String)>,
     /// Actor-local wall-clock offsets applied only while that actor handles a message.
     actor_clock_skew_ms: BTreeMap<String, i64>,
 }
@@ -191,7 +189,6 @@ impl SimActorSystem {
             recorded_transitions: Vec::new(),
             recorded_invariants: Vec::new(),
             integration_responses: SimIntegrationResponses::new(),
-            pending_integration_callbacks: Vec::new(),
             actor_clock_skew_ms: BTreeMap::new(),
         }
     }
@@ -285,11 +282,6 @@ impl SimActorSystem {
             Err(_) => {
                 // Failed action — invariants should still hold on unchanged state
             }
-        }
-
-        // Deliver any pending integration callbacks
-        if !self.pending_integration_callbacks.is_empty() {
-            self.deliver_integration_callbacks();
         }
 
         result
@@ -399,11 +391,16 @@ impl SimActorSystem {
         );
         let mut consumed = 0;
         while consumed < tick_budget && !self.scheduler.is_quiescent() {
-            let delivered = self.scheduler.tick();
-            self.clock.advance();
+            self.tick_and_apply_ready();
             consumed += 1;
-            self.reconstruct_restarted_actors();
-            self.process_delivered_messages(&delivered);
+        }
+        if !self.scheduler.is_quiescent() {
+            self.record_delivery_violation(
+                "sim-driver",
+                "RunQueued",
+                String::new(),
+                format!("queued delivery did not quiesce within {tick_budget} ticks"),
+            );
         }
         consumed
     }
@@ -443,6 +440,13 @@ impl SimActorSystem {
                 continue;
             }
 
+            // Preserve per-actor mailbox serialization: do not choose a new
+            // action from stale state while an earlier action is in flight.
+            if self.scheduler.has_in_flight(&actor_id) {
+                self.tick_and_apply_ready();
+                continue;
+            }
+
             // Get valid actions
             let valid = {
                 let handler = self.actors.get(&actor_id).unwrap(); // ci-ok: actor_id from self.actors.keys()
@@ -461,20 +465,27 @@ impl SimActorSystem {
             self.scheduler.send("sim-driver", &actor_id, &action, "{}");
             self.total_messages += 1;
 
-            let delivered = self.scheduler.tick();
-            self.clock.advance();
+            self.tick_and_apply_ready();
+        }
 
-            self.reconstruct_restarted_actors();
-            self.process_delivered_messages(&delivered);
-
-            // Deliver any pending integration callbacks
-            if !self.pending_integration_callbacks.is_empty() {
-                self.deliver_integration_callbacks();
-            }
-
-            // Drain any remaining scheduled messages
-            self.scheduler.tick();
-            self.reconstruct_restarted_actors();
+        // Delays can move a delivery past the final exploration iteration.
+        // Flush through the same mailbox-consumption path under an explicit
+        // budget instead of discarding a final tick's deliveries.
+        let mut flush_ticks = 0;
+        while flush_ticks < self.config.max_ticks && !self.scheduler.is_quiescent() {
+            self.tick_and_apply_ready();
+            flush_ticks += 1;
+        }
+        if !self.scheduler.is_quiescent() {
+            self.record_delivery_violation(
+                "sim-driver",
+                "RunRandomFlush",
+                String::new(),
+                format!(
+                    "random delivery did not quiesce within {} flush ticks",
+                    self.config.max_ticks
+                ),
+            );
         }
 
         let actor_states: Vec<_> = self
@@ -574,38 +585,39 @@ impl SimActorSystem {
             return;
         }
 
-        // Derive entity_type from actor_id (convention: "EntityType:EntityId" or just id)
-        // For simplicity, check against all registered entity_type patterns.
+        // Resolve every configured callback before mutating the scheduler.
+        let mut scheduled = Vec::new();
         for trigger in &callbacks {
-            // Try matching with the actor_id as-is for the entity_type lookup
-            if let Some(callback_action) =
-                self.integration_responses.get_callback(actor_id, trigger)
-            {
-                self.pending_integration_callbacks
-                    .push((actor_id.to_string(), callback_action.to_string()));
+            let callback = self
+                .integration_responses
+                .get_callback(actor_id, trigger)
+                .or_else(|| {
+                    let colon_pos = actor_id.find(':')?;
+                    let entity_type = &actor_id[..colon_pos];
+                    self.integration_responses
+                        .get_callback(entity_type, trigger)
+                });
+            if let Some(callback_action) = callback {
+                scheduled.push(callback_action.to_string());
             }
-            // Also try splitting on ':' (e.g., "Order:o1" → entity_type = "Order")
-            else if let Some(colon_pos) = actor_id.find(':') {
-                let entity_type = &actor_id[..colon_pos];
-                if let Some(callback_action) = self
-                    .integration_responses
-                    .get_callback(entity_type, trigger)
-                {
-                    self.pending_integration_callbacks
-                        .push((actor_id.to_string(), callback_action.to_string()));
-                }
-            }
+        }
+
+        for callback_action in scheduled {
+            self.scheduler
+                .send("sim-integration", actor_id, &callback_action, "{}");
+            self.total_messages = self.total_messages.saturating_add(1);
         }
     }
 
-    /// Deliver any pending integration callbacks by executing them as actions.
-    fn deliver_integration_callbacks(&mut self) {
-        let callbacks: Vec<(String, String)> =
-            self.pending_integration_callbacks.drain(..).collect();
-        for (actor_id, callback_action) in callbacks {
-            // Execute the callback as a regular step (this checks invariants too)
-            let _ = self.step(&actor_id, &callback_action, "{}");
-        }
+    /// Advance one scheduler tick, reconstruct restarts, drain mailboxes, and
+    /// apply every ready message exactly once.
+    fn tick_and_apply_ready(&mut self) {
+        self.scheduler.tick();
+        self.clock.advance();
+        self.reconstruct_restarted_actors();
+        let delivered = self.scheduler.drain_ready();
+        self.process_delivered_messages(&delivered);
+        self.scheduler.finish_tick();
     }
 
     fn reconstruct_restarted_actors(&mut self) {
@@ -623,6 +635,12 @@ impl SimActorSystem {
     fn process_delivered_messages(&mut self, delivered: &[super::SimMessage]) {
         for msg in delivered {
             let Some(handler) = self.actors.get_mut(&msg.to) else {
+                self.record_delivery_violation(
+                    &msg.to,
+                    &msg.msg_type,
+                    String::new(),
+                    "scheduled message targeted an unknown actor".to_string(),
+                );
                 continue;
             };
             let status_before = handler.current_status();
@@ -631,7 +649,7 @@ impl SimActorSystem {
             let outcome = handler.handle_message(&msg.msg_type, &msg.payload);
             self.clock.set_skew_ms(0);
 
-            if outcome.is_ok() {
+            let Err(error) = outcome else {
                 let status_after = handler.current_status();
                 let item_count = handler.current_item_count();
                 let tick = self.clock.tick();
@@ -656,8 +674,38 @@ impl SimActorSystem {
                     tick,
                 );
                 self.schedule_integration_callbacks(&msg.to);
-            }
+                continue;
+            };
+
+            let description = if msg.from == "sim-integration" {
+                format!("integration callback rejected: {error}")
+            } else {
+                format!("scheduled handler rejected message: {error}")
+            };
+            self.record_delivery_violation(
+                &msg.to,
+                &msg.msg_type,
+                status_before.clone(),
+                description,
+            );
         }
+    }
+
+    fn record_delivery_violation(
+        &mut self,
+        actor_id: &str,
+        action: &str,
+        status: String,
+        description: String,
+    ) {
+        self.violations.push(ActorInvariantViolation {
+            actor_id: actor_id.to_string(),
+            action: action.to_string(),
+            status_before: status.clone(),
+            status_after: status,
+            description,
+            tick: self.clock.tick(),
+        });
     }
 
     // ===================================================================
@@ -795,86 +843,5 @@ fn evaluate_spec_assert(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn integration_responses_empty_returns_none() {
-        let responses = SimIntegrationResponses::new();
-        assert!(responses.get_callback("Order", "payment_trigger").is_none());
-    }
-
-    #[test]
-    fn integration_responses_on_trigger_and_get_callback() {
-        let responses = SimIntegrationResponses::new()
-            .on_trigger("Order", "payment_trigger", "ConfirmPayment")
-            .on_trigger("Invoice", "send_trigger", "MarkSent");
-
-        assert_eq!(
-            responses.get_callback("Order", "payment_trigger"),
-            Some("ConfirmPayment")
-        );
-        assert_eq!(
-            responses.get_callback("Invoice", "send_trigger"),
-            Some("MarkSent")
-        );
-        assert!(responses.get_callback("Order", "send_trigger").is_none());
-        assert!(
-            responses
-                .get_callback("Unknown", "payment_trigger")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn integration_responses_overwrite() {
-        let responses = SimIntegrationResponses::new()
-            .on_trigger("Order", "trigger", "ActionA")
-            .on_trigger("Order", "trigger", "ActionB");
-
-        assert_eq!(responses.get_callback("Order", "trigger"), Some("ActionB"));
-    }
-
-    #[test]
-    fn config_default_values() {
-        let config = SimActorSystemConfig::default();
-        assert_eq!(config.seed, 42);
-        assert_eq!(config.max_ticks, 500);
-        assert_eq!(config.max_actions_per_actor, 50);
-    }
-
-    #[test]
-    fn run_record_equality() {
-        let r1 = RunRecord {
-            seed: 42,
-            transitions: vec![(
-                1,
-                "a".into(),
-                "Submit".into(),
-                "Draft".into(),
-                "Submitted".into(),
-            )],
-            events: BTreeMap::new(),
-            final_states: vec![],
-            invariant_results: vec![],
-        };
-        let r2 = r1.clone();
-        assert_eq!(r1, r2);
-    }
-
-    #[test]
-    fn run_record_inequality_on_seed() {
-        let r1 = RunRecord {
-            seed: 42,
-            transitions: vec![],
-            events: BTreeMap::new(),
-            final_states: vec![],
-            invariant_results: vec![],
-        };
-        let r2 = RunRecord {
-            seed: 99,
-            ..r1.clone()
-        };
-        assert_ne!(r1, r2);
-    }
-}
+#[path = "test_sim_actor_system.rs"]
+mod tests;

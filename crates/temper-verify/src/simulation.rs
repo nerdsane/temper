@@ -9,7 +9,11 @@
 //! - Any failure is reproducible by replaying the same seed
 //! - Specification invariants are checked after every transition
 
-use temper_runtime::scheduler::{DeterministicRng, FaultConfig, SimActorState, SimScheduler};
+use std::collections::{BTreeMap, BTreeSet};
+
+use temper_runtime::scheduler::{
+    DeterministicRng, FaultConfig, SimActorState, SimMessage, SimScheduler,
+};
 
 use stateright::Model;
 
@@ -159,33 +163,61 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
     // Initialize actors
     let mut actor_states: Vec<(String, TemperModelState)> = Vec::new();
     let mut actor_action_counts: Vec<usize> = Vec::new();
+    let mut visited_statuses: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
     for i in 0..config.num_actors {
         let actor_id = format!("entity-{i}");
         sched.register_actor(&actor_id);
         let initial = model.init_states()[0].clone();
+        visited_statuses
+            .entry(actor_id.clone())
+            .or_default()
+            .insert(initial.status.clone());
         actor_states.push((actor_id, initial));
         actor_action_counts.push(0);
     }
 
-    let mut violations = Vec::new();
-    let mut total_transitions: u64 = 0;
+    let mut run = ModelRunState {
+        actor_states,
+        actor_action_counts,
+        violations: Vec::new(),
+        total_transitions: 0,
+        visited_statuses,
+    };
     let mut total_messages: u64 = 0;
 
     // Main simulation loop
     for tick in 0..config.max_ticks {
-        if actor_states.is_empty() {
+        if run.actor_states.is_empty() {
             break;
         }
 
-        let actor_idx = rng.next_bound(actor_states.len());
-        let (ref actor_id, ref current_state) = actor_states[actor_idx];
+        let actor_idx = rng.next_bound(run.actor_states.len());
+        let (ref actor_id, ref current_state) = run.actor_states[actor_idx];
 
-        if actor_action_counts[actor_idx] >= config.max_actions_per_actor {
+        if run.actor_action_counts[actor_idx] >= config.max_actions_per_actor {
+            continue;
+        }
+
+        // One in-flight action per actor keeps action selection serialized to
+        // the state that will consume it, matching actor mailbox semantics.
+        if sched.has_in_flight(actor_id) {
+            sched.tick();
+            for msg in &sched.drain_ready() {
+                apply_to_model(model, &mut run, tick, msg);
+            }
+            sched.finish_tick();
             continue;
         }
 
         if sched.actor_state(actor_id) == Some(&SimActorState::Crashed) {
+            // A crashed idle actor still consumes logical ticks so the
+            // scheduler can exercise its independent restart fault edge.
+            sched.tick();
+            for msg in &sched.drain_ready() {
+                apply_to_model(model, &mut run, tick, msg);
+            }
+            sched.finish_tick();
             continue;
         }
 
@@ -208,52 +240,53 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
         );
         total_messages += 1;
 
-        let delivered = sched.tick();
-
-        for msg in &delivered {
-            let target_idx = actor_states.iter().position(|(id, _)| id == &msg.to);
-            let Some(idx) = target_idx else { continue };
-
-            let (ref target_id, ref state_before) = actor_states[idx];
-
-            let action: TemperModelAction = match serde_json::from_str(&msg.payload) {
-                Ok(a) => a,
-                Err(_) => continue,
-            };
-
-            if let Some(new_state) = model.next_state(state_before, action.clone()) {
-                check_invariants_on_state(
-                    model,
-                    target_id,
-                    &action.name,
-                    state_before,
-                    &new_state,
-                    tick,
-                    &mut violations,
-                );
-
-                actor_states[idx].1 = new_state;
-                actor_action_counts[idx] += 1;
-                total_transitions += 1;
-            }
-        }
-
         sched.tick();
+        for msg in &sched.drain_ready() {
+            apply_to_model(model, &mut run, tick, msg);
+        }
+        sched.finish_tick();
+    }
+
+    // Flush delay-faulted tail deliveries through the same exactly-once path.
+    let mut flush_budget = config.max_ticks;
+    let mut tick = config.max_ticks.saturating_sub(1);
+    while !sched.is_quiescent() && flush_budget > 0 {
+        flush_budget -= 1;
+        tick = tick.saturating_add(1);
+        sched.tick();
+        for msg in &sched.drain_ready() {
+            apply_to_model(model, &mut run, tick, msg);
+        }
+        sched.finish_tick();
+    }
+    if !sched.is_quiescent() {
+        run.violations.push(InvariantViolation {
+            actor_id: "sim-driver".to_string(),
+            action: "Flush".to_string(),
+            state_before: model.init_states()[0].clone(),
+            state_after: model.init_states()[0].clone(),
+            invariant: format!(
+                "simulation did not quiesce within {} flush ticks",
+                config.max_ticks
+            ),
+            tick,
+        });
     }
 
     // Post-simulation liveness checks
-    let liveness_violations = check_liveness_post_simulation(model, &actor_states);
+    let liveness_violations =
+        check_liveness_post_simulation(model, &run.actor_states, &run.visited_statuses);
 
     SimulationResult {
-        all_invariants_held: violations.is_empty(),
-        ticks: config.max_ticks.min(sched.current_time()),
-        total_transitions,
+        all_invariants_held: run.violations.is_empty(),
+        ticks: sched.current_time(),
+        total_transitions: run.total_transitions,
         total_messages,
         total_dropped: sched.total_dropped() as u64,
-        violations,
+        violations: run.violations,
         liveness_violations,
         seed: config.seed,
-        actor_final_states: actor_states,
+        actor_final_states: run.actor_states,
     }
 }
 
@@ -265,6 +298,7 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
 fn check_liveness_post_simulation(
     model: &TemperModel,
     actor_states: &[(String, TemperModelState)],
+    visited_statuses: &BTreeMap<String, BTreeSet<String>>,
 ) -> Vec<LivenessViolation> {
     let mut violations = Vec::new();
 
@@ -292,15 +326,16 @@ fn check_liveness_post_simulation(
                     if targets.is_empty() {
                         continue;
                     }
-                    // If the actor started from a "from" state, it should have
-                    // reached a target state by the end of simulation.
                     let started_from = from.is_empty() || from.contains(&model.initial_status);
-                    if started_from && !targets.contains(&final_state.status) {
+                    let visited_target = visited_statuses
+                        .get(actor_id)
+                        .is_some_and(|seen| targets.iter().any(|target| seen.contains(target)));
+                    if started_from && !visited_target {
                         violations.push(LivenessViolation {
                             actor_id: actor_id.clone(),
                             property: live.name.clone(),
                             description: format!(
-                                "actor did not reach target states {:?}, stuck at '{}'",
+                                "actor never reached target states {:?}, ending at '{}'",
                                 targets, final_state.status
                             ),
                             final_state: final_state.clone(),
@@ -312,6 +347,105 @@ fn check_liveness_post_simulation(
     }
 
     violations
+}
+
+/// Mutable state shared by the main driver and its bounded tail flush.
+struct ModelRunState {
+    actor_states: Vec<(String, TemperModelState)>,
+    actor_action_counts: Vec<usize>,
+    violations: Vec<InvariantViolation>,
+    total_transitions: u64,
+    visited_statuses: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// Apply one mailbox-owned message to the verifier model exactly once.
+fn apply_to_model(model: &TemperModel, run: &mut ModelRunState, tick: u64, msg: &SimMessage) {
+    let Some(idx) = run
+        .actor_states
+        .iter()
+        .position(|(actor_id, _)| actor_id == &msg.to)
+    else {
+        record_model_delivery_failure(
+            model,
+            run,
+            tick,
+            msg,
+            "scheduled message targeted an unknown actor".to_string(),
+        );
+        return;
+    };
+    let Ok(action) = serde_json::from_str::<TemperModelAction>(&msg.payload) else {
+        record_model_delivery_failure(
+            model,
+            run,
+            tick,
+            msg,
+            "scheduled message payload was not a model action".to_string(),
+        );
+        return;
+    };
+    let (target_id, state_before) = &run.actor_states[idx];
+    let mut enabled_actions = Vec::new();
+    model.actions(state_before, &mut enabled_actions);
+    if !enabled_actions.contains(&action) {
+        let status = state_before.status.clone();
+        run.violations.push(InvariantViolation {
+            actor_id: target_id.clone(),
+            action: action.name,
+            state_before: state_before.clone(),
+            state_after: state_before.clone(),
+            invariant: format!("scheduled model action was rejected from status '{status}'"),
+            tick,
+        });
+        return;
+    }
+    let Some(new_state) = model.next_state(state_before, action.clone()) else {
+        let status = state_before.status.clone();
+        run.violations.push(InvariantViolation {
+            actor_id: target_id.clone(),
+            action: action.name,
+            state_before: state_before.clone(),
+            state_after: state_before.clone(),
+            invariant: format!("scheduled model action was rejected from status '{status}'"),
+            tick,
+        });
+        return;
+    };
+
+    check_invariants_on_state(
+        model,
+        target_id,
+        &action.name,
+        state_before,
+        &new_state,
+        tick,
+        &mut run.violations,
+    );
+    run.actor_states[idx].1 = new_state;
+    run.visited_statuses
+        .entry(run.actor_states[idx].0.clone())
+        .or_default()
+        .insert(run.actor_states[idx].1.status.clone());
+    run.actor_action_counts[idx] += 1;
+    run.total_transitions += 1;
+}
+
+fn record_model_delivery_failure(
+    model: &TemperModel,
+    run: &mut ModelRunState,
+    tick: u64,
+    msg: &SimMessage,
+    invariant: String,
+) {
+    let state = model.init_states()[0].clone();
+    run.violations.push(InvariantViolation {
+        actor_id: msg.to.clone(),
+        action: msg.msg_type.clone(),
+        state_before: state.clone(),
+        state_after: state,
+        invariant,
+        tick,
+    });
 }
 
 /// Check invariants on a state using the model's resolved invariants.
@@ -417,6 +551,158 @@ mod tests {
     use super::*;
 
     const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
+
+    const CYCLIC_IOA: &str = r#"
+[automaton]
+name = "Loop"
+states = ["Open", "Resolved"]
+initial = "Open"
+
+[[action]]
+name = "Resolve"
+kind = "input"
+from = ["Open"]
+to = "Resolved"
+
+[[action]]
+name = "Reopen"
+kind = "input"
+from = ["Resolved"]
+to = "Open"
+
+[[liveness]]
+name = "EventuallyResolved"
+from = ["Open"]
+reaches = ["Resolved"]
+"#;
+
+    const UNREACHABLE_IOA: &str = r#"
+[automaton]
+name = "Stuck"
+states = ["Open", "Parked", "Resolved"]
+initial = "Open"
+
+[[action]]
+name = "Park"
+kind = "input"
+from = ["Open"]
+to = "Parked"
+
+[[action]]
+name = "Unpark"
+kind = "input"
+from = ["Parked"]
+to = "Open"
+
+[[liveness]]
+name = "EventuallyResolved"
+from = ["Open"]
+reaches = ["Resolved"]
+"#;
+
+    fn liveness_config(seed: u64) -> SimConfig {
+        SimConfig {
+            seed,
+            max_ticks: 200,
+            num_actors: 2,
+            max_actions_per_actor: 20,
+            max_counter: 2,
+            faults: FaultConfig::none(),
+        }
+    }
+
+    fn model_run(model: &TemperModel) -> ModelRunState {
+        let actor_id = "entity-0".to_string();
+        let initial = model.init_states()[0].clone();
+        ModelRunState {
+            actor_states: vec![(actor_id.clone(), initial.clone())],
+            actor_action_counts: vec![0],
+            violations: Vec::new(),
+            total_transitions: 0,
+            visited_statuses: BTreeMap::from([(actor_id, BTreeSet::from([initial.status]))]),
+        }
+    }
+
+    fn model_message(target: &str, payload: String) -> SimMessage {
+        SimMessage {
+            from: "driver".to_string(),
+            to: target.to_string(),
+            msg_type: "model-action".to_string(),
+            payload,
+            deliver_at: 1,
+            id: 1,
+        }
+    }
+
+    #[test]
+    fn verifier_records_unknown_and_malformed_deliveries() {
+        let model = build_model_from_ioa(CYCLIC_IOA, 2).unwrap();
+        let mut run = model_run(&model);
+
+        apply_to_model(
+            &model,
+            &mut run,
+            1,
+            &model_message("missing", "{}".to_string()),
+        );
+        apply_to_model(
+            &model,
+            &mut run,
+            2,
+            &model_message("entity-0", "not-json".to_string()),
+        );
+
+        assert_eq!(run.violations.len(), 2);
+        assert!(run.violations[0].invariant.contains("unknown actor"));
+        assert!(run.violations[1].invariant.contains("not a model action"));
+    }
+
+    #[test]
+    fn verifier_records_action_rejected_after_state_changes() {
+        let model = build_model_from_ioa(CYCLIC_IOA, 2).unwrap();
+        let mut actions = Vec::new();
+        model.actions(&model.init_states()[0], &mut actions);
+        let resolve = actions
+            .into_iter()
+            .find(|action| action.name == "Resolve")
+            .unwrap();
+        let message = model_message("entity-0", serde_json::to_string(&resolve).unwrap());
+        let mut run = model_run(&model);
+
+        apply_to_model(&model, &mut run, 1, &message);
+        apply_to_model(&model, &mut run, 2, &message);
+
+        assert_eq!(run.total_transitions, 1);
+        assert_eq!(run.violations.len(), 1);
+        assert!(run.violations[0].invariant.contains("was rejected"));
+    }
+
+    #[test]
+    fn reaches_liveness_is_satisfied_by_a_trace_visit() {
+        for seed in [7, 21, 99] {
+            let result = run_simulation_from_ioa(CYCLIC_IOA, &liveness_config(seed)).unwrap();
+            assert!(result.total_transitions > 0);
+            assert!(
+                result
+                    .liveness_violations
+                    .iter()
+                    .all(|violation| violation.property != "EventuallyResolved"),
+                "seed {seed}: {:?}",
+                result.liveness_violations
+            );
+        }
+    }
+
+    #[test]
+    fn reaches_liveness_fails_when_target_is_never_visited() {
+        let result = run_simulation_from_ioa(UNREACHABLE_IOA, &liveness_config(7)).unwrap();
+        assert!(
+            result
+                .liveness_violations
+                .iter()
+                .any(|violation| violation.property == "EventuallyResolved")
+        );
+    }
 
     #[test]
     fn test_simulation_no_faults() {

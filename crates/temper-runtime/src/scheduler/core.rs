@@ -162,14 +162,32 @@ impl SimScheduler {
         });
     }
 
-    /// Advance one tick: deliver all messages due at current_time + 1.
-    /// Returns the messages delivered this tick.
-    pub fn tick(&mut self) -> Vec<SimMessage> {
+    /// Advance one tick and enqueue every message due at the new logical time.
+    ///
+    /// This method only transfers ownership from the pending queue to target
+    /// mailboxes. Drivers consume deliveries through [`Self::drain_ready`] or
+    /// [`Self::receive`], so a processable message is never exposed as a clone.
+    pub fn tick(&mut self) {
         self.current_time += 1;
         self.ticks += 1;
-        let mut delivered_this_tick = Vec::new();
 
-        // Deliver all messages due at or before current time
+        // Restart is an independent per-tick fault edge. Tying restart only
+        // to a newly due message can strand a crashed, idle actor forever.
+        let crashed: Vec<String> = self
+            .actor_states
+            .iter()
+            .filter(|(_, state)| **state == SimActorState::Crashed)
+            .map(|(actor_id, _)| actor_id.clone())
+            .collect();
+        for actor_id in crashed {
+            if self.rng.chance(self.fault_config.actor_restart_prob) {
+                self.actor_states
+                    .insert(actor_id.clone(), SimActorState::Running);
+                self.restarted.push(actor_id);
+            }
+        }
+
+        // Enqueue all messages due at or before current time.
         while let Some(msg) = self.pending.peek() {
             if msg.deliver_at <= self.current_time {
                 let msg = self.pending.pop().unwrap(); // ci-ok: guarded by peek() above
@@ -179,19 +197,12 @@ impl SimScheduler {
                 let actor_state = self.actor_states.get(&to).cloned();
                 match actor_state {
                     Some(SimActorState::Running) => {
-                        self.mailboxes.entry(to).or_default().push_back(msg.clone());
-                        delivered_this_tick.push(msg.clone());
-                        self.delivered.push(msg);
+                        self.delivered.push(msg.clone());
+                        self.mailboxes.entry(to).or_default().push_back(msg);
                     }
                     Some(SimActorState::Crashed) => {
-                        // Actor is crashed — message is lost (or could be re-queued)
+                        // Actor remained crashed through this tick — drop.
                         self.dropped.push(msg);
-
-                        // Maybe restart the actor
-                        if self.rng.chance(self.fault_config.actor_restart_prob) {
-                            self.actor_states.insert(to.clone(), SimActorState::Running);
-                            self.restarted.push(to);
-                        }
                     }
                     None => {
                         // Unknown actor — drop
@@ -202,8 +213,14 @@ impl SimScheduler {
                 break;
             }
         }
+    }
 
-        // Maybe crash an actor after delivery
+    /// Complete a tick after the driver has applied every drained delivery.
+    ///
+    /// Crash injection is deliberately separated from [`Self::tick`]: a
+    /// message enqueued while its target is running must be consumed before a
+    /// post-delivery crash can change that actor's state.
+    pub fn finish_tick(&mut self) {
         if self.rng.chance(self.fault_config.actor_crash_prob) {
             let running: Vec<String> = self
                 .actor_states
@@ -217,8 +234,18 @@ impl SimScheduler {
                     .insert(running[idx].clone(), SimActorState::Crashed);
             }
         }
+    }
 
-        delivered_this_tick
+    /// Remove every ready message in actor-id order and FIFO mailbox order.
+    ///
+    /// A drained message leaves the scheduler and is owned by the caller,
+    /// which must either apply it or report why application failed.
+    pub fn drain_ready(&mut self) -> Vec<SimMessage> {
+        let mut ready = Vec::new();
+        for mailbox in self.mailboxes.values_mut() {
+            ready.extend(mailbox.drain(..));
+        }
+        ready
     }
 
     /// Take the next message from an actor's mailbox.
@@ -231,15 +258,13 @@ impl SimScheduler {
         self.pending.is_empty() && self.mailboxes.values().all(|q| q.is_empty())
     }
 
-    /// Run until quiescent or max ticks reached. Returns total ticks.
-    pub fn run_until_quiescent(&mut self, max_ticks: u64) -> u64 {
-        for _ in 0..max_ticks {
-            if self.is_quiescent() {
-                break;
-            }
-            self.tick();
-        }
-        self.ticks
+    /// Whether an actor already owns an unconsumed pending or mailbox message.
+    pub fn has_in_flight(&self, actor_id: &str) -> bool {
+        self.pending.iter().any(|message| message.to == actor_id)
+            || self
+                .mailboxes
+                .get(actor_id)
+                .is_some_and(|mailbox| !mailbox.is_empty())
     }
 
     /// Get the current logical time.
@@ -321,7 +346,12 @@ mod tests {
                 sched.send("a", "b", &format!("msg-{i}"), "{}");
             }
 
-            sched.run_until_quiescent(100);
+            for _ in 0..100 {
+                if sched.pending.is_empty() {
+                    break;
+                }
+                sched.tick();
+            }
 
             sched
                 .delivered_log()
@@ -346,7 +376,12 @@ mod tests {
                 sched.send("a", "b", &format!("msg-{i}"), "{}");
             }
 
-            sched.run_until_quiescent(100);
+            for _ in 0..100 {
+                if sched.pending.is_empty() {
+                    break;
+                }
+                sched.tick();
+            }
             sched
                 .delivered_log()
                 .iter()
@@ -393,8 +428,10 @@ mod tests {
 
         sched.send("a", "b", "msg", "{}");
         sched.tick();
+        sched.drain_ready();
+        sched.finish_tick();
 
-        // Message should be delivered (crash happens AFTER delivery)
+        // Message is consumed before the post-delivery crash.
         assert_eq!(sched.total_delivered(), 1);
 
         // But one of the actors should now be crashed
@@ -425,6 +462,36 @@ mod tests {
     }
 
     #[test]
+    fn message_to_unknown_actor_is_dropped_without_a_mailbox() {
+        let mut sched = SimScheduler::new(42, FaultConfig::none());
+        sched.register_actor("source");
+
+        sched.send("source", "missing", "msg", "{}");
+        sched.tick();
+
+        assert_eq!(sched.total_dropped(), 1);
+        assert!(sched.drain_ready().is_empty());
+        assert!(sched.is_quiescent());
+    }
+
+    #[test]
+    fn duplicate_sends_are_distinct_and_each_drained_once() {
+        let mut sched = SimScheduler::new(42, FaultConfig::none());
+        sched.register_actor("source");
+        sched.register_actor("target");
+
+        sched.send("source", "target", "same", "{}");
+        sched.send("source", "target", "same", "{}");
+        sched.tick();
+
+        let ready = sched.drain_ready();
+        assert_eq!(ready.len(), 2);
+        assert_ne!(ready[0].id, ready[1].id);
+        assert!(sched.drain_ready().is_empty());
+        assert!(sched.is_quiescent());
+    }
+
+    #[test]
     fn test_quiescence_detection() {
         let mut sched = SimScheduler::new(1, FaultConfig::none());
         sched.register_actor("a");
@@ -441,18 +508,24 @@ mod tests {
     }
 
     #[test]
-    fn test_run_until_quiescent() {
+    fn drain_ready_consumes_all_mailboxes_deterministically() {
         let mut sched = SimScheduler::new(1, FaultConfig::none());
         sched.register_actor("a");
         sched.register_actor("b");
 
-        sched.send("a", "b", "msg-1", "{}");
-        sched.send("a", "b", "msg-2", "{}");
-        sched.send("a", "b", "msg-3", "{}");
+        sched.send("a", "b", "b-1", "{}");
+        sched.send("b", "a", "a-1", "{}");
+        sched.send("a", "b", "b-2", "{}");
 
-        let ticks = sched.run_until_quiescent(100);
-        assert!(ticks <= 100);
+        sched.tick();
+        let ready = sched.drain_ready();
+        let delivered: Vec<_> = ready
+            .iter()
+            .map(|message| message.msg_type.as_str())
+            .collect();
+        assert_eq!(delivered, ["a-1", "b-1", "b-2"]);
         assert_eq!(sched.total_delivered(), 3);
+        assert!(sched.is_quiescent());
     }
 
     #[test]
@@ -473,7 +546,12 @@ mod tests {
         let delivered_at_1 = sched.total_delivered();
 
         // Run more ticks
-        sched.run_until_quiescent(20);
+        for _ in 0..20 {
+            if sched.total_delivered() == 1 {
+                break;
+            }
+            sched.tick();
+        }
         assert_eq!(
             sched.total_delivered(),
             1,
@@ -503,7 +581,13 @@ mod tests {
             sched.send(&from, &to, "msg", "{}");
         }
 
-        sched.run_until_quiescent(200);
+        for _ in 0..200 {
+            if sched.pending.is_empty() {
+                break;
+            }
+            sched.tick();
+            sched.drain_ready();
+        }
 
         // Just verify it completed without panic and some messages got through
         let total = sched.total_delivered() + sched.total_dropped();
@@ -549,7 +633,12 @@ mod tests {
         sched.register_actor("b");
 
         sched.send_at("a", "b", "Scheduled", "{}", 3);
-        sched.run_until_quiescent(10);
+        for _ in 0..10 {
+            if sched.pending.is_empty() {
+                break;
+            }
+            sched.tick();
+        }
 
         assert_eq!(sched.total_delivered(), 0);
         assert_eq!(sched.total_dropped(), 1);
