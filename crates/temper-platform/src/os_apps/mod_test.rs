@@ -157,6 +157,10 @@ fn test_list_os_apps_returns_catalog() {
         names.contains(&"dsf-deploy"),
         "missing dsf-deploy: {names:?}"
     );
+    assert!(
+        names.contains(&"dsf-investigate"),
+        "missing dsf-investigate: {names:?}"
+    );
 
     let pm = apps
         .iter()
@@ -203,6 +207,17 @@ fn test_list_os_apps_returns_catalog() {
     assert!(
         dsf.app_guide.is_some(),
         "dsf-deploy should have an app guide"
+    );
+    let investigate = apps.iter().find(|e| e.name == "dsf-investigate").unwrap();
+    assert_eq!(
+        investigate.entity_types.as_slice(),
+        ["Investigation"],
+        "dsf-investigate entity types: {:?}",
+        investigate.entity_types
+    );
+    assert!(
+        investigate.app_guide.is_some(),
+        "dsf-investigate should have an app guide"
     );
 }
 
@@ -958,6 +973,61 @@ fn test_dsf_deploy_specs_verify() {
         assert!(
             result.all_passed,
             "dsf-deploy spec {entity_type} failed verification"
+        );
+    }
+}
+
+#[test]
+fn test_dsf_investigate_bundle_loads() {
+    let bundle = get_os_app("dsf-investigate").expect("dsf-investigate app not found");
+    assert_eq!(bundle.specs.len(), 1);
+    assert!(bundle.csdl.is_some());
+    assert!(!bundle.csdl.as_ref().unwrap().is_empty());
+    assert!(!bundle.cedar_policies.is_empty());
+}
+
+#[test]
+fn test_dsf_investigate_specs_parse() {
+    let bundle = get_os_app("dsf-investigate").expect("dsf-investigate app not found");
+    for (entity_type, ioa_source) in &bundle.specs {
+        let result = automaton::parse_automaton(ioa_source);
+        assert!(
+            result.is_ok(),
+            "dsf-investigate spec {entity_type} failed to parse: {:?}",
+            result.err()
+        );
+        let parsed = result.expect("parsed after ok check");
+        assert_eq!(parsed.automaton.name, *entity_type);
+    }
+}
+
+#[test]
+fn test_dsf_investigate_csdl_parses() {
+    let bundle = get_os_app("dsf-investigate").expect("dsf-investigate app not found");
+    let result = parse_csdl(
+        bundle
+            .csdl
+            .as_ref()
+            .expect("dsf-investigate should have CSDL"),
+    );
+    assert!(
+        result.is_ok(),
+        "dsf-investigate CSDL failed to parse: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_dsf_investigate_specs_verify() {
+    let bundle = get_os_app("dsf-investigate").expect("dsf-investigate app not found");
+    for (entity_type, ioa_source) in &bundle.specs {
+        let cascade = VerificationCascade::from_ioa(ioa_source)
+            .with_sim_seeds(3)
+            .with_prop_test_cases(40);
+        let result = cascade.run();
+        assert!(
+            result.all_passed,
+            "dsf-investigate spec {entity_type} failed verification"
         );
     }
 }

@@ -648,6 +648,8 @@ impl crate::state::ServerState {
                 .integration_config
                 .insert("temper_api_url".to_string(), api_url);
         }
+        crate::secrets::env_overlay::overlay_named_sandbox_env(&mut inv_ctx.integration_config);
+        crate::secrets::env_overlay::overlay_datadog_env(&mut inv_ctx.integration_config);
         // ADR-0046: inline-hydrate blob refs below the 128KB ceiling; defer
         // oversize refs into a blob_cache the WASM guest can read via
         // host_read_field_stream. No-op on tenants without a Turso store.

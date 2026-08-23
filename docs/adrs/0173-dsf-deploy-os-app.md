@@ -1,4 +1,4 @@
-# ADR-0173: Shared Deep Sci-Fi Deploy Sequence OS App
+# ADR-0173: Shared Deep Sci-Fi Deploy and Investigate OS Apps
 
 - Status: Proposed
 - Date: 2026-08-23
@@ -6,95 +6,160 @@
 - Related:
   - ADR-0027: OS App Catalog
   - ADR-0031: Temper-native agent
-  - `os-apps/project-management/` (shape this app follows, smaller)
+  - ADR-0046: Inline WASM triggers
+  - `os-apps/project-management/` (bundle shape this pair follows, smaller)
   - `os-apps/temper-agent/wasm/sandbox_provisioner/src/lib.rs` (provision path)
 
 ## Context
 
-Howl and TemperPaw both need the same Deep Sci-Fi deploy walk: arm a target,
-probe health, deploy, record the deploy id, verify, then mark healthy or fail.
-That walk is a state machine. It belongs in the kernel catalog as a shared OS
-app, not as a one-off helper in either agent repo.
+Howl and TemperPaw both need the same Deep Sci-Fi deploy walk and the same
+Datadog investigation walk. Those walks are state machines, but Temper apps
+are not IOA-only: they also carry guest scripts as WASM. An IOA without a
+module that does real work is not enough to ship.
 
-Sandbox hands for that work run on the TensorLake sandbox named `dsf`. The
-hypothesis that temper-agent can connect or resume that named sandbox from
-`TEMPER_SANDBOX_NAME` must be verified against the actual provision path
-before any host or guest change.
+Sandbox hands for that work run on the TensorLake named sandbox `dsf`
+(also called dd comp). The live temper-agent provision path is the WASM
+guest `sandbox_provisioner`. Today that guest either uses a static
+`sandbox_url` or creates an ephemeral E2B sandbox. It has no TensorLake
+client and does not read `TEMPER_SANDBOX_NAME` / `TEMPER_SANDBOX_URL`.
+WASM guests do not see host environment variables unless the host injects
+them into `ctx.config`.
+
+The `dsf` sandbox must be stocked with Datadog access and the official
+`pup` CLI. Secret *values* must never be invented, printed, or written
+by this change.
 
 ## Decision
 
-### Sub-Decision 1: Ship `os-apps/dsf-deploy`
+### Sub-Decision 1: Ship `os-apps/dsf-deploy` with IOA and WASM
 
-Add a catalog app named `dsf-deploy` with one entity, `DeployRun`. Follow the
-project-management bundle layout (`app.toml`, `APP.md`, IOA, CSDL, Cedar) and
-keep it smaller: one machine, no extra entities, no WASM, no startup install.
+Catalog app `dsf-deploy`, entity `DeployRun`. Bundle layout matches
+project-management (`app.toml`, `APP.md`, IOA, CSDL, Cedar) plus a guest
+module `dsf_deploy`.
 
-`startup_install` stays at the default `manual`. This app is installable. It is
-not part of the core boot surface.
+The machine is unchanged in spirit: Arm → ProbeHealth → MarkReady →
+StartDeploy → RecordDeploy → StartVerify → MarkHealthy, with Failed /
+Cancelled / ResumeOnComputer beside that walk.
 
-**Why this approach**: the catalog already discovers any directory with
-`app.toml` + `APP.md`. Install already loads root-level `*.ioa.toml`,
-`model.csdl.xml`, and `policies/*.cedar`. No kernel loader change is required.
+`ProbeHealth`, `ResumeOnComputer`, `StartDeploy`, and `StartVerify`
+trigger `dsf_deploy`. The module performs real HTTP:
 
-### Sub-Decision 2: Do not change the provisioner in this PR
+- Probe / resume: `GET` `health_url` (or `sandbox_url` + `/health`)
+- Deploy: `POST` `deploy_url` (or `sandbox_url` + `/deploy`) and return
+  `DeployId`
+- Verify: `GET` `verify_url`, else the same health URL
 
-Verified in code (not hypothesized):
+Missing URLs fail closed with operator instructions. The module does not
+invent a Railway or TensorLake API and does not log secret values.
 
-1. `os-apps/temper-agent/sandbox/local_sandbox.py` is the local process helper.
-   Out of scope.
-2. The live provision path is the WASM guest
-   `os-apps/temper-agent/wasm/sandbox_provisioner/src/lib.rs`, triggered by
-   `TemperAgent.Provision` in `os-apps/temper-agent/specs/temper_agent.ioa.toml`.
-3. `provision_sandbox()` has two priorities today:
-   - static `sandbox_url` from entity fields, integration config, or trigger
-     params
-   - otherwise `POST {e2b_api_url}/sandboxes` (ephemeral E2B create)
-4. There is no TensorLake client, no named-sandbox resume, and no read of
-   `TEMPER_SANDBOX_NAME` anywhere on this path. WASM guests do not see host
-   environment variables unless the host injects them into `ctx.config`.
+`startup_install` stays `manual`.
 
-Changing that guest is not safe in this PR: it requires a rebuilt
-`wasm32-unknown-unknown` artifact, and a mistake breaks every existing
-ephemeral `Provision`.
+**Why this approach**: Howl and TemperPaw need one shared walk *and* the
+hands that execute the probe/deploy/verify steps.
 
-**Smallest later hook** (do not land here):
+### Sub-Decision 2: Ship sibling app `os-apps/dsf-investigate`
 
-- File: `os-apps/temper-agent/wasm/sandbox_provisioner/src/lib.rs`
-- Function: `provision_sandbox()`
-- Insert after the static `sandbox_url` return (today ~L148) and before the
-  ephemeral E2B `POST /sandboxes` (today ~L159).
-- Gate: if `ctx.config` has a non-empty sandbox name, connect/resume that
-  named sandbox; if empty, keep current create.
-- Host injection (second, smaller file): add the name to
-  `[action.triggers.config]` on `Provision` in
-  `os-apps/temper-agent/specs/temper_agent.ioa.toml`, sourced from
-  `TEMPER_SANDBOX_NAME` (default empty).
+Same pattern: IOA + WASM + CSDL + Cedar. Entity `Investigation`. Stored
+workflow: Arm → StartGather → RecordFindings → MarkReady, with Failed /
+Cancelled / Resume.
 
-Until that hook exists, operators can still point a run at `dsf` by setting
-`sandbox_url` on Configure / integration config. That reuses priority 1 and
-does not change Provision.
+`StartGather` and `Resume` trigger `dsf_investigate`. The module calls
+the Datadog HTTP API when credentials are present in config (`DD_SITE`,
+plus `DD_ACCESS_TOKEN` or `DD_API_KEY` + `DD_APP_KEY`). It never prints
+those values. If credentials are missing, it fails closed and tells the
+operator to stock sandbox `dsf` with `pup` and the named env vars.
 
-### Sub-Decision 3: Non-goals stay out of this PR
+**Why this approach**: investigations are a second shared tool on the
+same computer, not a second state inside DeployRun.
 
-Do not change Railway. Do not publish Galley. Do not rewrite other OS apps.
+### Sub-Decision 3: Gated named-sandbox path in `sandbox_provisioner`
+
+Land the hook that the first draft of this ADR deferred.
+
+Priority in `provision_sandbox()`:
+
+1. Usable static `sandbox_url` (entity fields, config, trigger params).
+   Unresolved `{secret:...}` values are treated as unset so they do not
+   become a URL.
+2. Named sandbox from `temper_sandbox_url` / `TEMPER_SANDBOX_URL`.
+   Sandbox id is `temper_sandbox_name` / `TEMPER_SANDBOX_NAME` when set,
+   else `named-sandbox`.
+3. If a name is set and the URL is empty: **fail closed**. Do not create
+   an ephemeral E2B sandbox when the operator asked for `dsf`.
+4. Else existing E2B `POST /sandboxes`.
+
+There is still no TensorLake create/resume client. Connect means "use
+this URL". Empty name and empty URL keep today's E2B path.
+
+Host injection (WASM cannot read env):
+
+- `os-apps/temper-agent/specs/temper_agent.ioa.toml` Provision trigger
+  config adds `temper_sandbox_name` and `temper_sandbox_url` as
+  `{secret:...}` templates.
+- After secret resolution, `crates/temper-server/src/secrets/env_overlay.rs`
+  overlays process env `TEMPER_SANDBOX_NAME` / `TEMPER_SANDBOX_URL` when
+  those config keys are empty or unresolved. Datadog keys are overlaid
+  the same way, but only when the trigger already declared them.
+
+`std::env::var` is annotated `// determinism-ok`: production provision
+config, not entity state.
+
+**Why this approach**: smallest hook that connects `dsf` without
+default-breaking ephemeral E2B.
+
+### Sub-Decision 4: Stock script for sandbox `dsf`
+
+`os-apps/dsf-deploy/scripts/stock_dsf_sandbox.sh` installs `pup` when
+missing and checks that Datadog env *names* are present. It does not
+write secrets, print secret values, bounce Railway, or publish Galley.
+
+Official `pup` install (do not invent asset names):
+
+- `brew tap datadog-labs/pack && brew install datadog-labs/pack/pup`
+- `git clone https://github.com/DataDog/pup.git && cd pup && cargo build --release`
+- Prebuilt binaries from https://github.com/DataDog/pup/releases/latest
+
+Env names (values never printed):
+
+- `DD_SITE` (default `datadoghq.com` if unset)
+- `DD_ACCESS_TOKEN` (highest priority)
+- or `DD_API_KEY` + `DD_APP_KEY`
+- optional: `PUP_TRUST_SITE`, `DD_ORG`, `DD_TOKEN_STORAGE`
+- Temper connect: `TEMPER_SANDBOX_NAME` (expected `dsf`), `TEMPER_SANDBOX_URL`
+
+### Sub-Decision 5: Non-goals stay out
+
+Do not bounce Railway. Do not publish Galley. Do not dump secrets. Do
+not rewrite other OS apps beyond the two Provision config keys.
 
 ## Consequences
 
 ### Positive
-- Howl and TemperPaw can install one shared deploy machine.
-- The catalog loads the app with the same files sibling apps already require.
+- Howl and TemperPaw can install shared deploy and investigate machines
+  that actually run hands.
+- Operators can point Provision at `dsf` without changing the E2B
+  default.
+- The stock script is a repeatable, secret-safe checklist.
 
 ### Negative
-- Named sandbox `dsf` is not auto-connected. Hands still need an explicit
-  `sandbox_url` or a later WASM hook.
+- Named sandbox connect still requires a URL. Name-only fails closed
+  instead of guessing a TensorLake API.
+- Host overlay is process-env, not a vault write.
 
 ### Risks
-- If the IOA walk is too strict, agents will 409. The machine is the
-  contract; walk the states instead of adding shortcut actions.
+- If the IOA walk is too strict, agents will 409. Walk the states.
+- If `TEMPER_SANDBOX_NAME=dsf` is set without a URL, Provision fails
+  instead of silently creating E2B. That is intentional.
+
+### DST Compliance
+- `env_overlay` is production host config. Tests inject values; they do
+  not read process env.
+- Overlay uses `BTreeMap`. No wall clock, no thread spawn, no entity
+  state mutation from env.
 
 ## Non-Goals
 
-- TensorLake or E2B named-sandbox resume
+- TensorLake HTTP create/resume client
 - Railway or Galley changes
-- Changes to `temper-agent` WASM artifacts
 - Auto-install at platform boot
+- Printing or storing secret values

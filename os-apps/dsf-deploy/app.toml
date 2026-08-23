@@ -1,3 +1,11 @@
 name = "dsf-deploy"
 description = "Shared Deep Sci-Fi deploy sequence. Howl and TemperPaw both drive this. Hands run on TensorLake sandbox dsf."
 version = "0.1.0"
+
+[[wasm_modules]]
+name = "dsf_deploy"
+target = "wasm32-unknown-unknown"
+criticality = "app-required"
+startup_loading = "lazy"
+provenance = "bundled-artifact"
+import_class = "temper-host"
