@@ -38,16 +38,27 @@ pub(super) fn local_name_end(element: &BytesEnd) -> String {
     full.rsplit(':').next().unwrap_or(full).to_string()
 }
 
-pub(super) fn attr_str(element: &BytesStart, name: &str) -> Option<String> {
-    element
-        .attributes()
-        .flatten()
-        .find(|attribute| std::str::from_utf8(attribute.key.as_ref()).unwrap_or("") == name)
-        .and_then(|attribute| String::from_utf8(attribute.value.to_vec()).ok())
+/// Read an attribute, decoding XML entity and character references exactly once.
+pub(super) fn attr_str(element: &BytesStart, name: &str) -> Result<Option<String>, CsdlParseError> {
+    for attribute in element.attributes() {
+        let attribute = attribute?;
+        if attribute.key.as_ref() == name.as_bytes() {
+            let value = attribute
+                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                .map_err(|source| CsdlParseError::InvalidAttributeValue {
+                    element: local_name(element),
+                    attr: name.to_string(),
+                    source,
+                })?;
+            return Ok(Some(value.into_owned()));
+        }
+    }
+
+    Ok(None)
 }
 
 pub(super) fn required_attr(element: &BytesStart, name: &str) -> Result<String, CsdlParseError> {
-    attr_str(element, name).ok_or_else(|| CsdlParseError::MissingAttribute {
+    attr_str(element, name)?.ok_or_else(|| CsdlParseError::MissingAttribute {
         element: local_name(element),
         attr: name.to_string(),
     })

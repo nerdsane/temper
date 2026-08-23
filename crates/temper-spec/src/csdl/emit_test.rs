@@ -80,55 +80,114 @@ fn emit_round_trips_has_stream() {
     assert!(!schema2.entity_type("RegularEntity").unwrap().has_stream);
 }
 
-/// A property name carrying a quote must not be able to close the attribute
-/// and inject markup of its own.
+/// Every string-valued attribute must survive adversarial markup without
+/// creating schema structure or changing the typed document.
 #[test]
 fn adversarial_identifiers_do_not_inject_markup() {
+    let hostile = |label: &str| format!("{label}\"><Injected Property=\"&<>'");
     let doc = CsdlDocument {
-        version: "4.0".to_string(),
+        version: hostile("4.0"),
         schemas: vec![Schema {
-            namespace: "Ns\"><Injected/><Schema Namespace=\"Evil".to_string(),
+            namespace: hostile("Namespace"),
             entity_types: vec![EntityType {
-                name: "Widget\" HasStream=\"true".to_string(),
-                key_properties: vec!["Id<&>".to_string()],
+                name: "Widget\" HasStream=\"true\"><Injected Property=\"&<>'".to_string(),
+                key_properties: vec![hostile("Key")],
                 properties: vec![Property {
                     name: "Name\"/><Property Name=\"Smuggled".to_string(),
-                    type_name: "Edm.String".to_string(),
+                    type_name: hostile("PropertyType"),
                     nullable: true,
-                    default_value: Some("a\"b&c<d".to_string()),
+                    default_value: Some(hostile("Default")),
                     precision: None,
                     scale: None,
                 }],
-                navigation_properties: Vec::new(),
+                navigation_properties: vec![NavigationProperty {
+                    name: hostile("Navigation"),
+                    type_name: hostile("NavigationType"),
+                    nullable: true,
+                    contains_target: false,
+                    referential_constraints: vec![ReferentialConstraint {
+                        property: hostile("ConstraintProperty"),
+                        referenced_property: hostile("ConstraintTarget"),
+                    }],
+                }],
                 annotations: vec![Annotation {
-                    term: "Ns.Term\"><Injected/><Annotation Term=\"Evil".to_string(),
-                    value: AnnotationValue::String("v\"><Injected/>".to_string()),
+                    term: hostile("EntityAnnotationTerm"),
+                    value: AnnotationValue::String(hostile("EntityAnnotationValue")),
                 }],
                 has_stream: false,
             }],
-            enum_types: Vec::new(),
-            actions: Vec::new(),
-            functions: Vec::new(),
+            enum_types: vec![EnumType {
+                name: hostile("Enum"),
+                members: vec![EnumMember {
+                    name: hostile("Member"),
+                    value: Some(7),
+                }],
+            }],
+            actions: vec![Action {
+                name: hostile("Action"),
+                is_bound: true,
+                parameters: vec![Parameter {
+                    name: hostile("ActionParameter"),
+                    type_name: hostile("ActionParameterType"),
+                    nullable: true,
+                    default_value: Some(hostile("ActionDefault")),
+                }],
+                return_type: Some(ReturnType {
+                    type_name: hostile("ActionReturnType"),
+                    nullable: true,
+                    precision: None,
+                    scale: None,
+                }),
+                annotations: vec![Annotation {
+                    term: hostile("ActionAnnotationTerm"),
+                    value: AnnotationValue::String(hostile("ActionAnnotationValue")),
+                }],
+            }],
+            functions: vec![Function {
+                name: hostile("Function"),
+                is_bound: true,
+                parameters: vec![Parameter {
+                    name: hostile("FunctionParameter"),
+                    type_name: hostile("FunctionParameterType"),
+                    nullable: true,
+                    default_value: Some(hostile("FunctionDefault")),
+                }],
+                return_type: Some(ReturnType {
+                    type_name: hostile("FunctionReturnType"),
+                    nullable: true,
+                    precision: None,
+                    scale: None,
+                }),
+                annotations: vec![Annotation {
+                    term: hostile("FunctionAnnotationTerm"),
+                    value: AnnotationValue::String(hostile("FunctionAnnotationValue")),
+                }],
+            }],
             entity_containers: vec![EntityContainer {
-                name: "Svc\"><Injected/><EntityContainer Name=\"Evil".to_string(),
+                name: hostile("Container"),
                 entity_sets: vec![EntitySet {
-                    name: "Widgets\"><Injected/>".to_string(),
-                    entity_type: "Test.Widget\"><Injected/>".to_string(),
+                    name: hostile("EntitySet"),
+                    entity_type: hostile("EntitySetType"),
                     navigation_bindings: vec![NavigationBinding {
-                        path: "Path\"><Injected/>".to_string(),
-                        target: "Target\"><Injected/>".to_string(),
+                        path: hostile("BindingPath"),
+                        target: hostile("BindingTarget"),
                     }],
                 }],
                 action_imports: vec![ActionImport {
-                    name: "DoIt\"><Injected/>".to_string(),
-                    action: "Test.DoIt\"><Injected/>".to_string(),
+                    name: hostile("ActionImport"),
+                    action: hostile("ActionReference"),
                 }],
                 function_imports: vec![FunctionImport {
-                    name: "GetIt\"><Injected/>".to_string(),
-                    function: "Test.GetIt\"><Injected/>".to_string(),
+                    name: hostile("FunctionImport"),
+                    function: hostile("FunctionReference"),
                 }],
             }],
-            terms: Vec::new(),
+            terms: vec![Term {
+                name: hostile("Term"),
+                type_name: hostile("TermType"),
+                applies_to: Some(hostile("AppliesTo")),
+                description: Some(hostile("Description")),
+            }],
         }],
     };
 
@@ -137,7 +196,7 @@ fn adversarial_identifiers_do_not_inject_markup() {
     // attribute value; what must never appear is live markup.
     assert!(
         !emitted.contains("<Injected/>"),
-        "namespace escaped its attribute:\n{emitted}"
+        "attribute value injected live markup:\n{emitted}"
     );
     assert!(
         !emitted.contains("<Property Name=\"Smuggled"),
@@ -145,71 +204,10 @@ fn adversarial_identifiers_do_not_inject_markup() {
     );
 
     let reparsed = parse_csdl(&emitted).expect("adversarial emit must stay well-formed");
-    let schema = &reparsed.schemas[0];
-    assert_eq!(schema.namespace, doc.schemas[0].namespace);
     assert_eq!(
-        schema.entity_types.len(),
-        1,
-        "injection created extra entity types"
-    );
-
-    let entity_type = &schema.entity_types[0];
-    let original = &doc.schemas[0].entity_types[0];
-    assert_eq!(entity_type.name, original.name);
-    assert!(
-        !entity_type.has_stream,
-        "smuggled HasStream=\"true\" changed the typed model"
-    );
-    assert_eq!(entity_type.key_properties, original.key_properties);
-    assert_eq!(entity_type.properties.len(), 1);
-    assert_eq!(entity_type.properties[0].name, original.properties[0].name);
-    assert_eq!(
-        entity_type.properties[0].default_value,
-        original.properties[0].default_value
-    );
-
-    assert_eq!(entity_type.annotations.len(), 1);
-    assert_eq!(
-        entity_type.annotations[0].term,
-        original.annotations[0].term
-    );
-
-    // Container-side identifiers were unescaped before this fix too, so pin
-    // them against regression rather than trusting the emitter by symmetry.
-    assert_eq!(
-        schema.entity_containers.len(),
-        1,
-        "injection created extra entity containers"
-    );
-    let container = &schema.entity_containers[0];
-    let original_container = &doc.schemas[0].entity_containers[0];
-    assert_eq!(container.name, original_container.name);
-
-    assert_eq!(container.entity_sets.len(), 1);
-    let entity_set = &container.entity_sets[0];
-    let original_set = &original_container.entity_sets[0];
-    assert_eq!(entity_set.name, original_set.name);
-    assert_eq!(entity_set.entity_type, original_set.entity_type);
-
-    assert_eq!(entity_set.navigation_bindings.len(), 1);
-    assert_eq!(
-        entity_set.navigation_bindings[0].path,
-        original_set.navigation_bindings[0].path
-    );
-    assert_eq!(
-        entity_set.navigation_bindings[0].target,
-        original_set.navigation_bindings[0].target
-    );
-
-    assert_eq!(container.action_imports.len(), 1);
-    assert_eq!(
-        container.action_imports[0].action,
-        original_container.action_imports[0].action
-    );
-    assert_eq!(container.function_imports.len(), 1);
-    assert_eq!(
-        container.function_imports[0].function,
-        original_container.function_imports[0].function
+        serde_json::to_value(reparsed).expect("reparsed document should serialize"),
+        serde_json::to_value(doc).expect("original document should serialize"),
+        "adversarial attributes changed the typed CSDL document"
     );
 }
 
@@ -240,6 +238,46 @@ fn whitespace_in_attribute_values_round_trips() {
         reparsed.schemas[0].terms[0].description,
         doc.schemas[0].terms[0].description
     );
+}
+
+/// Whitespace and markup-significant characters in collection text nodes
+/// survive without becoming literal character-reference strings.
+#[test]
+fn whitespace_in_collection_text_round_trips() {
+    let value = "line one\nline\ttwo<&>".to_string();
+    let doc = CsdlDocument {
+        version: "4.0".to_string(),
+        schemas: vec![Schema {
+            namespace: "Test".to_string(),
+            entity_types: vec![EntityType {
+                name: "Widget".to_string(),
+                key_properties: Vec::new(),
+                properties: Vec::new(),
+                navigation_properties: Vec::new(),
+                annotations: vec![Annotation {
+                    term: "Test.Values".to_string(),
+                    value: AnnotationValue::Collection(vec![value.clone()]),
+                }],
+                has_stream: false,
+            }],
+            enum_types: Vec::new(),
+            actions: Vec::new(),
+            functions: Vec::new(),
+            entity_containers: Vec::new(),
+            terms: Vec::new(),
+        }],
+    };
+
+    let emitted = emit_csdl_xml(&doc);
+    assert!(emitted.contains("line one\nline\ttwo&lt;&amp;&gt;"));
+
+    let reparsed = parse_csdl(&emitted).expect("emitted XML should re-parse");
+    let AnnotationValue::Collection(items) =
+        &reparsed.schemas[0].entity_types[0].annotations[0].value
+    else {
+        panic!("annotation should remain a collection");
+    };
+    assert_eq!(items, &[value]);
 }
 
 #[test]

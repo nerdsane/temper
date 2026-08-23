@@ -41,6 +41,52 @@ fn test_parse_minimal_csdl() {
 }
 
 #[test]
+fn test_attribute_entities_decode_named_decimal_and_hex_once() {
+    let xml = r#"<?xml version="1.0"?>
+    <edmx:Edmx Version="4&#x2E;&#48;" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+      <edmx:DataServices>
+        <Schema Namespace="A&amp;B&#32;C&#x2F;D&quot;&apos;&lt;&gt;" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+          <EntityType Name="Widget">
+            <Property Name="Value" Type="Edm.String" DefaultValue="already&amp;amp;escaped"/>
+          </EntityType>
+        </Schema>
+      </edmx:DataServices>
+    </edmx:Edmx>"#;
+
+    let doc = parse_csdl(xml).expect("legal XML references should decode");
+    assert_eq!(doc.version, "4.0");
+    assert_eq!(doc.schemas[0].namespace, "A&B C/D\"'<>");
+    assert_eq!(
+        doc.schemas[0].entity_types[0].properties[0].default_value,
+        Some("already&amp;escaped".to_string()),
+        "attribute references must decode exactly once"
+    );
+}
+
+#[test]
+fn test_malformed_optional_attribute_entity_is_rejected() {
+    let xml = r#"<?xml version="1.0"?>
+    <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+      <edmx:DataServices>
+        <Schema Namespace="Test" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+          <EntityType Name="Widget">
+            <Property Name="Value" Type="Edm.String" DefaultValue="not&an-entity;"/>
+          </EntityType>
+        </Schema>
+      </edmx:DataServices>
+    </edmx:Edmx>"#;
+
+    let error = parse_csdl(xml).expect_err("malformed optional attributes must not disappear");
+    assert!(
+        matches!(
+            error,
+            CsdlParseError::InvalidAttributeValue { ref attr, .. } if attr == "DefaultValue"
+        ),
+        "unexpected parse error: {error}"
+    );
+}
+
+#[test]
 fn test_parse_entity_nested_bound_actions_as_schema_actions() {
     let xml = r#"<?xml version="1.0"?>
     <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
@@ -154,10 +200,7 @@ fn assert_example_container(schema: &Schema) {
 fn test_parse_collection_annotation_preserved_across_quick_xml_bump() {
     // Regression guard for the quick-xml 0.37 -> 0.41 bump (ARN-169): 0.41's
     // read_text returns a raw BytesText rather than an owned String, so the
-    // Collection<String> path decodes it explicitly. Behavior is preserved:
-    // ordinary state-list strings parse, and — matching 0.37, whose read_text
-    // also did not unescape — an XML entity stays literal (the pre-existing
-    // entity-unescaping gap is out of scope for this dependency bump).
+    // Collection<String> path charset-decodes and entity-decodes it explicitly.
     let xml = r#"<?xml version="1.0"?>
     <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
       <edmx:DataServices>
@@ -190,7 +233,7 @@ fn test_parse_collection_annotation_preserved_across_quick_xml_bump() {
                 &vec![
                     "Draft".to_string(),
                     "Active".to_string(),
-                    "A &amp; B".to_string(),
+                    "A & B".to_string(),
                 ]
             );
         }

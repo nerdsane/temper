@@ -45,7 +45,7 @@ pub(super) fn parse_schema(
                 _ => skip_element(reader)?,
             },
             Ok(Event::Empty(ref element)) if local_name(element) == "Term" => {
-                schema.terms.push(parse_term(element));
+                schema.terms.push(parse_term(element)?);
             }
             Ok(Event::End(ref element)) if local_name_end(element) == "Schema" => break,
             Ok(Event::Eof) => break,
@@ -74,7 +74,7 @@ fn parse_entity_type(
         properties: Vec::new(),
         navigation_properties: Vec::new(),
         annotations: Vec::new(),
-        has_stream: attr_str(start, "HasStream").is_some_and(|v| v == "true"),
+        has_stream: attr_str(start, "HasStream")?.is_some_and(|v| v == "true"),
     };
     let mut actions = Vec::new();
     let mut functions = Vec::new();
@@ -95,15 +95,15 @@ fn parse_entity_type(
                 _ => skip_element(reader)?,
             },
             Ok(Event::Empty(ref element)) => match local_name(element).as_str() {
-                "PropertyRef" => push_property_ref(element, &mut entity_type.key_properties),
-                "Property" => entity_type.properties.push(parse_property(element)),
+                "PropertyRef" => push_property_ref(element, &mut entity_type.key_properties)?,
+                "Property" => entity_type.properties.push(parse_property(element)?),
                 "NavigationProperty" => {
                     entity_type
                         .navigation_properties
-                        .push(nav_prop_from_attrs(element));
+                        .push(nav_prop_from_attrs(element)?);
                 }
                 "Annotation" => {
-                    if let Some(annotation) = annotation_from_attrs(element) {
+                    if let Some(annotation) = annotation_from_attrs(element)? {
                         entity_type.annotations.push(annotation);
                     }
                 }
@@ -134,7 +134,7 @@ fn parse_key(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Empty(ref element)) if local_name(element) == "PropertyRef" => {
-                push_property_ref(element, key_properties);
+                push_property_ref(element, key_properties)?;
             }
             Ok(Event::End(ref element)) if local_name_end(element) == "Key" => break,
             Ok(Event::Eof) => break,
@@ -147,10 +147,14 @@ fn parse_key(
     Ok(())
 }
 
-fn push_property_ref(element: &BytesStart, key_properties: &mut Vec<String>) {
-    if let Some(name) = attr_str(element, "Name") {
+fn push_property_ref(
+    element: &BytesStart,
+    key_properties: &mut Vec<String>,
+) -> Result<(), CsdlParseError> {
+    if let Some(name) = attr_str(element, "Name")? {
         key_properties.push(name);
     }
+    Ok(())
 }
 
 fn parse_enum_type(
@@ -164,8 +168,8 @@ fn parse_enum_type(
         match reader.read_event_into(&mut buf) {
             Ok(Event::Empty(ref element)) if local_name(element) == "Member" => {
                 members.push(EnumMember {
-                    name: attr_str(element, "Name").unwrap_or_default(),
-                    value: attr_str(element, "Value").and_then(|v| v.parse().ok()),
+                    name: attr_str(element, "Name")?.unwrap_or_default(),
+                    value: attr_str(element, "Value")?.and_then(|v| v.parse().ok()),
                 });
             }
             Ok(Event::End(ref element)) if local_name_end(element) == "EnumType" => break,
@@ -238,7 +242,7 @@ where
     F: FnOnce(String, bool) -> T,
 {
     let name = required_attr(start, "Name")?;
-    let is_bound = attr_str(start, "IsBound").is_some_and(|v| v == "true");
+    let is_bound = attr_str(start, "IsBound")?.is_some_and(|v| v == "true");
     Ok(build(name, is_bound))
 }
 
@@ -251,7 +255,7 @@ where
     F: FnOnce(String, bool, Vec<Parameter>, Option<ReturnType>, Vec<Annotation>) -> T,
 {
     let name = required_attr(start, "Name")?;
-    let is_bound = attr_str(start, "IsBound").is_some_and(|v| v == "true");
+    let is_bound = attr_str(start, "IsBound")?.is_some_and(|v| v == "true");
     let mut parameters = Vec::new();
     let mut return_type = None;
     let mut annotations = Vec::new();
@@ -265,10 +269,10 @@ where
                 _ => skip_element(reader)?,
             },
             Ok(Event::Empty(ref element)) => match local_name(element).as_str() {
-                "Parameter" => parameters.push(parse_parameter(element)),
-                "ReturnType" => return_type = Some(parse_return_type(element)),
+                "Parameter" => parameters.push(parse_parameter(element)?),
+                "ReturnType" => return_type = Some(parse_return_type(element)?),
                 "Annotation" => {
-                    if let Some(annotation) = annotation_from_attrs(element) {
+                    if let Some(annotation) = annotation_from_attrs(element)? {
                         annotations.push(annotation);
                     }
                 }
@@ -308,13 +312,13 @@ fn parse_entity_container(
             Ok(Event::Empty(ref element)) => match local_name(element).as_str() {
                 "EntitySet" => entity_container
                     .entity_sets
-                    .push(parse_entity_set_empty(element)),
+                    .push(parse_entity_set_empty(element)?),
                 "ActionImport" => entity_container
                     .action_imports
-                    .push(parse_action_import(element)),
+                    .push(parse_action_import(element)?),
                 "FunctionImport" => entity_container
                     .function_imports
-                    .push(parse_function_import(element)),
+                    .push(parse_function_import(element)?),
                 _ => {}
             },
             Ok(Event::End(ref element)) if local_name_end(element) == "EntityContainer" => break,

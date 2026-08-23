@@ -365,7 +365,10 @@ fn emit_annotation(out: &mut String, ann: &Annotation, indent: usize) {
             out.push_str(&format!("{pad}<Annotation Term=\"{term}\">\n"));
             out.push_str(&format!("{pad}  <Collection>\n"));
             for item in items {
-                out.push_str(&format!("{pad}    <String>{}</String>\n", xml_escape(item)));
+                out.push_str(&format!(
+                    "{pad}    <String>{}</String>\n",
+                    xml_escape_text(item)
+                ));
             }
             out.push_str(&format!("{pad}  </Collection>\n"));
             out.push_str(&format!("{pad}</Annotation>\n"));
@@ -388,7 +391,7 @@ fn emit_annotation(out: &mut String, ann: &Annotation, indent: usize) {
     }
 }
 
-/// Escape XML special characters in attribute/text values.
+/// Escape XML special characters in attribute values.
 ///
 /// Every value interpolated into emitted CSDL must pass through this function —
 /// identifiers included. Names, types, and references are agent- or
@@ -410,6 +413,23 @@ fn xml_escape(s: &str) -> String {
             '\t' => out.push_str("&#x9;"),
             '\n' => out.push_str("&#xA;"),
             '\r' => out.push_str("&#xD;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Escape XML special characters in text nodes without changing whitespace.
+///
+/// Attribute-value normalization does not apply to text nodes, so preserving
+/// literal tabs and newlines keeps collection values stable when parsed again.
+fn xml_escape_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
             _ => out.push(ch),
         }
     }
