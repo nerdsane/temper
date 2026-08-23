@@ -51,3 +51,7 @@ pub struct McpConfig {
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "elicit_loop_tests.rs"]
+mod elicit_loop_tests;
