@@ -2,17 +2,19 @@ use std::collections::BTreeMap;
 
 use sqlx::migrate::{Migration, Migrator};
 
-use super::{CONVERGENCE_MIGRATOR, FORK_MIGRATOR, UPSTREAM_MIGRATOR};
+use super::{
+    FIXED_UPSTREAM_MIGRATOR, FORK_MIGRATOR, HISTORICAL_CONVERGENCE_MIGRATOR,
+    LEGACY_UPSTREAM_MIGRATOR, SHARED_MIGRATOR,
+};
 
 const COMMON_LAST_VERSION: i64 = 11;
-const FORK_LAST_VERSION: i64 = 13;
-const UPSTREAM_LAST_VERSION: i64 = 15;
-const CONVERGENCE_FIRST_VERSION: i64 = 16;
+const FIRST_DIVERGENT_VERSION: i64 = 12;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum MigrationLineage {
     Fork,
-    Upstream,
+    LegacyUpstream,
+    FixedUpstream,
 }
 
 #[derive(Clone, Debug)]
@@ -39,15 +41,12 @@ pub(super) fn classify_migration_lineage(
         ));
     }
 
-    validate_prefix(
-        &applied_by_version,
-        migrations_in_range(&FORK_MIGRATOR, 1, COMMON_LAST_VERSION),
-        "common",
-    )?;
+    let common = migrations_in_range(&FORK_MIGRATOR, 1, COMMON_LAST_VERSION);
+    validate_prefix(&applied_by_version, &common, "common")?;
     if applied
         .iter()
         .any(|migration| migration.version > COMMON_LAST_VERSION)
-        && !legacy_is_complete(&applied_by_version, &FORK_MIGRATOR, COMMON_LAST_VERSION)
+        && !stream_is_complete(&applied_by_version, &common)
     {
         return Err(
             "Postgres divergent migration history exists before the common stream is complete"
@@ -55,69 +54,29 @@ pub(super) fn classify_migration_lineage(
         );
     }
 
-    let lineage = match applied_by_version.get(&(COMMON_LAST_VERSION + 1)) {
-        None => MigrationLineage::Fork,
-        Some(migration)
-            if checksum_matches(
-                migration,
-                migration_at(&FORK_MIGRATOR, COMMON_LAST_VERSION + 1)?,
-            ) =>
-        {
-            MigrationLineage::Fork
-        }
-        Some(migration)
-            if checksum_matches(
-                migration,
-                migration_at(&UPSTREAM_MIGRATOR, COMMON_LAST_VERSION + 1)?,
-            ) =>
-        {
-            MigrationLineage::Upstream
-        }
-        Some(_) => {
-            return Err(format!(
-                "Postgres migration version {} has an unknown lineage checksum",
-                COMMON_LAST_VERSION + 1
-            ));
-        }
-    };
+    let lineage = classify_divergent_stream(&applied_by_version)?;
+    let pre_shared = pre_shared_migrations(lineage)?;
+    let lineage_name = lineage_name(lineage);
+    validate_prefix(&applied_by_version, &pre_shared, lineage_name)?;
 
-    let (legacy_migrator, legacy_last, lineage_name) = match lineage {
-        MigrationLineage::Fork => (&FORK_MIGRATOR, FORK_LAST_VERSION, "fork"),
-        MigrationLineage::Upstream => (&UPSTREAM_MIGRATOR, UPSTREAM_LAST_VERSION, "upstream"),
-    };
-    validate_prefix(
-        &applied_by_version,
-        migrations_in_range(legacy_migrator, COMMON_LAST_VERSION + 1, legacy_last),
-        lineage_name,
-    )?;
-
-    for version in (COMMON_LAST_VERSION + 1)..=UPSTREAM_LAST_VERSION {
-        if version > legacy_last && applied_by_version.contains_key(&version) {
-            return Err(format!(
-                "Postgres migration history mixes {lineage_name} lineage with version {version}"
-            ));
-        }
-    }
-
-    let convergence =
-        migrations_in_range(&CONVERGENCE_MIGRATOR, CONVERGENCE_FIRST_VERSION, i64::MAX);
-    validate_prefix(&applied_by_version, convergence.clone(), "convergence")?;
-    if convergence
+    let shared = migrations_in_range(&SHARED_MIGRATOR, 17, i64::MAX);
+    validate_prefix(&applied_by_version, &shared, "shared")?;
+    if shared
         .iter()
         .any(|migration| applied_by_version.contains_key(&migration.version))
-        && !legacy_is_complete(&applied_by_version, legacy_migrator, legacy_last)
+        && !stream_is_complete(&applied_by_version, &pre_shared)
     {
         return Err(format!(
-            "Postgres convergence history exists before the {lineage_name} legacy stream is complete"
+            "Postgres shared migration history exists before the {lineage_name} stream is complete"
         ));
     }
 
     for applied_migration in applied {
-        let known = (1..=COMMON_LAST_VERSION).contains(&applied_migration.version)
-            || ((COMMON_LAST_VERSION + 1)..=legacy_last).contains(&applied_migration.version)
-            || convergence
-                .iter()
-                .any(|migration| migration.version == applied_migration.version);
+        let known = common
+            .iter()
+            .chain(pre_shared.iter())
+            .chain(shared.iter())
+            .any(|migration| migration.version == applied_migration.version);
         if !known {
             return Err(format!(
                 "Postgres migration history contains unknown version {}",
@@ -129,24 +88,93 @@ pub(super) fn classify_migration_lineage(
     Ok(lineage)
 }
 
+fn classify_divergent_stream(
+    applied: &BTreeMap<i64, &AppliedMigrationRow>,
+) -> Result<MigrationLineage, String> {
+    let Some(version_twelve) = applied.get(&FIRST_DIVERGENT_VERSION) else {
+        return Ok(MigrationLineage::Fork);
+    };
+
+    if checksum_matches(
+        version_twelve,
+        migration_at(&LEGACY_UPSTREAM_MIGRATOR, FIRST_DIVERGENT_VERSION)?,
+    ) {
+        return Ok(MigrationLineage::LegacyUpstream);
+    }
+    if !checksum_matches(
+        version_twelve,
+        migration_at(&FORK_MIGRATOR, FIRST_DIVERGENT_VERSION)?,
+    ) {
+        return Err(format!(
+            "Postgres migration version {FIRST_DIVERGENT_VERSION} has an unknown lineage checksum"
+        ));
+    }
+
+    let Some(version_thirteen) = applied.get(&(FIRST_DIVERGENT_VERSION + 1)) else {
+        // Fork and corrected upstream share 0012. Until 0013 records a
+        // distinct identity, resume on the canonical fork stream; the shared
+        // migration produces the same final schema either way.
+        return Ok(MigrationLineage::Fork);
+    };
+    if checksum_matches(
+        version_thirteen,
+        migration_at(&FORK_MIGRATOR, FIRST_DIVERGENT_VERSION + 1)?,
+    ) {
+        return Ok(MigrationLineage::Fork);
+    }
+    if checksum_matches(
+        version_thirteen,
+        migration_at(&FIXED_UPSTREAM_MIGRATOR, FIRST_DIVERGENT_VERSION + 1)?,
+    ) {
+        return Ok(MigrationLineage::FixedUpstream);
+    }
+    Err(format!(
+        "Postgres migration version {} has an unknown lineage checksum",
+        FIRST_DIVERGENT_VERSION + 1
+    ))
+}
+
+fn pre_shared_migrations(lineage: MigrationLineage) -> Result<Vec<&'static Migration>, String> {
+    let mut migrations = match lineage {
+        MigrationLineage::Fork => migrations_in_range(&FORK_MIGRATOR, 12, 13),
+        MigrationLineage::LegacyUpstream => migrations_in_range(&LEGACY_UPSTREAM_MIGRATOR, 12, 15),
+        MigrationLineage::FixedUpstream => {
+            let mut fixed = vec![migration_at(&FORK_MIGRATOR, 12)?];
+            fixed.extend(migrations_in_range(&FIXED_UPSTREAM_MIGRATOR, 13, 16));
+            fixed
+        }
+    };
+    if lineage != MigrationLineage::FixedUpstream {
+        migrations.extend(migrations_in_range(
+            &HISTORICAL_CONVERGENCE_MIGRATOR,
+            16,
+            16,
+        ));
+    }
+    Ok(migrations)
+}
+
+fn lineage_name(lineage: MigrationLineage) -> &'static str {
+    match lineage {
+        MigrationLineage::Fork => "fork",
+        MigrationLineage::LegacyUpstream => "legacy upstream",
+        MigrationLineage::FixedUpstream => "fixed upstream",
+    }
+}
+
 fn validate_prefix(
     applied: &BTreeMap<i64, &AppliedMigrationRow>,
-    expected: Vec<&Migration>,
+    expected: &[&Migration],
     stream_name: &str,
 ) -> Result<(), String> {
-    let highest_applied = expected
+    let highest_applied_index = expected
         .iter()
-        .filter(|migration| applied.contains_key(&migration.version))
-        .map(|migration| migration.version)
-        .max();
-    let Some(highest_applied) = highest_applied else {
+        .rposition(|migration| applied.contains_key(&migration.version));
+    let Some(highest_applied_index) = highest_applied_index else {
         return Ok(());
     };
 
-    for migration in expected
-        .into_iter()
-        .take_while(|migration| migration.version <= highest_applied)
-    {
+    for migration in &expected[..=highest_applied_index] {
         let Some(applied_migration) = applied.get(&migration.version) else {
             return Err(format!(
                 "Postgres {stream_name} migration history has a gap at version {}",
@@ -163,12 +191,11 @@ fn validate_prefix(
     Ok(())
 }
 
-fn legacy_is_complete(
+fn stream_is_complete(
     applied: &BTreeMap<i64, &AppliedMigrationRow>,
-    migrator: &'static Migrator,
-    last_version: i64,
+    expected: &[&Migration],
 ) -> bool {
-    migrations_in_range(migrator, 1, last_version)
+    expected
         .iter()
         .all(|migration| applied.contains_key(&migration.version))
 }

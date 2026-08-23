@@ -14,7 +14,7 @@ fn versioned_migration_is_the_schema_source() {
         include_str!("../../../migrations/0009_entity_key_index.sql"),
         include_str!("../../../migrations/0010_key_index_backfill_watermark.sql"),
         include_str!("../../../migrations/0011_key_index_watermark_key_set.sql"),
-        include_str!("../../../migrations-convergence/0016_converge_divergent_lineages.sql"),
+        include_str!("../../../migrations-shared/0017_converge_migration_lineages.sql"),
     ]
     .join("\n")
     .to_lowercase();
@@ -86,8 +86,7 @@ fn capture_order_column_exists_on_both_schema_paths() {
     // A fresh bootstrap reads schema.rs and an existing database reads the
     // migration; a session read that orders by `capture_seq` fails on
     // whichever path forgets it.
-    let migration =
-        include_str!("../../../migrations-convergence/0016_converge_divergent_lineages.sql");
+    let migration = include_str!("../../../migrations-shared/0017_converge_migration_lineages.sql");
     assert!(
         migration.contains("ADD COLUMN IF NOT EXISTS capture_seq"),
         "convergence migration must add the capture-order column idempotently"
@@ -107,8 +106,7 @@ fn ots_trajectory_identity_is_tenant_scoped_on_both_schema_paths() {
     // A fresh bootstrap reads schema.rs and an existing database reads the
     // migration. Whichever path keeps the global key lets one tenant's
     // upload overwrite another tenant's trajectory.
-    let migration =
-        include_str!("../../../migrations-convergence/0016_converge_divergent_lineages.sql");
+    let migration = include_str!("../../../migrations-shared/0017_converge_migration_lineages.sql");
     assert!(
         migration.contains("DROP CONSTRAINT IF EXISTS ots_trajectories_pkey"),
         "convergence migration must drop the globally keyed primary key idempotently"
