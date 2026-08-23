@@ -3,6 +3,9 @@
 //! `*_test.rs` file.
 
 use super::*;
+use crate::code_analysis::{
+    extract_temper_call_metadata, extract_trajectory_actions_from_code, parse_python_json_value,
+};
 use crate::trajectory_bounds::{MAX_TRAJECTORY_ACTIONS, MAX_TRAJECTORY_TEXT_BYTES};
 use axum::{Router, extract::State, http::HeaderMap, http::StatusCode, routing::post};
 use std::sync::Mutex;
