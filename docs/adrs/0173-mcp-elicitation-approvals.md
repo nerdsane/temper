@@ -146,6 +146,16 @@ swallowed.
   the operator's identity), the approve/deny returns 403 and the
   annotation surfaces that error. Distinct agent credentials are the
   supported shape.
+- To make this work on the credential-bound edge, the MCP takes an optional
+  `TEMPER_MCP_APPROVER_KEY`: `TEMPER_API_KEY` carries the agent's scoped
+  credential (the *asker*), and `TEMPER_MCP_APPROVER_KEY` carries the
+  operator/human credential used *only* to post the approve/deny (the
+  *approver*). Two distinct principals satisfy the self-approval guard.
+  When `TEMPER_MCP_APPROVER_KEY` is unset, resolution falls back to
+  `TEMPER_API_KEY` (single-principal dev mode, subject to the block above).
+  Proven live 2026-08-23: agent `claude-code` denied → human accepted inline
+  → resolved as `operator` (status `approved`). The productized version of
+  this two-key wiring is the MCP OAuth flow (see the linked Linear ticket).
 - An elicitation blocks the session's dispatch queue for up to the
   timeout; concurrent client requests wait behind it.
 

@@ -64,6 +64,11 @@ pub(crate) struct RuntimeContext {
     pub(crate) agent_type: Option<String>,
     pub(crate) session_id: Option<String>,
     pub(crate) api_key: Option<String>,
+    /// Separate credential used ONLY to resolve elicitation approvals. When the
+    /// agent's `api_key` is a scoped agent credential, the approval must be
+    /// posted as a DIFFERENT principal (the human operator), or ARN-389's
+    /// self-approval guard rejects it. Falls back to `api_key` when unset.
+    pub(crate) approver_key: Option<String>,
     pub(crate) identity_tenant: String,
     sandbox: temper_sandbox::runner::PersistentSandbox,
     /// OTS trajectory builder for capturing agent execution traces.
@@ -110,6 +115,9 @@ impl RuntimeContext {
                 .api_key
                 .clone()
                 .or_else(|| std::env::var("TEMPER_API_KEY").ok()), // determinism-ok: startup config
+            approver_key: std::env::var("TEMPER_MCP_APPROVER_KEY")
+                .ok()
+                .filter(|v| !v.trim().is_empty()), // determinism-ok: startup config
             identity_tenant: std::env::var("TEMPER_TENANT")
                 .ok()
                 .filter(|v| !v.trim().is_empty())

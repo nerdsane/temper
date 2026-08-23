@@ -312,8 +312,14 @@ async fn resolve_decision(
         ctx.base_url, denial.tenant, denial.decision_id
     );
     let mut request = ctx.http.post(&url).header("X-Tenant-Id", &denial.tenant);
-    if let Some(ref api_key) = ctx.api_key {
-        request = request.header("Authorization", format!("Bearer {api_key}"));
+    // Post the approval as the approver principal. When a scoped agent
+    // credential (api_key) makes the denied call, resolving with a distinct
+    // operator credential (approver_key) is required — ARN-389 forbids the
+    // denied principal from approving its own decision. Fall back to api_key
+    // only when no separate approver is configured (single-principal dev mode).
+    let resolve_key = ctx.approver_key.as_ref().or(ctx.api_key.as_ref());
+    if let Some(key) = resolve_key {
+        request = request.header("Authorization", format!("Bearer {key}"));
     }
     if let Some(ref payload) = body {
         request = request.json(payload);
