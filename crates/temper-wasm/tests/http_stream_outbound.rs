@@ -310,3 +310,79 @@ async fn outbound_streaming_1mib_roundtrip() {
     writer.await.unwrap();
     assert_eq!(received, TOTAL, "received bytes must match sent total");
 }
+
+/// ARN-207 end-to-end: a *real* completed bridge frees its slot, so a guest can
+/// make far more than `MAX_OUTBOUND_STREAMS_PER_SCOPE` outbound calls
+/// sequentially. This is the load-bearing wiring of the two-event slot model —
+/// the registry-level tests model bridge completion by calling
+/// `release_outbound_exchange` directly, so only this test fails if the bridge's
+/// actual `release_outbound_exchange` call is deleted.
+///
+/// Also covers the head-loss race (P2): each call awaits the head AFTER draining,
+/// so a fast bridge that completes before the head is read must not lose it.
+#[tokio::test]
+async fn real_bridges_free_their_slots_across_the_cap() {
+    use temper_wasm::http_stream::{HttpStreamRegistry, MAX_OUTBOUND_STREAMS_PER_SCOPE};
+
+    let base = spawn_echo_server().await;
+    let registry = Arc::new(HttpStreamRegistry::new());
+    let scope = registry.mint_scope().await;
+    let host = Arc::new(ProductionWasmHost::with_shared_streams(
+        BTreeMap::new(),
+        registry.clone(),
+        scope,
+    ));
+
+    // More than the concurrency cap, done sequentially. If a completed bridge did
+    // not free its slot, this wedges at the cap.
+    for i in 0..(MAX_OUTBOUND_STREAMS_PER_SCOPE + 8) {
+        // The previous exchange's bridge releases asynchronously right after it
+        // finishes streaming the response. Give it a bounded chance to run before
+        // asserting the slot is free — a transient lag must not flake, but a
+        // permanent leak (deleted release) exhausts the retries and fails.
+        let mut handles = None;
+        for _ in 0..200 {
+            match host
+                .http_stream_begin_outbound(HttpRequestHead {
+                    method: "POST".into(),
+                    url: format!("{base}/echo"),
+                    headers: vec![("content-type".into(), "application/octet-stream".into())],
+                })
+                .await
+            {
+                Ok(h) => {
+                    handles = Some(h);
+                    break;
+                }
+                Err(_) => tokio::task::yield_now().await,
+            }
+        }
+        let handles = handles.unwrap_or_else(|| {
+            panic!("outbound call {i} wedged — a completed bridge did not free its slot")
+        });
+
+        host.http_stream_try_write(handles.request_body, format!("call-{i}").into_bytes())
+            .await
+            .unwrap();
+        host.http_stream_close(handles.request_body).await.unwrap();
+
+        // Drain the response body first, then read the head — exercises the
+        // head-loss race: the bridge may already be done by the time we ask.
+        let mut body = Vec::new();
+        loop {
+            let chunk = host.http_stream_read(handles.response_body).await.unwrap();
+            if chunk.is_empty() {
+                break;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let head = host
+            .http_stream_response_head(handles.response_body)
+            .await
+            .expect("a completed bridge must not lose its response head");
+        assert_eq!(head.status, 200, "call {i}");
+        assert_eq!(body, format!("call-{i}").into_bytes(), "call {i} body");
+
+        host.http_stream_close(handles.response_body).await.unwrap();
+    }
+}

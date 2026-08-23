@@ -588,6 +588,11 @@ pub struct ServerState {
     /// WASM invocation. Per-request ProductionWasmHost instances
     /// receive a clone of this Arc via `with_shared_streams` so
     /// FFI calls from the guest resolve to the same handle IDs.
+    ///
+    /// Sharing one registry process-wide is intentional, and is safe because
+    /// authority is a per-invocation `StreamScope`, not the handle integer
+    /// (ARN-207): every guest op resolves only handles minted for its own scope,
+    /// so a guessed handle from another request resolves to nothing.
     pub http_stream_registry: Arc<temper_wasm::http_stream::HttpStreamRegistry>,
     /// Long-lived workflow root spans keyed by workflow.run_id.
     pub(crate) workflow_spans: Arc<crate::workflow_tracing::WorkflowSpanRegistry>,
