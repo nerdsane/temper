@@ -20,6 +20,9 @@ FROM chef AS builder
 RUN rustup toolchain install 1.92 && rustup default 1.92
 
 COPY --from=planner /app/recipe.json recipe.json
+# cargo-chef's recipe recreates workspace members, but not patched path
+# dependencies that live outside the workspace.
+COPY third-party/libsql-0.9.29-temper third-party/libsql-0.9.29-temper
 # Build dependencies (cached unless Cargo.toml/lock changes).
 RUN cargo chef cook --release --recipe-path recipe.json
 
