@@ -11,6 +11,13 @@ use crate::state::PlatformState;
 pub const OPERATOR_MANAGE_POLICIES_POLICY_ID: &str = "operator-bootstrap-manage-policies";
 
 /// Cedar statement granting a verified operator `manage_policies` on this tenant.
+///
+/// The `when`-clause is built from [`temper_authz::VERIFIED_OPERATOR_WHEN`] —
+/// the single source of truth shared with the built-in system-platform
+/// identity-entity gate in temper-authz — so this tenant-seeded governance
+/// surface and the code-embedded platform-security surface can never drift to
+/// different strength. See ADR-0172 ("Boundary with the ARN-255 identity-entity
+/// gate").
 pub fn operator_manage_policies_cedar(tenant: &str) -> String {
     debug_assert!(
         !tenant.is_empty() && !tenant.contains('"'),
@@ -21,10 +28,8 @@ pub fn operator_manage_policies_cedar(tenant: &str) -> String {
   principal is Agent,
   action == Action::"manage_policies",
   resource == PolicySet::"{tenant}"
-) when {{
-  principal.agent_type == "operator" &&
-  principal.agentTypeVerified == true
-}};"#
+) when {{ {when} }};"#,
+        when = temper_authz::VERIFIED_OPERATOR_WHEN
     )
 }
 
@@ -135,5 +140,22 @@ mod tests {
         assert!(other.contains(r#"PolicySet::"other""#));
         assert!(acme.contains(r#"principal.agent_type == "operator""#));
         assert!(acme.contains("principal.agentTypeVerified == true"));
+    }
+
+    /// The seeded `manage_policies` permit and the temper-authz identity-entity
+    /// gate must share ONE verified-operator predicate so they cannot drift to
+    /// different strength. Assert the generated clause embeds the shared const
+    /// verbatim, and that the shared const requires verification.
+    #[test]
+    fn operator_manage_policies_cedar_uses_shared_verified_operator_predicate() {
+        let acme = operator_manage_policies_cedar("acme");
+        assert!(
+            acme.contains(temper_authz::VERIFIED_OPERATOR_WHEN),
+            "manage_policies clause must embed the shared VERIFIED_OPERATOR_WHEN predicate"
+        );
+        assert!(
+            temper_authz::VERIFIED_OPERATOR_WHEN.contains("agentTypeVerified == true"),
+            "the shared predicate must require credential verification"
+        );
     }
 }

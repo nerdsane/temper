@@ -662,7 +662,7 @@ impl AuthzEngine {
     /// kind for reasons other than authorization (logging, telemetry tagging).
     /// Actual authorization of System principals flows through the normal
     /// Cedar evaluation, matching the built-in `system-platform` policy
-    /// installed at engine construction time (see `SYSTEM_PLATFORM_POLICY`).
+    /// installed at engine construction time (see `system_platform_policy`).
     pub fn is_system(security_ctx: &SecurityContext) -> bool {
         security_ctx.principal.kind == PrincipalKind::System
     }
@@ -712,26 +712,52 @@ impl AuthzEngine {
 /// than hard-coded control flow. Follow-up work narrows this policy to the
 /// specific actions the platform genuinely needs (bootstrap writes,
 /// credential rotation, recovery).
-const SYSTEM_PLATFORM_POLICY: &str = r#"
+/// The single source of truth for "who is a verified platform operator" in
+/// Cedar. Shared by the built-in [`system_platform_policy`] identity-entity
+/// clauses here in temper-authz AND the seeded operator `manage_policies`
+/// permit in temper-platform (which re-exports this const), so the two
+/// authorization surfaces can never drift to different strength.
+///
+/// It requires BOTH `agent_type == "operator"` and `agentTypeVerified == true`:
+/// a self-declared, credential-unverified context claiming the operator type
+/// (e.g. one built via `SecurityContext::with_agent_context`) does NOT satisfy
+/// it. The `has` guards make a principal lacking either attribute evaluate the
+/// clause to `false` (a clean deny) rather than raising a Cedar evaluation
+/// error.
+///
+/// "operator" is a privileged claim ultimately guarded by trusted-issuer
+/// registration: a registered issuer could mint an operator-claim JWT, but
+/// registering an issuer is itself gated to System/Admin/verified-operator by
+/// the identity-entity clauses below.
+pub const VERIFIED_OPERATOR_WHEN: &str = "principal has agent_type && principal.agent_type == \"operator\" && principal has agentTypeVerified && principal.agentTypeVerified == true";
+
+/// Built the built-in system-platform Cedar policy, interpolating the shared
+/// [`VERIFIED_OPERATOR_WHEN`] predicate into the four identity-entity clauses.
+fn system_platform_policy() -> String {
+    format!(
+        r#"
 @id("system-platform:broad-permit")
 permit(principal is System, action, resource);
 
 @id("system-platform:identity-entities-permit-trusted-issuer")
 permit(principal, action, resource is TrustedIssuer)
-when { principal is System || principal is Admin || (principal has agent_type && principal.agent_type == "operator") };
+when {{ principal is System || principal is Admin || ({op}) }};
 
 @id("system-platform:identity-entities-permit-principal-generation")
 permit(principal, action, resource is PrincipalGeneration)
-when { principal is System || principal is Admin || (principal has agent_type && principal.agent_type == "operator") };
+when {{ principal is System || principal is Admin || ({op}) }};
 
 @id("system-platform:protect-trusted-issuer")
 forbid(principal, action, resource is TrustedIssuer)
-unless { principal is System || principal is Admin || (principal has agent_type && principal.agent_type == "operator") };
+unless {{ principal is System || principal is Admin || ({op}) }};
 
 @id("system-platform:protect-principal-generation")
 forbid(principal, action, resource is PrincipalGeneration)
-unless { principal is System || principal is Admin || (principal has agent_type && principal.agent_type == "operator") };
-"#;
+unless {{ principal is System || principal is Admin || ({op}) }};
+"#,
+        op = VERIFIED_OPERATOR_WHEN
+    )
+}
 
 /// PolicyId prefix used for the built-in system-platform policies
 /// (ADR-0046). Used to exclude them from user-facing counts.
@@ -745,7 +771,7 @@ const SYSTEM_PLATFORM_POLICY_ID_PREFIX: &str = "system-platform:";
 /// hard-coded system policy fails to parse, the combined set is left
 /// unchanged — preserving availability at the cost of System auth.
 fn merge_system_platform_policy(combined: &mut PolicySet) {
-    let system_set: PolicySet = match SYSTEM_PLATFORM_POLICY.parse() {
+    let system_set: PolicySet = match system_platform_policy().parse() {
         Ok(ps) => ps,
         Err(_) => return,
     };
