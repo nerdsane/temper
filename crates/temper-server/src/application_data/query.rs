@@ -11,6 +11,7 @@ use temper_wasm_sdk::data::{
     SequencedValueV1,
 };
 
+use crate::storage::QueryFieldIndexOrderTarget;
 use crate::storage::{QueryFieldIndexOrder, QueryFieldIndexOrderDirection};
 
 use super::{
@@ -75,12 +76,24 @@ impl ApplicationDataInvocation {
             &mut filter_nodes,
         )?;
         for order in order_by {
-            if !entity_grant.query_order_fields.contains(&order.field) {
-                return Err(data_error(
-                    ModuleDataErrorKind::AuthorizationDenied,
-                    "QueryFieldDenied",
-                    "query ordering field is not granted",
-                ));
+            match order {
+                OrderV1::Property { field, .. }
+                    if !entity_grant.query_order_fields.contains(field) =>
+                {
+                    return Err(data_error(
+                        ModuleDataErrorKind::AuthorizationDenied,
+                        "QueryFieldDenied",
+                        "query ordering field is not granted",
+                    ));
+                }
+                OrderV1::EntityCommitSequence { .. } if !entity_grant.query_order_by_sequence => {
+                    return Err(data_error(
+                        ModuleDataErrorKind::AuthorizationDenied,
+                        "QuerySequenceDenied",
+                        "query ordering by entity commit sequence is not granted",
+                    ));
+                }
+                _ => {}
             }
         }
         let digest = query_digest(entity_type, filter, order_by)?;
@@ -90,14 +103,21 @@ impl ApplicationDataInvocation {
         let projected_order = order_by
             .iter()
             .map(|order| QueryFieldIndexOrder {
-                field_name: order.field.clone(),
-                direction: match order.direction {
+                target: match order {
+                    OrderV1::Property { field, .. } => {
+                        QueryFieldIndexOrderTarget::Property(field.clone())
+                    }
+                    OrderV1::EntityCommitSequence { .. } => {
+                        QueryFieldIndexOrderTarget::EntityCommitSequence
+                    }
+                },
+                direction: match order.direction() {
                     OrderDirectionV1::Asc => QueryFieldIndexOrderDirection::Asc,
                     OrderDirectionV1::Desc => QueryFieldIndexOrderDirection::Desc,
                 },
             })
             .chain(std::iter::once(QueryFieldIndexOrder {
-                field_name: "entity_id".into(),
+                target: QueryFieldIndexOrderTarget::EntityId,
                 direction: QueryFieldIndexOrderDirection::Asc,
             }))
             .collect::<Vec<_>>();
@@ -426,23 +446,44 @@ fn compare_fallback_entities(
     let left_fields = left.and_then(|response| response.state.fields.as_object());
     let right_fields = right.and_then(|response| response.state.fields.as_object());
     for order in order_by {
-        let type_name = schema
-            .properties
-            .iter()
-            .find(|property| property.canonical_name == order.field)
-            .map(|property| property.type_name.as_str())
-            .unwrap_or("Edm.String");
-        let ordering = compare_order_values(
-            left_fields.and_then(|fields| fields.get(&order.field)),
-            right_fields.and_then(|fields| fields.get(&order.field)),
-            type_name,
-            order.direction,
-        );
+        let ordering = match order {
+            OrderV1::Property { field, direction } => {
+                let type_name = schema
+                    .properties
+                    .iter()
+                    .find(|property| property.canonical_name == *field)
+                    .map(|property| property.type_name.as_str())
+                    .unwrap_or("Edm.String");
+                compare_order_values(
+                    left_fields.and_then(|fields| fields.get(field)),
+                    right_fields.and_then(|fields| fields.get(field)),
+                    type_name,
+                    *direction,
+                )
+            }
+            OrderV1::EntityCommitSequence { direction } => compare_direction(
+                left.map(|response| response.state.sequence_nr),
+                right.map(|response| response.state.sequence_nr),
+                *direction,
+            ),
+        };
         if ordering != Ordering::Equal {
             return ordering;
         }
     }
     left_id.cmp(right_id)
+}
+
+fn compare_direction<T: Ord>(
+    left: Option<T>,
+    right: Option<T>,
+    direction: OrderDirectionV1,
+) -> Ordering {
+    let ordering = left.cmp(&right);
+    match direction {
+        OrderDirectionV1::Asc => ordering,
+        OrderDirectionV1::Desc => ordering.reverse(),
+    }
 }
 
 fn compare_order_values(

@@ -1,6 +1,8 @@
 //! Native query-plane page reads over the durable Turso catalog.
 
-use temper_runtime::persistence::{PersistenceError, storage_error};
+use temper_runtime::persistence::{
+    PersistenceError, QueryProjectionOrder, QueryProjectionOrderTarget, storage_error,
+};
 use tracing::instrument;
 
 use super::TursoEventStore;
@@ -25,7 +27,7 @@ impl TursoEventStore {
         entity_type: &str,
         where_clause: &str,
         params: Vec<String>,
-        order_by: &[(String, bool)],
+        order_by: &[QueryProjectionOrder],
         skip: usize,
         top: usize,
         include_count: bool,
@@ -132,37 +134,42 @@ fn turso_query_field_page_sql(
     )
 }
 
-fn turso_query_field_order_sql(order_by: &[(String, bool)]) -> String {
+fn turso_query_field_order_sql(order_by: &[QueryProjectionOrder]) -> String {
     let mut clauses = Vec::new();
-    for (field_name, descending) in order_by {
-        let direction = if *descending { "DESC" } else { "ASC" };
-        let null_direction = if *descending { "DESC" } else { "ASC" };
-        if field_name == "entity_id" || field_name == "Id" || field_name == "id" {
-            clauses.push(format!("entity_id {direction}"));
-        } else if field_name == "status" || field_name == "Status" {
-            clauses.push(format!("status IS NULL {null_direction}"));
-            clauses.push(format!("status {direction}"));
-        } else {
-            let path = turso_json_path_literal(field_name);
-            clauses.push(format!(
-                "json_extract(fields, {path}) IS NULL {null_direction}"
-            ));
-            clauses.push(format!(
-                "CASE WHEN json_type(fields, {path}) IN ('integer', 'real') \
+    for order in order_by {
+        let direction = if order.descending { "DESC" } else { "ASC" };
+        let null_direction = if order.descending { "DESC" } else { "ASC" };
+        match &order.target {
+            QueryProjectionOrderTarget::EntityId => clauses.push(format!("entity_id {direction}")),
+            QueryProjectionOrderTarget::Status => {
+                clauses.push(format!("status IS NULL {null_direction}"));
+                clauses.push(format!("status {direction}"));
+            }
+            QueryProjectionOrderTarget::EntityCommitSequence => {
+                clauses.push(format!("sequence_nr {direction}"));
+            }
+            QueryProjectionOrderTarget::Property(field_name) => {
+                let path = turso_json_path_literal(field_name);
+                clauses.push(format!(
+                    "json_extract(fields, {path}) IS NULL {null_direction}"
+                ));
+                clauses.push(format!(
+                    "CASE WHEN json_type(fields, {path}) IN ('integer', 'real') \
                  THEN CAST(json_extract(fields, {path}) AS REAL) END IS NULL ASC"
-            ));
-            clauses.push(format!(
-                "CASE WHEN json_type(fields, {path}) IN ('integer', 'real') \
+                ));
+                clauses.push(format!(
+                    "CASE WHEN json_type(fields, {path}) IN ('integer', 'real') \
                  THEN CAST(json_extract(fields, {path}) AS REAL) END {direction}"
-            ));
-            clauses.push(format!(
-                "CASE WHEN json_type(fields, {path}) NOT IN ('integer', 'real') \
+                ));
+                clauses.push(format!(
+                    "CASE WHEN json_type(fields, {path}) NOT IN ('integer', 'real') \
                  THEN json_extract(fields, {path}) END IS NULL ASC"
-            ));
-            clauses.push(format!(
-                "CASE WHEN json_type(fields, {path}) NOT IN ('integer', 'real') \
+                ));
+                clauses.push(format!(
+                    "CASE WHEN json_type(fields, {path}) NOT IN ('integer', 'real') \
                  THEN json_extract(fields, {path}) END {direction}"
-            ));
+                ));
+            }
         }
     }
     clauses.push("entity_id ASC".to_string());

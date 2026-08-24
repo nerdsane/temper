@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use temper_spec::csdl::{Action, CsdlDocument, EntityType};
+use temper_spec::csdl::{Action, CsdlDocument, EntityType, emit_csdl_xml};
 use temper_wasm_sdk::data::{
     ArtifactModuleSdkBinding, EntityDataGrant, ManifestActionV1, ManifestEntityV1,
     ManifestPropertyV1, ModuleDataGrant, ModuleSdkManifest, ModuleSdkMetadataDigests,
@@ -80,9 +80,7 @@ pub fn generate_module_sdk(
     grant
         .validate()
         .map_err(ModuleSdkCodegenError::InvalidGrant)?;
-    let schema_bytes = serde_json::to_vec(csdl)
-        .map_err(|error| ModuleSdkCodegenError::Manifest(error.to_string()))?;
-    let schema_digest = hex_sha256(&schema_bytes);
+    let schema_digest = hex_sha256(emit_csdl_xml(csdl).as_bytes());
     let entity_sets = entity_sets(csdl);
     validate_entity_results(csdl, &grant)?;
     let generated_entity_names = generated_entity_names(csdl, &grant)?;
@@ -135,6 +133,19 @@ pub fn generate_module_sdk(
                 .iter()
                 .map(|property| (&property.canonical_name, &property.generated_name)),
         )?;
+        if entity_grant.query_order_by_sequence
+            && properties.iter().any(|property| {
+                entity_grant
+                    .query_order_fields
+                    .contains(&property.canonical_name)
+                    && property.generated_name == "commit_sequence"
+            })
+        {
+            return Err(ModuleSdkCodegenError::IdentifierCollision(format!(
+                "{}: query property and host commit-sequence helper both generate 'commit_sequence'",
+                entity_grant.entity_type
+            )));
+        }
         let manifest_actions = actions
             .into_iter()
             .map(|action| {

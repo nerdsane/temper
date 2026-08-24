@@ -1,7 +1,9 @@
 use super::*;
 use crate::migration::run_migrations;
 use sqlx::PgPool;
-use temper_runtime::persistence::{EntityKeyRow, EventStore};
+use temper_runtime::persistence::{
+    EntityKeyRow, EventStore, QueryProjectionOrder, QueryProjectionOrderTarget,
+};
 
 fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
     PersistenceEnvelope {
@@ -431,7 +433,10 @@ fn query_field_index_page_orders_and_limits_inside_postgres() {
                  WHERE tenant = ?1 AND entity_type = ?2 \
                  AND field_name = ?3 AND field_value = ?4)",
                 vec!["SessionId".to_string(), "ss-bounded".to_string()],
-                &[("Sequence".to_string(), true)],
+                &[QueryProjectionOrder {
+                    target: QueryProjectionOrderTarget::Property("Sequence".into()),
+                    descending: true,
+                }],
                 0,
                 1,
                 true,
@@ -450,7 +455,10 @@ fn query_field_index_page_orders_and_limits_inside_postgres() {
                  WHERE tenant = ?1 AND entity_type = ?2 \
                  AND field_name = ?3 AND field_value = ?4)",
                 vec!["SessionId".to_string(), "ss-bounded".to_string()],
-                &[("Sequence".to_string(), true)],
+                &[QueryProjectionOrder {
+                    target: QueryProjectionOrderTarget::Property("Sequence".into()),
+                    descending: true,
+                }],
                 0,
                 1,
                 false,
@@ -494,7 +502,10 @@ fn query_field_index_page_orders_and_limits_inside_postgres() {
                  WHERE tenant = ?1 AND entity_type = ?2 \
                  AND field_name = ?3 AND field_value = ?4)",
                 vec!["SessionId".to_string(), "ss-bounded".to_string()],
-                &[("Sequence".to_string(), true)],
+                &[QueryProjectionOrder {
+                    target: QueryProjectionOrderTarget::Property("Sequence".into()),
+                    descending: true,
+                }],
                 0,
                 1,
                 true,
@@ -504,6 +515,49 @@ fn query_field_index_page_orders_and_limits_inside_postgres() {
 
         assert_eq!(ids, vec![missing_sequence_id.to_string()]);
         assert_eq!(count, Some(4));
+
+        let (ids, _) = store
+            .query_field_index_page(
+                &tenant,
+                entity_type,
+                "entity_id IN (SELECT entity_id FROM entity_field_index \
+                 WHERE tenant = ?1 AND entity_type = ?2 \
+                 AND field_name = ?3 AND field_value = ?4)",
+                vec!["SessionId".to_string(), "ss-bounded".to_string()],
+                &[QueryProjectionOrder {
+                    target: QueryProjectionOrderTarget::EntityCommitSequence,
+                    descending: true,
+                }],
+                0,
+                2,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            ids,
+            vec![missing_sequence_id.to_string(), "entry-10".to_string()]
+        );
+
+        let (ids, _) = store
+            .query_field_index_page(
+                &tenant,
+                entity_type,
+                "entity_id IN (SELECT entity_id FROM entity_field_index \
+                 WHERE tenant = ?1 AND entity_type = ?2 \
+                 AND field_name = ?3 AND field_value = ?4)",
+                vec!["SessionId".to_string(), "ss-bounded".to_string()],
+                &[QueryProjectionOrder {
+                    target: QueryProjectionOrderTarget::EntityCommitSequence,
+                    descending: false,
+                }],
+                0,
+                2,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(ids, vec!["entry-1".to_string(), "entry-2".to_string()]);
 
         crate::dbm::postgres_query!("DELETE FROM entity_field_index WHERE tenant = $1")
             .bind(&tenant)

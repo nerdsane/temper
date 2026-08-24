@@ -69,6 +69,7 @@ fn representative_generated_surface_compiles() {
                 actions: BTreeSet::from(["Complete".into(), "Snapshot".into()]),
                 query_filter_fields: BTreeSet::from(["Status".into(), "Estimate".into()]),
                 query_order_fields: BTreeSet::from(["CreatedAt".into(), "Estimate".into()]),
+                query_order_by_sequence: true,
                 file_operations: BTreeSet::from([
                     FileOperationKind::ContentRead,
                     FileOperationKind::ContentWrite,
@@ -100,9 +101,10 @@ pub fn typecheck_surface() {
     let _status = TemperGeneratedTaskStatus::Open;
     let filter = FileFilter::status_eq(TemperGeneratedTaskStatus::Open);
     let order = FileOrder::created_at(OrderDirectionV1::Asc);
+    let sequence_order = FileOrder::commit_sequence(OrderDirectionV1::Desc);
     let _query: fn(&mut FileClient, Option<FileFilter>, Vec<FileOrder>, PageV1) -> Result<TypedPage<File>, ModuleDataError> = FileClient::query;
     let _entity_action: fn(&mut FileClient, String, Option<u64>, FileSnapshotInput) -> Result<TypedAction<File>, ModuleDataError> = FileClient::snapshot;
-    let _ = (filter, order);
+    let _ = (filter, order, sequence_order);
     let _batch: fn(&mut DataClient, Vec<BatchItemV1>) -> Result<DataResultV1, ModuleDataError> = execute_batch;
     let _read: fn(&mut FileClient, String, Option<String>) -> Result<OpenedFileRead, ModuleDataError> = FileClient::open_file_read;
 }

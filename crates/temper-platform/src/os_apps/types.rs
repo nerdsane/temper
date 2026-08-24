@@ -107,8 +107,11 @@ pub struct AppManifest {
 }
 
 impl AppManifest {
-    /// Validate manifest invariants before any bundle contents are installed.
-    pub fn validate(&self) -> Result<(), String> {
+    /// Validate a pre-compilation candidate manifest.
+    ///
+    /// Candidate builds may not have a final artifact binding yet. Every
+    /// declared grant is still validated before code generation.
+    pub fn validate_candidate(&self) -> Result<(), String> {
         let mut module_names = std::collections::BTreeSet::new();
         for module in &self.wasm_modules {
             if module.name.trim().is_empty() {
@@ -120,6 +123,21 @@ impl AppManifest {
             if let Some(data) = &module.data {
                 data.validate()
                     .map_err(|error| format!("WASM module '{}': {error}", module.name))?;
+            } else if module.data_binding.is_some() {
+                return Err(format!(
+                    "WASM module '{}' data_binding requires a data grant",
+                    module.name
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate manifest invariants before any bundle contents are installed.
+    pub fn validate(&self) -> Result<(), String> {
+        self.validate_candidate()?;
+        for module in &self.wasm_modules {
+            if module.data.is_some() {
                 let binding = module.data_binding.as_ref().ok_or_else(|| {
                     format!(
                         "WASM module '{}' data grant requires data_binding",
@@ -135,11 +153,6 @@ impl AppManifest {
                         module.name
                     ));
                 }
-            } else if module.data_binding.is_some() {
-                return Err(format!(
-                    "WASM module '{}' data_binding requires a data grant",
-                    module.name
-                ));
             }
         }
         Ok(())

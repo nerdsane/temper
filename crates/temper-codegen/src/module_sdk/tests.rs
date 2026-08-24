@@ -78,6 +78,22 @@ fn generation_is_deterministic_and_scoped() {
 }
 
 #[test]
+fn record_annotations_have_a_canonical_schema_digest() {
+    let source = CSDL.replace(
+        "</EntityType>",
+        "<Annotation Term=\"Example.Metadata\"><Record><PropertyValue Property=\"Zulu\" String=\"last\"/><PropertyValue Property=\"Alpha\" String=\"first\"/></Record></Annotation></EntityType>",
+    );
+    let mut generated = Vec::new();
+    for _ in 0..16 {
+        let csdl = parse_csdl(&source).unwrap();
+        let sdk = generate_module_sdk(&csdl, "worker", "closure", "closure", "artifact", grant())
+            .unwrap();
+        generated.push((sdk.source, sdk.manifest.schema_digest));
+    }
+    assert!(generated.windows(2).all(|pair| pair[0] == pair[1]));
+}
+
+#[test]
 fn cross_entity_action_results_fail_closed() {
     let csdl = parse_csdl(CSDL).unwrap();
     let mut invalid = grant();
@@ -100,6 +116,25 @@ fn generated_names_preserve_word_boundaries_and_escape_keywords() {
     assert_eq!(rust_field_name("created_at"), "created_at");
     assert_eq!(rust_field_name("type"), "type_");
     assert_eq!(rust_field_name("gen"), "gen_");
+}
+
+#[test]
+fn commit_sequence_property_cannot_collide_with_host_order_helper() {
+    let csdl = parse_csdl(&CSDL.replace(
+        "<Property Name=\"Status\"",
+        "<Property Name=\"CommitSequence\" Type=\"Edm.Int64\" Nullable=\"false\"/><Property Name=\"Status\"",
+    ))
+    .unwrap();
+    let mut invalid = grant();
+    invalid.entities[0]
+        .query_order_fields
+        .insert("CommitSequence".into());
+    invalid.entities[0].query_order_by_sequence = true;
+    assert!(matches!(
+        generate_module_sdk(&csdl, "worker", "closure", "closure", "artifact", invalid),
+        Err(ModuleSdkCodegenError::IdentifierCollision(message))
+            if message.contains("commit_sequence")
+    ));
 }
 
 #[test]

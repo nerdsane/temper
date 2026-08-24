@@ -1,6 +1,8 @@
 //! Native bounded query-page reads for the Postgres query projection.
 
-use temper_runtime::persistence::PersistenceError;
+use temper_runtime::persistence::{
+    PersistenceError, QueryProjectionOrder, QueryProjectionOrderTarget,
+};
 
 use crate::platform::{postgres_placeholders, storage_error};
 use crate::store::PostgresEventStore;
@@ -16,7 +18,7 @@ impl PostgresEventStore {
         entity_type: &str,
         where_clause: &str,
         params: Vec<String>,
-        order_by: &[(String, bool)],
+        order_by: &[QueryProjectionOrder],
         skip: usize,
         top: usize,
         include_count: bool,
@@ -127,29 +129,34 @@ fn postgres_query_field_page_sql(
     )
 }
 
-fn postgres_query_field_order_sql(order_by: &[(String, bool)]) -> String {
+fn postgres_query_field_order_sql(order_by: &[QueryProjectionOrder]) -> String {
     let mut clauses = Vec::new();
-    for (field_name, descending) in order_by {
-        let direction = if *descending { "DESC" } else { "ASC" };
-        let nulls = if *descending {
+    for order in order_by {
+        let direction = if order.descending { "DESC" } else { "ASC" };
+        let nulls = if order.descending {
             "NULLS FIRST"
         } else {
             "NULLS LAST"
         };
-        if field_name == "entity_id" || field_name == "Id" || field_name == "id" {
-            clauses.push(format!("entity_id {direction}"));
-        } else if field_name == "status" || field_name == "Status" {
-            clauses.push(format!("status {direction} {nulls}"));
-        } else {
-            let field = postgres_string_literal(field_name);
-            clauses.push(format!(
-                "CASE WHEN jsonb_typeof(fields -> {field}) = 'number' \
+        match &order.target {
+            QueryProjectionOrderTarget::EntityId => clauses.push(format!("entity_id {direction}")),
+            QueryProjectionOrderTarget::Status => {
+                clauses.push(format!("status {direction} {nulls}"));
+            }
+            QueryProjectionOrderTarget::EntityCommitSequence => {
+                clauses.push(format!("sequence_nr {direction}"));
+            }
+            QueryProjectionOrderTarget::Property(field_name) => {
+                let field = postgres_string_literal(field_name);
+                clauses.push(format!(
+                    "CASE WHEN jsonb_typeof(fields -> {field}) = 'number' \
                  THEN (fields ->> {field})::numeric END {direction} {nulls}"
-            ));
-            clauses.push(format!(
-                "CASE WHEN jsonb_typeof(fields -> {field}) <> 'number' \
+                ));
+                clauses.push(format!(
+                    "CASE WHEN jsonb_typeof(fields -> {field}) <> 'number' \
                  THEN fields ->> {field} END {direction} {nulls}"
-            ));
+                ));
+            }
         }
     }
     clauses.push("entity_id ASC".to_string());

@@ -14,6 +14,7 @@ mod init;
 mod install;
 mod mcp;
 mod migrate_turso_to_postgres;
+mod module_sdk;
 mod serve;
 mod util;
 mod verify;
@@ -58,6 +59,11 @@ enum Commands {
         /// Output directory for generated code
         #[arg(short, long, default_value = "generated")]
         output_dir: String,
+    },
+    /// Generate and bind typed Rust SDKs for local application modules.
+    ModuleSdk {
+        #[command(subcommand)]
+        command: ModuleSdkCommand,
     },
     /// Run the verification cascade
     Verify {
@@ -215,6 +221,60 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand)]
+enum ModuleSdkCommand {
+    /// Resolve local metadata, write its lock, and generate typed Rust source.
+    Generate(ModuleSdkGenerateArgs),
+    /// Package compiled WASM and update its exact app-manifest binding.
+    Bind(ModuleSdkBindArgs),
+}
+
+#[derive(clap::Args)]
+struct ModuleSdkCommonArgs {
+    /// Root application directory; all conventional paths derive from here.
+    #[arg(long)]
+    app: PathBuf,
+    /// Exact [[wasm_modules]] name to generate.
+    #[arg(long)]
+    module: String,
+    /// Local directory containing dependency app directories; repeatable.
+    #[arg(long)]
+    dependency_root: Vec<PathBuf>,
+    /// Override the conventional APP/app.toml path.
+    #[arg(long)]
+    app_manifest: Option<PathBuf>,
+    /// Override APP/wasm/MODULE/src/temper_module_sdk.rs.
+    #[arg(long)]
+    source_out: Option<PathBuf>,
+    /// Override APP/temper-module-sdk.lock.
+    #[arg(long)]
+    lock: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+struct ModuleSdkGenerateArgs {
+    #[command(flatten)]
+    common: ModuleSdkCommonArgs,
+    /// Fail on drift without rewriting generated files.
+    #[arg(long)]
+    check: bool,
+}
+
+#[derive(clap::Args)]
+struct ModuleSdkBindArgs {
+    #[command(flatten)]
+    common: ModuleSdkCommonArgs,
+    /// Explicit unbound compiler output.
+    #[arg(long)]
+    wasm: PathBuf,
+    /// Override APP/wasm/MODULE/MODULE.wasm.
+    #[arg(long)]
+    bound_wasm_out: Option<PathBuf>,
+    /// Fail on drift without rewriting the artifact or manifest.
+    #[arg(long)]
+    check: bool,
+}
+
 fn resolve_storage_backend(
     cli_storage: StorageBackend,
     storage_explicit: bool,
@@ -329,6 +389,7 @@ async fn async_main() -> anyhow::Result<()> {
             specs_dir,
             output_dir,
         } => codegen::run(&specs_dir, &output_dir)?,
+        Commands::ModuleSdk { command } => module_sdk::run(command)?,
         Commands::Verify { specs_dir } => verify::run(&specs_dir)?,
         Commands::VerifyRemote {
             specs_dir,

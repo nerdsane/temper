@@ -21,11 +21,24 @@ pub enum QueryFieldIndexOrderDirection {
     Desc,
 }
 
+/// Host-resolved query projection order target.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum QueryFieldIndexOrderTarget {
+    /// One canonical projected entity property.
+    Property(String),
+    /// Canonical entity status.
+    Status,
+    /// Canonical entity identifier.
+    EntityId,
+    /// Host-owned entity commit sequence.
+    EntityCommitSequence,
+}
+
 /// One storage-pushed query-field page order clause.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryFieldIndexOrder {
-    /// Projection field, `status`, or `entity_id` to order by.
-    pub field_name: String,
+    /// Typed projection order target.
+    pub target: QueryFieldIndexOrderTarget,
     /// Sort direction.
     pub direction: QueryFieldIndexOrderDirection,
 }
