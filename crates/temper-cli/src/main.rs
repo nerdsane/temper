@@ -63,7 +63,7 @@ enum Commands {
     /// Generate and bind typed Rust SDKs for local application modules.
     ModuleSdk {
         #[command(subcommand)]
-        command: ModuleSdkCommand,
+        command: module_sdk::Command,
     },
     /// Run the verification cascade
     Verify {
@@ -219,60 +219,6 @@ enum Commands {
         #[arg(long, hide = true)]
         agent_id: Option<String>,
     },
-}
-
-#[derive(Subcommand)]
-enum ModuleSdkCommand {
-    /// Resolve local metadata, write its lock, and generate typed Rust source.
-    Generate(ModuleSdkGenerateArgs),
-    /// Package compiled WASM and update its exact app-manifest binding.
-    Bind(ModuleSdkBindArgs),
-}
-
-#[derive(clap::Args)]
-struct ModuleSdkCommonArgs {
-    /// Root application directory; all conventional paths derive from here.
-    #[arg(long)]
-    app: PathBuf,
-    /// Exact [[wasm_modules]] name to generate.
-    #[arg(long)]
-    module: String,
-    /// Local directory containing dependency app directories; repeatable.
-    #[arg(long)]
-    dependency_root: Vec<PathBuf>,
-    /// Override the conventional APP/app.toml path.
-    #[arg(long)]
-    app_manifest: Option<PathBuf>,
-    /// Override APP/wasm/MODULE/src/temper_module_sdk.rs.
-    #[arg(long)]
-    source_out: Option<PathBuf>,
-    /// Override APP/temper-module-sdk.lock.
-    #[arg(long)]
-    lock: Option<PathBuf>,
-}
-
-#[derive(clap::Args)]
-struct ModuleSdkGenerateArgs {
-    #[command(flatten)]
-    common: ModuleSdkCommonArgs,
-    /// Fail on drift without rewriting generated files.
-    #[arg(long)]
-    check: bool,
-}
-
-#[derive(clap::Args)]
-struct ModuleSdkBindArgs {
-    #[command(flatten)]
-    common: ModuleSdkCommonArgs,
-    /// Explicit unbound compiler output.
-    #[arg(long)]
-    wasm: PathBuf,
-    /// Override APP/wasm/MODULE/MODULE.wasm.
-    #[arg(long)]
-    bound_wasm_out: Option<PathBuf>,
-    /// Fail on drift without rewriting the artifact or manifest.
-    #[arg(long)]
-    check: bool,
 }
 
 fn resolve_storage_backend(
