@@ -21,8 +21,8 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 # ── Stage 3: Builder ────────────────────────────────────────────────────
 FROM chef AS builder
-# Full release LTO makes the final link memory-intensive. Use the same
-# low-memory parallel linker as Linux CI for production container builds.
+# Use the low-memory parallel linker alongside the repository's distribution
+# profile, whose ThinLTO bounds LLVM memory during the final application build.
 ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=-fuse-ld=mold"
 
 COPY --from=planner /app/recipe.json recipe.json
@@ -30,11 +30,11 @@ COPY --from=planner /app/recipe.json recipe.json
 # dependencies that live outside the workspace.
 COPY third-party/libsql-0.9.29-temper third-party/libsql-0.9.29-temper
 # Build dependencies (cached unless Cargo.toml/lock changes).
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN cargo chef cook --profile dist --recipe-path recipe.json
 
 # Build the actual binary.
 COPY . .
-RUN cargo build --release --bin temper
+RUN cargo build --profile dist --bin temper
 
 # ── Stage 4: Runtime ────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
@@ -42,7 +42,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates libssl3 python3 libz3-4 libjemalloc2 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/temper /usr/local/bin/temper
+COPY --from=builder /app/target/dist/temper /usr/local/bin/temper
 
 ENV RUST_LOG=info,temper=info
 EXPOSE 3000
