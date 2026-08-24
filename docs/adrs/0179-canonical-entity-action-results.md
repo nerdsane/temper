@@ -1,6 +1,6 @@
 # ADR-0179: Canonical Entity-Valued Action Results
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-24
 - Deciders: Temper core maintainers
 - Related:
@@ -33,14 +33,16 @@ host-side canonical representation shared with authoritative keyed reads.
 
 ### Generate Entity Return Types as Entity Structs
 
-When a bound action's CSDL `ReturnType` resolves to an entity type in the
-verified closure, the generated method returns `TypedAction<GeneratedEntity>`.
-EDM scalars, named enums, nullable results, void results, and deliberately
-omitted results keep their existing ABI representation and behavior.
+When a bound action's CSDL `ReturnType` resolves to its bound entity type, the
+generated method returns `TypedAction<GeneratedEntity>`. EDM scalars, named
+enums, nullable results, void results, and deliberately omitted results keep
+their existing ABI representation and behavior.
 
 Entity resolution uses the same fully qualified CSDL identity used to generate
 entity clients. It does not infer entity-ness from spelling or fall back to an
-ID newtype.
+ID newtype. A bound action returning a different entity type fails SDK
+generation: the current action ABI carries the committed state of the bound
+actor and cannot truthfully fabricate another entity's authoritative value.
 
 **Why this approach**: the declared return type is the entity value, not a
 reference. Generating the entity struct makes the Rust contract match the CSDL
@@ -110,8 +112,8 @@ canonical value and the sequence needed for safe follow-up reads.
 ### Negative
 
 - Host action result construction becomes schema-aware.
-- Entity return types must be present in the verified SDK closure to generate a
-  concrete Rust entity struct.
+- Entity return types must match the bound entity until the action ABI can
+  carry a separately materialized authoritative entity result.
 
 ### Risks
 
@@ -136,6 +138,7 @@ canonical value and the sequence needed for safe follow-up reads.
 - Adding raw-envelope escape hatches to generated clients.
 - Changing scalar, enum, nullable, void, or response-compaction ABI shapes.
 - Adding entity-specific state names or application logic to the kernel.
+- Materializing a different entity instance as the result of a bound action.
 
 ## Alternatives Considered
 

@@ -7,6 +7,8 @@ mod manifest;
 mod proof;
 mod query_types;
 mod response;
+#[cfg(all(not(target_arch = "wasm32"), feature = "test-helpers"))]
+mod test_host;
 
 pub use artifact::{
     ArtifactModuleSdkBinding, bind_module_sdk_artifact, read_module_sdk_artifact_binding,
@@ -21,3 +23,5 @@ pub use manifest::*;
 pub use proof::*;
 pub use query_types::*;
 pub use response::*;
+#[cfg(all(not(target_arch = "wasm32"), feature = "test-helpers"))]
+pub use test_host::{install_native_data_host_for_test, take_native_data_requests_for_test};

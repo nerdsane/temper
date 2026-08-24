@@ -29,6 +29,10 @@ const CSDL: &str = r#"
         <Parameter Name="Note" Type="Edm.String" Nullable="true"/>
         <ReturnType Type="Temper.Generated.TaskStatus" Nullable="false"/>
       </Action>
+      <Action Name="Snapshot" IsBound="true">
+        <Parameter Name="binding" Type="Temper.Generated.File" Nullable="false"/>
+        <ReturnType Type="Temper.Generated.File" Nullable="false"/>
+      </Action>
       <EntityContainer Name="Container">
         <EntitySet Name="Files" EntityType="Temper.Generated.File"/>
         <EntitySet Name="Users" EntityType="Temper.Generated.User"/>
@@ -62,7 +66,7 @@ fn representative_generated_surface_compiles() {
             .collect(),
             entities: vec![EntityDataGrant {
                 entity_type: "Temper.Generated.File".into(),
-                actions: BTreeSet::from(["Complete".into()]),
+                actions: BTreeSet::from(["Complete".into(), "Snapshot".into()]),
                 query_filter_fields: BTreeSet::from(["Status".into(), "Estimate".into()]),
                 query_order_fields: BTreeSet::from(["CreatedAt".into(), "Estimate".into()]),
                 file_operations: BTreeSet::from([
@@ -85,7 +89,7 @@ fn representative_generated_surface_compiles() {
     fs::write(
         temp.path().join("Cargo.toml"),
         format!(
-            "[package]\nname='generated-sdk-proof'\nversion='0.0.0'\nedition='2024'\n\n[dependencies]\ntemper-wasm-sdk={{path={sdk_path:?}}}\nserde={{version='1',features=['derive']}}\nserde_json='1'\n"
+            "[package]\nname='generated-sdk-proof'\nversion='0.0.0'\nedition='2024'\n\n[dependencies]\ntemper-wasm-sdk={{path={sdk_path:?},features=['test-helpers']}}\nserde={{version='1',features=['derive']}}\nserde_json='1'\n"
         ),
     )
     .unwrap();
@@ -97,9 +101,64 @@ pub fn typecheck_surface() {
     let filter = FileFilter::status_eq(TemperGeneratedTaskStatus::Open);
     let order = FileOrder::created_at(OrderDirectionV1::Asc);
     let _query: fn(&mut FileClient, Option<FileFilter>, Vec<FileOrder>, PageV1) -> Result<TypedPage<File>, ModuleDataError> = FileClient::query;
+    let _entity_action: fn(&mut FileClient, String, Option<u64>, FileSnapshotInput) -> Result<TypedAction<File>, ModuleDataError> = FileClient::snapshot;
     let _ = (filter, order);
     let _batch: fn(&mut DataClient, Vec<BatchItemV1>) -> Result<DataResultV1, ModuleDataError> = execute_batch;
     let _read: fn(&mut FileClient, String, Option<String>) -> Result<OpenedFileRead, ModuleDataError> = FileClient::open_file_read;
+}
+
+#[test]
+fn generated_entity_action_decodes_and_advances_the_next_read() {
+    let value = serde_json::json!({
+        "Id": "file-1",
+        "Status": "Done",
+        "Owner": "user-1",
+        "Estimate": null,
+        "CreatedAt": "2026-08-24T12:00:00Z"
+    });
+    let commit = CommitToken {
+        entity_type: FileClient::ENTITY_TYPE.into(),
+        entity_id: "file-1".into(),
+        sequence: 9,
+    };
+    install_native_data_host_for_test(vec![
+        DataResponseV1::ok(DataResultV1::Action {
+            commit: commit.clone(),
+            result: Some(value.clone()),
+            result_omitted: false,
+        }),
+        DataResponseV1::ok(DataResultV1::Entity {
+            value: value.as_object().cloned().expect("fixture entity is an object"),
+            sequence: commit.sequence,
+        }),
+    ]);
+
+    let mut client = FileClient::new();
+    let action = client
+        .snapshot("file-1", None, FileSnapshotInput {})
+        .expect("generated entity action decodes");
+    assert_eq!(action.commit, commit);
+    assert_eq!(action.result.expect("entity result").id, "file-1");
+    let read = client.get("file-1").expect("sequence-aware keyed read");
+    assert_eq!(read.sequence, commit.sequence);
+    assert_eq!(read.value.status, TemperGeneratedTaskStatus::Done);
+
+    let requests = take_native_data_requests_for_test();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| matches!(request.operation, DataOperationV1::ActionInvoke { .. }))
+            .count(),
+        1,
+        "the generated client must invoke the committed action exactly once"
+    );
+    assert!(matches!(
+        &requests[1].operation,
+        DataOperationV1::EntityGet {
+            at_least_sequence: Some(9),
+            ..
+        }
+    ));
 }
 "#;
     fs::write(
@@ -108,7 +167,7 @@ pub fn typecheck_surface() {
     )
     .unwrap();
     let output = Command::new(env!("CARGO"))
-        .args(["check", "--offline", "--quiet"])
+        .args(["test", "--offline", "--quiet"])
         .current_dir(temp.path())
         .output()
         .unwrap();

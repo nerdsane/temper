@@ -28,11 +28,16 @@ pub(super) fn invocation(
     security: SecurityContext,
 ) -> std::sync::Arc<ApplicationDataInvocation> {
     const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
-<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="Temper.Example" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EntityType Name="Customer"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.Guid" Nullable="false"/><Property Name="Name" Type="Edm.String" Nullable="true"/></EntityType><Action Name="Rename" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Example.Customer"/><Parameter Name="Name" Type="Edm.String" Nullable="false"/></Action><Action Name="Reject" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Example.Customer"/></Action><EntityContainer Name="Container"><EntitySet Name="Customers" EntityType="Temper.Example.Customer"/></EntityContainer></Schema></edmx:DataServices></edmx:Edmx>"#;
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="Temper.Example" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EntityType Name="Customer"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.Guid" Nullable="false"/><Property Name="Name" Type="Edm.String" Nullable="true"/><Property Name="Status" Type="Edm.String" Nullable="true"/><Property Name="RenameCount" Type="Edm.Int64" Nullable="true"/></EntityType><Action Name="Rename" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Example.Customer"/><Parameter Name="Name" Type="Edm.String" Nullable="false"/><ReturnType Type="Temper.Example.Customer" Nullable="false"/></Action><Action Name="Reject" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Example.Customer"/></Action><EntityContainer Name="Container"><EntitySet Name="Customers" EntityType="Temper.Example.Customer"/></EntityContainer></Schema></edmx:DataServices></edmx:Edmx>"#;
     const IOA: &str = r#"[automaton]
 name = "Customer"
 states = ["Active", "Disabled"]
 initial = "Active"
+
+[[state]]
+name = "RenameCount"
+type = "counter"
+initial = "0"
 
 [[action]]
 name = "Rename"
@@ -40,6 +45,7 @@ kind = "input"
 from = ["Active"]
 to = "Active"
 params = ["Name"]
+effect = [{ type = "increment", var = "RenameCount" }]
 
 [[action]]
 name = "Reject"
@@ -91,6 +97,20 @@ to = "Disabled"
                     nullable: true,
                     enum_members: Vec::new(),
                 },
+                ManifestPropertyV1 {
+                    canonical_name: "Status".into(),
+                    generated_name: "status".into(),
+                    type_name: "Edm.String".into(),
+                    nullable: true,
+                    enum_members: Vec::new(),
+                },
+                ManifestPropertyV1 {
+                    canonical_name: "RenameCount".into(),
+                    generated_name: "rename_count".into(),
+                    type_name: "Edm.Int64".into(),
+                    nullable: true,
+                    enum_members: Vec::new(),
+                },
             ],
             actions: vec![
                 ManifestActionV1 {
@@ -111,7 +131,7 @@ to = "Disabled"
                         nullable: false,
                         enum_members: Vec::new(),
                     }],
-                    result_type: None,
+                    result_type: Some("Temper.Example.Customer".into()),
                     result_enum_members: Vec::new(),
                     composite: false,
                 },

@@ -211,15 +211,7 @@ impl DataClient {
         &mut self,
         mut operation: DataOperationV1,
     ) -> Result<DataResultV1, ModuleDataError> {
-        if let DataOperationV1::EntityGet {
-            entity_type,
-            entity_id,
-            at_least_sequence,
-        } = &mut operation
-            && let Some(observed) = self.observed.get(&(entity_type.clone(), entity_id.clone()))
-        {
-            *at_least_sequence = Some(at_least_sequence.unwrap_or(0).max(*observed));
-        }
+        self.apply_observed_sequence(&mut operation);
         let request = DataRequestV1::new(operation);
         let bytes = serde_json::to_vec(&request).map_err(|error| {
             sdk_error(
@@ -240,6 +232,18 @@ impl DataClient {
                 Ok(result)
             }
             DataOutcomeV1::Error { error } => Err(error),
+        }
+    }
+
+    fn apply_observed_sequence(&self, operation: &mut DataOperationV1) {
+        if let DataOperationV1::EntityGet {
+            entity_type,
+            entity_id,
+            at_least_sequence,
+        } = operation
+            && let Some(observed) = self.observed.get(&(entity_type.clone(), entity_id.clone()))
+        {
+            *at_least_sequence = Some(at_least_sequence.unwrap_or(0).max(*observed));
         }
     }
 
@@ -403,7 +407,12 @@ fn call_host(request: &[u8]) -> Result<DataResponseV1, ModuleDataError> {
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "test-helpers"))]
+fn call_host(request: &[u8]) -> Result<DataResponseV1, ModuleDataError> {
+    super::test_host::call(request)
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "test-helpers")))]
 fn call_host(_request: &[u8]) -> Result<DataResponseV1, ModuleDataError> {
     Err(sdk_error(
         "HostUnavailable",
@@ -474,18 +483,5 @@ fn decode_stream_result(result: i32) -> Result<usize, ModuleDataError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn native_client_fails_without_fabricating_authority() {
-        let error = DataClient::default()
-            .call(DataOperationV1::EntityGet {
-                entity_type: "Temper.Task".into(),
-                entity_id: "task-1".into(),
-                at_least_sequence: None,
-            })
-            .unwrap_err();
-        assert_eq!(error.code, "HostUnavailable");
-    }
-}
+#[path = "client_tests.rs"]
+mod tests;

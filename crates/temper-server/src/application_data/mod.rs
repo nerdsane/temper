@@ -27,6 +27,8 @@ pub(crate) use invocation::{ApplicationDataInvocation, ModuleInvocationAuthority
 use telemetry::{record_operation_fields, result_kind};
 
 #[cfg(test)]
+mod entity_action_result_tests;
+#[cfg(test)]
 mod parity_tests;
 #[cfg(all(test, feature = "sim"))]
 mod schema_deployment_tests;
@@ -270,12 +272,7 @@ impl ApplicationDataInvocation {
             .get(&self.authority.tenant, short_type(entity_type), entity_id)
             .await
             .map_err(internal_error)?;
-        let value = response
-            .state
-            .fields
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
+        let value = self.canonical_entity_value(entity_type, &response.state);
         self.authorize_value("read", entity_type, Some(entity_id), Some(&value))?;
         if minimum.is_some_and(|minimum| response.state.sequence_nr < minimum) {
             return Err(data_error(
@@ -332,7 +329,7 @@ impl ApplicationDataInvocation {
             entity_type,
             &entity_id,
             response.state.sequence_nr,
-            response.state.fields,
+            serde_json::Value::Object(self.canonical_entity_value(entity_type, &response.state)),
         ))
     }
 
@@ -390,7 +387,7 @@ impl ApplicationDataInvocation {
             entity_type,
             entity_id,
             response.state.sequence_nr,
-            response.state.fields,
+            serde_json::Value::Object(self.canonical_entity_value(entity_type, &response.state)),
         ))
     }
 
@@ -457,9 +454,17 @@ impl ApplicationDataInvocation {
                 response.error.as_deref().unwrap_or("action rejected"),
             ));
         }
+        let result =
+            if let Some(result_entity_type) = self.action_result_entity_type(entity_type, action) {
+                serde_json::Value::Object(
+                    self.canonical_entity_value(result_entity_type, &response.state),
+                )
+            } else {
+                response.state.fields
+            };
         Ok(DataResultV1::Action {
             commit: commit(entity_type, entity_id, response.state.sequence_nr),
-            result: Some(response.state.fields),
+            result: Some(result),
             result_omitted: false,
         })
     }

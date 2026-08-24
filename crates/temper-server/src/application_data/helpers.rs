@@ -306,3 +306,33 @@ pub(super) fn data_error(kind: ModuleDataErrorKind, code: &str, message: &str) -
         Retryability::Never,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compacting_committed_action_preserves_token_and_marks_omission() {
+        let commit = commit("Temper.Example.Customer", "customer-1", 7);
+        let mut response = DataResponseV1::ok(DataResultV1::Action {
+            commit: commit.clone(),
+            result: Some(serde_json::json!({"Id": "customer-1"})),
+            result_omitted: false,
+        });
+
+        compact_committed_results(&mut response);
+
+        let temper_wasm_sdk::data::DataOutcomeV1::Ok {
+            result:
+                DataResultV1::Action {
+                    commit: compacted_commit,
+                    result: None,
+                    result_omitted: true,
+                },
+        } = response.outcome
+        else {
+            panic!("compacted action must remain a successful commit")
+        };
+        assert_eq!(compacted_commit, commit);
+    }
+}
