@@ -121,6 +121,31 @@ async fn genesis_install_body_cannot_select_another_tenant() {
 }
 
 #[tokio::test]
+async fn local_bundle_install_body_cannot_select_another_tenant() {
+    let app = tenant_api_router().with_state(PlatformState::new(None));
+    let response = app
+        .oneshot(typed_request(
+            Method::POST,
+            "/app-bundles/install",
+            serde_json::json!({
+                "tenant": "victim",
+                "provenance": {"source_locator": "display-only", "lock_digest": ""},
+                "manifest": {
+                    "schema_version": 1,
+                    "root_app": "sample",
+                    "apps": [],
+                    "bundle_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "blobs": []
+            }),
+            "attacker",
+        ))
+        .await
+        .expect("request should run");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn app_catalog_authorization_is_resource_specific() {
     let state = PlatformState::new(None);
     state

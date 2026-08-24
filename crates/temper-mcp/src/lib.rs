@@ -1,10 +1,12 @@
 //! stdio MCP server exposing Temper Code Mode tools.
 
+mod http;
 mod protocol;
 mod runtime;
 mod trajectory_bounds;
 
 pub mod repl;
+pub use http::http_router;
 pub use runtime::run_stdio_server;
 
 #[cfg(test)]

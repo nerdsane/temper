@@ -27,6 +27,7 @@ mod data_binding;
 mod entity_aliases;
 mod policy_rows;
 mod reconcile;
+mod reconcile_digest;
 mod runtime_heal;
 mod system_files;
 mod types;
@@ -46,16 +47,19 @@ use entity_aliases::{
 };
 #[cfg(test)]
 pub(super) use policy_rows::os_app_policy_row_id;
-pub use reconcile::{os_app_bundle_digest, reconcile_os_app, resolve_os_app_install_order};
+pub use reconcile::{reconcile_os_app, resolve_os_app_install_order};
 pub(crate) use reconcile::{
-    tenant_has_active_policies_for_bundle, tenant_has_registered_wasm_for_bundle,
+    reconcile_os_app_from_dir, tenant_has_active_policies_for_bundle,
+    tenant_has_registered_wasm_for_bundle,
 };
+pub(crate) use reconcile_digest::digest_app_bundle_with_version;
+pub use reconcile_digest::os_app_bundle_digest;
 pub(crate) use runtime_heal::{
     restore_app_specs_from_matching_digest, tenant_has_ready_app_specs_for_bundle,
 };
 pub use types::*;
 
-fn read_app_manifest(app_dir: &Path) -> Option<AppManifest> {
+pub(crate) fn read_app_manifest(app_dir: &Path) -> Option<AppManifest> {
     let path = app_dir.join("app.toml");
     let content = std::fs::read_to_string(&path).ok()?;
     let manifest: AppManifest = toml::from_str(&content).ok()?;
@@ -931,7 +935,7 @@ pub fn get_app_guide(name: &str) -> Option<String> {
 }
 
 /// Load a complete app bundle from a directory on disk.
-fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
+pub(crate) fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
     let manifest = read_app_manifest(app_dir)?;
     let deployment_mode = effective_app_deployment_mode(&manifest);
     let legacy_reaction_paths = [
@@ -1117,7 +1121,22 @@ pub(super) async fn install_os_app_with_plan(
             format!("OS app '{app_name}' not found in catalog (known path keys: {known:?})")
         })?
     };
-    let bundle = load_app_bundle(&app_dir).ok_or_else(|| {
+    install_os_app_from_dir_with_plan(state, tenant, app_name, &app_dir, plan, None).await
+}
+
+/// Install one already-validated app directory without consulting the global catalog.
+pub(crate) async fn install_os_app_from_dir_with_plan(
+    state: &PlatformState,
+    tenant: &str,
+    app_name: &str,
+    app_dir: &Path,
+    plan: OsAppInstallPlan,
+    canonical_closure_id: Option<&str>,
+) -> Result<InstallResult, String> {
+    let app_version = read_app_manifest(app_dir)
+        .ok_or_else(|| format!("OS app '{app_name}' has no valid app.toml"))?
+        .version;
+    let bundle = load_app_bundle(app_dir).ok_or_else(|| {
         format!(
             "OS app '{app_name}' is registered at '{}' but its bundle failed to load",
             app_dir.display()
@@ -1132,7 +1151,10 @@ pub(super) async fn install_os_app_with_plan(
     } else {
         UploadedWasmReplacementContext::default()
     };
-    let resolved_dependency_lock = os_app_closure_for_roots(&[app_name.to_string()])?;
+    let resolved_dependency_lock_id = match canonical_closure_id {
+        Some(closure_id) => closure_id.to_string(),
+        None => os_app_closure_for_roots(&[app_name.to_string()])?.id,
+    };
 
     if bundle.adrs.is_empty() {
         tracing::warn!(
@@ -1418,48 +1440,16 @@ pub(super) async fn install_os_app_with_plan(
             let module_started = Instant::now();
             let module_config = bundle.wasm_module_configs.get(module_name);
             let hash = temper_wasm::WasmEngine::hash_module(wasm_bytes);
-            if let Some(config) = module_config
-                && let Some(grant) = &config.data
-            {
-                let binding_result = config
-                    .data_binding
-                    .as_ref()
-                    .ok_or_else(|| "module data grant requires a data_binding".to_string())
-                    .and_then(|binding| {
-                        if binding.artifact_digest != hash {
-                            return Err("module data binding artifact digest mismatch".into());
-                        }
-                        let csdl_source = bundle.csdl.as_deref().ok_or_else(|| {
-                            "module data binding requires canonical CSDL".to_string()
-                        })?;
-                        let csdl = parse_csdl(csdl_source).map_err(|error| {
-                            format!("module data binding CSDL is invalid: {error}")
-                        })?;
-                        let regenerated = temper_codegen::generate_module_sdk(
-                            &csdl,
-                            module_name,
-                            &resolved_dependency_lock.id,
-                            &resolved_dependency_lock.id,
-                            &hash,
-                            grant.clone(),
-                        )
-                        .map_err(|error| {
-                            format!("module data binding regeneration failed: {error}")
-                        })?;
-                        data_binding::verify_module_data_binding(
-                            wasm_bytes,
-                            module_name,
-                            grant,
-                            binding,
-                            &regenerated.manifest,
-                        )
-                    });
-                if let Err(error) = binding_result {
-                    wasm_failures.push(module_name.clone());
-                    tracing::error!(tenant, module = %module_name, %error, "rejecting incompatible module data binding");
-                    continue;
-                }
-            }
+            let activated_binding = match module_config {
+                Some(config) => data_binding::verify_module_config_data_binding(
+                    wasm_bytes,
+                    module_name,
+                    config,
+                    bundle.csdl.as_deref(),
+                    &resolved_dependency_lock_id,
+                )?,
+                None => None,
+            };
             let required = module_config.is_some_and(WasmModuleManifest::is_required);
             let replace_uploaded_module =
                 existing_sources.get(module_name).is_some_and(|existing| {
@@ -1518,26 +1508,7 @@ pub(super) async fn install_os_app_with_plan(
             {
                 let mut wasm_reg = state.server.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
                 wasm_reg.register(&tenant_id, module_name, &hash);
-                if let Some(config) = module_config
-                    && let (Some(grant), Some(binding)) = (&config.data, &config.data_binding)
-                    && let Some(csdl_source) = bundle.csdl.as_deref()
-                    && let Ok(csdl) = parse_csdl(csdl_source)
-                    && let Ok(regenerated) = temper_codegen::generate_module_sdk(
-                        &csdl,
-                        module_name,
-                        &resolved_dependency_lock.id,
-                        &resolved_dependency_lock.id,
-                        &hash,
-                        grant.clone(),
-                    )
-                    && let Ok(activated) = data_binding::verify_module_data_binding(
-                        wasm_bytes,
-                        module_name,
-                        grant,
-                        binding,
-                        &regenerated.manifest,
-                    )
-                {
+                if let Some(activated) = activated_binding {
                     wasm_reg.bind_data_manifest(&tenant_id, module_name, &hash, activated);
                 }
             }
@@ -1607,7 +1578,8 @@ pub(super) async fn install_os_app_with_plan(
 
     // ── Step 5: Bootstrap App entity + APP.md. ──────────────────────────
     let (agents_bootstrapped, skills_bootstrapped, adrs_bootstrapped) = if plan.content {
-        let app_id = bootstrap_app_entity(state, &tenant_id, tenant, app_name).await;
+        let app_id =
+            bootstrap_app_entity(state, &tenant_id, tenant, app_name, app_dir, &bundle).await;
 
         // ── Step 6: Bootstrap agents (returns name→uuid map). ──────────
         let (agents_bootstrapped, agent_uuid_map) = agent_bootstrap::bootstrap_agents(
@@ -1642,7 +1614,15 @@ pub(super) async fn install_os_app_with_plan(
         Vec::new()
     };
 
-    reconcile::record_app_install_metadata_for_bundle(state, tenant, app_name, &bundle).await;
+    reconcile::record_app_install_metadata_for_bundle_version(
+        state,
+        tenant,
+        app_name,
+        &app_version,
+        read_app_guide(app_dir).as_deref(),
+        &bundle,
+    )
+    .await;
 
     Ok(InstallResult {
         added,
@@ -1709,7 +1689,7 @@ async fn uploaded_wasm_replacement_context(
     else {
         return UploadedWasmReplacementContext::default();
     };
-    let digest = reconcile::digest_app_bundle(app_name, bundle);
+    let digest = reconcile_digest::digest_app_bundle(app_name, bundle);
     match ps.get_installed_app(tenant, app_name).await {
         Ok(Some(record)) => UploadedWasmReplacementContext {
             bundle_wasm_digest_changed: record.wasm_digest != digest.wasm_digest,
@@ -1743,6 +1723,8 @@ async fn bootstrap_app_entity(
     tenant_id: &TenantId,
     tenant: &str,
     app_name: &str,
+    app_dir: &Path,
+    bundle: &AppBundle,
 ) -> Option<String> {
     // Check if App entity type is registered.
     let has_apps = {
@@ -1777,10 +1759,30 @@ async fn bootstrap_app_entity(
     }
 
     // Read app manifest for metadata.
-    let manifest = {
-        let cat = catalog().read().unwrap(); // ci-ok: infallible lock
-        cat.entries.iter().find(|e| e.name == app_name).cloned()
-    };
+    let manifest = read_app_manifest(app_dir).map(|source| {
+        let app_guide = read_app_guide(app_dir);
+        let description = if source.description.is_empty() {
+            app_guide
+                .as_deref()
+                .and_then(extract_description)
+                .unwrap_or_else(|| format!("App: {app_name}"))
+        } else {
+            source.description.clone()
+        };
+        AppEntry {
+            name: source.name,
+            description,
+            entity_types: bundle
+                .specs
+                .iter()
+                .map(|(entity_type, _)| entity_type.clone())
+                .collect(),
+            version: source.version,
+            startup_install: source.startup_install,
+            app_guide,
+            dependencies: source.dependencies,
+        }
+    });
     let description = manifest
         .as_ref()
         .map(|m| m.description.clone())

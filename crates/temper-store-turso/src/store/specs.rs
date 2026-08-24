@@ -450,11 +450,11 @@ impl TursoEventStore {
             "INSERT INTO tenant_installed_apps (
                  tenant_id, app_name, source_kind, app_ref, version_hash,
                  pinned_version_hash, current_version_hash, follow_policy, closure_id,
-                 registry_url, registry_tenant, app_version, bundle_digest, spec_digest,
+                 registry_url, registry_tenant, dependency_lock_digest, app_version, bundle_digest, spec_digest,
                  policy_digest, wasm_digest, content_digest, seed_digest,
                  installed_at, last_reconciled_at, status
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, datetime('now'), datetime('now'), ?19)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, datetime('now'), datetime('now'), ?20)
              ON CONFLICT(tenant_id, app_name) DO UPDATE SET
                  source_kind = excluded.source_kind,
                  app_ref = excluded.app_ref,
@@ -465,6 +465,7 @@ impl TursoEventStore {
                  closure_id = excluded.closure_id,
                  registry_url = excluded.registry_url,
                  registry_tenant = excluded.registry_tenant,
+                 dependency_lock_digest = excluded.dependency_lock_digest,
                  app_version = excluded.app_version,
                  bundle_digest = excluded.bundle_digest,
                  spec_digest = excluded.spec_digest,
@@ -486,6 +487,7 @@ impl TursoEventStore {
                 record.closure_id.as_str(),
                 record.registry_url.as_str(),
                 record.registry_tenant.as_str(),
+                record.dependency_lock_digest.as_str(),
                 record.app_version.as_str(),
                 record.bundle_digest.as_str(),
                 record.spec_digest.as_str(),
@@ -514,7 +516,7 @@ impl TursoEventStore {
             .query(
                 "SELECT tenant_id, app_name, source_kind, app_ref, version_hash,
                         pinned_version_hash, current_version_hash, follow_policy, closure_id,
-                        registry_url, registry_tenant, app_version, bundle_digest, spec_digest,
+                        registry_url, registry_tenant, dependency_lock_digest, app_version, bundle_digest, spec_digest,
                         policy_digest, wasm_digest, content_digest, seed_digest,
                         installed_at, last_reconciled_at, status
                  FROM tenant_installed_apps
@@ -541,16 +543,17 @@ impl TursoEventStore {
             closure_id: row.get(8).map_err(storage_error)?,
             registry_url: row.get(9).map_err(storage_error)?,
             registry_tenant: row.get(10).map_err(storage_error)?,
-            app_version: row.get(11).map_err(storage_error)?,
-            bundle_digest: row.get(12).map_err(storage_error)?,
-            spec_digest: row.get(13).map_err(storage_error)?,
-            policy_digest: row.get(14).map_err(storage_error)?,
-            wasm_digest: row.get(15).map_err(storage_error)?,
-            content_digest: row.get(16).map_err(storage_error)?,
-            seed_digest: row.get(17).map_err(storage_error)?,
-            installed_at: row.get(18).map_err(storage_error)?,
-            last_reconciled_at: row.get(19).map_err(storage_error)?,
-            status: row.get(20).map_err(storage_error)?,
+            dependency_lock_digest: row.get(11).map_err(storage_error)?,
+            app_version: row.get(12).map_err(storage_error)?,
+            bundle_digest: row.get(13).map_err(storage_error)?,
+            spec_digest: row.get(14).map_err(storage_error)?,
+            policy_digest: row.get(15).map_err(storage_error)?,
+            wasm_digest: row.get(16).map_err(storage_error)?,
+            content_digest: row.get(17).map_err(storage_error)?,
+            seed_digest: row.get(18).map_err(storage_error)?,
+            installed_at: row.get(19).map_err(storage_error)?,
+            last_reconciled_at: row.get(20).map_err(storage_error)?,
+            status: row.get(21).map_err(storage_error)?,
         }))
     }
 

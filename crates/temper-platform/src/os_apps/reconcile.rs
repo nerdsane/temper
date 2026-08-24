@@ -1,13 +1,13 @@
 use std::collections::HashSet;
 
-use sha2::{Digest, Sha256};
 use temper_runtime::tenant::TenantId;
 use temper_server::platform_store::InstalledAppRecord;
 
 use super::{
-    AppBundle, AppEntry, OsAppBundleDigest, OsAppInstallPlan, OsAppReconcileResult, catalog,
-    get_os_app, install_os_app_with_plan, os_app_dependencies,
-    restore_app_specs_from_matching_digest, tenant_has_ready_app_specs_for_bundle,
+    AppBundle, OsAppBundleDigest, OsAppInstallPlan, OsAppReconcileResult, catalog,
+    digest_app_bundle_with_version, install_os_app_from_dir_with_plan, load_app_bundle,
+    os_app_dependencies, read_app_manifest, restore_app_specs_from_matching_digest,
+    tenant_has_ready_app_specs_for_bundle,
 };
 use crate::state::PlatformState;
 
@@ -63,174 +63,6 @@ pub(super) fn resolve_os_app_install_order_with_dependencies(
         )?;
     }
     Ok(order)
-}
-
-fn app_entry(app_name: &str) -> Option<AppEntry> {
-    let cat = catalog().read().expect("OS app catalog lock poisoned");
-    cat.entries
-        .iter()
-        .find(|entry| entry.name == app_name)
-        .cloned()
-}
-
-fn digest_bytes(parts: &[(&str, Vec<u8>)]) -> String {
-    let mut hasher = Sha256::new();
-    for (name, bytes) in parts {
-        hasher.update(name.as_bytes());
-        hasher.update([0]);
-        hasher.update(bytes);
-        hasher.update([0xff]);
-    }
-    format!("sha256:{:x}", hasher.finalize())
-}
-
-fn digest_named_parts(parts: &[(String, Vec<u8>)]) -> String {
-    let parts = parts
-        .iter()
-        .map(|(name, bytes)| (name.as_str(), bytes.clone()))
-        .collect::<Vec<_>>();
-    digest_bytes(&parts)
-}
-
-pub(super) fn digest_app_bundle(app_name: &str, bundle: &AppBundle) -> OsAppBundleDigest {
-    let entry = app_entry(app_name);
-    let app_version = entry
-        .as_ref()
-        .map(|entry| entry.version.clone())
-        .unwrap_or_else(|| "0.1.0".to_string());
-
-    let mut spec_parts = Vec::new();
-    for (entity_type, ioa_source) in &bundle.specs {
-        spec_parts.push((
-            format!("spec:{entity_type}"),
-            ioa_source.as_bytes().to_vec(),
-        ));
-    }
-    if let Some(csdl) = &bundle.csdl {
-        spec_parts.push(("csdl".to_string(), csdl.as_bytes().to_vec()));
-    }
-    if let Some(cross_invariants) = &bundle.cross_invariants_toml {
-        spec_parts.push((
-            "cross-invariants".to_string(),
-            cross_invariants.as_bytes().to_vec(),
-        ));
-    }
-    spec_parts.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut policy_parts: Vec<(String, Vec<u8>)> = bundle
-        .cedar_policy_sources
-        .iter()
-        .map(|source| {
-            (
-                format!("policy:{}", source.relative_path),
-                source.text.as_bytes().to_vec(),
-            )
-        })
-        .collect();
-    policy_parts.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut wasm_parts = Vec::new();
-    for (module_name, wasm_bytes) in &bundle.wasm_modules {
-        wasm_parts.push((format!("wasm:{module_name}"), wasm_bytes.clone()));
-    }
-    for (module_name, config) in &bundle.wasm_module_configs {
-        // The binding is derived from this digest, so exclude it from the
-        // immutable closure input while retaining the grant declaration.
-        let mut closure_config = config.clone();
-        closure_config.data_binding = None;
-        let config_bytes = serde_json::to_vec(&closure_config).unwrap_or_default();
-        wasm_parts.push((format!("wasm-config:{module_name}"), config_bytes));
-    }
-    wasm_parts.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut content_parts = Vec::new();
-    if let Some(app_guide) = entry.as_ref().and_then(|entry| entry.app_guide.as_ref()) {
-        content_parts.push(("APP.md".to_string(), app_guide.as_bytes().to_vec()));
-    }
-    for agent in &bundle.agents {
-        content_parts.push((
-            format!("agent:{}:content", agent.name),
-            agent.content.as_bytes().to_vec(),
-        ));
-    }
-    for skill in &bundle.skills {
-        content_parts.push((
-            format!(
-                "skill:{}:{}",
-                skill.agent_name.as_deref().unwrap_or("_system"),
-                skill.name
-            ),
-            skill.content.as_bytes().to_vec(),
-        ));
-        for companion in &skill.companion_files {
-            content_parts.push((
-                format!(
-                    "skill-companion:{}:{}:{}",
-                    skill.agent_name.as_deref().unwrap_or("_system"),
-                    skill.name,
-                    companion.name
-                ),
-                companion.content.clone(),
-            ));
-        }
-    }
-    for file in &bundle.system_files {
-        content_parts.push((
-            format!("system:{}", file.relative_path),
-            file.content.clone(),
-        ));
-    }
-    for adr in &bundle.adrs {
-        content_parts.push((
-            format!("adr:{}", adr.file_name),
-            adr.content.as_bytes().to_vec(),
-        ));
-    }
-    content_parts.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut seed_parts = Vec::new();
-    for seed in &bundle.seed_instances {
-        seed_parts.push((
-            format!(
-                "seed:{}:{}",
-                seed.entity_type,
-                seed.id.as_deref().unwrap_or("_generated")
-            ),
-            serde_json::to_vec(seed).unwrap_or_default(),
-        ));
-    }
-    seed_parts.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let spec_digest = digest_named_parts(&spec_parts);
-    let policy_digest = digest_named_parts(&policy_parts);
-    let wasm_digest = digest_named_parts(&wasm_parts);
-    let content_digest = digest_named_parts(&content_parts);
-    let seed_digest = digest_named_parts(&seed_parts);
-    let bundle_digest = digest_bytes(&[
-        ("app_name", app_name.as_bytes().to_vec()),
-        ("app_version", app_version.as_bytes().to_vec()),
-        ("spec", spec_digest.as_bytes().to_vec()),
-        ("policy", policy_digest.as_bytes().to_vec()),
-        ("wasm", wasm_digest.as_bytes().to_vec()),
-        ("content", content_digest.as_bytes().to_vec()),
-        ("seed", seed_digest.as_bytes().to_vec()),
-    ]);
-
-    OsAppBundleDigest {
-        app_name: app_name.to_string(),
-        app_version,
-        bundle_digest,
-        spec_digest,
-        policy_digest,
-        wasm_digest,
-        content_digest,
-        seed_digest,
-    }
-}
-
-/// Compute the current bundle digest for an app in the catalog.
-pub fn os_app_bundle_digest(app_name: &str) -> Option<OsAppBundleDigest> {
-    get_os_app(app_name).map(|bundle| digest_app_bundle(app_name, &bundle))
 }
 
 pub(super) fn plan_reconcile_from_installed_record(
@@ -359,6 +191,7 @@ async fn record_app_install_metadata(
         closure_id: String::new(),
         registry_url: String::new(),
         registry_tenant: String::new(),
+        dependency_lock_digest: String::new(),
         app_version: digest.app_version.clone(),
         bundle_digest: digest.bundle_digest.clone(),
         spec_digest: digest.spec_digest.clone(),
@@ -381,13 +214,15 @@ async fn record_app_install_metadata(
     }
 }
 
-pub(super) async fn record_app_install_metadata_for_bundle(
+pub(super) async fn record_app_install_metadata_for_bundle_version(
     state: &PlatformState,
     tenant: &str,
     app_name: &str,
+    app_version: &str,
+    app_guide: Option<&str>,
     bundle: &AppBundle,
 ) {
-    let bundle_digest = digest_app_bundle(app_name, bundle);
+    let bundle_digest = digest_app_bundle_with_version(app_name, app_version, app_guide, bundle);
     record_app_install_metadata(state, tenant, &bundle_digest, "installed").await;
 }
 
@@ -400,8 +235,47 @@ pub async fn reconcile_os_app(
     tenant: &str,
     app_name: &str,
 ) -> Result<OsAppReconcileResult, String> {
-    let bundle = get_os_app(app_name).ok_or_else(|| format!("OS app '{app_name}' not found"))?;
-    let digest = digest_app_bundle(app_name, &bundle);
+    let app_dir = {
+        let catalog = catalog()
+            .read()
+            .map_err(|_| "OS app catalog lock poisoned")?;
+        catalog
+            .paths
+            .get(app_name)
+            .cloned()
+            .ok_or_else(|| format!("OS app '{app_name}' not found"))?
+    };
+    reconcile_os_app_from_dir(state, tenant, app_name, &app_dir, None).await
+}
+
+/// Reconcile one immutable app directory without consulting the global catalog.
+pub(crate) async fn reconcile_os_app_from_dir(
+    state: &PlatformState,
+    tenant: &str,
+    app_name: &str,
+    app_dir: &std::path::Path,
+    canonical_closure_id: Option<&str>,
+) -> Result<OsAppReconcileResult, String> {
+    let manifest = read_app_manifest(app_dir)
+        .ok_or_else(|| format!("OS app '{app_name}' has no valid app.toml"))?;
+    if manifest.name != app_name {
+        return Err(format!(
+            "OS app directory declares '{}' but '{}' was requested",
+            manifest.name, app_name
+        ));
+    }
+    let bundle = load_app_bundle(app_dir).ok_or_else(|| {
+        format!(
+            "OS app '{app_name}' at '{}' failed to load",
+            app_dir.display()
+        )
+    })?;
+    let app_guide = std::fs::read_to_string(app_dir.join("APP.md")).ok();
+    let digest =
+        digest_app_bundle_with_version(app_name, &manifest.version, app_guide.as_deref(), &bundle);
+    if let Some(closure_id) = canonical_closure_id {
+        super::data_binding::verify_bundle_data_bindings(&bundle, closure_id)?;
+    }
 
     if let Some(ps) = state
         .server
@@ -475,7 +349,15 @@ pub async fn reconcile_os_app(
                     seed = plan.seed,
                     "OS app changed; running delta reconcile"
                 );
-                let install = install_os_app_with_plan(state, tenant, app_name, plan).await?;
+                let install = install_os_app_from_dir_with_plan(
+                    state,
+                    tenant,
+                    app_name,
+                    app_dir,
+                    plan,
+                    canonical_closure_id,
+                )
+                .await?;
                 return Ok(OsAppReconcileResult::Installed {
                     app_name: app_name.to_string(),
                     bundle_digest: digest.bundle_digest,
@@ -494,8 +376,15 @@ pub async fn reconcile_os_app(
         }
     }
 
-    let install =
-        install_os_app_with_plan(state, tenant, app_name, OsAppInstallPlan::all()).await?;
+    let install = install_os_app_from_dir_with_plan(
+        state,
+        tenant,
+        app_name,
+        app_dir,
+        OsAppInstallPlan::all(),
+        canonical_closure_id,
+    )
+    .await?;
     Ok(OsAppReconcileResult::Installed {
         app_name: app_name.to_string(),
         bundle_digest: digest.bundle_digest,

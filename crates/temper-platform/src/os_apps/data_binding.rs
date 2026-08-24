@@ -5,6 +5,65 @@ use temper_wasm_sdk::data::{
     read_module_sdk_artifact_binding,
 };
 
+use super::{AppBundle, WasmModuleManifest};
+
+pub(super) fn verify_bundle_data_bindings(
+    bundle: &AppBundle,
+    closure_id: &str,
+) -> Result<(), String> {
+    for (module_name, config) in &bundle.wasm_module_configs {
+        if config.data.is_none() {
+            continue;
+        }
+        let wasm = bundle
+            .wasm_modules
+            .get(module_name)
+            .ok_or_else(|| format!("module '{module_name}' data binding has no WASM artifact"))?;
+        verify_module_config_data_binding(
+            wasm,
+            module_name,
+            config,
+            bundle.csdl.as_deref(),
+            closure_id,
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn verify_module_config_data_binding(
+    wasm: &[u8],
+    module_name: &str,
+    config: &WasmModuleManifest,
+    csdl_source: Option<&str>,
+    closure_id: &str,
+) -> Result<Option<ModuleSdkManifest>, String> {
+    let Some(grant) = &config.data else {
+        return Ok(None);
+    };
+    let binding = config
+        .data_binding
+        .as_ref()
+        .ok_or_else(|| "module data grant requires a data_binding".to_string())?;
+    let artifact_digest = temper_wasm::WasmEngine::hash_module(wasm);
+    if binding.artifact_digest != artifact_digest {
+        return Err("module data binding artifact digest mismatch".into());
+    }
+    let csdl_source =
+        csdl_source.ok_or_else(|| "module data binding requires canonical CSDL".to_string())?;
+    let csdl = temper_spec::csdl::parse_csdl(csdl_source)
+        .map_err(|error| format!("module data binding CSDL is invalid: {error}"))?;
+    let regenerated = temper_codegen::generate_module_sdk(
+        &csdl,
+        module_name,
+        closure_id,
+        closure_id,
+        &artifact_digest,
+        grant.clone(),
+    )
+    .map_err(|error| format!("module data binding regeneration failed: {error}"))?;
+    verify_module_data_binding(wasm, module_name, grant, binding, &regenerated.manifest).map(Some)
+}
+
 pub(super) fn verify_module_data_binding(
     wasm: &[u8],
     module_name: &str,
@@ -171,6 +230,28 @@ mod tests {
                 &regenerated.manifest,
             )
             .is_err()
+        );
+
+        let config = WasmModuleManifest {
+            name: "worker".into(),
+            target: None,
+            criticality: super::super::WasmModuleCriticality::Optional,
+            startup_loading: super::super::WasmStartupLoading::Lazy,
+            provenance: None,
+            import_class: None,
+            data: Some(grant()),
+            data_binding: Some(packaged.manifest.clone()),
+        };
+        assert!(
+            verify_module_config_data_binding(
+                &packaged.wasm,
+                "worker",
+                &config,
+                Some(CSDL),
+                "different-closure",
+            )
+            .is_err(),
+            "a closure-only change must be validated before an unchanged install can skip"
         );
     }
 }

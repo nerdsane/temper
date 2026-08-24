@@ -6705,6 +6705,8 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tokio-postgres",
+ "toml",
+ "tracing",
  "url",
  "urlencoding",
  "uuid",
@@ -6780,6 +6782,7 @@ dependencies = [
  "temper-spec",
  "temper-store-turso",
  "tokio",
+ "tower 0.5.3",
  "tracing",
 ]
 

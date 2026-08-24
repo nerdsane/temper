@@ -54,16 +54,32 @@ Tools build on tools.
 
 ## Quick start
 
-Temper is an HTTP server with an OData API. Agents talk to it directly, through one of the SDKs, or via the MCP bridge for stdio agent clients.
+The default path is a persistent, local-only daemon. It needs no account,
+Docker, Postgres, Genesis server, or hosted deployment.
 
-**Start the kernel:**
+**Create and run an app:**
 
 ```bash
-temper serve --port 3000          # HTTP server, OData API, Observe UI
-temper decide --port 3000         # interactive review of pending governance decisions
+temper init my-app
+cd my-app
+temper dev
 ```
 
-**Connect an agent (via MCP):**
+`temper dev` starts the local daemon when needed, verifies the workspace, and
+promotes each valid revision as an immutable bundle. Verification failures leave
+the last valid revision running. For separate daemon and install lifecycles:
+
+```bash
+temper up
+temper app install ./my-app
+```
+
+The daemon persists under `~/.local/share/temper`, serves Observe at `/observe`,
+and exposes authenticated stateless MCP at `/mcp`. See the
+[local-first guide](docs/LOCAL_FIRST.md) for credentials, dependency locks,
+cache maintenance, and optional Genesis/hosted progression.
+
+**Connect a stdio-only agent client:**
 
 ```json
 {

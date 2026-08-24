@@ -9,7 +9,7 @@
 //! - `GET    /api/tenants/:id/users`    — list users for a tenant
 //! - `GET    /api/genesis/apps/follow-updates` — list staged follow-latest rollout status
 
-use axum::extract::{Extension, State};
+use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Json, Router, routing};
@@ -24,8 +24,8 @@ use crate::state::PlatformState;
 mod apps;
 mod auth;
 pub(crate) use apps::{
-    get_genesis_app_bundle, get_os_app_guide, install_genesis_app, list_genesis_follow_updates,
-    list_os_apps,
+    garbage_collect_local_bundle_cache, get_genesis_app_bundle, get_os_app_guide,
+    install_genesis_app, install_local_bundle, list_genesis_follow_updates, list_os_apps,
 };
 use auth::{
     PlatformResourceAuthorization, require_authenticated, require_control_plane,
@@ -114,6 +114,16 @@ pub fn tenant_api_router() -> Router<PlatformState> {
         )
         .route("/os-apps", routing::get(list_os_apps))
         .route("/os-apps/{name}", routing::get(get_os_app_guide))
+        .route(
+            "/app-bundles/install",
+            routing::post(install_local_bundle).layer(DefaultBodyLimit::max(
+                crate::app_bundles::MAX_BUNDLE_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            "/app-bundles/cache/gc",
+            routing::post(garbage_collect_local_bundle_cache),
+        )
         .route("/genesis/apps/install", routing::post(install_genesis_app))
         .route(
             "/genesis/apps/follow-updates",

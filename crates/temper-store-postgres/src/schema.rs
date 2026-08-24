@@ -304,6 +304,7 @@ CREATE TABLE IF NOT EXISTS tenant_installed_apps (
     closure_id          TEXT         NOT NULL DEFAULT '',
     registry_url        TEXT         NOT NULL DEFAULT '',
     registry_tenant     TEXT         NOT NULL DEFAULT '',
+    dependency_lock_digest TEXT      NOT NULL DEFAULT '',
     app_version         TEXT         NOT NULL DEFAULT '',
     bundle_digest       TEXT         NOT NULL DEFAULT '',
     spec_digest         TEXT         NOT NULL DEFAULT '',

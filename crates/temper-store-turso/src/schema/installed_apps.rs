@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS tenant_installed_apps (
     current_version_hash TEXT NOT NULL DEFAULT '', follow_policy TEXT NOT NULL DEFAULT 'pinned',
     closure_id TEXT NOT NULL DEFAULT '',
     registry_url TEXT NOT NULL DEFAULT '', registry_tenant TEXT NOT NULL DEFAULT '',
+    dependency_lock_digest TEXT NOT NULL DEFAULT '',
     bundle_digest TEXT NOT NULL DEFAULT '', spec_digest TEXT NOT NULL DEFAULT '',
     policy_digest TEXT NOT NULL DEFAULT '', wasm_digest TEXT NOT NULL DEFAULT '',
     content_digest TEXT NOT NULL DEFAULT '', seed_digest TEXT NOT NULL DEFAULT '',
@@ -38,6 +39,8 @@ pub const ALTER_INSTALLED_APPS_ADD_REGISTRY_URL: &str =
     "ALTER TABLE tenant_installed_apps ADD COLUMN registry_url TEXT NOT NULL DEFAULT ''";
 pub const ALTER_INSTALLED_APPS_ADD_REGISTRY_TENANT: &str =
     "ALTER TABLE tenant_installed_apps ADD COLUMN registry_tenant TEXT NOT NULL DEFAULT ''";
+pub const ALTER_INSTALLED_APPS_ADD_DEPENDENCY_LOCK_DIGEST: &str =
+    "ALTER TABLE tenant_installed_apps ADD COLUMN dependency_lock_digest TEXT NOT NULL DEFAULT ''";
 pub const ALTER_INSTALLED_APPS_ADD_BUNDLE_DIGEST: &str =
     "ALTER TABLE tenant_installed_apps ADD COLUMN bundle_digest TEXT NOT NULL DEFAULT ''";
 pub const ALTER_INSTALLED_APPS_ADD_SPEC_DIGEST: &str =

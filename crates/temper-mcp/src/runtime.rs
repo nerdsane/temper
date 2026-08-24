@@ -59,6 +59,7 @@ pub(crate) struct RuntimeContext {
     pub(crate) session_id: Option<String>,
     pub(crate) api_key: Option<String>,
     pub(crate) identity_tenant: String,
+    pub(crate) allow_host_ops: bool,
     sandbox: temper_sandbox::runner::PersistentSandbox,
     /// OTS trajectory builder for capturing agent execution traces.
     pub(crate) trajectory: Option<TrajectoryBuilder>,
@@ -100,6 +101,7 @@ impl RuntimeContext {
                 .ok()
                 .filter(|v| !v.trim().is_empty())
                 .unwrap_or_else(|| "default".to_string()), // determinism-ok: startup config
+            allow_host_ops: true,
             sandbox: temper_sandbox::runner::PersistentSandbox::new(&[("temper", "Temper", 1)]),
             trajectory: None,
             tenants_seen: BTreeMap::new(),
@@ -467,6 +469,7 @@ impl RuntimeContext {
         let agent_id = self.agent_id.clone();
         let session_id = self.session_id.clone();
         let api_key = self.api_key.clone();
+        let allow_host_ops = self.allow_host_ops;
 
         self.sandbox
             .execute(
@@ -512,10 +515,9 @@ impl RuntimeContext {
                             binary_path: None,
                             api_key: api_key.as_deref(),
                             internal_credential_issuer: None,
-                            // Local stdio MCP: the host process is the
-                            // developer's own machine, so upload_wasm/compile_wasm
-                            // are legitimate developer ops (ARN-166).
-                            allow_host_ops: true,
+                            // Stdio operates on the developer's machine. HTTP
+                            // requests override this to preserve path isolation.
+                            allow_host_ops,
                         };
                         temper_sandbox::dispatch::dispatch_temper_method(
                             &ctx,

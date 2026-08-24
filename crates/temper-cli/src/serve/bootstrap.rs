@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -30,10 +30,41 @@ use super::storage::{
     upsert_loaded_specs_to_turso,
 };
 
+pub(super) fn resolve_data_dir(override_path: Option<PathBuf>) -> Result<PathBuf> {
+    let data_dir = override_path.unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        Path::new(&home).join(".local/share/temper")
+    });
+    std::fs::create_dir_all(&data_dir)
+        .with_context(|| format!("Failed to create data directory {}", data_dir.display()))?;
+    Ok(data_dir)
+}
+
+pub(super) fn seed_cedar_policies(
+    state: &PlatformState,
+    tenant_policy_seed: BTreeMap<String, String>,
+) {
+    for (tenant, policy_text) in &tenant_policy_seed {
+        if let Err(error) = state
+            .server
+            .authz
+            .reload_tenant_policies(tenant, policy_text)
+        {
+            eprintln!("  Warning: failed to load Cedar policies for tenant '{tenant}': {error}");
+            continue;
+        }
+    }
+    let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+    for (tenant, policy_text) in tenant_policy_seed {
+        policies.insert(tenant, policy_text);
+    }
+}
+
 /// Phase 1: Initialize the storage backend (Postgres, Turso, Redis, or memory).
 pub(super) async fn init_storage(
     storage: StorageBackend,
     storage_explicit: bool,
+    data_dir: Option<&Path>,
 ) -> Result<(Option<sqlx::PgPool>, Option<StorageStack>)> {
     let mut pg_pool: Option<sqlx::PgPool> = None;
     let storage_stack: Option<StorageStack> = match storage {
@@ -56,7 +87,9 @@ pub(super) async fn init_storage(
         }
         StorageBackend::Turso => {
             // Multi-tenant cloud mode: TURSO_PLATFORM_URL points at the shared platform DB.
-            if let Ok(platform_url) = std::env::var("TURSO_PLATFORM_URL") {
+            if data_dir.is_none()
+                && let Ok(platform_url) = std::env::var("TURSO_PLATFORM_URL")
+            {
                 let platform_token = std::env::var("TURSO_PLATFORM_AUTH_TOKEN").ok();
                 let local_base_dir = std::env::var("TURSO_LOCAL_BASE_DIR").ok().or_else(|| {
                     let home = std::env::var("HOME").ok()?;
@@ -87,11 +120,9 @@ pub(super) async fn init_storage(
                 Some(StorageStack::from_tenant_router(router))
             } else {
                 // Single-DB mode (local dev).
-                let turso_url = match std::env::var("TURSO_URL") {
-                    Ok(url) => url,
-                    Err(_) => {
-                        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-                        let db_path = Path::new(&home).join(".local/share/temper/agents.db");
+                let turso_url = match data_dir {
+                    Some(data_dir) => {
+                        let db_path = data_dir.join("agents.db");
                         let parent_dir = db_path.parent().context(
                             "Failed to determine parent directory for default Turso DB path",
                         )?;
@@ -103,8 +134,29 @@ pub(super) async fn init_storage(
                         })?;
                         format!("file:{}", db_path.display())
                     }
+                    None => match std::env::var("TURSO_URL") {
+                        Ok(url) => url,
+                        Err(_) => {
+                            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                            let db_path = Path::new(&home).join(".local/share/temper/agents.db");
+                            let parent_dir = db_path.parent().context(
+                                "Failed to determine parent directory for default Turso DB path",
+                            )?;
+                            fs::create_dir_all(parent_dir).with_context(|| {
+                                format!(
+                                    "Failed to create default Turso DB directory: {}",
+                                    parent_dir.display()
+                                )
+                            })?;
+                            format!("file:{}", db_path.display())
+                        }
+                    },
                 };
-                let turso_token = std::env::var("TURSO_AUTH_TOKEN").ok();
+                let turso_token = if data_dir.is_some() {
+                    None
+                } else {
+                    std::env::var("TURSO_AUTH_TOKEN").ok()
+                };
                 let store = TursoEventStore::new(&turso_url, turso_token.as_deref())
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to connect to Turso/libSQL: {e}"))?;
@@ -432,7 +484,11 @@ async fn load_verified_cache(
 /// After verifying (or skipping via cache), persists spec hashes and
 /// verification status to the per-tenant Turso store so subsequent boots
 /// skip the cascade.
-pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, String)]) {
+pub(super) async fn bootstrap_tenants(
+    state: &PlatformState,
+    apps: &[(String, String)],
+    operator_tenant: &str,
+) {
     let sys_cache = load_verified_cache(state, "temper-system").await;
     let sys_hashes = temper_platform::bootstrap_system_tenant(state, &sys_cache);
     if let Some(turso) = state.server.turso_store_for_tenant("temper-system").await {
@@ -450,6 +506,15 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
             &default_cache,
         )
         .await;
+    }
+
+    if operator_tenant != "default" && !apps.iter().any(|(tenant, _)| tenant == operator_tenant) {
+        let cache = load_verified_cache(state, operator_tenant).await;
+        let hashes = temper_platform::bootstrap_agent_specs(state, operator_tenant, false, &cache);
+        if let Some(turso) = state.server.turso_store_for_tenant(operator_tenant).await {
+            temper_platform::persist_agent_verification(&turso, operator_tenant, &hashes, &cache)
+                .await;
+        }
     }
 
     for (tenant, _dir) in apps {
@@ -480,10 +545,10 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
         }
     }
 
-    // Register the bootstrap key as a normal operator credential in the default
-    // tenant. It grants no implicit authority in other tenants (ADR-0157).
+    // Register the bootstrap key only in the configured operator tenant. It
+    // grants no implicit authority in other tenants (ADR-0157).
     if let Some(ref api_key) = state.api_token {
-        temper_platform::bootstrap_operator_credential(state, api_key, "default").await;
+        temper_platform::bootstrap_operator_credential(state, api_key, operator_tenant).await;
     }
 }
 
@@ -516,6 +581,19 @@ pub(super) async fn bootstrap_installed_apps(
         match platform_store.list_all_installed_apps().await {
             Ok(installed) => {
                 for (tenant, app_name) in installed {
+                    if platform_store
+                        .get_installed_app(&tenant, &app_name)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some_and(|record| {
+                            record.source_kind == "local_bundle"
+                                || (record.source_kind == "genesis"
+                                    && record.closure_id.starts_with("bundle:sha256:"))
+                        })
+                    {
+                        continue;
+                    }
                     requested.insert((tenant, app_name), AppBootstrapSource::Persisted);
                 }
             }
@@ -552,13 +630,25 @@ pub(super) async fn bootstrap_installed_apps(
         );
     }
 
+    let restored_local_caches =
+        temper_platform::app_bundles::restore_local_bundle_cache_roots(state)
+            .await
+            .map_err(anyhow::Error::msg)?;
+    let restored_canonical_genesis_caches =
+        temper_platform::app_bundles::restore_canonical_genesis_bundle_cache_roots(state)
+            .await
+            .map_err(anyhow::Error::msg)?;
     let restored_genesis_caches =
         temper_platform::genesis_install::restore_genesis_app_cache_roots(state).await;
     let restored_genesis_registry_caches =
         temper_platform::genesis_install::restore_genesis_registry_cache_roots(state).await;
-    if restored_genesis_caches > 0 || restored_genesis_registry_caches > 0 {
+    if restored_local_caches > 0
+        || restored_genesis_caches > 0
+        || restored_genesis_registry_caches > 0
+        || restored_canonical_genesis_caches > 0
+    {
         println!(
-            "  Restored Genesis app cache roots: service={restored_genesis_caches}, registry={restored_genesis_registry_caches}"
+            "  Restored app cache roots: local={restored_local_caches}, canonical Genesis={restored_canonical_genesis_caches}, Genesis service={restored_genesis_caches}, Genesis registry={restored_genesis_registry_caches}"
         );
     }
 

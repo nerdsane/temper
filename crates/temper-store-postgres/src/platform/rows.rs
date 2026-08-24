@@ -34,6 +34,7 @@ pub(super) fn row_to_installed_app(row: sqlx::postgres::PgRow) -> PostgresInstal
         closure_id: row.get("closure_id"),
         registry_url: row.get("registry_url"),
         registry_tenant: row.get("registry_tenant"),
+        dependency_lock_digest: row.get("dependency_lock_digest"),
         app_version: row.get("app_version"),
         bundle_digest: row.get("bundle_digest"),
         spec_digest: row.get("spec_digest"),

@@ -189,6 +189,7 @@ pub struct PostgresInstalledAppRow {
     pub closure_id: String,
     pub registry_url: String,
     pub registry_tenant: String,
+    pub dependency_lock_digest: String,
     pub app_version: String,
     pub bundle_digest: String,
     pub spec_digest: String,
@@ -1396,6 +1397,7 @@ impl PostgresEventStore {
             closure_id: String::new(),
             registry_url: String::new(),
             registry_tenant: String::new(),
+            dependency_lock_digest: String::new(),
             app_version: String::new(),
             bundle_digest: String::new(),
             spec_digest: String::new(),
@@ -1417,16 +1419,17 @@ impl PostgresEventStore {
         let last_reconciled_at = parse_optional_rfc3339(record.last_reconciled_at.as_deref())?;
         crate::dbm::postgres_query!(
             "INSERT INTO tenant_installed_apps \
-             (tenant, app_name, source_kind, app_ref, version_hash, pinned_version_hash, current_version_hash, follow_policy, closure_id, registry_url, registry_tenant, \
+             (tenant, app_name, source_kind, app_ref, version_hash, pinned_version_hash, current_version_hash, follow_policy, closure_id, registry_url, registry_tenant, dependency_lock_digest, \
               app_version, bundle_digest, spec_digest, policy_digest, wasm_digest, \
               content_digest, seed_digest, installed_at, last_reconciled_at, status) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, now(), $19, $20) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, now(), $20, $21) \
              ON CONFLICT (tenant, app_name) DO UPDATE SET \
                  source_kind = EXCLUDED.source_kind, app_ref = EXCLUDED.app_ref, \
                  version_hash = EXCLUDED.version_hash, pinned_version_hash = EXCLUDED.pinned_version_hash, \
                  current_version_hash = EXCLUDED.current_version_hash, follow_policy = EXCLUDED.follow_policy, \
                  closure_id = EXCLUDED.closure_id, \
                  registry_url = EXCLUDED.registry_url, registry_tenant = EXCLUDED.registry_tenant, \
+                 dependency_lock_digest = EXCLUDED.dependency_lock_digest, \
                  app_version = EXCLUDED.app_version, bundle_digest = EXCLUDED.bundle_digest, \
                  spec_digest = EXCLUDED.spec_digest, policy_digest = EXCLUDED.policy_digest, \
                  wasm_digest = EXCLUDED.wasm_digest, content_digest = EXCLUDED.content_digest, \
@@ -1443,6 +1446,7 @@ impl PostgresEventStore {
         .bind(&record.closure_id)
         .bind(&record.registry_url)
         .bind(&record.registry_tenant)
+        .bind(&record.dependency_lock_digest)
         .bind(&record.app_version)
         .bind(&record.bundle_digest)
         .bind(&record.spec_digest)
@@ -1464,7 +1468,7 @@ impl PostgresEventStore {
         app_name: &str,
     ) -> Result<Option<PostgresInstalledAppRow>, PersistenceError> {
         let row = crate::dbm::postgres_query!(
-            "SELECT tenant, app_name, source_kind, app_ref, version_hash, pinned_version_hash, current_version_hash, follow_policy, closure_id, registry_url, registry_tenant, \
+            "SELECT tenant, app_name, source_kind, app_ref, version_hash, pinned_version_hash, current_version_hash, follow_policy, closure_id, registry_url, registry_tenant, dependency_lock_digest, \
                     app_version, bundle_digest, spec_digest, policy_digest, \
                     wasm_digest, content_digest, seed_digest, installed_at, last_reconciled_at, status \
              FROM tenant_installed_apps WHERE tenant = $1 AND app_name = $2",

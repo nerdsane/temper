@@ -12,6 +12,8 @@ mod codegen;
 mod decide;
 mod init;
 mod install;
+mod local;
+mod local_args;
 mod mcp;
 mod migrate_turso_to_postgres;
 mod module_sdk;
@@ -51,6 +53,12 @@ struct Cli {
 enum Commands {
     /// Initialize a new Temper project
     Init { name: String },
+    /// Run a persistent, self-contained local Temper instance.
+    Up(local_args::UpArgs),
+    /// Manage immutable local application bundles.
+    App(local_args::AppArgs),
+    /// Watch a local app and promote each verified immutable revision.
+    Dev(local_args::DevArgs),
     /// Generate Rust code from specifications
     Codegen {
         /// Path to the specs directory
@@ -309,6 +317,9 @@ async fn async_main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Init { name } => init::run(&name)?,
+        Commands::Up(args) => local::run_up(args).await?,
+        Commands::App(args) => local::run_app(args).await?,
+        Commands::Dev(args) => local::run_dev(args).await?,
         Commands::Install {
             app_ref,
             tenant,
@@ -415,6 +426,10 @@ async fn async_main() -> anyhow::Result<()> {
                 verify_subprocess,
                 discord_token,
                 tenant,
+                None,
+                "0.0.0.0".to_string(),
+                None,
+                None,
             )
             .await?
         }

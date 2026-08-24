@@ -18,14 +18,15 @@ reqwest = { workspace = true }
 sha2 = { workspace = true }
 tracing = { workspace = true }
 hostname = { workspace = true }
+axum = { workspace = true }
 
 # pydantic/monty Rust sandbox crate
 monty = { git = "https://github.com/pydantic/monty.git", package = "monty", rev = "bf7c7ef" }
 
 [dev-dependencies]
-axum = { workspace = true }
 temper-platform = { workspace = true }
 temper-server = { workspace = true, features = ["observe"] }
 temper-runtime = { workspace = true }
 temper-spec = { workspace = true }
 temper-store-turso = { workspace = true }
+tower = { workspace = true }

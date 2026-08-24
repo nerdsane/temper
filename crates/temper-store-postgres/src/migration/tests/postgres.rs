@@ -338,7 +338,7 @@ async fn real_postgres_restarts_after_every_boundary_and_converges_identically()
             }
             assert_eq!(
                 migrated_history.last().map(|row| row.0),
-                Some(17),
+                Some(18),
                 "{lineage:?} boundary {boundary} did not reach the shared stream"
             );
             assert_union_schema(&pool).await;

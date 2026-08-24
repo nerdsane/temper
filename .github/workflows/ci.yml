@@ -233,7 +233,9 @@ jobs:
     name: DST/Platform Tests (${{ matrix.lane }})
     needs: verification-contract
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The longest lane has a 20-minute command budget; reserve time for
+    # checkout, toolchain setup, report upload, and Rust cache finalization.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -275,7 +277,9 @@ jobs:
   instrumentation-hygiene:
     name: Instrumentation Hygiene (ADR-0052)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The lane has a 10-minute command budget; post-job cache finalization
+    # must not turn a successful validation into a cancelled job.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-setup

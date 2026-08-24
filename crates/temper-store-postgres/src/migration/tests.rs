@@ -77,7 +77,7 @@ fn embedded_migration_streams_preserve_every_published_boundary() {
             .iter()
             .map(|migration| migration.version)
             .collect::<Vec<_>>(),
-        vec![17]
+        vec![17, 18]
     );
     assert_ne!(
         migration_at(&FORK_MIGRATOR, 12).unwrap().checksum,

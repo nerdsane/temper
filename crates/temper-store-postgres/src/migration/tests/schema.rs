@@ -15,6 +15,7 @@ fn versioned_migration_is_the_schema_source() {
         include_str!("../../../migrations/0010_key_index_backfill_watermark.sql"),
         include_str!("../../../migrations/0011_key_index_watermark_key_set.sql"),
         include_str!("../../../migrations-shared/0017_converge_migration_lineages.sql"),
+        include_str!("../../../migrations-shared/0018_installed_app_local_provenance.sql"),
     ]
     .join("\n")
     .to_lowercase();

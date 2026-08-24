@@ -10,10 +10,14 @@
 mod actor_runtime;
 mod bootstrap;
 mod loader;
+mod local_observe;
 mod storage;
 
 use std::collections::{BTreeMap, HashMap};
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use tokio::io::AsyncBufReadExt;
@@ -66,6 +70,10 @@ pub async fn run(
     verify_subprocess: bool,
     discord_bot_token: Option<String>,
     tenant: String,
+    data_dir_override: Option<PathBuf>,
+    bind_host: String,
+    api_token_override: Option<String>,
+    local_observe: Option<bool>,
 ) -> Result<()> {
     let _otel_guard = init_observability("temper-platform");
     temper_authz::init_metrics();
@@ -74,8 +82,12 @@ pub async fn run(
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
     // Phase 1: Storage backend
-    let (pg_pool, storage_stack) =
-        bootstrap::init_storage(storage.clone(), storage_explicit).await?;
+    let (pg_pool, storage_stack) = bootstrap::init_storage(
+        storage.clone(),
+        storage_explicit,
+        data_dir_override.as_deref(),
+    )
+    .await?;
 
     // Phase 2: Registry (restore + disk apps)
     let (registry, tenant_policy_seed) =
@@ -84,15 +96,14 @@ pub async fn run(
     // Assemble platform state
     let mut state = PlatformState::with_registry(registry, api_key);
     let mut pg_actor_runtime_cancel = None;
-    state.api_token = std::env::var("TEMPER_API_KEY").ok();
+    state.api_token = api_token_override.or_else(|| std::env::var("TEMPER_API_KEY").ok());
     if state.api_token.is_some() {
         println!("  API key: configured (Bearer token required)");
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let data_dir = Path::new(&home).join(".local/share/temper");
+    let data_dir = bootstrap::resolve_data_dir(data_dir_override)?;
     state.server.data_dir = data_dir.clone();
 
-    seed_cedar_policies(&state, tenant_policy_seed);
+    bootstrap::seed_cedar_policies(&state, tenant_policy_seed);
     state.server.rebuild_reaction_dispatcher();
 
     // Configure subprocess verification if requested.
@@ -239,7 +250,7 @@ pub async fn run(
     }
 
     // Phase 8: Bootstrap system + agent tenants
-    bootstrap::bootstrap_tenants(&state, &apps).await;
+    bootstrap::bootstrap_tenants(&state, &apps, &tenant).await;
     // Phase 8b: Restore persisted apps + apply CLI `--app` requests.
     bootstrap::bootstrap_installed_apps(&state, &os_app_installs).await?;
     if actor_runtime == ActorRuntimeBackend::Postgres {
@@ -255,8 +266,7 @@ pub async fn run(
     }
 
     // Phase 9: Bind, start background tasks, serve
-    let router = build_platform_router(state.clone());
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
+    let listener = tokio::net::TcpListener::bind(format!("{bind_host}:{port}"))
         .await
         .with_context(|| format!("Failed to bind to port {port}"))?;
     let actual_port = listener
@@ -264,6 +274,13 @@ pub async fn run(
         .context("Failed to get listener local address")?
         .port();
     let _ = state.server.listen_port.set(actual_port);
+
+    let mut router = build_platform_router(state.clone());
+    let mut local_summary = String::new();
+    if let (Some(open_after_start), Some(token)) = (local_observe, state.api_token.clone()) {
+        (router, local_summary) =
+            local_observe::install(router, actual_port, token, tenant.clone(), open_after_start)?;
+    }
 
     if observe {
         spawn_observe_ui(actual_port);
@@ -323,30 +340,12 @@ pub async fn run(
         }
     }
 
-    println!("Listening on http://0.0.0.0:{actual_port}");
+    println!("Listening on http://{bind_host}:{actual_port}{local_summary}");
     axum::serve(listener, router)
         .await
         .context("Server error")?;
 
     Ok(())
-}
-
-fn seed_cedar_policies(state: &PlatformState, tenant_policy_seed: BTreeMap<String, String>) {
-    for (tenant, policy_text) in &tenant_policy_seed {
-        if let Err(e) = state
-            .server
-            .authz
-            .reload_tenant_policies(tenant, policy_text)
-        {
-            eprintln!("  Warning: failed to load Cedar policies for tenant '{tenant}': {e}");
-            continue;
-        }
-    }
-    // Update in-memory text cache.
-    let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-    for (tenant, policy_text) in tenant_policy_seed {
-        policies.insert(tenant, policy_text);
-    }
 }
 
 fn cache_platform_secret_if_present(
