@@ -29,6 +29,20 @@ fn canonical_grant_digest_ignores_entity_declaration_order() {
 }
 
 #[test]
+fn sequence_order_grant_is_wire_absent_until_enabled() {
+    let mut entity = EntityDataGrant {
+        entity_type: "Temper.Task".into(),
+        ..EntityDataGrant::default()
+    };
+    let disabled = serde_json::to_value(&entity).unwrap();
+    assert!(disabled.get("query_order_by_sequence").is_none());
+
+    entity.query_order_by_sequence = true;
+    let enabled = serde_json::to_value(&entity).unwrap();
+    assert_eq!(enabled["query_order_by_sequence"], serde_json::json!(true));
+}
+
+#[test]
 fn duplicate_entity_grants_fail() {
     let grant = ModuleDataGrant {
         entities: vec![

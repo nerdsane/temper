@@ -539,7 +539,7 @@ async fn try_resolve_composite_entity_key(
     let filter = composite_key_filter(key_pairs)?;
     let translated = filter_sql::try_translate_candidate_filter(&filter)?;
     let order_by = [QueryFieldIndexOrder {
-        field_name: "entity_id".to_string(),
+        target: crate::storage::QueryFieldIndexOrderTarget::EntityId,
         direction: QueryFieldIndexOrderDirection::Asc,
     }];
     let page = match crate::application_data::GovernedApplicationDataService::new(state)

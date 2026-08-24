@@ -103,7 +103,10 @@ pub(super) fn emit_query_types(
         .iter()
         .filter(|property| grant.query_order_fields.contains(&property.canonical_name))
     {
-        source.push_str(&format!("    pub fn {}(direction: OrderDirectionV1) -> Self {{ Self(OrderV1 {{ field: \"{}\".into(), direction }}) }}\n", property.generated_name, property.canonical_name));
+        source.push_str(&format!("    pub fn {}(direction: OrderDirectionV1) -> Self {{ Self(OrderV1::property(\"{}\", direction)) }}\n", property.generated_name, property.canonical_name));
+    }
+    if grant.query_order_by_sequence {
+        source.push_str("    pub fn commit_sequence(direction: OrderDirectionV1) -> Self { Self(OrderV1::EntityCommitSequence { direction }) }\n");
     }
     source.push_str("}\n\n");
 }

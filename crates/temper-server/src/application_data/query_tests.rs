@@ -64,13 +64,60 @@ fn fallback_order_matches_declared_direction_and_null_rules() {
             Some(&low),
             "b",
             Some(&high),
-            &[OrderV1 {
-                field: "Estimate".into(),
-                direction: OrderDirectionV1::Asc,
-            }],
+            &[OrderV1::property("Estimate", OrderDirectionV1::Asc)],
             &schema
         ),
         Ordering::Less
+    );
+}
+
+#[test]
+fn fallback_orders_by_host_owned_commit_sequence() {
+    let response = |id: &str, sequence_nr| crate::entity_actor::EntityResponse {
+        success: true,
+        state: crate::entity_actor::EntityState {
+            entity_type: "Task".into(),
+            entity_id: id.into(),
+            status: "Open".into(),
+            item_count: 0,
+            counters: BTreeMap::new(),
+            booleans: BTreeMap::new(),
+            lists: BTreeMap::new(),
+            fields: serde_json::json!({"sequence_nr": 999}),
+            events: std::collections::VecDeque::new(),
+            total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
+            sequence_nr,
+            processed_idempotency_keys: BTreeMap::new(),
+        },
+        error: None,
+        custom_effects: Vec::new(),
+        scheduled_actions: Vec::new(),
+        spawn_requests: Vec::new(),
+        spec_governed: true,
+    };
+    let schema = ManifestEntityV1 {
+        entity_type: "Temper.Task".into(),
+        entity_set: "Tasks".into(),
+        generated_name: "Task".into(),
+        properties: Vec::new(),
+        actions: Vec::new(),
+    };
+    let older = response("a", 3);
+    let newer = response("b", 7);
+    assert_eq!(
+        compare_fallback_entities(
+            "a",
+            Some(&older),
+            "b",
+            Some(&newer),
+            &[OrderV1::EntityCommitSequence {
+                direction: OrderDirectionV1::Desc,
+            }],
+            &schema,
+        ),
+        Ordering::Greater
     );
 }
 

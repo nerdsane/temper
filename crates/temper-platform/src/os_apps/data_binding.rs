@@ -81,6 +81,7 @@ fn grant_is_equal_or_narrower(candidate: &ModuleDataGrant, prior: &ModuleDataGra
             .is_some_and(|prior| {
                 entity.actions.is_subset(&prior.actions)
                     && entity.composite_actions.is_subset(&prior.composite_actions)
+                    && (!entity.query_order_by_sequence || prior.query_order_by_sequence)
                     && entity
                         .query_filter_fields
                         .is_subset(&prior.query_filter_fields)
@@ -120,6 +121,18 @@ mod tests {
             }],
             ..ModuleDataGrant::default()
         }
+    }
+
+    #[test]
+    fn sequence_order_permission_cannot_widen_during_compatibility() {
+        let prior = grant();
+        let mut candidate = prior.clone();
+        candidate.entities[0].query_order_by_sequence = true;
+        assert!(!grant_is_equal_or_narrower(&candidate, &prior));
+
+        let mut prior = prior;
+        prior.entities[0].query_order_by_sequence = true;
+        assert!(grant_is_equal_or_narrower(&candidate, &prior));
     }
 
     #[test]

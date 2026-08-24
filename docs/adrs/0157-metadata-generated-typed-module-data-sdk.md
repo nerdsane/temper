@@ -143,6 +143,7 @@ actions = ["StartWork", "Complete"]
 composite_actions = []
 query_filter_fields = ["Status", "AssigneeId"]
 query_order_fields = ["CreatedAt", "Id"]
+query_order_by_sequence = true
 file_operations = []
 
 [[wasm_modules.data.entities]]
@@ -274,7 +275,8 @@ ScalarV1 =
   | Decimal(canonical-string)
   | Enum { type_name, member }
 
-OrderV1 { field, direction: asc | desc }
+OrderV1 = Property { field, direction: asc | desc }
+        | EntityCommitSequence { direction: asc | desc }
 PageV1 { limit, cursor? }
 ```
 
@@ -728,6 +730,107 @@ packaged module requires it.
 
 **Why this approach**: removing HTTP should remove transport overhead, not the
 evidence used to govern and diagnose application behavior.
+
+### Sub-Decision 14: Make Offline Candidate Builds App-Rooted And Explicit
+
+Provide two offline `temper module-sdk` commands. The natural invocation names
+an app root and module, then lets Temper derive repository conventions from that
+root:
+
+```text
+temper module-sdk generate --app /repo/os-apps/paw-heal --module heal_reporter \
+  --dependency-root /repo/os-apps
+
+temper module-sdk bind --app /repo/os-apps/paw-heal --module heal_reporter \
+  --dependency-root /repo/os-apps \
+  --wasm /repo/target/wasm32-wasip1/release/heal_reporter.wasm
+```
+
+`--app` is an explicit filesystem anchor, never an app name resolved through a
+server or catalog. A relative `--app` is resolved once against the caller's
+working directory and canonicalized. Relative override paths are then resolved
+exactly once against that canonical app root; after that, all
+discovery is constrained beneath the canonical app and dependency roots. The
+commands never search upward from the current directory and never consult
+Temper server state, Genesis, environment-selected app catalogs, or HTTP.
+
+By convention, generation writes
+`wasm/<module>/src/temper_module_sdk.rs` and `temper-module-sdk.lock` beneath the
+app root. Binding writes `wasm/<module>/<module>.wasm` and updates the exact
+`app.toml` beneath that root. Explicit `--source-out`, `--lock`,
+`--bound-wasm-out`, and `--app-manifest` overrides support nonstandard layouts;
+every override must still be named rather than inferred from the current
+directory. The commands print the resolved inputs and outputs so CI and humans
+can see the complete build contract.
+
+A dependency root is an explicitly supplied directory containing one or more
+app directories. Resolution reads only the root app's declared dependency
+graph and matches each dependency to exactly one supplied local app manifest.
+Missing dependencies, duplicate candidates, cycles, manifest-name mismatches,
+unsafe paths, and conflicting CSDL/IOA symbols fail closed. Resolution parses
+and validates every declared app manifest and IOA automaton and the single
+unambiguous CSDL document in each app, merges the
+closure in deterministic dependency order, and rejects incompatible duplicate
+entity, enum, action, function, term, entity-set, action-import, or
+function-import symbols rather than relying on merge precedence. Unrelated apps
+under a dependency root are indexed by directory name but never parsed.
+
+The v1 resolver applies explicit budgets before allocation: at most 32
+dependency roots, 4,096 directory entries per dependency root, 1,024 candidate
+apps, 128 apps in the declared closure, 1,024 metadata directory entries, and
+256 IOA files per app. Individual manifests are capped at 1 MiB, CSDL at 8 MiB,
+IOA files at 2 MiB, and aggregate metadata at 32 MiB per app. Exceeding a budget
+fails before an unbounded read or closure merge.
+
+Compiled, existing bound, and final bound WASM artifacts are individually
+capped at 256 MiB. Output paths are normalized before use and must be distinct
+from the app manifest, generated source, lock, and compiler input; aliases fail
+before any read or write.
+
+The generated TOML lock contains the resolver version, root identity, stable
+dependency edges, app versions, and canonical metadata digests. Candidate
+metadata digests exclude generated SDK source, final data bindings, and compiled
+WASM so the pre-compilation lock has no digest cycle. They include every
+generation-relevant app manifest grant, CSDL document, IOA specification, and
+declared dependency edge. Canonical CSDL emission sorts record annotations
+before schema hashing; canonical ordering and length-framed hashing make
+identical inputs byte-for-byte reproducible.
+
+`generate --check` recomputes the closure and fails without writing if either
+the lock or generated source differs. `bind` recomputes the same closure and
+source expectation, packages the supplied unbound WASM with the exact binding,
+writes the conventional final artifact, and updates the module's manifest
+binding without discarding unrelated formatting or comments. `bind --check`
+performs all regeneration and binding checks in memory and fails without
+writing on source, lock, grant, binding, manifest, input-WASM, or final-WASM
+drift. Binding an already-bound input fails closed. Final artifact and manifest
+outputs are staged before publication; if manifest publication fails after the
+artifact rename, the prior artifact is restored so the app never points at a
+partially published binding.
+
+Local locks are candidate evidence, not publication authority. They let a
+consumer compile before it can contact Genesis. When Genesis later publishes
+or resolves the app, its immutable published bundle and dependency closure are
+authoritative. If they diverge from the local candidate, publication and
+activation reject the candidate binding; tooling must regenerate and rebuild
+against the Genesis closure rather than silently preserving local metadata.
+
+Entity commit sequence is a typed query-order target, not a reserved property
+name. A module receives the generated `commit_sequence` order constructor only
+when its entity grant declares `query_order_by_sequence = true`. The host carries
+the typed target through query validation and storage planning; Turso and
+PostgreSQL order by their host-owned `entity_catalog.sequence_nr` column, and
+the bounded authoritative fallback compares hydrated `sequence_nr` values.
+Callers cannot supply a fake entity property to impersonate the sequence.
+Generation rejects a granted CSDL property whose Rust order constructor would
+also normalize to `commit_sequence`.
+Property ordering retains its existing ABI representation and semantics, and
+external OData continues to expose only declared CSDL properties.
+
+**Why this approach**: one app-root anchor makes the common workflow concise,
+while explicit dependency roots and typed order targets keep resolution and
+host-owned metadata fail closed. Separate unbound input and conventional bound
+output make drift checks repeatable and prevent double-binding corruption.
 
 ## Rollout Plan
 

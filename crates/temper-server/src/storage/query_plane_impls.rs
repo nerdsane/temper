@@ -1,22 +1,32 @@
-use temper_runtime::persistence::PersistenceError;
+use temper_runtime::persistence::{
+    PersistenceError, QueryProjectionOrder, QueryProjectionOrderTarget,
+};
 use temper_store_postgres::PostgresEventStore;
 use temper_store_turso::{
     QueryProjectionUpsert as TursoQueryProjectionUpsert, TenantStoreRouter, TursoEventStore,
 };
 
 use super::{
-    EntityCatalogRow, QueryFieldIndexOrder, QueryFieldIndexOrderDirection, QueryFieldIndexPage,
-    QueryPlaneStore, QueryProjectionFieldsRow, QueryProjectionUpsert,
+    EntityCatalogRow, QueryFieldIndexOrder, QueryFieldIndexOrderDirection,
+    QueryFieldIndexOrderTarget, QueryFieldIndexPage, QueryPlaneStore, QueryProjectionFieldsRow,
+    QueryProjectionUpsert,
 };
 
-fn storage_order_by(order_by: &[QueryFieldIndexOrder]) -> Vec<(String, bool)> {
+fn storage_order_by(order_by: &[QueryFieldIndexOrder]) -> Vec<QueryProjectionOrder> {
     order_by
         .iter()
-        .map(|order| {
-            (
-                order.field_name.clone(),
-                order.direction == QueryFieldIndexOrderDirection::Desc,
-            )
+        .map(|order| QueryProjectionOrder {
+            target: match &order.target {
+                QueryFieldIndexOrderTarget::Property(field) => {
+                    QueryProjectionOrderTarget::Property(field.clone())
+                }
+                QueryFieldIndexOrderTarget::Status => QueryProjectionOrderTarget::Status,
+                QueryFieldIndexOrderTarget::EntityId => QueryProjectionOrderTarget::EntityId,
+                QueryFieldIndexOrderTarget::EntityCommitSequence => {
+                    QueryProjectionOrderTarget::EntityCommitSequence
+                }
+            },
+            descending: order.direction == QueryFieldIndexOrderDirection::Desc,
         })
         .collect()
 }

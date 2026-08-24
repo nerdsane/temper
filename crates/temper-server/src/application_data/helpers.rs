@@ -94,7 +94,9 @@ pub(super) fn validate_operation_identifiers(
         } => {
             identifier(entity_type)?;
             for order in order_by {
-                identifier(&order.field)?;
+                if let temper_wasm_sdk::data::OrderV1::Property { field, .. } = order {
+                    identifier(field)?;
+                }
             }
             Ok(())
         }

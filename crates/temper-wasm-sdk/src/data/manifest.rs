@@ -124,9 +124,16 @@ pub struct EntityDataGrant {
     /// Fields accepted in v1 query ordering.
     #[serde(default)]
     pub query_order_fields: BTreeSet<String>,
+    /// Whether generated queries may order by the host-owned commit sequence.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub query_order_by_sequence: bool,
     /// File operations available for this File entity type.
     #[serde(default)]
     pub file_operations: BTreeSet<FileOperationKind>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl EntityDataGrant {

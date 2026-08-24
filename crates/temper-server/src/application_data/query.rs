@@ -11,6 +11,7 @@ use temper_wasm_sdk::data::{
     SequencedValueV1,
 };
 
+use crate::storage::QueryFieldIndexOrderTarget;
 use crate::storage::{QueryFieldIndexOrder, QueryFieldIndexOrderDirection};
 
 use super::{
@@ -21,6 +22,9 @@ use super::{
 #[path = "query/decimal.rs"]
 mod decimal;
 use decimal::compare_decimal;
+#[path = "query/order.rs"]
+mod order;
+use order::compare_fallback_entities;
 
 impl ApplicationDataInvocation {
     pub(super) async fn entity_query(
@@ -75,12 +79,24 @@ impl ApplicationDataInvocation {
             &mut filter_nodes,
         )?;
         for order in order_by {
-            if !entity_grant.query_order_fields.contains(&order.field) {
-                return Err(data_error(
-                    ModuleDataErrorKind::AuthorizationDenied,
-                    "QueryFieldDenied",
-                    "query ordering field is not granted",
-                ));
+            match order {
+                OrderV1::Property { field, .. }
+                    if !entity_grant.query_order_fields.contains(field) =>
+                {
+                    return Err(data_error(
+                        ModuleDataErrorKind::AuthorizationDenied,
+                        "QueryFieldDenied",
+                        "query ordering field is not granted",
+                    ));
+                }
+                OrderV1::EntityCommitSequence { .. } if !entity_grant.query_order_by_sequence => {
+                    return Err(data_error(
+                        ModuleDataErrorKind::AuthorizationDenied,
+                        "QuerySequenceDenied",
+                        "query ordering by entity commit sequence is not granted",
+                    ));
+                }
+                _ => {}
             }
         }
         let digest = query_digest(entity_type, filter, order_by)?;
@@ -90,14 +106,21 @@ impl ApplicationDataInvocation {
         let projected_order = order_by
             .iter()
             .map(|order| QueryFieldIndexOrder {
-                field_name: order.field.clone(),
-                direction: match order.direction {
+                target: match order {
+                    OrderV1::Property { field, .. } => {
+                        QueryFieldIndexOrderTarget::Property(field.clone())
+                    }
+                    OrderV1::EntityCommitSequence { .. } => {
+                        QueryFieldIndexOrderTarget::EntityCommitSequence
+                    }
+                },
+                direction: match order.direction() {
                     OrderDirectionV1::Asc => QueryFieldIndexOrderDirection::Asc,
                     OrderDirectionV1::Desc => QueryFieldIndexOrderDirection::Desc,
                 },
             })
             .chain(std::iter::once(QueryFieldIndexOrder {
-                field_name: "entity_id".into(),
+                target: QueryFieldIndexOrderTarget::EntityId,
                 direction: QueryFieldIndexOrderDirection::Asc,
             }))
             .collect::<Vec<_>>();
@@ -412,84 +435,6 @@ fn compare_scalar(actual: Option<&Value>, expected: &ScalarV1) -> Option<Orderin
         (Value::String(actual), ScalarV1::Decimal(expected)) => compare_decimal(actual, expected),
         (Value::String(actual), ScalarV1::Enum(expected)) => actual.partial_cmp(&expected.member),
         _ => None,
-    }
-}
-
-fn compare_fallback_entities(
-    left_id: &str,
-    left: Option<&crate::entity_actor::EntityResponse>,
-    right_id: &str,
-    right: Option<&crate::entity_actor::EntityResponse>,
-    order_by: &[OrderV1],
-    schema: &ManifestEntityV1,
-) -> Ordering {
-    let left_fields = left.and_then(|response| response.state.fields.as_object());
-    let right_fields = right.and_then(|response| response.state.fields.as_object());
-    for order in order_by {
-        let type_name = schema
-            .properties
-            .iter()
-            .find(|property| property.canonical_name == order.field)
-            .map(|property| property.type_name.as_str())
-            .unwrap_or("Edm.String");
-        let ordering = compare_order_values(
-            left_fields.and_then(|fields| fields.get(&order.field)),
-            right_fields.and_then(|fields| fields.get(&order.field)),
-            type_name,
-            order.direction,
-        );
-        if ordering != Ordering::Equal {
-            return ordering;
-        }
-    }
-    left_id.cmp(right_id)
-}
-
-fn compare_order_values(
-    left: Option<&Value>,
-    right: Option<&Value>,
-    type_name: &str,
-    direction: OrderDirectionV1,
-) -> Ordering {
-    let left = left.filter(|value| !value.is_null());
-    let right = right.filter(|value| !value.is_null());
-    let ordering = match (left, right) {
-        (None, None) => Ordering::Equal,
-        // Query-plane parity: NULLS LAST for ascending and NULLS FIRST for descending.
-        (None, Some(_)) => Ordering::Greater,
-        (Some(_), None) => Ordering::Less,
-        (Some(left), Some(right)) => compare_typed_json(left, right, type_name),
-    };
-    match direction {
-        OrderDirectionV1::Asc => ordering,
-        OrderDirectionV1::Desc => ordering.reverse(),
-    }
-}
-
-fn compare_typed_json(left: &Value, right: &Value, type_name: &str) -> Ordering {
-    match type_name {
-        "Edm.Boolean" => left.as_bool().cmp(&right.as_bool()),
-        "Edm.Byte" | "Edm.Int16" | "Edm.Int32" | "Edm.Int64" => left.as_i64().cmp(&right.as_i64()),
-        "Edm.Single" | "Edm.Double" => left
-            .as_f64()
-            .and_then(|left| right.as_f64().and_then(|right| left.partial_cmp(&right)))
-            .unwrap_or(Ordering::Equal),
-        "Edm.Decimal" => left
-            .as_str()
-            .zip(right.as_str())
-            .and_then(|(left, right)| compare_decimal(left, right))
-            .unwrap_or(Ordering::Equal),
-        "Edm.DateTimeOffset" => left
-            .as_str()
-            .and_then(|left| chrono::DateTime::parse_from_rfc3339(left).ok())
-            .zip(
-                right
-                    .as_str()
-                    .and_then(|right| chrono::DateTime::parse_from_rfc3339(right).ok()),
-            )
-            .map(|(left, right)| left.cmp(&right))
-            .unwrap_or(Ordering::Equal),
-        _ => left.as_str().cmp(&right.as_str()),
     }
 }
 
