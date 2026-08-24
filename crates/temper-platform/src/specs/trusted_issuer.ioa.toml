@@ -1,0 +1,105 @@
+# TrustedIssuer Entity — I/O Automaton Specification
+#
+# A per-tenant allowlist entry for a JWT issuer the kernel will trust. The
+# bearer resolver verifies platform-issued ES256 tokens against the JWKS
+# registered here (entity id = the issuer URL, i.e. the token's `iss` claim).
+# Keys are stored inline so token verification makes no outbound HTTP call and
+# stays deterministic under DST; rotation is a governed action, not an
+# automatic JWKS refetch.
+#
+# See RFC-0002 (First-Class Authorization) and ADR-0033 (Platform-Assigned
+# Agent Identity).
+
+[automaton]
+name = "TrustedIssuer"
+states = ["Active", "Suspended", "Revoked"]
+initial = "Active"
+
+# --- State Variables ---
+
+[[state]]
+name = "issuer"
+type = "string"
+initial = ""
+
+# Inline JWKS document (JSON) holding the issuer's public keys.
+[[state]]
+name = "jwks_json"
+type = "string"
+initial = ""
+
+# Expected `aud` claim for tokens from this issuer.
+[[state]]
+name = "audience"
+type = "string"
+initial = ""
+
+# Accepted signing algorithms (informational; the verifier enforces ES256).
+[[state]]
+name = "algorithms"
+type = "string"
+initial = "ES256"
+
+[[state]]
+name = "description"
+type = "string"
+initial = ""
+
+[[state]]
+name = "created_by"
+type = "string"
+initial = ""
+
+# --- Actions ---
+
+[[action]]
+name = "RegisterIssuer"
+kind = "input"
+from = ["Active"]
+params = ["issuer", "jwks_json", "audience", "algorithms", "description", "created_by"]
+hint = "Register a trusted JWT issuer for this tenant. Entity id must be the issuer URL."
+
+[[action]]
+name = "RotateIssuerKeys"
+kind = "input"
+from = ["Active"]
+params = ["jwks_json"]
+hint = "Replace the issuer's inline JWKS with a rotated key set."
+
+[[action]]
+name = "SuspendIssuer"
+kind = "input"
+from = ["Active"]
+to = "Suspended"
+hint = "Temporarily stop trusting tokens from this issuer without discarding its registration."
+
+[[action]]
+name = "ResumeIssuer"
+kind = "input"
+from = ["Suspended"]
+to = "Active"
+hint = "Resume trusting tokens from a suspended issuer."
+
+[[action]]
+name = "RevokeIssuer"
+kind = "input"
+from = ["Active", "Suspended"]
+to = "Revoked"
+hint = "Permanently stop trusting this issuer."
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "ActiveRequiresIssuer"
+when = ["Active"]
+assert = "issuer != ''"
+
+[[invariant]]
+name = "ActiveRequiresJwks"
+when = ["Active"]
+assert = "jwks_json != ''"
+
+[[invariant]]
+name = "ActiveRequiresAudience"
+when = ["Active"]
+assert = "audience != ''"

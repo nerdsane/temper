@@ -1,4 +1,7 @@
-//! temper-verify: Model checking, simulation, and property-based testing.
+//! How verified: L0–L3 cascade. Must not become a second kernel.
+//!
+//! `ModelEffect` / `apply_effects` in `model/semantics.rs` is a third interpreter.
+//! Production apply is `temper-server` `entity_actor/effects.rs`.
 //!
 //! Four-level verification cascade:
 //! 0. **SMT symbolic verification** — Z3-based algebraic verification

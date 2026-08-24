@@ -141,6 +141,25 @@
         <Property Name="reason" Type="Edm.String"/>
       </EntityType>
 
+      <EntityType Name="TrustedIssuer">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="issuer" Type="Edm.String"/>
+        <Property Name="jwks_json" Type="Edm.String"/>
+        <Property Name="audience" Type="Edm.String"/>
+        <Property Name="algorithms" Type="Edm.String"/>
+        <Property Name="description" Type="Edm.String"/>
+        <Property Name="created_by" Type="Edm.String"/>
+      </EntityType>
+
+      <EntityType Name="PrincipalGeneration">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="generation" Type="Edm.Int64"/>
+      </EntityType>
+
       <Action Name="Issue" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.AgentCredential"/>
         <Parameter Name="agent_type_id" Type="Edm.String" Nullable="false"/>
@@ -164,6 +183,43 @@
       <Action Name="Revoke" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.AgentCredential"/>
         <ReturnType Type="Temper.AgentCredential"/>
+      </Action>
+
+      <Action Name="RegisterIssuer" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.TrustedIssuer"/>
+        <Parameter Name="issuer" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="jwks_json" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="audience" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="algorithms" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="description" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="created_by" Type="Edm.String" Nullable="true"/>
+        <ReturnType Type="Temper.TrustedIssuer"/>
+      </Action>
+
+      <Action Name="RotateIssuerKeys" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.TrustedIssuer"/>
+        <Parameter Name="jwks_json" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.TrustedIssuer"/>
+      </Action>
+
+      <Action Name="SuspendIssuer" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.TrustedIssuer"/>
+        <ReturnType Type="Temper.TrustedIssuer"/>
+      </Action>
+
+      <Action Name="ResumeIssuer" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.TrustedIssuer"/>
+        <ReturnType Type="Temper.TrustedIssuer"/>
+      </Action>
+
+      <Action Name="RevokeIssuer" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.TrustedIssuer"/>
+        <ReturnType Type="Temper.TrustedIssuer"/>
+      </Action>
+
+      <Action Name="BumpGeneration" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.PrincipalGeneration"/>
+        <ReturnType Type="Temper.PrincipalGeneration"/>
       </Action>
 
       <EntityContainer Name="Service">
@@ -191,6 +247,8 @@
         <EntitySet Name="AgentCredentials" EntityType="Temper.AgentCredential">
           <NavigationPropertyBinding Path="AgentType" Target="AgentTypes"/>
         </EntitySet>
+        <EntitySet Name="TrustedIssuers" EntityType="Temper.TrustedIssuer"/>
+        <EntitySet Name="PrincipalGenerations" EntityType="Temper.PrincipalGeneration"/>
       </EntityContainer>
 
     </Schema>

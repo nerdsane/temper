@@ -918,3 +918,150 @@ fn resource_role_cannot_satisfy_role_scoped_permit() {
         "resource.role must not satisfy context.role, got: {decision:?}"
     );
 }
+// --- Platform gate on the god-mode identity entities (ARN-255) ---------------
+
+/// RegisterIssuer / BumpGeneration must be System/Admin-only even when the
+/// tenant base is permit-all (the ARN-230 fail-open scenario) — the
+/// system-platform forbid overrides it. This is the fix for the "an agent
+/// registers its own signing key → mints owner tokens" takeover.
+///
+/// The platform's own operator credential (the shared API key, resolved through
+/// the bootstrapped operator AgentType) must still manage these entities under a
+/// PRODUCTION-shaped policy set — an app bundle that carries no permit for them
+/// at all. Locking it out breaks token issue/refresh, grant revocation and
+/// sign-out-everywhere, since the authorization server calls with exactly that
+/// credential. This is not a weakening: a holder of the shared key can already
+/// self-declare admin at the ingress.
+#[test]
+fn operator_credential_can_manage_identity_entities_under_app_policies() {
+    // An app bundle like katagami's: permits for its own entities, nothing for
+    // TrustedIssuer or PrincipalGeneration.
+    let engine = AuthzEngine::new("permit(principal, action, resource is DesignLanguage);")
+        .expect("policy parses");
+    let attrs = HashMap::new();
+
+    let operator = agent_context("operator", "operator");
+
+    for entity in ["TrustedIssuer", "PrincipalGeneration"] {
+        for action in ["read", "update", "RegisterIssuer", "BumpGeneration"] {
+            assert!(
+                engine
+                    .authorize(&operator, action, entity, &attrs)
+                    .is_allowed(),
+                "the operator credential must be able to {action} {entity}"
+            );
+        }
+    }
+
+    // A contributor agent is still shut out under the same policy set.
+    let contributor = agent_context("kc_attacker", "contributor");
+    for entity in ["TrustedIssuer", "PrincipalGeneration"] {
+        for action in ["read", "update", "RegisterIssuer", "BumpGeneration"] {
+            assert!(
+                !engine
+                    .authorize(&contributor, action, entity, &attrs)
+                    .is_allowed(),
+                "a contributor must not {action} {entity}"
+            );
+        }
+    }
+}
+
+#[test]
+fn issuer_registry_is_admin_system_only_even_on_permit_all() {
+    let engine = AuthzEngine::permissive(); // permit(principal, action, resource) + system-platform
+    let attrs = HashMap::new();
+
+    // Allowed: System (platform) and Admin (operator key / the AS).
+    assert!(
+        engine
+            .authorize(
+                &SecurityContext::system(),
+                "RegisterIssuer",
+                "TrustedIssuer",
+                &attrs
+            )
+            .is_allowed()
+    );
+    assert!(
+        engine
+            .authorize(&admin_context(), "RegisterIssuer", "TrustedIssuer", &attrs)
+            .is_allowed()
+    );
+
+    // Forbidden: a verified agent or human — the takeover path.
+    for action in ["RegisterIssuer", "RotateIssuerKeys", "RevokeIssuer"] {
+        assert!(
+            !engine
+                .authorize(
+                    &agent_context("kc_attacker", "contributor"),
+                    action,
+                    "TrustedIssuer",
+                    &attrs
+                )
+                .is_allowed(),
+            "agent must be forbidden from {action} on TrustedIssuer"
+        );
+        assert!(
+            !engine
+                .authorize(
+                    &customer_context("human-x"),
+                    action,
+                    "TrustedIssuer",
+                    &attrs
+                )
+                .is_allowed(),
+            "customer must be forbidden from {action} on TrustedIssuer"
+        );
+    }
+
+    // BumpGeneration (per-user sign-out DoS) is likewise gated.
+    assert!(
+        engine
+            .authorize(
+                &admin_context(),
+                "BumpGeneration",
+                "PrincipalGeneration",
+                &attrs
+            )
+            .is_allowed(),
+        "the AS (Admin) must be able to BumpGeneration"
+    );
+    assert!(
+        !engine
+            .authorize(
+                &agent_context("kc_attacker", "contributor"),
+                "BumpGeneration",
+                "PrincipalGeneration",
+                &attrs
+            )
+            .is_allowed(),
+        "an agent must not be able to sign out arbitrary users"
+    );
+
+    // Generic OData CRUD must not walk around the named actions: PATCH is
+    // authorized as "update", so a gate listing only named actions would let an
+    // agent rewrite TrustedIssuer.jwks_json with its own key and mint owner
+    // tokens. The forbid is resource-wide for exactly that reason.
+    for entity in ["TrustedIssuer", "PrincipalGeneration"] {
+        for action in ["create", "read", "update", "delete"] {
+            assert!(
+                !engine
+                    .authorize(
+                        &agent_context("kc_attacker", "contributor"),
+                        action,
+                        entity,
+                        &attrs
+                    )
+                    .is_allowed(),
+                "agent must not reach {entity} via generic {action}"
+            );
+            assert!(
+                engine
+                    .authorize(&admin_context(), action, entity, &attrs)
+                    .is_allowed(),
+                "Admin must still {action} {entity}"
+            );
+        }
+    }
+}

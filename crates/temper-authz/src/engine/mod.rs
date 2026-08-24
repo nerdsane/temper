@@ -139,8 +139,13 @@ impl AuthzEngine {
     /// so that Cedar evaluates to Allow for every principal kind (System or
     /// otherwise). Used in tests and permissive dev environments.
     pub fn permissive() -> Self {
-        let policy_set =
+        let mut policy_set =
             PolicySet::from_str("permit(principal, action, resource);").unwrap_or_default();
+        // Even a permit-all fallback (e.g. the ARN-230 fail-open path) must keep
+        // the system-platform forbids — the god-mode identity entities
+        // (TrustedIssuer / PrincipalGeneration) stay System/Admin-only, so a
+        // fail-open tenant can never become an authz-takeover (ARN-255).
+        merge_system_platform_policy(&mut policy_set);
         Self {
             tenant_policies: RwLock::new(BTreeMap::new()),
             fallback_policy_set: RwLock::new(CompiledPolicies::new(policy_set)),
@@ -710,6 +715,22 @@ impl AuthzEngine {
 const SYSTEM_PLATFORM_POLICY: &str = r#"
 @id("system-platform:broad-permit")
 permit(principal is System, action, resource);
+
+@id("system-platform:identity-entities-permit-trusted-issuer")
+permit(principal, action, resource is TrustedIssuer)
+when { principal is System || principal is Admin || (principal has agent_type && principal.agent_type == "operator") };
+
+@id("system-platform:identity-entities-permit-principal-generation")
+permit(principal, action, resource is PrincipalGeneration)
+when { principal is System || principal is Admin || (principal has agent_type && principal.agent_type == "operator") };
+
+@id("system-platform:protect-trusted-issuer")
+forbid(principal, action, resource is TrustedIssuer)
+unless { principal is System || principal is Admin || (principal has agent_type && principal.agent_type == "operator") };
+
+@id("system-platform:protect-principal-generation")
+forbid(principal, action, resource is PrincipalGeneration)
+unless { principal is System || principal is Admin || (principal has agent_type && principal.agent_type == "operator") };
 "#;
 
 /// PolicyId prefix used for the built-in system-platform policies

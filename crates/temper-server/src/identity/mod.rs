@@ -5,6 +5,7 @@
 //! See ADR-0033: Platform-Assigned Agent Identity.
 
 pub mod endpoint;
+pub mod jwt;
 mod resolver;
 
 pub use resolver::{IdentityResolver, MAX_CREDENTIAL_BYTES, ResolvedIdentity, hash_token};

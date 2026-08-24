@@ -41,3 +41,5 @@ tokio-test = { workspace = true }
 tower = { workspace = true }
 hyper = { workspace = true }
 wiremock = { workspace = true }
+# ES256 token minting for the TrustedIssuer resolver integration test.
+p256 = { version = "0.13", features = ["ecdsa"] }

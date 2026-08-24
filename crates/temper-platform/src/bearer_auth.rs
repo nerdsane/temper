@@ -74,11 +74,36 @@ pub async fn bearer_auth_check(
                 .then_some(sid),
             None => None,
         };
-        let security_context = temper_authz::SecurityContext::from_resolved_identity(
-            &identity.agent_instance_id,
-            &identity.agent_type_name,
-            verified_session,
-        );
+        // A trusted-issuer JWT resolves to an agent acting for a human (or the
+        // human themselves, a Customer) and carries a verified acting_for/role
+        // that from_resolved_identity cannot express (ARN-255, RFC-0002). The
+        // AgentCredential path stays exactly as before.
+        let security_context = if identity.from_jwt {
+            let kind = if identity.is_human {
+                temper_authz::PrincipalKind::Customer
+            } else {
+                temper_authz::PrincipalKind::Agent
+            };
+            let agent_type = if identity.agent_type_name.is_empty() {
+                None
+            } else {
+                Some(identity.agent_type_name.as_str())
+            };
+            temper_authz::SecurityContext::from_verified_jwt(
+                &identity.agent_instance_id,
+                kind,
+                agent_type,
+                identity.acting_for.as_deref(),
+                identity.role.as_deref(),
+                verified_session,
+            )
+        } else {
+            temper_authz::SecurityContext::from_resolved_identity(
+                &identity.agent_instance_id,
+                &identity.agent_type_name,
+                verified_session,
+            )
+        };
         let authenticated =
             temper_authz::AuthenticatedRequestContext::new(tenant.clone(), security_context)
                 .with_intent(intent)
