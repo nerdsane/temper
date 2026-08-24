@@ -139,6 +139,26 @@ fn duplicate_idempotency_custom_effects(
         .unwrap_or_default()
 }
 
+fn attach_timeout_occurrence_evidence(
+    event: &mut EntityEvent,
+    reaction_context: Option<&crate::trigger::delivery::ReactionCommitContext>,
+) {
+    let Some(timeout_state) = reaction_context
+        .and_then(|context| context.receipt.as_ref())
+        .and_then(|receipt| receipt.state_timeout_state.as_ref())
+    else {
+        return;
+    };
+    let params = event
+        .params
+        .as_object_mut()
+        .expect("spec action parameters must serialize as an object");
+    params.insert(
+        crate::trigger::delivery::STATE_TIMEOUT_OCCURRENCE_FIELD.to_string(),
+        serde_json::Value::String(timeout_state.clone()),
+    );
+}
+
 /// The entity actor -- processes actions through a TransitionTable.
 /// Optionally persists events to the configured backend. Wide events are emitted
 /// via the OTEL SDK (no-op when OTEL is not initialised).
@@ -445,9 +465,10 @@ impl EntityActor {
                         .map_err(|e| PersistenceError::Serialization(e.to_string()))?,
                 );
         }
+        let source_sequence = state.sequence_nr + 1;
+        let mut intents = Vec::new();
         if let Some(context) = reaction_context {
-            let source_sequence = state.sequence_nr + 1;
-            let mut intents = Vec::with_capacity(context.rules.len());
+            intents.reserve(context.rules.len());
             for (trigger_index, rule) in context.rules.iter().enumerate() {
                 let delivery_id = crate::trigger::delivery::stable_delivery_id(
                     self.tenant.as_str(),
@@ -464,6 +485,7 @@ impl EntityActor {
                     .cloned()
                     .unwrap_or_default();
                 intents.push(crate::trigger::delivery::PersistedReactionIntent {
+                    kind: crate::trigger::delivery::DeliveryKind::Reaction,
                     root_delivery_id: context
                         .root_delivery_id
                         .clone()
@@ -497,17 +519,40 @@ impl EntityActor {
                         .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
                     authority: context.authority.clone(),
                     created_at: event.timestamp,
+                    not_before: None,
+                    state_timeout: None,
                     schema_pin: self.schema_event_pin(&event.action),
                 });
             }
-            crate::trigger::delivery::attach_intents(&mut payload, &intents)
-                .map_err(PersistenceError::Serialization)?;
             if let Some(receipt) = context.receipt.as_ref() {
                 let mut receipt = receipt.clone();
                 receipt.schema_pin = self.schema_event_pin(&event.action);
                 crate::trigger::delivery::attach_receipt(&mut payload, &receipt)
                     .map_err(PersistenceError::Serialization)?;
             }
+        }
+        let timeout_intents = {
+            let table = self.table.read().expect("table lock poisoned");
+            crate::trigger::delivery::state_timeout_intents(
+                crate::trigger::delivery::StateTimeoutIntentContext {
+                    tenant: self.tenant.as_str(),
+                    entity_type: &self.entity_type,
+                    entity_id: &self.entity_id,
+                    source_sequence,
+                    event,
+                    source_fields: &state.fields,
+                    table: &table,
+                    schema_pin: self.schema_event_pin(&event.action),
+                    triggering_authority: reaction_context.map(|context| &context.authority),
+                    durable_idempotency_evidence: &state.processed_idempotency_keys,
+                },
+            )
+        }
+        .map_err(PersistenceError::Serialization)?;
+        intents.extend(timeout_intents);
+        if !intents.is_empty() {
+            crate::trigger::delivery::attach_intents(&mut payload, &intents)
+                .map_err(PersistenceError::Serialization)?;
         }
         let envelope = PersistenceEnvelope {
             sequence_nr: state.sequence_nr + 1,
@@ -941,8 +986,21 @@ impl EntityActor {
                                     table, state, env, &event,
                                 )?;
                             }
+                            let timeout_occurrence = event
+                                .params
+                                .get(crate::trigger::delivery::STATE_TIMEOUT_OCCURRENCE_FIELD)
+                                .cloned();
                             event.params =
                                 super::effects::sanitize_action_params(&event.params).into_owned();
+                            if let (Some(params), Some(timeout_occurrence)) =
+                                (event.params.as_object_mut(), timeout_occurrence)
+                            {
+                                params.insert(
+                                    crate::trigger::delivery::STATE_TIMEOUT_OCCURRENCE_FIELD
+                                        .to_string(),
+                                    timeout_occurrence,
+                                );
+                            }
                             if env.event_type == super::types::FIELD_UPDATE_EVENT_TYPE {
                                 if event
                                     .params
@@ -1555,6 +1613,7 @@ impl Actor for EntityActor {
                         .clone()
                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
                     event.idempotency_key = idempotency_key.clone();
+                    attach_timeout_occurrence_evidence(&mut event, reaction_context.as_deref());
 
                     if !result.overflow_blobs.is_empty()
                         && let Err(e) = Self::persist_overflow_blobs(
@@ -1726,6 +1785,10 @@ impl Actor for EntityActor {
                                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
                                     let mut retry_event = retry_event;
                                     retry_event.idempotency_key = idempotency_key.clone();
+                                    attach_timeout_occurrence_evidence(
+                                        &mut retry_event,
+                                        reaction_context.as_deref(),
+                                    );
 
                                     // Overflow blobs for the re-evaluated result.
                                     if !retry_result.overflow_blobs.is_empty()

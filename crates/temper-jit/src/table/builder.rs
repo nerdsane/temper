@@ -147,6 +147,8 @@ impl TransitionTable {
             entity_name: automaton.automaton.name.clone(),
             states: automaton.automaton.states.clone(),
             initial_state: automaton.automaton.initial.clone(),
+            schema_digest: None,
+            state_timeouts: automaton.state_timeouts.clone(),
             rules,
             keys: automaton
                 .keys

@@ -408,16 +408,27 @@ impl EventStore for SimEventStore {
 
         if let Ok((tenant, _, entity_id)) = parse_persistence_id_parts(persistence_id)
             && let Some((_, pin)) = split_scoped_journal_entity_id(entity_id)
-            && !inner.journals.contains_key(persistence_id)
-            && !inner.schema_deployments.permits_scoped_journal_write(
+        {
+            if inner.schema_deployments.migrated_source_is_fenced(
                 tenant,
                 &pin.scope,
                 &pin.bundle_digest,
-            )
-        {
-            return Err(PersistenceError::Storage(
-                "stale scoped schema write fence".into(),
-            ));
+            ) {
+                return Err(PersistenceError::Storage(
+                    "migrated scoped schema write fence".into(),
+                ));
+            }
+            if !inner.journals.contains_key(persistence_id)
+                && !inner.schema_deployments.permits_scoped_journal_write(
+                    tenant,
+                    &pin.scope,
+                    &pin.bundle_digest,
+                )
+            {
+                return Err(PersistenceError::Storage(
+                    "stale scoped schema write fence".into(),
+                ));
+            }
         }
 
         // Deterministic one-shot injection (see `inject_concurrency_violations`).
@@ -830,16 +841,27 @@ impl EventStore for SimEventStore {
         for append in appends {
             if let Ok((tenant, _, entity_id)) = parse_persistence_id_parts(&append.persistence_id)
                 && let Some((_, pin)) = split_scoped_journal_entity_id(entity_id)
-                && !inner.journals.contains_key(&append.persistence_id)
-                && !inner.schema_deployments.permits_scoped_journal_write(
+            {
+                if inner.schema_deployments.migrated_source_is_fenced(
                     tenant,
                     &pin.scope,
                     &pin.bundle_digest,
-                )
-            {
-                return Err(PersistenceError::Storage(
-                    "stale scoped schema write fence".into(),
-                ));
+                ) {
+                    return Err(PersistenceError::Storage(
+                        "migrated scoped schema write fence".into(),
+                    ));
+                }
+                if !inner.journals.contains_key(&append.persistence_id)
+                    && !inner.schema_deployments.permits_scoped_journal_write(
+                        tenant,
+                        &pin.scope,
+                        &pin.bundle_digest,
+                    )
+                {
+                    return Err(PersistenceError::Storage(
+                        "stale scoped schema write fence".into(),
+                    ));
+                }
             }
             let pending_cv = inner
                 .pending_concurrency_violations

@@ -683,10 +683,19 @@ impl ServerState {
             .reaction_dispatcher
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Some(dispatcher) = dispatcher {
-            self.spawn_reaction_recovery(dispatcher);
+            .clone()
+            .unwrap_or_else(|| {
+                let registry = self
+                    .registry
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .build_reaction_registry();
+                Arc::new(ReactionDispatcher::new(Arc::new(registry)))
+            });
+        if let Ok(mut slot) = self.reaction_dispatcher.write() {
+            *slot = Some(Arc::clone(&dispatcher));
         }
+        self.spawn_reaction_recovery(dispatcher);
     }
 
     /// Hand one already-claimed migration to the bounded local supervisor.

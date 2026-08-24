@@ -81,6 +81,8 @@ pub(super) struct BoundDelivery {
     root_delivery_id: String,
     fencing_token: u64,
     target_entity_id: Option<String>,
+    expected_target_sequence: Option<u64>,
+    state_timeout_state: Option<String>,
 }
 
 /// Async reaction dispatcher for production use.

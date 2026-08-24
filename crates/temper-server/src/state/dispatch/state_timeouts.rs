@@ -201,6 +201,12 @@ impl crate::state::ServerState {
         ctx: &PostDispatchContext<'_>,
         response: &EntityResponse,
     ) {
+        // ADR-0178: durable stores co-commit timeout intents with the source
+        // event and route them through the single leased delivery owner. A
+        // second process-local timer here would race that durable owner.
+        if self.event_journal().is_some() {
+            return;
+        }
         let registry = match self.registry.read() {
             Ok(g) => g,
             Err(_) => return,

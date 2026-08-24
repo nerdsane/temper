@@ -26,6 +26,7 @@ async fn awaited_drain_waits_for_logical_retry_and_completes_it() {
     let delivery_id =
         stable_delivery_id(tenant_name, "Order", "o1", "ConfirmOrder", 1, &rule.name, 0);
     let intent = PersistedReactionIntent {
+        kind: temper_server::trigger::delivery::DeliveryKind::Reaction,
         delivery_id: delivery_id.clone(),
         root_delivery_id: delivery_id,
         tenant: tenant_name.to_string(),
@@ -48,6 +49,8 @@ async fn awaited_drain_waits_for_logical_retry_and_completes_it() {
         )
         .expect("serialize authority"),
         created_at: sim_now(),
+        not_before: None,
+        state_timeout: None,
         schema_pin: None,
     };
     let mut payload = serde_json::json!({});

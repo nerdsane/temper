@@ -14,6 +14,8 @@ use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope
 
 use crate::{PostgresEventStore, migration::run_migrations};
 
+mod migration_fence_race;
+
 fn scope(id: &str) -> SchemaScope {
     SchemaScope {
         kind: SchemaScopeKind::Task,

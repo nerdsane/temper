@@ -105,6 +105,23 @@ impl SimSchemaDeploymentState {
                     )
             })
     }
+
+    pub(super) fn migrated_source_is_fenced(
+        &self,
+        tenant: &str,
+        scope: &SchemaScope,
+        digest: &str,
+    ) -> bool {
+        self.migrations.values().any(|job| {
+            job.command.tenant == tenant
+                && &job.command.scope == scope
+                && job.command.source_bundle_digest == digest
+                && matches!(
+                    job.status,
+                    SchemaMigrationStatus::CutOver | SchemaMigrationStatus::Completed
+                )
+        })
+    }
 }
 
 fn deployment_key(tenant: &str, scope: &SchemaScope, digest: &str) -> DeploymentKey {

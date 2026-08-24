@@ -43,6 +43,24 @@ async fn assert_scoped_journal_write_fence(
     let Some((_, pin)) = split_scoped_journal_entity_id(entity_id) else {
         return Ok(());
     };
+    let mut migrated_rows = tx
+        .query(
+            "SELECT 1 FROM schema_migration_jobs
+             WHERE tenant = ?1
+               AND json_extract(job_json, '$.command.source_bundle_digest') = ?2
+               AND json_extract(job_json, '$.command.scope.kind') = 'task'
+               AND json_extract(job_json, '$.command.scope.id') = ?3
+               AND json_extract(job_json, '$.status') IN ('cut_over', 'completed')
+             LIMIT 1",
+            params![tenant, pin.bundle_digest.as_str(), pin.scope.id.as_str()],
+        )
+        .await
+        .map_err(storage_error)?;
+    if migrated_rows.next().await.map_err(storage_error)?.is_some() {
+        return Err(PersistenceError::Storage(
+            "migrated scoped schema write fence".into(),
+        ));
+    }
     let mut existing_rows = tx
         .query(
             "SELECT 1 FROM events

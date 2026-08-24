@@ -1514,6 +1514,7 @@ impl ServerState {
         } else {
             BTreeMap::new()
         };
+        let materialization_pin = schema_pin.clone();
         let actor_ref = self
             .get_or_spawn_tenant_actor_with_fields_and_reference_evidence(
                 tenant,
@@ -1536,6 +1537,32 @@ impl ServerState {
         .await
         .result
         .map_err(|e| format!("Actor query failed: {e}"))?;
+
+        // ADR-0178: the bootstrap Created event may carry a durable timeout
+        // intent for a timed initial state. Materialize its pending lifecycle
+        // immediately and wake the same fenced recovery owner used by
+        // committed reactions.
+        if creating && self.event_journal().is_some() && response.state.sequence_nr > 0 {
+            let intents = self
+                .materialize_committed_reaction_intents(
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    response.state.sequence_nr,
+                    materialization_pin.as_ref(),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            if !intents.is_empty()
+                && let Some(dispatcher) = self
+                    .reaction_dispatcher
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            {
+                dispatcher.notify_recovery(tenant);
+            }
+        }
 
         // Broadcast entity creation event for SSE subscribers
         let seq = self.next_entity_event_sequence(tenant.as_str(), entity_type, entity_id);

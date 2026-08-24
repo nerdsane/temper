@@ -11,6 +11,7 @@ pub mod types;
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
+use sha2::{Digest, Sha256};
 use tracing::instrument;
 
 use temper_jit::swap::SwapController;
@@ -28,6 +29,19 @@ use crate::trigger::types::ReactionRule;
 pub use types::*;
 
 use relations::{build_relation_graph, build_webhook_routes, synthesize_action_trigger_reaction};
+
+fn global_schema_digest(csdl_xml: &str, entity_type: &str, ioa_source: &str) -> String {
+    let mut hasher = Sha256::new();
+    for component in [
+        csdl_xml.as_bytes(),
+        entity_type.as_bytes(),
+        ioa_source.as_bytes(),
+    ] {
+        hasher.update((component.len() as u64).to_be_bytes());
+        hasher.update(component);
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
 
 fn merge_reaction_rules(
     existing: &[ReactionRule],
@@ -449,7 +463,12 @@ impl SpecRegistry {
                         source: e.to_string(),
                     }
                 })?;
-                let table = TransitionTable::from_automaton(&automaton);
+                let mut table = TransitionTable::from_automaton(&automaton);
+                table.schema_digest = Some(global_schema_digest(
+                    &existing_config.csdl_xml,
+                    entity_type,
+                    ioa_source,
+                ));
                 let integrations = automaton.integrations.clone();
 
                 if let Some(existing_spec) = existing_config.entities.get_mut(*entity_type) {
@@ -475,6 +494,18 @@ impl SpecRegistry {
                             ioa_source: ioa_source.to_string(),
                         },
                     );
+                }
+            }
+
+            // A CSDL-only hot reload changes the deployed schema identity even
+            // when an entity's IOA was omitted from a merge payload.
+            for (entity_type, spec) in &mut existing_config.entities {
+                let digest =
+                    global_schema_digest(&existing_config.csdl_xml, entity_type, &spec.ioa_source);
+                if spec.table().schema_digest.as_deref() != Some(digest.as_str()) {
+                    let mut table = (*spec.table()).clone();
+                    table.schema_digest = Some(digest);
+                    spec.swap_controller().swap(table);
                 }
             }
 
@@ -516,7 +547,9 @@ impl SpecRegistry {
                         source: e.to_string(),
                     }
                 })?;
-                let table = TransitionTable::from_automaton(&automaton);
+                let mut table = TransitionTable::from_automaton(&automaton);
+                table.schema_digest =
+                    Some(global_schema_digest(&csdl_xml, entity_type, ioa_source));
                 let integrations = automaton.integrations.clone();
                 entities.insert(
                     entity_type.to_string(),
@@ -1115,6 +1148,37 @@ type = "create"
             config.verification.get("Task"),
             Some(VerificationStatus::Pending)
         ));
+    }
+
+    #[test]
+    fn csdl_only_reload_changes_global_schema_digest() {
+        let mut registry = SpecRegistry::new();
+        let (csdl, xml) = minimal_csdl();
+        registry.register_tenant("alpha", csdl, xml.clone(), &[("Order", ORDER_IOA)]);
+        let tenant = TenantId::new("alpha");
+        let before = registry
+            .get_table(&tenant, "Order")
+            .and_then(|table| table.schema_digest.clone())
+            .expect("registered table must carry full schema identity");
+
+        let (csdl, _) = minimal_csdl();
+        registry
+            .try_register_tenant_with_reactions_and_constraints(
+                "alpha",
+                csdl,
+                format!("{xml}<!-- compatible CSDL metadata change -->"),
+                &[("Order", ORDER_IOA)],
+                Vec::new(),
+                None,
+                false,
+            )
+            .expect("CSDL-only replacement should succeed");
+        let after = registry
+            .get_table(&tenant, "Order")
+            .and_then(|table| table.schema_digest.clone())
+            .expect("reloaded table must carry full schema identity");
+
+        assert_ne!(before, after);
     }
 
     #[test]

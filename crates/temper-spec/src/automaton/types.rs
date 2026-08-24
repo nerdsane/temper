@@ -17,7 +17,12 @@ use super::field_invariant::FieldInvariant;
 pub fn is_server_derived_field_name(name: &str) -> bool {
     matches!(
         name,
-        "Id" | "id" | "Status" | "status" | "has_spec" | "HasSpec"
+        "Id" | "id"
+            | "Status"
+            | "status"
+            | "has_spec"
+            | "HasSpec"
+            | "_temper_state_timeout_declaration_v1"
     ) || is_server_derived_context_status_name(name)
 }
 

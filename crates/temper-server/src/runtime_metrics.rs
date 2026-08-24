@@ -451,11 +451,15 @@ fn metrics() -> &'static RuntimeMetrics {
 
 /// Record a terminal durable-reaction outcome without high-cardinality IDs.
 pub(crate) fn record_reaction_delivery_outcome(
+    kind: &'static str,
     outcome: &'static str,
     attempts: u32,
     queue_age: Duration,
 ) {
-    let attrs = [KeyValue::new("outcome", outcome)];
+    let attrs = [
+        KeyValue::new("kind", kind),
+        KeyValue::new("outcome", outcome),
+    ];
     metrics().reaction_delivery_outcome_total.add(1, &attrs);
     metrics()
         .reaction_delivery_attempts
@@ -466,17 +470,18 @@ pub(crate) fn record_reaction_delivery_outcome(
 }
 
 /// Record a low-cardinality durable-reaction lifecycle event.
-pub(crate) fn record_reaction_delivery_event(event: &'static str) {
-    metrics()
-        .reaction_delivery_outcome_total
-        .add(1, &[KeyValue::new("outcome", event)]);
+pub(crate) fn record_reaction_delivery_event(kind: &'static str, event: &'static str) {
+    metrics().reaction_delivery_outcome_total.add(
+        1,
+        &[KeyValue::new("kind", kind), KeyValue::new("outcome", event)],
+    );
 }
 
 /// Record recovery of an expired fenced delivery lease.
-pub(crate) fn record_reaction_delivery_lease_recovered() {
+pub(crate) fn record_reaction_delivery_lease_recovered(kind: &'static str) {
     metrics()
         .reaction_delivery_lease_recovered_total
-        .add(1, &[]);
+        .add(1, &[KeyValue::new("kind", kind)]);
 }
 
 /// Record an operator retry decision without identifying the delivery.

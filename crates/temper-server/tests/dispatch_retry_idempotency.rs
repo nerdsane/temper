@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use temper_runtime::ActorSystem;
+use temper_runtime::persistence::EventStore;
 use temper_runtime::scheduler::install_deterministic_context;
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::SpecRegistry;
@@ -96,9 +97,25 @@ async fn retry_after_dropped_reply_replays_success_response_and_runs_effects_wit
     );
     assert_eq!(response.state.status, "Running");
 
+    assert!(
+        state.state_timeout_tracker.pending_snapshot().is_empty(),
+        "durable stores must not create a second process-local timeout owner"
+    );
+    let events = sim_store
+        .read_events(&persistence_id, 0)
+        .await
+        .expect("read authoritative timed-task events");
+    let intents = events
+        .iter()
+        .find(|event| event.event_type == "Start")
+        .and_then(|event| {
+            temper_server::trigger::delivery::extract_intents(&event.payload)
+                .ok()
+                .map(|intents| intents.len())
+        });
     assert_eq!(
-        state.state_timeout_tracker.pending_snapshot(),
-        vec![("TimedTask".to_string(), 1)],
-        "post-dispatch effects from the successful Start transition must arm the state_timeout"
+        intents,
+        Some(1),
+        "the successful retried transition must co-commit one durable timeout intent"
     );
 }

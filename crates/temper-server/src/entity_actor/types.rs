@@ -24,6 +24,8 @@ pub const RECENT_EVENTS_BUDGET_DEFAULT: usize = 50;
 pub const MAX_ITEMS_PER_ENTITY: usize = 1_000;
 /// Maximum durable idempotency keys retained per entity.
 pub const MAX_DURABLE_IDEMPOTENCY_KEYS_PER_ENTITY: usize = 1_000;
+/// Maximum distinct durable state-timeout counters retained by one entity.
+pub const MAX_STATE_TIMEOUT_COUNTERS_PER_ENTITY: usize = 128;
 
 /// Number of recent events retained in memory per entity.
 ///
@@ -146,6 +148,30 @@ impl EntityState {
         if let Some(key) = event.idempotency_key.as_deref() {
             self.record_processed_idempotency_key(key);
         }
+        if let Some(timeout_state) = event
+            .params
+            .get(crate::trigger::delivery::STATE_TIMEOUT_OCCURRENCE_FIELD)
+            .and_then(serde_json::Value::as_str)
+        {
+            let key = format!("state-timeout-occurrences:{timeout_state}");
+            let existing_timeout_counters = self
+                .processed_idempotency_keys
+                .keys()
+                .filter(|key| key.starts_with("state-timeout-occurrences:"))
+                .count();
+            assert!(
+                self.processed_idempotency_keys.contains_key(&key)
+                    || existing_timeout_counters < MAX_STATE_TIMEOUT_COUNTERS_PER_ENTITY,
+                "state-timeout occurrence counter budget exhausted"
+            );
+            let occurrences = self
+                .processed_idempotency_keys
+                .get(&key)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(1);
+            self.processed_idempotency_keys.insert(key, occurrences);
+        }
         self.events.push_back(event);
 
         let budget = recent_events_budget();
@@ -175,15 +201,30 @@ impl EntityState {
         self.processed_idempotency_keys.contains_key(key)
     }
 
+    /// Successful firings recorded for one exact state-timeout declaration.
+    pub fn state_timeout_occurrences(&self, timeout_state: &str) -> u64 {
+        self.processed_idempotency_keys
+            .get(&format!("state-timeout-occurrences:{timeout_state}"))
+            .copied()
+            .unwrap_or(0)
+    }
+
     fn record_processed_idempotency_key(&mut self, key: &str) {
         let sequence = self.sequence_nr.max(self.total_event_count as u64);
         self.processed_idempotency_keys
             .insert(key.to_string(), sequence);
 
-        while self.processed_idempotency_keys.len() > MAX_DURABLE_IDEMPOTENCY_KEYS_PER_ENTITY {
+        while self
+            .processed_idempotency_keys
+            .keys()
+            .filter(|key| !key.starts_with("state-timeout-occurrences:"))
+            .count()
+            > MAX_DURABLE_IDEMPOTENCY_KEYS_PER_ENTITY
+        {
             let Some(oldest_key) = self
                 .processed_idempotency_keys
                 .iter()
+                .filter(|(key, _)| !key.starts_with("state-timeout-occurrences:"))
                 .min_by_key(|(_, sequence)| **sequence)
                 .map(|(key, _)| key.clone())
             else {

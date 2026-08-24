@@ -49,5 +49,10 @@ pub(super) fn record_delivery_terminal_metrics(
         .signed_duration_since(record.intent.created_at)
         .to_std()
         .unwrap_or_default();
-    crate::runtime_metrics::record_reaction_delivery_outcome(outcome, record.attempts, age);
+    crate::runtime_metrics::record_reaction_delivery_outcome(
+        record.intent.kind.metric_label(),
+        outcome,
+        record.attempts,
+        age,
+    );
 }

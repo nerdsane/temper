@@ -63,6 +63,19 @@ pub struct TransitionTable {
     pub states: Vec<String>,
     /// The state an entity starts in.
     pub initial_state: String,
+    /// Digest of the complete deployed schema identity (CSDL + entity + IOA).
+    ///
+    /// Registry-built tables populate this value so durable work can reject a
+    /// deployment whose data contract changed even when its transitions did not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_digest: Option<String>,
+    /// Durable state-entry timeout declarations carried into the runtime.
+    ///
+    /// Keeping these on the compiled table lets the entity actor co-commit a
+    /// timeout intent with the exact state-entry/reset event instead of
+    /// reconstructing scheduling metadata after the source commit.
+    #[serde(default)]
+    pub state_timeouts: Vec<temper_spec::automaton::StateTimeout>,
     /// Ordered list of transition rules.
     pub rules: Vec<TransitionRule>,
     /// ADR-0153: declared unique/alternate keys the kernel indexes for
@@ -178,6 +191,10 @@ impl<'de> Deserialize<'de> for TransitionTable {
             entity_name: String,
             states: Vec<String>,
             initial_state: String,
+            #[serde(default)]
+            schema_digest: Option<String>,
+            #[serde(default)]
+            state_timeouts: Vec<temper_spec::automaton::StateTimeout>,
             rules: Vec<TransitionRule>,
             #[serde(default)]
             state_var_metadata: BTreeMap<String, StateVarMetadata>,
@@ -196,6 +213,8 @@ impl<'de> Deserialize<'de> for TransitionTable {
             entity_name: raw.entity_name,
             states: raw.states,
             initial_state: raw.initial_state,
+            schema_digest: raw.schema_digest,
+            state_timeouts: raw.state_timeouts,
             rules: raw.rules,
             keys: raw.keys,
             vectors: raw.vectors,
@@ -313,6 +332,8 @@ mod tests {
             entity_name: "TestEntity".to_string(),
             states: vec!["Draft".to_string(), "Active".to_string()],
             initial_state: "Draft".to_string(),
+            schema_digest: None,
+            state_timeouts: vec![],
             keys: vec![],
             vectors: vec![],
             rules: vec![

@@ -151,6 +151,7 @@ type = "same_id"
         .security_ctx
         .expect("service authority");
     let intent = PersistedReactionIntent {
+        kind: temper_server::trigger::delivery::DeliveryKind::Reaction,
         delivery_id: delivery_id.clone(),
         root_delivery_id: delivery_id,
         tenant: tenant_name.to_string(),
@@ -168,6 +169,8 @@ type = "same_id"
         rule: serde_json::to_value(rule).expect("rule must serialize"),
         authority: serde_json::to_value(authority).expect("authority must serialize"),
         created_at: sim_now(),
+        not_before: None,
+        state_timeout: None,
         schema_pin: None,
     };
     let mut payload = serde_json::json!({
@@ -280,6 +283,7 @@ type = "same_id"
         0,
     );
     let intent = PersistedReactionIntent {
+        kind: temper_server::trigger::delivery::DeliveryKind::Reaction,
         delivery_id: delivery_id.clone(),
         root_delivery_id: delivery_id,
         tenant: tenant_name.to_string(),
@@ -302,6 +306,8 @@ type = "same_id"
         )
         .expect("serialize authority"),
         created_at: sim_now(),
+        not_before: None,
+        state_timeout: None,
         schema_pin: None,
     };
     let mut payload = serde_json::json!({});
@@ -387,6 +393,7 @@ type = "same_id"
         0,
     );
     let intent = PersistedReactionIntent {
+        kind: temper_server::trigger::delivery::DeliveryKind::Reaction,
         delivery_id: delivery_id.clone(),
         root_delivery_id: delivery_id,
         tenant: tenant_name.to_string(),
@@ -409,6 +416,8 @@ type = "same_id"
         )
         .expect("serialize authority"),
         created_at: sim_now(),
+        not_before: None,
+        state_timeout: None,
         schema_pin: None,
     };
     let dispatcher = state

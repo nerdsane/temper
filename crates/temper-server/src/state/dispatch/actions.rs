@@ -211,6 +211,24 @@ impl crate::state::ServerState {
             self.reject_action_supplied_sub_writes(entity_type, action, &params)?;
         }
 
+        let durable_timeouts_expected = if self.event_journal().is_some() {
+            let registry = self
+                .registry
+                .read()
+                .map_err(|_| DispatchError::Internal("registry lock poisoned".into()))?;
+            match agent_ctx.schema_pin.as_ref() {
+                Some(pin) => registry.get_scoped_spec_at_digest(
+                    tenant,
+                    &pin.scope,
+                    &pin.bundle_digest,
+                    entity_type,
+                ),
+                None => registry.get_spec(tenant, entity_type),
+            }
+            .is_some_and(|spec| !spec.automaton.state_timeouts.is_empty())
+        } else {
+            false
+        };
         let dispatcher = self
             .reaction_dispatcher
             .read()
@@ -231,7 +249,7 @@ impl crate::state::ServerState {
             } else {
                 dispatcher.candidate_rules(tenant, entity_type, action)
             };
-            if rules.is_empty() {
+            if rules.is_empty() && !durable_timeouts_expected {
                 None
             } else {
                 let guard_source = match agent_ctx.schema_pin.as_ref() {
@@ -284,7 +302,10 @@ impl crate::state::ServerState {
             None
         };
 
-        let durable_reactions_expected = reaction_context.is_some();
+        let durable_reactions_expected = reaction_context
+            .as_ref()
+            .is_some_and(|context| !context.rules.is_empty());
+        let durable_intents_expected = durable_reactions_expected || durable_timeouts_expected;
         if durable_reactions_expected && self.event_journal().is_none() {
             return Err(DispatchError::Internal(
                 "durable reactions require a configured event journal".to_string(),
@@ -315,7 +336,7 @@ impl crate::state::ServerState {
             Box::pin(async {
                 let to_state = response.state.status.clone();
                 let fields = serde_json::to_value(&response.state.fields).unwrap_or_default();
-                let committed_intents = if durable_reactions_expected {
+                let committed_intents = if durable_intents_expected {
                     self.materialize_committed_reaction_intents(
                         tenant,
                         entity_type,
@@ -327,12 +348,22 @@ impl crate::state::ServerState {
                 } else {
                     Vec::new()
                 };
-                if !committed_intents.is_empty() && await_reactions {
-                    let root_delivery_ids: BTreeSet<_> = committed_intents
+                let had_committed_intents = !committed_intents.is_empty();
+                let (reaction_intents, timeout_intents): (Vec<_>, Vec<_>) =
+                    committed_intents.into_iter().partition(|intent| {
+                        intent.kind == crate::trigger::delivery::DeliveryKind::Reaction
+                    });
+                if !timeout_intents.is_empty() {
+                    // A state timeout is future scheduler work, never part of
+                    // the caller's synchronous reaction-tree wait budget.
+                    dispatcher.notify_recovery(tenant);
+                }
+                if !reaction_intents.is_empty() && await_reactions {
+                    let root_delivery_ids: BTreeSet<_> = reaction_intents
                         .iter()
                         .map(|intent| intent.root_delivery_id.clone())
                         .collect();
-                    for intent in committed_intents {
+                    for intent in reaction_intents {
                         dispatcher
                             .dispatch_committed_intent(self, intent)
                             .await
@@ -349,14 +380,14 @@ impl crate::state::ServerState {
                         .map_err(DispatchError::Internal)?;
                     self.require_terminal_reaction_roots(tenant, &root_delivery_ids)
                         .await?;
-                } else if !committed_intents.is_empty() {
+                } else if !reaction_intents.is_empty() {
                     dispatcher.notify_recovery(tenant);
                     match background_reaction_semaphore().try_acquire_owned() {
                         Ok(permit) => self.spawn_background_reactions(
                             BackgroundReactionDispatch {
                                 dispatcher: Arc::clone(&dispatcher),
                                 tenant: tenant.clone(),
-                                intents: committed_intents,
+                                intents: reaction_intents,
                             },
                             permit,
                         ),
@@ -366,7 +397,7 @@ impl crate::state::ServerState {
                             "reaction intent is durable; periodic recovery will claim it"
                         ),
                     }
-                } else {
+                } else if !had_committed_intents {
                     dispatcher
                         .dispatch_reactions(
                             self,

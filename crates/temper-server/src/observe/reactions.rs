@@ -10,8 +10,8 @@ use temper_authz::AuthenticatedRequestContext;
 use crate::authz::{observe_tenant_scope, require_authenticated_context, require_observe_auth};
 use crate::state::ServerState;
 use crate::trigger::delivery::{
-    ReactionDeliveryRecord, ReactionDeliveryStatus, delivery_journal_id, find_delivery_record,
-    list_delivery_records_page,
+    DeliveryKind, ReactionDeliveryRecord, ReactionDeliveryStatus, delivery_journal_id,
+    find_delivery_record, list_delivery_records_page,
 };
 
 const DEFAULT_LIST_LIMIT: usize = 100;
@@ -26,6 +26,7 @@ pub(crate) struct ReactionListQuery {
 
 #[derive(Debug, Serialize)]
 struct ReactionDeliveryView {
+    kind: DeliveryKind,
     delivery_id: String,
     root_delivery_id: String,
     tenant: String,
@@ -42,7 +43,10 @@ struct ReactionDeliveryView {
     fencing_token: u64,
     lease_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     next_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
+    deadline: Option<chrono::DateTime<chrono::Utc>>,
+    schema_digest: Option<String>,
     transient_failure: bool,
+    last_error: Option<String>,
     principal_id: Option<String>,
     principal_kind: Option<String>,
 }
@@ -61,6 +65,7 @@ impl From<&ReactionDeliveryRecord> for ReactionDeliveryView {
     fn from(record: &ReactionDeliveryRecord) -> Self {
         let principal = record.intent.authority.get("principal");
         Self {
+            kind: record.intent.kind,
             delivery_id: record.intent.delivery_id.clone(),
             root_delivery_id: record.intent.root_delivery_id.clone(),
             tenant: record.intent.tenant.clone(),
@@ -77,7 +82,14 @@ impl From<&ReactionDeliveryRecord> for ReactionDeliveryView {
             fencing_token: record.fencing_token,
             lease_expires_at: record.lease_expires_at,
             next_attempt_at: record.next_attempt_at,
+            deadline: record.intent.not_before,
+            schema_digest: record
+                .intent
+                .state_timeout
+                .as_ref()
+                .map(|clock| clock.schema_digest.clone()),
             transient_failure: record.transient_failure,
+            last_error: record.last_error.clone(),
             principal_id: principal
                 .and_then(|value| value.get("id"))
                 .and_then(serde_json::Value::as_str)

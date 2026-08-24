@@ -149,6 +149,7 @@ impl ReactionDispatcher {
             );
             if let Some(delivery) = bound_delivery.as_ref() {
                 dispatch_ctx.idempotency_key = Some(delivery.delivery_id.clone());
+                dispatch_ctx.expected_entity_sequence = delivery.expected_target_sequence;
             }
 
             let authz_snapshot = match dispatch_ctx.schema_pin.as_ref() {
@@ -305,6 +306,7 @@ impl ReactionDispatcher {
                             delivery_id: delivery.delivery_id.clone(),
                             fencing_token: delivery.fencing_token,
                             received_at: temper_runtime::scheduler::sim_now(),
+                            state_timeout_state: delivery.state_timeout_state.clone(),
                             schema_pin: None,
                         }),
                     }),
