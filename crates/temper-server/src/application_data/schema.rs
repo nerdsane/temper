@@ -1,6 +1,10 @@
 //! Bound-schema validation and shared governed write prechecks.
 
-use temper_wasm_sdk::data::{ManifestPropertyV1, ModuleDataError, ModuleDataErrorKind};
+use temper_wasm_sdk::data::{
+    ManifestEntityV1, ManifestPropertyV1, ModuleDataError, ModuleDataErrorKind,
+};
+
+use crate::entity_actor::EntityState;
 
 use super::{ApplicationDataInvocation, data_error, short_type};
 
@@ -65,6 +69,41 @@ fn canonical_decimal(value: &str) -> bool {
 }
 
 impl ApplicationDataInvocation {
+    pub(super) fn canonical_entity_value(
+        &self,
+        entity_type: &str,
+        state: &EntityState,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        let schema = self
+            .authority
+            .binding
+            .entities
+            .iter()
+            .find(|entity| entity.entity_type == entity_type)
+            .expect("granted entity type must exist in the bound schema");
+        canonical_entity_value(schema, state)
+    }
+
+    pub(super) fn action_result_entity_type(
+        &self,
+        entity_type: &str,
+        action: &str,
+    ) -> Option<&str> {
+        self.authority
+            .binding
+            .entities
+            .iter()
+            .find(|entity| entity.entity_type == entity_type)
+            .and_then(|entity| {
+                entity
+                    .actions
+                    .iter()
+                    .find(|candidate| candidate.canonical_name == action)
+            })
+            .and_then(|action| action.result_type.as_deref())
+            .filter(|result_type| *result_type == entity_type)
+    }
+
     pub(super) fn validate_entity_object(
         &self,
         entity_type: &str,
@@ -282,4 +321,36 @@ impl ApplicationDataInvocation {
             })?;
         Ok(())
     }
+}
+
+fn canonical_entity_value(
+    schema: &ManifestEntityV1,
+    state: &EntityState,
+) -> serde_json::Map<String, serde_json::Value> {
+    let fields = state
+        .fields
+        .as_object()
+        .expect("committed entity fields must be a JSON object");
+    let mut canonical = serde_json::Map::new();
+    for property in &schema.properties {
+        let normalized = temper_spec::to_snake_case(&property.canonical_name);
+        let value = fields
+            .get(&property.canonical_name)
+            .or_else(|| {
+                fields
+                    .iter()
+                    .find(|(name, _)| temper_spec::to_snake_case(name) == normalized)
+                    .map(|(_, value)| value)
+            })
+            .cloned()
+            .or_else(|| match normalized.as_str() {
+                "id" => Some(serde_json::Value::String(state.entity_id.clone())),
+                "status" => Some(serde_json::Value::String(state.status.clone())),
+                _ => None,
+            });
+        if let Some(value) = value {
+            canonical.insert(property.canonical_name.clone(), value);
+        }
+    }
+    canonical
 }

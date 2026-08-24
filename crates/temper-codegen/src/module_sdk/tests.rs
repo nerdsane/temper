@@ -9,7 +9,17 @@ const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
       <Property Name="Id" Type="Edm.String" Nullable="false"/>
       <Property Name="Status" Type="Edm.String" Nullable="false"/>
     </EntityType>
-    <Action Name="StartWork" IsBound="true"><Parameter Name="binding" Type="Temper.App.Task" Nullable="false"/></Action>
+    <EntityType Name="Receipt"><Key><PropertyRef Name="Id"/></Key>
+      <Property Name="Id" Type="Edm.String" Nullable="false"/>
+      <Property Name="Status" Type="Edm.String" Nullable="false"/>
+    </EntityType>
+    <EnumType Name="Outcome"><Member Name="Accepted"/><Member Name="Rejected"/></EnumType>
+    <Action Name="StartWork" IsBound="true"><Parameter Name="binding" Type="Temper.App.Task" Nullable="false"/><ReturnType Type="Temper.App.Task" Nullable="false"/></Action>
+    <Action Name="MaybeStart" IsBound="true"><Parameter Name="binding" Type="Temper.App.Task" Nullable="false"/><ReturnType Type="Temper.App.Task" Nullable="true"/></Action>
+    <Action Name="AttemptCount" IsBound="true"><Parameter Name="binding" Type="Temper.App.Task" Nullable="false"/><ReturnType Type="Edm.Int32" Nullable="false"/></Action>
+    <Action Name="Outcome" IsBound="true"><Parameter Name="binding" Type="Temper.App.Task" Nullable="false"/><ReturnType Type="Temper.App.Outcome" Nullable="false"/></Action>
+    <Action Name="Reset" IsBound="true"><Parameter Name="binding" Type="Temper.App.Task" Nullable="false"/></Action>
+    <Action Name="IssueReceipt" IsBound="true"><Parameter Name="binding" Type="Temper.App.Task" Nullable="false"/><ReturnType Type="Temper.App.Receipt" Nullable="false"/></Action>
     <EntityContainer Name="Container"><EntitySet Name="Tasks" EntityType="Temper.App.Task"/></EntityContainer>
   </Schema></edmx:DataServices>
 </edmx:Edmx>"#;
@@ -22,7 +32,13 @@ fn grant() -> ModuleDataGrant {
         entity_type: "Temper.App.Task".into(),
         ..EntityDataGrant::default()
     };
-    entity.actions.insert("StartWork".into());
+    entity.actions.extend([
+        "AttemptCount".into(),
+        "MaybeStart".into(),
+        "Outcome".into(),
+        "Reset".into(),
+        "StartWork".into(),
+    ]);
     entity.query_filter_fields.insert("Status".into());
     grant.entities.push(entity);
     grant
@@ -41,10 +57,41 @@ fn generation_is_deterministic_and_scoped() {
     assert!(!first.source.contains("EntityPatch"));
     assert!(first.source.contains("pub status: String"));
     assert!(first.source.contains("pub fn start_work"));
+    assert!(first.source.contains("pub fn maybe_start"));
+    assert_eq!(first.source.matches("Result<TypedAction<Task>").count(), 2);
+    assert!(first.source.contains("Result<TypedAction<i64>"));
+    assert!(
+        first
+            .source
+            .contains("Result<TypedAction<TemperAppOutcome>")
+    );
+    assert!(
+        first
+            .source
+            .contains("Result<TypedAction<serde_json::Value>")
+    );
+    assert!(!first.source.contains("TypedAction<TemperAppTaskId>"));
     assert!(first.source.contains("Result<TypedEntity<Task>"));
     assert!(first.source.contains("TEMPER_MODULE_SCHEMA_DIGEST"));
     assert!(first.source.contains("TEMPER_MODULE_USED_SYMBOLS_DIGEST"));
     first.manifest.verify_binding().unwrap();
+}
+
+#[test]
+fn cross_entity_action_results_fail_closed() {
+    let csdl = parse_csdl(CSDL).unwrap();
+    let mut invalid = grant();
+    invalid.entities[0].actions.insert("IssueReceipt".into());
+    assert!(matches!(
+        generate_module_sdk(&csdl, "worker", "closure", "closure", "artifact", invalid),
+        Err(ModuleSdkCodegenError::UnsupportedEntityResult {
+            action,
+            entity_type,
+            result_type,
+        }) if action == "IssueReceipt"
+            && entity_type == "Temper.App.Task"
+            && result_type == "Temper.App.Receipt"
+    ));
 }
 
 #[test]
