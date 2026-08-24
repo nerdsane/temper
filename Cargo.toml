@@ -187,3 +187,5 @@ strip = true
 [profile.dist]
 inherits = "release"
 lto = "thin"
+# Keep ThinLTO partitioned so production builds have a bounded LLVM memory peak.
+codegen-units = 16
