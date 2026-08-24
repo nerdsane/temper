@@ -4,8 +4,13 @@
 # ── Stage 1: Chef ────────────────────────────────────────────────────────
 FROM rust:1-bookworm AS chef
 RUN cargo install cargo-chef --locked
+# Match the repository toolchain in every build stage. Otherwise the planner
+# downloads it again and the source copy invalidates the cooked dependency cache.
+RUN rustup toolchain install nightly-2026-02-08 --profile minimal \
+        --component clippy,rustfmt \
+    && rustup default nightly-2026-02-08
 RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev python3-dev clang libclang-dev libjemalloc-dev \
+    pkg-config libssl-dev python3-dev clang libclang-dev libjemalloc-dev mold \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
@@ -16,8 +21,9 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 # ── Stage 3: Builder ────────────────────────────────────────────────────
 FROM chef AS builder
-# Install Rust 1.92 (workspace MSRV).
-RUN rustup toolchain install 1.92 && rustup default 1.92
+# Full release LTO makes the final link memory-intensive. Use the same
+# low-memory parallel linker as Linux CI for production container builds.
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=-fuse-ld=mold"
 
 COPY --from=planner /app/recipe.json recipe.json
 # cargo-chef's recipe recreates workspace members, but not patched path

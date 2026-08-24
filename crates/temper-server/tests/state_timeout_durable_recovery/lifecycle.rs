@@ -50,6 +50,13 @@ async fn reset_supersedes_the_old_clock_without_extending_the_new_deadline() {
         .await,
         "InProgress"
     );
+    wait_for_delivery_status(
+        &inspection_store,
+        &tenant,
+        temper_server::trigger::delivery::ReactionDeliveryStatus::Succeeded,
+        Duration::from_secs(5),
+    )
+    .await;
     let records = temper_server::trigger::delivery::list_delivery_records(
         &inspection_store,
         tenant.as_str(),
