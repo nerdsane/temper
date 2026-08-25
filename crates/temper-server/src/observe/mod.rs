@@ -4,6 +4,7 @@
 //! They are only available when the `observe` feature is enabled.
 
 mod agents;
+mod collection_workflows;
 mod entities;
 pub(crate) mod evolution;
 mod metrics;
@@ -216,6 +217,18 @@ pub fn build_observe_router() -> Router<ServerState> {
         .route(
             "/reactions/{delivery_id}",
             get(reactions::handle_get_reaction),
+        )
+        .route(
+            "/collection-workflows",
+            get(collection_workflows::handle_list_workflows),
+        )
+        .route(
+            "/collection-workflows/{workflow_id}",
+            get(collection_workflows::handle_get_workflow),
+        )
+        .route(
+            "/collection-workflows/{workflow_id}/members",
+            get(collection_workflows::handle_list_members),
         )
         .route(
             "/projections/replay-parity",

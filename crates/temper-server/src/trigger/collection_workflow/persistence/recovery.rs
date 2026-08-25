@@ -57,6 +57,28 @@ pub(crate) async fn list_collection_records_page(
     Ok(records)
 }
 
+/// Read one bounded keyset page of tenant-scoped workflow identities.
+///
+/// Observe uses this lower-level form so it can inspect no more than its
+/// authorization scan budget while still fetching one identity lookahead to
+/// decide whether a continuation exists. Payloads remain behind the tenant
+/// storage boundary until the caller explicitly loads them.
+pub(crate) async fn list_collection_workflow_ids_page(
+    store: &BoxedEventStore,
+    tenant: &str,
+    after_workflow_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<String>, PersistenceError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let after = after_workflow_id.map(|id| (COLLECTION_WORKFLOW_ENTITY_TYPE, id));
+    store
+        .list_journal_ids_page(tenant, Some(COLLECTION_WORKFLOW_ENTITY_TYPE), after, limit)
+        .await
+        .map(|ids| ids.into_iter().map(|(_, id)| id).collect())
+}
+
 pub(super) enum SourceEvidence<'a> {
     Start(&'a CollectionStartIntentV1),
     Control(&'a CollectionControlIntentV1),

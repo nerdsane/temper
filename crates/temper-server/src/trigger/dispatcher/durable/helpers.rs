@@ -75,4 +75,12 @@ pub(super) fn record_delivery_terminal_metrics(
         record.attempts,
         age,
     );
+    if let Some(collection) = record.intent.collection.as_ref() {
+        crate::runtime_metrics::record_collection_delivery_terminal(
+            collection.role,
+            record.status,
+            record.attempts,
+            age,
+        );
+    }
 }

@@ -14,8 +14,10 @@ use opentelemetry::{KeyValue, global};
 use crate::state::ServerState;
 
 pub(crate) mod blob_transport;
+mod collection_workflows;
 mod handler_deadlines;
 mod snapshot_writes;
+pub(crate) use collection_workflows::*;
 pub use handler_deadlines::*;
 pub use snapshot_writes::*;
 
@@ -54,6 +56,8 @@ struct RuntimeMetrics {
     #[cfg(feature = "observe")]
     reaction_delivery_manual_retry_total: Counter<u64>,
     reaction_delivery_queue_age_ms: Histogram<f64>,
+    // --- ADR-0181: bounded collection workflows -------------------------
+    collection_workflows: collection_workflows::CollectionWorkflowMetrics,
     // --- ADR-0050: liveness coverage enforcement --------------------------
     spec_liveness_violations_total: Counter<u64>,
     spec_allow_indefinite_states: Gauge<u64>,
@@ -265,6 +269,7 @@ fn metrics() -> &'static RuntimeMetrics {
                 .with_unit("ms")
                 .with_description("ADR-0158: age of a durable reaction delivery at terminal outcome.")
                 .build(),
+            collection_workflows: collection_workflows::CollectionWorkflowMetrics::new(&meter),
             spec_liveness_violations_total: meter
                 .u64_counter("temper_spec_liveness_violations_total")
                 .with_description(
