@@ -166,7 +166,16 @@ type = "same_id"
     .await
     .expect("read delivery record")
     .expect("committed non-awaited delivery must be immediately observable");
-    assert_eq!(visible.0.status, ReactionDeliveryStatus::Pending);
+    assert!(
+        matches!(
+            visible.0.status,
+            ReactionDeliveryStatus::Pending
+                | ReactionDeliveryStatus::Claimed
+                | ReactionDeliveryStatus::Dispatching
+        ),
+        "delivery must remain nonterminal during the injected target delay, observed {:?}",
+        visible.0.status
+    );
 }
 
 #[tokio::test]
