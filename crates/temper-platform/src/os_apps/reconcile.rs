@@ -1,7 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use temper_runtime::tenant::TenantId;
 use temper_server::platform_store::InstalledAppRecord;
+use temper_wasm_sdk::data::ModuleSdkManifest;
 
 use super::{
     AppBundle, OsAppBundleDigest, OsAppInstallPlan, OsAppReconcileResult, catalog,
@@ -131,6 +132,35 @@ pub(crate) fn tenant_has_registered_wasm_for_bundle(
         let hash = temper_wasm::WasmEngine::hash_module(wasm_bytes);
         registry.get_hash(&tenant_id, module_name) == Some(hash.as_str())
     })
+}
+
+pub(super) fn restore_canonical_data_bindings(
+    state: &PlatformState,
+    tenant: &str,
+    wasm_modules: &BTreeMap<String, Vec<u8>>,
+    canonical_bindings: &BTreeMap<String, ModuleSdkManifest>,
+) -> Result<(), String> {
+    let tenant_id = TenantId::new(tenant);
+    let mut registry = state
+        .server
+        .wasm_module_registry
+        .write()
+        .map_err(|_| "WASM module registry lock poisoned".to_string())?;
+
+    for (module_name, binding) in canonical_bindings {
+        let wasm_bytes = wasm_modules.get(module_name).ok_or_else(|| {
+            format!("module '{module_name}' canonical data binding has no WASM artifact")
+        })?;
+        let artifact_digest = temper_wasm::WasmEngine::hash_module(wasm_bytes);
+        if registry.get_hash(&tenant_id, module_name) != Some(artifact_digest.as_str()) {
+            return Err(format!(
+                "module '{module_name}' canonical data binding does not match the registered artifact"
+            ));
+        }
+        registry.bind_data_manifest(&tenant_id, module_name, &artifact_digest, binding.clone());
+    }
+
+    Ok(())
 }
 
 pub(crate) async fn tenant_has_durable_wasm_for_bundle(
@@ -301,6 +331,10 @@ pub(crate) async fn reconcile_os_app_from_dir(
                     tenant_has_durable_wasm_for_bundle(state, tenant, &bundle).await;
                 let wasm_ready = wasm_registered && durable_wasm_ready;
                 let policies_active = tenant_has_active_policies_for_bundle(state, tenant, &bundle);
+
+                if wasm_ready && let Some(bindings) = canonical_bindings.as_ref() {
+                    restore_canonical_data_bindings(state, tenant, &bundle.wasm_modules, bindings)?;
+                }
 
                 if record.bundle_digest == digest.bundle_digest && !specs_ready {
                     specs_ready = restore_app_specs_from_matching_digest(
