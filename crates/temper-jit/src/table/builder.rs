@@ -21,6 +21,9 @@ impl TransitionTable {
     pub fn try_from_ioa_source(ioa_toml: &str) -> Result<Self, String> {
         let automaton = automaton::parse_automaton(ioa_toml)
             .map_err(|e| format!("failed to parse I/O Automaton TOML: {e}"))?;
+        if !automaton.collection_workflows.is_empty() {
+            return Err("CollectionWorkflowNotEnabled: public collection workflow activation is gated by ADR-0181 readiness checks".to_string());
+        }
         Ok(Self::from_automaton(&automaton))
     }
 
@@ -486,3 +489,6 @@ effect = [{ type = "spawn", entity_type = "Session", entity_id_source = "{uuid}"
         );
     }
 }
+
+#[cfg(test)]
+mod collection_tests;

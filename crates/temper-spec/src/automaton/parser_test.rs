@@ -1,5 +1,8 @@
 pub(super) const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
+use super::parse_automaton;
 
+#[path = "parser_collection_test.rs"]
+mod collection;
 #[path = "parser_core_test.rs"]
 mod core;
 #[path = "parser_features_test.rs"]

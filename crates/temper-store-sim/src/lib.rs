@@ -829,6 +829,7 @@ impl EventStore for SimEventStore {
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
 
         let mut seen = std::collections::BTreeSet::new();
+        let mut batch_key_claims = std::collections::BTreeMap::new();
         for append in appends {
             if !seen.insert(append.persistence_id.as_str()) {
                 return Err(PersistenceError::Storage(format!(
@@ -915,6 +916,28 @@ impl EventStore for SimEventStore {
                     actual: current_seq,
                 });
             }
+            let (tenant, entity_type, entity_id) =
+                parse_persistence_id_parts(&append.persistence_id)
+                    .map_err(PersistenceError::Storage)?;
+            for row in &append.key_rows {
+                let key = (
+                    tenant.to_string(),
+                    entity_type.to_string(),
+                    row.key_name.clone(),
+                    row.key_hash.clone(),
+                );
+                let existing = batch_key_claims
+                    .get(&key)
+                    .or_else(|| inner.key_index.get(&key));
+                if existing.is_some_and(|existing| existing != entity_id) {
+                    return Err(PersistenceError::Storage(format!(
+                        "duplicate declared key '{}' for {entity_type}: held by {existing}",
+                        row.key_name,
+                        existing = existing.expect("checked as present")
+                    )));
+                }
+                batch_key_claims.insert(key, entity_id.to_string());
+            }
         }
 
         let mut results = Vec::with_capacity(appends.len());
@@ -934,6 +957,45 @@ impl EventStore for SimEventStore {
                 persistence_id: append.persistence_id.clone(),
                 sequence_nr: new_seq,
             });
+        }
+        for append in appends {
+            let (tenant, entity_type, entity_id) =
+                parse_persistence_id_parts(&append.persistence_id)
+                    .map_err(PersistenceError::Storage)?;
+            for row in &append.key_rows {
+                inner.key_index.retain(|(t, et, name, _), holder| {
+                    !(t.as_str() == tenant
+                        && et == entity_type
+                        && name == &row.key_name
+                        && holder == entity_id)
+                });
+                inner.key_index.insert(
+                    (
+                        tenant.to_string(),
+                        entity_type.to_string(),
+                        row.key_name.clone(),
+                        row.key_hash.clone(),
+                    ),
+                    entity_id.to_string(),
+                );
+            }
+            if append.reconcile_vectors {
+                inner.vector_index.retain(|(t, et, _, _, id), _| {
+                    !(t.as_str() == tenant && et == entity_type && id == entity_id)
+                });
+                for row in &append.vector_rows {
+                    inner.vector_index.insert(
+                        (
+                            tenant.to_string(),
+                            entity_type.to_string(),
+                            row.decl_name.clone(),
+                            row.model_tag.clone(),
+                            entity_id.to_string(),
+                        ),
+                        row.vector.clone(),
+                    );
+                }
+            }
         }
 
         Ok(results)

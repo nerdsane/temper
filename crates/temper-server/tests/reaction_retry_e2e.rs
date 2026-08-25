@@ -51,6 +51,7 @@ async fn awaited_drain_waits_for_logical_retry_and_completes_it() {
         created_at: sim_now(),
         not_before: None,
         state_timeout: None,
+        collection: None,
         schema_pin: None,
     };
     let mut payload = serde_json::json!({});

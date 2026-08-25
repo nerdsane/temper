@@ -677,7 +677,11 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
     // 7. Validate [[action.triggers]] declarations (ADR-0046).
     validate_action_triggers(automaton, &action_names)?;
 
-    // 7. Validate [[vector]] access-path declarations (ADR-0155).
+    // 8. Validate ADR-0181's source-local collection contract. Bundle-level
+    // target action/type validation runs after all entity specs are available.
+    super::collection_contract::validate_local(automaton)?;
+
+    // 9. Validate [[vector]] access-path declarations (ADR-0155).
     //    - `property` and `model_property` must be declared state variables.
     //    - `dims` must be > 0.
     //    - `metric` must be one of cosine | dot | l2.

@@ -3,6 +3,8 @@
 //! This pass checks semantic completeness (undefined references, unsupported
 //! declarations, and likely-dead transitions) before verification.
 
+mod collection;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Automaton, Effect, FieldInvariant, Guard};
@@ -256,6 +258,7 @@ pub fn lint_automata_bundle(automata: &BTreeMap<String, Automaton>) -> Vec<Bundl
             automaton,
             &mut findings,
         );
+        collection::lint_workflows(automata, entity_name, automaton, &mut findings);
         let parent_snake = to_snake_case(entity_name);
         for action in &automaton.actions {
             for effect in &action.effect {
@@ -270,6 +273,8 @@ pub fn lint_automata_bundle(automata: &BTreeMap<String, Automaton>) -> Vec<Bundl
             }
         }
     }
+
+    collection::lint_role_uniqueness(automata, &mut findings);
 
     sort_bundle_findings(&mut findings);
     findings

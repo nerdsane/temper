@@ -169,6 +169,7 @@ async fn generated_faults_and_crashes_reconstruct_every_collection_boundary() {
         let (control, _) = record
             .request_control(
                 CollectionRequestedOutcome::Cancelled,
+                None,
                 "CancelChecks".to_string(),
                 2,
                 serde_json::json!({"principal": "controller"}),
@@ -322,6 +323,7 @@ async fn restart_reconciles_ambiguous_collection_writes_without_duplicates() {
         let (control, _) = record
             .request_control(
                 CollectionRequestedOutcome::Cancelled,
+                None,
                 "CancelChecks".to_string(),
                 2,
                 serde_json::json!({"principal": "controller"}),
@@ -426,9 +428,11 @@ async fn restart_after_atomic_batch_failure_never_observes_a_torn_commit() {
         ));
 
         let mut controlled = record.clone();
+        let timeout_delivery_id = bind_test_timeout(&mut controlled);
         let (control, _) = controlled
             .request_control(
                 CollectionRequestedOutcome::TimedOut,
+                Some(&timeout_delivery_id),
                 "TimeoutChecks".to_string(),
                 2,
                 serde_json::json!({"principal": "timer"}),

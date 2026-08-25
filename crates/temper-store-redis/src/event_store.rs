@@ -419,6 +419,8 @@ impl EventStore for RedisEventStore {
         if appends.is_empty() {
             return Ok(Vec::new());
         }
+        // Redis has no query-plane projections; match `append_with_index_rows`
+        // by accepting and intentionally ignoring derived projection rows.
         if let [append] = appends {
             let sequence_nr = self
                 .append(

@@ -196,6 +196,9 @@ async fn boxed_event_store_delegates_through_object_safe_adapter() {
                 persistence_id: "default:Ticket:t-1".to_string(),
                 expected_sequence: 0,
                 events: events.clone(),
+                key_rows: Vec::new(),
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             }])
             .await
             .expect("append batch through dyn adapter"),

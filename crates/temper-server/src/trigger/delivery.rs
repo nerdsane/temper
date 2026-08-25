@@ -9,8 +9,10 @@ use super::types::ReactionRule;
 use crate::storage::BoxedEventStore;
 
 mod identity;
+mod payload;
 mod state_timeout;
 pub use identity::stable_delivery_id;
+pub use payload::{attach_intents, attach_receipt, extract_intents, extract_receipt};
 pub(crate) use state_timeout::state_timeout_declaration_id;
 pub use state_timeout::{
     DeliveryKind, STATE_TIMEOUT_CLOCK_AUDIT_BUDGET, STATE_TIMEOUT_SERVICE,
@@ -66,6 +68,9 @@ pub struct ReactionReceipt {
     /// Exact target action schema, absent only for tenant-global compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_pin: Option<SchemaEventPin>,
+    /// Collection workflow fence checked at the target commit boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<crate::trigger::collection_workflow::CollectionDeliveryContext>,
 }
 
 /// Immutable normalized reaction input committed with the source event.
@@ -115,6 +120,9 @@ pub struct PersistedReactionIntent {
     /// State-clock evidence for generated timeout deliveries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_timeout: Option<StateTimeoutPrecondition>,
+    /// Collection execution fence for member, cancellation, or join delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<crate::trigger::collection_workflow::CollectionDeliveryContext>,
     /// Exact source action schema, absent only for tenant-global compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_pin: Option<SchemaEventPin>,
@@ -140,6 +148,20 @@ pub enum ReactionDeliveryStatus {
     Rejected,
     /// Bounded transient attempts were exhausted.
     DeadLettered,
+}
+
+impl ReactionDeliveryStatus {
+    /// Whether normal automatic delivery work has ended.
+    pub(crate) const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded
+                | Self::Skipped
+                | Self::DroppedAllowed
+                | Self::Rejected
+                | Self::DeadLettered
+        )
+    }
 }
 
 /// Mutable durable state for one logical delivery.
@@ -242,6 +264,11 @@ impl ReactionDeliveryRecord {
 
     /// Request another attempt without replacing the original authority.
     pub fn request_manual_retry(&mut self) -> Result<u32, String> {
+        if self.intent.collection.as_ref().is_some_and(|context| {
+            context.role != crate::trigger::collection_workflow::CollectionDeliveryRole::Join
+        }) {
+            return Err("manual retry is forbidden for collection member lineages".to_string());
+        }
         if self.status != ReactionDeliveryStatus::DeadLettered || !self.transient_failure {
             return Err("only transient dead letters can be retried".to_string());
         }
@@ -272,55 +299,6 @@ impl ReactionDeliveryRecord {
     }
 }
 
-/// Attach normalized intents to the source event payload before its single append.
-pub fn attach_intents(
-    payload: &mut serde_json::Value,
-    intents: &[PersistedReactionIntent],
-) -> Result<(), String> {
-    if intents.is_empty() {
-        return Ok(());
-    }
-    let object = payload
-        .as_object_mut()
-        .ok_or_else(|| "entity event payload must be an object".to_string())?;
-    let value = serde_json::to_value(intents).map_err(|error| error.to_string())?;
-    object.insert(REACTION_INTENTS_FIELD.to_string(), value);
-    Ok(())
-}
-
-/// Read normalized intents from a replayed source event payload.
-pub fn extract_intents(
-    payload: &serde_json::Value,
-) -> Result<Vec<PersistedReactionIntent>, String> {
-    let Some(value) = payload.get(REACTION_INTENTS_FIELD) else {
-        return Ok(Vec::new());
-    };
-    serde_json::from_value(value.clone()).map_err(|error| error.to_string())
-}
-
-/// Attach one delivery receipt to the target event before its append.
-pub fn attach_receipt(
-    payload: &mut serde_json::Value,
-    receipt: &ReactionReceipt,
-) -> Result<(), String> {
-    let object = payload
-        .as_object_mut()
-        .ok_or_else(|| "entity event payload must be an object".to_string())?;
-    let value = serde_json::to_value(receipt).map_err(|error| error.to_string())?;
-    object.insert(REACTION_RECEIPT_FIELD.to_string(), value);
-    Ok(())
-}
-
-/// Read a co-committed target receipt from a replayed event payload.
-pub fn extract_receipt(payload: &serde_json::Value) -> Result<Option<ReactionReceipt>, String> {
-    let Some(value) = payload.get(REACTION_RECEIPT_FIELD) else {
-        return Ok(None);
-    };
-    serde_json::from_value(value.clone())
-        .map(Some)
-        .map_err(|error| error.to_string())
-}
-
 /// Persistence ID of the private lifecycle journal for an intent.
 pub fn delivery_journal_id(intent: &PersistedReactionIntent) -> String {
     format!(
@@ -335,6 +313,16 @@ pub async fn append_delivery_record(
     expected_sequence: u64,
     record: &ReactionDeliveryRecord,
 ) -> Result<u64, PersistenceError> {
+    let append = delivery_record_append(expected_sequence, record)?;
+    let results = store.append_batch(std::slice::from_ref(&append)).await?;
+    Ok(results[0].sequence_nr)
+}
+
+/// Build a delivery append for atomic composition with its owning workflow.
+pub(crate) fn delivery_record_append(
+    expected_sequence: u64,
+    record: &ReactionDeliveryRecord,
+) -> Result<temper_runtime::persistence::PersistenceAppend, PersistenceError> {
     let payload = serde_json::to_value(record)
         .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
     let persistence_id = delivery_journal_id(&record.intent);
@@ -350,9 +338,14 @@ pub async fn append_delivery_record(
             actor_id: persistence_id.clone(),
         },
     };
-    store
-        .append(&persistence_id, expected_sequence, &[envelope])
-        .await
+    Ok(temper_runtime::persistence::PersistenceAppend {
+        persistence_id,
+        expected_sequence,
+        events: vec![envelope],
+        key_rows: Vec::new(),
+        vector_rows: Vec::new(),
+        reconcile_vectors: false,
+    })
 }
 
 /// Restore the latest lifecycle snapshot, inferring `Pending` from the atomic

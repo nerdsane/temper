@@ -1,8 +1,9 @@
 //! Lifecycle mutations and invariant validation for collection records.
 
-use temper_runtime::persistence::schema_deployment::SchemaEventPin;
+mod control;
+mod join;
 
-use super::identity::{collection_control_id, collection_member_id, collection_workflow_id};
+use super::identity::{collection_member_id, collection_workflow_id};
 use super::model::*;
 use crate::trigger::delivery::ReactionDeliveryStatus;
 
@@ -66,6 +67,7 @@ impl CollectionWorkflowRecordV1 {
                     terminal_control_epoch: None,
                     attempts: 0,
                     delivery_id: None,
+                    cancellation_delivery_id: None,
                     delivery_status: None,
                     receipt: None,
                     failure_class: None,
@@ -89,6 +91,8 @@ impl CollectionWorkflowRecordV1 {
             schema_digest: start.schema_digest,
             schema_pin: start.schema_pin,
             original_authority: start.authority,
+            execution_actions: None,
+            timeout_binding: None,
             sealed_roster: start.roster,
             budgets,
             next_undispatched_index: 0,
@@ -97,6 +101,7 @@ impl CollectionWorkflowRecordV1 {
             requested_outcome: None,
             terminal_classification: None,
             join_status: CollectionJoinStatus::Pending,
+            join_delivery_id: None,
             counts: CollectionWorkflowCounts {
                 pending: members.len() as u16,
                 ..CollectionWorkflowCounts::default()
@@ -108,9 +113,69 @@ impl CollectionWorkflowRecordV1 {
             control_source_sequence: None,
             control_authority: None,
             control_schema_pin: None,
+            control_timeout_delivery_id: None,
         };
         record.validate()?;
         Ok((intent, record))
+    }
+
+    /// Bind the verified, schema-pinned action contract before activation.
+    pub(crate) fn bind_execution_actions(
+        &mut self,
+        actions: CollectionDeliveryActions,
+    ) -> Result<CollectionMutationOutcome, String> {
+        if let Some(existing) = &self.execution_actions {
+            return if existing == &actions {
+                Ok(CollectionMutationOutcome::Replayed)
+            } else {
+                Err("workflow execution actions are already bound".to_string())
+            };
+        }
+        if [
+            actions.member_entity.as_str(),
+            actions.member_action.as_str(),
+            actions.member_cancel_action.as_str(),
+            actions.timeout_action.as_str(),
+            actions.on_success.as_str(),
+            actions.on_partial_failure.as_str(),
+            actions.on_failure.as_str(),
+            actions.on_cancelled.as_str(),
+            actions.on_timed_out.as_str(),
+        ]
+        .iter()
+        .any(|value| value.is_empty())
+        {
+            return Err("workflow execution action names must be non-empty".to_string());
+        }
+        self.execution_actions = Some(actions);
+        self.validate()?;
+        Ok(CollectionMutationOutcome::Applied)
+    }
+
+    /// Bind the exact generated ADR-0178 timeout intent before activation.
+    pub(crate) fn bind_timeout(
+        &mut self,
+        binding: CollectionTimeoutBinding,
+    ) -> Result<CollectionMutationOutcome, String> {
+        if binding.delivery_id.is_empty()
+            || binding.timeout_action.is_empty()
+            || binding.state.is_empty()
+            || binding.declaration_id.is_empty()
+            || binding.clock_sequence != self.source_sequence
+            || binding.schema_digest != self.schema_digest
+        {
+            return Err("collection timeout binding does not match its start clock".to_string());
+        }
+        if let Some(existing) = &self.timeout_binding {
+            return if existing == &binding {
+                Ok(CollectionMutationOutcome::Replayed)
+            } else {
+                Err("collection timeout clock is already bound".to_string())
+            };
+        }
+        self.timeout_binding = Some(binding);
+        self.validate()?;
+        Ok(CollectionMutationOutcome::Applied)
     }
 
     /// Admit the exact next roster member under the current control epoch.
@@ -295,98 +360,99 @@ impl CollectionWorkflowRecordV1 {
         Ok(CollectionMutationOutcome::Applied)
     }
 
-    /// Apply the first cancellation or timeout request and fence later admission.
-    pub(crate) fn request_control(
+    /// Bind one cancellation delivery to a receipted active child.
+    pub(crate) fn begin_member_cancellation(
         &mut self,
-        requested_outcome: CollectionRequestedOutcome,
-        source_action: String,
-        source_sequence: u64,
-        authority: serde_json::Value,
-        schema_pin: Option<SchemaEventPin>,
-    ) -> Result<(CollectionControlIntentV1, CollectionMutationOutcome), String> {
-        if source_action.is_empty() || source_sequence == 0 {
+        member_id: &str,
+        delivery_id: String,
+        control_epoch: u64,
+    ) -> Result<CollectionMutationOutcome, String> {
+        if control_epoch != self.control_epoch || self.requested_outcome.is_none() {
+            return Err("stale or absent collection control fence".to_string());
+        }
+        let member = self
+            .members
+            .iter_mut()
+            .find(|member| member.member_id == member_id)
+            .ok_or_else(|| "cancellation member does not belong to this workflow".to_string())?;
+        if member.status != CollectionMemberStatus::InFlight || member.receipt.is_none() {
+            return Err("only a receipted active member can be cancelled".to_string());
+        }
+        if let Some(existing) = &member.cancellation_delivery_id {
+            return if existing == &delivery_id {
+                Ok(CollectionMutationOutcome::Replayed)
+            } else {
+                Err("member has a conflicting cancellation delivery".to_string())
+            };
+        }
+        if delivery_id.is_empty() {
+            return Err("cancellation delivery identity must be non-empty".to_string());
+        }
+        member.cancellation_delivery_id = Some(delivery_id);
+        self.validate()?;
+        Ok(CollectionMutationOutcome::Applied)
+    }
+
+    /// Apply one fenced cancellation delivery result exactly once.
+    pub(crate) fn record_member_controlled_terminal(
+        &mut self,
+        member_id: &str,
+        delivery_id: &str,
+        control_epoch: u64,
+        delivery_status: ReactionDeliveryStatus,
+        matching_receipt: bool,
+    ) -> Result<CollectionMutationOutcome, String> {
+        if control_epoch != self.control_epoch || !delivery_status_is_terminal(delivery_status) {
             return Err(
-                "control source action and sequence must be committed evidence".to_string(),
+                "controlled terminal evidence has a stale fence or active delivery".to_string(),
             );
         }
-        let control_id = collection_control_id(
-            &self.workflow_id,
-            &source_action,
-            source_sequence,
-            requested_outcome.identity_component(),
-        );
-        if let Some(first) = self.requested_outcome {
-            let outcome = if first == requested_outcome
-                && self.last_control_id.as_deref() == Some(control_id.as_str())
-            {
-                CollectionMutationOutcome::Replayed
-            } else {
-                CollectionMutationOutcome::IgnoredAfterFirstControl
-            };
-            return Ok((
-                CollectionControlIntentV1 {
-                    version: COLLECTION_LEDGER_VERSION,
-                    control_id,
-                    workflow_id: self.workflow_id.clone(),
-                    requested_outcome,
-                    source_action,
-                    source_sequence,
-                    control_epoch: self.control_epoch,
-                    authority,
-                    schema_pin,
-                },
-                outcome,
-            ));
-        }
-        if self.status != CollectionWorkflowStatus::Running {
-            return Err("terminal workflow cannot accept control".to_string());
-        }
-        self.control_epoch = self
-            .control_epoch
-            .checked_add(1)
-            .ok_or_else(|| "collection control epoch exhausted".to_string())?;
-        self.requested_outcome = Some(requested_outcome);
-        self.last_control_id = Some(control_id.clone());
-        self.control_source_action = Some(source_action.clone());
-        self.control_source_sequence = Some(source_sequence);
-        self.control_authority = Some(authority.clone());
-        self.control_schema_pin = schema_pin.clone();
-        self.status = match requested_outcome {
-            CollectionRequestedOutcome::Cancelled => CollectionWorkflowStatus::Cancelling,
-            CollectionRequestedOutcome::TimedOut => CollectionWorkflowStatus::TimingOut,
+        let requested = self
+            .requested_outcome
+            .ok_or_else(|| "workflow has no control request".to_string())?;
+        let controlled_terminal = match requested {
+            CollectionRequestedOutcome::Cancelled => CollectionMemberStatus::Cancelled,
+            CollectionRequestedOutcome::TimedOut => CollectionMemberStatus::TimedOut,
         };
-        for member in &mut self.members {
-            if member.status == CollectionMemberStatus::Pending
-                || (member.status == CollectionMemberStatus::InFlight && member.receipt.is_none())
+        let terminal = if delivery_status == ReactionDeliveryStatus::Succeeded
+            || (delivery_status == ReactionDeliveryStatus::Skipped && matching_receipt)
+        {
+            controlled_terminal
+        } else {
+            CollectionMemberStatus::Failed
+        };
+        let member = self
+            .members
+            .iter_mut()
+            .find(|member| member.member_id == member_id)
+            .ok_or_else(|| "controlled member does not belong to this workflow".to_string())?;
+        if member.status.is_terminal() {
+            return if member.status == terminal
+                && member.cancellation_delivery_id.as_deref() == Some(delivery_id)
+                && member.terminal_control_epoch == Some(control_epoch)
             {
-                member.status = match requested_outcome {
-                    CollectionRequestedOutcome::Cancelled => CollectionMemberStatus::Cancelled,
-                    CollectionRequestedOutcome::TimedOut => CollectionMemberStatus::TimedOut,
-                };
-                if member.delivery_id.is_some() {
-                    member.delivery_status = Some(ReactionDeliveryStatus::Skipped);
-                    member.terminal_control_epoch = Some(self.control_epoch);
-                }
-            }
+                Ok(CollectionMutationOutcome::Replayed)
+            } else {
+                Err("conflicting controlled terminal evidence".to_string())
+            };
         }
-        self.next_undispatched_index = self.members.len() as u16;
+        if member.status != CollectionMemberStatus::InFlight
+            || member.receipt.is_none()
+            || member.cancellation_delivery_id.as_deref() != Some(delivery_id)
+        {
+            return Err(
+                "controlled terminal evidence is not bound to a receipted child".to_string(),
+            );
+        }
+        member.status = terminal;
+        member.terminal_control_epoch = Some(control_epoch);
+        member.delivery_status = Some(delivery_status);
+        member.failure_class = (terminal == CollectionMemberStatus::Failed)
+            .then_some(CollectionFailureClass::CancellationFailed);
         self.recount();
         self.classify_if_complete();
         self.validate()?;
-        Ok((
-            CollectionControlIntentV1 {
-                version: COLLECTION_LEDGER_VERSION,
-                control_id,
-                workflow_id: self.workflow_id.clone(),
-                requested_outcome,
-                source_action,
-                source_sequence,
-                control_epoch: self.control_epoch,
-                authority,
-                schema_pin,
-            },
-            CollectionMutationOutcome::Applied,
-        ))
+        Ok(CollectionMutationOutcome::Applied)
     }
 
     fn classify_if_complete(&mut self) {

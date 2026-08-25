@@ -1,5 +1,6 @@
 //! Versioned collection-workflow intents and lifecycle state.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use temper_runtime::persistence::schema_deployment::SchemaEventPin;
 
@@ -19,7 +20,12 @@ pub(crate) const MAX_COLLECTION_ATTEMPTS: u8 = 5;
 pub(crate) struct CollectionWorkflowBudgets {
     pub(crate) max_members: u16,
     pub(crate) max_concurrency: u8,
+    #[serde(default = "default_collection_max_attempts")]
     pub(crate) max_attempts: u8,
+}
+
+const fn default_collection_max_attempts() -> u8 {
+    MAX_COLLECTION_ATTEMPTS
 }
 
 impl CollectionWorkflowBudgets {
@@ -57,6 +63,18 @@ pub(crate) struct CollectionWorkflowStart {
     pub(crate) budgets: CollectionWorkflowBudgets,
 }
 
+/// Exact ADR-0178 clock that exclusively owns workflow timeout control.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CollectionTimeoutBinding {
+    pub(crate) delivery_id: String,
+    pub(crate) timeout_action: String,
+    pub(crate) state: String,
+    pub(crate) deadline: DateTime<Utc>,
+    pub(crate) declaration_id: String,
+    pub(crate) clock_sequence: u64,
+    pub(crate) schema_digest: String,
+}
+
 /// Normalized start evidence co-committed with the source event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct CollectionStartIntentV1 {
@@ -89,6 +107,8 @@ pub(crate) struct CollectionControlIntentV1 {
     pub(crate) control_id: String,
     pub(crate) workflow_id: String,
     pub(crate) requested_outcome: CollectionRequestedOutcome,
+    #[serde(default)]
+    pub(crate) timeout_delivery_id: Option<String>,
     pub(crate) source_action: String,
     pub(crate) source_sequence: u64,
     pub(crate) control_epoch: u64,
@@ -99,7 +119,7 @@ pub(crate) struct CollectionControlIntentV1 {
 /// Durable workflow lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum CollectionWorkflowStatus {
+pub enum CollectionWorkflowStatus {
     Running,
     Cancelling,
     TimingOut,
@@ -175,6 +195,8 @@ pub(crate) struct CollectionMemberRecord {
     pub(crate) terminal_control_epoch: Option<u64>,
     pub(crate) attempts: u8,
     pub(crate) delivery_id: Option<String>,
+    #[serde(default)]
+    pub(crate) cancellation_delivery_id: Option<String>,
     pub(crate) delivery_status: Option<ReactionDeliveryStatus>,
     pub(crate) receipt: Option<CollectionMemberReceipt>,
     pub(crate) failure_class: Option<CollectionFailureClass>,
@@ -214,6 +236,64 @@ pub(crate) enum CollectionJoinStatus {
     InFlight,
     Delivered,
     DeliveryFailed,
+    SupersededByNewWorkflow,
+}
+
+/// Role of one durable delivery owned by a collection workflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionDeliveryRole {
+    Member,
+    Cancellation,
+    Join,
+    MemberDescendant,
+    CancellationDescendant,
+    JoinDescendant,
+}
+
+impl CollectionDeliveryRole {
+    pub(crate) const fn descendant(self) -> Self {
+        match self {
+            Self::Member | Self::MemberDescendant => Self::MemberDescendant,
+            Self::Cancellation | Self::CancellationDescendant => Self::CancellationDescendant,
+            Self::Join | Self::JoinDescendant => Self::JoinDescendant,
+        }
+    }
+
+    pub(crate) const fn is_descendant(self) -> bool {
+        matches!(
+            self,
+            Self::MemberDescendant | Self::CancellationDescendant | Self::JoinDescendant
+        )
+    }
+}
+
+/// Immutable workflow fence carried through target commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollectionDeliveryContext {
+    pub(crate) workflow_id: String,
+    pub(crate) member_id: Option<String>,
+    pub(crate) control_epoch: u64,
+    pub(crate) role: CollectionDeliveryRole,
+    pub(crate) terminal_classification: Option<CollectionWorkflowStatus>,
+    pub(crate) actions: CollectionDeliveryActions,
+    pub(crate) max_attempts: u8,
+    #[serde(default)]
+    pub(crate) attempts: u8,
+}
+
+/// Schema-pinned action names needed for deterministic continuation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollectionDeliveryActions {
+    pub(crate) member_entity: String,
+    pub(crate) member_action: String,
+    pub(crate) member_cancel_action: String,
+    pub(crate) timeout_action: String,
+    pub(crate) on_success: String,
+    pub(crate) on_partial_failure: String,
+    pub(crate) on_failure: String,
+    pub(crate) on_cancelled: String,
+    pub(crate) on_timed_out: String,
 }
 
 /// Complete replayable v1 workflow ledger snapshot.
@@ -230,6 +310,10 @@ pub(crate) struct CollectionWorkflowRecordV1 {
     pub(crate) schema_digest: String,
     pub(crate) schema_pin: Option<SchemaEventPin>,
     pub(crate) original_authority: serde_json::Value,
+    #[serde(default)]
+    pub(crate) execution_actions: Option<CollectionDeliveryActions>,
+    #[serde(default)]
+    pub(crate) timeout_binding: Option<CollectionTimeoutBinding>,
     pub(crate) sealed_roster: Vec<String>,
     pub(crate) budgets: CollectionWorkflowBudgets,
     pub(crate) next_undispatched_index: u16,
@@ -238,6 +322,8 @@ pub(crate) struct CollectionWorkflowRecordV1 {
     pub(crate) requested_outcome: Option<CollectionRequestedOutcome>,
     pub(crate) terminal_classification: Option<CollectionWorkflowStatus>,
     pub(crate) join_status: CollectionJoinStatus,
+    #[serde(default)]
+    pub(crate) join_delivery_id: Option<String>,
     pub(crate) counts: CollectionWorkflowCounts,
     pub(crate) total_attempts: u32,
     pub(crate) members: Vec<CollectionMemberRecord>,
@@ -246,6 +332,8 @@ pub(crate) struct CollectionWorkflowRecordV1 {
     pub(crate) control_source_sequence: Option<u64>,
     pub(crate) control_authority: Option<serde_json::Value>,
     pub(crate) control_schema_pin: Option<SchemaEventPin>,
+    #[serde(default)]
+    pub(crate) control_timeout_delivery_id: Option<String>,
 }
 
 /// Result of an idempotent lifecycle mutation.

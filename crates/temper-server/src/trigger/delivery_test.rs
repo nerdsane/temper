@@ -61,6 +61,7 @@ fn intent() -> PersistedReactionIntent {
         created_at: Utc.timestamp_opt(1_800_000_000, 0).single().unwrap(),
         not_before: None,
         state_timeout: None,
+        collection: None,
         schema_pin: None,
     }
 }
@@ -266,6 +267,7 @@ fn receipt_round_trips_inside_the_atomic_target_event_payload() {
         received_at: Utc.timestamp_opt(1_800_000_001, 0).single().unwrap(),
         state_timeout_state: None,
         schema_pin: None,
+        collection: None,
     };
 
     attach_receipt(&mut payload, &receipt).unwrap();

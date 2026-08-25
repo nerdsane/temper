@@ -55,14 +55,14 @@ pub trait PersistentActor: Send + 'static {
 }
 
 /// A declared-key row to co-commit with an append.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityKeyRow {
     pub key_name: String,
     pub key_hash: String,
 }
 
 /// A derived vector-index row to co-commit with an append.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EntityVectorRow {
     pub decl_name: String,
     pub model_tag: String,
@@ -116,6 +116,15 @@ pub struct PersistenceAppend {
     pub persistence_id: String,
     pub expected_sequence: u64,
     pub events: Vec<PersistenceEnvelope>,
+    /// Declared-key projection rows co-committed with this stream.
+    #[serde(default)]
+    pub key_rows: Vec<EntityKeyRow>,
+    /// Vector projection rows co-committed with this stream.
+    #[serde(default)]
+    pub vector_rows: Vec<EntityVectorRow>,
+    /// Whether prior vector rows for this entity must be replaced.
+    #[serde(default)]
+    pub reconcile_vectors: bool,
 }
 
 /// New sequence number for one stream after an atomic batch append.

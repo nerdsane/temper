@@ -430,12 +430,17 @@ impl EventStore for TursoEventStore {
         if appends.is_empty() {
             return Ok(Vec::new());
         }
+        // Turso has no key query plane; match `append_with_index_rows` by
+        // accepting and intentionally ignoring declared key rows.
         if let [append] = appends {
             let sequence_nr = self
-                .append(
+                .append_with_index_rows(
                     &append.persistence_id,
                     append.expected_sequence,
                     &append.events,
+                    &append.key_rows,
+                    &append.vector_rows,
+                    append.reconcile_vectors,
                 )
                 .await?;
             return Ok(vec![PersistenceAppendResult {
@@ -1489,6 +1494,39 @@ impl TursoEventStore {
                     });
                 }
                 return Err(PersistenceError::Storage(msg));
+            }
+        }
+
+        for ((append, (tenant, entity_type, entity_id)), result) in appends
+            .iter()
+            .zip(parsed.iter())
+            .zip(results.iter())
+            .filter(|((append, _), _)| append.reconcile_vectors)
+        {
+            tx.execute(
+                "DELETE FROM entity_vector_index \
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                params![tenant.clone(), entity_type.clone(), entity_id.clone()],
+            )
+            .await
+            .map_err(storage_error)?;
+            for row in &append.vector_rows {
+                tx.execute(
+                    "INSERT INTO entity_vector_index \
+                     (tenant, entity_type, decl_name, model_tag, entity_id, vector, sequence_nr) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        tenant.clone(),
+                        entity_type.clone(),
+                        row.decl_name.as_str(),
+                        row.model_tag.as_str(),
+                        entity_id.clone(),
+                        Value::Blob(pack_f32_le(&row.vector)),
+                        result.sequence_nr as i64,
+                    ],
+                )
+                .await
+                .map_err(storage_error)?;
             }
         }
 

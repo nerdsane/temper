@@ -83,6 +83,7 @@ pub(super) struct BoundDelivery {
     target_entity_id: Option<String>,
     expected_target_sequence: Option<u64>,
     state_timeout_state: Option<String>,
+    collection: Option<crate::trigger::collection_workflow::CollectionDeliveryContext>,
 }
 
 /// Async reaction dispatcher for production use.

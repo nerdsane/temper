@@ -49,6 +49,7 @@ async fn atomic_helpers_reject_mismatched_source_and_intent_evidence() {
     let (control, _) = controlled
         .request_control(
             CollectionRequestedOutcome::Cancelled,
+            None,
             "CancelChecks".to_string(),
             2,
             serde_json::json!({"principal": "controller"}),

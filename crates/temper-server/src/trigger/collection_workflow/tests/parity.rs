@@ -95,6 +95,7 @@ async fn prove_collection_ledger_semantics(tenant: &str, store: BoxedEventStore)
     let (control, control_outcome) = record
         .request_control(
             CollectionRequestedOutcome::Cancelled,
+            None,
             "CancelChecks".to_string(),
             2,
             serde_json::json!({"principal": "controller"}),
