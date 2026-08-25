@@ -61,12 +61,61 @@ export class TemperClient {
 
   // ── Entity CRUD ──────────────────────────────────────────────────
 
-  /** List all entities of the given type. */
-  async list(entityType: string): Promise<unknown[]> {
-    const url = `${this.baseUrl}/tdata/${entityType}`;
-    const resp = await fetch(url, {
-      headers: this.defaultHeaders(),
-    });
+  /**
+   * List entities of the given type, following server-driven paging to
+   * completion.
+   *
+   * A Temper list read is capped at a default page size and returns an
+   * `@odata.nextLink` (`$skiptoken`) for the remainder. A single bare GET
+   * therefore returns only the first page — a silent-truncation footgun
+   * (ARN-363). This method follows the nextLink until the collection is
+   * exhausted, so it honours its name and returns *all* matching entities.
+   *
+   * @param entityType - The entity set (e.g., "Tasks").
+   * @param options.filter - Optional OData `$filter` expression.
+   * @param options.pageSize - Rows per underlying request (default 500).
+   */
+  async list(
+    entityType: string,
+    options?: { filter?: string; pageSize?: number }
+  ): Promise<unknown[]> {
+    const filterQ = options?.filter
+      ? `$filter=${encodeURIComponent(options.filter)}&`
+      : "";
+    const top = options?.pageSize ?? 500;
+    let url: string | null = `${this.baseUrl}/tdata/${entityType}?${filterQ}$top=${top}`;
+    const out: unknown[] = [];
+    // Bounded loop: a defensive ceiling so a misbehaving server can never
+    // spin this forever.
+    for (let page = 0; url && page < 10_000; page++) {
+      const current: string = url;
+      const resp = await fetch(current, { headers: this.defaultHeaders() });
+      this.checkStatus(resp, "list", entityType);
+      const body = (await resp.json()) as {
+        value?: unknown[];
+        "@odata.nextLink"?: string;
+      };
+      if (Array.isArray(body.value)) out.push(...body.value);
+      const next = body["@odata.nextLink"];
+      // nextLink may be absolute or relative to the request URI; resolve it
+      // the spec-correct way against the URL we just fetched.
+      url = next ? new URL(next, current).toString() : null;
+    }
+    return out;
+  }
+
+  /** Fetch only the first page of a list read (no pagination). Use when you
+   *  deliberately want a bounded sample; prefer {@link list} for completeness. */
+  async listPage(
+    entityType: string,
+    options?: { filter?: string; pageSize?: number }
+  ): Promise<unknown[]> {
+    const filterQ = options?.filter
+      ? `$filter=${encodeURIComponent(options.filter)}&`
+      : "";
+    const top = options?.pageSize ?? 100;
+    const url = `${this.baseUrl}/tdata/${entityType}?${filterQ}$top=${top}`;
+    const resp = await fetch(url, { headers: this.defaultHeaders() });
     this.checkStatus(resp, "list", entityType);
     const body = await resp.json();
     return body?.value ?? [];
