@@ -441,11 +441,29 @@ impl VerificationCascade {
     /// Level 1: Stateright exhaustive model checking.
     fn run_model_check(&self, model: &TemperModel) -> LevelResult {
         let verification = checker::check_model_with_state_budget(model, self.model_state_budget);
-        let passed = verification.all_properties_hold;
+        let collection_results = temper_spec::automaton::parse_automaton(&self.ioa_source)
+            .map(|automaton| {
+                automaton
+                    .collection_workflows
+                    .iter()
+                    .map(crate::collection::verify_collection_workflow)
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap_or_else(|error| Err(error.to_string()));
+        let passed = verification.all_properties_hold && collection_results.is_ok();
         let summary = if passed {
+            let collection_states = collection_results
+                .as_ref()
+                .map(|results| {
+                    results
+                        .iter()
+                        .map(|result| result.states_explored)
+                        .sum::<usize>()
+                })
+                .unwrap_or(0);
             format!(
-                "L1 Model Check PASSED: {} states explored, all properties hold",
-                verification.states_explored,
+                "L1 Model Check PASSED: {} entity states and {} collection quotient states explored, all properties hold",
+                verification.states_explored, collection_states,
             )
         } else {
             let mut parts = Vec::new();
@@ -461,6 +479,9 @@ impl VerificationCascade {
                     verification.dead_transitions.len(),
                     verification.dead_transitions.join(", ")
                 ));
+            }
+            if let Err(error) = &collection_results {
+                parts.push(format!("collection proof failed: {error}"));
             }
             format!(
                 "L1 Model Check FAILED: {} states explored, {}",

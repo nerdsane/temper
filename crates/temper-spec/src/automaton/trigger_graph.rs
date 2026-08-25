@@ -71,6 +71,9 @@ pub struct TriggerGraph {
     /// Incoming edges, keyed by target entity type. Useful for "who
     /// dispatches me?" queries.
     pub incoming: BTreeMap<String, Vec<TriggerEdge>>,
+    /// Undirected dependency adjacency contributed by cross-entity read
+    /// guards and collection workflow source/member contracts.
+    pub dependencies: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl TriggerGraph {
@@ -86,6 +89,9 @@ impl TriggerGraph {
             let entity_type = aut.automaton.name.clone();
             graph.entities.insert(entity_type.clone());
             for action in &aut.actions {
+                for guard in &action.guard {
+                    collect_guard_dependencies(&entity_type, guard, &mut graph.dependencies);
+                }
                 for trigger in &action.triggers {
                     if let Some(edge) = edge_from_trigger(&entity_type, &action.name, trigger) {
                         graph
@@ -100,6 +106,13 @@ impl TriggerGraph {
                             .push(edge);
                     }
                 }
+            }
+            for workflow in &aut.collection_workflows {
+                add_dependency(
+                    &mut graph.dependencies,
+                    &entity_type,
+                    &workflow.member_entity,
+                );
             }
         }
         graph
@@ -128,6 +141,13 @@ impl TriggerGraph {
                 for edge in edges {
                     if !visited.contains(&edge.to) {
                         queue.push_back(edge.to.clone());
+                    }
+                }
+            }
+            if let Some(dependencies) = self.dependencies.get(&entity) {
+                for dependency in dependencies {
+                    if self.entities.contains(dependency) && !visited.contains(dependency) {
+                        queue.push_back(dependency.clone());
                     }
                 }
             }
@@ -168,6 +188,27 @@ impl TriggerGraph {
         }
         in_stack.remove(node);
         false
+    }
+}
+
+fn add_dependency(dependencies: &mut BTreeMap<String, BTreeSet<String>>, left: &str, right: &str) {
+    dependencies
+        .entry(left.to_string())
+        .or_default()
+        .insert(right.to_string());
+    dependencies
+        .entry(right.to_string())
+        .or_default()
+        .insert(left.to_string());
+}
+
+fn collect_guard_dependencies(
+    source_entity: &str,
+    guard: &super::types::Guard,
+    dependencies: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    if let super::types::Guard::CrossEntityState { entity_type, .. } = guard {
+        add_dependency(dependencies, source_entity, entity_type);
     }
 }
 

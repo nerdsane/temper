@@ -8,6 +8,7 @@
 
 pub mod cascade;
 pub mod checker;
+pub mod collection;
 pub mod composite;
 pub mod model;
 pub mod paths;

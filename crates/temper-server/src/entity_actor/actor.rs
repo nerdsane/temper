@@ -30,7 +30,7 @@ use temper_observe::wide_event;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
 use temper_runtime::persistence::schema_deployment::{SchemaEventPin, SchemaExecutionPin};
 use temper_runtime::persistence::{
-    COMPOSITE_EVENT_TYPE, EventMetadata, PersistenceEnvelope, PersistenceError,
+    COMPOSITE_EVENT_TYPE, EventMetadata, PersistenceAppend, PersistenceEnvelope, PersistenceError,
 };
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 pub(super) use tokio::time::sleep as sleep_persistence_retry; // determinism-ok: production persistence retry backoff
@@ -521,6 +521,13 @@ impl EntityActor {
                     created_at: event.timestamp,
                     not_before: None,
                     state_timeout: None,
+                    collection: context.receipt.as_ref().and_then(|receipt| {
+                        receipt.collection.clone().map(|mut collection| {
+                            collection.role = collection.role.descendant();
+                            collection.attempts = 0;
+                            collection
+                        })
+                    }),
                     schema_pin: self.schema_event_pin(&event.action),
                 });
             }
@@ -624,16 +631,41 @@ impl EntityActor {
             (key_rows, vector_rows, reconcile_vectors)
         };
         let append_start = Instant::now(); // determinism-ok: production-only event-store wait metric
-        let result = store
-            .append_with_index_rows(
-                persistence_id,
-                state.sequence_nr,
-                &[envelope],
-                &key_rows,
-                &vector_rows,
-                reconcile_vectors,
+        let collection_receipt = reaction_context
+            .and_then(|context| context.receipt.as_ref())
+            .filter(|receipt| receipt.collection.is_some());
+        let result = if let Some(receipt) = collection_receipt {
+            let workflow_append = crate::trigger::collection_workflow::target_fence_append(
+                store,
+                self.tenant.as_str(),
+                receipt,
             )
-            .await;
+            .await
+            .map_err(PersistenceError::Storage)?;
+            let target_append = PersistenceAppend {
+                persistence_id: persistence_id.to_string(),
+                expected_sequence: state.sequence_nr,
+                events: vec![envelope],
+                key_rows: key_rows.clone(),
+                vector_rows: vector_rows.clone(),
+                reconcile_vectors,
+            };
+            store
+                .append_batch(&[target_append, workflow_append])
+                .await
+                .map(|results| results[0].sequence_nr)
+        } else {
+            store
+                .append_with_index_rows(
+                    persistence_id,
+                    state.sequence_nr,
+                    &[envelope],
+                    &key_rows,
+                    &vector_rows,
+                    reconcile_vectors,
+                )
+                .await
+        };
         crate::runtime_metrics::record_event_store_append_wait(
             backend.as_str(),
             "append",

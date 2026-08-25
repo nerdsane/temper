@@ -65,6 +65,11 @@ pub struct Automaton {
     /// unless the entity leaves the state or a `reset_on` action fires.
     #[serde(default, rename = "state_timeout")]
     pub state_timeouts: Vec<StateTimeout>,
+    /// ADR-0181 bounded collection workflow declarations. Parsing and
+    /// verification are additive; production JIT activation remains gated
+    /// until the complete readiness suite is enabled.
+    #[serde(default, rename = "collection_workflow")]
+    pub collection_workflows: Vec<CollectionWorkflow>,
     /// ADR-0153: declared unique keys (alternate keys). Each names a property
     /// set guaranteed unique across entities of this type; the kernel maintains
     /// a keyed index (`entity_key_index`) over it for O(log n) present/absent
@@ -599,6 +604,55 @@ pub struct StateTimeout {
     #[serde(default)]
     pub params: BTreeMap<String, String>,
 }
+
+/// A verified bounded collection workflow declaration (ADR-0181).
+///
+/// The kernel owns roster sealing, deterministic member identity, bounded
+/// delivery, terminal aggregation, cancellation, timeout propagation, and the
+/// eventual source join. Application-specific reducers and payload mappings
+/// are intentionally absent from v1.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CollectionWorkflow {
+    /// Stable declaration name within the source entity type.
+    pub name: String,
+    /// Source action whose committed post-state seals the roster.
+    pub start_action: String,
+    /// Source action requesting cancellation.
+    pub cancel_action: String,
+    /// Source action invoked by the bound durable state timeout.
+    pub timeout_action: String,
+    /// Declared list state variable containing member values.
+    pub roster_field: String,
+    /// Entity type materialized once per roster member.
+    pub member_entity: String,
+    /// Action applied when a member child is admitted.
+    pub member_action: String,
+    /// Action applied to a receipted child during cancellation or timeout.
+    pub member_cancel_action: String,
+    /// Maximum sealed roster size.
+    pub max_members: u16,
+    /// Maximum concurrently in-flight members.
+    pub max_concurrency: u8,
+    /// Maximum automatic attempts for member and cancel deliveries.
+    pub max_attempts: u8,
+    /// Join action used when every member succeeds.
+    pub on_success: String,
+    /// Join action used when success and failure are both present.
+    pub on_partial_failure: String,
+    /// Join action used when no member succeeds and no control won.
+    pub on_failure: String,
+    /// Join action used after cancellation quiesces.
+    pub on_cancelled: String,
+    /// Join action used after timeout quiesces.
+    pub on_timed_out: String,
+}
+
+/// ADR-0181 v1 maximum sealed roster size.
+pub const MAX_COLLECTION_WORKFLOW_MEMBERS: u16 = 64;
+/// ADR-0181 v1 maximum concurrent members.
+pub const MAX_COLLECTION_WORKFLOW_CONCURRENCY: u8 = 8;
+/// ADR-0181 v1 maximum automatic delivery attempts.
+pub const MAX_COLLECTION_WORKFLOW_ATTEMPTS: u8 = 5;
 
 fn default_one() -> u32 {
     1

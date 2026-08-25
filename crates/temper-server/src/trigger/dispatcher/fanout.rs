@@ -1,6 +1,7 @@
 //! Reaction rule evaluation, authorization, dispatch, and telemetry.
 
 mod entry;
+mod telemetry;
 
 use crate::request_context::AgentContext;
 use crate::trigger::{guard, params, resolver};
@@ -8,6 +9,7 @@ use temper_runtime::tenant::TenantId;
 
 use super::super::types::{MAX_REACTION_DEPTH, ReactionResult, ReactionRule};
 use super::{BoundDelivery, ReactionDispatcher, effective_trigger_security_context};
+use telemetry::{ReactionFanoutCounts, record_reaction_fanout_span};
 
 impl ReactionDispatcher {
     #[expect(
@@ -308,6 +310,7 @@ impl ReactionDispatcher {
                             received_at: temper_runtime::scheduler::sim_now(),
                             state_timeout_state: delivery.state_timeout_state.clone(),
                             schema_pin: None,
+                            collection: delivery.collection.clone(),
                         }),
                     }),
                     Err(error) => {
@@ -354,7 +357,22 @@ impl ReactionDispatcher {
                             .await
                         {
                             Ok(intents) => {
-                                if !intents.is_empty() {
+                                if bound_delivery
+                                    .as_ref()
+                                    .is_some_and(|delivery| delivery.collection.is_some())
+                                {
+                                    if let Err(error) =
+                                        self.dispatch_collection_descendants(state, intents).await
+                                    {
+                                        return vec![ReactionResult {
+                                            rule_name: rule.name.clone(),
+                                            success: false,
+                                            target_status: Some(target_status),
+                                            error: Some(error),
+                                            depth,
+                                        }];
+                                    }
+                                } else if !intents.is_empty() {
                                     self.notify_recovery(tenant);
                                 }
                                 None
@@ -425,33 +443,6 @@ impl ReactionDispatcher {
 
         results
     }
-}
-
-#[derive(Default)]
-struct ReactionFanoutCounts {
-    rule_count: usize,
-    fired_count: usize,
-    guard_skipped_count: usize,
-    target_resolve_error_count: usize,
-    authz_denied_count: usize,
-    dispatch_error_count: usize,
-    success_count: usize,
-    result_count: usize,
-}
-
-fn record_reaction_fanout_span(counts: ReactionFanoutCounts) {
-    let span = tracing::Span::current();
-    span.record("reaction.rule_count", counts.rule_count);
-    span.record("reaction.fired_count", counts.fired_count);
-    span.record("reaction.guard_skipped_count", counts.guard_skipped_count);
-    span.record(
-        "reaction.target_resolve_error_count",
-        counts.target_resolve_error_count,
-    );
-    span.record("reaction.authz_denied_count", counts.authz_denied_count);
-    span.record("reaction.dispatch_error_count", counts.dispatch_error_count);
-    span.record("reaction.success_count", counts.success_count);
-    span.record("reaction.result_count", counts.result_count);
 }
 
 /// Resolve an explicit reaction service principal or inherit the caller.

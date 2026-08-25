@@ -62,11 +62,17 @@ async fn append_batch_commits_multiple_journals_atomically() {
             persistence_id: "default:Order:ord-a".to_string(),
             expected_sequence: 0,
             events: vec![test_envelope(0, "Created")],
+            key_rows: Vec::new(),
+            vector_rows: Vec::new(),
+            reconcile_vectors: false,
         },
         PersistenceAppend {
             persistence_id: "default:Order:ord-b".to_string(),
             expected_sequence: 0,
             events: vec![test_envelope(0, "Created"), test_envelope(0, "Submitted")],
+            key_rows: Vec::new(),
+            vector_rows: Vec::new(),
+            reconcile_vectors: false,
         },
     ];
 
@@ -107,11 +113,17 @@ async fn append_batch_conflict_leaves_all_journals_untouched() {
                 persistence_id: "default:Order:ord-new".to_string(),
                 expected_sequence: 0,
                 events: vec![test_envelope(0, "Created")],
+                key_rows: Vec::new(),
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             },
             PersistenceAppend {
                 persistence_id: "default:Order:ord-existing".to_string(),
                 expected_sequence: 0,
                 events: vec![test_envelope(0, "Submitted")],
+                key_rows: Vec::new(),
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             },
         ])
         .await
@@ -130,6 +142,78 @@ async fn append_batch_conflict_leaves_all_journals_untouched() {
         1,
         "conflicting stream must keep its original journal only"
     );
+}
+
+#[tokio::test]
+async fn append_batch_key_conflict_aborts_every_journal_and_projection() {
+    let store = SimEventStore::no_faults(43);
+    let key = temper_runtime::persistence::EntityKeyRow {
+        key_name: "external".to_string(),
+        key_hash: "same".to_string(),
+    };
+    store
+        .append_with_index_rows(
+            "default:Child:existing",
+            0,
+            &[test_envelope(0, "Created")],
+            std::slice::from_ref(&key),
+            &[],
+            false,
+        )
+        .await
+        .unwrap();
+    let error = store
+        .append_batch(&[
+            PersistenceAppend {
+                persistence_id: "default:Child:new".to_string(),
+                expected_sequence: 0,
+                events: vec![test_envelope(0, "Created")],
+                key_rows: vec![key],
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
+            },
+            PersistenceAppend {
+                persistence_id: "default:_CollectionWorkflow:w1".to_string(),
+                expected_sequence: 0,
+                events: vec![test_envelope(0, "Receipt")],
+                key_rows: Vec::new(),
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
+            },
+        ])
+        .await
+        .expect_err("duplicate key must abort the target/fence batch");
+    assert!(error.to_string().contains("duplicate declared key"));
+    assert!(store.dump_journal("default:Child:new").is_empty());
+    assert!(
+        store
+            .dump_journal("default:_CollectionWorkflow:w1")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn append_batch_rejects_two_new_streams_claiming_the_same_key() {
+    let store = SimEventStore::no_faults(44);
+    let key = temper_runtime::persistence::EntityKeyRow {
+        key_name: "external".to_string(),
+        key_hash: "same-new-batch".to_string(),
+    };
+    let appends = ["first", "second"].map(|entity_id| PersistenceAppend {
+        persistence_id: format!("default:Child:{entity_id}"),
+        expected_sequence: 0,
+        events: vec![test_envelope(0, "Created")],
+        key_rows: vec![key.clone()],
+        vector_rows: Vec::new(),
+        reconcile_vectors: false,
+    });
+    let error = store
+        .append_batch(&appends)
+        .await
+        .expect_err("intra-batch duplicate key must abort every stream");
+    assert!(error.to_string().contains("duplicate declared key"));
+    assert!(store.dump_journal("default:Child:first").is_empty());
+    assert!(store.dump_journal("default:Child:second").is_empty());
 }
 
 #[tokio::test]

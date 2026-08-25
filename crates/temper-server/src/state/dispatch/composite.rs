@@ -256,8 +256,8 @@ impl crate::state::ServerState {
         let parent_persistence_id =
             composite_persistence_id(tenant, parent_entity_type, parent_entity_id, schema_pin);
         let timing_enabled = prepared_sub_writes.len() >= 10;
-        let total_started_at = timing_enabled.then(std::time::Instant::now);
-        let parent_started_at = timing_enabled.then(std::time::Instant::now);
+        let total_started_at = timing_enabled.then(std::time::Instant::now); // determinism-ok: production-only metric
+        let parent_started_at = timing_enabled.then(std::time::Instant::now); // determinism-ok: production-only metric
 
         if parent.record_event
             && !self
@@ -296,7 +296,7 @@ impl crate::state::ServerState {
         }
         let parent_ms = parent_started_at.map(|started| started.elapsed().as_millis() as u64);
 
-        let stage_started_at = timing_enabled.then(std::time::Instant::now);
+        let stage_started_at = timing_enabled.then(std::time::Instant::now); // determinism-ok: production-only metric
         let atomic_targets = prepared_sub_writes
             .iter()
             .filter(|write| write.action == "Create")
@@ -444,20 +444,23 @@ impl crate::state::ServerState {
                 persistence_id: persistence_id.clone(),
                 expected_sequence: stream.expected_sequence,
                 events: stream.events.clone(),
+                key_rows: Vec::new(),
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
             })
             .collect::<Vec<_>>();
         if appends.is_empty() {
             return Ok(true);
         }
 
-        let append_started_at = timing_enabled.then(std::time::Instant::now);
+        let append_started_at = timing_enabled.then(std::time::Instant::now); // determinism-ok: production-only metric
         store
             .append_batch(&appends)
             .await
             .map_err(composite_batch_persistence_error)?;
         let append_ms = append_started_at.map(|started| started.elapsed().as_millis() as u64);
 
-        let projection_collect_started_at = timing_enabled.then(std::time::Instant::now);
+        let projection_collect_started_at = timing_enabled.then(std::time::Instant::now); // determinism-ok: production-only metric
         if schema_pin.is_none() {
             self.update_composite_query_projections(tenant, &streams)
                 .await?;
@@ -465,11 +468,11 @@ impl crate::state::ServerState {
         let projection_collect_ms =
             projection_collect_started_at.map(|started| started.elapsed().as_millis() as u64);
 
-        let projection_write_started_at = timing_enabled.then(std::time::Instant::now);
+        let projection_write_started_at = timing_enabled.then(std::time::Instant::now); // determinism-ok: production-only metric
         let projection_write_ms =
             projection_write_started_at.map(|started| started.elapsed().as_millis() as u64);
 
-        let reload_started_at = timing_enabled.then(std::time::Instant::now);
+        let reload_started_at = timing_enabled.then(std::time::Instant::now); // determinism-ok: production-only metric
         for stream in streams.values() {
             if stream.events.is_empty() {
                 continue;

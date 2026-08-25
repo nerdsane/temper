@@ -63,6 +63,14 @@ pub enum CompositePlanError {
         /// Missing target entity type.
         target: String,
     },
+    /// A cross-entity read guard or collection workflow references an entity
+    /// outside the supplied verification bundle.
+    UnknownDependencyTarget {
+        /// Entity declaring the dependency.
+        source: String,
+        /// Missing dependency entity type.
+        target: String,
+    },
 }
 
 impl fmt::Display for CompositePlanError {
@@ -78,6 +86,10 @@ impl fmt::Display for CompositePlanError {
             } => write!(
                 f,
                 "trigger '{trigger}' on '{source}' references unknown target entity '{target}'"
+            ),
+            Self::UnknownDependencyTarget { source, target } => write!(
+                f,
+                "entity '{source}' has a verification dependency on unknown entity '{target}'"
             ),
         }
     }
@@ -149,6 +161,14 @@ impl CompositeVerificationPlan {
                     }
                 }
             }
+            for (entity, dependencies) in &graph.dependencies {
+                if !scope.contains(entity) {
+                    continue;
+                }
+                for dependency in dependencies {
+                    scope.insert(dependency.clone());
+                }
+            }
             if scope.len() == before {
                 break;
             }
@@ -160,6 +180,21 @@ impl CompositeVerificationPlan {
             .iter()
             .map(|a| (a.automaton.name.as_str(), a))
             .collect();
+
+        for entity in &scope {
+            if !by_name.contains_key(entity.as_str()) {
+                let dependency_source = graph
+                    .dependencies
+                    .iter()
+                    .find_map(|(source, targets)| targets.contains(entity).then(|| source.clone()));
+                if let Some(source) = dependency_source {
+                    return Err(CompositePlanError::UnknownDependencyTarget {
+                        source,
+                        target: entity.clone(),
+                    });
+                }
+            }
+        }
 
         // Validate every edge inside scope points at an in-scope target
         // (they must, since reachability is transitive, but this also

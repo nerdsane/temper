@@ -138,6 +138,200 @@ fn terminal_evidence_requires_admission_delivery_and_epoch_fences() {
 }
 
 #[test]
+fn receipted_member_requires_fenced_control_delivery_and_replays_once() {
+    let (_, mut record) =
+        CollectionWorkflowRecordV1::start(start("controlled-member", "b1", &["a"]))
+            .expect("valid start");
+    record
+        .admit_member(0, "member-delivery".to_string(), 0)
+        .unwrap();
+    let receipt = CollectionMemberReceipt {
+        delivery_id: "member-delivery".to_string(),
+        fencing_token: 4,
+    };
+    let member_id = record.members[0].member_id.clone();
+    record
+        .record_member_receipt(&member_id, "member-delivery", 0, 1, receipt)
+        .unwrap();
+    record
+        .request_control(
+            CollectionRequestedOutcome::Cancelled,
+            None,
+            "CancelChecks".to_string(),
+            2,
+            serde_json::json!({"principal": "controller"}),
+            None,
+        )
+        .unwrap();
+    record
+        .begin_member_cancellation(&member_id, "cancel-delivery".to_string(), 1)
+        .unwrap();
+    assert!(
+        record
+            .record_member_controlled_terminal(
+                &member_id,
+                "wrong-delivery",
+                1,
+                ReactionDeliveryStatus::Succeeded,
+                true,
+            )
+            .is_err()
+    );
+    assert_eq!(
+        record
+            .record_member_controlled_terminal(
+                &member_id,
+                "cancel-delivery",
+                1,
+                ReactionDeliveryStatus::Succeeded,
+                true,
+            )
+            .unwrap(),
+        CollectionMutationOutcome::Applied
+    );
+    assert_eq!(
+        record
+            .record_member_controlled_terminal(
+                &member_id,
+                "cancel-delivery",
+                1,
+                ReactionDeliveryStatus::Succeeded,
+                true,
+            )
+            .unwrap(),
+        CollectionMutationOutcome::Replayed
+    );
+    assert_eq!(record.status, CollectionWorkflowStatus::Cancelled);
+}
+
+#[test]
+fn skipped_control_delivery_requires_a_matching_target_receipt() {
+    fn controlled_record(name: &str) -> (CollectionWorkflowRecordV1, String) {
+        let (_, mut record) =
+            CollectionWorkflowRecordV1::start(start(name, "b1", &["a"])).expect("valid start");
+        record
+            .bind_execution_actions(CollectionDeliveryActions {
+                member_entity: "CheckRun".to_string(),
+                member_action: "Start".to_string(),
+                member_cancel_action: "Cancel".to_string(),
+                timeout_action: "TimeoutChecks".to_string(),
+                on_success: "ChecksSucceeded".to_string(),
+                on_partial_failure: "ChecksPartiallyFailed".to_string(),
+                on_failure: "ChecksFailed".to_string(),
+                on_cancelled: "ChecksCancelled".to_string(),
+                on_timed_out: "ChecksTimedOut".to_string(),
+            })
+            .unwrap();
+        record
+            .admit_member(0, "member-delivery".to_string(), 0)
+            .unwrap();
+        let member_id = record.members[0].member_id.clone();
+        record
+            .record_member_receipt(
+                &member_id,
+                "member-delivery",
+                0,
+                1,
+                CollectionMemberReceipt {
+                    delivery_id: "member-delivery".to_string(),
+                    fencing_token: 4,
+                },
+            )
+            .unwrap();
+        record
+            .request_control(
+                CollectionRequestedOutcome::Cancelled,
+                None,
+                "CancelChecks".to_string(),
+                2,
+                serde_json::json!({"principal": "controller"}),
+                None,
+            )
+            .unwrap();
+        record
+            .begin_member_cancellation(&member_id, "cancel-delivery".to_string(), 1)
+            .unwrap();
+        (record, member_id)
+    }
+
+    let (mut receipted, receipted_member_id) = controlled_record("skipped-receipted");
+    receipted
+        .record_member_controlled_terminal(
+            &receipted_member_id,
+            "cancel-delivery",
+            1,
+            ReactionDeliveryStatus::Skipped,
+            true,
+        )
+        .unwrap();
+    assert_eq!(receipted.status, CollectionWorkflowStatus::Cancelled);
+    assert_eq!(receipted.counts.cancelled, 1);
+
+    let (mut unreceipted, unreceipted_member_id) = controlled_record("skipped-unreceipted");
+    unreceipted
+        .record_member_controlled_terminal(
+            &unreceipted_member_id,
+            "cancel-delivery",
+            1,
+            ReactionDeliveryStatus::Skipped,
+            false,
+        )
+        .unwrap();
+    assert_eq!(unreceipted.status, CollectionWorkflowStatus::Cancelled);
+    assert_eq!(unreceipted.counts.failed, 1);
+    assert_eq!(
+        unreceipted.members[0].failure_class,
+        Some(CollectionFailureClass::CancellationFailed)
+    );
+}
+
+#[test]
+fn terminal_workflow_emits_only_one_join_identity() {
+    let (_, mut record) =
+        CollectionWorkflowRecordV1::start(start("join-once", "b1", &["a"])).expect("valid start");
+    record
+        .admit_member(0, "member-delivery".to_string(), 0)
+        .unwrap();
+    let receipt = CollectionMemberReceipt {
+        delivery_id: "member-delivery".to_string(),
+        fencing_token: 1,
+    };
+    let member_id = record.members[0].member_id.clone();
+    record
+        .record_member_receipt(&member_id, "member-delivery", 0, 1, receipt.clone())
+        .unwrap();
+    record
+        .record_member_terminal(CollectionMemberTerminalEvidence {
+            member_id,
+            control_epoch: 0,
+            status: CollectionMemberStatus::Succeeded,
+            attempts: 1,
+            delivery_id: Some("member-delivery".to_string()),
+            delivery_status: ReactionDeliveryStatus::Succeeded,
+            receipt: Some(receipt),
+            failure_class: None,
+        })
+        .unwrap();
+    assert_eq!(
+        record.begin_join("join-delivery".to_string()).unwrap(),
+        CollectionMutationOutcome::Applied
+    );
+    assert_eq!(
+        record.begin_join("join-delivery".to_string()).unwrap(),
+        CollectionMutationOutcome::Replayed
+    );
+    assert!(record.begin_join("second-join".to_string()).is_err());
+    assert_eq!(
+        record.record_join_terminal("join-delivery", true).unwrap(),
+        CollectionMutationOutcome::Applied
+    );
+    assert_eq!(
+        record.record_join_terminal("join-delivery", true).unwrap(),
+        CollectionMutationOutcome::Replayed
+    );
+}
+
+#[test]
 fn replay_validation_derives_exact_lifecycle_and_member_shapes() {
     let (_, running) = CollectionWorkflowRecordV1::start(start("replay-validation", "b1", &["a"]))
         .expect("valid running record");
@@ -155,6 +349,7 @@ fn replay_validation_derives_exact_lifecycle_and_member_shapes() {
     cancelled
         .request_control(
             CollectionRequestedOutcome::Cancelled,
+            None,
             "CancelChecks".to_string(),
             2,
             serde_json::json!({"principal": "controller"}),

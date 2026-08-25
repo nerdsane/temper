@@ -21,6 +21,12 @@ pub enum DeliveryKind {
     Reaction,
     /// A generated same-entity state-entry timeout.
     StateTimeout,
+    /// A bounded collection member action.
+    CollectionMember,
+    /// A cancellation action for a receipted collection child.
+    CollectionCancellation,
+    /// The sole classified source join action.
+    CollectionJoin,
 }
 
 impl DeliveryKind {
@@ -29,6 +35,9 @@ impl DeliveryKind {
         match self {
             Self::Reaction => "reaction",
             Self::StateTimeout => "state_timeout",
+            Self::CollectionMember => "collection_member",
+            Self::CollectionCancellation => "collection_cancellation",
+            Self::CollectionJoin => "collection_join",
         }
     }
 }
@@ -205,6 +214,7 @@ pub fn state_timeout_intents(
                 max_occurrences: declaration.max_occurrences,
                 occurrence_ordinal,
             }),
+            collection: None,
             schema_pin: schema_pin.clone(),
         });
     }

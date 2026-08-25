@@ -14,6 +14,33 @@ impl CollectionWorkflowRecordV1 {
             ));
         }
         self.budgets.validate()?;
+        if let Some(actions) = &self.execution_actions
+            && [
+                &actions.member_entity,
+                &actions.member_action,
+                &actions.member_cancel_action,
+                &actions.timeout_action,
+                &actions.on_success,
+                &actions.on_partial_failure,
+                &actions.on_failure,
+                &actions.on_cancelled,
+                &actions.on_timed_out,
+            ]
+            .into_iter()
+            .any(|action| action.is_empty())
+        {
+            return Err("collection execution action names must be non-empty".to_string());
+        }
+        if let Some(timeout) = &self.timeout_binding
+            && (timeout.delivery_id.is_empty()
+                || timeout.timeout_action.is_empty()
+                || timeout.state.is_empty()
+                || timeout.declaration_id.is_empty()
+                || timeout.clock_sequence != self.source_sequence
+                || timeout.schema_digest != self.schema_digest)
+        {
+            return Err("persisted collection timeout binding is invalid".to_string());
+        }
         if self.sealed_roster.is_empty()
             || self.sealed_roster.len() != self.members.len()
             || self.members.len() > usize::from(self.budgets.max_members)
@@ -99,6 +126,17 @@ impl CollectionWorkflowRecordV1 {
                 "workflow lifecycle does not match its durable member partition".to_string(),
             );
         }
+        match (self.join_status, self.join_delivery_id.as_deref()) {
+            (CollectionJoinStatus::Pending, None) => {}
+            (
+                CollectionJoinStatus::InFlight
+                | CollectionJoinStatus::Delivered
+                | CollectionJoinStatus::DeliveryFailed
+                | CollectionJoinStatus::SupersededByNewWorkflow,
+                Some(id),
+            ) if self.status.is_terminal() && !id.is_empty() => {}
+            _ => return Err("join lifecycle does not match its delivery identity".to_string()),
+        }
         match self.requested_outcome {
             None => {
                 if self.control_epoch != 0
@@ -107,6 +145,7 @@ impl CollectionWorkflowRecordV1 {
                     || self.control_source_sequence.is_some()
                     || self.control_authority.is_some()
                     || self.control_schema_pin.is_some()
+                    || self.control_timeout_delivery_id.is_some()
                 {
                     return Err("uncontrolled workflow contains control evidence".to_string());
                 }
@@ -131,6 +170,25 @@ impl CollectionWorkflowRecordV1 {
                         )
                 {
                     return Err("workflow control evidence does not match its fence".to_string());
+                }
+                match outcome {
+                    CollectionRequestedOutcome::Cancelled
+                        if self.control_timeout_delivery_id.is_some() =>
+                    {
+                        return Err("cancellation contains timeout ownership evidence".to_string());
+                    }
+                    CollectionRequestedOutcome::TimedOut
+                        if self
+                            .timeout_binding
+                            .as_ref()
+                            .map(|binding| binding.delivery_id.as_str())
+                            != self.control_timeout_delivery_id.as_deref() =>
+                    {
+                        return Err(
+                            "timeout control does not match its ADR-0178 binding".to_string()
+                        );
+                    }
+                    _ => {}
                 }
             }
         }
@@ -192,9 +250,11 @@ fn validate_member_shape(
                 || member.admission_control_epoch.is_some()
                 || member.terminal_control_epoch.is_some()
                 || member.delivery_id.is_some()
+                || member.cancellation_delivery_id.is_some()
                 || member.delivery_status.is_some()
                 || member.receipt.is_some()
                 || member.failure_class.is_some()
+                || (requested_outcome.is_none() && member.cancellation_delivery_id.is_some())
                 || requested_outcome.is_some()
             {
                 return Err("pending member contains lifecycle evidence".to_string());
@@ -213,6 +273,8 @@ fn validate_member_shape(
                     )
                 )
                 || member.failure_class.is_some()
+                || (member.cancellation_delivery_id.is_some()
+                    && (requested_outcome.is_none() || member.receipt.is_none()))
                 || (requested_outcome.is_some() && member.receipt.is_none())
             {
                 return Err("in-flight member evidence is inconsistent".to_string());
@@ -237,6 +299,8 @@ fn validate_member_shape(
                 || member.delivery_id.is_none()
                 || !member.delivery_status.is_some_and(failed_delivery_status)
                 || member.failure_class.is_none()
+                || (member.cancellation_delivery_id.is_some()
+                    && member.failure_class != Some(CollectionFailureClass::CancellationFailed))
             {
                 return Err("failed member lacks terminal failure evidence".to_string());
             }
@@ -255,13 +319,21 @@ fn validate_member_shape(
                 && member.terminal_control_epoch.is_none()
                 && member.delivery_id.is_none()
                 && member.delivery_status.is_none()
-                && member.receipt.is_none();
+                && member.receipt.is_none()
+                && member.cancellation_delivery_id.is_none();
             let fenced_before_receipt = member.admission_control_epoch.is_some()
                 && member.terminal_control_epoch == Some(control_epoch)
                 && member.delivery_id.is_some()
                 && member.delivery_status == Some(ReactionDeliveryStatus::Skipped)
-                && member.receipt.is_none();
-            if !undispatched && !fenced_before_receipt {
+                && member.receipt.is_none()
+                && member.cancellation_delivery_id.is_none();
+            let cancelled_after_receipt = member.admission_control_epoch.is_some()
+                && member.terminal_control_epoch == Some(control_epoch)
+                && member.delivery_id.is_some()
+                && member.delivery_status.is_some()
+                && member.receipt.is_some()
+                && member.cancellation_delivery_id.is_some();
+            if !undispatched && !fenced_before_receipt && !cancelled_after_receipt {
                 return Err("controlled member has ambiguous terminal evidence".to_string());
             }
         }

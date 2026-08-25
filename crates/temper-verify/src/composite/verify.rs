@@ -130,6 +130,13 @@ pub fn seed_cover(automatons: &[&Automaton]) -> Vec<String> {
             }
         }
     }
+    for (entity, dependencies) in &graph.dependencies {
+        for dependency in dependencies {
+            if parent.contains_key(entity) && parent.contains_key(dependency) {
+                union(&mut parent, entity, dependency);
+            }
+        }
+    }
 
     // Collect the canonical root of each component.
     let mut roots: BTreeSet<String> = BTreeSet::new();
@@ -213,15 +220,15 @@ pub fn verify_composite_with_budget(
 
 /// Run composite verification across the seed cover, returning one result
 /// per seed. The aggregate is gating: any [`CompositeOutcome::Violated`]
-/// fails; any [`CompositeOutcome::Incomplete`] is surfaced as a warning by
-/// the caller (the proof is partial, not a pass).
+/// fails; any [`CompositeOutcome::Incomplete`] is also a hard verification
+/// failure because a partial exploration is not proof.
 pub fn verify_all(automatons: &[&Automaton]) -> Vec<CompositeVerifyResult> {
     let seeds = seed_cover(automatons);
     let mut results = Vec::with_capacity(seeds.len());
     for seed in seeds {
         match verify_composite(automatons, &seed) {
             Ok(result) => results.push(result),
-            Err(_) => {
+            Err(error) => {
                 // A seed that cannot build a plan (e.g. a trigger to an
                 // entity outside the supplied set) is reported as an
                 // incomplete result so the caller never reads it as a pass.
@@ -231,9 +238,7 @@ pub fn verify_all(automatons: &[&Automaton]) -> Vec<CompositeVerifyResult> {
                     outcome: CompositeOutcome::Incomplete,
                     states_explored: 0,
                     dropped_reactions: Vec::new(),
-                    other_violations: vec![
-                        "plan build failed (unknown trigger target?)".to_string(),
-                    ],
+                    other_violations: vec![format!("plan build failed: {error}")],
                 });
             }
         }

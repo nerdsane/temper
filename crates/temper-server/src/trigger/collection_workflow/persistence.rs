@@ -1,5 +1,8 @@
 //! Atomic event-store persistence and bounded replay for the private ledger.
 
+mod recovery;
+mod source;
+
 use temper_runtime::persistence::{
     EventMetadata, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
     PersistenceError,
@@ -12,6 +15,10 @@ use super::{
     CollectionWorkflowRecordV1, CollectionWorkflowStart, collection_control_id,
 };
 use crate::storage::BoxedEventStore;
+use recovery::{SourceEvidence, commit_or_reconcile};
+pub(crate) use recovery::{list_collection_records_page, load_collection_record};
+use source::active_workflow_append;
+use source::{attach_active_workflow, ensure_source_journal};
 
 /// Reserved source-event field containing normalized collection starts.
 pub(crate) const COLLECTION_START_INTENTS_FIELD: &str = "_temper_collection_starts_v1";
@@ -21,6 +28,8 @@ pub(crate) const COLLECTION_CONTROL_INTENTS_FIELD: &str = "_temper_collection_co
 pub(crate) const ACTIVE_COLLECTION_WORKFLOW_FIELD: &str = "_temper_active_collection_workflow_v1";
 /// Private synthetic entity type used for one workflow journal.
 pub(crate) const COLLECTION_WORKFLOW_ENTITY_TYPE: &str = "_CollectionWorkflow";
+/// Maximum private workflow snapshots inspected to recover one owned intent.
+const MAX_COLLECTION_WORKFLOW_EVENTS: usize = 1_024;
 
 /// Outcome of an atomic commit whose prior result may have been ambiguous.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,9 +136,20 @@ pub(crate) fn collection_workflow_journal_id(tenant: &str, workflow_id: &str) ->
 /// Atomically commit a source start event and the initial `Running` snapshot.
 pub(crate) async fn commit_collection_start(
     store: &BoxedEventStore,
+    source_append: PersistenceAppend,
+    intent: &CollectionStartIntentV1,
+    record: &CollectionWorkflowRecordV1,
+) -> Result<CollectionLedgerCommitOutcome, PersistenceError> {
+    commit_collection_start_with_intents(store, source_append, intent, record, &[], &[]).await
+}
+
+pub(super) async fn commit_collection_start_with_intents(
+    store: &BoxedEventStore,
     mut source_append: PersistenceAppend,
     intent: &CollectionStartIntentV1,
     record: &CollectionWorkflowRecordV1,
+    intents: &[crate::trigger::delivery::PersistedReactionIntent],
+    extra_appends: &[PersistenceAppend],
 ) -> Result<CollectionLedgerCommitOutcome, PersistenceError> {
     record.validate().map_err(PersistenceError::Serialization)?;
     ensure_source_journal(&source_append.persistence_id, record)?;
@@ -162,23 +182,45 @@ pub(crate) async fn commit_collection_start(
     }
     attach_collection_start(&mut source_append.events[0].payload, intent)
         .map_err(PersistenceError::Serialization)?;
-    let workflow_append = workflow_append(record, 0, "CollectionWorkflow::StartedV1")?;
-    commit_or_reconcile(
-        store,
-        &[source_append, workflow_append],
-        SourceEvidence::Start(intent),
-        record,
-    )
-    .await
+    let mut workflow_append = workflow_append(record, 0, "CollectionWorkflow::StartedV1")?;
+    crate::trigger::delivery::attach_intents(&mut workflow_append.events[0].payload, intents)
+        .map_err(PersistenceError::Serialization)?;
+    let mut appends = Vec::with_capacity(2 + extra_appends.len());
+    appends.push(source_append);
+    appends.push(workflow_append);
+    appends.extend_from_slice(extra_appends);
+    appends.push(active_workflow_append(store, record).await?);
+    commit_or_reconcile(store, &appends, SourceEvidence::Start(intent), record).await
 }
 
 /// Atomically commit a source control event and its fenced workflow snapshot.
 pub(crate) async fn commit_collection_control(
     store: &BoxedEventStore,
+    source_append: PersistenceAppend,
+    intent: &CollectionControlIntentV1,
+    expected_workflow_sequence: u64,
+    record: &CollectionWorkflowRecordV1,
+) -> Result<CollectionLedgerCommitOutcome, PersistenceError> {
+    commit_collection_control_with_intents(
+        store,
+        source_append,
+        intent,
+        expected_workflow_sequence,
+        record,
+        &[],
+        &[],
+    )
+    .await
+}
+
+pub(super) async fn commit_collection_control_with_intents(
+    store: &BoxedEventStore,
     mut source_append: PersistenceAppend,
     intent: &CollectionControlIntentV1,
     expected_workflow_sequence: u64,
     record: &CollectionWorkflowRecordV1,
+    intents: &[crate::trigger::delivery::PersistedReactionIntent],
+    delivery_appends: &[PersistenceAppend],
 ) -> Result<CollectionLedgerCommitOutcome, PersistenceError> {
     record.validate().map_err(PersistenceError::Serialization)?;
     ensure_source_journal(&source_append.persistence_id, record)?;
@@ -195,10 +237,26 @@ pub(crate) async fn commit_collection_control(
         && record.control_source_action.as_deref() == Some(intent.source_action.as_str())
         && record.control_source_sequence == Some(intent.source_sequence)
         && record.control_authority.as_ref() == Some(&intent.authority)
-        && record.control_schema_pin == intent.schema_pin;
+        && record.control_schema_pin == intent.schema_pin
+        && record.control_timeout_delivery_id == intent.timeout_delivery_id;
     let ignored_after_first = record.last_control_id.is_some()
         && record.requested_outcome.is_some()
         && record.last_control_id.as_deref() != Some(intent.control_id.as_str());
+    let timeout_receipt_matches = match intent.requested_outcome {
+        super::CollectionRequestedOutcome::Cancelled => intent.timeout_delivery_id.is_none(),
+        super::CollectionRequestedOutcome::TimedOut => {
+            let receipt =
+                crate::trigger::delivery::extract_receipt(&source_append.events[0].payload)
+                    .map_err(PersistenceError::Serialization)?;
+            let binding = record.timeout_binding.as_ref();
+            receipt.as_ref().is_some_and(|receipt| {
+                Some(receipt.delivery_id.as_str()) == intent.timeout_delivery_id.as_deref()
+                    && receipt.state_timeout_state.as_deref()
+                        == binding.map(|binding| binding.state.as_str())
+                    && receipt.schema_pin == intent.schema_pin
+            })
+        }
+    };
     if intent.workflow_id != record.workflow_id
         || intent.control_id != expected_control_id
         || intent.control_epoch != record.control_epoch
@@ -206,6 +264,7 @@ pub(crate) async fn commit_collection_control(
         || source_append.events.len() != 1
         || source_append.expected_sequence + 1 != intent.source_sequence
         || source_append.events[0].event_type != intent.source_action
+        || !timeout_receipt_matches
     {
         return Err(PersistenceError::Serialization(
             "collection control intent does not match source or workflow record".to_string(),
@@ -213,18 +272,51 @@ pub(crate) async fn commit_collection_control(
     }
     attach_collection_control(&mut source_append.events[0].payload, intent)
         .map_err(PersistenceError::Serialization)?;
-    let workflow_append = workflow_append(
+    let mut workflow_append = workflow_append(
         record,
         expected_workflow_sequence,
         "CollectionWorkflow::ControlledV1",
     )?;
-    commit_or_reconcile(
-        store,
-        &[source_append, workflow_append],
-        SourceEvidence::Control(intent),
-        record,
-    )
-    .await
+    crate::trigger::delivery::attach_intents(&mut workflow_append.events[0].payload, intents)
+        .map_err(PersistenceError::Serialization)?;
+    let mut appends = Vec::with_capacity(2 + delivery_appends.len());
+    appends.push(source_append);
+    appends.push(workflow_append);
+    appends.extend_from_slice(delivery_appends);
+    commit_or_reconcile(store, &appends, SourceEvidence::Control(intent), record).await
+}
+
+/// Find one collection-owned intent in the bounded private workflow history.
+pub(crate) async fn find_collection_intent(
+    store: &BoxedEventStore,
+    record: &CollectionWorkflowRecordV1,
+    delivery_id: &str,
+) -> Result<Option<crate::trigger::delivery::PersistedReactionIntent>, PersistenceError> {
+    let persistence_id = collection_workflow_journal_id(&record.tenant, &record.workflow_id);
+    let events = store
+        .read_events_limited(&persistence_id, 0, MAX_COLLECTION_WORKFLOW_EVENTS)
+        .await?;
+    for event in events.iter().rev() {
+        let intents = crate::trigger::delivery::extract_intents(&event.payload)
+            .map_err(PersistenceError::Serialization)?;
+        if let Some(intent) = intents
+            .into_iter()
+            .find(|intent| intent.delivery_id == delivery_id)
+        {
+            return Ok(Some(intent));
+        }
+    }
+    Ok(None)
+}
+
+/// Recover the active workflow identity from its dedicated atomic pointer.
+pub(super) async fn active_source_workflow_id(
+    store: &BoxedEventStore,
+    record: &CollectionWorkflowRecordV1,
+) -> Result<Option<String>, PersistenceError> {
+    source::load_active_workflow(store, record)
+        .await
+        .map(|active| active.map(|(workflow_id, _)| workflow_id))
 }
 
 /// Append one lifecycle snapshot, accepting an identical concurrent append.
@@ -254,108 +346,33 @@ pub(crate) async fn append_collection_record_idempotent(
     }
 }
 
-use super::CollectionMutationOutcome;
-
-/// Load and validate the latest workflow snapshot with a one-event bound.
-pub(crate) async fn load_collection_record(
+/// Append a workflow snapshot with the durable delivery intents it created.
+pub(crate) async fn append_collection_step_idempotent(
     store: &BoxedEventStore,
-    tenant: &str,
-    workflow_id: &str,
-) -> Result<Option<(CollectionWorkflowRecordV1, u64)>, PersistenceError> {
-    let persistence_id = collection_workflow_journal_id(tenant, workflow_id);
-    let events = store.read_latest_events(&persistence_id, 1).await?;
-    let Some(event) = events.last() else {
-        return Ok(None);
-    };
-    let record = decode_record(&event.payload)?;
-    if record.tenant != tenant || record.workflow_id != workflow_id {
-        return Err(PersistenceError::Serialization(
-            "collection journal identity does not match payload".to_string(),
-        ));
-    }
-    Ok(Some((record, event.sequence_nr)))
-}
-
-/// Read one bounded keyset page of private workflow snapshots.
-pub(crate) async fn list_collection_records_page(
-    store: &BoxedEventStore,
-    tenant: &str,
-    after_workflow_id: Option<&str>,
-    limit: usize,
-) -> Result<Vec<(CollectionWorkflowRecordV1, u64)>, PersistenceError> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    let after = after_workflow_id.map(|id| (COLLECTION_WORKFLOW_ENTITY_TYPE, id));
-    let ids = store
-        .list_journal_ids_page(tenant, Some(COLLECTION_WORKFLOW_ENTITY_TYPE), after, limit)
-        .await?;
-    let mut records = Vec::with_capacity(ids.len());
-    for (_, workflow_id) in ids {
-        let Some(record) = load_collection_record(store, tenant, &workflow_id).await? else {
-            return Err(PersistenceError::Storage(
-                "indexed collection journal has no lifecycle event".to_string(),
-            ));
-        };
-        records.push(record);
-    }
-    Ok(records)
-}
-
-enum SourceEvidence<'a> {
-    Start(&'a CollectionStartIntentV1),
-    Control(&'a CollectionControlIntentV1),
-}
-
-async fn commit_or_reconcile(
-    store: &BoxedEventStore,
-    appends: &[PersistenceAppend],
-    evidence: SourceEvidence<'_>,
+    expected_sequence: u64,
+    event_type: &str,
     record: &CollectionWorkflowRecordV1,
-) -> Result<CollectionLedgerCommitOutcome, PersistenceError> {
-    match store.append_batch(appends).await {
-        Ok(results) => Ok(CollectionLedgerCommitOutcome::Committed(results)),
+    intents: &[crate::trigger::delivery::PersistedReactionIntent],
+) -> Result<(CollectionMutationOutcome, u64), PersistenceError> {
+    record.validate().map_err(PersistenceError::Serialization)?;
+    let mut append = workflow_append(record, expected_sequence, event_type)?;
+    crate::trigger::delivery::attach_intents(&mut append.events[0].payload, intents)
+        .map_err(PersistenceError::Serialization)?;
+    match store.append_batch(std::slice::from_ref(&append)).await {
+        Ok(results) => Ok((CollectionMutationOutcome::Applied, results[0].sequence_nr)),
         Err(error) => {
-            let source = &appends[0];
-            let committed_source = store
-                .read_events_limited(&source.persistence_id, source.expected_sequence, 1)
-                .await?
-                .into_iter()
-                .next();
-            let Some(source_event) = committed_source else {
+            let events = store
+                .read_events_limited(&append.persistence_id, expected_sequence, 1)
+                .await?;
+            let Some(event) = events.first() else {
                 return Err(error);
             };
-            let source_matches = match evidence {
-                SourceEvidence::Start(intent) => extract_collection_starts(&source_event.payload)
-                    .map_err(PersistenceError::Serialization)?
-                    .iter()
-                    .any(|found| found == intent),
-                SourceEvidence::Control(intent) => {
-                    extract_collection_controls(&source_event.payload)
-                        .map_err(PersistenceError::Serialization)?
-                        .iter()
-                        .any(|found| found == intent)
-                }
-            };
-            let workflow_events = store
-                .read_events_limited(&appends[1].persistence_id, appends[1].expected_sequence, 1)
-                .await?;
-            let workflow_event = workflow_events.first();
-            let workflow_matches = workflow_event
-                .map(|event| decode_record(&event.payload))
-                .transpose()?
-                .is_some_and(|found| found == *record);
-            if source_matches && workflow_matches {
-                Ok(CollectionLedgerCommitOutcome::Reconciled(vec![
-                    PersistenceAppendResult {
-                        persistence_id: source.persistence_id.clone(),
-                        sequence_nr: source_event.sequence_nr,
-                    },
-                    PersistenceAppendResult {
-                        persistence_id: appends[1].persistence_id.clone(),
-                        sequence_nr: workflow_event.map_or(0, |event| event.sequence_nr),
-                    },
-                ]))
+            let same_record = decode_record(&event.payload)? == *record;
+            let same_intents = crate::trigger::delivery::extract_intents(&event.payload)
+                .map_err(PersistenceError::Serialization)?
+                == intents;
+            if same_record && same_intents {
+                Ok((CollectionMutationOutcome::Replayed, event.sequence_nr))
             } else {
                 Err(error)
             }
@@ -363,7 +380,38 @@ async fn commit_or_reconcile(
     }
 }
 
-fn workflow_append(
+/// Atomically persist a terminal delivery and its workflow aggregation.
+pub(crate) async fn commit_collection_delivery_outcome(
+    store: &BoxedEventStore,
+    expected_delivery_sequence: u64,
+    delivery: &crate::trigger::delivery::ReactionDeliveryRecord,
+    expected_workflow_sequence: u64,
+    record: &CollectionWorkflowRecordV1,
+    continuation: &[crate::trigger::delivery::PersistedReactionIntent],
+) -> Result<Vec<PersistenceAppendResult>, PersistenceError> {
+    record.validate().map_err(PersistenceError::Serialization)?;
+    if !delivery.status.is_terminal() || delivery.intent.collection.is_none() {
+        return Err(PersistenceError::Serialization(
+            "collection outcome requires a terminal bound delivery".to_string(),
+        ));
+    }
+    let delivery_append =
+        crate::trigger::delivery::delivery_record_append(expected_delivery_sequence, delivery)?;
+    let mut workflow_append = workflow_append(
+        record,
+        expected_workflow_sequence,
+        "CollectionWorkflow::DeliveryTerminalV1",
+    )?;
+    crate::trigger::delivery::attach_intents(&mut workflow_append.events[0].payload, continuation)
+        .map_err(PersistenceError::Serialization)?;
+    store
+        .append_batch(&[delivery_append, workflow_append])
+        .await
+}
+
+use super::CollectionMutationOutcome;
+
+pub(super) fn workflow_append(
     record: &CollectionWorkflowRecordV1,
     expected_sequence: u64,
     event_type: &str,
@@ -386,10 +434,13 @@ fn workflow_append(
                 actor_id: persistence_id,
             },
         }],
+        key_rows: Vec::new(),
+        vector_rows: Vec::new(),
+        reconcile_vectors: false,
     })
 }
 
-fn decode_record(
+pub(super) fn decode_record(
     payload: &serde_json::Value,
 ) -> Result<CollectionWorkflowRecordV1, PersistenceError> {
     let version = payload
@@ -411,40 +462,6 @@ fn ensure_supported_version(version: impl Into<u64>) -> Result<(), String> {
     let version = version.into();
     if version != u64::from(COLLECTION_LEDGER_VERSION) {
         return Err(format!("unsupported collection ledger version {version}"));
-    }
-    Ok(())
-}
-
-fn attach_active_workflow(
-    object: &mut serde_json::Map<String, serde_json::Value>,
-    workflow_id: &str,
-) -> Result<(), String> {
-    match object.get(ACTIVE_COLLECTION_WORKFLOW_FIELD) {
-        None => {
-            object.insert(
-                ACTIVE_COLLECTION_WORKFLOW_FIELD.to_string(),
-                serde_json::Value::String(workflow_id.to_string()),
-            );
-            Ok(())
-        }
-        Some(serde_json::Value::String(existing)) if existing == workflow_id => Ok(()),
-        Some(_) => Err("active collection workflow evidence is contradictory".to_string()),
-    }
-}
-
-fn ensure_source_journal(
-    persistence_id: &str,
-    record: &CollectionWorkflowRecordV1,
-) -> Result<(), PersistenceError> {
-    let (tenant, entity_type, entity_id) =
-        parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Serialization)?;
-    if tenant != record.tenant
-        || entity_type != record.source_entity_type
-        || entity_id != record.source_entity_id
-    {
-        return Err(PersistenceError::Serialization(
-            "collection evidence persistence ID does not match the source identity".to_string(),
-        ));
     }
     Ok(())
 }

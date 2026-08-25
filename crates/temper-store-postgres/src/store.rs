@@ -869,6 +869,83 @@ impl EventStore for PostgresEventStore {
                 sequence_nr: new_seq,
             });
         }
+        for ((append, (tenant, entity_type, entity_id, _)), result) in
+            appends.iter().zip(parsed.iter()).zip(results.iter())
+        {
+            for key in &append.key_rows {
+                let holder: Option<(String,)> = crate::dbm::postgres_query_as!(
+                    "SELECT entity_id FROM entity_key_index \
+                     WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND key_hash = $4",
+                )
+                .bind(tenant)
+                .bind(entity_type)
+                .bind(&key.key_name)
+                .bind(&key.key_hash)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+                if holder.is_some_and(|(existing,)| existing != *entity_id) {
+                    return Err(PersistenceError::Storage(format!(
+                        "duplicate declared key '{}' for {entity_type}",
+                        key.key_name
+                    )));
+                }
+                crate::dbm::postgres_query!(
+                    "DELETE FROM entity_key_index \
+                     WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND entity_id = $4",
+                )
+                .bind(tenant)
+                .bind(entity_type)
+                .bind(&key.key_name)
+                .bind(entity_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+                crate::dbm::postgres_query!(
+                    "INSERT INTO entity_key_index \
+                     (tenant, entity_type, key_name, key_hash, entity_id, sequence_nr) \
+                     VALUES ($1, $2, $3, $4, $5, $6)",
+                )
+                .bind(tenant)
+                .bind(entity_type)
+                .bind(&key.key_name)
+                .bind(&key.key_hash)
+                .bind(entity_id)
+                .bind(result.sequence_nr as i64)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+            }
+            if append.reconcile_vectors {
+                crate::dbm::postgres_query!(
+                    "DELETE FROM entity_vector_index \
+                     WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+                )
+                .bind(tenant)
+                .bind(entity_type)
+                .bind(entity_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+                for row in &append.vector_rows {
+                    crate::dbm::postgres_query!(
+                        "INSERT INTO entity_vector_index \
+                         (tenant, entity_type, decl_name, model_tag, entity_id, sequence_nr, vector) \
+                         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    )
+                    .bind(tenant)
+                    .bind(entity_type)
+                    .bind(&row.decl_name)
+                    .bind(&row.model_tag)
+                    .bind(entity_id)
+                    .bind(result.sequence_nr as i64)
+                    .bind(&row.vector)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+                }
+            }
+        }
 
         let commit_started = Instant::now();
         tx.commit().await.map_err(|e| {

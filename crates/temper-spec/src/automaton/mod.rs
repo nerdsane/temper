@@ -13,6 +13,7 @@
 //! TLA+ remains available for humans who want temporal reasoning.
 
 pub mod assert_parser;
+mod collection_contract;
 pub mod field_invariant;
 mod initial;
 mod lint;

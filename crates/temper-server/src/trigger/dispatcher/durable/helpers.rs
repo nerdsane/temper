@@ -21,6 +21,26 @@ pub(super) fn is_expected_target_drop(error: &str) -> bool {
     normalized.contains("not valid from state") || normalized.contains("blocked from state")
 }
 
+pub(super) fn collection_control_skip_reason(
+    role: Option<crate::trigger::collection_workflow::CollectionDeliveryRole>,
+    error: &str,
+) -> Option<&'static str> {
+    let descendant = matches!(
+        role,
+        Some(
+            crate::trigger::collection_workflow::CollectionDeliveryRole::MemberDescendant
+                | crate::trigger::collection_workflow::CollectionDeliveryRole::CancellationDescendant
+                | crate::trigger::collection_workflow::CollectionDeliveryRole::JoinDescendant
+        )
+    );
+    (descendant
+        && (error.contains("fenced by lifecycle change")
+            || error.contains("stale collection control epoch at target commit")
+            || error.contains("lost its active lineage")
+            || error.contains("lost its terminal fence")))
+    .then_some("CollectionControlBeforeDescendantCommit")
+}
+
 pub(super) fn automatic_retry_backoff(attempts: u32) -> chrono::Duration {
     match attempts {
         0 | 1 => chrono::Duration::milliseconds(100),

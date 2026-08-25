@@ -2,8 +2,8 @@
 
 use libsql::params;
 use temper_runtime::persistence::{
-    EntityVectorRow, EventMetadata, EventStore, PersistenceAppend, PersistenceEnvelope,
-    PersistenceError, QueryProjectionOrder, QueryProjectionOrderTarget,
+    EntityKeyRow, EntityVectorRow, EventMetadata, EventStore, PersistenceAppend,
+    PersistenceEnvelope, PersistenceError, QueryProjectionOrder, QueryProjectionOrderTarget,
 };
 
 use super::{PublishedArtifactUpsert, QueryProjectionUpsert, TursoEventStore};
@@ -361,6 +361,9 @@ async fn append_batch_zero_sequence_detects_existing_stream_by_unique_key() {
                 "OrderUpdated",
                 serde_json::json!({ "step": 2 }),
             )],
+            key_rows: Vec::new(),
+            vector_rows: Vec::new(),
+            reconcile_vectors: false,
         }])
         .await
         .unwrap_err();
@@ -376,6 +379,65 @@ async fn append_batch_zero_sequence_detects_existing_stream_by_unique_key() {
     let events = store.read_events(persistence_id, 0).await.unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event_type, "OrderCreated");
+}
+
+#[tokio::test]
+async fn append_batch_commits_vectors_and_ignores_unsupported_keys() {
+    let store = make_store("append-batch-projections").await;
+    let vector_append = PersistenceAppend {
+        persistence_id: "tenant-a:Item:item-vector".to_string(),
+        expected_sequence: 0,
+        events: vec![test_envelope("Created", serde_json::json!({}))],
+        key_rows: Vec::new(),
+        vector_rows: vec![EntityVectorRow {
+            decl_name: "embedding".to_string(),
+            model_tag: "m1".to_string(),
+            vector: vec![1.0, 0.0],
+        }],
+        reconcile_vectors: true,
+    };
+    let companion = PersistenceAppend {
+        persistence_id: "tenant-a:_CollectionWorkflow:workflow-1".to_string(),
+        expected_sequence: 0,
+        events: vec![test_envelope("Advanced", serde_json::json!({}))],
+        key_rows: Vec::new(),
+        vector_rows: Vec::new(),
+        reconcile_vectors: false,
+    };
+    store
+        .append_batch(&[vector_append, companion])
+        .await
+        .expect("atomic event and vector batch");
+    let candidates = store
+        .vector_candidates("tenant-a", "Item", "embedding", "m1", 2)
+        .await
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].entity_id, "item-vector");
+
+    let keyed = PersistenceAppend {
+        persistence_id: "tenant-a:Item:item-keyed".to_string(),
+        expected_sequence: 0,
+        events: vec![test_envelope("Created", serde_json::json!({}))],
+        key_rows: vec![EntityKeyRow {
+            key_name: "ByName".to_string(),
+            key_hash: "sha256:test".to_string(),
+        }],
+        vector_rows: Vec::new(),
+        reconcile_vectors: false,
+    };
+    store
+        .append_batch(&[keyed])
+        .await
+        .expect("Turso ignores key rows like its single-stream append path");
+    assert_eq!(
+        store
+            .read_events("tenant-a:Item:item-keyed", 0)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]

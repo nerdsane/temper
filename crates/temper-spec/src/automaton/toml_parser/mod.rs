@@ -28,6 +28,8 @@ enum Section {
     Integration,
     FieldInvariant,
     StateTimeout,
+    /// ADR-0181: parsed by serde in an isolated second pass.
+    CollectionWorkflow,
     /// ADR-0153: `[[key]]` unique-key declarations. Passthrough; extracted via
     /// serde in the second pass.
     Key,
@@ -76,6 +78,9 @@ impl ParseState {
             // ADR-0049: state_timeouts use nested inline tables for params;
             // parse via serde in the second pass rather than field-by-field.
             "[[state_timeout]]" => self.start_passthrough_section(Section::StateTimeout),
+            "[[collection_workflow]]" => {
+                self.start_passthrough_section(Section::CollectionWorkflow)
+            }
             // ADR-0153: [[key]] unique-key declarations — passthrough; serde
             // extracts them in the second pass.
             "[[key]]" => self.start_passthrough_section(Section::Key),
@@ -111,6 +116,7 @@ impl ParseState {
             Section::Integration => self.apply_integration_field(key, &value),
             Section::FieldInvariant
             | Section::StateTimeout
+            | Section::CollectionWorkflow
             | Section::Key
             | Section::Vector
             | Section::Webhook
@@ -163,6 +169,7 @@ impl ParseState {
             context_entities: Vec::new(),
             field_invariants: Vec::new(),
             state_timeouts: Vec::new(),
+            collection_workflows: Vec::new(),
             keys: Vec::new(),
             vectors: Vec::new(),
             admission: None,
@@ -449,6 +456,9 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
     // an isolated pass. Errors are propagated — a silently-dropped timeout
     // would mean a trap state at runtime.
     automaton.state_timeouts = extract_state_timeouts(input)?;
+    // ADR-0181: collection declarations are visible to verification even
+    // while production TransitionTable activation remains gated.
+    automaton.collection_workflows = extract_collection_workflows(input)?;
     // ADR-0153: [[key]] unique-key declarations; serde-extracted like timeouts.
     // A silently-dropped key would mean the declared access path is not indexed.
     automaton.keys = extract_keys(input)?;
@@ -718,6 +728,26 @@ fn extract_state_timeouts(
     toml::from_str::<StateTimeoutWrapper>(&slice)
         .map(|w| w.state_timeouts)
         .map_err(|e| AutomatonParseError::Toml(format!("state_timeout: {e}")))
+}
+
+/// Extract `[[collection_workflow]]` declarations through an isolated serde
+/// pass. A malformed declaration must never disappear silently.
+fn extract_collection_workflows(
+    source: &str,
+) -> Result<Vec<super::types::CollectionWorkflow>, AutomatonParseError> {
+    let slice = isolate_sections(source, "[[collection_workflow]]");
+    if slice.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    #[derive(serde::Deserialize)]
+    struct CollectionWorkflowWrapper {
+        #[serde(default, rename = "collection_workflow")]
+        collection_workflows: Vec<super::types::CollectionWorkflow>,
+    }
+    toml::from_str::<CollectionWorkflowWrapper>(&slice)
+        .map(|wrapper| wrapper.collection_workflows)
+        .map_err(|error| AutomatonParseError::Toml(format!("collection_workflow: {error}")))
 }
 
 /// Extract `[[key]]` unique-key declarations from TOML source via serde

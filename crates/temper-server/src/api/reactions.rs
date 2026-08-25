@@ -85,10 +85,20 @@ pub(crate) async fn handle_retry_reaction(
                 .into_response();
         }
     };
-    if append_delivery_record(&store, sequence, &record)
-        .await
-        .is_err()
+    let retry_commit = match crate::trigger::collection_workflow::commit_manual_join_retry(
+        &store, sequence, &record,
+    )
+    .await
     {
+        Ok(true) => Ok(()),
+        Ok(false) => append_delivery_record(&store, sequence, &record)
+            .await
+            .map(|_| ()),
+        Err(error) => Err(temper_runtime::persistence::PersistenceError::Storage(
+            error,
+        )),
+    };
+    if retry_commit.is_err() {
         crate::runtime_metrics::record_reaction_delivery_manual_retry("conflict");
         return StatusCode::CONFLICT.into_response();
     }
@@ -103,15 +113,15 @@ pub(crate) async fn handle_retry_reaction(
         dispatcher.notify_recovery(tenant);
         let state_for_retry = state.clone();
         let intent = record.intent.clone();
-        tokio::spawn(async move {
-            // determinism-ok: governed API schedules durable work; the worker uses persisted scheduler time
+        let retry = async move {
             if let Err(error) = dispatcher
                 .dispatch_committed_intent(&state_for_retry, intent)
                 .await
             {
                 tracing::error!(%error, "manual reaction retry dispatch failed");
             }
-        });
+        };
+        tokio::spawn(retry); // determinism-ok
     }
 
     (

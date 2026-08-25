@@ -10,7 +10,7 @@
 
 // ADR-0181 requires this foundation to remain inert until the final activation gate.
 #[allow(dead_code, unused_imports)]
-pub(crate) mod collection_workflow;
+pub mod collection_workflow;
 pub mod delivery;
 pub mod dispatcher;
 pub(crate) mod guard;
