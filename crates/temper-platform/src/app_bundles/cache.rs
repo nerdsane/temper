@@ -191,7 +191,7 @@ pub(super) async fn reconcile_materialized_bundle(
             tenant,
             app_name,
             &view.join(app_name),
-            Some(&manifest.bundle_digest),
+            Some((manifest, view)),
         )
         .await?;
         if app_name == &manifest.root_app {

@@ -254,7 +254,10 @@ pub(crate) async fn reconcile_os_app_from_dir(
     tenant: &str,
     app_name: &str,
     app_dir: &std::path::Path,
-    canonical_closure_id: Option<&str>,
+    canonical_bundle: Option<(
+        &crate::app_bundles::CanonicalBundleManifestV1,
+        &std::path::Path,
+    )>,
 ) -> Result<OsAppReconcileResult, String> {
     let manifest = read_app_manifest(app_dir)
         .ok_or_else(|| format!("OS app '{app_name}' has no valid app.toml"))?;
@@ -273,9 +276,16 @@ pub(crate) async fn reconcile_os_app_from_dir(
     let app_guide = std::fs::read_to_string(app_dir.join("APP.md")).ok();
     let digest =
         digest_app_bundle_with_version(app_name, &manifest.version, app_guide.as_deref(), &bundle);
-    if let Some(closure_id) = canonical_closure_id {
-        super::data_binding::verify_bundle_data_bindings(&bundle, closure_id)?;
-    }
+    let canonical_bindings = canonical_bundle
+        .map(|(manifest, materialized_view)| {
+            super::data_binding::verify_bundle_data_bindings(
+                &bundle,
+                app_name,
+                manifest,
+                materialized_view,
+            )
+        })
+        .transpose()?;
 
     if let Some(ps) = state
         .server
@@ -355,7 +365,7 @@ pub(crate) async fn reconcile_os_app_from_dir(
                     app_name,
                     app_dir,
                     plan,
-                    canonical_closure_id,
+                    canonical_bindings.as_ref(),
                 )
                 .await?;
                 return Ok(OsAppReconcileResult::Installed {
@@ -382,7 +392,7 @@ pub(crate) async fn reconcile_os_app_from_dir(
         app_name,
         app_dir,
         OsAppInstallPlan::all(),
-        canonical_closure_id,
+        canonical_bindings.as_ref(),
     )
     .await?;
     Ok(OsAppReconcileResult::Installed {

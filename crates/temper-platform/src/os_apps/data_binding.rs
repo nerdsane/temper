@@ -5,12 +5,17 @@ use temper_wasm_sdk::data::{
     read_module_sdk_artifact_binding,
 };
 
+use crate::app_bundles::CanonicalBundleManifestV1;
+
 use super::{AppBundle, WasmModuleManifest};
 
 pub(super) fn verify_bundle_data_bindings(
     bundle: &AppBundle,
-    closure_id: &str,
-) -> Result<(), String> {
+    app_name: &str,
+    canonical_manifest: &CanonicalBundleManifestV1,
+    materialized_view: &std::path::Path,
+) -> Result<std::collections::BTreeMap<String, ModuleSdkManifest>, String> {
+    let mut verified = std::collections::BTreeMap::new();
     for (module_name, config) in &bundle.wasm_module_configs {
         if config.data.is_none() {
             continue;
@@ -19,15 +24,24 @@ pub(super) fn verify_bundle_data_bindings(
             .wasm_modules
             .get(module_name)
             .ok_or_else(|| format!("module '{module_name}' data binding has no WASM artifact"))?;
-        verify_module_config_data_binding(
+        let closure = crate::module_sdk_build::resolve_materialized_module(
+            materialized_view,
+            canonical_manifest,
+            app_name,
+            module_name,
+        )
+        .map_err(|error| format!("module data closure resolution failed: {error}"))?;
+        let binding = verify_module_config_data_binding_with_csdl(
             wasm,
             module_name,
             config,
-            bundle.csdl.as_deref(),
-            closure_id,
-        )?;
+            &closure.csdl,
+            &closure.lock_digest,
+        )?
+        .ok_or_else(|| format!("module '{module_name}' data binding was not activated"))?;
+        verified.insert(module_name.clone(), binding);
     }
-    Ok(())
+    Ok(verified)
 }
 
 pub(super) fn verify_module_config_data_binding(
@@ -35,6 +49,23 @@ pub(super) fn verify_module_config_data_binding(
     module_name: &str,
     config: &WasmModuleManifest,
     csdl_source: Option<&str>,
+    closure_id: &str,
+) -> Result<Option<ModuleSdkManifest>, String> {
+    if config.data.is_none() {
+        return Ok(None);
+    }
+    let csdl_source =
+        csdl_source.ok_or_else(|| "module data binding requires canonical CSDL".to_string())?;
+    let csdl = temper_spec::csdl::parse_csdl(csdl_source)
+        .map_err(|error| format!("module data binding CSDL is invalid: {error}"))?;
+    verify_module_config_data_binding_with_csdl(wasm, module_name, config, &csdl, closure_id)
+}
+
+fn verify_module_config_data_binding_with_csdl(
+    wasm: &[u8],
+    module_name: &str,
+    config: &WasmModuleManifest,
+    csdl: &temper_spec::csdl::CsdlDocument,
     closure_id: &str,
 ) -> Result<Option<ModuleSdkManifest>, String> {
     let Some(grant) = &config.data else {
@@ -48,12 +79,8 @@ pub(super) fn verify_module_config_data_binding(
     if binding.artifact_digest != artifact_digest {
         return Err("module data binding artifact digest mismatch".into());
     }
-    let csdl_source =
-        csdl_source.ok_or_else(|| "module data binding requires canonical CSDL".to_string())?;
-    let csdl = temper_spec::csdl::parse_csdl(csdl_source)
-        .map_err(|error| format!("module data binding CSDL is invalid: {error}"))?;
     let regenerated = temper_codegen::generate_module_sdk(
-        &csdl,
+        csdl,
         module_name,
         closure_id,
         closure_id,

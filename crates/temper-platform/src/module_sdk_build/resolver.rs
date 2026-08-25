@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use temper_spec::bundle::{IoaSourceInput, ScopedSpecBundle, ScopedSpecBundleInput};
 use temper_spec::csdl::{CsdlDocument, emit_csdl_xml, merge_csdl, parse_csdl};
 
+use crate::app_bundles::CanonicalBundleManifestV1;
 use crate::os_apps::AppManifest;
 
 use super::metadata::{CandidateApp, read_candidate_app};
@@ -27,6 +28,11 @@ pub(super) struct ResolvedCandidate {
     pub csdl: CsdlDocument,
     pub lock: LocalModuleSdkLock,
     pub lock_source: String,
+}
+
+pub(crate) struct ResolvedMaterializedModule {
+    pub(crate) csdl: CsdlDocument,
+    pub(crate) lock_digest: String,
 }
 
 pub(super) fn resolve(inputs: &LocalModuleSdkInputs) -> Result<ResolvedCandidate, String> {
@@ -70,38 +76,7 @@ pub(super) fn resolve(inputs: &LocalModuleSdkInputs) -> Result<ResolvedCandidate
         &mut order,
     )?;
 
-    let (csdl, canonical_csdl, canonical_ioa) = compile_closure(&order, &loaded)?;
-    let apps = order
-        .iter()
-        .map(|name| {
-            let app = loaded
-                .get(name)
-                .ok_or_else(|| format!("resolved app '{name}' disappeared from the closure"))?;
-            Ok(LocalLockedApp {
-                name: name.clone(),
-                version: app.manifest.version.clone(),
-                metadata_digest: metadata_digest(app)?,
-                dependencies: declared_dependencies(&app.manifest.dependencies),
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    let lock_digest = digest_serializable(&(
-        LOCAL_MODULE_SDK_RESOLVER_VERSION,
-        &root_name,
-        &inputs.module,
-        &apps,
-        &canonical_csdl,
-        &canonical_ioa,
-    ))?;
-    let lock = LocalModuleSdkLock {
-        resolver_version: LOCAL_MODULE_SDK_RESOLVER_VERSION.into(),
-        root: root_name,
-        module: inputs.module.clone(),
-        digest: lock_digest,
-        apps,
-    };
-    let lock_source = toml::to_string_pretty(&lock)
-        .map_err(|error| format!("failed to encode module SDK lock: {error}"))?;
+    let resolved = compile_module_closure(&root_name, &inputs.module, &order, &loaded)?;
     let source_path = resolve_output(
         &app,
         inputs.source_out.as_deref(),
@@ -124,7 +99,7 @@ pub(super) fn resolve(inputs: &LocalModuleSdkInputs) -> Result<ResolvedCandidate
     ])?;
 
     let root = loaded
-        .remove(&lock.root)
+        .remove(&resolved.lock.root)
         .ok_or_else(|| "root app disappeared from the resolved closure".to_string())?;
     Ok(ResolvedCandidate {
         app,
@@ -132,6 +107,128 @@ pub(super) fn resolve(inputs: &LocalModuleSdkInputs) -> Result<ResolvedCandidate
         source_path,
         lock_path,
         manifest: root.manifest,
+        csdl: resolved.csdl,
+        lock: resolved.lock,
+        lock_source: resolved.lock_source,
+    })
+}
+
+pub(crate) fn resolve_materialized_module(
+    view: &Path,
+    manifest: &CanonicalBundleManifestV1,
+    root_name: &str,
+    module: &str,
+) -> Result<ResolvedMaterializedModule, String> {
+    let view = canonical_directory(view, "materialized bundle view")?;
+    let candidates = manifest
+        .apps
+        .iter()
+        .map(|app| (app.name.clone(), vec![view.join(&app.name)]))
+        .collect::<BTreeMap<_, _>>();
+    let root_path = view.join(root_name);
+    let root = read_candidate_app(&root_path, &root_path.join("app.toml"))?;
+    if root.manifest.name != root_name {
+        return Err(format!(
+            "materialized module root '{root_name}' declares app '{}'",
+            root.manifest.name
+        ));
+    }
+    let mut loaded = BTreeMap::from([(root_name.to_string(), root)]);
+    let mut visiting = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut order = Vec::new();
+    visit(
+        root_name,
+        &candidates,
+        &mut loaded,
+        &mut visiting,
+        &mut visited,
+        &mut order,
+    )?;
+    for name in &order {
+        let canonical = manifest
+            .apps
+            .iter()
+            .find(|app| &app.name == name)
+            .ok_or_else(|| format!("materialized dependency '{name}' is absent from the bundle"))?;
+        let candidate = loaded
+            .get(name)
+            .ok_or_else(|| format!("materialized dependency '{name}' was not loaded"))?;
+        if candidate.manifest.version != canonical.version
+            || dependency_names(&candidate.manifest.dependencies) != canonical.dependencies
+        {
+            return Err(format!(
+                "materialized metadata for '{name}' does not match the canonical bundle"
+            ));
+        }
+    }
+    let resolved = compile_module_closure(root_name, module, &order, &loaded)?;
+    Ok(ResolvedMaterializedModule {
+        csdl: resolved.csdl,
+        lock_digest: resolved.lock.digest,
+    })
+}
+
+struct ResolvedModuleClosure {
+    csdl: CsdlDocument,
+    lock: LocalModuleSdkLock,
+    lock_source: String,
+}
+
+fn compile_module_closure(
+    root_name: &str,
+    module: &str,
+    order: &[String],
+    loaded: &BTreeMap<String, CandidateApp>,
+) -> Result<ResolvedModuleClosure, String> {
+    let root = loaded
+        .get(root_name)
+        .ok_or_else(|| format!("resolved root app '{root_name}' disappeared from the closure"))?;
+    let declaration = root
+        .manifest
+        .wasm_modules
+        .iter()
+        .find(|candidate| candidate.name == module)
+        .ok_or_else(|| format!("module '{module}' is not declared by app '{root_name}'"))?;
+    if declaration.data.is_none() {
+        return Err(format!(
+            "module '{module}' has no [wasm_modules.data] grant"
+        ));
+    }
+
+    let (csdl, canonical_csdl, canonical_ioa) = compile_closure(order, loaded)?;
+    let apps = order
+        .iter()
+        .map(|name| {
+            let app = loaded
+                .get(name)
+                .ok_or_else(|| format!("resolved app '{name}' disappeared from the closure"))?;
+            Ok(LocalLockedApp {
+                name: name.clone(),
+                version: app.manifest.version.clone(),
+                metadata_digest: metadata_digest(app)?,
+                dependencies: declared_dependencies(&app.manifest.dependencies),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let lock_digest = digest_serializable(&(
+        LOCAL_MODULE_SDK_RESOLVER_VERSION,
+        root_name,
+        module,
+        &apps,
+        &canonical_csdl,
+        &canonical_ioa,
+    ))?;
+    let lock = LocalModuleSdkLock {
+        resolver_version: LOCAL_MODULE_SDK_RESOLVER_VERSION.into(),
+        root: root_name.to_string(),
+        module: module.to_string(),
+        digest: lock_digest,
+        apps,
+    };
+    let lock_source = toml::to_string_pretty(&lock)
+        .map_err(|error| format!("failed to encode module SDK lock: {error}"))?;
+    Ok(ResolvedModuleClosure {
         csdl,
         lock,
         lock_source,

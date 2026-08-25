@@ -334,6 +334,7 @@ pub(super) fn collect_files(
             blob_digest: digest,
         });
     }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(files)
 }
 

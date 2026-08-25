@@ -124,3 +124,222 @@ async fn same_app_name_is_pinned_independently_per_tenant() {
         2
     );
 }
+
+const ROOT_CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Example.Root" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Task">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="state" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="Default">
+        <EntitySet Name="Tasks" EntityType="Example.Root.Task"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>
+"#;
+
+const DEPENDENCY_CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Paw.FS" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="File">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="state" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="Default">
+        <EntitySet Name="Files" EntityType="Paw.FS.File"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>
+"#;
+
+fn ioa(name: &str) -> String {
+    format!(
+        r#"[automaton]
+name = "{name}"
+states = ["Open", "Done"]
+initial = "Open"
+
+[[action]]
+name = "Complete"
+kind = "input"
+from = ["Open"]
+to = "Done"
+"#
+    )
+}
+
+fn bound_dependency_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let apps = temp.path().join("apps");
+    let root = apps.join("root");
+    let dependency = apps.join("dependency");
+    std::fs::create_dir_all(root.join("wasm/worker/src")).unwrap();
+    std::fs::create_dir_all(root.join("specs")).unwrap();
+    std::fs::create_dir_all(dependency.join("specs")).unwrap();
+    std::fs::write(
+        root.join("app.toml"),
+        r#"name = "root"
+version = "1.0.0"
+dependencies = ["dependency"]
+
+[[wasm_modules]]
+name = "worker"
+target = "wasm32-wasip1"
+
+[wasm_modules.data]
+operations = ["entity_get"]
+
+[[wasm_modules.data.entities]]
+type = "Paw.FS.File"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("temper.lock.toml"),
+        "version = 1\n\n[[local]]\nname = \"dependency\"\npath = \"../dependency\"\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("specs/model.csdl.xml"), ROOT_CSDL).unwrap();
+    std::fs::write(root.join("specs/task.ioa.toml"), ioa("Task")).unwrap();
+    std::fs::write(
+        dependency.join("app.toml"),
+        "name = \"dependency\"\nversion = \"2.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(dependency.join("specs/model.csdl.xml"), DEPENDENCY_CSDL).unwrap();
+    std::fs::write(dependency.join("specs/file.ioa.toml"), ioa("File")).unwrap();
+
+    let inputs = crate::module_sdk_build::LocalModuleSdkInputs {
+        app: root.clone(),
+        module: "worker".to_string(),
+        dependency_roots: vec![apps],
+        app_manifest: None,
+        source_out: None,
+        lock: None,
+    };
+    crate::module_sdk_build::generate_module_sdk(
+        crate::module_sdk_build::GenerateModuleSdkRequest {
+            inputs: inputs.clone(),
+            check: false,
+        },
+    )
+    .unwrap();
+    let unbound = temp.path().join("worker.wasm");
+    std::fs::write(&unbound, b"\0asm\x01\0\0\0").unwrap();
+    crate::module_sdk_build::bind_module_sdk(crate::module_sdk_build::BindModuleSdkRequest {
+        inputs,
+        wasm: unbound,
+        bound_wasm_out: None,
+        check: false,
+    })
+    .unwrap();
+    (temp, root, dependency)
+}
+
+fn locked_workspace_bundle(
+    root: &std::path::Path,
+    tenant: &str,
+) -> crate::app_bundles::WorkspaceBundle {
+    let unlocked = super::super::workspace::build_workspace_bundle(root, tenant, false).unwrap();
+    super::super::workspace::write_workspace_lock(&unlocked).unwrap();
+    super::super::workspace::build_workspace_bundle(root, tenant, true).unwrap()
+}
+
+async fn bundle_test_platform(data_dir: std::path::PathBuf) -> crate::state::PlatformState {
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let database_url = format!("file:{}", data_dir.join("metadata.db").display());
+    let store = temper_store_turso::TursoEventStore::new(&database_url, None)
+        .await
+        .unwrap();
+    let mut platform = crate::state::PlatformState::new(None);
+    platform.server.data_dir = data_dir;
+    platform
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(store));
+    platform
+}
+
+#[tokio::test]
+async fn locked_install_uses_dependency_metadata_lock_and_restores_without_sources() {
+    let (temp, root, dependency) = bound_dependency_fixture();
+    let locked = locked_workspace_bundle(&root, "typed-dependency");
+    let manifest = crate::os_apps::read_app_manifest(&root).unwrap();
+    let module_digest = manifest.wasm_modules[0]
+        .data_binding
+        .as_ref()
+        .unwrap()
+        .closure_digest
+        .clone();
+    assert_ne!(module_digest, locked.request.manifest.bundle_digest);
+
+    let platform = bundle_test_platform(temp.path().join("data")).await;
+    install_local_bundle(&platform, locked.request)
+        .await
+        .unwrap();
+
+    std::fs::remove_dir_all(&root).unwrap();
+    std::fs::remove_dir_all(&dependency).unwrap();
+    assert_eq!(
+        restore_local_bundle_cache_roots(&platform).await.unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn locked_install_rejects_dependency_metadata_changed_after_binding() {
+    let (temp, root, dependency) = bound_dependency_fixture();
+    std::fs::write(
+        dependency.join("specs/model.csdl.xml"),
+        DEPENDENCY_CSDL.replace(
+            "</EntityType>",
+            "<Property Name=\"path\" Type=\"Edm.String\"/></EntityType>",
+        ),
+    )
+    .unwrap();
+    let locked = locked_workspace_bundle(&root, "stale-dependency");
+    let platform = bundle_test_platform(temp.path().join("data")).await;
+    let error = install_local_bundle(&platform, locked.request)
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("differs without an artifact-bound proof"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn locked_install_rejects_entity_available_only_in_ambient_tenant_schema() {
+    let (temp, root, dependency) = bound_dependency_fixture();
+    let platform = bundle_test_platform(temp.path().join("data")).await;
+    let ambient =
+        super::super::workspace::build_workspace_bundle(&dependency, "ambient-schema", false)
+            .unwrap();
+    install_local_bundle(&platform, ambient.request)
+        .await
+        .unwrap();
+
+    let manifest_path = root.join("app.toml");
+    let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+    std::fs::write(
+        &manifest_path,
+        manifest.replace("dependencies = [\"dependency\"]\n", "dependencies = []\n"),
+    )
+    .unwrap();
+    std::fs::write(root.join("temper.lock.toml"), "version = 1\n").unwrap();
+    let root_only =
+        super::super::workspace::build_workspace_bundle(&root, "ambient-schema", true).unwrap();
+    let error = install_local_bundle(&platform, root_only.request)
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("granted entity type 'Paw.FS.File' is absent"),
+        "unexpected error: {error}"
+    );
+}

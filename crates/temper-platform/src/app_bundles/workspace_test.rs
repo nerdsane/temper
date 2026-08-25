@@ -42,6 +42,26 @@ fn workspace_digest_is_stable_and_excludes_lock_paths() {
     }));
 }
 
+#[test]
+fn workspace_files_use_canonical_normalized_path_order() {
+    let root = tempfile::tempdir().unwrap();
+    write_minimal_app(root.path(), "root", &[]);
+    std::fs::create_dir_all(root.path().join("wasm/module")).unwrap();
+    std::fs::write(root.path().join("wasm/module/module.wasm"), b"wasm").unwrap();
+    std::fs::write(root.path().join("wasm-build-env.sh"), b"env").unwrap();
+
+    let bundle = build_workspace_bundle(root.path(), "default", false).unwrap();
+    let paths = bundle.request.manifest.apps[0]
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>();
+    let mut expected = paths.clone();
+    expected.sort_unstable();
+
+    assert_eq!(paths, expected);
+}
+
 #[cfg(unix)]
 #[test]
 fn workspace_rejects_symlinks() {

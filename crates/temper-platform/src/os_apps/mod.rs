@@ -1131,7 +1131,7 @@ pub(crate) async fn install_os_app_from_dir_with_plan(
     app_name: &str,
     app_dir: &Path,
     plan: OsAppInstallPlan,
-    canonical_closure_id: Option<&str>,
+    canonical_bindings: Option<&BTreeMap<String, temper_wasm_sdk::data::ModuleSdkManifest>>,
 ) -> Result<InstallResult, String> {
     let app_version = read_app_manifest(app_dir)
         .ok_or_else(|| format!("OS app '{app_name}' has no valid app.toml"))?
@@ -1151,9 +1151,9 @@ pub(crate) async fn install_os_app_from_dir_with_plan(
     } else {
         UploadedWasmReplacementContext::default()
     };
-    let resolved_dependency_lock_id = match canonical_closure_id {
-        Some(closure_id) => closure_id.to_string(),
-        None => os_app_closure_for_roots(&[app_name.to_string()])?.id,
+    let resolved_dependency_lock_id = match canonical_bindings {
+        Some(_) => None,
+        None => Some(os_app_closure_for_roots(&[app_name.to_string()])?.id),
     };
 
     if bundle.adrs.is_empty() {
@@ -1440,15 +1440,23 @@ pub(crate) async fn install_os_app_from_dir_with_plan(
             let module_started = Instant::now();
             let module_config = bundle.wasm_module_configs.get(module_name);
             let hash = temper_wasm::WasmEngine::hash_module(wasm_bytes);
-            let activated_binding = match module_config {
-                Some(config) => data_binding::verify_module_config_data_binding(
+            let activated_binding = match (module_config, canonical_bindings) {
+                (Some(config), Some(bindings)) if config.data.is_some() => {
+                    Some(bindings.get(module_name).cloned().ok_or_else(|| {
+                        format!("module '{module_name}' has no verified canonical data binding")
+                    })?)
+                }
+                (Some(_), Some(_)) => None,
+                (Some(config), None) => data_binding::verify_module_config_data_binding(
                     wasm_bytes,
                     module_name,
                     config,
                     bundle.csdl.as_deref(),
-                    &resolved_dependency_lock_id,
+                    resolved_dependency_lock_id
+                        .as_deref()
+                        .ok_or_else(|| "OS app closure identity is missing".to_string())?,
                 )?,
-                None => None,
+                (None, _) => None,
             };
             let required = module_config.is_some_and(WasmModuleManifest::is_required);
             let replace_uploaded_module =
