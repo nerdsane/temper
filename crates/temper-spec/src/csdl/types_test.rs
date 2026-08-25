@@ -113,6 +113,22 @@ fn schema_find_action() {
 }
 
 #[test]
+fn schema_finds_only_exact_bound_action_overloads() {
+    let mut schema = sample_schema();
+    let mut customer_submit = schema.actions[0].clone();
+    customer_submit.parameters[0].type_name = "TestNs.Customer".into();
+    let mut unbound_submit = schema.actions[0].clone();
+    unbound_submit.is_bound = false;
+    schema.actions.insert(0, customer_submit);
+    schema.actions.insert(0, unbound_submit);
+
+    let matches = schema.bound_actions("Submit", "TestNs.Order");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].binding_type(), Some("TestNs.Order"));
+    assert!(schema.bound_actions("Missing", "TestNs.Order").is_empty());
+}
+
+#[test]
 fn schema_find_function() {
     let schema = sample_schema();
     assert!(schema.function("GetTotal").is_some());

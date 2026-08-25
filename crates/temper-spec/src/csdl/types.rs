@@ -185,9 +185,21 @@ impl Schema {
         self.entity_types.iter().find(|e| e.name == name)
     }
 
-    /// Find an action by name.
+    /// Find the first action by name.
+    ///
+    /// This lookup is suitable for existence checks or schemas where action
+    /// names are known to be unique. Use [`Self::bound_actions`] when resolving
+    /// an entity-bound overload.
     pub fn action(&self, name: &str) -> Option<&Action> {
         self.actions.iter().find(|a| a.name == name)
+    }
+
+    /// Find every action with the given name and exact binding entity type.
+    pub fn bound_actions<'a>(&'a self, name: &str, binding_type: &str) -> Vec<&'a Action> {
+        self.actions
+            .iter()
+            .filter(|action| action.name == name && action.binding_type() == Some(binding_type))
+            .collect()
     }
 
     /// Find a function by name.

@@ -1,5 +1,8 @@
 use super::*;
-use temper_spec::csdl::parse_csdl;
+use temper_spec::{
+    IoaSourceInput, ScopedBundleBudgets, ScopedSpecBundle, ScopedSpecBundleInput,
+    csdl::{emit_csdl_xml, parse_csdl},
+};
 use temper_wasm_sdk::data::{DataOperationKind, EntityDataGrant};
 
 const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -24,6 +27,75 @@ const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
   </Schema></edmx:DataServices>
 </edmx:Edmx>"#;
 
+const OVERLOADED_ACTION_CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices><Schema Namespace="TemperPaw.ArcAgi2" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+    <EntityType Name="ArcTask"><Key><PropertyRef Name="Id"/></Key>
+      <Property Name="Id" Type="Edm.String" Nullable="false"/>
+    </EntityType>
+    <EntityType Name="ArcInferenceCandidate"><Key><PropertyRef Name="Id"/></Key>
+      <Property Name="Id" Type="Edm.String" Nullable="false"/>
+    </EntityType>
+    <Action Name="Configure" IsBound="true">
+      <Parameter Name="binding" Type="TemperPaw.ArcAgi2.ArcTask" Nullable="false"/>
+      <Parameter Name="TaskPrompt" Type="Edm.String" Nullable="false"/>
+      <ReturnType Type="Edm.String" Nullable="false"/>
+    </Action>
+    <Action Name="Configure" IsBound="true">
+      <Parameter Name="binding" Type="TemperPaw.ArcAgi2.ArcInferenceCandidate" Nullable="false"/>
+      <Parameter Name="AttemptBudget" Type="Edm.Int64" Nullable="false"/>
+      <ReturnType Type="Edm.Boolean" Nullable="false"/>
+    </Action>
+    <Action Name="RecordVerified" IsBound="true">
+      <Parameter Name="binding" Type="TemperPaw.ArcAgi2.ArcTask" Nullable="false"/>
+      <Parameter Name="Verifier" Type="Edm.String" Nullable="false"/>
+    </Action>
+    <Action Name="RecordVerified" IsBound="true">
+      <Parameter Name="binding" Type="TemperPaw.ArcAgi2.ArcInferenceCandidate" Nullable="false"/>
+      <Parameter Name="Confidence" Type="Edm.Decimal" Nullable="false"/>
+    </Action>
+    <Action Name="RecordRejected" IsBound="true">
+      <Parameter Name="binding" Type="TemperPaw.ArcAgi2.ArcTask" Nullable="false"/>
+      <Parameter Name="Verifier" Type="Edm.String" Nullable="false"/>
+    </Action>
+    <Action Name="RecordRejected" IsBound="true">
+      <Parameter Name="binding" Type="TemperPaw.ArcAgi2.ArcInferenceCandidate" Nullable="false"/>
+      <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
+    </Action>
+    <Action Name="Configure" IsBound="false">
+      <Parameter Name="GlobalMode" Type="Edm.String" Nullable="false"/>
+    </Action>
+    <EntityContainer Name="Container">
+      <EntitySet Name="ArcTasks" EntityType="TemperPaw.ArcAgi2.ArcTask"/>
+      <EntitySet Name="ArcInferenceCandidates" EntityType="TemperPaw.ArcAgi2.ArcInferenceCandidate"/>
+    </EntityContainer>
+  </Schema></edmx:DataServices>
+</edmx:Edmx>"#;
+
+const ARC_TASK_IOA: &str = r#"
+[automaton]
+name = "ArcTask"
+states = ["Open"]
+initial = "Open"
+
+[[state]]
+name = "lifecycle"
+type = "status"
+initial = "Open"
+"#;
+
+const ARC_CANDIDATE_IOA: &str = r#"
+[automaton]
+name = "ArcInferenceCandidate"
+states = ["Open"]
+initial = "Open"
+
+[[state]]
+name = "lifecycle"
+type = "status"
+initial = "Open"
+"#;
+
 fn grant() -> ModuleDataGrant {
     let mut grant = ModuleDataGrant::default();
     grant.operations.insert(DataOperationKind::EntityGet);
@@ -42,6 +114,198 @@ fn grant() -> ModuleDataGrant {
     entity.query_filter_fields.insert("Status".into());
     grant.entities.push(entity);
     grant
+}
+
+fn arc_candidate_grant() -> ModuleDataGrant {
+    ModuleDataGrant {
+        operations: [DataOperationKind::ActionInvoke].into_iter().collect(),
+        entities: vec![EntityDataGrant {
+            entity_type: "TemperPaw.ArcAgi2.ArcInferenceCandidate".into(),
+            actions: [
+                "Configure".into(),
+                "RecordRejected".into(),
+                "RecordVerified".into(),
+            ]
+            .into_iter()
+            .collect(),
+            ..EntityDataGrant::default()
+        }],
+        ..ModuleDataGrant::default()
+    }
+}
+
+fn arc_task_grant() -> ModuleDataGrant {
+    ModuleDataGrant {
+        operations: [DataOperationKind::ActionInvoke].into_iter().collect(),
+        entities: vec![EntityDataGrant {
+            entity_type: "TemperPaw.ArcAgi2.ArcTask".into(),
+            actions: ["Configure".into()].into_iter().collect(),
+            ..EntityDataGrant::default()
+        }],
+        ..ModuleDataGrant::default()
+    }
+}
+
+fn canonical_arc_csdl(source: &str) -> CsdlDocument {
+    let bundle = ScopedSpecBundle::compile(ScopedSpecBundleInput {
+        scope_id: "arc-overload-regression".into(),
+        predecessor_digest: None,
+        csdl_xml: source.into(),
+        ioa_sources: vec![
+            IoaSourceInput {
+                entity_type: "TemperPaw.ArcAgi2.ArcTask".into(),
+                source: ARC_TASK_IOA.into(),
+            },
+            IoaSourceInput {
+                entity_type: "TemperPaw.ArcAgi2.ArcInferenceCandidate".into(),
+                source: ARC_CANDIDATE_IOA.into(),
+            },
+        ],
+        cedar_policies: vec![],
+        wasm_modules: vec![],
+        migration: None,
+        budgets: ScopedBundleBudgets::default(),
+    })
+    .expect("ARC-shaped fixture should canonicalize as a verified bundle");
+    parse_csdl(bundle.canonical_csdl()).unwrap()
+}
+
+#[test]
+fn generation_resolves_arc_shaped_actions_by_exact_binding_entity() {
+    let csdl = parse_csdl(OVERLOADED_ACTION_CSDL).unwrap();
+    let generated = generate_module_sdk(
+        &csdl,
+        "arc-inference",
+        "closure",
+        "lock",
+        "artifact",
+        arc_candidate_grant(),
+    )
+    .expect("the candidate-bound overloads should satisfy the candidate grant");
+
+    let candidate = &generated.manifest.entities[0];
+    let configure = candidate
+        .actions
+        .iter()
+        .find(|action| action.canonical_name == "Configure")
+        .unwrap();
+    assert_eq!(configure.parameters[0].canonical_name, "AttemptBudget");
+    assert_eq!(configure.parameters[0].type_name, "Edm.Int64");
+    assert_eq!(configure.result_type.as_deref(), Some("Edm.Boolean"));
+    assert!(generated.source.contains("pub fn configure"));
+    assert!(generated.source.contains("pub attempt_budget: i64"));
+    assert!(!generated.source.contains("pub task_prompt: String"));
+
+    let task_generated = generate_module_sdk(
+        &csdl,
+        "arc-task",
+        "closure",
+        "lock",
+        "artifact",
+        arc_task_grant(),
+    )
+    .expect("the task-bound overload should satisfy the task grant");
+    let task_configure = &task_generated.manifest.entities[0].actions[0];
+    assert_eq!(task_configure.parameters[0].canonical_name, "TaskPrompt");
+    assert_eq!(task_configure.parameters[0].type_name, "Edm.String");
+    assert_eq!(task_configure.result_type.as_deref(), Some("Edm.String"));
+    assert!(task_generated.source.contains("pub task_prompt: String"));
+    assert!(!task_generated.source.contains("pub attempt_budget: i64"));
+}
+
+#[test]
+fn missing_exact_bound_action_ignores_other_bindings_and_unbound_overloads() {
+    let mut csdl = parse_csdl(OVERLOADED_ACTION_CSDL).unwrap();
+    csdl.schemas[0].actions.retain(|action| {
+        action.name != "Configure"
+            || action.binding_type() != Some("TemperPaw.ArcAgi2.ArcInferenceCandidate")
+    });
+
+    assert!(matches!(
+        generate_module_sdk(
+            &csdl,
+            "arc-inference",
+            "closure",
+            "lock",
+            "artifact",
+            arc_candidate_grant(),
+        ),
+        Err(ModuleSdkCodegenError::MissingSymbol { entity_type, symbol })
+            if entity_type == "TemperPaw.ArcAgi2.ArcInferenceCandidate"
+                && symbol == "Configure"
+    ));
+}
+
+#[test]
+fn ambiguous_exact_bound_actions_fail_closed() {
+    let mut csdl = parse_csdl(OVERLOADED_ACTION_CSDL).unwrap();
+    let mut duplicate = csdl.schemas[0]
+        .bound_actions("Configure", "TemperPaw.ArcAgi2.ArcInferenceCandidate")
+        .into_iter()
+        .next()
+        .unwrap()
+        .clone();
+    duplicate.parameters[1].name = "CandidateMode".into();
+    duplicate.parameters[1].type_name = "Edm.String".into();
+    csdl.schemas[0].actions.push(duplicate);
+
+    assert!(matches!(
+        generate_module_sdk(
+            &csdl,
+            "arc-inference",
+            "closure",
+            "lock",
+            "artifact",
+            arc_candidate_grant(),
+        ),
+        Err(ModuleSdkCodegenError::AmbiguousBoundAction {
+            entity_type,
+            action,
+            matches: 2,
+        }) if entity_type == "TemperPaw.ArcAgi2.ArcInferenceCandidate"
+            && action == "Configure"
+    ));
+}
+
+#[test]
+fn canonical_action_order_keeps_generated_sdk_and_binding_identical() {
+    let original = canonical_arc_csdl(OVERLOADED_ACTION_CSDL);
+    let mut reordered = parse_csdl(OVERLOADED_ACTION_CSDL).unwrap();
+    reordered.schemas[0].actions.reverse();
+    let reordered_source = emit_csdl_xml(&reordered);
+    let reordered = canonical_arc_csdl(&reordered_source);
+    assert_eq!(emit_csdl_xml(&original), emit_csdl_xml(&reordered));
+
+    let first = generate_module_sdk(
+        &original,
+        "arc-inference",
+        "closure",
+        "lock",
+        "",
+        arc_candidate_grant(),
+    )
+    .unwrap();
+    let second = generate_module_sdk(
+        &reordered,
+        "arc-inference",
+        "closure",
+        "lock",
+        "",
+        arc_candidate_grant(),
+    )
+    .unwrap();
+    assert_eq!(first.source, second.source);
+    assert_eq!(first.manifest, second.manifest);
+    assert_eq!(first.manifest.grant_digest, second.manifest.grant_digest);
+
+    let first = package_generated_module_sdk(b"\0asm\x01\0\0\0", first).unwrap();
+    let second = package_generated_module_sdk(b"\0asm\x01\0\0\0", second).unwrap();
+    assert_eq!(first.wasm, second.wasm);
+    assert_eq!(first.manifest, second.manifest);
+    assert_eq!(
+        first.manifest.artifact_digest,
+        second.manifest.artifact_digest
+    );
 }
 
 #[test]

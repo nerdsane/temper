@@ -33,6 +33,14 @@ pub enum ModuleSdkCodegenError {
     MissingEntitySet(String),
     #[error("granted schema symbol '{symbol}' is absent from entity '{entity_type}'")]
     MissingSymbol { entity_type: String, symbol: String },
+    #[error(
+        "granted bound action '{action}' is ambiguous on entity '{entity_type}': {matches} exact overloads match"
+    )]
+    AmbiguousBoundAction {
+        entity_type: String,
+        action: String,
+        matches: usize,
+    },
     #[error("generated Rust identifier collision '{0}'")]
     IdentifierCollision(String),
     #[error(
@@ -310,22 +318,23 @@ fn resolve_entity<'a>(
     }
     let mut actions = Vec::new();
     for name in grant.actions.iter().chain(&grant.composite_actions) {
-        let action = schema
-            .action(name)
-            .ok_or_else(|| ModuleSdkCodegenError::MissingSymbol {
-                entity_type: grant.entity_type.clone(),
-                symbol: name.clone(),
-            })?;
-        let bound_type = action
-            .parameters
-            .first()
-            .map(|parameter| parameter.type_name.as_str());
-        if !action.is_bound || bound_type != Some(grant.entity_type.as_str()) {
-            return Err(ModuleSdkCodegenError::MissingSymbol {
-                entity_type: grant.entity_type.clone(),
-                symbol: name.clone(),
-            });
-        }
+        let matches = schema.bound_actions(name, &grant.entity_type);
+        let action = match matches.as_slice() {
+            [] => {
+                return Err(ModuleSdkCodegenError::MissingSymbol {
+                    entity_type: grant.entity_type.clone(),
+                    symbol: name.clone(),
+                });
+            }
+            [action] => *action,
+            _ => {
+                return Err(ModuleSdkCodegenError::AmbiguousBoundAction {
+                    entity_type: grant.entity_type.clone(),
+                    action: name.clone(),
+                    matches: matches.len(),
+                });
+            }
+        };
         actions.push(action);
     }
     actions.sort_by(|left, right| left.name.cmp(&right.name));
