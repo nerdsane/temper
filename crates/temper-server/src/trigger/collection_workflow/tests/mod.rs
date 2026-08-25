@@ -59,3 +59,4 @@ fn source_append(
 mod model;
 mod parity;
 mod persistence;
+mod restart_dst;
