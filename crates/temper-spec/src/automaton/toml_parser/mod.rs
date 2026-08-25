@@ -10,10 +10,10 @@ mod inline;
 
 use super::parser::AutomatonParseError;
 use super::types::*;
-use effects::parse_effect_value;
+use effects::{parse_effect_fields, parse_effect_value};
 #[cfg(test)]
 use guards::parse_guard_clause;
-use guards::parse_guard_value;
+use guards::{parse_guard_fields, parse_guard_value};
 use inline::{join_multiline_arrays, parse_action_params, parse_kv, parse_string_array};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -44,6 +44,10 @@ enum Section {
     /// ADR-0040: nested composite-action metadata blocks. Hand-rolled parser
     /// skips the body; metadata is extracted via serde in the second pass.
     CompositeActionMetadata,
+    /// Canonical TOML emits inline action guards and effects as nested
+    /// array-of-table sections. Serde restores those typed values in a second
+    /// pass so their fields cannot leak into the parent action.
+    ActionBehaviorMetadata,
 }
 
 #[derive(Debug, Default)]
@@ -102,6 +106,11 @@ impl ParseState {
                 self.current_section = Section::CompositeActionMetadata;
                 true
             }
+            "[[action.guard]]" | "[[action.effect]]" => {
+                self.flush_items();
+                self.current_section = Section::ActionBehaviorMetadata;
+                true
+            }
             _ => false,
         }
     }
@@ -122,6 +131,7 @@ impl ParseState {
             | Section::Webhook
             | Section::ActionTrigger
             | Section::CompositeActionMetadata
+            | Section::ActionBehaviorMetadata
             | Section::None => {}
         }
 
@@ -142,6 +152,7 @@ impl ParseState {
         // actions by name. The hand-rolled parser skips these blocks.
         let mut triggers_by_action = extract_action_triggers(input)?;
         let mut composite_by_action = extract_action_composite_metadata(input)?;
+        let mut behavior_by_action = extract_action_behavior_metadata(input)?;
         let mut actions = self.actions;
         for action in &mut actions {
             if let Some(trigs) = triggers_by_action.remove(&action.name) {
@@ -150,6 +161,10 @@ impl ParseState {
             if let Some(metadata) = composite_by_action.remove(&action.name) {
                 action.cedar_gate = metadata.cedar_gate;
                 action.sub_writes.extend(metadata.sub_writes);
+            }
+            if let Some(metadata) = behavior_by_action.remove(&action.name) {
+                action.guard.extend(metadata.guards);
+                action.effect.extend(metadata.effects);
             }
         }
 
@@ -532,6 +547,95 @@ struct ParsedCompositeActionMetadata {
     sub_writes: Vec<super::types::SubWriteSpec>,
 }
 
+#[derive(Debug, Default)]
+struct ParsedActionBehaviorMetadata {
+    guards: Vec<super::types::Guard>,
+    effects: Vec<super::types::Effect>,
+}
+
+/// Extract canonical `[[action.guard]]` and `[[action.effect]]` sections.
+///
+/// Source-authored IOA usually expresses these values as inline arrays, which
+/// the hand-written parser handles directly. The canonical TOML serializer
+/// expands them into nested array-of-table sections instead. This filtered
+/// serde pass retains only each parent action name and those expanded sections,
+/// preserving both forms without asking serde to parse legacy string effects.
+fn extract_action_behavior_metadata(
+    source: &str,
+) -> Result<std::collections::BTreeMap<String, ParsedActionBehaviorMetadata>, AutomatonParseError> {
+    let slice = isolate_action_behavior_sections(source);
+    if slice.trim().is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ActionBehaviorWrapper {
+        #[serde(default, rename = "action")]
+        actions: Vec<ActionSkeleton>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ActionSkeleton {
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        guard: Vec<toml::Value>,
+        #[serde(default)]
+        effect: Vec<toml::Value>,
+    }
+
+    let wrapper: ActionBehaviorWrapper = toml::from_str(&slice)
+        .map_err(|error| AutomatonParseError::Toml(format!("action behavior: {error}")))?;
+    let mut map = std::collections::BTreeMap::<String, ParsedActionBehaviorMetadata>::new();
+    for action in wrapper.actions {
+        if action.name.is_empty() || (action.guard.is_empty() && action.effect.is_empty()) {
+            continue;
+        }
+        let metadata = map.entry(action.name).or_default();
+        for value in action.guard {
+            let fields = canonical_behavior_fields(value, "guard")?;
+            metadata.guards.push(parse_guard_fields(&fields)?);
+        }
+        for value in action.effect {
+            let fields = canonical_behavior_fields(value, "effect")?;
+            if let Some(effect) = parse_effect_fields(&fields)? {
+                metadata.effects.push(effect);
+            }
+        }
+    }
+    Ok(map)
+}
+
+fn canonical_behavior_fields(
+    value: toml::Value,
+    behavior: &str,
+) -> Result<std::collections::BTreeMap<String, String>, AutomatonParseError> {
+    let toml::Value::Table(table) = value else {
+        return Err(AutomatonParseError::Toml(format!(
+            "action behavior: {behavior} entry must be a table"
+        )));
+    };
+    Ok(table
+        .into_iter()
+        .map(|(key, value)| (key, canonical_behavior_field(value)))
+        .collect())
+}
+
+fn canonical_behavior_field(value: toml::Value) -> String {
+    match value {
+        toml::Value::String(value) => value,
+        toml::Value::Integer(value) => value.to_string(),
+        toml::Value::Float(value) => value.to_string(),
+        toml::Value::Boolean(value) => value.to_string(),
+        toml::Value::Datetime(value) => value.to_string(),
+        toml::Value::Array(values) => values
+            .into_iter()
+            .map(canonical_behavior_field)
+            .collect::<Vec<_>>()
+            .join(","),
+        toml::Value::Table(table) => toml::Value::Table(table).to_string(),
+    }
+}
+
 /// Extract nested `[[action.cedar_gate]]` and `[[action.sub_writes]]`
 /// sections via serde (ADR-0040).
 fn extract_action_composite_metadata(
@@ -594,15 +698,7 @@ fn extract_field_invariants(
     if slice.trim().is_empty() {
         return Ok(Vec::new());
     }
-
-    #[derive(serde::Deserialize)]
-    struct FieldInvariantWrapper {
-        #[serde(default, rename = "field_invariant")]
-        field_invariants: Vec<super::field_invariant::FieldInvariant>,
-    }
-    toml::from_str::<FieldInvariantWrapper>(&slice)
-        .map(|w| w.field_invariants)
-        .map_err(|e| AutomatonParseError::Toml(format!("field_invariant: {e}")))
+    deserialize_array_section(&slice, "field_invariant")
 }
 
 /// Extract the optional `[admission]` block from TOML source via serde
@@ -660,14 +756,25 @@ fn isolate_single_table(source: &str, marker: &str) -> String {
 fn isolate_sections(source: &str, marker: &str) -> String {
     let mut out = String::new();
     let mut inside = false;
+    let table_name = marker.trim_matches(['[', ']']);
+    let nested_table_prefix = format!("[{table_name}.");
+    let nested_array_prefix = format!("[[{table_name}.");
     for line in source.lines() {
         let trimmed = line.trim_start();
         let is_header = trimmed.starts_with('[');
         if is_header {
-            inside = trimmed.starts_with(marker);
-            if inside {
+            if trimmed == marker {
+                inside = true;
                 out.push_str(marker);
                 out.push('\n');
+            } else if inside
+                && (trimmed.starts_with(&nested_table_prefix)
+                    || trimmed.starts_with(&nested_array_prefix))
+            {
+                out.push_str(trimmed);
+                out.push('\n');
+            } else {
+                inside = false;
             }
             continue;
         }
@@ -705,6 +812,51 @@ fn isolate_action_sections(source: &str) -> String {
     out
 }
 
+/// Return a TOML document containing action names plus only nested guard and
+/// effect tables emitted by canonical serialization.
+fn isolate_action_behavior_sections(source: &str) -> String {
+    #[derive(Clone, Copy)]
+    enum CopyMode {
+        Skip,
+        ActionName,
+        Behavior,
+    }
+
+    let mut out = String::new();
+    let mut mode = CopyMode::Skip;
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') {
+            mode = match trimmed {
+                "[[action]]" => {
+                    out.push_str("[[action]]\n");
+                    CopyMode::ActionName
+                }
+                "[[action.guard]]" | "[[action.effect]]" => {
+                    out.push_str(trimmed);
+                    out.push('\n');
+                    CopyMode::Behavior
+                }
+                _ => CopyMode::Skip,
+            };
+            continue;
+        }
+
+        match mode {
+            CopyMode::ActionName if trimmed.starts_with("name =") => {
+                out.push_str(trimmed);
+                out.push('\n');
+            }
+            CopyMode::Behavior => {
+                out.push_str(line);
+                out.push('\n');
+            }
+            CopyMode::Skip | CopyMode::ActionName => {}
+        }
+    }
+    out
+}
+
 /// Extract `[[state_timeout]]` sections from TOML source via serde
 /// (ADR-0049).
 ///
@@ -720,14 +872,7 @@ fn extract_state_timeouts(
         return Ok(Vec::new());
     }
 
-    #[derive(serde::Deserialize)]
-    struct StateTimeoutWrapper {
-        #[serde(default, rename = "state_timeout")]
-        state_timeouts: Vec<super::types::StateTimeout>,
-    }
-    toml::from_str::<StateTimeoutWrapper>(&slice)
-        .map(|w| w.state_timeouts)
-        .map_err(|e| AutomatonParseError::Toml(format!("state_timeout: {e}")))
+    deserialize_array_section(&slice, "state_timeout")
 }
 
 /// Extract `[[collection_workflow]]` declarations through an isolated serde
@@ -760,14 +905,7 @@ fn extract_keys(source: &str) -> Result<Vec<super::types::KeyDecl>, AutomatonPar
         return Ok(Vec::new());
     }
 
-    #[derive(serde::Deserialize)]
-    struct KeyWrapper {
-        #[serde(default, rename = "key")]
-        keys: Vec<super::types::KeyDecl>,
-    }
-    toml::from_str::<KeyWrapper>(&slice)
-        .map(|w| w.keys)
-        .map_err(|e| AutomatonParseError::Toml(format!("key: {e}")))
+    deserialize_array_section(&slice, "key")
 }
 
 /// Extract `[[vector]]` access-path declarations from TOML source via serde
@@ -780,45 +918,41 @@ fn extract_vectors(source: &str) -> Result<Vec<super::types::VectorDecl>, Automa
         return Ok(Vec::new());
     }
 
-    #[derive(serde::Deserialize)]
-    struct VectorWrapper {
-        #[serde(default, rename = "vector")]
-        vectors: Vec<super::types::VectorDecl>,
-    }
-    toml::from_str::<VectorWrapper>(&slice)
-        .map(|w| w.vectors)
-        .map_err(|e| AutomatonParseError::Toml(format!("vector: {e}")))
+    deserialize_array_section(&slice, "vector")
+}
+
+fn deserialize_array_section<T>(source: &str, key: &str) -> Result<Vec<T>, AutomatonParseError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let document = toml::from_str::<toml::Value>(source)
+        .map_err(|error| AutomatonParseError::Toml(format!("{key}: {error}")))?;
+    let Some(items) = document.get(key).and_then(toml::Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    items
+        .iter()
+        .cloned()
+        .map(|item| {
+            item.try_into()
+                .map_err(|error| AutomatonParseError::Toml(format!("{key}: {error}")))
+        })
+        .collect()
 }
 
 /// Return a minimal TOML document containing only the `[[field_invariant]]`
 /// sections from `source`. Any other top-level section is skipped.
 ///
-/// A section starts at a line whose trimmed form is `[[field_invariant]]`
-/// and ends at the next line whose trimmed form begins with `[` (either a
-/// new array-of-tables or a regular table header). Lines inside a section
-/// are copied verbatim; comment and blank lines outside any field-invariant
-/// section are dropped.
+/// Nested predicate tables emitted by canonical TOML remain attached to their
+/// parent invariant. Unrelated top-level sections are dropped.
 fn isolate_field_invariant_sections(source: &str) -> String {
-    let mut out = String::new();
-    let mut inside = false;
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        let is_header = trimmed.starts_with('[');
-        if is_header {
-            inside = trimmed.starts_with("[[field_invariant]]");
-            if inside {
-                out.push_str("[[field_invariant]]\n");
-            }
-            continue;
-        }
-        if inside {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    out
+    isolate_sections(source, "[[field_invariant]]")
 }
 
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "nested_metadata_test.rs"]
+mod nested_metadata_test;

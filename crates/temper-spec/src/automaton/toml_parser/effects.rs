@@ -38,7 +38,7 @@ fn parse_effect_array(value: &str, effects: &mut Vec<Effect>) -> Result<(), Auto
     Ok(())
 }
 
-fn parse_effect_fields(
+pub(super) fn parse_effect_fields(
     fields: &std::collections::BTreeMap<String, String>,
 ) -> Result<Option<Effect>, AutomatonParseError> {
     let effect_type = fields.get("type").map(|s| s.as_str()).unwrap_or("");
@@ -68,14 +68,18 @@ fn parse_effect_fields(
                 Some(Effect::ScheduleAt { action, field })
             }
         }
-        "increment" => fields.get("var").cloned().map(|var| Effect::Increment {
-            var,
-            amount: fields.get("amount").cloned(),
-        }),
-        "decrement" => fields.get("var").cloned().map(|var| Effect::Decrement {
-            var,
-            amount: fields.get("amount").cloned(),
-        }),
+        "increment" | "IncrementCounter" => {
+            fields.get("var").cloned().map(|var| Effect::Increment {
+                var,
+                amount: fields.get("amount").cloned(),
+            })
+        }
+        "decrement" | "DecrementCounter" => {
+            fields.get("var").cloned().map(|var| Effect::Decrement {
+                var,
+                amount: fields.get("amount").cloned(),
+            })
+        }
         "set_counter_from_param" => fields.get("var").cloned().map(|var| {
             let param = fields.get("param").cloned().unwrap_or_else(|| var.clone());
             Effect::SetCounterFromParam { var, param }

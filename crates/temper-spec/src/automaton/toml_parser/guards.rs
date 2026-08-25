@@ -47,7 +47,7 @@ fn parse_guard_array(value: &str, guards: &mut Vec<Guard>) -> Result<(), Automat
     Ok(())
 }
 
-fn parse_guard_fields(
+pub(super) fn parse_guard_fields(
     fields: &std::collections::BTreeMap<String, String>,
 ) -> Result<Guard, AutomatonParseError> {
     let guard_type = fields.get("type").map(|s| s.as_str()).unwrap_or("");
@@ -79,18 +79,18 @@ fn parse_guard_fields(
                 .map(|s| parse_string_array(s))
                 .unwrap_or_default(),
         },
-        "min_count" => Guard::MinCount {
+        "min_count" | "CounterMin" => Guard::MinCount {
             var: fields.get("var").cloned().unwrap_or_default(),
             min: fields.get("min").and_then(|s| s.parse().ok()).unwrap_or(0),
         },
-        "max_count" => Guard::MaxCount {
+        "max_count" | "CounterMax" => Guard::MaxCount {
             var: fields.get("var").cloned().unwrap_or_default(),
             max: fields.get("max").and_then(|s| s.parse().ok()).unwrap_or(0),
         },
-        "is_true" => Guard::IsTrue {
+        "is_true" | "BoolTrue" => Guard::IsTrue {
             var: fields.get("var").cloned().unwrap_or_default(),
         },
-        "is_false" => Guard::IsFalse {
+        "is_false" | "BoolFalse" => Guard::IsFalse {
             var: fields.get("var").cloned().unwrap_or_default(),
         },
         "list_contains" => Guard::ListContains {

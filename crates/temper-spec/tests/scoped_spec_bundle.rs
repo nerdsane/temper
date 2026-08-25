@@ -34,6 +34,61 @@ type = "status"
 initial = "Open"
 "#;
 
+const ACTION_TRIGGER_TIMEOUT_IOA: &str = r#"
+[automaton]
+name = "Alpha"
+states = ["Created", "Running", "Failed"]
+initial = "Created"
+
+[[state]]
+name = "lifecycle"
+type = "status"
+initial = "Created"
+
+[[action]]
+name = "Start"
+kind = "input"
+from = ["Created"]
+to = "Running"
+guard = [{ type = "state_in", values = ["Created"] }]
+
+[[action.triggers]]
+name = "run_worker"
+kind = "wasm"
+module = "worker"
+on_failure = "Fail"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+
+[[action]]
+name = "Fail"
+kind = "input"
+from = ["Created", "Running"]
+to = "Failed"
+params = ["error_message"]
+effect = [
+  { type = "trigger", name = "record_failure" },
+  { type = "trigger", name = "notify_operator" },
+]
+
+[[action.triggers]]
+name = "record_failure"
+kind = "wasm"
+module = "failure_recorder"
+
+[[action.triggers]]
+name = "notify_operator"
+kind = "wasm"
+module = "operator_notifier"
+
+[[state_timeout]]
+state = "Created"
+after_seconds = 60
+on_timeout = "Fail"
+params = { error_message = "start never arrived" }
+"#;
+
 const ORDERED_CSDL: &str = r#"<?xml version="1.0"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
   <edmx:DataServices>
@@ -159,6 +214,39 @@ fn canonical_sources_round_trip_without_changing_identity() {
     .expect("canonical bundle should recompile");
 
     assert_eq!(compiled, recompiled);
+}
+
+#[test]
+fn canonical_source_preserves_actions_after_nested_trigger_config() {
+    let compiled = ScopedSpecBundle::compile(input(
+        ORDERED_CSDL,
+        vec![("Example.Alpha", ACTION_TRIGGER_TIMEOUT_IOA)],
+    ))
+    .expect("nested trigger configuration must not hide later timeout actions");
+
+    let automaton = parse_automaton(&compiled.ioa_specs()[0].canonical_source)
+        .expect("canonical IOA source should preserve the timeout action");
+    let start = automaton
+        .actions
+        .iter()
+        .find(|action| action.name == "Start")
+        .expect("Start action should survive canonicalization");
+    assert_eq!(
+        start.guard.len(),
+        1,
+        "Start guard should survive canonicalization"
+    );
+
+    let fail = automaton
+        .actions
+        .iter()
+        .find(|action| action.name == "Fail")
+        .expect("Fail action should survive canonicalization");
+    assert_eq!(
+        fail.effect.len(),
+        2,
+        "Fail effects should survive canonicalization"
+    );
 }
 
 #[test]
