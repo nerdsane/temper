@@ -163,7 +163,9 @@ async fn tenant_hints_require_a_credential() {
 async fn registered_credential_is_tenant_bound_and_headers_cannot_replace_it() {
     let state = PlatformState::new(None);
     crate::bootstrap::bootstrap_agent_specs(&state, "default", false, &BTreeMap::new());
-    crate::bootstrap::bootstrap_operator_credential(&state, "tenant-key", "default").await;
+    crate::bootstrap::bootstrap_operator_credential(&state, "tenant-key", "default")
+        .await
+        .expect("operator credential bootstrap should succeed");
     let router = app(state);
 
     let response = router
@@ -203,7 +205,9 @@ async fn registered_credential_is_tenant_bound_and_headers_cannot_replace_it() {
     let basic = base64::engine::general_purpose::STANDARD.encode("git:tenant-key");
     let state = PlatformState::new(None);
     crate::bootstrap::bootstrap_agent_specs(&state, "default", false, &BTreeMap::new());
-    crate::bootstrap::bootstrap_operator_credential(&state, "tenant-key", "default").await;
+    crate::bootstrap::bootstrap_operator_credential(&state, "tenant-key", "default")
+        .await
+        .expect("operator credential bootstrap should succeed");
     let response = app(state)
         .oneshot(
             HttpRequest::get("/whoami")
@@ -393,7 +397,9 @@ async fn reserved_internal_prefix_never_falls_back_to_agent_credentials() {
         "{}registered-as-normal",
         temper_server::internal_invocation::INTERNAL_INVOCATION_BEARER_PREFIX
     );
-    crate::bootstrap::bootstrap_operator_credential(&state, &reserved, "default").await;
+    crate::bootstrap::bootstrap_operator_credential(&state, &reserved, "default")
+        .await
+        .expect("operator credential bootstrap should succeed");
 
     let response = app(state)
         .oneshot(
@@ -469,7 +475,9 @@ async fn session_header_reaches_cedar_only_through_an_approved_grant() {
         .server
         .set_storage_stack(temper_server::storage::StorageStack::from_turso(turso));
     crate::bootstrap::bootstrap_agent_specs(&state, "default", false, &BTreeMap::new());
-    crate::bootstrap::bootstrap_operator_credential(&state, "tenant-key", "default").await;
+    crate::bootstrap::bootstrap_operator_credential(&state, "tenant-key", "default")
+        .await
+        .expect("operator credential bootstrap should succeed");
     let server_state = state.server.clone();
     let router = app(state);
 

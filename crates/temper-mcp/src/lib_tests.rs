@@ -202,7 +202,9 @@ async fn register_test_operator(state: &PlatformState) {
             .expect("merge credential specs");
         mark_specs_verified(&mut registry, TEST_TENANT, &credential_specs);
     }
-    bootstrap_operator_credential(state, TEST_OPERATOR_KEY, TEST_TENANT).await;
+    bootstrap_operator_credential(state, TEST_OPERATOR_KEY, TEST_TENANT)
+        .await
+        .expect("operator credential bootstrap should succeed");
     state
         .server
         .authz

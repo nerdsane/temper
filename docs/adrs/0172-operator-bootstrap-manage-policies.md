@@ -9,6 +9,9 @@
   - ADR-0033: Platform-assigned agent identity
   - ADR-0144: Idempotent Cedar merges
   - ADR-0157: Credential-bound Class A authentication edge
+  - ARN-255 / #407: kernel token verification; the code-embedded
+    `TrustedIssuer` / `PrincipalGeneration` identity-entity gate
+    (`crates/temper-authz/src/engine/mod.rs`, `VERIFIED_OPERATOR_WHEN`)
   - `crates/temper-platform/src/bootstrap.rs` (`bootstrap_operator_credential`)
   - `crates/temper-server/src/api/decisions.rs` (approve / deny)
   - `crates/temper-server/src/api/decisions_access.rs`
@@ -79,6 +82,17 @@ permit(
 `{tenant}` is the tenant being bootstrapped. Unverified principals and
 non-operator agent types remain default-deny for `manage_policies`.
 
+The `when`-clause body is no longer written out here by hand. It is built
+from a single shared constant, `temper_authz::VERIFIED_OPERATOR_WHEN`
+(`crates/temper-authz/src/engine/mod.rs`), which
+`operator_manage_policies_cedar` interpolates. The same constant is the
+source of the operator clauses in the ARN-255 system-platform gate, so the
+two surfaces cannot drift to different strength. The shared form adds `has`
+guards (`principal has agent_type && … && principal has agentTypeVerified &&
+…`) so a principal lacking either attribute evaluates to a clean deny
+instead of a Cedar evaluation error; this is not a behavior change for the
+operator, which always carries both attributes.
+
 **Why this approach**: it is the smallest Cedar that closes the approval
 loop, matches the existing HTTP authorization test, and does not grant
 entity actions or `create_tenant`.
@@ -125,6 +139,40 @@ denied principal can approve.
 ban are different failures. Cedar grants the governance door; the
 approve/deny handlers refuse to let the subject of the denial walk
 through it for that decision.
+
+### Boundary with the ARN-255 identity-entity gate
+
+Two operator-authorization surfaces coexist, and they are deliberately
+different kinds of thing:
+
+- **`PolicySet` / `manage_policies` (this ADR)** — a **tenant-seeded,
+  overridable governance surface**. It is persisted as a granular Cedar row,
+  merged into the tenant's live policy set, and can be disabled or replaced
+  like any other tenant policy. It gates the governance loop (approve/deny,
+  add Cedar), not the identity entities.
+- **`TrustedIssuer` / `PrincipalGeneration` (ARN-255, #407)** — a
+  **code-embedded, non-overridable platform-security surface**. Its permit and
+  forbid clauses live in the built-in `system_platform_policy` in temper-authz
+  and are merged into every engine at construction; a tenant cannot weaken
+  them. They guard the god-mode identity entities (registering a signing
+  issuer, bumping a principal's token generation).
+
+Both now evaluate the **same** verified-operator predicate
+(`temper_authz::VERIFIED_OPERATOR_WHEN`). Before this change the ARN-255
+clauses checked only `agent_type == "operator"` while this ADR's permit also
+required `agentTypeVerified == true`; a credential-unverified context that
+merely self-declared `agent_type == "operator"` (the shape produced by
+`SecurityContext::with_agent_context` on the trigger-dispatch path) therefore
+passed the identity-entity gate but not this one — a fail-open. Unifying the
+predicate and tightening ARN-255 to require verification closes that gap
+without touching the authorization server, which is credential-resolved and
+always `agentTypeVerified == true`.
+
+Note that `"operator"` is a privileged claim ultimately guarded by
+trusted-issuer registration: a registered issuer could mint a JWT carrying
+`agent_type == "operator"`, but registering an issuer is itself a
+`TrustedIssuer` write, gated to System/Admin/verified-operator by exactly
+these clauses. The trust root is the issuer registry, not the claim.
 
 ## Rollout Plan
 

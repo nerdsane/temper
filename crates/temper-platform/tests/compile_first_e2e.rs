@@ -205,7 +205,9 @@ async fn register_test_operator(
             );
         }
     }
-    bootstrap_operator_credential(state, credential, tenant).await;
+    bootstrap_operator_credential(state, credential, tenant)
+        .await
+        .expect("operator credential bootstrap should succeed");
     state
         .server
         .authz

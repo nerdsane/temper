@@ -1065,3 +1065,74 @@ fn issuer_registry_is_admin_system_only_even_on_permit_all() {
         }
     }
 }
+
+/// Regression proof for Finding A (ARN-255 operator-predicate gap): a
+/// credential-UNVERIFIED context that merely self-declares
+/// `agent_type == "operator"` — the shape produced by
+/// `SecurityContext::with_agent_context` on the trigger-dispatch path — must NOT
+/// reach the god-mode identity entities. Before the predicate was tightened to
+/// require `agentTypeVerified == true`, this context was ALLOWED (it satisfied
+/// the old `principal.agent_type == "operator"` clause); after, it is DENIED on
+/// every action, including the generic OData verbs that PATCH/PUT/DELETE map to.
+#[test]
+fn unverified_operator_type_cannot_reach_identity_entities() {
+    let engine = AuthzEngine::permissive(); // permit-all base + system-platform gate
+    let attrs = HashMap::new();
+
+    // Self-declared operator with NO credential verification (agentTypeVerified=false).
+    let unverified_operator =
+        SecurityContext::anonymous().with_agent_context(Some("attacker"), None, Some("operator"));
+
+    for entity in ["TrustedIssuer", "PrincipalGeneration"] {
+        for action in [
+            "RegisterIssuer",
+            "BumpGeneration",
+            "create",
+            "read",
+            "update",
+            "delete",
+        ] {
+            assert!(
+                !engine
+                    .authorize(&unverified_operator, action, entity, &attrs)
+                    .is_allowed(),
+                "an UNVERIFIED operator-type context must not {action} {entity}"
+            );
+        }
+    }
+}
+
+/// Consistency check that both authorization surfaces now agree on the same
+/// verified-operator predicate: the credential-VERIFIED operator is allowed the
+/// identity entities while the credential-UNVERIFIED, same-agent_type context is
+/// denied them. Demonstrates the two contexts differ ONLY by
+/// `agentTypeVerified`, which is exactly the requirement the shared predicate
+/// enforces.
+#[test]
+fn verified_and_unverified_operator_contexts_disagree_on_identity_entities() {
+    let engine = AuthzEngine::permissive();
+    let attrs = HashMap::new();
+
+    // Credential-resolved (ADR-0033) → agentTypeVerified == true.
+    let verified_operator = agent_context("operator", "operator");
+    // Self-declared → agentTypeVerified == false.
+    let unverified_operator =
+        SecurityContext::anonymous().with_agent_context(Some("operator"), None, Some("operator"));
+
+    for entity in ["TrustedIssuer", "PrincipalGeneration"] {
+        for action in ["read", "update", "RegisterIssuer", "BumpGeneration"] {
+            assert!(
+                engine
+                    .authorize(&verified_operator, action, entity, &attrs)
+                    .is_allowed(),
+                "the VERIFIED operator must {action} {entity}"
+            );
+            assert!(
+                !engine
+                    .authorize(&unverified_operator, action, entity, &attrs)
+                    .is_allowed(),
+                "the UNVERIFIED operator-type context must not {action} {entity}"
+            );
+        }
+    }
+}

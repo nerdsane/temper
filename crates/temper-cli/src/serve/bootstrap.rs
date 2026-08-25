@@ -491,8 +491,11 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
 
     // Register the bootstrap key as a normal operator credential in the default
     // tenant. It grants no implicit authority in other tenants (ADR-0157).
-    if let Some(ref api_key) = state.api_token {
-        temper_platform::bootstrap_operator_credential(state, api_key, "default").await;
+    if let Some(ref api_key) = state.api_token
+        && let Err(e) =
+            temper_platform::bootstrap_operator_credential(state, api_key, "default").await
+    {
+        eprintln!("  Warning: failed to bootstrap operator credential for tenant 'default': {e}");
     }
 
     // Register a trusted JWT issuer from env config, if provided (ARN-255).
@@ -500,7 +503,9 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
     // an authenticated API call. Registered for every tenant that carries the
     // agent specs, since the issuer is resolved in the request's own tenant.
     for tenant in &agent_spec_tenants {
-        temper_platform::bootstrap_trusted_issuer_from_env(state, tenant).await;
+        if let Err(e) = temper_platform::bootstrap_trusted_issuer_from_env(state, tenant).await {
+            eprintln!("  Warning: failed to bootstrap trusted issuer for tenant '{tenant}': {e}");
+        }
     }
 }
 
