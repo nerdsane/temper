@@ -35,6 +35,17 @@ impl CollectionExecutionActions<'_> {
             on_timed_out: self.on_timed_out.to_string(),
         }
     }
+
+    fn join(&self, classification: CollectionWorkflowStatus) -> Result<&str, String> {
+        match classification {
+            CollectionWorkflowStatus::Succeeded => Ok(self.on_success),
+            CollectionWorkflowStatus::PartiallyFailed => Ok(self.on_partial_failure),
+            CollectionWorkflowStatus::Failed => Ok(self.on_failure),
+            CollectionWorkflowStatus::Cancelled => Ok(self.on_cancelled),
+            CollectionWorkflowStatus::TimedOut => Ok(self.on_timed_out),
+            _ => Err("join action requested before terminal classification".to_string()),
+        }
+    }
 }
 
 impl CollectionDeliveryActions {
@@ -51,17 +62,18 @@ impl CollectionDeliveryActions {
             on_timed_out: &self.on_timed_out,
         }
     }
+}
 
-    fn join(&self, classification: CollectionWorkflowStatus) -> Result<&str, String> {
-        match classification {
-            CollectionWorkflowStatus::Succeeded => Ok(&self.on_success),
-            CollectionWorkflowStatus::PartiallyFailed => Ok(&self.on_partial_failure),
-            CollectionWorkflowStatus::Failed => Ok(&self.on_failure),
-            CollectionWorkflowStatus::Cancelled => Ok(&self.on_cancelled),
-            CollectionWorkflowStatus::TimedOut => Ok(&self.on_timed_out),
-            _ => Err("join action requested before terminal classification".to_string()),
-        }
-    }
+struct CollectionIntentDraft<'a> {
+    delivery_id: String,
+    trigger_name: String,
+    trigger_index: usize,
+    target_entity: &'a str,
+    target_action: &'a str,
+    target_entity_id: String,
+    params: serde_json::Value,
+    kind: DeliveryKind,
+    collection: CollectionDeliveryContext,
 }
 
 /// Admit the next deterministic concurrency window and return its durable
@@ -83,29 +95,31 @@ pub(crate) fn admit_collection_window(
         intents.push(intent(
             record,
             workflow_sequence,
-            delivery_id,
-            trigger,
-            usize::from(index),
-            actions.member_entity,
-            actions.member_action,
-            member.child_entity_id,
-            serde_json::json!({
-                "workflow_id": record.workflow_id,
-                "member_id": member.member_id,
-                "member_value": member.member_value,
-                "source_entity_id": record.source_entity_id,
-                "member_index": member.member_index,
-            }),
-            DeliveryKind::CollectionMember,
-            CollectionDeliveryContext {
-                workflow_id: record.workflow_id.clone(),
-                member_id: Some(member.member_id),
-                control_epoch: record.control_epoch,
-                role: CollectionDeliveryRole::Member,
-                terminal_classification: None,
-                actions: actions.owned(),
-                max_attempts: record.budgets.max_attempts,
-                attempts: 0,
+            CollectionIntentDraft {
+                delivery_id,
+                trigger_name: trigger,
+                trigger_index: usize::from(index),
+                target_entity: actions.member_entity,
+                target_action: actions.member_action,
+                target_entity_id: member.child_entity_id,
+                params: serde_json::json!({
+                    "workflow_id": record.workflow_id,
+                    "member_id": member.member_id,
+                    "member_value": member.member_value,
+                    "source_entity_id": record.source_entity_id,
+                    "member_index": member.member_index,
+                }),
+                kind: DeliveryKind::CollectionMember,
+                collection: CollectionDeliveryContext {
+                    workflow_id: record.workflow_id.clone(),
+                    member_id: Some(member.member_id),
+                    control_epoch: record.control_epoch,
+                    role: CollectionDeliveryRole::Member,
+                    terminal_classification: None,
+                    actions: actions.owned(),
+                    max_attempts: record.budgets.max_attempts,
+                    attempts: 0,
+                },
             },
         )?);
     }
@@ -149,10 +163,14 @@ pub(crate) fn collection_cancellation_intents(
             delivery_id.clone(),
             record.control_epoch,
         )?;
-        intents.push(intent(
-            record, workflow_sequence, delivery_id, trigger, member.member_index as usize,
-            actions.member_entity, actions.member_cancel_action, member.child_entity_id,
-            serde_json::json!({
+        intents.push(intent(record, workflow_sequence, CollectionIntentDraft {
+            delivery_id,
+            trigger_name: trigger,
+            trigger_index: member.member_index as usize,
+            target_entity: actions.member_entity,
+            target_action: actions.member_cancel_action,
+            target_entity_id: member.child_entity_id,
+            params: serde_json::json!({
                 "workflow_id": record.workflow_id,
                 "member_id": member.member_id,
                 "member_value": member.member_value,
@@ -160,8 +178,8 @@ pub(crate) fn collection_cancellation_intents(
                 "member_index": member.member_index,
                 "requested_outcome": match requested { CollectionRequestedOutcome::Cancelled => "cancelled", CollectionRequestedOutcome::TimedOut => "timed_out" },
             }),
-            DeliveryKind::CollectionCancellation,
-            CollectionDeliveryContext {
+            kind: DeliveryKind::CollectionCancellation,
+            collection: CollectionDeliveryContext {
                 workflow_id: record.workflow_id.clone(), member_id: Some(member.member_id),
                 control_epoch: record.control_epoch, role: CollectionDeliveryRole::Cancellation,
                 terminal_classification: None,
@@ -169,7 +187,7 @@ pub(crate) fn collection_cancellation_intents(
                 max_attempts: record.budgets.max_attempts,
                 attempts: 0,
             },
-        )?);
+        })?);
     }
     Ok(intents)
 }
@@ -192,30 +210,32 @@ pub(crate) fn collection_join_intent(
     Ok(Some(intent(
         record,
         workflow_sequence,
-        delivery_id,
-        trigger,
-        0,
-        &record.source_entity_type,
-        actions.owned().join(classification)?,
-        record.source_entity_id.clone(),
-        serde_json::json!({
-            "workflow_id": record.workflow_id,
-            "total_members": record.members.len(),
-            "succeeded_members": record.counts.succeeded,
-            "failed_members": record.counts.failed,
-            "cancelled_members": record.counts.cancelled,
-            "timed_out_members": record.counts.timed_out,
-        }),
-        DeliveryKind::CollectionJoin,
-        CollectionDeliveryContext {
-            workflow_id: record.workflow_id.clone(),
-            member_id: None,
-            control_epoch: record.control_epoch,
-            role: CollectionDeliveryRole::Join,
-            terminal_classification: Some(classification),
-            actions: actions.owned(),
-            max_attempts: record.budgets.max_attempts,
-            attempts: 0,
+        CollectionIntentDraft {
+            delivery_id,
+            trigger_name: trigger,
+            trigger_index: 0,
+            target_entity: &record.source_entity_type,
+            target_action: actions.join(classification)?,
+            target_entity_id: record.source_entity_id.clone(),
+            params: serde_json::json!({
+                "workflow_id": record.workflow_id,
+                "total_members": record.members.len(),
+                "succeeded_members": record.counts.succeeded,
+                "failed_members": record.counts.failed,
+                "cancelled_members": record.counts.cancelled,
+                "timed_out_members": record.counts.timed_out,
+            }),
+            kind: DeliveryKind::CollectionJoin,
+            collection: CollectionDeliveryContext {
+                workflow_id: record.workflow_id.clone(),
+                member_id: None,
+                control_epoch: record.control_epoch,
+                role: CollectionDeliveryRole::Join,
+                terminal_classification: Some(classification),
+                actions: actions.owned(),
+                max_attempts: record.budgets.max_attempts,
+                attempts: 0,
+            },
         },
     )?))
 }
@@ -237,20 +257,22 @@ fn delivery_id(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn intent(
     record: &CollectionWorkflowRecordV1,
     sequence: u64,
-    delivery_id: String,
-    trigger_name: String,
-    trigger_index: usize,
-    target_entity: &str,
-    target_action: &str,
-    target_entity_id: String,
-    params: serde_json::Value,
-    kind: DeliveryKind,
-    collection: CollectionDeliveryContext,
+    draft: CollectionIntentDraft<'_>,
 ) -> Result<PersistedReactionIntent, String> {
+    let CollectionIntentDraft {
+        delivery_id,
+        trigger_name,
+        trigger_index,
+        target_entity,
+        target_action,
+        target_entity_id,
+        params,
+        kind,
+        collection,
+    } = draft;
     let rule = ReactionRule {
         name: trigger_name.clone(),
         when: ReactionTrigger {

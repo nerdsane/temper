@@ -78,7 +78,7 @@ fn prove_schema(workflow: &CollectionWorkflow, members: u16, schema: usize) -> R
             1 | 2 => {
                 solver.assert(pre[6].eq(&zero));
                 solver.assert(pre[5].eq(&zero));
-                let phase = i64::try_from(schema - bucket_schemas).unwrap();
+                let phase = if schema - bucket_schemas == 1 { 1 } else { 2 };
                 post[6] = Int::from_i64(phase);
                 post[0] = zero.clone();
                 let target = if phase == 1 { 3 } else { 4 };
