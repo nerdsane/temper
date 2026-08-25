@@ -276,6 +276,7 @@ after    schedule / spawn / WASM / observe
 - Assure each unit at the strongest tier it supports: proven, runtime-enforced, tested, or contained. Nothing sits at zero - a door and a journal are the floor.
 - Route every effect through a door as deterministic journaled data. The unit replays. The simulator runs the real code under faults.
 - Keep each unit a bounded leaf. The machine owns sequencing and external effects. A pile of steps in one body hides control flow from the check.
+- A unit never dispatches transitions. If step B follows step A, that is two declared transitions, not a dispatch inside A's unit. One unit, one concern; a sequence inside one body is a spec smell the verifier rejects. (Rita, 2026-08-25; enforced by review in TemperPaw v1 until the kernel enforces it.)
 
 ---
 
