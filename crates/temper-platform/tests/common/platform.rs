@@ -19,6 +19,8 @@ pub fn bootstrapped_state() -> PlatformState {
 pub async fn bootstrapped_router() -> Router {
     let state = bootstrapped_state();
     bootstrap_agent_specs(&state, SYSTEM_TENANT, true, &BTreeMap::new());
-    bootstrap_operator_credential(&state, OPERATOR_KEY, SYSTEM_TENANT).await;
+    bootstrap_operator_credential(&state, OPERATOR_KEY, SYSTEM_TENANT)
+        .await
+        .expect("operator credential bootstrap should succeed");
     build_platform_router(state)
 }

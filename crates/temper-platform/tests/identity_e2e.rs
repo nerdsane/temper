@@ -566,7 +566,9 @@ async fn e2e_identity_resolution_deprecated_agent_type() {
 /// Build state with an ordinary tenant operator and exact HTTP test policy.
 async fn identity_http_state() -> PlatformState {
     let state = identity_test_state();
-    temper_platform::bootstrap_operator_credential(&state, TEST_OPERATOR_KEY, TEST_TENANT).await;
+    temper_platform::bootstrap_operator_credential(&state, TEST_OPERATOR_KEY, TEST_TENANT)
+        .await
+        .expect("operator credential bootstrap should succeed");
     state
         .server
         .authz
@@ -892,7 +894,9 @@ async fn e2e_bootstrap_operator_credential_resolves() {
     let tenant = TenantId::new(TEST_TENANT);
 
     // Bootstrap the operator credential for our test tenant.
-    temper_platform::bootstrap_operator_credential(&state, api_key, TEST_TENANT).await;
+    temper_platform::bootstrap_operator_credential(&state, api_key, TEST_TENANT)
+        .await
+        .expect("operator credential bootstrap should succeed");
 
     // The global API key should now resolve as a verified "operator" identity.
     let resolver = IdentityResolver::new();
@@ -914,8 +918,12 @@ async fn e2e_bootstrap_operator_credential_idempotent() {
     let tenant = TenantId::new(TEST_TENANT);
 
     // Call twice — should not panic or error.
-    temper_platform::bootstrap_operator_credential(&state, api_key, TEST_TENANT).await;
-    temper_platform::bootstrap_operator_credential(&state, api_key, TEST_TENANT).await;
+    temper_platform::bootstrap_operator_credential(&state, api_key, TEST_TENANT)
+        .await
+        .expect("operator credential bootstrap should succeed");
+    temper_platform::bootstrap_operator_credential(&state, api_key, TEST_TENANT)
+        .await
+        .expect("operator credential bootstrap should succeed");
 
     // Should still resolve correctly.
     let resolver = IdentityResolver::new();
@@ -934,7 +942,9 @@ async fn e2e_identity_resolution_is_tenant_scoped() {
     let state = identity_test_state();
     let api_key = "tmpr_tenant_scoped_cache_test";
 
-    temper_platform::bootstrap_operator_credential(&state, api_key, TEST_TENANT).await;
+    temper_platform::bootstrap_operator_credential(&state, api_key, TEST_TENANT)
+        .await
+        .expect("operator credential bootstrap should succeed");
 
     let resolver = IdentityResolver::new();
     let first = resolver

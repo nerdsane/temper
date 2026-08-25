@@ -200,7 +200,6 @@ impl SpecRegistry {
             } else {
                 reactions
             };
-            existing_config.relation_graph = relation_graph;
             // In merge mode, an incoming payload without cross-invariants must
             // not wipe the ones previously loaded for the tenant — otherwise a
             // follow-up merge (e.g. Agent OS app bootstrap) silently disables
@@ -210,6 +209,22 @@ impl SpecRegistry {
                 existing_config.cross_invariants = cross_invariants;
                 existing_config.cross_invariants_source = cross_invariants_source;
             }
+            // Rebuild the relation graph. In merge mode it MUST be derived from
+            // the MERGED csdl and the effective (post-merge) cross-invariants,
+            // not from the incoming csdl alone: a merge of an identity-only
+            // CSDL (no navigation relations) would otherwise wipe the tenant's
+            // full relation graph — breaking FK validation, restricted deletes,
+            // and $expand for the process lifetime. In replace mode the caller
+            // is the new source of truth, so the incoming graph stands.
+            let rebuilt_relation_graph = if merge {
+                build_relation_graph(
+                    &existing_config.csdl,
+                    existing_config.cross_invariants.as_ref(),
+                )
+            } else {
+                relation_graph
+            };
+            existing_config.relation_graph = rebuilt_relation_graph;
 
             for (entity_type, ioa_source) in ioa_sources {
                 let automaton = automaton::parse_automaton(ioa_source).map_err(|e| {
@@ -614,6 +629,115 @@ mod tests {
         let result = table.evaluate("Draft", 1, "SubmitOrder");
         assert!(result.is_some());
         assert!(result.unwrap().success);
+    }
+
+    #[test]
+    fn merge_register_identity_only_csdl_preserves_existing_relations() {
+        // Regression (ARN-255): a merge=true registration of an identity-only
+        // CSDL (no navigation relations) must NOT wipe the tenant's existing
+        // relation graph. Before the fix, `relation_graph` was rebuilt from the
+        // incoming csdl alone and assigned unconditionally, so FK validation,
+        // restricted deletes, and $expand silently broke for the process
+        // lifetime after any identity-spec merge (e.g. TrustedIssuer bootstrap).
+        let mut registry = SpecRegistry::new();
+
+        let relation_csdl = r#"<?xml version="1.0" encoding="UTF-8"?>
+<edmx:Edmx Version="4.0"
+  xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Rel"
+      xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Author">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+      </EntityType>
+      <EntityType Name="Book">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="AuthorId" Type="Edm.Guid" Nullable="false"/>
+        <NavigationProperty Name="Author" Type="Temper.Rel.Author">
+          <ReferentialConstraint Property="AuthorId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+      </EntityType>
+      <EntityContainer Name="RelService">
+        <EntitySet Name="Authors" EntityType="Temper.Rel.Author"/>
+        <EntitySet Name="Books" EntityType="Temper.Rel.Book"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+        let author_ioa =
+            "[automaton]\nname = \"Author\"\nstates = [\"Created\"]\ninitial = \"Created\"\n";
+        let book_ioa =
+            "[automaton]\nname = \"Book\"\nstates = [\"Created\"]\ninitial = \"Created\"\n";
+
+        registry.register_tenant(
+            "rel-tenant",
+            parse_csdl(relation_csdl).expect("relation CSDL should parse"),
+            relation_csdl.to_string(),
+            &[("Author", author_ioa), ("Book", book_ioa)],
+        );
+
+        let tenant = TenantId::new("rel-tenant");
+        let edge_present = |registry: &SpecRegistry| {
+            registry
+                .get_tenant(&tenant)
+                .and_then(|tc| tc.relation_graph.outgoing.get("Book"))
+                .is_some_and(|edges| {
+                    edges
+                        .iter()
+                        .any(|e| e.navigation_property == "Author" && e.to_entity == "Author")
+                })
+        };
+        assert!(
+            edge_present(&registry),
+            "Book->Author relation should exist after initial registration"
+        );
+
+        // Merge-register an identity-only CSDL with no navigation relations.
+        let identity_csdl = r#"<?xml version="1.0" encoding="UTF-8"?>
+<edmx:Edmx Version="4.0"
+  xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Ident"
+      xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="TrustedIssuer">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="IdentService">
+        <EntitySet Name="TrustedIssuers" EntityType="Temper.Ident.TrustedIssuer"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+        let issuer_ioa =
+            "[automaton]\nname = \"TrustedIssuer\"\nstates = [\"Active\"]\ninitial = \"Active\"\n";
+
+        registry
+            .try_register_tenant_with_reactions_and_constraints(
+                "rel-tenant",
+                parse_csdl(identity_csdl).expect("identity CSDL should parse"),
+                identity_csdl.to_string(),
+                &[("TrustedIssuer", issuer_ioa)],
+                Vec::new(),
+                None,
+                true, // merge
+            )
+            .expect("merge registration should succeed");
+
+        assert!(
+            edge_present(&registry),
+            "Book->Author relation MUST survive a merge of an identity-only CSDL"
+        );
+        assert!(
+            registry.get_table(&tenant, "TrustedIssuer").is_some(),
+            "merged identity entity should be registered"
+        );
+        assert!(
+            registry.get_table(&tenant, "Book").is_some(),
+            "existing Book entity should survive the merge"
+        );
     }
 
     #[test]

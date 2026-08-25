@@ -45,7 +45,16 @@ const BROADCAST_CAPACITY: usize = 256;
 /// tenant but have no os-app to ship policies with. This baseline policy
 /// permits only a credential-verified, tenant-scoped operator Agent to manage
 /// platform entities. The deployment key has no implicit Admin authority.
-const SYSTEM_TENANT_POLICY: &str = r#"
+///
+/// The operator predicate is generated from the shared
+/// [`temper_authz::VERIFIED_OPERATOR_WHEN`] const rather than hand-written, so
+/// it cannot drift from the verified-operator definition used by the
+/// system-platform Cedar policy. Interpolating the const also brings the
+/// `principal has …` attribute guards, so a principal missing `agent_type` /
+/// `agentTypeVerified` is a clean deny rather than a Cedar evaluation error.
+fn system_tenant_policy() -> String {
+    format!(
+        r#"
 // Baseline policy for the temper-system tenant.
 // Operators are ordinary tenant credentials. Both the registered AgentType and
 // the credential-verification attribute must match.
@@ -53,11 +62,11 @@ permit(
   principal is Agent,
   action,
   resource
-) when {
-  principal.agent_type == "operator" &&
-  principal.agentTypeVerified == true
-};
-"#;
+) when {{ {op} }};
+"#,
+        op = temper_authz::VERIFIED_OPERATOR_WHEN
+    )
+}
 
 impl PlatformState {
     /// Create a new platform state with an empty registry.
@@ -75,7 +84,7 @@ impl PlatformState {
         // WASM modules can manage GovernanceDecision entities via HTTP.
         if let Err(e) = server
             .authz
-            .reload_tenant_policies("temper-system", SYSTEM_TENANT_POLICY)
+            .reload_tenant_policies("temper-system", &system_tenant_policy())
         {
             tracing::warn!(error = %e, "failed to load temper-system Cedar policies");
         }
@@ -110,7 +119,7 @@ impl PlatformState {
         // WASM modules can manage GovernanceDecision entities via HTTP.
         if let Err(e) = server
             .authz
-            .reload_tenant_policies("temper-system", SYSTEM_TENANT_POLICY)
+            .reload_tenant_policies("temper-system", &system_tenant_policy())
         {
             tracing::warn!(error = %e, "failed to load temper-system Cedar policies");
         }
@@ -203,6 +212,32 @@ mod tests {
 
         assert!(rx1.try_recv().is_ok());
         assert!(rx2.try_recv().is_ok());
+    }
+
+    #[test]
+    fn system_tenant_policy_operator_clause_matches_shared_predicate() {
+        // ARN-255: the operator predicate must be generated from the shared
+        // const, never hand-written, so the system-tenant baseline policy and
+        // the system-platform Cedar policy cannot drift apart.
+        let policy = system_tenant_policy();
+        assert!(
+            policy.contains(temper_authz::VERIFIED_OPERATOR_WHEN),
+            "system-tenant policy must interpolate VERIFIED_OPERATOR_WHEN verbatim;\n\
+             policy was:\n{policy}"
+        );
+        // Interpolating the const also carries the `has` attribute guards, so a
+        // principal missing these attributes is a clean deny, not a Cedar
+        // evaluation error.
+        assert!(
+            policy.contains("principal has agent_type")
+                && policy.contains("principal has agentTypeVerified"),
+            "generated policy must carry the `has` attribute guards"
+        );
+        // And the generated text must be valid Cedar.
+        assert!(
+            temper_authz::AuthzEngine::new(&policy).is_ok(),
+            "generated system-tenant policy must parse as valid Cedar"
+        );
     }
 
     #[test]

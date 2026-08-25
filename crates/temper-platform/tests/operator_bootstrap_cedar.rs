@@ -133,7 +133,9 @@ fn statement_occurrences(haystack: &str, tenant: &str) -> usize {
 async fn virgin_store_verified_operator_can_manage_policies() {
     let tenant = "acme";
     let state = virgin_state(tenant);
-    bootstrap_operator_credential(&state, OPERATOR_KEY, tenant).await;
+    bootstrap_operator_credential(&state, OPERATOR_KEY, tenant)
+        .await
+        .expect("operator credential bootstrap should succeed");
 
     let operator = SecurityContext::from_resolved_identity("operator", "operator", None);
     let decision = authorize_manage_policies(&state, tenant, &operator);
@@ -161,7 +163,9 @@ async fn virgin_store_verified_operator_can_manage_policies() {
 async fn bootstrapped_operator_can_manage_identity_entities() {
     let tenant = "acme";
     let state = virgin_state(tenant);
-    bootstrap_operator_credential(&state, OPERATOR_KEY, tenant).await;
+    bootstrap_operator_credential(&state, OPERATOR_KEY, tenant)
+        .await
+        .expect("operator credential bootstrap should succeed");
 
     let operator = SecurityContext::from_resolved_identity("operator", "operator", None);
     let attrs = HashMap::new();
@@ -203,7 +207,9 @@ async fn bootstrapped_operator_can_manage_identity_entities() {
 async fn unverified_or_non_operator_cannot_manage_policies() {
     let tenant = "acme";
     let state = virgin_state(tenant);
-    bootstrap_operator_credential(&state, OPERATOR_KEY, tenant).await;
+    bootstrap_operator_credential(&state, OPERATOR_KEY, tenant)
+        .await
+        .expect("operator credential bootstrap should succeed");
 
     let unverified = authorize_manage_policies(&state, tenant, &unverified_operator_context());
     assert!(
@@ -224,8 +230,12 @@ async fn rebootstrap_is_idempotent_and_persists_one_granular_row() {
     let tenant = "acme";
     let (state, _temp) = virgin_state_with_store(tenant).await;
 
-    bootstrap_operator_credential(&state, OPERATOR_KEY, tenant).await;
-    bootstrap_operator_credential(&state, OPERATOR_KEY, tenant).await;
+    bootstrap_operator_credential(&state, OPERATOR_KEY, tenant)
+        .await
+        .expect("operator credential bootstrap should succeed");
+    bootstrap_operator_credential(&state, OPERATOR_KEY, tenant)
+        .await
+        .expect("operator credential bootstrap should succeed");
 
     let text = state
         .server
@@ -267,7 +277,9 @@ async fn existing_app_cedar_still_loads_after_operator_bootstrap() {
     let tenant = "app-tenant";
     let (state, _temp) = virgin_state_with_store(tenant).await;
 
-    bootstrap_operator_credential(&state, OPERATOR_KEY, tenant).await;
+    bootstrap_operator_credential(&state, OPERATOR_KEY, tenant)
+        .await
+        .expect("operator credential bootstrap should succeed");
     install_os_app(&state, tenant, "project-management")
         .await
         .expect("install project-management");
@@ -324,7 +336,9 @@ async fn recovered_granular_row_still_allows_verified_operator() {
     seeded
         .server
         .set_storage_stack(StorageStack::from_turso(store.clone()));
-    bootstrap_operator_credential(&seeded, OPERATOR_KEY, tenant).await;
+    bootstrap_operator_credential(&seeded, OPERATOR_KEY, tenant)
+        .await
+        .expect("operator credential bootstrap should succeed");
 
     let recovered = PlatformState::new(None);
     recover_cedar_policies(&recovered, &store).await;
@@ -341,7 +355,9 @@ async fn recovered_granular_row_still_allows_verified_operator() {
 async fn http_policy_api_allows_operator_and_denies_developer() {
     let tenant = "acme";
     let (state, _temp) = virgin_state_with_store(tenant).await;
-    bootstrap_operator_credential(&state, OPERATOR_KEY, tenant).await;
+    bootstrap_operator_credential(&state, OPERATOR_KEY, tenant)
+        .await
+        .expect("operator credential bootstrap should succeed");
     issue_developer_credential(&state, tenant, DEVELOPER_KEY).await;
 
     let app = build_platform_router(state);
@@ -412,7 +428,9 @@ async fn http_policy_api_allows_operator_and_denies_developer() {
 async fn denied_developer_cannot_self_approve_operator_can() {
     let tenant = "acme";
     let (state, _temp) = virgin_state_with_store(tenant).await;
-    bootstrap_operator_credential(&state, OPERATOR_KEY, tenant).await;
+    bootstrap_operator_credential(&state, OPERATOR_KEY, tenant)
+        .await
+        .expect("operator credential bootstrap should succeed");
     issue_developer_credential(&state, tenant, DEVELOPER_KEY).await;
 
     let developer_permit = format!(
