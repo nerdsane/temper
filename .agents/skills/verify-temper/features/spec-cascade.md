@@ -5,7 +5,7 @@ IOA parse, TransitionTable build, model checking, DST invariants.
 
 ## Driving it
 ```bash
-cargo run -p temper-cli -- verify <path/to/spec.ioa.toml>      # single spec
+cargo run -p temper-cli -- verify --specs-dir <dir-with-specs>    # takes a directory, not a file
 scripts/verify-cascade.sh                                       # all spec dirs, results in .cascade-results/
 ```
 

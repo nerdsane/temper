@@ -6,8 +6,8 @@ Boot, health, CSDL metadata, entity-set reads, action dispatch.
 ## Driving it
 ```bash
 cargo run -p temper-cli -- serve --port 3600   # capture PID
-curl -sf http://localhost:3600/observe/health
-curl -sf http://localhost:3600/tdata/$metadata | head -c 400   # CSDL XML
+curl -sf http://localhost:3600/healthz
+curl -sf -H 'X-Tenant-Id: default' 'http://localhost:3600/tdata/$metadata' | head -c 400   # CSDL XML
 ```
 Read an entity set named in the metadata; dispatch an action via `POST /tdata/<Set>('<id>')/Temper.<Action>` with `X-Tenant-Id`.
 

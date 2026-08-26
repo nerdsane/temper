@@ -12,7 +12,9 @@ cargo build -p temper-cli                                    # first build is lo
 cargo run -p temper-cli -- serve --port 3600                 # pick a free port; capture the PID
 ```
 
-Ready when `GET http://localhost:3600/observe/health` returns 200 and `GET /tdata/$metadata` returns CSDL XML. No env vars are required for a local scratch serve.
+Ready when `GET http://localhost:3600/healthz` returns 200 (unauthenticated liveness; `/observe/health` is behind Observe auth and 401s) and `GET /tdata/$metadata` with `X-Tenant-Id: default` returns CSDL XML.
+
+For authenticated entity reads and dispatches, set `TEMPER_API_KEY=<any local value>` in the environment BEFORE serve - the platform bootstraps a tenant credential from it at startup, and a keyless boot serves 401 on every governed route (that 401 is itself the fail-closed proof).
 
 **ISOLATE**: run from your worktree so state lands in the worktree, not in a shared checkout. Never point at another session's data directory.
 
