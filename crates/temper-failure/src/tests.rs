@@ -86,10 +86,12 @@ fn contradictory_omission_states_fail_closed() {
     contradictory_message["diagnostic_omitted"] = serde_json::json!(true);
     assert!(serde_json::from_value::<FailureEnvelopeV1>(contradictory_message).is_err());
 
-    let mut contradictory_details = encoded;
-    contradictory_details["details"] = serde_json::json!({"safe":{"kind":"bool","value":true}});
-    contradictory_details["details_omitted"] = serde_json::json!(true);
-    assert!(serde_json::from_value::<FailureEnvelopeV1>(contradictory_details).is_err());
+    let mut partial_details = encoded;
+    partial_details["details"] = serde_json::json!({"safe":{"kind":"bool","value":true}});
+    partial_details["details_omitted"] = serde_json::json!(true);
+    let decoded = serde_json::from_value::<FailureEnvelopeV1>(partial_details)
+        .expect("safe retained details may coexist with an upstream omission marker");
+    assert!(decoded.details_omitted);
 }
 
 #[test]
@@ -189,7 +191,7 @@ fn oversized_optional_values_are_omitted_as_complete_fields() {
 }
 
 #[test]
-fn omitted_details_cannot_be_repopulated() {
+fn omission_marker_allows_a_safe_retained_subset() {
     let mut envelope = FailureEnvelopeV1::new(
         FailureCategory::Permanent,
         StableFailureCode::new("ProviderFailure").expect("valid code"),
@@ -204,7 +206,7 @@ fn omitted_details_cannot_be_repopulated() {
         DetailKey::new("late_detail").expect("valid key"),
         FailureDetailValue::Bool(true),
     );
-    assert!(envelope.details.values().is_empty());
+    assert_eq!(envelope.details.values().len(), 1);
 }
 
 #[test]

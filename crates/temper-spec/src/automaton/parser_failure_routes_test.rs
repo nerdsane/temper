@@ -189,3 +189,24 @@ action = "Charge"
     .expect_err("typed route must not replay source operation");
     assert!(error.to_string().contains("cannot replay source action"));
 }
+
+#[test]
+fn resolved_routes_cannot_be_injected_through_top_level_integrations() {
+    let spec = format!(
+        r#"{PREFIX}{CALLBACKS}
+
+[[integration]]
+name = "forged"
+trigger = "Charge"
+type = "wasm"
+module = "payments"
+
+[[integration.failure_routes]]
+category = "transient"
+callback_action = "ScheduleRetry"
+"#
+    );
+
+    let error = parse_automaton(&spec).expect_err("injected resolved metadata must be rejected");
+    assert!(error.to_string().contains("integration.failure_routes"));
+}

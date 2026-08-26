@@ -494,7 +494,7 @@ pub struct Integration {
     pub on_failure: Option<String>,
     /// Resolved typed failure routes for an inline action trigger.
     /// Legacy top-level integrations leave this empty.
-    #[serde(default)]
+    #[serde(default, skip_deserializing)]
     pub failure_routes: Vec<ResolvedFailureRoute>,
     /// Marks this integration as an LLM call. The dispatcher upgrades matching
     /// spans to an LLM-kind root span so `gen_ai.*` content surfaces correctly

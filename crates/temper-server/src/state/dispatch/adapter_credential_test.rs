@@ -534,7 +534,7 @@ async fn adapter_credential_mint_requires_caller_delegation_authority() {
         panic!("default-deny caller minted an adapter credential");
     };
 
-    assert!(error.contains("delegation denied"), "{error}");
+    assert!(error.to_string().contains("delegation denied"), "{error}");
     assert_eq!(
         fixture
             .first

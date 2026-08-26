@@ -6975,6 +6975,7 @@ dependencies = [
  "temper-authz",
  "temper-codegen",
  "temper-evolution",
+ "temper-failure",
  "temper-jit",
  "temper-observe",
  "temper-odata",

@@ -242,11 +242,8 @@ impl FailureEnvelopeV1 {
         self
     }
 
-    /// Insert one safe detail, omitting the complete map if any budget is exceeded.
+    /// Insert one safe detail, omitting the complete map if its budget is exceeded.
     pub fn insert_detail_or_omit(&mut self, key: DetailKey, value: FailureDetailValue) {
-        if self.details_omitted {
-            return;
-        }
         if self.details.try_insert(key, value).is_err() {
             self.details = BoundedFailureDetails::default();
             self.details_omitted = true;
@@ -305,9 +302,6 @@ fn validate_envelope(envelope: &FailureEnvelopeV1) -> Result<(), FailureContract
     validate_semantics(envelope.category, envelope.retryability, envelope.outcome)?;
     if envelope.diagnostic_omitted && envelope.message.is_some() {
         return Err(FailureContractError::ContradictoryOmission { field: "message" });
-    }
-    if envelope.details_omitted && !envelope.details.values().is_empty() {
-        return Err(FailureContractError::ContradictoryOmission { field: "details" });
     }
     Ok(())
 }

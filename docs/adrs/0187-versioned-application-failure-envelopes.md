@@ -94,8 +94,10 @@ wire values return `FailureContractError`; they are never truncated, hashed into
 a replacement, or reclassified. Kernel-owned adapters build allowlisted details
 through the same fallible API. If an optional diagnostic or detail from an
 upstream system does not fit, the adapter omits the complete optional field and
-sets the typed `diagnostic_omitted` or `details_omitted` flag. It never keeps a
-prefix whose meaning may change. The required category, code, retryability,
+sets the typed `diagnostic_omitted` or `details_omitted` flag. A bounded,
+allowlisted subset of safe details may remain when other upstream details are
+omitted; `details_omitted` records that the map is incomplete. It never keeps a
+text prefix whose meaning may change. The required category, code, retryability,
 outcome, operation, and provenance must validate or the adapter itself fails
 closed with the bounded permanent code `InvalidFailureAdapterOutput`.
 

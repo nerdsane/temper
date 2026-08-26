@@ -38,9 +38,6 @@ pub fn adapt_module_data_error(
     )?
     .with_diagnostic(error.message.clone());
 
-    if error.details.is_some() {
-        envelope.details_omitted = true;
-    }
     if let Some(decision_id) = &error.decision_id {
         match (
             DetailKey::new("decision_id"),
@@ -51,6 +48,9 @@ pub fn adapt_module_data_error(
             }
             _ => envelope.details_omitted = true,
         }
+    }
+    if error.details.is_some() {
+        envelope.details_omitted = true;
     }
     Ok(envelope)
 }
@@ -198,7 +198,12 @@ mod tests {
             .expect("valid authorization adaptation");
         assert_eq!(envelope.category, FailureCategory::Authorization);
         assert!(envelope.details_omitted);
-        assert!(envelope.details.values().is_empty());
+        assert!(matches!(
+            envelope.details.values().get(
+                &DetailKey::new("decision_id").expect("static detail key")
+            ),
+            Some(FailureDetailValue::String(value)) if value.as_str() == "PD-123"
+        ));
         let encoded = serde_json::to_vec(&envelope).expect("adapter output must serialize");
         let decoded: FailureEnvelopeV1 =
             serde_json::from_slice(&encoded).expect("adapter output must round trip");

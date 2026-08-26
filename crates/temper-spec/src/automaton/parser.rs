@@ -68,6 +68,7 @@ pub fn parse_automaton_with_liveness(
     toml_str: &str,
     mode: LivenessEnforcement,
 ) -> Result<Automaton, AutomatonParseError> {
+    reject_injected_resolved_failure_routes(toml_str)?;
     let mut automaton: Automaton = toml_parser::parse_toml_to_automaton(toml_str)?;
     validate(&automaton)?;
     // ADR-0049: wire each state_timeout's `state` into the target action's
@@ -82,6 +83,29 @@ pub fn parse_automaton_with_liveness(
     // ADR-0050: enforce (or warn on) liveness coverage.
     check_liveness_coverage(&automaton, mode)?;
     Ok(automaton)
+}
+
+fn reject_injected_resolved_failure_routes(source: &str) -> Result<(), AutomatonParseError> {
+    let Ok(document) = toml::from_str::<toml::Value>(source) else {
+        return Ok(());
+    };
+    let has_injected_routes = document
+        .get("integration")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|integrations| {
+            integrations.iter().any(|integration| {
+                integration
+                    .as_table()
+                    .is_some_and(|table| table.contains_key("failure_routes"))
+            })
+        });
+    if has_injected_routes {
+        return Err(AutomatonParseError::Validation(
+            "top-level integration.failure_routes is reserved resolved metadata; declare routes under action.triggers"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// ADR-0046/0078: translate external `[[action.triggers]]` declarations into

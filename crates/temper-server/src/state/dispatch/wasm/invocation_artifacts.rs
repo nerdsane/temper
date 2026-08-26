@@ -1,7 +1,5 @@
-use super::{
-    WasmDispatchCtx, WasmDispatchMode, WasmEntityRef, is_http_call_authz_denial,
-    record_wasm_error_on_current_span,
-};
+use super::failure_routing::{WasmFailure, failure_callback};
+use super::{WasmDispatchCtx, WasmDispatchMode, WasmEntityRef, record_wasm_error_on_current_span};
 use crate::entity_actor::EntityResponse;
 use crate::request_context::AgentContext;
 use crate::state::pending_decisions::PendingDecision;
@@ -11,6 +9,14 @@ use temper_observe::wide_event;
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 use tracing::{Instrument, instrument};
+
+fn persisted_authorization_reason(raw_reason: &str, typed_routes: bool) -> &str {
+    if typed_routes {
+        "AuthorizationDenied"
+    } else {
+        raw_reason
+    }
+}
 
 impl crate::state::ServerState {
     /// Record a WASM invocation (persist log entry + emit observability events).
@@ -81,50 +87,115 @@ impl crate::state::ServerState {
         integration_name,
         module_name,
         error.type = tracing::field::Empty,
+        failure.category = tracing::field::Empty,
+        failure.code = tracing::field::Empty,
         error.message = tracing::field::Empty,
         exception.message = tracing::field::Empty,
     ))]
     pub(super) async fn handle_wasm_failure(
         &self,
         ctx: &WasmDispatchCtx<'_>,
-        integration_name: &str,
+        integration: &temper_spec::automaton::Integration,
         module_name: &str,
-        on_failure: &Option<String>,
-        error_str: String,
+        failure: WasmFailure,
         duration_ms: u64,
     ) -> Result<Option<EntityResponse>, String> {
-        record_wasm_error_on_current_span(&error_str);
-        let is_authz_denied = is_http_call_authz_denial(&error_str);
-        self.record_invocation(
-            ctx.entity_ref,
-            module_name,
-            ctx.action,
-            on_failure.clone(),
-            false,
-            Some(error_str.clone()),
-            duration_ms,
-            if is_authz_denied { Some(true) } else { None },
-        )
-        .await;
-
+        let error_str = failure.diagnostic();
+        let is_authz_denied = failure.is_authorization();
         let decision_id = if is_authz_denied {
+            let persisted_reason = persisted_authorization_reason(
+                error_str.as_str(),
+                !integration.failure_routes.is_empty(),
+            );
             self.record_wasm_authz_denial(
                 ctx.entity_ref,
                 ctx.action,
-                integration_name,
+                &integration.name,
                 module_name,
-                &error_str,
+                persisted_reason,
                 ctx.agent_ctx,
             )
         } else {
             None
         };
 
-        if let Some(cb) = on_failure {
+        if !integration.failure_routes.is_empty() {
+            let envelope = failure
+                .into_envelope(
+                    ctx.dispatch_idempotency_key
+                        .or(ctx.agent_ctx.idempotency_key.as_deref()),
+                    [
+                        ctx.entity_ref.tenant.as_str(),
+                        ctx.entity_ref.entity_type,
+                        ctx.entity_ref.entity_id,
+                        ctx.action,
+                        &integration.name,
+                    ],
+                    decision_id.as_deref(),
+                )
+                .map_err(|error| format!("InvalidFailureAdapterOutput: {error}"))?;
+            self.record_typed_failure_observation(
+                ctx.entity_ref,
+                &integration.name,
+                ctx.action,
+                &envelope,
+            );
+            let callback_result = failure_callback(integration, envelope.category);
+            self.record_invocation(
+                ctx.entity_ref,
+                module_name,
+                ctx.action,
+                callback_result
+                    .as_ref()
+                    .ok()
+                    .map(|callback| callback.to_string()),
+                false,
+                Some(format!(
+                    "typed failure category={:?} code={}",
+                    envelope.category,
+                    envelope.code.as_str()
+                )),
+                duration_ms,
+                is_authz_denied.then_some(true),
+            )
+            .await;
+            let callback = callback_result?;
+            let params = serde_json::json!({"failure": envelope});
+            let callback_ctx = super::super::typed_failure::typed_failure_callback_context(
+                ctx.agent_ctx,
+                &envelope.operation.id,
+                callback,
+            );
+            return super::dispatch_wasm_callback_boxed(
+                self,
+                ctx.entity_ref,
+                callback,
+                params,
+                &callback_ctx,
+                ctx.mode,
+                true,
+            )
+            .await;
+        }
+
+        record_wasm_error_on_current_span(&error_str);
+        self.record_invocation(
+            ctx.entity_ref,
+            module_name,
+            ctx.action,
+            integration.on_failure.clone(),
+            false,
+            Some(error_str.clone()),
+            duration_ms,
+            is_authz_denied.then_some(true),
+        )
+        .await;
+
+        if let Some(cb) = &integration.on_failure {
             let mut params = serde_json::json!({
                 "error": error_str.clone(),
                 "error_message": error_str,
-                "integration": integration_name,
+                "integration": integration.name,
             });
             if let Some(ref did) = decision_id {
                 params["decision_id"] = serde_json::json!(did);
@@ -137,6 +208,7 @@ impl crate::state::ServerState {
                 params,
                 ctx.agent_ctx,
                 ctx.mode,
+                false,
             )
             .await;
         }
@@ -156,6 +228,7 @@ impl crate::state::ServerState {
         callback_params: serde_json::Value,
         agent_ctx: &AgentContext,
         mode: WasmDispatchMode,
+        preserve_idempotency: bool,
     ) -> Result<Option<EntityResponse>, String> {
         match mode {
             WasmDispatchMode::Inline => {
@@ -181,7 +254,11 @@ impl crate::state::ServerState {
                 Ok(Some(resp))
             }
             WasmDispatchMode::Background => {
-                let callback_ctx = AgentContext::for_service_inheriting("wasm-runtime", agent_ctx);
+                let callback_ctx = super::super::typed_failure::background_callback_context(
+                    "wasm-runtime",
+                    agent_ctx,
+                    preserve_idempotency,
+                );
                 self.dispatch_tenant_action(
                     entity_ref.tenant,
                     entity_ref.entity_type,
@@ -322,5 +399,23 @@ impl crate::state::ServerState {
         }
         self.enqueue_trajectory_entry(traj);
         Some(decision_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::persisted_authorization_reason;
+
+    #[test]
+    fn typed_authorization_persistence_redacts_raw_diagnostics() {
+        let secret_bearing = "denied because token=secret";
+        assert_eq!(
+            persisted_authorization_reason(secret_bearing, true),
+            "AuthorizationDenied"
+        );
+        assert_eq!(
+            persisted_authorization_reason(secret_bearing, false),
+            secret_bearing
+        );
     }
 }
