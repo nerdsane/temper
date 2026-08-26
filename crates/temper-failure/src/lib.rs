@@ -5,6 +5,7 @@
 //! human-readable display string.
 
 mod bounds;
+mod declaration;
 mod details;
 mod envelope;
 mod error;
@@ -16,6 +17,7 @@ pub use bounds::{
     MAX_DIAGNOSTIC_BYTES, MAX_FAILURE_CODE_BYTES, MAX_OPERATION_ATTEMPT, MAX_OPERATION_ID_BYTES,
     MAX_OPERATION_KIND_BYTES, MAX_PROVENANCE_TOKEN_BYTES,
 };
+pub use declaration::GuestFailureDeclarationV1;
 pub use details::{BoundedFailureDetails, FailureDetailValue};
 pub use envelope::{
     CausalOperationV1, FailureCategory, FailureEnvelopeV1, FailureOutcome, FailureProvenanceV1,

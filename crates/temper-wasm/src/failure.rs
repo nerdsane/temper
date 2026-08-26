@@ -17,10 +17,18 @@ pub fn adapt_wasm_error(
     operation: CausalOperationV1,
 ) -> Result<FailureEnvelopeV1, FailureContractError> {
     let (category, code, retryability, outcome) = classification(error);
+    let source_code = match error {
+        WasmError::InvalidGuestResult(kind) => kind.source_code(),
+        _ => code,
+    };
+    let component = match error {
+        WasmError::InvalidGuestResult(_) => "wasm-result-validator",
+        _ => "wasm-engine",
+    };
     let provenance = FailureProvenanceV1 {
         source: FailureSource::Wasm,
-        component: ProvenanceToken::new("wasm-engine")?,
-        source_code: Some(ProvenanceToken::new(code)?),
+        component: ProvenanceToken::new(component)?,
+        source_code: Some(ProvenanceToken::new(source_code)?),
     };
     let mut envelope = FailureEnvelopeV1::new(
         category,
@@ -51,6 +59,7 @@ pub fn adapt_wasm_error(
         | WasmError::Instantiation(_)
         | WasmError::Invocation(_)
         | WasmError::GuestExecution(_)
+        | WasmError::InvalidGuestResult(_)
         | WasmError::FuelExhausted
         | WasmError::ModuleNotFound(_) => {}
     }
@@ -97,6 +106,7 @@ fn classification(
             FailureOutcome::NotApplied,
         ),
         WasmError::GuestExecution(_) => ambiguous("WasmGuestExecutionFailed"),
+        WasmError::InvalidGuestResult(_) => ambiguous("InvalidGuestFailureResult"),
         WasmError::FuelExhausted => ambiguous("WasmFuelExhausted"),
         WasmError::Timeout(_) => ambiguous("WasmTimedOut"),
         WasmError::MemoryLimitExceeded { .. } => ambiguous("WasmMemoryBudgetExceeded"),
@@ -191,5 +201,40 @@ mod tests {
         assert_eq!(first.category, second.category);
         assert_eq!(first.code, second.code);
         assert_eq!(first.retryability, second.retryability);
+    }
+
+    #[test]
+    fn invalid_guest_results_use_the_pinned_ambiguous_envelope() {
+        for kind in [
+            crate::InvalidGuestResultKind::AbsentResult,
+            crate::InvalidGuestResultKind::MultipleWrites,
+            crate::InvalidGuestResultKind::MultipleSources,
+            crate::InvalidGuestResultKind::InvalidLength,
+            crate::InvalidGuestResultKind::ResultTooLarge,
+            crate::InvalidGuestResultKind::OutOfBounds,
+            crate::InvalidGuestResultKind::InvalidUtf8,
+            crate::InvalidGuestResultKind::InvalidJson,
+            crate::InvalidGuestResultKind::InvalidShape,
+        ] {
+            let envelope = adapt_wasm_error(&WasmError::InvalidGuestResult(kind), operation())
+                .expect("invalid guest result should adapt");
+            assert_eq!(envelope.category, FailureCategory::Ambiguous);
+            assert_eq!(envelope.code.as_str(), "InvalidGuestFailureResult");
+            assert_eq!(envelope.retryability, FailureRetryability::Reconcile);
+            assert_eq!(envelope.outcome, FailureOutcome::Unknown);
+            assert_eq!(envelope.provenance.source, FailureSource::Wasm);
+            assert_eq!(
+                envelope.provenance.component.as_str(),
+                "wasm-result-validator"
+            );
+            assert_eq!(
+                envelope
+                    .provenance
+                    .source_code
+                    .as_ref()
+                    .map(ProvenanceToken::as_str),
+                Some(kind.source_code())
+            );
+        }
     }
 }

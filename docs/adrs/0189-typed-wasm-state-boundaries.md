@@ -1,4 +1,4 @@
-# ADR-0188: Typed WASM State Boundaries
+# ADR-0189: Typed WASM State Boundaries
 
 - Status: Proposed
 - Date: 2026-08-26

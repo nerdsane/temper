@@ -102,6 +102,7 @@ impl crate::state::ServerState {
     ) -> Result<Option<EntityResponse>, String> {
         let error_str = failure.diagnostic();
         let is_authz_denied = failure.is_authorization();
+        let redact_guest_details = failure.has_guest_owned_content();
         let decision_id = if is_authz_denied {
             let persisted_reason = persisted_authorization_reason(
                 error_str.as_str(),
@@ -139,6 +140,7 @@ impl crate::state::ServerState {
                 &integration.name,
                 ctx.action,
                 &envelope,
+                redact_guest_details,
             );
             let callback_result = failure_callback(integration, envelope.category);
             self.record_invocation(

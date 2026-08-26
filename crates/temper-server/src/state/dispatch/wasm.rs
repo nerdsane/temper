@@ -1404,16 +1404,22 @@ impl crate::state::ServerState {
                         );
                     },
                 );
+                let typed_failure = result.typed_failure;
                 let error_str = result.error.unwrap_or_else(|| {
                     format!(
                         "WASM integration '{}' returned unsuccessful result",
                         integration.name
                     )
                 });
-                let failure = denial_tracker.take_denial().map_or_else(
-                    || WasmFailure::Legacy(error_str),
-                    |reason| WasmFailure::Authorization(http_call_authz_denied_error(&reason)),
-                );
+                let failure = match denial_tracker.take_denial() {
+                    Some(reason) => {
+                        WasmFailure::Authorization(http_call_authz_denied_error(&reason))
+                    }
+                    None => match typed_failure {
+                        Some(declaration) => WasmFailure::Guest(declaration),
+                        None => WasmFailure::Legacy(error_str),
+                    },
+                };
                 // A failed integration's effect never landed. `handle_wasm_failure`
                 // records the invocation, then either runs the declared
                 // `on_failure` recovery or — when none is declared — returns

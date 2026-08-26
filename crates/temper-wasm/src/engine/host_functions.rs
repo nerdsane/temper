@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 use wasmtime::{Caller, Linker};
 
-use super::{HostState, WasmError};
+use super::{HostState, InvalidGuestResultKind, WasmError};
+use crate::types::MAX_WASM_RESULT_BYTES_V1;
 
 /// Minimal deadline for host-side async calls entered after the invocation
 /// budget has already been consumed.
@@ -434,18 +435,32 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
             "env",
             "host_set_result",
             |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| {
-                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
-                let Some(memory) = memory else {
-                    return;
+                let result = if len < 0 {
+                    Err(InvalidGuestResultKind::InvalidLength)
+                } else if len as usize > MAX_WASM_RESULT_BYTES_V1 {
+                    Err(InvalidGuestResultKind::ResultTooLarge)
+                } else {
+                    caller
+                        .get_export("memory")
+                        .and_then(|export| export.into_memory())
+                        .ok_or(InvalidGuestResultKind::OutOfBounds)
+                        .and_then(|memory| {
+                            read_guest_bytes(
+                                &caller,
+                                &memory,
+                                ptr,
+                                len,
+                                "host_set_result",
+                                "result",
+                            )
+                            .map_err(|()| InvalidGuestResultKind::OutOfBounds)
+                        })
+                        .and_then(|bytes| {
+                            String::from_utf8(bytes)
+                                .map_err(|_| InvalidGuestResultKind::InvalidUtf8)
+                        })
                 };
-                let Ok(buf) =
-                    read_guest_bytes(&caller, &memory, ptr, len, "host_set_result", "result")
-                else {
-                    return;
-                };
-                if let Ok(s) = String::from_utf8(buf) {
-                    caller.data_mut().result_json = Some(s);
-                }
+                caller.data_mut().guest_result_write.record(result);
             },
         )
         .map_err(|e| WasmError::Compilation(format!("failed to link host_set_result: {e}")))?;

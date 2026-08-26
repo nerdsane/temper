@@ -48,8 +48,8 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
     let result = if allowed {
         r#"{"action":"EchoSucceeded","params":{},"success":true}"#
     } else {
-        r#"{"action":"EchoFailed","params":{},"success":false,"error":"local TData denied"}"#
+        r#"{"action":"callback","params":{"error":"local TData denied"},"success":false,"error":"local TData denied"}"#
     };
     unsafe { host_set_result(result.as_ptr() as i32, result.len() as i32) };
-    (!allowed) as i32
+    0
 }

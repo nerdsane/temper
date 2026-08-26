@@ -68,7 +68,7 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
         Some(s) => s,
         None => {
             set_error_result("failed to read invocation context");
-            return 1;
+            return 0;
         }
     };
 
@@ -139,10 +139,9 @@ fn set_result(json: &str) {
 }
 
 fn set_error_result(error: &str) {
+    let escaped = escape_json(error);
     let result = format!(
-        r#"{{"action":"EchoFailed","params":{{"error":"{}"}},"success":false,"error":"{}"}}"#,
-        escape_json(error),
-        escape_json(error),
+        r#"{{"action":"callback","params":{{"error":"{escaped}"}},"success":false,"error":"{escaped}"}}"#,
     );
     set_result(&result);
 }

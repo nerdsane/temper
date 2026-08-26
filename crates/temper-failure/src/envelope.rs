@@ -211,7 +211,7 @@ impl FailureEnvelopeV1 {
         operation: CausalOperationV1,
         provenance: FailureProvenanceV1,
     ) -> Result<Self, FailureContractError> {
-        validate_semantics(category, retryability, outcome)?;
+        validate_failure_semantics(category, retryability, outcome)?;
         Ok(Self {
             version: FAILURE_ENVELOPE_VERSION_V1,
             category,
@@ -299,14 +299,14 @@ fn validate_envelope(envelope: &FailureEnvelopeV1) -> Result<(), FailureContract
             actual: envelope.version,
         });
     }
-    validate_semantics(envelope.category, envelope.retryability, envelope.outcome)?;
+    validate_failure_semantics(envelope.category, envelope.retryability, envelope.outcome)?;
     if envelope.diagnostic_omitted && envelope.message.is_some() {
         return Err(FailureContractError::ContradictoryOmission { field: "message" });
     }
     Ok(())
 }
 
-fn validate_semantics(
+pub(crate) fn validate_failure_semantics(
     category: FailureCategory,
     retryability: FailureRetryability,
     outcome: FailureOutcome,

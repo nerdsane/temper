@@ -584,6 +584,7 @@ impl crate::state::ServerState {
                 &integration.name,
                 ctx.action,
                 &envelope,
+                false,
             );
             let callback_action =
                 super::wasm::failure_routing::failure_callback(integration, envelope.category)?;

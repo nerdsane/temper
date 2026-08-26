@@ -101,6 +101,7 @@ impl crate::state::ServerState {
         integration_name: &str,
         source_action: &str,
         envelope: &FailureEnvelopeV1,
+        redact_guest_details: bool,
     ) {
         let category = category_name(envelope.category);
         let span = Span::current();
@@ -123,7 +124,11 @@ impl crate::state::ServerState {
                 "seq": sequence,
                 "integration": integration_name,
                 "source_action": source_action,
-                "failure": crate::failure_observation::redacted_failure_value(envelope),
+                "failure": if redact_guest_details {
+                    crate::failure_observation::redacted_guest_failure_value(envelope)
+                } else {
+                    crate::failure_observation::redacted_failure_value(envelope)
+                },
             }),
         );
     }

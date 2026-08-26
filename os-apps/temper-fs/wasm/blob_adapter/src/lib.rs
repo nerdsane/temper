@@ -83,6 +83,7 @@ static mut CTX_BUF: [u8; CTX_BUF_LEN] = [0u8; CTX_BUF_LEN];
 static mut SECRET_BUF: [u8; SECRET_BUF_LEN] = [0u8; SECRET_BUF_LEN];
 static mut HASH_BUF: [u8; HASH_BUF_LEN] = [0u8; HASH_BUF_LEN];
 const BLOB_HTTP_ATTEMPTS: usize = 8;
+const SIDE_EFFECT_SUCCESS_RESULT: &str = r#"{"action":"","params":{},"success":true}"#;
 
 // ---- Entry point ----
 
@@ -92,7 +93,7 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
         Some(s) => s,
         None => {
             set_error_result("failed to read invocation context");
-            return 1;
+            return 0;
         }
     };
 
@@ -110,7 +111,7 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
         "get" => handle_download(&ctx_json),
         _ => {
             set_error_result(&format!("unknown operation: {operation}"));
-            1
+            0
         }
     }
 }
@@ -127,7 +128,7 @@ fn handle_upload(ctx_json: &str) -> i32 {
         Some(h) => h,
         None => {
             set_error_result("failed to compute content hash");
-            return 1;
+            return 0;
         }
     };
 
@@ -154,7 +155,7 @@ fn handle_upload(ctx_json: &str) -> i32 {
 
     if status < 200 || status >= 300 {
         set_error_result(&format!("upload failed with HTTP {status}"));
-        return 1;
+        return 0;
     }
 
     // 6. Cache for future reads and dedup
@@ -189,7 +190,7 @@ fn handle_download(ctx_json: &str) -> i32 {
     };
     if content_hash.is_empty() {
         set_error_result("entity has no content_hash");
-        return 1;
+        return 0;
     }
 
     // 1. Cache check — skip download if bytes already cached
@@ -197,8 +198,7 @@ fn handle_download(ctx_json: &str) -> i32 {
         log("info", "blob_adapter: cache hit for download");
         let copied = cache_to_stream(&content_hash, &response_stream_id);
         if copied >= 0 {
-            let result = r#"{"success":true}"#;
-            set_result(result);
+            set_result(SIDE_EFFECT_SUCCESS_RESULT);
             return 0;
         }
         // Fall through to R2 download if cache_to_stream failed
@@ -224,14 +224,13 @@ fn handle_download(ctx_json: &str) -> i32 {
 
     if status < 200 || status >= 300 {
         set_error_result(&format!("download failed with HTTP {status}"));
-        return 1;
+        return 0;
     }
 
     // 5. Cache for next time
     cache_from_stream(&content_hash, &response_stream_id);
 
-    let result = r#"{"success":true}"#;
-    set_result(result);
+    set_result(SIDE_EFFECT_SUCCESS_RESULT);
     0
 }
 
@@ -267,8 +266,15 @@ fn set_result(json: &str) {
 }
 
 fn set_error_result(error: &str) {
-    let result = format!(r#"{{"success":false,"error":"{}"}}"#, escape_json(error),);
+    let result = build_error_result(error);
     set_result(&result);
+}
+
+fn build_error_result(error: &str) -> String {
+    let escaped = escape_json(error);
+    format!(
+        r#"{{"action":"callback","params":{{"error":"{escaped}"}},"success":false,"error":"{escaped}"}}"#
+    )
 }
 
 fn compute_hash(stream_id: &str, algorithm: &str) -> Option<String> {
@@ -543,7 +549,19 @@ fn escape_json(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::build_stream_updated_result;
+    use super::{SIDE_EFFECT_SUCCESS_RESULT, build_error_result, build_stream_updated_result};
+
+    #[test]
+    fn terminal_results_use_the_canonical_wire_shapes() {
+        assert_eq!(
+            SIDE_EFFECT_SUCCESS_RESULT,
+            r#"{"action":"","params":{},"success":true}"#
+        );
+        assert_eq!(
+            build_error_result("upload failed"),
+            r#"{"action":"callback","params":{"error":"upload failed"},"success":false,"error":"upload failed"}"#
+        );
+    }
 
     #[test]
     fn stream_updated_result_includes_version_metadata_for_existing_file() {
