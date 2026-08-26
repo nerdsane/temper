@@ -38,6 +38,7 @@ if [ "$FOUND" = true ]; then
     exit 1
 fi
 
+bash scripts/readability-ratchet.sh classifier-test
 bash scripts/readability-ratchet.sh check .ci/readability-baseline.env
 bash scripts/check-storage-dispatch-boundary.sh
 
