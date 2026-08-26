@@ -11,6 +11,15 @@ mod service;
 mod streams;
 mod telemetry;
 
+#[cfg(feature = "test-helpers")]
+/// Canonicalize committed entity state with the production module-data response path.
+pub fn canonicalize_entity_for_test(
+    schema: &temper_wasm_sdk::data::ManifestEntityV1,
+    state: &crate::EntityState,
+) -> Result<serde_json::Map<String, serde_json::Value>, temper_wasm_sdk::data::ModuleDataError> {
+    schema::canonical_entity_value(schema, state)
+}
+
 pub(crate) use service::GovernedApplicationDataService;
 
 use temper_wasm_sdk::data::{
@@ -26,6 +35,8 @@ use helpers::{
 pub(crate) use invocation::{ApplicationDataInvocation, ModuleInvocationAuthority};
 use telemetry::{record_operation_fields, result_kind};
 
+#[cfg(test)]
+mod canonical_defaults_tests;
 #[cfg(test)]
 mod entity_action_result_tests;
 #[cfg(test)]
@@ -272,7 +283,7 @@ impl ApplicationDataInvocation {
             .get(&self.authority.tenant, short_type(entity_type), entity_id)
             .await
             .map_err(internal_error)?;
-        let value = self.canonical_entity_value(entity_type, &response.state);
+        let value = self.canonical_entity_value(entity_type, &response.state)?;
         self.authorize_value("read", entity_type, Some(entity_id), Some(&value))?;
         if minimum.is_some_and(|minimum| response.state.sequence_nr < minimum) {
             return Err(data_error(
@@ -329,7 +340,7 @@ impl ApplicationDataInvocation {
             entity_type,
             &entity_id,
             response.state.sequence_nr,
-            serde_json::Value::Object(self.canonical_entity_value(entity_type, &response.state)),
+            serde_json::Value::Object(self.canonical_entity_value(entity_type, &response.state)?),
         ))
     }
 
@@ -387,7 +398,7 @@ impl ApplicationDataInvocation {
             entity_type,
             entity_id,
             response.state.sequence_nr,
-            serde_json::Value::Object(self.canonical_entity_value(entity_type, &response.state)),
+            serde_json::Value::Object(self.canonical_entity_value(entity_type, &response.state)?),
         ))
     }
 
@@ -457,7 +468,7 @@ impl ApplicationDataInvocation {
         let result =
             if let Some(result_entity_type) = self.action_result_entity_type(entity_type, action) {
                 serde_json::Value::Object(
-                    self.canonical_entity_value(result_entity_type, &response.state),
+                    self.canonical_entity_value(result_entity_type, &response.state)?,
                 )
             } else {
                 response.state.fields

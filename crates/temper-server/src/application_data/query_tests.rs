@@ -52,6 +52,7 @@ fn fallback_order_matches_declared_direction_and_null_rules() {
             generated_name: "estimate".into(),
             type_name: "Edm.Decimal".into(),
             nullable: true,
+            default_value: None,
             enum_members: Vec::new(),
         }],
         actions: Vec::new(),

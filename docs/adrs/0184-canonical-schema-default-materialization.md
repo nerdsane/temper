@@ -25,7 +25,7 @@ Issue #21 proposes a broader application-facing failure envelope and declarative
 
 ### Store validated canonical defaults in the module SDK manifest
 
-`ManifestPropertyV1` will carry an optional canonical JSON default. SDK generation will parse each declared CSDL property or action-parameter default according to its exact scalar or enum type and reject invalid declarations. The manifest stores the typed canonical value rather than the original lexical string so runtime behavior is self-contained and cannot vary by parser or workspace availability.
+`ManifestPropertyV1` will carry an optional canonical JSON default. SDK generation will parse each declared CSDL property or action-parameter default according to its exact supported scalar or enum type and reject invalid declarations. Defaults for Edm primitives or value forms that the closed module ABI cannot represent are rejected rather than retained as unchecked strings. In particular, `Edm.DateTimeOffset` defaults remain unsupported until the ABI has a validator for OData's full year and optional-second lexical space; accepting only Chrono's narrower RFC 3339 subset would be inconsistent. The manifest stores the typed canonical value rather than the original lexical string so runtime behavior is self-contained and cannot vary by parser or workspace availability.
 
 Default metadata remains part of deterministic manifest serialization, the binding digest, and per-symbol semantic hashes. Consequently, changing a default changes the locked binding and compatibility calculations just as changing nullability or a property type does.
 

@@ -5,7 +5,7 @@ use temper_spec::{
 };
 use temper_wasm_sdk::data::{DataOperationKind, EntityDataGrant};
 
-const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+pub(super) const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
   <edmx:DataServices><Schema Namespace="Temper.App" xmlns="http://docs.oasis-open.org/odata/ns/edm">
     <EntityType Name="Task"><Key><PropertyRef Name="Id"/></Key>
@@ -96,7 +96,7 @@ type = "status"
 initial = "Open"
 "#;
 
-fn grant() -> ModuleDataGrant {
+pub(super) fn grant() -> ModuleDataGrant {
     let mut grant = ModuleDataGrant::default();
     grant.operations.insert(DataOperationKind::EntityGet);
     grant.operations.insert(DataOperationKind::ActionInvoke);

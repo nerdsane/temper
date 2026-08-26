@@ -12,6 +12,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
+uuid = { workspace = true }
 temper-wasm-sdk = { workspace = true }
 
 [dev-dependencies]

@@ -28,6 +28,8 @@ mod entity_aliases;
 mod policy_rows;
 mod reconcile;
 mod reconcile_digest;
+#[cfg(test)]
+mod restart_default_test;
 mod runtime_heal;
 mod system_files;
 mod types;

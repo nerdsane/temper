@@ -309,6 +309,9 @@ pub struct ManifestPropertyV1 {
     pub type_name: String,
     /// Whether the canonical value may be null.
     pub nullable: bool,
+    /// Generation-validated canonical JSON value for the declared CSDL default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<serde_json::Value>,
     /// Closed enum members, empty for non-enum properties.
     #[serde(default)]
     pub enum_members: Vec<String>,

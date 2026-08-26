@@ -9,11 +9,13 @@ use temper_wasm_sdk::data::{
     bind_module_sdk_artifact,
 };
 
+mod defaults;
 mod entity_results;
 mod names;
 mod schema_helpers;
 mod source_types;
 mod types;
+use defaults::manifest_property;
 use entity_results::{emit_entity_value_types, generated_entity_names, validate_entity_results};
 use names::{reject_generated_collisions, rust_field_name};
 use schema_helpers::{entity_sets, enum_members};
@@ -43,6 +45,12 @@ pub enum ModuleSdkCodegenError {
     },
     #[error("generated Rust identifier collision '{0}'")]
     IdentifierCollision(String),
+    #[error("invalid default '{value}' for schema symbol '{symbol}' of type '{type_name}'")]
+    InvalidDefault {
+        symbol: String,
+        type_name: String,
+        value: String,
+    },
     #[error(
         "bound action '{action}' on '{entity_type}' returns different entity type '{result_type}'"
     )]
@@ -117,14 +125,16 @@ pub fn generate_module_sdk(
         let properties = entity
             .properties
             .iter()
-            .map(|property| ManifestPropertyV1 {
-                canonical_name: property.name.clone(),
-                generated_name: rust_field_name(&property.name),
-                type_name: property.type_name.clone(),
-                nullable: property.nullable,
-                enum_members: enum_members(csdl, &property.type_name),
+            .map(|property| {
+                manifest_property(
+                    csdl,
+                    &property.name,
+                    &property.type_name,
+                    property.nullable,
+                    property.default_value.as_deref(),
+                )
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         for property in &properties {
             used_symbols.insert(format!(
                 "property:{}:{}",
@@ -156,54 +166,58 @@ pub fn generate_module_sdk(
         }
         let manifest_actions = actions
             .into_iter()
-            .map(|action| {
-                used_symbols.insert(action.name.clone());
-                let manifest_action = ManifestActionV1 {
-                    canonical_name: action.name.clone(),
-                    generated_name: rust_field_name(&action.name),
-                    parameters: action
-                        .parameters
-                        .iter()
-                        .skip(1)
-                        .map(|parameter| ManifestPropertyV1 {
-                            canonical_name: parameter.name.clone(),
-                            generated_name: rust_field_name(&parameter.name),
-                            type_name: parameter.type_name.clone(),
-                            nullable: parameter.nullable,
-                            enum_members: enum_members(csdl, &parameter.type_name),
-                        })
-                        .collect(),
-                    result_type: action
-                        .return_type
-                        .as_ref()
-                        .map(|result| result.type_name.clone()),
-                    result_enum_members: action
-                        .return_type
-                        .as_ref()
-                        .map(|result| enum_members(csdl, &result.type_name))
-                        .unwrap_or_default(),
-                    composite: entity_grant.composite_actions.contains(&action.name),
-                };
-                for parameter in &manifest_action.parameters {
-                    used_symbols.insert(format!(
-                        "parameter:{}:{}:{}",
-                        entity_grant.entity_type, action.name, parameter.canonical_name
-                    ));
-                    used_symbols.insert(format!("type:{}", parameter.type_name));
-                    for member in &parameter.enum_members {
-                        used_symbols.insert(format!("enum:{}:{member}", parameter.type_name));
+            .map(
+                |action| -> Result<ManifestActionV1, ModuleSdkCodegenError> {
+                    used_symbols.insert(action.name.clone());
+                    let manifest_action = ManifestActionV1 {
+                        canonical_name: action.name.clone(),
+                        generated_name: rust_field_name(&action.name),
+                        parameters: action
+                            .parameters
+                            .iter()
+                            .skip(1)
+                            .map(|parameter| {
+                                manifest_property(
+                                    csdl,
+                                    &parameter.name,
+                                    &parameter.type_name,
+                                    parameter.nullable,
+                                    parameter.default_value.as_deref(),
+                                )
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                        result_type: action
+                            .return_type
+                            .as_ref()
+                            .map(|result| result.type_name.clone()),
+                        result_enum_members: action
+                            .return_type
+                            .as_ref()
+                            .map(|result| enum_members(csdl, &result.type_name))
+                            .unwrap_or_default(),
+                        composite: entity_grant.composite_actions.contains(&action.name),
+                    };
+                    for parameter in &manifest_action.parameters {
+                        used_symbols.insert(format!(
+                            "parameter:{}:{}:{}",
+                            entity_grant.entity_type, action.name, parameter.canonical_name
+                        ));
+                        used_symbols.insert(format!("type:{}", parameter.type_name));
+                        for member in &parameter.enum_members {
+                            used_symbols.insert(format!("enum:{}:{member}", parameter.type_name));
+                        }
                     }
-                }
-                if let Some(result_type) = &manifest_action.result_type {
-                    used_symbols.insert(format!("result:{}:{}", action.name, result_type));
-                    used_symbols.insert(format!("type:{result_type}"));
-                    for member in &manifest_action.result_enum_members {
-                        used_symbols.insert(format!("enum:{result_type}:{member}"));
+                    if let Some(result_type) = &manifest_action.result_type {
+                        used_symbols.insert(format!("result:{}:{}", action.name, result_type));
+                        used_symbols.insert(format!("type:{result_type}"));
+                        for member in &manifest_action.result_enum_members {
+                            used_symbols.insert(format!("enum:{result_type}:{member}"));
+                        }
                     }
-                }
-                manifest_action
-            })
-            .collect::<Vec<_>>();
+                    Ok(manifest_action)
+                },
+            )
+            .collect::<Result<Vec<_>, _>>()?;
         reject_generated_collisions(
             &entity_grant.entity_type,
             manifest_actions
@@ -227,6 +241,7 @@ pub fn generate_module_sdk(
                         generated_name: "result".into(),
                         type_name: type_name.clone(),
                         nullable: false,
+                        default_value: None,
                         enum_members: action.result_enum_members.clone(),
                     },
                     &mut generated_named_types,
@@ -341,5 +356,7 @@ fn resolve_entity<'a>(
     Ok((entity, actions))
 }
 
+#[cfg(test)]
+mod default_tests;
 #[cfg(test)]
 mod tests;
