@@ -343,6 +343,13 @@ fn emit_annotation(out: &mut String, ann: &Annotation, indent: usize) {
                 xml_escape(s)
             ));
         }
+        AnnotationValue::NavigationPropertyPath(path) => {
+            out.push_str(&format!(
+                "{pad}<Annotation Term=\"{}\" NavigationPropertyPath=\"{}\"/>\n",
+                term,
+                xml_escape(path)
+            ));
+        }
         AnnotationValue::Float(f) => {
             out.push_str(&format!(
                 "{pad}<Annotation Term=\"{}\" Float=\"{f}\"/>\n",

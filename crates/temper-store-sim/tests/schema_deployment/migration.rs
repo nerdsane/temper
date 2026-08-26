@@ -226,6 +226,7 @@ async fn migration_batches_replay_and_cut_over_atomically() {
                 correlation_id: sim_uuid(),
                 timestamp: sim_now(),
                 actor_id: "migration-test".into(),
+                kernel: None,
             },
         },
     };
@@ -403,6 +404,7 @@ async fn migration_batches_replay_and_cut_over_atomically() {
             correlation_id: event_id,
             timestamp: sim_now(),
             actor_id: "test".into(),
+            kernel: None,
         },
     };
     let stale_source_id = scoped_persistence_id(

@@ -6,7 +6,6 @@ use temper_runtime::scheduler::{sim_now, sim_uuid};
 use crate::entity_actor::{EntityEvent, EntityResponse, EntityState, process_action_with_xref};
 use crate::events::EntityStateChange;
 
-use super::file_writes::content_hash_and_native_blob_key;
 use super::{FileStreamContentError, ServerState, validate_global_entity_id};
 
 impl ServerState {
@@ -92,14 +91,16 @@ impl ServerState {
         self.reject_write_if_workspace_not_active(tenant, &workspace_id)
             .await?;
 
-        let (content_hash, blob_key) = content_hash_and_native_blob_key(body);
-        self.put_content_addressed_blob(tenant, &blob_key, body, None)
+        let receipt = self
+            .put_stream_content_attested(tenant, "temper-fs/", body, Some(mime_type))
             .await
             .map_err(|e| {
                 FileStreamContentError::BlobStore(format!(
-                    "failed to persist blob '{blob_key}': {e}"
+                    "failed to persist attested File stream: {e}"
                 ))
             })?;
+        let content_hash = receipt.content_hash().to_string();
+        let byte_length = receipt.byte_length();
 
         let persistence_id = format!("{tenant}:File:{file_id}");
         let mut state = initial_file_state(file_id, &table, serde_json::json!({}));
@@ -139,7 +140,9 @@ impl ServerState {
         let created_by = agent_ctx.agent_id.clone().unwrap_or_default();
         let stream_params = serde_json::json!({
             "content_hash": content_hash,
-            "size_bytes": body.len() as i64,
+            "size_bytes": i64::try_from(byte_length).map_err(|_| {
+                FileStreamContentError::State("File byte length exceeds i64".into())
+            })?,
             "mime_type": mime_type,
             "version_number": version_number,
             "previous_version_id": previous_version_id,
@@ -163,10 +166,41 @@ impl ServerState {
         )?;
         push_synthetic_event(&mut state, &mut events, stream_event);
 
+        let kernel_metadata = if self.stream_descriptor_contract_activated(
+            tenant,
+            agent_ctx.schema_pin.as_ref(),
+            "File",
+        ) {
+            let descriptor = receipt
+                .into_descriptor(
+                    temper_runtime::persistence::StreamEntityRef::new("File", file_id)
+                        .map_err(|error| FileStreamContentError::State(error.to_string()))?,
+                    None,
+                    state.sequence_nr,
+                    temper_runtime::persistence::StreamMutability::Mutable,
+                )
+                .map_err(FileStreamContentError::State)?;
+            Some(temper_runtime::persistence::KernelEventMetadata::V1 {
+                stream_descriptor: descriptor,
+            })
+        } else {
+            None
+        };
+
         let envelopes = events
             .iter()
             .enumerate()
-            .map(|(idx, event)| synthetic_envelope(&persistence_id, (idx + 1) as u64, event))
+            .map(|(idx, event)| {
+                let sequence_nr = (idx + 1) as u64;
+                synthetic_envelope(
+                    &persistence_id,
+                    sequence_nr,
+                    event,
+                    (sequence_nr == state.sequence_nr)
+                        .then_some(kernel_metadata.as_ref())
+                        .flatten(),
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         match store.append(&persistence_id, 0, &envelopes).await {
@@ -433,6 +467,7 @@ fn synthetic_envelope(
     persistence_id: &str,
     sequence_nr: u64,
     event: &EntityEvent,
+    kernel_metadata: Option<&temper_runtime::persistence::KernelEventMetadata>,
 ) -> Result<PersistenceEnvelope, FileStreamContentError> {
     let payload = serde_json::to_value(event)
         .map_err(|e| FileStreamContentError::State(format!("failed to serialize event: {e}")))?;
@@ -446,6 +481,7 @@ fn synthetic_envelope(
             correlation_id: sim_uuid(),
             timestamp: event.timestamp,
             actor_id: persistence_id.to_string(),
+            kernel: kernel_metadata.cloned(),
         },
     })
 }

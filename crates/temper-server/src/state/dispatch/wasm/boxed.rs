@@ -126,6 +126,7 @@ pub(in crate::state::dispatch) fn dispatch_tenant_action_core_boxed<'a>(
             await_integration,
             reaction_context,
             expected_authorization_precondition,
+            None,
         )
         .boxed()
 }

@@ -108,7 +108,15 @@ pub(super) async fn commit_field_update(
     let mut attempt: u32 = 0;
     loop {
         match actor
-            .persist_event(store, backend, &actor.persistence_id(), state, &event, None)
+            .persist_event(
+                store,
+                backend,
+                &actor.persistence_id(),
+                state,
+                &event,
+                None,
+                None,
+            )
             .await
         {
             Ok(_) => break,

@@ -195,6 +195,7 @@ fn test_event(sequence_nr: u64, event_type: &str, actor_id: &str) -> Persistence
             correlation_id: temper_runtime::scheduler::sim_uuid(),
             timestamp: temper_runtime::scheduler::sim_now(),
             actor_id: actor_id.into(),
+            kernel: None,
         },
     }
 }

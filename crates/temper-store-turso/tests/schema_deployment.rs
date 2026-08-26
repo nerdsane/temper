@@ -291,6 +291,7 @@ async fn turso_schema_deployment_core_contract() {
                         correlation_id: temper_runtime::scheduler::sim_uuid(),
                         timestamp: temper_runtime::scheduler::sim_now(),
                         actor_id: "cross-scope-fence-contract".into(),
+                        kernel: None,
                     },
                 }],
             )
@@ -317,6 +318,7 @@ async fn turso_schema_deployment_core_contract() {
                     correlation_id: temper_runtime::scheduler::sim_uuid(),
                     timestamp: temper_runtime::scheduler::sim_now(),
                     actor_id: "pin-contract".into(),
+                    kernel: None,
                 },
             }],
         )
@@ -347,6 +349,7 @@ async fn turso_schema_deployment_core_contract() {
                     correlation_id: temper_runtime::scheduler::sim_uuid(),
                     timestamp: temper_runtime::scheduler::sim_now(),
                     actor_id: "pin-collision-contract".into(),
+                    kernel: None,
                 },
             }],
         )
@@ -548,6 +551,7 @@ async fn turso_schema_migration_contract() {
                 correlation_id: temper_runtime::scheduler::sim_uuid(),
                 timestamp: temper_runtime::scheduler::sim_now(),
                 actor_id: "migration-test".into(),
+                kernel: None,
             },
         },
     };

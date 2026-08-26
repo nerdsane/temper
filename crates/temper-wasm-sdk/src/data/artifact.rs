@@ -31,6 +31,9 @@ pub struct ArtifactModuleSdkBinding {
     pub generator_version: String,
     /// Exact capability grant digest.
     pub grant_digest: String,
+    /// Digest of verified stream semantics and required descriptor contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_capabilities_digest: Option<String>,
     /// Optional compatibility evidence covered by this artifact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compatibility_proof: Option<ModuleSdkCompatibilityProof>,
@@ -49,6 +52,7 @@ impl ArtifactModuleSdkBinding {
             used_symbol_hashes: manifest.used_symbol_hashes()?,
             generator_version: manifest.generator_version.clone(),
             grant_digest: manifest.grant_digest.clone(),
+            stream_capabilities_digest: manifest.stream_capabilities_digest()?,
             compatibility_proof: manifest.compatibility_proof.clone(),
         })
     }
@@ -173,6 +177,7 @@ mod tests {
             used_symbol_hashes: BTreeMap::new(),
             generator_version: "1".into(),
             grant_digest: "grant".into(),
+            stream_capabilities_digest: None,
             compatibility_proof: None,
         };
         let wasm = bind_module_sdk_artifact(WASM_MAGIC_AND_VERSION, &binding).unwrap();

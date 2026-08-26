@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::stream_descriptor::KernelEventMetadata;
+
 /// Event type used for the parent-journal record of a Composite action.
 pub const COMPOSITE_EVENT_TYPE: &str = "CompositeEvent";
 
@@ -40,6 +42,9 @@ pub struct EventMetadata {
     pub correlation_id: uuid::Uuid,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub actor_id: String,
+    /// Reserved, versioned metadata minted and validated by the kernel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel: Option<KernelEventMetadata>,
 }
 
 /// Trait for event-sourced persistent actors.

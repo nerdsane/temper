@@ -375,6 +375,7 @@ fn test_envelope(sequence_nr: u64) -> PersistenceEnvelope {
             correlation_id: uuid::Uuid::nil(),
             timestamp: chrono::Utc::now(),
             actor_id: "test".to_string(),
+            kernel: None,
         },
     }
 }

@@ -54,6 +54,7 @@ async fn actor_project_full_lifecycle() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -73,6 +74,7 @@ async fn actor_project_full_lifecycle() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -92,6 +94,7 @@ async fn actor_project_full_lifecycle() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -119,6 +122,7 @@ async fn actor_project_verify_requires_building_state() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -152,6 +156,7 @@ async fn actor_tenant_full_lifecycle() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -171,6 +176,7 @@ async fn actor_tenant_full_lifecycle() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -190,6 +196,7 @@ async fn actor_tenant_full_lifecycle() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -209,6 +216,7 @@ async fn actor_tenant_full_lifecycle() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -235,6 +243,7 @@ async fn actor_tenant_cannot_deploy_archived() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -250,6 +259,7 @@ async fn actor_tenant_cannot_deploy_archived() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -267,6 +277,7 @@ async fn actor_tenant_cannot_deploy_archived() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -305,6 +316,7 @@ async fn actor_catalog_publish_and_fork() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -324,6 +336,7 @@ async fn actor_catalog_publish_and_fork() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -343,6 +356,7 @@ async fn actor_catalog_publish_and_fork() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -380,6 +394,7 @@ async fn actor_collaborator_invite_accept_remove() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -399,6 +414,7 @@ async fn actor_collaborator_invite_accept_remove() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -417,6 +433,7 @@ async fn actor_collaborator_invite_accept_remove() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -449,6 +466,7 @@ async fn actor_version_lifecycle() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -467,6 +485,7 @@ async fn actor_version_lifecycle() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -523,6 +542,7 @@ async fn actor_multiple_system_entities_independent() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -538,6 +558,7 @@ async fn actor_multiple_system_entities_independent() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )
@@ -553,6 +574,7 @@ async fn actor_multiple_system_entities_independent() {
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             TIMEOUT,
         )

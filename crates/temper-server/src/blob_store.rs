@@ -1,7 +1,4 @@
-//! Object storage for durable blob bytes.
-//!
-//! New blob writes go through this boundary. The Turso `blobs` table remains a
-//! legacy read fallback for installations that already wrote blob bytes there.
+//! Durable blob storage, with a Turso legacy-read fallback.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -19,8 +16,10 @@ mod keys;
 mod limits;
 mod local;
 mod raw_ingest;
+mod receipt;
 mod state;
 mod streaming;
+
 pub(crate) use endpoint::{LocalInternalBlobEndpoint, is_local_internal_blob_endpoint};
 pub(crate) use keys::{DEFAULT_BLOB_BUCKET, hex_lower, wasm_artifact_key};
 use limits::{BLOB_BUFFERED_OPERATION_TIMEOUT, BLOB_IO_QUEUE_TIMEOUT, blob_io_semaphore};
@@ -31,6 +30,7 @@ pub(crate) use raw_ingest::BlobIngestProgressPolicy;
 pub(crate) use raw_ingest::{
     BlobIngestAdmissionError, BlobIngestBudget, BlobStageError, MAX_RAW_BLOB_BYTES,
 };
+pub(crate) use receipt::CommittedStreamReceiptV1;
 pub(crate) use streaming::BlobReadBounded;
 pub use streaming::{BlobObjectStream, BlobStreamRead, decode_json_base64_stream};
 

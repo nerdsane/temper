@@ -4,7 +4,10 @@ use std::time::Duration;
 use sha2::{Digest as _, Sha256};
 use temper_runtime::tenant::TenantId;
 
-use super::{BlobReadBounded, BlobStore, DEFAULT_BLOB_BUCKET, is_local_internal_blob_endpoint};
+use super::{
+    BlobReadBounded, BlobStore, CommittedStreamReceiptV1, DEFAULT_BLOB_BUCKET,
+    is_local_internal_blob_endpoint,
+};
 use crate::state::ServerState;
 
 impl ServerState {
@@ -49,17 +52,30 @@ impl ServerState {
         self.put_metadata_blob_shadow(tenant, key, body, ttl).await
     }
 
-    /// Write bytes to a tenant-scoped content-addressed blob key.
-    pub(crate) async fn put_content_addressed_blob(
+    /// Persist exact bytes and mint the only receipt accepted by typed stream commits.
+    pub(crate) async fn put_stream_content_attested(
         &self,
         tenant: &TenantId,
-        key: &str,
+        key_prefix: &str,
         body: &[u8],
-        ttl: Option<Duration>,
-    ) -> Result<(), String> {
+        content_type: Option<&str>,
+    ) -> Result<CommittedStreamReceiptV1, String> {
+        let mut hasher = Sha256::new();
+        hasher.update(body);
+        let content_hash = format!("sha256:{:x}", hasher.finalize());
+        let object_id = format!("{key_prefix}{content_hash}");
         let store = self.blob_store_for_tenant(tenant)?;
-        store.put_content_addressed(key, body, ttl).await?;
-        self.put_metadata_blob_shadow(tenant, key, body, ttl).await
+        store.put_content_addressed(&object_id, body, None).await?;
+        self.put_metadata_blob_shadow(tenant, &object_id, body, None)
+            .await?;
+        Ok(CommittedStreamReceiptV1 {
+            storage: temper_runtime::persistence::StreamStorageRefV1::new(object_id)
+                .map_err(|error| error.to_string())?,
+            byte_length: u64::try_from(body.len())
+                .map_err(|_| "accepted stream length exceeds u64".to_string())?,
+            content_hash,
+            content_type: content_type.map(str::to_string),
+        })
     }
 
     pub async fn get_blob_with_legacy_fallback(

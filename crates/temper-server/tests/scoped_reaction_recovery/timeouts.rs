@@ -212,6 +212,7 @@ async fn scoped_timeout_is_suppressed_after_durable_migration_cutover() {
                     correlation_id: temper_runtime::scheduler::sim_uuid(),
                     timestamp: sim_now(),
                     actor_id: target_id.clone(),
+                    kernel: None,
                 },
             }],
         )

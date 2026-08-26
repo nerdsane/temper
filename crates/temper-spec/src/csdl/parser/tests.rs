@@ -240,3 +240,38 @@ fn test_parse_collection_annotation_preserved_across_quick_xml_bump() {
         other => panic!("expected Collection, got {other:?}"),
     }
 }
+
+#[test]
+fn parses_navigation_property_path_as_closed_annotation_value() {
+    let xml = r#"<?xml version="1.0"?>
+    <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+      <edmx:DataServices>
+        <Schema Namespace="Test" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+          <EntityType Name="File">
+            <Key><PropertyRef Name="Id"/></Key>
+            <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+            <NavigationProperty Name="Versions" Type="Collection(Test.FileVersion)"/>
+            <Annotation Term="Temper.Vocab.Stream.VersionCollection"
+                        NavigationPropertyPath="Versions"/>
+          </EntityType>
+          <EntityType Name="FileVersion">
+            <Key><PropertyRef Name="Id"/></Key>
+            <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+          </EntityType>
+        </Schema>
+      </edmx:DataServices>
+    </edmx:Edmx>"#;
+    let document = parse_csdl(xml).unwrap();
+    let annotation = document.schemas[0]
+        .entity_type("File")
+        .unwrap()
+        .annotation("Stream.VersionCollection")
+        .unwrap();
+    assert!(matches!(
+        &annotation.value,
+        crate::csdl::types::AnnotationValue::NavigationPropertyPath(path)
+            if path == "Versions"
+    ));
+    let emitted = crate::csdl::emit_csdl_xml(&document);
+    assert!(emitted.contains("NavigationPropertyPath=\"Versions\""));
+}
