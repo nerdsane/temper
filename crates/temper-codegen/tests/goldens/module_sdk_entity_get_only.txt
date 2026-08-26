@@ -1,0 +1,6 @@
+struct TaskId
+struct Task
+struct TaskClient
+const ENTITY_TYPE
+fn new
+fn get

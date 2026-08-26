@@ -1,0 +1,7 @@
+struct TaskId
+struct Task
+struct TaskStartWorkInput
+struct TaskClient
+const ENTITY_TYPE
+fn new
+fn start_work

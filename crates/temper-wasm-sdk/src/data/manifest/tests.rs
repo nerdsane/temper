@@ -73,6 +73,35 @@ fn missing_operation_denies_even_when_entity_exists() {
 }
 
 #[test]
+fn file_metadata_reads_require_the_exact_file_capability() {
+    let mut grant = ModuleDataGrant {
+        operations: BTreeSet::from([DataOperationKind::EntityGet, DataOperationKind::EntityQuery]),
+        entities: vec![EntityDataGrant {
+            entity_type: "Temper.FileSystem.File".into(),
+            ..EntityDataGrant::default()
+        }],
+        ..ModuleDataGrant::default()
+    };
+
+    assert!(!grant.permits(DataOperationKind::EntityGet, "Temper.FileSystem.File", None));
+    assert!(!grant.permits(
+        DataOperationKind::EntityQuery,
+        "Temper.FileSystem.File",
+        None
+    ));
+
+    grant.entities[0]
+        .file_operations
+        .insert(FileOperationKind::MetadataRead);
+    assert!(grant.permits(DataOperationKind::EntityGet, "Temper.FileSystem.File", None));
+    assert!(grant.permits(
+        DataOperationKind::EntityQuery,
+        "Temper.FileSystem.File",
+        None
+    ));
+}
+
+#[test]
 fn semantic_hashes_change_when_a_used_property_changes() {
     let entity = |properties| ManifestEntityV1 {
         entity_type: "Temper.Task".into(),
