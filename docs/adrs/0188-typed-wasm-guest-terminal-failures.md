@@ -64,7 +64,7 @@ result budget, and `success` is the literal `true`.
 Legacy failure preserves the existing `set_error_result(&str)` wire form:
 
 ```json
-{"action":"callback","error":"provider rejected request","params":{"error":"provider rejected request"},"success":false}
+{"action":"callback","params":{"error":"provider rejected request"},"success":false,"error":"provider rejected request"}
 ```
 
 Its allowed top-level fields are exactly `action`, `params`, `success`, and

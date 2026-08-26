@@ -198,13 +198,26 @@ fn encode_success_result(action: &str, params: &Value) -> String {
 }
 
 fn encode_error_result(error: &str) -> String {
-    serde_json::json!({
-        "action": "callback",
-        "params": { "error": error },
-        "success": false,
-        "error": error,
+    #[derive(serde::Serialize)]
+    struct LegacyErrorParams<'a> {
+        error: &'a str,
+    }
+
+    #[derive(serde::Serialize)]
+    struct LegacyTerminalResult<'a> {
+        action: &'static str,
+        params: LegacyErrorParams<'a>,
+        success: bool,
+        error: &'a str,
+    }
+
+    serde_json::to_string(&LegacyTerminalResult {
+        action: "callback",
+        params: LegacyErrorParams { error },
+        success: false,
+        error,
     })
-    .to_string()
+    .expect("serializing a legacy terminal result with string fields cannot fail")
 }
 
 fn encode_typed_failure_result(
@@ -335,7 +348,7 @@ mod terminal_result_tests {
         );
         assert_eq!(
             encode_error_result("provider rejected request"),
-            r#"{"action":"callback","error":"provider rejected request","params":{"error":"provider rejected request"},"success":false}"#
+            r#"{"action":"callback","params":{"error":"provider rejected request"},"success":false,"error":"provider rejected request"}"#
         );
     }
 
