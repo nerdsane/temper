@@ -136,6 +136,19 @@ unknown mutability values or incomplete contracts. A version entity need not
 independently expose public OData `$value`; its content capability is reached
 through the verified current entity's version contract.
 
+Stream semantics are deliberately inert during the reader-first rollout. A
+separate, closed per-entity activation marker enables descriptor writes and
+strict reads only in a later pinned tenant schema:
+
+```xml
+<Annotation Term="Temper.Vocab.Stream.DescriptorContractVersion" Int="1"/>
+```
+
+Verification rejects unsupported versions. Deployment may add this marker only
+after descriptor-aware writer/replay fleet checks and the tenant's durable
+migration inventory are complete. Removing it disables strict opens and new
+descriptor writes but does not permit descriptor metadata to be discarded.
+
 Verification emits a canonical `StreamCapabilityV1` into the locked application
 closure and module SDK manifest. It contains fully qualified subject and version
 types, mutability, canonical navigation identities, and authorization-parent
@@ -301,7 +314,8 @@ For each historical stream, the migration will:
 5. record a durable failure for missing, corrupt, or ambiguous content instead
    of manufacturing a descriptor.
 
-Activation is gated on a complete migration inventory. Once activated, typed
+Activation is gated on a complete migration inventory and the distinct
+`DescriptorContractVersion=1` schema marker. Once activated, typed
 reads do not fall back to historical field spellings. Tenants with unresolved
 records retain the prior deployment and receive an actionable bounded report.
 
@@ -354,9 +368,10 @@ reintroduce ambient schema dependence after artifact binding.
    run the idempotent migration, and prove that descriptor counts, ownership,
    hashes, lengths, and unresolved records match the inventory before
    activation.
-5. **Activation** — Migrate TemperFS/TemperPaw bundles to
-   artifacts bound to the descriptor contract. Keep the prior deployment live
-   until activation and rollback gates pass.
+5. **Activation** — Migrate TemperFS/TemperPaw bundles to artifacts bound to the
+   descriptor contract and add the distinct `DescriptorContractVersion=1`
+   marker only after the migration-complete and fleet-ready evidence is durable.
+   Keep the prior deployment live until activation and rollback gates pass.
 6. **Live verification** — Exercise current and versioned typed reads after a
    real restart, verify exact content and budget rejection, and use Datadog to
    prove descriptor resolution precedes blob fetch and that no rejected open

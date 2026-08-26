@@ -69,6 +69,7 @@ fn keyed_filter_resolves_to_bounded_candidate_on_postgres() {
                 correlation_id: runtime_sim_uuid(),
                 timestamp: sim_now(),
                 actor_id: "keyed-pg-proof".to_string(),
+                kernel: None,
             },
         };
         store
@@ -1198,6 +1199,7 @@ async fn equality_list_on_large_type_repairs_unprojected_match_boundedly() {
                     correlation_id: runtime_sim_uuid(),
                     timestamp: sim_now(),
                     actor_id: "arn68-gap-list".to_string(),
+                    kernel: None,
                 },
             }],
         )

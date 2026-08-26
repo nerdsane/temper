@@ -25,6 +25,8 @@ mod runtime_metrics;
 mod schema_pin;
 pub(crate) use schema_pin::SCHEMA_PIN_MISMATCH_PREFIX;
 pub(crate) mod storage_caps;
+mod stream_descriptors;
+pub mod stream_migration;
 pub mod trajectory;
 pub mod wasm_invocation_log;
 
@@ -52,6 +54,7 @@ pub(crate) use published_artifacts::{
     PUBLISH_ARTIFACT_STALE_AUTHORIZATION, PublishArtifactAuthorization,
 };
 pub(crate) use query_projection_queue::{ProjectionEnqueueOutcome, QueryProjectionWriteQueue};
+pub(crate) use stream_descriptors::StreamDescriptorResolutionError;
 pub use trajectory::{TrajectoryEntry, TrajectorySource};
 pub use wasm_invocation_log::WasmInvocationEntry;
 

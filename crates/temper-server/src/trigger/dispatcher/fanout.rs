@@ -1,6 +1,8 @@
 //! Reaction rule evaluation, authorization, dispatch, and telemetry.
 
 mod entry;
+mod principal;
+mod stream_provenance;
 mod telemetry;
 
 use crate::request_context::AgentContext;
@@ -9,6 +11,8 @@ use temper_runtime::tenant::TenantId;
 
 use super::super::types::{MAX_REACTION_DEPTH, ReactionResult, ReactionRule};
 use super::{BoundDelivery, ReactionDispatcher, effective_trigger_security_context};
+use principal::resolve_trigger_principal;
+use stream_provenance::immutable_version_metadata;
 use telemetry::{ReactionFanoutCounts, record_reaction_fanout_span};
 
 impl ReactionDispatcher {
@@ -181,14 +185,20 @@ impl ReactionDispatcher {
                             serde_json::Value::String(response.state.status.clone()),
                         );
                         attrs.insert("has_spec".into(), serde_json::Value::Bool(true));
-                        (attrs, response.state.status)
+                        (attrs, response.state.status, response.state.sequence_nr)
                     }),
                 None => state
                     .load_authz_resource_snapshot(tenant, &rule.then.entity_type, &target_entity_id)
                     .await
-                    .map(|snapshot| (snapshot.resource_attrs, snapshot.current_state.state.status)),
+                    .map(|snapshot| {
+                        (
+                            snapshot.resource_attrs,
+                            snapshot.current_state.state.status,
+                            snapshot.current_state.state.sequence_nr,
+                        )
+                    }),
             };
-            let (authz_resource_attrs, authz_status) = match authz_snapshot {
+            let (authz_resource_attrs, authz_status, authz_sequence) = match authz_snapshot {
                 Ok(snapshot) => snapshot,
                 Err(e) => {
                     tracing::warn!(
@@ -241,6 +251,31 @@ impl ReactionDispatcher {
             // Fire the target action via the core dispatch (no reaction cascade
             // to avoid infinite async recursion — we handle cascading ourselves).
             fired_count += 1;
+            let kernel_metadata = match immutable_version_metadata(
+                state,
+                tenant,
+                dispatch_ctx.schema_pin.as_ref(),
+                &rule,
+                &target_entity_id,
+                authz_sequence,
+                bound_delivery.as_ref(),
+            ) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    dispatch_error_count += 1;
+                    results.push(ReactionResult {
+                        rule_name: rule.name.clone(),
+                        success: false,
+                        target_status: None,
+                        error: Some(error),
+                        depth,
+                    });
+                    continue;
+                }
+            };
+            if kernel_metadata.is_some() {
+                dispatch_ctx.expected_entity_sequence = Some(authz_sequence);
+            }
             let reaction_context = if let Some(delivery) = bound_delivery.as_ref() {
                 let descendant_rules = if let Some(pin) = dispatch_ctx.schema_pin.as_ref() {
                     state
@@ -339,6 +374,7 @@ impl ReactionDispatcher {
                     false,
                     reaction_context,
                     None,
+                    kernel_metadata,
                 )
                 .await;
 
@@ -442,48 +478,5 @@ impl ReactionDispatcher {
         });
 
         results
-    }
-}
-
-/// Resolve an explicit reaction service principal or inherit the caller.
-fn resolve_trigger_principal(
-    declared_principal: Option<&str>,
-    invoking_ctx: &AgentContext,
-    rule_name: &str,
-    source_entity_type: &str,
-    source_entity_id: &str,
-    source_action: &str,
-) -> AgentContext {
-    match declared_principal {
-        Some(service_name) if !service_name.is_empty() => {
-            let mut ctx = AgentContext::for_service_inheriting(service_name, invoking_ctx);
-            // Preserve ADR-0048 behavior for declared reaction principals:
-            // existing trigger dispatch copied the caller's idempotency key.
-            ctx.idempotency_key = invoking_ctx.idempotency_key.clone();
-            if let Some(security_ctx) = ctx.security_ctx.as_mut() {
-                security_ctx.context_attrs.insert(
-                    "triggerRule".to_string(),
-                    serde_json::Value::String(rule_name.to_string()),
-                );
-                security_ctx.context_attrs.insert(
-                    "triggerSourceEntityType".to_string(),
-                    serde_json::Value::String(source_entity_type.to_string()),
-                );
-                security_ctx.context_attrs.insert(
-                    "triggerSourceEntityId".to_string(),
-                    serde_json::Value::String(source_entity_id.to_string()),
-                );
-                security_ctx.context_attrs.insert(
-                    "triggerSourceAction".to_string(),
-                    serde_json::Value::String(source_action.to_string()),
-                );
-                security_ctx.context_attrs.insert(
-                    "triggerDeclaredPrincipal".to_string(),
-                    serde_json::Value::Bool(true),
-                );
-            }
-            ctx
-        }
-        _ => invoking_ctx.clone(),
     }
 }

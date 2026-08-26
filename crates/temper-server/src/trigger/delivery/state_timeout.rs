@@ -196,6 +196,7 @@ pub fn state_timeout_intents(
             source_sequence,
             source_to_state: event.to_status.clone(),
             source_fields: source_fields.clone(),
+            source_stream_descriptor: None,
             guard_passed: true,
             target_entity_id: Some(entity_id.to_string()),
             trigger_name,

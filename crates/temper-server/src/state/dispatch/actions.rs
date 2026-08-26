@@ -193,6 +193,16 @@ impl crate::state::ServerState {
         cmd: DispatchCommand<'_>,
         expected_authorization_precondition: Option<String>,
     ) -> Result<EntityResponse, DispatchError> {
+        self.dispatch_typed_checked_with_kernel(cmd, expected_authorization_precondition, None)
+            .await
+    }
+
+    pub(crate) async fn dispatch_typed_checked_with_kernel(
+        &self,
+        cmd: DispatchCommand<'_>,
+        expected_authorization_precondition: Option<String>,
+        kernel_metadata: Option<temper_runtime::persistence::KernelEventMetadata>,
+    ) -> Result<EntityResponse, DispatchError> {
         let DispatchCommand {
             tenant,
             entity_type,
@@ -322,6 +332,7 @@ impl crate::state::ServerState {
                 await_integration,
                 reaction_context,
                 expected_authorization_precondition,
+                kernel_metadata,
             )
             .await?;
 
@@ -602,7 +613,16 @@ impl crate::state::ServerState {
         await_integration: bool,
         reaction_context: Option<crate::trigger::delivery::ReactionCommitContext>,
         expected_authorization_precondition: Option<String>,
+        kernel_metadata: Option<temper_runtime::persistence::KernelEventMetadata>,
     ) -> Result<EntityResponse, DispatchError> {
+        if let Some(metadata) = kernel_metadata.as_ref() {
+            self.validate_stream_descriptor_capability(
+                tenant,
+                agent_ctx.schema_pin.as_ref(),
+                metadata.stream_descriptor(),
+            )
+            .map_err(DispatchError::Conflict)?;
+        }
         let explicit_workflow_context = agent_ctx.workflow_run_id.is_some()
             || agent_ctx.workflow_root_entity_type.is_some()
             || agent_ctx.workflow_root_entity_id.is_some();
@@ -831,6 +851,7 @@ impl crate::state::ServerState {
         let params_for_retry = params;
         let cross_for_retry = cross_entity_booleans;
         let reactions_for_retry = reaction_context;
+        let kernel_metadata_for_retry = kernel_metadata;
         let reaction_expected_sequence = reactions_for_retry
             .as_ref()
             .map(|context| context.expected_source_sequence);
@@ -862,6 +883,7 @@ impl crate::state::ServerState {
                         .expected_entity_sequence
                         .or(reaction_expected_sequence),
                     reaction_context: reactions_for_retry.clone().map(Box::new),
+                    kernel_metadata: kernel_metadata_for_retry.clone().map(Box::new),
                     expected_authorization_precondition: authorization_precondition_for_retry
                         .clone(),
                 },

@@ -1481,6 +1481,7 @@ mod tests {
                 correlation_id: uuid::Uuid::new_v4(),
                 timestamp: chrono::Utc::now(),
                 actor_id: "store-test".to_string(),
+                kernel: None,
             },
         }
     }
@@ -1531,6 +1532,67 @@ mod tests {
         assert!(parse_pid("tenant:Order:").is_err());
         assert!(parse_pid(":abc").is_err());
         assert!(parse_pid("Order:").is_err());
+    }
+
+    #[test]
+    fn kernel_stream_metadata_roundtrips_with_historical_events() {
+        use temper_runtime::persistence::{
+            KernelEventMetadata, StreamDescriptorV1, StreamEntityRef, StreamMutability,
+            StreamStorageRefV1,
+        };
+
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => {
+                eprintln!("skipping Postgres integration test: DATABASE_URL is not set");
+                return;
+            }
+        };
+        sqlx::test_block_on(async {
+            let pool = PgPool::connect(&database_url)
+                .await
+                .expect("connect to DATABASE_URL");
+            run_migrations(&pool).await.expect("run migrations");
+            let store = PostgresEventStore::new(pool);
+            let tenant = format!("stream-metadata-{}", uuid::Uuid::new_v4());
+            let persistence_id = format!("{tenant}:File:file-1");
+            let historical = test_envelope("Created", serde_json::json!({}));
+            let mut described = test_envelope("StreamUpdated", serde_json::json!({}));
+            described.metadata.kernel = Some(KernelEventMetadata::V1 {
+                stream_descriptor: StreamDescriptorV1::new(
+                    StreamEntityRef::new("File", "file-1").unwrap(),
+                    None,
+                    "sha256:abc",
+                    StreamStorageRefV1::new("temper-fs/sha256:abc").unwrap(),
+                    3,
+                    None,
+                    2,
+                    2,
+                    StreamMutability::Mutable,
+                )
+                .unwrap(),
+            });
+            store
+                .append(&persistence_id, 0, &[historical, described])
+                .await
+                .expect("append mixed-version journal");
+            let events = store
+                .read_events(&persistence_id, 0)
+                .await
+                .expect("read mixed-version journal");
+            assert!(events[0].metadata.kernel.is_none());
+            assert_eq!(
+                events[1]
+                    .metadata
+                    .kernel
+                    .as_ref()
+                    .unwrap()
+                    .stream_descriptor()
+                    .storage()
+                    .object_id(),
+                "temper-fs/sha256:abc"
+            );
+        });
     }
 
     #[test]

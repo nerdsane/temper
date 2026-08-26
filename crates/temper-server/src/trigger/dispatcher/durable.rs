@@ -362,6 +362,7 @@ impl ReactionDispatcher {
                         collection.attempts = u8::try_from(record.attempts).unwrap_or(u8::MAX);
                         collection
                     }),
+                    source_stream_descriptor: intent.source_stream_descriptor.clone(),
                 }),
             )
             .await;

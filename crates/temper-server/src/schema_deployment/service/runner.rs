@@ -325,6 +325,7 @@ impl GovernedSchemaDeploymentService<'_> {
                             correlation_id: event_id,
                             timestamp: sim_now(),
                             actor_id: format!("schema-migration:{}", job.command.job_id),
+                            kernel: None,
                         },
                     },
                 });

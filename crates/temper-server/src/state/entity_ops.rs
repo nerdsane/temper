@@ -1758,6 +1758,7 @@ impl ServerState {
                 correlation_id: sim_uuid(),
                 timestamp: created.timestamp,
                 actor_id: persistence_id.clone(),
+                kernel: None,
             },
         };
 

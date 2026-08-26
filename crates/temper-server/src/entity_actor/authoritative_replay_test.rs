@@ -110,6 +110,7 @@ fn envelope(
             correlation_id: sim_uuid(),
             timestamp: sim_now(),
             actor_id: "default:Order:security-replay".to_string(),
+            kernel: None,
         },
     }
 }
@@ -312,6 +313,7 @@ async fn authoritative_replay_rejects_malformed_field_update_events() {
                 correlation_id: sim_uuid(),
                 timestamp: sim_now(),
                 actor_id: "default:Order:security-replay".to_string(),
+                kernel: None,
             },
         };
         let error = authoritative_replay(StaticEventStore {
@@ -352,6 +354,7 @@ async fn authoritative_replay_rejects_non_object_field_update_payloads() {
             correlation_id: sim_uuid(),
             timestamp: sim_now(),
             actor_id: "default:Order:security-replay".to_string(),
+            kernel: None,
         },
     };
     let error = authoritative_replay(StaticEventStore {

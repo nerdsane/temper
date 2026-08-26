@@ -1,7 +1,9 @@
 mod query_projection;
 pub mod schema_deployment;
+mod stream_descriptor;
 mod types;
 pub use query_projection::{QueryProjectionOrder, QueryProjectionOrderTarget};
+pub use stream_descriptor::*;
 pub use types::*;
 
 /// Event-store backend contract.

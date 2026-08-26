@@ -59,6 +59,8 @@ pub enum EntityMsg {
         expected_sequence: Option<u64>,
         /// ADR-0158 rule and authority snapshot to co-commit with the event.
         reaction_context: Option<Box<crate::trigger::delivery::ReactionCommitContext>>,
+        /// Host-minted kernel metadata to co-commit with this action event.
+        kernel_metadata: Option<Box<temper_runtime::persistence::KernelEventMetadata>>,
         /// Digest of the exact local state used for an external Cedar
         /// decision. Internal dispatches omit it.
         expected_authorization_precondition: Option<String>,

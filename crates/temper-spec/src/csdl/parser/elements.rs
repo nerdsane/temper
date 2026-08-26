@@ -208,6 +208,9 @@ fn parse_inline_annotation_override(
     if let Some(string_value) = attr_str(element, "String")? {
         return Ok(Some(AnnotationValue::String(string_value)));
     }
+    if let Some(path) = attr_str(element, "NavigationPropertyPath")? {
+        return Ok(Some(AnnotationValue::NavigationPropertyPath(path)));
+    }
 
     if let Some(float_value) = attr_str(element, "Float")? {
         return Ok(Some(AnnotationValue::Float(
@@ -221,6 +224,9 @@ fn parse_inline_annotation_override(
 fn parse_inline_annotation_value(element: &BytesStart) -> Result<AnnotationValue, CsdlParseError> {
     if let Some(string_value) = attr_str(element, "String")? {
         return Ok(AnnotationValue::String(string_value));
+    }
+    if let Some(path) = attr_str(element, "NavigationPropertyPath")? {
+        return Ok(AnnotationValue::NavigationPropertyPath(path));
     }
     if let Some(float_value) = attr_str(element, "Float")? {
         return Ok(AnnotationValue::Float(float_value.parse().unwrap_or(0.0)));

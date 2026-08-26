@@ -8,9 +8,12 @@ use temper_wasm_sdk::data::{
 };
 
 use crate::request_context::AgentContext;
-use crate::state::IndexedFileStreamRead;
 
 use super::{ApplicationDataInvocation, data_error};
+
+#[path = "streams/descriptor_error.rs"]
+mod descriptor_error;
+use descriptor_error::{invalid_stream, stream_descriptor_error, stream_registry_unavailable};
 
 enum FileStream {
     Read {
@@ -127,84 +130,112 @@ impl ApplicationDataInvocation {
             },
         )?;
         self.authorize("read", &file_type, Some(&file_id))?;
+        let current_capability = self
+            .authority
+            .binding
+            .stream_capabilities
+            .iter()
+            .find(|capability| capability.subject_type == file_type)
+            .ok_or_else(|| {
+                data_error(
+                    ModuleDataErrorKind::SchemaMismatch,
+                    "StreamCapabilityUnavailable",
+                    "Artifact is not bound to verified stream descriptor semantics",
+                )
+            })?;
+        let current_runtime_type = current_capability
+            .subject_type
+            .rsplit('.')
+            .next()
+            .ok_or_else(|| {
+                data_error(
+                    ModuleDataErrorKind::SchemaMismatch,
+                    "StreamCapabilityInvalid",
+                    "Artifact stream subject type is invalid",
+                )
+            })?;
+        if !self.state.stream_descriptor_contract_activated(
+            &self.authority.tenant,
+            None,
+            current_runtime_type,
+        ) {
+            return Err(data_error(
+                ModuleDataErrorKind::ConsistencyUnavailable,
+                "StreamDescriptorContractInactive",
+                "Stream descriptor admission is not activated for this tenant schema",
+            ));
+        }
         let file_state = self
             .state
-            .get_tenant_entity_state(&self.authority.tenant, "File", &file_id)
+            .get_tenant_entity_state(&self.authority.tenant, current_runtime_type, &file_id)
             .await
             .map_err(super::internal_error)?;
-        let declared_length = if let Some(version_id) = &version_id {
-            let version = self
-                .state
-                .get_tenant_entity_state(&self.authority.tenant, "FileVersion", version_id)
-                .await
-                .map_err(|_| {
+        let (subject_type, subject_id) = if let Some(version_id) = &version_id {
+            let version_type = current_capability
+                .version_entity_type
+                .as_deref()
+                .and_then(|qualified| qualified.rsplit('.').next())
+                .ok_or_else(|| {
                     data_error(
-                        ModuleDataErrorKind::NotFound,
-                        "FileVersionNotFound",
-                        "File version is not available",
+                        ModuleDataErrorKind::SchemaMismatch,
+                        "VersionStreamCapabilityUnavailable",
+                        "Artifact has no verified immutable version capability",
                     )
                 })?;
-            if !version_belongs_to_file(&version.state.fields, &file_id) {
+            if !self.state.stream_descriptor_contract_activated(
+                &self.authority.tenant,
+                None,
+                version_type,
+            ) {
+                return Err(data_error(
+                    ModuleDataErrorKind::ConsistencyUnavailable,
+                    "StreamDescriptorContractInactive",
+                    "Version stream descriptor admission is not activated for this tenant schema",
+                ));
+            }
+            (version_type, version_id.as_str())
+        } else {
+            (current_runtime_type, file_id.as_str())
+        };
+        let descriptor = self
+            .state
+            .resolve_stream_descriptor(&self.authority.tenant, subject_type, subject_id)
+            .await
+            .map_err(stream_descriptor_error)?;
+        if version_id.is_some() {
+            let parent = descriptor.authorization_parent();
+            if descriptor.mutability() != temper_runtime::persistence::StreamMutability::Immutable
+                || parent.is_none_or(|parent| {
+                    parent.entity_type() != current_runtime_type || parent.entity_id() != file_id
+                })
+            {
                 return Err(data_error(
                     ModuleDataErrorKind::InvalidRequest,
                     "FileVersionMismatch",
                     "File version does not belong to the requested File",
                 ));
             }
-            declared_stream_length(&version.state.fields)
-        } else {
-            declared_stream_length(&file_state.state.fields)
-        };
-        let declared_length = declared_length.ok_or_else(|| {
-            data_error(
-                ModuleDataErrorKind::ConsistencyUnavailable,
-                "FileLengthUnavailable",
-                "File content length is unavailable for bounded streaming",
-            )
-        })?;
-        if declared_length > self.authority.binding.grant.budgets.max_stream_bytes {
-            return Err(data_error(
-                ModuleDataErrorKind::BudgetExceeded,
-                "FileSizeBudgetExceeded",
-                "File content exceeds the stream byte budget",
-            ));
-        }
-        let read = if let Some(version_id) = &version_id {
-            self.state
-                .read_file_version_stream_indexed(&self.authority.tenant, version_id)
-                .await
-        } else {
-            self.state
-                .read_file_stream_indexed(&self.authority.tenant, &file_id)
-                .await
-        };
-        let read = read.map_err(super::internal_error)?;
-        let (bytes, content_hash, content_type) = match read {
-            IndexedFileStreamRead::Content {
-                bytes,
-                content_hash,
-                mime_type,
-            } => (bytes, Some(content_hash), Some(mime_type)),
-            IndexedFileStreamRead::NoContent { .. }
-            | IndexedFileStreamRead::MissingIndex
-            | IndexedFileStreamRead::StaleIndex { .. } => {
-                return Err(data_error(
-                    ModuleDataErrorKind::NotFound,
-                    "FileContentNotFound",
-                    "File content is not available",
-                ));
-            }
-        };
-        let length = bytes.len() as u64;
-        if length != declared_length
-            || length > self.authority.binding.grant.budgets.max_stream_bytes
+        } else if descriptor.mutability() != temper_runtime::persistence::StreamMutability::Mutable
+            || descriptor.authorization_parent().is_some()
         {
             return Err(data_error(
-                ModuleDataErrorKind::BudgetExceeded,
-                "FileSizeBudgetExceeded",
-                "File content exceeds the stream byte budget",
+                ModuleDataErrorKind::ConsistencyUnavailable,
+                "StreamDescriptorCapabilityMismatch",
+                "Committed stream descriptor differs from verified schema semantics",
             ));
         }
+        let bytes = self
+            .state
+            .read_stream_descriptor_bytes(
+                &self.authority.tenant,
+                &descriptor,
+                self.authority.binding.grant.budgets.max_stream_bytes,
+            )
+            .await
+            .map_err(stream_descriptor_error)?;
+        let length = descriptor.byte_length();
+        let content_hash = Some(descriptor.content_hash().to_string());
+        let content_type = descriptor.content_type().map(str::to_string);
         let handle = self
             .streams
             .lock()
@@ -449,32 +480,10 @@ impl FileStreamRegistry {
     }
 }
 
-fn invalid_stream() -> ModuleDataError {
-    data_error(
-        ModuleDataErrorKind::InvalidRequest,
-        "InvalidFileStream",
-        "File stream handle is invalid or has the wrong direction",
-    )
-}
-
-fn stream_registry_unavailable() -> ModuleDataError {
-    data_error(
-        ModuleDataErrorKind::Internal,
-        "InvocationStatePoisoned",
-        "File stream registry unavailable",
-    )
-}
-
-fn version_belongs_to_file(fields: &serde_json::Value, file_id: &str) -> bool {
-    fields.get("FileId").and_then(serde_json::Value::as_str) == Some(file_id)
-}
-
-fn declared_stream_length(fields: &serde_json::Value) -> Option<u64> {
-    ["Size", "size", "ContentLength", "content_length"]
-        .into_iter()
-        .find_map(|name| fields.get(name).and_then(serde_json::Value::as_u64))
-}
-
 #[cfg(test)]
 #[path = "streams_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "streams/restart_tests.rs"]
+mod restart_tests;
