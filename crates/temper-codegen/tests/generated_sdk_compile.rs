@@ -5,6 +5,7 @@ use std::fs;
 use std::process::Command;
 
 use temper_codegen::generate_module_sdk;
+use temper_spec::bundle::IoaSourceInput;
 use temper_spec::csdl::parse_csdl;
 use temper_wasm_sdk::data::{
     DataOperationKind, EntityDataGrant, FileOperationKind, ModuleDataGrant,
@@ -48,6 +49,15 @@ fn representative_generated_surface_compiles() {
     let csdl = parse_csdl(CSDL).unwrap();
     let generated = generate_module_sdk(
         &csdl,
+        &[IoaSourceInput {
+            entity_type: "Temper.Generated.File".into(),
+            source: r#"[automaton]
+name = "File"
+states = ["Open", "Done"]
+initial = "Open"
+"#
+            .into(),
+        }],
         "worker",
         "closure",
         "closure",

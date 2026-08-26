@@ -26,12 +26,14 @@ pub(super) struct ResolvedCandidate {
     pub lock_path: PathBuf,
     pub manifest: AppManifest,
     pub csdl: CsdlDocument,
+    pub ioa_sources: Vec<IoaSourceInput>,
     pub lock: LocalModuleSdkLock,
     pub lock_source: String,
 }
 
 pub(crate) struct ResolvedMaterializedModule {
     pub(crate) csdl: CsdlDocument,
+    pub(crate) ioa_sources: Vec<IoaSourceInput>,
     pub(crate) lock_digest: String,
 }
 
@@ -108,6 +110,7 @@ pub(super) fn resolve(inputs: &LocalModuleSdkInputs) -> Result<ResolvedCandidate
         lock_path,
         manifest: root.manifest,
         csdl: resolved.csdl,
+        ioa_sources: resolved.ioa_sources,
         lock: resolved.lock,
         lock_source: resolved.lock_source,
     })
@@ -165,12 +168,14 @@ pub(crate) fn resolve_materialized_module(
     let resolved = compile_module_closure(root_name, module, &order, &loaded)?;
     Ok(ResolvedMaterializedModule {
         csdl: resolved.csdl,
+        ioa_sources: resolved.ioa_sources,
         lock_digest: resolved.lock.digest,
     })
 }
 
 struct ResolvedModuleClosure {
     csdl: CsdlDocument,
+    ioa_sources: Vec<IoaSourceInput>,
     lock: LocalModuleSdkLock,
     lock_source: String,
 }
@@ -196,7 +201,11 @@ fn compile_module_closure(
         ));
     }
 
-    let (csdl, canonical_csdl, canonical_ioa) = compile_closure(order, loaded)?;
+    let (csdl, canonical_csdl, ioa_sources) = compile_closure(order, loaded)?;
+    let canonical_ioa = ioa_sources
+        .iter()
+        .map(|source| source.source.as_str())
+        .collect::<Vec<_>>();
     let apps = order
         .iter()
         .map(|name| {
@@ -230,6 +239,7 @@ fn compile_module_closure(
         .map_err(|error| format!("failed to encode module SDK lock: {error}"))?;
     Ok(ResolvedModuleClosure {
         csdl,
+        ioa_sources,
         lock,
         lock_source,
     })
@@ -290,7 +300,7 @@ fn visit(
 fn compile_closure(
     order: &[String],
     loaded: &BTreeMap<String, CandidateApp>,
-) -> Result<(CsdlDocument, String, Vec<String>), String> {
+) -> Result<(CsdlDocument, String, Vec<IoaSourceInput>), String> {
     let mut merged = None;
     let mut symbol_hashes = BTreeMap::new();
     let mut ioa_sources = Vec::new();
@@ -358,7 +368,10 @@ fn compile_closure(
     let canonical_ioa = compiled
         .ioa_specs()
         .iter()
-        .map(|spec| spec.canonical_source.clone())
+        .map(|spec| IoaSourceInput {
+            entity_type: spec.entity_type.clone(),
+            source: spec.canonical_source.clone(),
+        })
         .collect();
     let canonical_csdl = compiled.canonical_csdl().to_string();
     let csdl = parse_csdl(&canonical_csdl)

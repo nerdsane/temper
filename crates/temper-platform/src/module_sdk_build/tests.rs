@@ -14,7 +14,7 @@ const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
       <EntityType Name="Task">
         <Key><PropertyRef Name="id"/></Key>
         <Property Name="id" Type="Edm.String" Nullable="false"/>
-        <Property Name="state" Type="Edm.String" Nullable="false"/>
+        <Property Name="state" Type="Edm.String" Nullable="false" DefaultValue="Open"/>
       </EntityType>
       <EntityContainer Name="Default">
         <EntitySet Name="Tasks" EntityType="Example.Task"/>

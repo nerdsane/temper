@@ -1,14 +1,14 @@
 use temper_spec::csdl::parse_csdl;
 
-use super::tests::{CSDL, grant};
-use super::{ModuleSdkCodegenError, generate_module_sdk};
+use super::ModuleSdkCodegenError;
+use super::tests::{CSDL, generate_module_sdk, grant};
 
 #[test]
 fn generation_preserves_typed_canonical_defaults() {
     let source = CSDL.replace(
-        "<Property Name=\"Status\" Type=\"Edm.String\" Nullable=\"false\"/>",
+        "<Property Name=\"Status\" Type=\"Edm.String\" Nullable=\"false\" DefaultValue=\"Open\"/>",
         concat!(
-            "<Property Name=\"Status\" Type=\"Edm.String\" Nullable=\"false\"/>",
+            "<Property Name=\"Status\" Type=\"Edm.String\" Nullable=\"false\" DefaultValue=\"Open\"/>",
             "<Property Name=\"FailureReason\" Type=\"Edm.String\" Nullable=\"false\" DefaultValue=\"\"/>",
             "<Property Name=\"Label\" Type=\"Edm.String\" Nullable=\"false\" DefaultValue=\"unknown\"/>",
             "<Property Name=\"AttemptCount\" Type=\"Edm.Int64\" Nullable=\"false\" DefaultValue=\"0\"/>",
@@ -66,9 +66,9 @@ fn generation_rejects_invalid_scalar_and_enum_defaults() {
         ("Temper.App.Outcome", "Unknown"),
     ] {
         let source = CSDL.replace(
-            "<Property Name=\"Status\" Type=\"Edm.String\" Nullable=\"false\"/>",
+            "<Property Name=\"Status\" Type=\"Edm.String\" Nullable=\"false\" DefaultValue=\"Open\"/>",
             &format!(
-                "<Property Name=\"Status\" Type=\"Edm.String\" Nullable=\"false\"/><Property Name=\"Invalid\" Type=\"{type_name}\" Nullable=\"false\" DefaultValue=\"{value}\"/>"
+                "<Property Name=\"Status\" Type=\"Edm.String\" Nullable=\"false\" DefaultValue=\"Open\"/><Property Name=\"Invalid\" Type=\"{type_name}\" Nullable=\"false\" DefaultValue=\"{value}\"/>"
             ),
         );
         assert!(matches!(
@@ -105,9 +105,9 @@ fn generation_accepts_supported_odata_primitive_lexicals() {
         ("Edm.Binary", "AQ", serde_json::json!("AQ")),
     ] {
         let source = CSDL.replace(
-            "<Property Name=\"Status\" Type=\"Edm.String\" Nullable=\"false\"/>",
+            "<Property Name=\"Status\" Type=\"Edm.String\" Nullable=\"false\" DefaultValue=\"Open\"/>",
             &format!(
-                "<Property Name=\"Status\" Type=\"Edm.String\" Nullable=\"false\"/><Property Name=\"Valid\" Type=\"{type_name}\" Nullable=\"false\" DefaultValue=\"{value}\"/>"
+                "<Property Name=\"Status\" Type=\"Edm.String\" Nullable=\"false\" DefaultValue=\"Open\"/><Property Name=\"Valid\" Type=\"{type_name}\" Nullable=\"false\" DefaultValue=\"{value}\"/>"
             ),
         );
         let generated = generate_module_sdk(

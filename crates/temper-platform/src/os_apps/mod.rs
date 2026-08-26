@@ -1454,6 +1454,7 @@ pub(crate) async fn install_os_app_from_dir_with_plan(
                     module_name,
                     config,
                     bundle.csdl.as_deref(),
+                    &bundle.specs,
                     resolved_dependency_lock_id
                         .as_deref()
                         .ok_or_else(|| "OS app closure identity is missing".to_string())?,

@@ -1,5 +1,5 @@
 use temper_spec::csdl::CsdlDocument;
-use temper_wasm_sdk::data::ManifestPropertyV1;
+use temper_wasm_sdk::data::{ManifestPropertyV1, ManifestValueSourceV1};
 
 use super::{ModuleSdkCodegenError, names::rust_field_name, schema_helpers::enum_members};
 
@@ -9,6 +9,7 @@ pub(super) fn manifest_property(
     type_name: &str,
     nullable: bool,
     declared_default: Option<&str>,
+    source: ManifestValueSourceV1,
 ) -> Result<ManifestPropertyV1, ModuleSdkCodegenError> {
     let enum_members = enum_members(csdl, type_name);
     let default_value = declared_default
@@ -19,6 +20,7 @@ pub(super) fn manifest_property(
         generated_name: rust_field_name(canonical_name),
         type_name: type_name.into(),
         nullable,
+        source,
         default_value,
         enum_members,
     })

@@ -46,10 +46,11 @@ not runtime control flow.
 
 SDK generation receives the verified IOA automaton associated with every granted
 CSDL entity. The CSDL key identifies the `EntityId` property. The lifecycle candidate
-is selected structurally from properties whose declared default equals the IOA initial
-state and whose scalar or enum value domain accepts every IOA lifecycle state. Exactly
-one candidate must exist. Zero or multiple candidates reject SDK generation with a
-stable diagnostic naming the entity and candidates.
+is selected structurally from properties whose scalar or enum value domain accepts
+every IOA lifecycle state. An open string property must declare a default equal to the
+IOA initial state; an enum whose values exactly equal the lifecycle state set may omit
+that redundant default. Exactly one candidate must exist. Zero or multiple candidates
+reject SDK generation with a stable diagnostic naming the entity and candidates.
 
 The lifecycle default is also validated against the IOA initial state. This does not
 materialize the default into persisted fields; it only establishes the cross-schema
@@ -113,7 +114,8 @@ installing it and deferring failure until a read would violate fail-closed deplo
 ### Negative
 
 - SDK generation now requires the verified IOA side of the application closure.
-- Lifecycle properties must declare the IOA initial state as their CSDL default.
+- Open string lifecycle properties must declare the IOA initial state as their CSDL
+  default; exact lifecycle enums may omit the redundant default.
 - Manifest fixtures and direct codegen callers must supply explicit source metadata.
 
 ### Risks
