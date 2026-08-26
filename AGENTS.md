@@ -36,7 +36,17 @@ In simulation-visible crates (`temper-runtime`, `temper-jit`, `temper-server`):
 - No `chrono::Utc::now()`, `std::thread::sleep()`, `OsRng`, `getrandom` - simulated time, seeded PRNG
 - `SimActorHandler::spec_invariants()` auto-checks `[[invariant]]` sections
 - `// determinism-ok` suppresses guard false positives
-- Full ruleset: `.agents/agents/dst-reviewer.md`
+- Full ruleset: `.agents/agents/dst-reviewer.md`; method: `.agents/skills/deterministic-simulation/`
+
+DST-driven development replaces TDD for stateful kernel code:
+
+1. Harness first: extend the simulator with the scenario - workload, faults, invariants (the things that must never happen). The invariant must FAIL before you implement; a harness that cannot catch the missing behavior proves nothing.
+2. Implement. Production code runs inside the simulation - not mocks, not a parallel reimplementation.
+3. Run many seeds until invariants hold. One green seed is one execution, not correctness.
+4. A failing seed found later is committed as a regression case and stays in the suite forever. The seed is the bug report: seed, invariant violated, minimal trace.
+5. Fix by root cause. Never by weakening the invariant or narrowing the workload.
+
+Suites: `platform_e2e_dst`, `system_entity_dst` (crates/temper-platform/tests/). Cooperative fault points (BUGGIFY-style rare branches under simulation) belong in production code.
 
 ## Multi-tenancy and identity
 

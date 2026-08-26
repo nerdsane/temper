@@ -6,6 +6,11 @@ Repo-specific passes on top of the global review bar. Severity + `file:line` + c
 
 Any touched code in `temper-runtime`, `temper-jit`, `temper-server`: scan against the DST ruleset in `.agents/agents/dst-reviewer.md`. Wall clock, random UUIDs, HashMap iteration, thread spawns, direct I/O, and global state are all findings even when tests pass - they break seeded reproduction. Check that new `// determinism-ok` suppressions are justified, not convenient.
 
+DST-driven development checks (`.agents/skills/deterministic-simulation/`):
+- New stateful behavior with no simulator scenario + invariant covering it is a finding.
+- A fix that weakens an invariant or narrows a workload to go green is a finding.
+- A bug fixed without its failing seed committed as a regression case is a finding.
+
 ## Pass 2: Invariants and the spec contract
 
 - A spec change and its TransitionTable behavior must say the same thing; look for code paths that bypass the table.
