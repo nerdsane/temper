@@ -28,13 +28,36 @@ trap cleanup EXIT
 is_production_file() {
     local file="$1"
     case "$file" in
-        */tests/*|*/benches/*|*test_*.rs|*_test.rs|*/temper-macros/*)
+        */tests/*|*/tests.rs|*/benches/*|*test_*.rs|*_test.rs|*_tests.rs|*/temper-macros/*)
             return 1
             ;;
         *)
             return 0
             ;;
     esac
+}
+
+test_file_classifier() {
+    local test_file
+    for test_file in \
+        crates/example/tests/integration.rs \
+        crates/example/src/tests.rs \
+        crates/example/src/feature_test.rs \
+        crates/example/src/feature_tests.rs \
+        crates/example/src/test_feature.rs
+    do
+        if is_production_file "$test_file"; then
+            echo "FAIL: classified test file as production: $test_file"
+            exit 1
+        fi
+    done
+
+    if ! is_production_file "crates/example/src/contest.rs"; then
+        echo "FAIL: classified production file as test: crates/example/src/contest.rs"
+        exit 1
+    fi
+
+    echo "Readability file classifier: OK"
 }
 
 metric_value() {
@@ -194,6 +217,9 @@ compare_non_increasing() {
 }
 
 case "$MODE" in
+    classifier-test)
+        test_file_classifier
+        ;;
     snapshot)
         mkdir -p "$(dirname "$BASELINE_PATH")"
         collect_metrics > "$BASELINE_PATH"
@@ -222,6 +248,7 @@ case "$MODE" in
         echo "  bash scripts/readability-ratchet.sh snapshot [.ci/readability-baseline.env]"
         echo "  bash scripts/readability-ratchet.sh check [.ci/readability-baseline.env]"
         echo "  bash scripts/readability-ratchet.sh show"
+        echo "  bash scripts/readability-ratchet.sh classifier-test"
         exit 2
         ;;
 esac
