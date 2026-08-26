@@ -1,6 +1,10 @@
 # Feature map
 
-Surface enumeration (from `temper-cli` subcommands + served routes): Serve (OData API + Observe UI), Mcp (stdio bridge + REPL), Verify/VerifyIoa/VerifyRemote (cascade), DST suites, Init/Codegen (scaffolding), Install, Decide (approval CLI), MigrateTursoToPostgres (ops migration).
+Surface enumeration.
+
+Served route trees (crates/temper-server/src): `/tdata` (OData), `/observe` (UI + health), `/api` (authorize, decisions, policies, audit, repl), `/_admin` (profiling), `/healthz`.
+CLI verbs (temper-cli): Serve, Mcp, Verify, VerifyIoa, VerifyRemote, Init, Codegen, Install, Decide, MigrateTursoToPostgres.
+Plus the DST suites (crates/temper-platform/tests).
 
 | Feature | File | Drive when you changed |
 |---|---|---|
@@ -11,6 +15,9 @@ Surface enumeration (from `temper-cli` subcommands + served routes): Serve (ODat
 | Observe UI + decisions | observe-ui.md | temper-observe, temper-authz, approval flow |
 
 ## Not yet mapped
+
+- `/api` governance routes (authorize, policies, audit) - the Cedar policy/audit surface; decisions is partially covered by observe-ui.md, the rest needs its own file
+- `/_admin` profiling (cpu/wall) - ops-only; drive read-only
 
 - Init/Codegen - scaffolding verbs; drive = run them in a temp dir and build the output
 - Install - app install flow; needs a target app checkout
