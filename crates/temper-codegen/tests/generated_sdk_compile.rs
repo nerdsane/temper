@@ -36,6 +36,10 @@ const CSDL: &str = r#"
         <Parameter Name="binding" Type="Temper.Generated.File" Nullable="false"/>
         <ReturnType Type="Temper.Generated.File" Nullable="false"/>
       </Action>
+      <Action Name="HandleFailure" IsBound="true">
+        <Parameter Name="binding" Type="Temper.Generated.File" Nullable="false"/>
+        <Parameter Name="Failure" Type="Temper.FailureEnvelopeV1" Nullable="false"/>
+      </Action>
       <EntityContainer Name="Container">
         <EntitySet Name="Files" EntityType="Temper.Generated.File"/>
         <EntitySet Name="Users" EntityType="Temper.Generated.User"/>
@@ -78,7 +82,11 @@ initial = "Open"
             .collect(),
             entities: vec![EntityDataGrant {
                 entity_type: "Temper.Generated.File".into(),
-                actions: BTreeSet::from(["Complete".into(), "Snapshot".into()]),
+                actions: BTreeSet::from([
+                    "Complete".into(),
+                    "HandleFailure".into(),
+                    "Snapshot".into(),
+                ]),
                 query_filter_fields: BTreeSet::from(["Status".into(), "Estimate".into()]),
                 query_order_fields: BTreeSet::from(["CreatedAt".into(), "Estimate".into()]),
                 query_order_by_sequence: true,
@@ -120,6 +128,7 @@ pub fn typecheck_surface() {
     let _create: fn(&mut FileClient, FileCreate) -> Result<TypedWrite<File>, ModuleDataError> = FileClient::create;
     let _patch: fn(&mut FileClient, String, Option<u64>, FilePatch) -> Result<TypedWrite<File>, ModuleDataError> = FileClient::patch;
     let _entity_action: fn(&mut FileClient, String, Option<u64>, FileSnapshotInput) -> Result<TypedAction<File>, ModuleDataError> = FileClient::snapshot;
+    let _failure_action: fn(&mut FileClient, String, Option<u64>, FileHandleFailureInput) -> Result<TypedAction<serde_json::Value>, ModuleDataError> = FileClient::handle_failure;
     let _ = (filter, order, sequence_order);
     let _batch: fn(&mut DataClient, Vec<BatchItemV1>) -> Result<DataResultV1, ModuleDataError> = execute_batch;
     let _read: fn(&mut FileClient, String) -> Result<OpenedFileRead, ModuleDataError> = FileClient::open_file_read;

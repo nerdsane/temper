@@ -215,6 +215,7 @@ fn llm_root_span_stays_on_active_trace() {
         config: std::collections::BTreeMap::new(),
         on_success: None,
         on_failure: None,
+        failure_routes: Vec::new(),
         llm: true,
     };
     let agent_ctx = AgentContext {

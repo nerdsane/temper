@@ -1,6 +1,7 @@
 //! Reaction rule evaluation, authorization, dispatch, and telemetry.
 
 mod entry;
+mod failure;
 mod principal;
 mod stream_provenance;
 mod telemetry;
@@ -9,10 +10,13 @@ use crate::request_context::AgentContext;
 use crate::trigger::{guard, params, resolver};
 use temper_runtime::tenant::TenantId;
 
-use super::super::types::{MAX_REACTION_DEPTH, ReactionResult, ReactionRule};
+use super::super::types::{MAX_REACTION_DEPTH, ReactionFailureKind, ReactionResult, ReactionRule};
 use super::{BoundDelivery, ReactionDispatcher, effective_trigger_security_context};
+use failure::{
+    reaction_authorization_decision_id, reaction_authorization_failure, reaction_dispatch_failure,
+};
 use principal::resolve_trigger_principal;
-use stream_provenance::immutable_version_metadata;
+use stream_provenance::{immutable_version_metadata, stream_provenance_failure};
 use telemetry::{ReactionFanoutCounts, record_reaction_fanout_span};
 
 impl ReactionDispatcher {
@@ -51,13 +55,10 @@ impl ReactionDispatcher {
             return Vec::new();
         }
 
-        let rule_count = rules.len();
-        let mut fired_count = 0usize;
-        let mut guard_skipped_count = 0usize;
-        let mut target_resolve_error_count = 0usize;
-        let mut authz_denied_count = 0usize;
-        let mut dispatch_error_count = 0usize;
-        let mut success_count = 0usize;
+        let mut counts = ReactionFanoutCounts {
+            rule_count: rules.len(),
+            ..ReactionFanoutCounts::default()
+        };
         let mut results = Vec::new();
 
         for rule in rules {
@@ -94,7 +95,7 @@ impl ReactionDispatcher {
                 let passed =
                     guard::evaluate_with_resolved(guard, fields, to_state, &resolved, &rule.name);
                 if !passed {
-                    guard_skipped_count += 1;
+                    counts.guard_skipped_count += 1;
                     tracing::debug!(
                         rule = rule.name,
                         cross_entity_queries = queries.len(),
@@ -111,7 +112,7 @@ impl ReactionDispatcher {
             {
                 Some(id) => id,
                 None => {
-                    target_resolve_error_count += 1;
+                    counts.target_resolve_error_count += 1;
                     tracing::warn!(
                         rule = rule.name,
                         "Could not resolve target entity ID for reaction"
@@ -121,6 +122,8 @@ impl ReactionDispatcher {
                         success: false,
                         target_status: None,
                         error: Some("Could not resolve target entity ID".to_string()),
+                        failure: Some(ReactionFailureKind::TargetResolution),
+                        decision_id: None,
                         depth,
                     });
                     continue;
@@ -213,6 +216,8 @@ impl ReactionDispatcher {
                         success: false,
                         target_status: None,
                         error: Some(e),
+                        failure: Some(ReactionFailureKind::TargetSnapshotUnavailable),
+                        decision_id: None,
                         depth,
                     });
                     continue;
@@ -227,8 +232,10 @@ impl ReactionDispatcher {
                 &authz_resource_attrs,
                 tenant.as_str(),
             ) {
+                let failure = reaction_authorization_failure(&denial);
+                let decision_id = reaction_authorization_decision_id(&denial);
                 let reason = denial.to_string();
-                authz_denied_count += 1;
+                counts.authz_denied_count += 1;
                 tracing::warn!(
                     rule = rule.name,
                     target_entity = %rule.then.entity_type,
@@ -243,6 +250,8 @@ impl ReactionDispatcher {
                     success: false,
                     target_status: Some(authz_status),
                     error: Some(reason),
+                    failure: Some(failure),
+                    decision_id,
                     depth,
                 });
                 continue;
@@ -250,7 +259,7 @@ impl ReactionDispatcher {
 
             // Fire the target action via the core dispatch (no reaction cascade
             // to avoid infinite async recursion — we handle cascading ourselves).
-            fired_count += 1;
+            counts.fired_count += 1;
             let kernel_metadata = match immutable_version_metadata(
                 state,
                 tenant,
@@ -262,14 +271,8 @@ impl ReactionDispatcher {
             ) {
                 Ok(metadata) => metadata,
                 Err(error) => {
-                    dispatch_error_count += 1;
-                    results.push(ReactionResult {
-                        rule_name: rule.name.clone(),
-                        success: false,
-                        target_status: None,
-                        error: Some(error),
-                        depth,
-                    });
+                    counts.dispatch_error_count += 1;
+                    results.push(stream_provenance_failure(&rule.name, error, depth));
                     continue;
                 }
             };
@@ -349,12 +352,14 @@ impl ReactionDispatcher {
                         }),
                     }),
                     Err(error) => {
-                        dispatch_error_count += 1;
+                        counts.dispatch_error_count += 1;
                         results.push(ReactionResult {
                             rule_name: rule.name.clone(),
                             success: false,
                             target_status: None,
                             error: Some(error),
+                            failure: Some(ReactionFailureKind::AuthorizationContextInvalid),
+                            decision_id: None,
                             depth,
                         });
                         continue;
@@ -381,7 +386,9 @@ impl ReactionDispatcher {
             match dispatch_result {
                 Ok(response) => {
                     let target_status = response.state.status.clone();
-                    let descendant_error = if response.success && bound_delivery.is_some() {
+                    let (descendant_error, descendant_failure) = if response.success
+                        && bound_delivery.is_some()
+                    {
                         match state
                             .materialize_committed_reaction_intents(
                                 tenant,
@@ -405,27 +412,39 @@ impl ReactionDispatcher {
                                             success: false,
                                             target_status: Some(target_status),
                                             error: Some(error),
+                                            failure: Some(
+                                                ReactionFailureKind::PostCommitDescendantFailure,
+                                            ),
+                                            decision_id: None,
                                             depth,
                                         }];
                                     }
                                 } else if !intents.is_empty() {
                                     self.notify_recovery(tenant);
                                 }
-                                None
+                                (None, None)
                             }
-                            Err(error) => Some(error.to_string()),
+                            Err(error) => (
+                                Some(error.to_string()),
+                                Some(ReactionFailureKind::PostCommitDescendantFailure),
+                            ),
                         }
                     } else {
-                        None
+                        (None, None)
                     };
                     if response.success && descendant_error.is_none() {
-                        success_count += 1;
+                        counts.success_count += 1;
                     }
                     results.push(ReactionResult {
                         rule_name: rule.name.clone(),
                         success: response.success && descendant_error.is_none(),
                         target_status: Some(target_status.clone()),
                         error: descendant_error.or_else(|| response.error.clone()),
+                        failure: descendant_failure.or_else(|| {
+                            (!response.success)
+                                .then_some(ReactionFailureKind::TargetTransitionRejected)
+                        }),
+                        decision_id: None,
                         depth,
                     });
 
@@ -449,7 +468,8 @@ impl ReactionDispatcher {
                     }
                 }
                 Err(e) => {
-                    dispatch_error_count += 1;
+                    let failure = reaction_dispatch_failure(&e);
+                    counts.dispatch_error_count += 1;
                     tracing::warn!(
                         rule = rule.name,
                         error = %e,
@@ -460,22 +480,16 @@ impl ReactionDispatcher {
                         success: false,
                         target_status: None,
                         error: Some(e.to_string()),
+                        failure: Some(failure),
+                        decision_id: None,
                         depth,
                     });
                 }
             }
         }
 
-        record_reaction_fanout_span(ReactionFanoutCounts {
-            rule_count,
-            fired_count,
-            guard_skipped_count,
-            target_resolve_error_count,
-            authz_denied_count,
-            dispatch_error_count,
-            success_count,
-            result_count: results.len(),
-        });
+        counts.result_count = results.len();
+        record_reaction_fanout_span(counts);
 
         results
     }

@@ -6,7 +6,23 @@ use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::{StreamCapabilityMutabilityV1, verify_stream_capabilities_v1};
 
 use super::super::BoundDelivery;
-use crate::trigger::types::ReactionRule;
+use crate::trigger::types::{ReactionFailureKind, ReactionResult, ReactionRule};
+
+pub(super) fn stream_provenance_failure(
+    rule_name: &str,
+    error: String,
+    depth: u32,
+) -> ReactionResult {
+    ReactionResult {
+        rule_name: rule_name.to_string(),
+        success: false,
+        target_status: None,
+        error: Some(error),
+        failure: Some(ReactionFailureKind::DispatchConflict),
+        decision_id: None,
+        depth,
+    }
+}
 
 pub(super) fn immutable_version_metadata(
     state: &crate::ServerState,
@@ -109,6 +125,16 @@ mod tests {
     use super::*;
     use crate::registry::SpecRegistry;
     use crate::trigger::types::{ReactionTarget, ReactionTrigger, TargetResolver};
+
+    #[test]
+    fn provenance_rejection_is_a_typed_dispatch_conflict() {
+        let result = stream_provenance_failure("version-stream", "contract mismatch".into(), 2);
+
+        assert!(!result.success);
+        assert_eq!(result.failure, Some(ReactionFailureKind::DispatchConflict));
+        assert_eq!(result.decision_id, None);
+        assert_eq!(result.depth, 2);
+    }
 
     #[test]
     fn verified_create_reaction_mints_immutable_child_descriptor() {

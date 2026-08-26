@@ -50,7 +50,7 @@ pub(super) fn map_invoke_error(
         _ => {
             let err = error.to_string();
             record_failure(context, needs_wasi, duration_ms, err.as_str());
-            WasmError::Invocation(err)
+            WasmError::GuestExecution(err)
         }
     }
 }
@@ -84,7 +84,7 @@ pub(super) fn parse_result_json(
     serde_json::from_str(result_json).map_err(|error| {
         let message = format!("failed to parse result JSON: {error}");
         record_failure(context, needs_wasi, duration_ms as f64, &message);
-        WasmError::Invocation(message)
+        WasmError::GuestExecution(message)
     })
 }
 

@@ -146,12 +146,18 @@ impl TransitionTable {
             );
         }
 
+        let failure_routes = match temper_spec::automaton::resolve_failure_routes(automaton) {
+            Ok(routes) => routes,
+            Err(error) => panic!("validated automaton has invalid failure routes: {error}"),
+        };
+
         TransitionTable {
             entity_name: automaton.automaton.name.clone(),
             states: automaton.automaton.states.clone(),
             initial_state: automaton.automaton.initial.clone(),
             schema_digest: None,
             state_timeouts: automaton.state_timeouts.clone(),
+            failure_routes,
             rules,
             keys: automaton
                 .keys

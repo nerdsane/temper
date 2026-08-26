@@ -1,8 +1,9 @@
 use super::{
-    DeliveryKind, PersistedReactionIntent, REACTION_INTENTS_FIELD, ReactionDeliveryRecord,
-    ReactionDeliveryStatus, ReactionReceipt, append_delivery_record, attach_intents,
-    attach_receipt, delivery_journal_id, extract_intents, extract_receipt, load_delivery_record,
-    stable_delivery_id, state_timeout_intents,
+    DeliveryKind, DurableFailureKind, PersistedReactionIntent, REACTION_INTENTS_FIELD,
+    ReactionDeliveryRecord, ReactionDeliveryStatus, ReactionReceipt, append_delivery_record,
+    attach_intents, attach_receipt, delivery_failure_envelope, delivery_journal_id,
+    extract_intents, extract_receipt, load_delivery_record, stable_delivery_id,
+    state_timeout_intents,
 };
 use chrono::{Duration, TimeZone, Utc};
 use serde_json::json;
@@ -38,6 +39,7 @@ params = { reason = "deadline" }
 "#;
 
 use crate::storage::BoxedEventStore;
+use crate::trigger::ReactionFailureKind;
 
 fn intent() -> PersistedReactionIntent {
     PersistedReactionIntent {
@@ -65,6 +67,54 @@ fn intent() -> PersistedReactionIntent {
         collection: None,
         schema_pin: None,
     }
+}
+
+#[test]
+fn acknowledgement_loss_is_ambiguous_and_uses_durable_identity() {
+    let intent = intent();
+    let envelope = delivery_failure_envelope(
+        &intent,
+        5,
+        DurableFailureKind::Reaction(ReactionFailureKind::AcknowledgementLost),
+        Some("diagnostic only"),
+        None,
+    )
+    .expect("valid envelope");
+
+    assert_eq!(
+        envelope.category,
+        temper_failure::FailureCategory::Ambiguous
+    );
+    assert_eq!(envelope.outcome, temper_failure::FailureOutcome::Unknown);
+    assert_eq!(envelope.operation.id.as_str(), intent.delivery_id);
+    assert_eq!(envelope.operation.attempt.get(), 5);
+    assert_eq!(
+        envelope.provenance.source,
+        temper_failure::FailureSource::Reaction
+    );
+    assert!(envelope.message.is_some());
+}
+
+#[test]
+fn authorization_denial_retains_bounded_decision_identity() {
+    let intent = intent();
+    let envelope = delivery_failure_envelope(
+        &intent,
+        1,
+        DurableFailureKind::Reaction(ReactionFailureKind::AuthorizationDenied),
+        Some("diagnostic only"),
+        Some("cedar:policies:policy-a,policy-b"),
+    )
+    .expect("valid authorization envelope");
+
+    assert_eq!(
+        envelope.category,
+        temper_failure::FailureCategory::Authorization
+    );
+    assert_eq!(
+        serde_json::to_value(&envelope).expect("serializable envelope")["details"]["decision_id"]["value"],
+        "cedar:policies:policy-a,policy-b"
+    );
 }
 
 fn timeout_intents(
@@ -296,9 +346,20 @@ fn lifecycle_uses_fenced_leases_and_bounds_manual_retry() {
     delivery
         .dead_letter(second_fence, true, "temporary outage")
         .unwrap();
+    delivery.failure = Some(
+        delivery_failure_envelope(
+            &delivery.intent,
+            delivery.attempts,
+            DurableFailureKind::Reaction(ReactionFailureKind::MailboxCapacityExhausted),
+            delivery.last_error.as_deref(),
+            None,
+        )
+        .expect("valid transient envelope"),
+    );
 
     for expected in 1..=3 {
         assert_eq!(delivery.request_manual_retry().unwrap(), expected);
+        assert!(delivery.failure.is_none());
         delivery.status = ReactionDeliveryStatus::DeadLettered;
         delivery.transient_failure = true;
     }

@@ -6,7 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+pub use temper_failure::FailureCategory;
 
+use super::ResolvedFailureRoute;
 use super::field_invariant::FieldInvariant;
 
 /// Return whether a field name is owned by the runtime rather than an action.
@@ -490,6 +492,10 @@ pub struct Integration {
     /// Action to dispatch on failed WASM execution (required when `type = "wasm"`).
     #[serde(default)]
     pub on_failure: Option<String>,
+    /// Resolved typed failure routes for an inline action trigger.
+    /// Legacy top-level integrations leave this empty.
+    #[serde(default, skip_deserializing)]
+    pub failure_routes: Vec<ResolvedFailureRoute>,
     /// Marks this integration as an LLM call. The dispatcher upgrades matching
     /// spans to an LLM-kind root span so `gen_ai.*` content surfaces correctly
     /// in observability backends (e.g., Datadog LLM Obs). Defaults to false.
@@ -938,6 +944,10 @@ pub struct ActionTrigger {
     /// Action to dispatch on the source entity on failed module execution.
     #[serde(default)]
     pub on_failure: Option<String>,
+    /// Typed v1 failure-category routes. These cannot be mixed with the legacy
+    /// free-form `on_failure` callback.
+    #[serde(default)]
+    pub failure_routes: Vec<FailureRoute>,
     /// Arbitrary config passed to the WASM module at invocation time.
     /// Common keys: `url`, `method`, `headers`, `api_key_ref`.
     #[serde(default)]
@@ -967,6 +977,22 @@ pub struct ActionTrigger {
     /// resolved from the source entity's post-action fields.
     #[serde(default)]
     pub body_template: Option<String>,
+}
+
+/// A typed failure-category route on an outgoing action trigger.
+///
+/// Exactly one of `action` or `to_state` must be declared. State shorthand is
+/// accepted only when it resolves to one ordinary callback action.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FailureRoute {
+    /// Closed v1 category selecting this route.
+    pub category: FailureCategory,
+    /// Explicit callback action on the source entity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// Destination-state shorthand resolved to one callback action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_state: Option<String>,
 }
 
 #[cfg(test)]

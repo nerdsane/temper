@@ -6743,6 +6743,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "temper-failure"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "temper-jit"
 version = "0.1.0"
 dependencies = [
@@ -6966,6 +6975,7 @@ dependencies = [
  "temper-authz",
  "temper-codegen",
  "temper-evolution",
+ "temper-failure",
  "temper-jit",
  "temper-observe",
  "temper-odata",
@@ -7006,6 +7016,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "temper-failure",
  "thiserror 2.0.18",
  "toml",
  "tracing",
@@ -7121,6 +7132,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "temper-failure",
  "temper-observe",
  "temper-wasm-sdk",
  "thiserror 2.0.18",
@@ -7142,6 +7154,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "temper-failure",
 ]
 
 [[package]]

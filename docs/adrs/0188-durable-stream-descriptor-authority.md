@@ -1,4 +1,4 @@
-# ADR-0187: Durable Stream Descriptor Authority
+# ADR-0188: Durable Stream Descriptor Authority
 
 - Status: Proposed
 - Date: 2026-08-26

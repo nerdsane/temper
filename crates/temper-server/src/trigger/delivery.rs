@@ -8,9 +8,11 @@ use temper_runtime::scheduler::{sim_now, sim_uuid};
 use super::types::ReactionRule;
 use crate::storage::BoxedEventStore;
 
+mod failure;
 mod identity;
 mod payload;
 mod state_timeout;
+pub(crate) use failure::{DurableFailureKind, delivery_failure_envelope};
 pub use identity::stable_delivery_id;
 pub use payload::{attach_intents, attach_receipt, extract_intents, extract_receipt};
 pub(crate) use state_timeout::state_timeout_declaration_id;
@@ -191,6 +193,9 @@ pub struct ReactionDeliveryRecord {
     pub transient_failure: bool,
     /// Sanitized last failure reason.
     pub last_error: Option<String>,
+    /// Canonical typed failure for the latest terminal unsuccessful outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<temper_failure::FailureEnvelopeV1>,
 }
 
 impl ReactionDeliveryRecord {
@@ -207,6 +212,7 @@ impl ReactionDeliveryRecord {
             next_attempt_at,
             transient_failure: false,
             last_error: None,
+            failure: None,
         }
     }
 
@@ -264,6 +270,7 @@ impl ReactionDeliveryRecord {
         self.lease_expires_at = None;
         self.transient_failure = transient;
         self.last_error = Some(error.to_string());
+        self.failure = None;
         Ok(())
     }
 
@@ -285,6 +292,7 @@ impl ReactionDeliveryRecord {
         self.status = ReactionDeliveryStatus::Pending;
         self.transient_failure = false;
         self.last_error = None;
+        self.failure = None;
         self.next_attempt_at = None;
         Ok(self.manual_retries)
     }
