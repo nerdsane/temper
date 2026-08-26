@@ -18,6 +18,8 @@ pub(super) enum WasmFailure {
     Setup(String),
     /// An unsuccessful legacy guest result with no typed source variant.
     Legacy(String),
+    /// Bounded application facts declared by a WASM guest.
+    Guest(temper_failure::GuestFailureDeclarationV1),
 }
 
 impl WasmFailure {
@@ -28,12 +30,22 @@ impl WasmFailure {
             | Self::Setup(diagnostic)
             | Self::Legacy(diagnostic) => diagnostic.clone(),
             Self::Engine(error) => error.to_string(),
+            Self::Guest(declaration) => format!(
+                "typed guest failure category={:?} code={}",
+                declaration.category,
+                declaration.code.as_str()
+            ),
         }
     }
 
     /// Whether this failure came from the structured authorization tracker.
     pub(super) const fn is_authorization(&self) -> bool {
         matches!(self, Self::Authorization(_))
+    }
+
+    /// Whether diagnostic/details originated in an untrusted guest declaration.
+    pub(super) const fn has_guest_owned_content(&self) -> bool {
+        matches!(self, Self::Guest(_))
     }
 
     /// Adapt the source without inspecting its diagnostic text.
@@ -101,6 +113,24 @@ impl WasmFailure {
                 )?
                 .with_diagnostic(diagnostic))
             }
+            Self::Guest(declaration) => {
+                let provenance = FailureProvenanceV1 {
+                    source: FailureSource::Wasm,
+                    component: ProvenanceToken::new("wasm-guest")?,
+                    source_code: Some(ProvenanceToken::new("GuestDeclaredFailure")?),
+                };
+                let mut envelope = FailureEnvelopeV1::new(
+                    declaration.category,
+                    declaration.code,
+                    declaration.retryability,
+                    declaration.outcome,
+                    operation,
+                    provenance,
+                )?;
+                envelope.message = declaration.diagnostic;
+                envelope.details = declaration.details;
+                Ok(envelope)
+            }
         }
     }
 }
@@ -153,6 +183,10 @@ const fn category_name(category: FailureCategory) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use temper_failure::{
+        BoundedDetailString, DetailKey, FailureDetailValue, GuestFailureDeclarationV1,
+        StableFailureCode,
+    };
     use temper_spec::automaton::ResolvedFailureRoute;
 
     fn integration(routes: Vec<ResolvedFailureRoute>) -> Integration {
@@ -236,5 +270,81 @@ mod tests {
 
         assert_eq!(encoded(42), encoded(42));
         assert_ne!(encoded(42), encoded(43));
+    }
+
+    #[test]
+    fn guest_declaration_gains_only_kernel_owned_identity_and_provenance() {
+        let mut declaration = GuestFailureDeclarationV1::new(
+            FailureCategory::Authorization,
+            StableFailureCode::new("ApprovalRequired").expect("valid code"),
+            FailureRetryability::AfterAuthorization,
+            FailureOutcome::NotApplied,
+        )
+        .expect("valid declaration")
+        .with_diagnostic("private provider diagnostic")
+        .expect("bounded diagnostic");
+        declaration
+            .try_insert_detail(
+                DetailKey::new("provider_token").expect("valid key"),
+                FailureDetailValue::String(
+                    BoundedDetailString::new("private-value").expect("bounded value"),
+                ),
+            )
+            .expect("bounded detail");
+
+        let envelope = WasmFailure::Guest(declaration)
+            .into_envelope(Some("dispatch:guest:1"), scope("guest-declaration"), None)
+            .expect("guest declaration should adapt");
+
+        assert_eq!(envelope.category, FailureCategory::Authorization);
+        assert_eq!(envelope.code.as_str(), "ApprovalRequired");
+        assert_eq!(
+            envelope.retryability,
+            FailureRetryability::AfterAuthorization
+        );
+        assert_eq!(envelope.outcome, FailureOutcome::NotApplied);
+        assert_eq!(envelope.provenance.source, FailureSource::Wasm);
+        assert_eq!(envelope.provenance.component.as_str(), "wasm-guest");
+        assert_eq!(
+            envelope
+                .provenance
+                .source_code
+                .as_ref()
+                .map(ProvenanceToken::as_str),
+            Some("GuestDeclaredFailure")
+        );
+        assert_eq!(
+            envelope.message.as_ref().map(|value| value.as_str()),
+            Some("private provider diagnostic")
+        );
+        assert_eq!(envelope.details.values().len(), 1);
+        assert_eq!(envelope.operation.attempt.get(), 1);
+    }
+
+    #[test]
+    fn guest_causal_identity_is_deterministic_and_scope_bound() {
+        let envelope = |entity_id: &'static str| {
+            WasmFailure::Guest(
+                GuestFailureDeclarationV1::new(
+                    FailureCategory::Budget,
+                    StableFailureCode::new("QuotaExhausted").expect("valid code"),
+                    FailureRetryability::Never,
+                    FailureOutcome::NotApplied,
+                )
+                .expect("valid declaration"),
+            )
+            .into_envelope(
+                Some("dispatch:stable:1"),
+                ["default", "Payment", entity_id, "Charge", "guest"],
+                None,
+            )
+            .expect("guest declaration should adapt")
+        };
+
+        let first = envelope("payment-1");
+        let repeated = envelope("payment-1");
+        let other = envelope("payment-2");
+        assert_eq!(first.operation, repeated.operation);
+        assert_ne!(first.operation.id, other.operation.id);
     }
 }

@@ -16,7 +16,9 @@ pub mod types;
 mod workflow_headers;
 
 pub use authorized_host::{AuthorizedWasmHost, WasmAuthzDecision, WasmAuthzGate, extract_domain};
-pub use engine::{PureMigrationError, PureMigrationLimits, WasmEngine, WasmError};
+pub use engine::{
+    InvalidGuestResultKind, PureMigrationError, PureMigrationLimits, WasmEngine, WasmError,
+};
 pub use failure::adapt_wasm_error;
 pub use host_trait::{
     BinaryHttpInterceptorFn, InternalHttpCapability, InternalHttpCapabilityIssuerFn,
@@ -26,5 +28,6 @@ pub use host_trait::{
 };
 pub use stream::{StreamRegistry, StreamRegistryConfig};
 pub use types::{
-    WasmAuthzContext, WasmInvocationContext, WasmInvocationResult, WasmResourceLimits,
+    MAX_WASM_RESULT_BYTES_V1, WasmAuthzContext, WasmInvocationContext, WasmInvocationResult,
+    WasmResourceLimits,
 };

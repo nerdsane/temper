@@ -102,6 +102,9 @@ pub struct WasmInvocationResult {
     pub success: bool,
     /// Error message if the integration failed.
     pub error: Option<String>,
+    /// Guest-declared typed application facts, when this is a typed failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typed_failure: Option<temper_failure::GuestFailureDeclarationV1>,
     /// Execution duration in milliseconds.
     pub duration_ms: u64,
 }
@@ -134,6 +137,9 @@ impl Default for WasmResourceLimits {
 
 /// Maximum WASM module size (TigerStyle budget). 10 MB.
 pub const MAX_MODULE_SIZE: usize = 10 * 1024 * 1024;
+
+/// Maximum serialized terminal result accepted from a WASM guest (1 MiB).
+pub const MAX_WASM_RESULT_BYTES_V1: usize = 1024 * 1024;
 
 /// Authorization context for WASM host function calls.
 ///
@@ -299,6 +305,7 @@ mod tests {
             callback_params: serde_json::json!({"ref": "tx-123"}),
             success: true,
             error: None,
+            typed_failure: None,
             duration_ms: 250,
         };
         let json = serde_json::to_string(&result).unwrap();

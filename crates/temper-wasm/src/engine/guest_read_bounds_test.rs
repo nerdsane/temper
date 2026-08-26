@@ -70,10 +70,12 @@ async fn forged_result_length_is_rejected_before_allocating() {
         .expect_err("a forged result length must be rejected");
     let large_allocs = LARGE_ALLOCS.load(Ordering::SeqCst) - before;
 
-    let message = format!("{err:?}");
     assert!(
-        message.contains("result length exceeds guest linear memory"),
-        "expected the bounds check to reject before allocating, got: {message}"
+        matches!(
+            err,
+            WasmError::InvalidGuestResult(InvalidGuestResultKind::ResultTooLarge)
+        ),
+        "expected the result budget to reject before allocating, got: {err:?}"
     );
     // Ordering, not just rejection: moving the allocation above the guard would
     // still produce the error above, but would trip the counter.
@@ -104,10 +106,12 @@ async fn result_length_overrunning_memory_end_is_rejected() {
         .await
         .expect_err("a result range running past the end of memory must be rejected");
 
-    let message = format!("{err:?}");
     assert!(
-        message.contains("result length exceeds guest linear memory"),
-        "expected the range check to reject ptr+len past the end, got: {message}"
+        matches!(
+            err,
+            WasmError::InvalidGuestResult(InvalidGuestResultKind::OutOfBounds)
+        ),
+        "expected the range check to reject ptr+len past the end, got: {err:?}"
     );
 }
 
@@ -231,8 +235,13 @@ async fn oversized_host_bytes_read_is_rejected_before_allocating() {
     let large_allocs = LARGE_ALLOCS.load(Ordering::SeqCst) - before;
 
     assert!(
-        result.is_ok(),
-        "the guest itself must run cleanly: {result:?}"
+        matches!(
+            result,
+            Err(WasmError::InvalidGuestResult(
+                InvalidGuestResultKind::AbsentResult
+            ))
+        ),
+        "the guest must reach terminal-result validation cleanly: {result:?}"
     );
     assert_eq!(
         large_allocs, 0,
@@ -263,10 +272,15 @@ async fn oversized_host_read_is_rejected_before_allocating() {
         .await;
     let large_allocs = LARGE_ALLOCS.load(Ordering::SeqCst) - before;
 
-    // The guest asserts it got -1 back, so a successful invocation proves the
-    // read was refused rather than served.
+    // The guest asserts it got -1 back, so reaching terminal-result validation
+    // proves the read was refused rather than served.
     assert!(
-        result.is_ok(),
+        matches!(
+            result,
+            Err(WasmError::InvalidGuestResult(
+                InvalidGuestResultKind::AbsentResult
+            ))
+        ),
         "host must return the error sentinel for an out-of-bounds read: {result:?}"
     );
     // And it was refused *before* allocating the guest-chosen 64 MiB.
