@@ -65,6 +65,46 @@ on_success = "EchoSucceeded"
 on_failure = "EchoFailed"
 "#;
 
+const TYPED_ECHO_IOA: &str = r#"
+[automaton]
+name = "EchoTest"
+states = ["Idle", "Pending", "Done", "Failed"]
+initial = "Idle"
+
+[[action]]
+name = "TriggerEcho"
+kind = "input"
+from = ["Idle"]
+to = "Pending"
+
+[[action.triggers]]
+name = "echo_integration"
+kind = "wasm"
+module = "echo_integration"
+on_success = "EchoSucceeded"
+
+[[action.triggers.failure_routes]]
+category = "authorization"
+action = "EchoFailed"
+
+[[action.triggers.failure_routes]]
+category = "integrity"
+action = "EchoFailed"
+
+[[action]]
+name = "EchoSucceeded"
+kind = "input"
+from = ["Pending"]
+to = "Done"
+
+[[action]]
+name = "EchoFailed"
+kind = "input"
+from = ["Pending"]
+to = "Failed"
+params = [{ name = "failure", type = "failure_v1" }]
+"#;
+
 /// Minimal CSDL with EchoTest entity type.
 const ECHO_CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
@@ -83,13 +123,17 @@ const ECHO_CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 </edmx:Edmx>"#;
 
 fn build_echo_test_state() -> ServerState {
+    build_echo_test_state_from_ioa(ECHO_IOA)
+}
+
+fn build_echo_test_state_from_ioa(ioa: &str) -> ServerState {
     let mut registry = SpecRegistry::new();
     let csdl = parse_csdl(ECHO_CSDL_XML).expect("CSDL should parse");
     registry.register_tenant(
         "default",
         csdl,
         ECHO_CSDL_XML.to_string(),
-        &[("EchoTest", ECHO_IOA)],
+        &[("EchoTest", ioa)],
     );
 
     let system = ActorSystem::new("wasm-dispatch-test");
@@ -183,6 +227,10 @@ async fn persist_active_scoped_echo_bundle(
 /// persisted artifacts (decisions, trajectories, invocations) can be
 /// queried after dispatch.
 async fn build_echo_test_state_with_turso() -> ServerState {
+    build_echo_test_state_with_turso_from_ioa(ECHO_IOA).await
+}
+
+async fn build_echo_test_state_with_turso_from_ioa(ioa: &str) -> ServerState {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock should be after UNIX epoch")
@@ -205,7 +253,7 @@ async fn build_echo_test_state_with_turso() -> ServerState {
     let turso = TursoEventStore::new(&db_url, None)
         .await
         .expect("create local turso db");
-    let mut state = build_echo_test_state();
+    let mut state = build_echo_test_state_from_ioa(ioa);
     state.set_storage_stack(StorageStack::from_turso(turso));
     state.data_dir = data_dir;
     state
@@ -781,6 +829,45 @@ async fn wasm_missing_module_dispatches_failure_callback() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn typed_wasm_setup_failure_routes_integrity_with_redacted_observation() {
+    let state = build_echo_test_state_from_ioa(TYPED_ECHO_IOA);
+    let tenant = TenantId::default();
+    let agent_ctx = AgentContext::default();
+
+    let response = state
+        .dispatch_tenant_action_ext(
+            &tenant,
+            "EchoTest",
+            "echo-typed-setup",
+            "TriggerEcho",
+            serde_json::json!({}),
+            DispatchExtOptions {
+                agent_ctx: &agent_ctx,
+                await_integration: true,
+                await_reactions: true,
+            },
+        )
+        .await
+        .expect("typed setup failure should route");
+
+    assert!(response.success);
+    assert_eq!(response.state.status, "Failed");
+    let log = state.entity_observe_log.lock().expect("observe log");
+    let event = log
+        .get("default:EchoTest:echo-typed-setup")
+        .and_then(|events| {
+            events
+                .iter()
+                .find(|event| event.event_name == "typed_integration_failure")
+        })
+        .expect("typed setup observation");
+    assert_eq!(event.data["failure"]["category"], "integrity");
+    assert_eq!(event.data["failure"]["code"], "WasmModuleNotFound");
+    assert!(event.data["failure"].get("message").is_none());
+    assert_eq!(event.data["failure"]["diagnostic_redacted"], true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn wasm_authz_denial_records_governance_artifacts_async_mode() {
     let state = build_echo_test_state_with_turso().await;
     let tenant = TenantId::default();
@@ -861,4 +948,81 @@ async fn wasm_authz_denial_records_governance_artifacts_blocking_mode() {
     assert!(response.success);
     assert_eq!(response.state.status, "Failed");
     assert_wasm_authz_denial_artifacts(&state, "echo-authz-blocking").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn typed_wasm_authorization_failure_routes_with_decision_provenance() {
+    let state = build_echo_test_state_with_turso_from_ioa(TYPED_ECHO_IOA).await;
+    let tenant = TenantId::default();
+    install_non_wasm_policy(&state);
+
+    let hash = state
+        .wasm_engine
+        .compile_and_cache(ECHO_WASM)
+        .expect("echo module should compile");
+    state
+        .wasm_module_registry
+        .write()
+        .expect("wasm registry lock")
+        .register(&tenant, "echo_integration", &hash);
+
+    let agent_ctx = AgentContext::default();
+    let response = state
+        .dispatch_tenant_action_ext(
+            &tenant,
+            "EchoTest",
+            "echo-typed-authz",
+            "TriggerEcho",
+            serde_json::json!({}),
+            DispatchExtOptions {
+                agent_ctx: &agent_ctx,
+                await_integration: true,
+                await_reactions: true,
+            },
+        )
+        .await
+        .expect("typed authorization failure should route");
+
+    assert!(response.success);
+    assert_eq!(response.state.status, "Failed");
+    let failure = {
+        let log = state.entity_observe_log.lock().expect("observe log");
+        log.get("default:EchoTest:echo-typed-authz")
+            .and_then(|events| {
+                events
+                    .iter()
+                    .find(|event| event.event_name == "typed_integration_failure")
+            })
+            .map(|event| event.data["failure"].clone())
+            .expect("typed authorization observation")
+    };
+    assert_eq!(failure["category"], "authorization");
+    assert_eq!(failure["code"], "AuthorizationDenied");
+    assert_eq!(failure["provenance"]["source"], "authorization");
+    let decision_id = failure["details"]["decision_id"]["value"]
+        .as_str()
+        .filter(|decision_id| !decision_id.is_empty())
+        .expect("bounded decision identity")
+        .to_string();
+    assert!(failure.get("message").is_none());
+    let turso = state
+        .platform_turso_store()
+        .expect("Turso backend required for typed decision verification");
+    let mut persisted = None;
+    for _ in 0..100 {
+        persisted = turso
+            .query_all_decisions(None)
+            .await
+            .expect("query typed decision")
+            .iter()
+            .filter_map(|data| serde_json::from_str::<PendingDecision>(data).ok())
+            .find(|decision| decision.id == decision_id);
+        if persisted.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let persisted = persisted.expect("typed envelope decision identity must resolve durably");
+    assert_eq!(persisted.action, "http_call");
+    assert_eq!(persisted.module_name.as_deref(), Some("echo_integration"));
 }

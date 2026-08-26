@@ -227,8 +227,52 @@ pub struct ReactionResult {
     pub target_status: Option<String>,
     /// Error message if the action failed.
     pub error: Option<String>,
+    /// Structured delivery failure used for retry and envelope classification.
+    /// Diagnostic text is never inspected to derive this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<ReactionFailureKind>,
+    /// Stable decision identity for an authorization denial. Envelope
+    /// construction applies the bounded safe-detail contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_id: Option<String>,
     /// The cascade depth at which this reaction fired.
     pub depth: u32,
+}
+
+/// Closed source facts for a failed reaction target delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactionFailureKind {
+    /// The declared target identifier could not be resolved.
+    TargetResolution,
+    /// Target state required for authorization could not be loaded.
+    TargetSnapshotUnavailable,
+    /// Cedar denied the target action.
+    AuthorizationDenied,
+    /// The authorization request or persisted authority was malformed.
+    AuthorizationContextInvalid,
+    /// The authorization engine could not decide the request.
+    AuthorizationEngineUnavailable,
+    /// The durable target rejected the requested transition.
+    TargetTransitionRejected,
+    /// The actor mailbox rejected the message before dispatch.
+    MailboxCapacityExhausted,
+    /// Dispatch began but its acknowledgement was not received.
+    AcknowledgementLost,
+    /// Admission control deferred the operation before dispatch.
+    DispatchDeferred,
+    /// A tenant or owner operation budget was exhausted.
+    DispatchBudgetExhausted,
+    /// The target schema or expected sequence did not match.
+    DispatchConflict,
+    /// No governed target schema exists.
+    TargetUngoverned,
+    /// The actor permanently rejected delivery before a successful reply.
+    ActorPermanentlyUnavailable,
+    /// A legacy dispatch boundary returned an untyped failure.
+    LegacyDispatchFailure,
+    /// The target committed but durable descendant work could not be materialized.
+    PostCommitDescendantFailure,
 }
 
 #[cfg(test)]

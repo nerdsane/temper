@@ -179,6 +179,8 @@ impl SimReactionSystem {
                             success: false,
                             target_status: None,
                             error: Some("Could not resolve target entity ID".to_string()),
+                            failure: Some(super::types::ReactionFailureKind::TargetResolution),
+                            decision_id: None,
                             depth,
                         });
                         continue;
@@ -195,6 +197,8 @@ impl SimReactionSystem {
                         success: false,
                         target_status: None,
                         error: Some(format!("No actor found for {target_key}")),
+                        failure: Some(super::types::ReactionFailureKind::TargetUngoverned),
+                        decision_id: None,
                         depth,
                     });
                     continue;
@@ -217,6 +221,10 @@ impl SimReactionSystem {
                         success: false,
                         target_status: None,
                         error: Some(format!("param serialization failed: {e}")),
+                        failure: Some(
+                            super::types::ReactionFailureKind::AuthorizationContextInvalid,
+                        ),
+                        decision_id: None,
                         depth,
                     });
                     continue;
@@ -234,6 +242,8 @@ impl SimReactionSystem {
                         success: true,
                         target_status: Some(target_status.clone()),
                         error: None,
+                        failure: None,
+                        decision_id: None,
                         depth,
                     });
 
@@ -258,6 +268,8 @@ impl SimReactionSystem {
                         success: false,
                         target_status: None,
                         error: Some(e),
+                        failure: Some(super::types::ReactionFailureKind::TargetTransitionRejected),
+                        decision_id: None,
                         depth,
                     });
                 }

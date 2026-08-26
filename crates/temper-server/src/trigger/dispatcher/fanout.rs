@@ -1,14 +1,20 @@
 //! Reaction rule evaluation, authorization, dispatch, and telemetry.
 
 mod entry;
+mod failure;
+mod principal;
 mod telemetry;
 
 use crate::request_context::AgentContext;
 use crate::trigger::{guard, params, resolver};
 use temper_runtime::tenant::TenantId;
 
-use super::super::types::{MAX_REACTION_DEPTH, ReactionResult, ReactionRule};
+use super::super::types::{MAX_REACTION_DEPTH, ReactionFailureKind, ReactionResult, ReactionRule};
 use super::{BoundDelivery, ReactionDispatcher, effective_trigger_security_context};
+use failure::{
+    reaction_authorization_decision_id, reaction_authorization_failure, reaction_dispatch_failure,
+};
+use principal::resolve_trigger_principal;
 use telemetry::{ReactionFanoutCounts, record_reaction_fanout_span};
 
 impl ReactionDispatcher {
@@ -117,6 +123,8 @@ impl ReactionDispatcher {
                         success: false,
                         target_status: None,
                         error: Some("Could not resolve target entity ID".to_string()),
+                        failure: Some(ReactionFailureKind::TargetResolution),
+                        decision_id: None,
                         depth,
                     });
                     continue;
@@ -203,6 +211,8 @@ impl ReactionDispatcher {
                         success: false,
                         target_status: None,
                         error: Some(e),
+                        failure: Some(ReactionFailureKind::TargetSnapshotUnavailable),
+                        decision_id: None,
                         depth,
                     });
                     continue;
@@ -217,6 +227,8 @@ impl ReactionDispatcher {
                 &authz_resource_attrs,
                 tenant.as_str(),
             ) {
+                let failure = reaction_authorization_failure(&denial);
+                let decision_id = reaction_authorization_decision_id(&denial);
                 let reason = denial.to_string();
                 authz_denied_count += 1;
                 tracing::warn!(
@@ -233,6 +245,8 @@ impl ReactionDispatcher {
                     success: false,
                     target_status: Some(authz_status),
                     error: Some(reason),
+                    failure: Some(failure),
+                    decision_id,
                     depth,
                 });
                 continue;
@@ -320,6 +334,8 @@ impl ReactionDispatcher {
                             success: false,
                             target_status: None,
                             error: Some(error),
+                            failure: Some(ReactionFailureKind::AuthorizationContextInvalid),
+                            decision_id: None,
                             depth,
                         });
                         continue;
@@ -345,7 +361,9 @@ impl ReactionDispatcher {
             match dispatch_result {
                 Ok(response) => {
                     let target_status = response.state.status.clone();
-                    let descendant_error = if response.success && bound_delivery.is_some() {
+                    let (descendant_error, descendant_failure) = if response.success
+                        && bound_delivery.is_some()
+                    {
                         match state
                             .materialize_committed_reaction_intents(
                                 tenant,
@@ -369,18 +387,25 @@ impl ReactionDispatcher {
                                             success: false,
                                             target_status: Some(target_status),
                                             error: Some(error),
+                                            failure: Some(
+                                                ReactionFailureKind::PostCommitDescendantFailure,
+                                            ),
+                                            decision_id: None,
                                             depth,
                                         }];
                                     }
                                 } else if !intents.is_empty() {
                                     self.notify_recovery(tenant);
                                 }
-                                None
+                                (None, None)
                             }
-                            Err(error) => Some(error.to_string()),
+                            Err(error) => (
+                                Some(error.to_string()),
+                                Some(ReactionFailureKind::PostCommitDescendantFailure),
+                            ),
                         }
                     } else {
-                        None
+                        (None, None)
                     };
                     if response.success && descendant_error.is_none() {
                         success_count += 1;
@@ -390,6 +415,11 @@ impl ReactionDispatcher {
                         success: response.success && descendant_error.is_none(),
                         target_status: Some(target_status.clone()),
                         error: descendant_error.or_else(|| response.error.clone()),
+                        failure: descendant_failure.or_else(|| {
+                            (!response.success)
+                                .then_some(ReactionFailureKind::TargetTransitionRejected)
+                        }),
+                        decision_id: None,
                         depth,
                     });
 
@@ -413,6 +443,7 @@ impl ReactionDispatcher {
                     }
                 }
                 Err(e) => {
+                    let failure = reaction_dispatch_failure(&e);
                     dispatch_error_count += 1;
                     tracing::warn!(
                         rule = rule.name,
@@ -424,6 +455,8 @@ impl ReactionDispatcher {
                         success: false,
                         target_status: None,
                         error: Some(e.to_string()),
+                        failure: Some(failure),
+                        decision_id: None,
                         depth,
                     });
                 }
@@ -442,48 +475,5 @@ impl ReactionDispatcher {
         });
 
         results
-    }
-}
-
-/// Resolve an explicit reaction service principal or inherit the caller.
-fn resolve_trigger_principal(
-    declared_principal: Option<&str>,
-    invoking_ctx: &AgentContext,
-    rule_name: &str,
-    source_entity_type: &str,
-    source_entity_id: &str,
-    source_action: &str,
-) -> AgentContext {
-    match declared_principal {
-        Some(service_name) if !service_name.is_empty() => {
-            let mut ctx = AgentContext::for_service_inheriting(service_name, invoking_ctx);
-            // Preserve ADR-0048 behavior for declared reaction principals:
-            // existing trigger dispatch copied the caller's idempotency key.
-            ctx.idempotency_key = invoking_ctx.idempotency_key.clone();
-            if let Some(security_ctx) = ctx.security_ctx.as_mut() {
-                security_ctx.context_attrs.insert(
-                    "triggerRule".to_string(),
-                    serde_json::Value::String(rule_name.to_string()),
-                );
-                security_ctx.context_attrs.insert(
-                    "triggerSourceEntityType".to_string(),
-                    serde_json::Value::String(source_entity_type.to_string()),
-                );
-                security_ctx.context_attrs.insert(
-                    "triggerSourceEntityId".to_string(),
-                    serde_json::Value::String(source_entity_id.to_string()),
-                );
-                security_ctx.context_attrs.insert(
-                    "triggerSourceAction".to_string(),
-                    serde_json::Value::String(source_action.to_string()),
-                );
-                security_ctx.context_attrs.insert(
-                    "triggerDeclaredPrincipal".to_string(),
-                    serde_json::Value::Bool(true),
-                );
-            }
-            ctx
-        }
-        _ => invoking_ctx.clone(),
     }
 }

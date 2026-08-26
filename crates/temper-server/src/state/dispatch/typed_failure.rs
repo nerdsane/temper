@@ -123,19 +123,7 @@ impl crate::state::ServerState {
                 "seq": sequence,
                 "integration": integration_name,
                 "source_action": source_action,
-                "failure": {
-                    "version": envelope.version,
-                    "category": envelope.category,
-                    "code": envelope.code,
-                    "retryability": envelope.retryability,
-                    "outcome": envelope.outcome,
-                    "operation": envelope.operation,
-                    "provenance": envelope.provenance,
-                    "diagnostic_redacted": envelope.message.is_some()
-                        || envelope.diagnostic_omitted,
-                    "details": envelope.details,
-                    "details_omitted": envelope.details_omitted,
-                },
+                "failure": crate::failure_observation::redacted_failure_value(envelope),
             }),
         );
     }
