@@ -1,4 +1,4 @@
-# ADR-0184: Canonical Schema Default Materialization
+# ADR-0185: Canonical Schema Default Materialization
 
 - Status: Proposed
 - Date: 2026-08-25

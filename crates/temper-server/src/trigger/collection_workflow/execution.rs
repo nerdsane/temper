@@ -7,6 +7,7 @@ use super::{
 use crate::storage::BoxedEventStore;
 use crate::trigger::delivery::{ReactionDeliveryRecord, ReactionDeliveryStatus};
 
+mod metrics;
 mod outcome;
 mod receipt;
 mod timeout_binding;
@@ -63,7 +64,7 @@ pub(crate) async fn commit_activated_start(
     }
     timeout_binding::bind_timeout_from_source(record, &source_append, actions.timeout_action)?;
     let intents = activate_start(record, 0, actions)?;
-    super::commit_collection_start_with_intents(
+    let outcome = super::commit_collection_start_with_intents(
         store,
         source_append,
         intent,
@@ -72,7 +73,9 @@ pub(crate) async fn commit_activated_start(
         superseded_append.as_slice(),
     )
     .await
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    metrics::record_start_commit(&outcome, record);
+    Ok(outcome)
 }
 
 /// Atomically commit first-writer control and every cancellation/join intent
@@ -109,7 +112,7 @@ pub(crate) async fn commit_controlled(
                 .map_err(|error| error.to_string())?,
         );
     }
-    super::commit_collection_control_with_intents(
+    let outcome = super::commit_collection_control_with_intents(
         store,
         source_append,
         intent,
@@ -119,7 +122,9 @@ pub(crate) async fn commit_controlled(
         &delivery_appends,
     )
     .await
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    metrics::record_control_commit(&outcome, intent, record);
+    Ok(outcome)
 }
 
 /// Deterministically reconstruct the next missing execution intents from a
@@ -305,6 +310,14 @@ pub(crate) async fn commit_terminal_delivery(
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "collection workflow journal is missing".to_string())?;
+    let was_terminal = record.status.is_terminal();
+    let prior_member_status = context.member_id.as_deref().and_then(|member_id| {
+        record
+            .members
+            .iter()
+            .find(|member| member.member_id == member_id)
+            .map(|member| member.status)
+    });
     if context.role == CollectionDeliveryRole::Member
         && matching_receipt
         && let Some(member_id) = context.member_id.as_deref()
@@ -417,6 +430,7 @@ pub(crate) async fn commit_terminal_delivery(
     )
     .await
     .map_err(|error| error.to_string())?;
+    metrics::record_terminal_commit(was_terminal, prior_member_status, context, &record);
     Ok(true)
 }
 

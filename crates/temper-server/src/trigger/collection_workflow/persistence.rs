@@ -16,7 +16,9 @@ use super::{
 };
 use crate::storage::BoxedEventStore;
 use recovery::{SourceEvidence, commit_or_reconcile};
-pub(crate) use recovery::{list_collection_records_page, load_collection_record};
+pub(crate) use recovery::{
+    list_collection_records_page, list_collection_workflow_ids_page, load_collection_record,
+};
 use source::active_workflow_append;
 use source::{attach_active_workflow, ensure_source_journal};
 
@@ -309,6 +311,35 @@ pub(crate) async fn find_collection_intent(
     Ok(None)
 }
 
+/// Find a bounded set of collection-owned intents with one private-history scan.
+pub(crate) async fn find_collection_intents(
+    store: &BoxedEventStore,
+    record: &CollectionWorkflowRecordV1,
+    delivery_ids: &std::collections::BTreeSet<String>,
+) -> Result<
+    std::collections::BTreeMap<String, crate::trigger::delivery::PersistedReactionIntent>,
+    PersistenceError,
+> {
+    let persistence_id = collection_workflow_journal_id(&record.tenant, &record.workflow_id);
+    let events = store
+        .read_events_limited(&persistence_id, 0, MAX_COLLECTION_WORKFLOW_EVENTS)
+        .await?;
+    let mut found = std::collections::BTreeMap::new();
+    for event in events.iter().rev() {
+        let intents = crate::trigger::delivery::extract_intents(&event.payload)
+            .map_err(PersistenceError::Serialization)?;
+        for intent in intents {
+            if delivery_ids.contains(&intent.delivery_id) {
+                found.entry(intent.delivery_id.clone()).or_insert(intent);
+            }
+        }
+        if found.len() == delivery_ids.len() {
+            break;
+        }
+    }
+    Ok(found)
+}
+
 /// Recover the active workflow identity from its dedicated atomic pointer.
 pub(super) async fn active_source_workflow_id(
     store: &BoxedEventStore,
@@ -411,7 +442,8 @@ pub(crate) async fn commit_collection_delivery_outcome(
 
 use super::CollectionMutationOutcome;
 
-pub(super) fn workflow_append(
+/// Build one validated private workflow journal append.
+pub(crate) fn workflow_append(
     record: &CollectionWorkflowRecordV1,
     expected_sequence: u64,
     event_type: &str,

@@ -1,0 +1,7 @@
+struct FileId
+struct File
+struct FileClient
+const ENTITY_TYPE
+fn new
+fn get
+fn open_file_read

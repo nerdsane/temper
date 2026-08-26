@@ -35,6 +35,8 @@ fn manifest_property(
     }
 }
 
+mod file_capability_tests;
+
 pub(super) fn authenticated_router(state: ServerState, security: SecurityContext) -> Router {
     crate::build_router(state).layer(Extension(AuthenticatedRequestContext::new(
         TenantId::default(),
@@ -390,35 +392,6 @@ async fn cedar_still_denies_after_capability_and_schema_accept() {
         .await
         .unwrap();
     assert_eq!(odata.status(), StatusCode::FORBIDDEN);
-}
-
-#[tokio::test]
-async fn unrelated_entity_file_operations_cannot_authorize_file_content() {
-    let mut invocation = invocation(
-        BTreeSet::from([DataOperationKind::FileRead]),
-        SecurityContext::system(),
-    );
-    std::sync::Arc::get_mut(&mut invocation)
-        .expect("unshared fixture")
-        .authority
-        .binding
-        .grant
-        .entities[0]
-        .file_operations
-        .insert(FileOperationKind::ContentRead);
-    let response = call(
-        &invocation,
-        DataOperationV1::FileReadOpen {
-            file_id: "file-1".into(),
-            version_id: None,
-        },
-    )
-    .await;
-    assert_eq!(
-        response_error(response).code,
-        "FileCapabilityDenied",
-        "a non-File entity grant must not authorize hard-coded File actors"
-    );
 }
 
 #[tokio::test]

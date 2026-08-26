@@ -101,6 +101,10 @@ impl ReactionDispatcher {
             crate::runtime_metrics::record_reaction_delivery_lease_recovered(
                 intent.kind.metric_label(),
             );
+            if let Some(collection) = intent.collection.as_ref() {
+                let role = crate::runtime_metrics::collection_delivery_role_label(collection.role);
+                crate::runtime_metrics::record_collection_workflow_event("lease_recovered", role);
+            }
             sequence = match append_delivery_record(&store, sequence, &record).await {
                 Ok(sequence) => sequence,
                 Err(temper_runtime::persistence::PersistenceError::ConcurrencyViolation {
@@ -246,6 +250,14 @@ impl ReactionDispatcher {
                     intent.kind.metric_label(),
                     "reconciled",
                 );
+                if let Some(collection) = intent.collection.as_ref() {
+                    let role =
+                        crate::runtime_metrics::collection_delivery_role_label(collection.role);
+                    crate::runtime_metrics::record_collection_workflow_event(
+                        "duplicate_receipt",
+                        role,
+                    );
+                }
                 record.status = ReactionDeliveryStatus::Succeeded;
                 record.lease_expires_at = None;
                 record.last_error = None;
