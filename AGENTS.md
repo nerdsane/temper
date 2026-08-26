@@ -1,203 +1,72 @@
-# Temper — Codex Project Guide
+# Temper
 
-> Synchronized with `CLAUDE.md` (Claude Code) — same rules, agent-specific paths. When you change one, mirror the other. Global rules live in `~/AGENTS.md` / `~/.claude/CLAUDE.md`; this file adds what is temper-specific.
+The Temper kernel: specs, verification, runtime, server, stores, observe, evolution. **Kernel code only** - app and agent logic belongs in temperpaw; if you find it mixed in here, flag it, do not silently relocate it. Global rules (worktrees, PRs, reviews, Definition of Done) come from the stack layer; this file is what is temper-specific.
 
-## Scope & Naming
+Worktrees live under `~/Development/temper-worktrees/` (the primary at `~/Development/temper` is bare on purpose).
 
-- This repo is the **Temper kernel only**: specs, verification, runtime, server, stores, observe, evolution. App and agent logic belongs in **temperpaw** (the agent OS — OpenPaw rebranded, same project); the Temper-native git server is **genesis** (formerly temper-git); the design commons is **katagami**. If you find code mixing those concerns into the kernel, **flag it — don't silently relocate it**.
-- Never invent product names. When unsure what something is called, ask.
-- Professional language everywhere — branch names, commits, PR text, docs. No internal slang ("deslop" etc.).
+## Repo map
 
-## Working Discipline
+- `crates/temper-spec` - how defined: IOA + CSDL parsers
+- `crates/temper-jit` - what is defined: `TransitionTable`, `Effect`
+- `crates/temper-verify` - how verified: L0-L3 cascade (own `ModelEffect`)
+- `crates/temper-runtime` - runtime (replaceable): mailbox, sim, `EventStore` trait; WASM host in `temper-wasm` + `temper-wasm-sdk`
+- `crates/temper-store-turso` - default store; `-sim`, `-postgres`, `-redis` (journal only) are plugs
+- `crates/temper-server` - the mix, read last: HTTP + EntityActor + `apply_effects` + registry
+- Control plane: `temper-odata`, `temper-authz`, `temper-observe`, `temper-evolution`, `temper-ots`, `temper-platform`, `temper-cli`, `temper-mcp`, `temper-sdk`, `temper-sandbox`
+- Default serve is own-Rust actors; `--actor-runtime postgres` is an adapter, not a second kernel. `apply_effect` must become one function; today it is three.
+- Verification: `.agents/skills/verify-temper/` - the verification skill and feature map
+- Architecture Decision Records: `docs/adrs/` (template at `docs/adrs/TEMPLATE.md`). A material architecture change gets its ADR before code - required for new features, new integrations, multi-crate changes, new patterns; not for bug fixes, single-file refactors, docs, or test additions.
 
-- **The primary checkout at `~/Development/temper` is bare on purpose** — you cannot and must not work there. Create a worktree branched from up-to-date `main` (`codex/<short-task-name>`), state which repo/worktree/branch you're on before mutating anything, open a **draft PR as soon as changes begin**, and keep it to **one PR per repo per effort**.
-- **DO NOT PUNT.** No "phase 0" that defers the hard part; no band-aid or local/temporary fixes; no backward compatibility for bad implementations (but never drop working capabilities). Address ALL review findings, then re-run review until clean.
-- **Definition of done**: implement fully → run live end-to-end locally → merge + deploy → verify live in the deployed system, using **Datadog** for verification and diagnosis → hand over PR links, merge commits, deployment links, live test results, residual risks. Tests passing alone is not done.
-- Brainstorm and align before implementing, even from a detailed handoff. Rita's handoffs follow: Objective / Why This Matters / Relevant PRs / Hot Files / Acceptance Criteria / Must Start With ADR / Suggested Validation / Copy-Paste Prompt — honor that structure, including the ADR-first step.
-- Explain tradeoffs in plain language before merge; merged-but-unexplained tradeoffs get reopened.
+## Specs
 
-## IMPORTANT: Use Temper for Your Own Work
+- IOA TOML (`.ioa.toml`) is the spec format; `TransitionTable::from_ioa_source()` in production. TLA+ is legacy: `from_tla_source()` is `#[cfg(test)]` only.
+- Specs are generated from conversation, never hand-written; code derived from specs is regenerable.
+- Framework code must not hardcode entity-specific state names. Domain invariants come from the spec's `[[invariant]]` sections. The verification cascade gates every spec change.
+- Data contract is CSDL (`*.csdl.xml`); a running server publishes it at `GET /tdata/$metadata`.
 
-**You are an agent running on Temper. This is your operating layer — not an optional tool.** When a Temper server is running (`mcp__temper__execute` is available), ALL your stateful work — planning, task tracking, progress, knowledge — MUST flow through Temper entities, not markdown files.
+## Deterministic simulation (DST)
 
-**Specifically:**
-- **Planning and task tracking** → Use the PM OS app (`await temper.install_app("{tenant}", "project-management")` if not installed). Create Issues, use `BeginPlanning` → `WritePlan` → `ApprovePlan` → `StartWork` flow. Do NOT use `.progress/` files when Temper is available.
-- **Building apps for users** → Use the Temper App Builder skill (`.claude/skills/temper-developer.md`). Workflow: interview → generate IOA specs + CSDL → verify → deploy. Use `/temper-developer`.
-- **Any MCP tool call** → ALWAYS read `.claude/skills/temper-agent.md` first. It has the exact Python API, spec format, and governance flow.
+In simulation-visible crates (`temper-runtime`, `temper-jit`, `temper-server`):
 
-**Cedar governance applies to everything.** If denied, surface the pending decision to the human. They approve via the Observe UI. You poll and retry.
+- `sim_now()` / `sim_uuid()`, never wall clock or random UUIDs
+- `BTreeMap`/`BTreeSet`, never `HashMap`/`HashSet` (deterministic iteration)
+- No `std::thread::spawn`, `rayon`, multi-threaded `tokio::spawn` - single-threaded actor model
+- No `std::fs`, `std::net`, `std::env::var` - I/O behind traits
+- No `static mut`, `lazy_static!`, `thread_local!` - state through actor context
+- No `chrono::Utc::now()`, `std::thread::sleep()`, `OsRng`, `getrandom` - simulated time, seeded PRNG
+- `SimActorHandler::spec_invariants()` auto-checks `[[invariant]]` sections
+- `// determinism-ok` suppresses guard false positives
+- Full ruleset: `.agents/agents/dst-reviewer.md`
 
-Use `/temper-agent` or read `.claude/skills/temper-agent.md` for the full API reference.
+## Multi-tenancy and identity
 
-## PM App: Planning/Planned Workflow
+- `SpecRegistry` maps (TenantId, EntityType) to specs + TransitionTable; single-tenant is `TenantId::default()` = "default". Pass the tenant explicitly; never assume a hardcoded one.
+- Agent identity registry: the platform verifies the `agent_type` claim and sets `agentTypeVerified` on the Cedar principal. Policies treat unverified types as untrusted.
 
-Issues in the Project Management OS App use a **Planning → Planned** phase with role separation:
+## Rust conventions
 
-1. **Supervisor** triages issue, assigns a planner (`AssignPlanner`) and implementer (`Assign`)
-2. **Planner** calls `BeginPlanning` → drafts plan via `WritePlan` (plan + acceptance_criteria)
-3. **Supervisor/Human** reviews and calls `ApprovePlan` → issue moves to `Planned`
-4. **Implementer** calls `StartWork` (requires approved plan + assignee) → implements → `SubmitForReview`
+- Edition 2024, rust-version 1.85. `gen` is a reserved keyword.
+- Files over 500 lines split into directory modules. All pub items documented.
+- TigerStyle: bounded mailboxes, pre/post assertions at function entry and return, budgets not limits, fail fast on invariant violation, no silent failures.
+- `temper-jit` must not depend on `temper-verify` in `[dependencies]`. Production binaries must not pull in `stateright` or `proptest`.
 
-**Role separation is Cedar-enforced:**
-- Planner cannot approve their own plan (`resource.PlannerId != principal.id`)
-- Implementer cannot approve their own review (`resource.AssigneeId != principal.id`)
-- Only supervisors/humans can triage, approve plans, and approve reviews
+## Commands
 
-**Agent API:** Read `.claude/skills/temper-agent.md` for the full Temper Python API including planning methods (`begin_planning`, `write_plan`, `approve_plan`).
-
-## What is Temper?
-A conversational application platform. Developers describe what they want through conversation — the system generates specs, verifies them, and deploys entity actors. End users interact through a separate production chat. Unmet user intents feed back through the Evolution Engine for developer approval.
-
-## The Vision
-```
-Developer Chat: "I want a project management tool"
-  → System interviews developer about entities, states, actions, guards
-  → Generates IOA specs + CSDL + Cedar from conversation
-  → Runs 3-level verification cascade
-  → Hot-deploys entity actors + OData API
-
-Production Chat: end users operate the app
-  → Unmet intents → trajectory spans → ClickHouse → Sentinel
-  → O-Record → I-Record → Developer reviews → D-Record → spec change
-```
-
-Two separated contexts: Developer Chat (design-time, can modify specs) and Production Chat (runtime, operates within specs). The developer holds the approval gate for all behavioral changes.
-
-## Architecture
-
-Six seams. ★ = replaceable plug. `apply_effect` must stay one function; today it is three.
-
-- **How defined** — `temper-spec` (IOA + CSDL parsers)
-- **What is defined** — `temper-jit` (`TransitionTable`, `Effect`). Apply is *not* here yet.
-- **How verified** — `temper-verify` (L0–L3). Has its own `ModelEffect`.
-- **Control plane** — `temper-odata`, `temper-authz`, `temper-observe`, `temper-evolution`, `temper-ots`, `temper-platform`, `temper-cli`, `temper-mcp`, `temper-sdk`, `temper-sandbox`
-- **Runtime ★** — `temper-runtime` (mailbox, sim, `EventStore` trait). Optional PG adapter: `temper-actor-runtime` (not default serve). WASM host: `temper-wasm` + `temper-wasm-sdk`. `temper-agents` is Gabriele’s PG-path agent chain; not default serve.
-- **Store ★** — `temper-store-turso` (default), `temper-store-sim`, `temper-store-postgres`, `temper-store-redis` (event journal only)
-- **Mix — read last** — `temper-server` (HTTP + EntityActor + `apply_effects` + registry)
-
-Default serve is own-Rust actors. `--actor-runtime postgres` is an adapter, not a second kernel.
-
-## Architecture Decision Records (ADRs)
-
-**Every significant implementation MUST start with an ADR as the first step.** Before writing any code, create `docs/adrs/NNNN-short-title.md` following the template at `docs/adrs/TEMPLATE.md`. Required for new features, architectural changes, new integrations, multi-crate changes, or new patterns. Not required for bug fixes, single-file refactors, doc changes, or test additions.
-
-## Agent Identity Registry
-
-Agent types are registered in the platform's identity registry. When an agent connects, the platform verifies its `agent_type` claim against the registry and sets the `agentTypeVerified` attribute on the Cedar principal:
-
-- **`agentTypeVerified: true`** — the agent's claimed type matches a registered entry; Cedar policies can trust scope decisions based on `agent_type`
-- **`agentTypeVerified: false`** — self-asserted type with no registry match; Cedar policies should treat as untrusted
-
-Cedar policies reference this attribute to distinguish verified agents from unverified ones (e.g., only verified agents can approve plans).
-
-## Issue Pickup Before Work
-
-**You MUST pick up or create a Temper issue before making code changes.** The `check-issue-pickup.sh` hook (advisory, PreToolUse on Write|Edit) checks for a session marker at `/tmp/temper-harness/{project_hash}/{session_id}/issue-active`. The marker is created when you transition an issue to Planning or InProgress via `BeginPlanning` or `StartWork`. If you see the advisory warning, stop and pick up an issue first.
-
-**Reality check**: probe the connected server once (`await temper.specs("<tenant>")`). If it returns 403/404 or the PM app isn't deployed, say so once, fall back to a `.progress/` plan file, and continue — do not retry-loop or block the task on Temper plumbing. Long-running plans can also be recorded as Temper **goals** when the goals system is deployed.
-
-## Key Rules
-
-### Platform Philosophy
-- Specs are generated from conversation, never hand-written by developers
-- Code is derived from specs and is regenerable
-- Framework code must NOT hardcode entity-specific state names
-- Domain invariants come from the spec's [[invariant]] sections
-- Trajectory intelligence captures every unmet intent
-- The verification cascade gates every spec change
-
-### Spec Format
-- I/O Automaton TOML (`.ioa.toml`) is the primary spec format
-- Use `TransitionTable::from_ioa_source()` in production
-- TLA+ is legacy — `from_tla_source()` is `#[cfg(test)]` only
-
-### Multi-Tenancy
-- SpecRegistry maps (TenantId, EntityType) → specs + TransitionTable
-- Postgres/Redis are tenant-scoped
-- Single-tenant uses TenantId::default() = "default"
-- **Active agent tenant:** use the tenant configured for the current project or server. Pass it explicitly to agent MCP calls instead of assuming a hardcoded repository tenant.
-
-### Deterministic Simulation (FoundationDB/TigerBeetle Standards)
-In simulation-visible crates (temper-runtime, temper-jit, temper-server):
-- Use `sim_now()` / `sim_uuid()` instead of wall clock / random UUIDs
-- Use `BTreeMap`/`BTreeSet` not `HashMap`/`HashSet` — deterministic iteration order
-- No `std::thread::spawn`, `rayon`, or multi-threaded `tokio::spawn` — single-threaded actor model
-- No `std::fs`, `std::net`, `std::env::var` — abstract all I/O behind traits
-- No `static mut`, `lazy_static!`, `thread_local!` — pass state through actor context
-- No `chrono::Utc::now()`, `std::thread::sleep()` — use simulated time
-- No `OsRng`, `getrandom` — use seeded PRNG
-- `SimActorHandler::spec_invariants()` auto-checks [[invariant]] sections
-- Add `// determinism-ok` to suppress false positives in the determinism guard
-- See `.claude/agents/dst-reviewer.md` for the full DST compliance ruleset
-
-### Dependency Discipline
-- `temper-jit` must NOT depend on `temper-verify` in `[dependencies]`
-- Production binaries must not pull in `stateright` or `proptest`
-
-### Rust Conventions
-- Edition 2024, rust-version 1.85
-- `gen` is a reserved keyword — never use as variable name
-- Files > 500 lines must be split into directory modules
-- All pub items must have doc comments
-- TigerStyle: bounded mailboxes, pre/post assertions, budgets not limits
-
-## Testing
 ```bash
-cargo test --workspace              # Full workspace (430+ tests)
-cargo test -p temper-server         # Including multi-tenant integration
-cargo test -p temper-platform       # Platform unit + deploy pipeline
-cargo test -p temper-platform --test platform_e2e_dst  # E2E shared registry proof
+cargo test --workspace                                  # full suite
+cargo test -p temper-platform --test platform_e2e_dst   # E2E shared-registry proof
+cargo run -p temper-cli -- serve --port 3000            # HTTP server, OData API, Observe UI
+scripts/setup-hooks.sh                                  # install git hooks (pre-commit integrity, pre-push 4-gate)
 ```
 
-## Development Harness
+## Enforcement hooks
 
-See `docs/HARNESS.md` for the full harness reference with diagrams.
+`.claude/settings.json` wires blocking hooks: L0-L3 spec verification on every `.ioa.toml` edit, a 25-pattern determinism guard on `.rs` edits in sim-visible crates, and a pre-commit gate requiring DST-review and code-review markers (`.agents/agents/dst-reviewer.md`, `code-reviewer.md` write them on PASS). Tests run at push time, not commit time.
 
-### Automated Enforcement (Codex Hooks)
-- **Plan Reminder** (advisory): Reminds to create a plan (Temper issue or `.progress/` fallback) before edits
-- **Issue Pickup** (advisory): Warns if no active Temper issue for the session before Write|Edit
-- **Spec Verification** (BLOCKING): L0-L3 cascade on every `.ioa.toml` edit
-- **Determinism Guard** (BLOCKING): 25-pattern DST scan on `.rs` edits in sim-visible crates
-- **Pre-Commit Review Gate** (BLOCKING): Blocks `git commit` without DST review + code review markers
-- **Post-Push Marker** (advisory): Records push for session tracking
-- **Session Exit Gate** (DISABLED): Can be re-enabled in settings.json Stop hook
+## Deploying spec changes
 
-### Mandatory Reviews Before Commit
-**You MUST run both reviews before committing any code changes:**
-
-1. **DST Compliance Review** (for simulation-visible code in temper-runtime, temper-jit, temper-server):
-   - Invoke the DST reviewer agent (`.claude/agents/dst-reviewer.md`)
-   - Writes a marker file on PASS — the pre-commit gate checks for it
-
-2. **Code Quality Review** (for all significant changes):
-   - Invoke the code-reviewer agent
-   - Writes a marker file on PASS — the pre-commit gate checks for it
-
-The pre-commit gate BLOCKS `git commit` if either marker is missing. Markers are session-scoped (`/tmp/temper-harness/{project_hash}/{session_id}/`) so multiple agent sessions don't conflict.
-
-### Git Hooks (installed via `scripts/setup-hooks.sh`)
-- **Pre-commit**: Integrity check (no TODO/unwrap), spec syntax, dep audit
-- **Pre-push**: 4-gate pipeline — rustfmt, clippy, readability ratchet, full test suite
-
-Tests run once at push time only — not at commit or post-push. This keeps commits fast.
-
-## Error Handling Standards (TigerStyle)
-- **Bounded mailboxes**: Every actor mailbox has a capacity limit
-- **Pre-assertions**: Validate inputs at function entry (`assert!` or `debug_assert!`)
-- **Post-assertions**: Validate outputs before return
-- **Budgets not limits**: Express constraints as budgets that get consumed, not arbitrary limits
-- **Fail fast**: If an invariant is violated, panic immediately rather than propagating corrupt state
-- **No silent failures**: Every error path must be logged or propagated
-
-## Deployment Verification Steps
-Before deploying any spec change:
-1. Spec passes all 5 verification cascade levels (L0-L3)
-2. TransitionTable builds successfully from verified spec
+1. Spec passes the verification cascade (L0-L3)
+2. TransitionTable builds from the verified spec
 3. Entity actors hot-deploy without dropping existing state
-4. OData endpoints respond correctly for all entity types
+4. OData endpoints respond for all entity types
 5. Telemetry emits WideEvents for all transitions
-
-## Definition of done — review bar
-
-- **Three independent fresh-context reviews before anything is "done".** Nothing counts as fully implemented until all three have reviewed it, each with NO prior context on the work: **Codex** (`codex exec --model gpt-5.6-sol -c model_reasoning_effort="high" --sandbox read-only`), **a second independent Codex Sol session**, and **an independent Fable** (a fresh Claude subagent, `model: fable`). Run **Greptile** on every PR too (`@greptile review` as a PR comment). Ask each for severity, `file:line`, and a concrete failure scenario, then fix everything they find — including findings that criticise your own fixes — and re-verify. They catch different classes: one finds bypass surface, one finds fail-open behaviour, one finds whether it actually runs. Two agreeing does not excuse skipping the third.
-- **Test the production shape, not a convenient one.** A gate proven against a permissive or mock engine, and an end-to-end that only exercises the happy verb, are not proof — verify against the real policy/config set and probe the generic paths too (PATCH/PUT/DELETE, not only the named action).
