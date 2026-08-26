@@ -29,6 +29,7 @@ temper-observe = { workspace = true }
 temper-ots = { workspace = true }
 temper-authz = { workspace = true }
 temper-evolution = { workspace = true }
+temper-failure = { workspace = true }
 temper-wasm = { workspace = true }
 temper-wasm-sdk = { workspace = true }
 temper-sandbox = { workspace = true }

@@ -457,6 +457,26 @@ type = "same_id"
         serde_json::from_value(lifecycle.last().expect("delivery outcome").payload.clone())
             .expect("delivery record");
     assert_eq!(record.status, ReactionDeliveryStatus::Rejected);
+    let failure = record.failure.expect("typed reaction failure");
+    assert_eq!(failure.category, temper_failure::FailureCategory::Integrity);
+    assert_eq!(failure.code.as_str(), "ReactionTargetTransitionRejected");
+    assert_eq!(
+        failure.provenance.source,
+        temper_failure::FailureSource::Reaction
+    );
+    assert_eq!(failure.operation.id.as_str(), intent.delivery_id);
+    let observed = state.entity_observe_log.lock().expect("observe log");
+    let event = observed
+        .get(&format!("{tenant_name}:Order:o1"))
+        .and_then(|events| {
+            events
+                .iter()
+                .find(|event| event.event_name == "typed_delivery_failure")
+        })
+        .expect("typed delivery observation");
+    assert_eq!(event.data["failure"]["category"], "integrity");
+    assert!(event.data["failure"].get("message").is_none());
+    assert_eq!(event.data["failure"]["diagnostic_redacted"], true);
 }
 
 #[tokio::test]

@@ -4,6 +4,7 @@ mod artifact;
 mod client;
 mod contracts;
 mod manifest;
+mod module_data_failure;
 mod proof;
 mod query_types;
 mod response;
@@ -20,8 +21,10 @@ pub use client::{
 };
 pub use contracts::*;
 pub use manifest::*;
+pub use module_data_failure::adapt_module_data_error;
 pub use proof::*;
 pub use query_types::*;
 pub use response::*;
+pub use temper_failure::*;
 #[cfg(all(not(target_arch = "wasm32"), feature = "test-helpers"))]
 pub use test_host::{install_native_data_host_for_test, take_native_data_requests_for_test};

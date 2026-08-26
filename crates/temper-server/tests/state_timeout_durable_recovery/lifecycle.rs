@@ -64,13 +64,21 @@ async fn reset_supersedes_the_old_clock_without_extending_the_new_deadline() {
     )
     .await
     .expect("delivery records");
-    assert!(records.iter().any(|(record, _)| {
+    let superseded = records.iter().find(|(record, _)| {
         record.status == temper_server::trigger::delivery::ReactionDeliveryStatus::Skipped
             && record
                 .last_error
                 .as_deref()
                 .is_some_and(|error| error.contains("superseded"))
-    }));
+    });
+    let failure = superseded
+        .and_then(|(record, _)| record.failure.as_ref())
+        .expect("typed superseded timeout failure");
+    assert_eq!(failure.category, temper_failure::FailureCategory::Integrity);
+    assert_eq!(
+        failure.provenance.source,
+        temper_failure::FailureSource::Timeout
+    );
     assert_eq!(
         records
             .iter()
@@ -166,13 +174,25 @@ async fn max_occurrences_is_a_durable_entity_declaration_budget() {
     )
     .await
     .expect("delivery records");
-    assert!(records.iter().any(|(record, _)| {
+    let exhausted = records.iter().find(|(record, _)| {
         record.status == temper_server::trigger::delivery::ReactionDeliveryStatus::Skipped
             && record
                 .last_error
                 .as_deref()
                 .is_some_and(|error| error.contains("occurrence budget exhausted"))
-    }));
+    });
+    let failure = exhausted
+        .and_then(|(record, _)| record.failure.as_ref())
+        .expect("typed timeout occurrence-budget failure");
+    assert_eq!(failure.category, temper_failure::FailureCategory::Budget);
+    assert_eq!(
+        failure.code.as_str(),
+        "StateTimeoutOccurrenceBudgetExhausted"
+    );
+    assert_eq!(
+        failure.provenance.source,
+        temper_failure::FailureSource::Timeout
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

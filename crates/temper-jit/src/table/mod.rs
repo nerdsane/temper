@@ -6,6 +6,8 @@
 
 mod builder;
 mod evaluate;
+#[cfg(test)]
+mod failure_routes_test;
 pub mod guard;
 #[cfg(test)]
 mod reference_contract_test;

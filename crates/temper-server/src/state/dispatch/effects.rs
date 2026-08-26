@@ -697,7 +697,7 @@ impl crate::state::ServerState {
                     custom_effects: &response.custom_effects,
                     entity_state: adapter_state,
                     agent_ctx: ctx.agent_ctx,
-                    dispatch_idempotency_key: None,
+                    dispatch_idempotency_key: ctx.dispatch_idempotency_key,
                     action_params: ctx.action_params,
                     mode: super::WasmDispatchMode::Inline,
                 };
@@ -731,6 +731,7 @@ impl crate::state::ServerState {
                     &response.custom_effects,
                     &response.state,
                     ctx.agent_ctx,
+                    ctx.dispatch_idempotency_key,
                     ctx.action_params,
                 );
                 self.dispatch_adapter_integrations(super::adapter::AdapterDispatchInput {
@@ -741,6 +742,7 @@ impl crate::state::ServerState {
                     custom_effects: &response.custom_effects,
                     entity_state: &response.state,
                     agent_ctx: ctx.agent_ctx,
+                    dispatch_idempotency_key: ctx.dispatch_idempotency_key,
                     action_params: ctx.action_params,
                 });
             }

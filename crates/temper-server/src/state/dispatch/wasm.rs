@@ -29,6 +29,7 @@ use super::{
 use replay_inputs::{extract_trajectory_actions_from_ots, has_replay_trajectory_input};
 
 mod boxed;
+pub(super) mod failure_routing;
 mod invocation_artifacts;
 mod local_tdata_host;
 mod replay_inputs;
@@ -38,6 +39,7 @@ pub(super) use boxed::{
     dispatch_wasm_integrations_boxed,
 };
 use boxed::{handle_wasm_failure_boxed, invoke_and_handle_result_boxed};
+use failure_routing::WasmFailure;
 use local_tdata_host::LocalTDataWasmHost;
 
 /// Build a request-bound internal HTTP capability issuer for a non-System caller.
@@ -201,10 +203,6 @@ const WASM_DISPATCH_PHASE_LLMOBS_SUBMIT: &str = "dispatch.wasm.phase.llmobs_subm
 
 fn http_call_authz_denied_error(reason: &str) -> String {
     format!("{HTTP_CALL_AUTHZ_DENIED_PREFIX}: {reason}")
-}
-
-fn is_http_call_authz_denial(error: &str) -> bool {
-    error.contains(HTTP_CALL_AUTHZ_DENIED_PREFIX)
 }
 
 fn llmobs_service_name() -> String {
@@ -596,20 +594,29 @@ impl crate::state::ServerState {
         };
 
         let Some(hash) = module_hash else {
-            let error_str = format!("WASM module '{}' not found", module_name);
-            record_wasm_error_on_span(active_span, &error_str);
             return self
                 .handle_module_not_found(ctx, integration, &module_name)
                 .await;
         };
-        instrument_wasm_dispatch_phase_result(
+        let cache_result = instrument_wasm_dispatch_phase_result(
             active_parent_span.clone(),
             ctx,
             &module_name,
             WASM_DISPATCH_PHASE_MODULE_CACHE,
             self.ensure_wasm_module_cached(ctx.entity_ref.tenant, &module_name, &hash),
         )
-        .await?;
+        .await;
+        if let Err(error) = cache_result {
+            return handle_wasm_failure_boxed(
+                self,
+                ctx,
+                integration,
+                &module_name,
+                WasmFailure::Setup(error),
+                0,
+            )
+            .await;
+        }
         let trigger_params = instrument_wasm_dispatch_phase(
             active_parent_span.clone(),
             ctx,
@@ -1076,7 +1083,7 @@ impl crate::state::ServerState {
         }
     }
 
-    /// Handle module-not-found: log, observe, dispatch on_failure callback.
+    /// Handle module-not-found through typed or legacy failure routing.
     async fn handle_module_not_found(
         &self,
         ctx: &WasmDispatchCtx<'_>,
@@ -1089,29 +1096,17 @@ impl crate::state::ServerState {
             module = %module_name,
             "WASM module not found in registry"
         );
-        let error_str = format!("WASM module '{}' not found", module_name);
-        self.record_invocation(
-            ctx.entity_ref,
+        handle_wasm_failure_boxed(
+            self,
+            ctx,
+            integration,
             module_name,
-            ctx.action,
-            integration.on_failure.clone(),
-            false,
-            Some(error_str.clone()),
+            WasmFailure::Engine(temper_wasm::WasmError::ModuleNotFound(
+                module_name.to_string(),
+            )),
             0,
-            None,
         )
-        .await;
-
-        if let Some(ref cb) = integration.on_failure {
-            let params = serde_json::json!({
-                "error": error_str,
-                "integration": integration.name.clone(),
-            });
-            return self
-                .dispatch_wasm_callback(ctx.entity_ref, cb, params, ctx.agent_ctx, ctx.mode)
-                .await;
-        }
-        Ok(None)
+        .await
     }
 
     /// Invoke the WASM module and handle success/failure/error results.
@@ -1252,14 +1247,12 @@ impl crate::state::ServerState {
                 );
                 if let Some(reason) = denial_tracker.take_denial() {
                     let error_str = http_call_authz_denied_error(&reason);
-                    record_wasm_error_on_current_span(&error_str);
                     return handle_wasm_failure_boxed(
                         self,
                         ctx,
-                        &integration.name,
+                        integration,
                         module_name,
-                        &integration.on_failure,
-                        error_str,
+                        WasmFailure::Authorization(error_str),
                         result.duration_ms,
                     )
                     .await;
@@ -1366,6 +1359,7 @@ impl crate::state::ServerState {
                             callback_params,
                             ctx.agent_ctx,
                             ctx.mode,
+                            false,
                         ),
                     )
                     .await?;
@@ -1401,21 +1395,25 @@ impl crate::state::ServerState {
                                 "result": "failure",
                                 "callback_action": result.callback_action.clone(),
                                 "duration_ms": result.duration_ms,
-                                "error": result.error.clone(),
+                                "error": integration
+                                    .failure_routes
+                                    .is_empty()
+                                    .then(|| result.error.clone())
+                                    .flatten(),
                             }),
                         );
                     },
                 );
-                let mut error_str = result.error.unwrap_or_else(|| {
+                let error_str = result.error.unwrap_or_else(|| {
                     format!(
                         "WASM integration '{}' returned unsuccessful result",
                         integration.name
                     )
                 });
-                if let Some(reason) = denial_tracker.take_denial() {
-                    error_str = http_call_authz_denied_error(&reason);
-                }
-                record_wasm_error_on_current_span(&error_str);
+                let failure = denial_tracker.take_denial().map_or_else(
+                    || WasmFailure::Legacy(error_str),
+                    |reason| WasmFailure::Authorization(http_call_authz_denied_error(&reason)),
+                );
                 // A failed integration's effect never landed. `handle_wasm_failure`
                 // records the invocation, then either runs the declared
                 // `on_failure` recovery or — when none is declared — returns
@@ -1424,10 +1422,9 @@ impl crate::state::ServerState {
                 handle_wasm_failure_boxed(
                     self,
                     ctx,
-                    &integration.name,
+                    integration,
                     module_name,
-                    &integration.on_failure,
-                    error_str,
+                    failure,
                     result.duration_ms,
                 )
                 .await
@@ -1457,32 +1454,23 @@ impl crate::state::ServerState {
                                 "trigger_action": ctx.action,
                                 "result": "error",
                                 "duration_ms": 0,
-                                "error": e.to_string(),
+                                "error": integration
+                                    .failure_routes
+                                    .is_empty()
+                                    .then(|| e.to_string()),
                             }),
                         );
                     },
                 );
-                let mut error_str = e.to_string();
-                if let Some(reason) = denial_tracker.take_denial()
-                    && !is_http_call_authz_denial(&error_str)
-                {
-                    error_str = http_call_authz_denied_error(&reason);
-                }
-                record_wasm_error_on_current_span(&error_str);
+                let failure = denial_tracker.take_denial().map_or_else(
+                    || WasmFailure::Engine(e),
+                    |reason| WasmFailure::Authorization(http_call_authz_denied_error(&reason)),
+                );
                 // Same as the unsuccessful-result arm above: a host trap, fuel
                 // exhaustion, or panic also leaves the integration's effect
                 // unrealized. `handle_wasm_failure` records it and propagates
                 // `Err` when no `on_failure` is declared (ADR-0152).
-                handle_wasm_failure_boxed(
-                    self,
-                    ctx,
-                    &integration.name,
-                    module_name,
-                    &integration.on_failure,
-                    error_str,
-                    0,
-                )
-                .await
+                handle_wasm_failure_boxed(self, ctx, integration, module_name, failure, 0).await
             }
         }
     }

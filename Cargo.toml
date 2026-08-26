@@ -15,6 +15,7 @@ exclude = [
     "os-apps/temper-fs/wasm/blob_adapter",
 ]
 members = [
+    "crates/temper-failure",
     "crates/temper-macros",
     "crates/temper-runtime",
     "crates/temper-spec",
@@ -134,6 +135,7 @@ prost-types = "0.14"
 futures = "0.3"
 
 # Internal crates
+temper-failure = { path = "crates/temper-failure" }
 temper-macros = { path = "crates/temper-macros" }
 temper-runtime = { path = "crates/temper-runtime" }
 temper-spec = { path = "crates/temper-spec" }

@@ -38,8 +38,8 @@
       "budget_seconds": 900,
       "required_pr": true,
       "cargo_timings": true,
-      "packages": ["temper-macros", "temper-runtime", "temper-spec", "temper-codegen", "temper-wasm-sdk", "temper-odata", "temper-authz", "temper-observe"],
-      "commands": [["cargo", "test", "-p", "temper-macros", "-p", "temper-runtime", "-p", "temper-spec", "-p", "temper-codegen", "-p", "temper-wasm-sdk", "-p", "temper-odata", "-p", "temper-authz", "-p", "temper-observe", "--timings", "--", "--skip", "dst_"]]
+      "packages": ["temper-macros", "temper-runtime", "temper-spec", "temper-failure", "temper-codegen", "temper-wasm-sdk", "temper-odata", "temper-authz", "temper-observe"],
+      "commands": [["cargo", "test", "-p", "temper-macros", "-p", "temper-runtime", "-p", "temper-spec", "-p", "temper-failure", "-p", "temper-codegen", "-p", "temper-wasm-sdk", "-p", "temper-odata", "-p", "temper-authz", "-p", "temper-observe", "--timings", "--", "--skip", "dst_"]]
     },
     {
       "id": "test-storage-verification",

@@ -17,6 +17,7 @@ mod cross_entity;
 mod effects;
 pub(crate) mod retry;
 pub(crate) mod state_timeouts;
+mod typed_failure;
 mod wasm;
 pub(crate) use wasm::authorized_http_endpoint_host;
 #[cfg(feature = "observe")]
@@ -366,6 +367,7 @@ impl crate::state::ServerState {
         custom_effects: &[String],
         _entity_state: &EntityState,
         agent_ctx: &AgentContext,
+        dispatch_idempotency_key: Option<&str>,
         action_params: &serde_json::Value,
     ) {
         let state = self.clone();
@@ -376,6 +378,7 @@ impl crate::state::ServerState {
         let custom_effects = custom_effects.to_vec();
         let entity_state = _entity_state.clone();
         let agent_ctx = agent_ctx.clone();
+        let dispatch_idempotency_key = dispatch_idempotency_key.map(str::to_string);
         let action_params = action_params.clone();
         let workflow_root_entity_type = workflow_root_type(&agent_ctx, &entity_type);
         let workflow_root_entity_id = workflow_root_id(&agent_ctx, &entity_id);
@@ -400,7 +403,7 @@ impl crate::state::ServerState {
                     custom_effects: &custom_effects,
                     entity_state: &entity_state,
                     agent_ctx: &agent_ctx,
-                    dispatch_idempotency_key: None,
+                    dispatch_idempotency_key: dispatch_idempotency_key.as_deref(),
                     action_params: &action_params,
                     mode: WasmDispatchMode::Background,
                 };

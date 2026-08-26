@@ -7,6 +7,7 @@
 
 pub mod authorized_host;
 pub mod engine;
+mod failure;
 pub mod host_trait;
 pub mod http_stream;
 pub(crate) mod metrics;
@@ -16,6 +17,7 @@ mod workflow_headers;
 
 pub use authorized_host::{AuthorizedWasmHost, WasmAuthzDecision, WasmAuthzGate, extract_domain};
 pub use engine::{PureMigrationError, PureMigrationLimits, WasmEngine, WasmError};
+pub use failure::adapt_wasm_error;
 pub use host_trait::{
     BinaryHttpInterceptorFn, InternalHttpCapability, InternalHttpCapabilityIssuerFn,
     ProductionWasmHost, ProgressEmitterFn, SecretResolverFn, SimWasmHost, SpecEvaluatorFn,
