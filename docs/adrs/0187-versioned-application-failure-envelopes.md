@@ -202,10 +202,14 @@ Adapters classify from structured variants and execution facts only:
 - Cedar denial is authorization with `after_authorization`, decision identity,
   and known-not-applied outcome.
 - WASM and external operations map typed engine, transport, HTTP-status, and host
-  capability variants. Fuel, memory, payload, and call ceilings are budget;
-  typed dependency unavailability is transient; an externally dispatched call
-  whose acknowledgement is lost is ambiguous; malformed contracts and terminal
-  responses are integrity or permanent as declared by the adapter table.
+  capability variants. Pre-execution payload and admission ceilings are budget.
+  Fuel, memory, timeout, and invocation failures after guest execution begins
+  are ambiguous because the guest may already have produced external effects;
+  their stable source codes retain which budget or engine condition ended the
+  invocation. Typed dependency unavailability is transient; an externally
+  dispatched call whose acknowledgement is lost is ambiguous; malformed
+  contracts and terminal responses are integrity or permanent as declared by
+  the adapter table.
 
 Adapter tests enumerate every source enum variant. Adding a new source variant
 therefore requires an explicit mapping. No adapter calls `to_string()` and then
@@ -252,7 +256,9 @@ duplicate externally committed work, especially when outcome is unknown.
 types only through an explicit ABI-compatible conversion. Generated SDK clients
 return the canonical envelope for application-facing failures and generate typed
 callback parameter structs containing `failure: FailureEnvelopeV1` where a
-route is declared.
+route is declared. The IOA parameter token `failure_v1` maps to the canonical
+CSDL type `Temper.FailureEnvelopeV1`; code generation recognizes that exact
+type and imports the shared contract instead of emitting an entity-ID wrapper.
 
 Telemetry records only version, category, code, retryability, outcome, bounded
 operation identity, and allowlisted scalar details. Diagnostic messages and

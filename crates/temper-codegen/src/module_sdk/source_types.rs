@@ -31,7 +31,9 @@ pub(super) fn emit_named_property_type(
     property: &ManifestPropertyV1,
     emitted: &mut BTreeSet<String>,
 ) {
-    if property.type_name.starts_with("Edm.") {
+    if property.type_name.starts_with("Edm.")
+        || property.type_name == temper_wasm_sdk::data::FAILURE_ENVELOPE_CSDL_TYPE_V1
+    {
         return;
     }
     let generated = rust_type_name(&property.type_name);
@@ -53,7 +55,9 @@ pub(super) fn emit_named_property_type(
 }
 
 pub(super) fn generated_rust_type(property: &ManifestPropertyV1) -> String {
-    if property.type_name.starts_with("Edm.") {
+    if property.type_name == temper_wasm_sdk::data::FAILURE_ENVELOPE_CSDL_TYPE_V1 {
+        "FailureEnvelopeV1".into()
+    } else if property.type_name.starts_with("Edm.") {
         rust_scalar_type(&property.type_name).into()
     } else if property.enum_members.is_empty() {
         format!("{}Id", rust_type_name(&property.type_name))
@@ -63,7 +67,9 @@ pub(super) fn generated_rust_type(property: &ManifestPropertyV1) -> String {
 }
 
 pub(super) fn generated_type_name(type_name: &str, enum_members: &[String]) -> String {
-    if type_name.starts_with("Edm.") {
+    if type_name == temper_wasm_sdk::data::FAILURE_ENVELOPE_CSDL_TYPE_V1 {
+        "FailureEnvelopeV1".into()
+    } else if type_name.starts_with("Edm.") {
         rust_scalar_type(type_name).into()
     } else if !enum_members.is_empty() {
         rust_type_name(type_name)
@@ -125,5 +131,41 @@ fn scalar_expression(property: &ManifestPropertyV1, value: &str) -> String {
             "ScalarV1::Enum(EnumValueV1 {{ type_name: \"{}\".into(), member: serde_json::to_value({value}).expect(\"generated enum serializes\").as_str().expect(\"generated enum is a string\").into() }})",
             property.type_name
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use temper_wasm_sdk::data::{FAILURE_ENVELOPE_CSDL_TYPE_V1, ManifestValueSourceV1};
+
+    fn failure_property() -> ManifestPropertyV1 {
+        ManifestPropertyV1 {
+            canonical_name: "Failure".into(),
+            generated_name: "failure".into(),
+            type_name: FAILURE_ENVELOPE_CSDL_TYPE_V1.into(),
+            nullable: false,
+            source: ManifestValueSourceV1::Input,
+            default_value: None,
+            enum_members: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn canonical_failure_parameter_uses_shared_envelope_not_reference_id() {
+        let property = failure_property();
+        assert_eq!(generated_rust_type(&property), "FailureEnvelopeV1");
+        assert_eq!(
+            generated_type_name(&property.type_name, &property.enum_members),
+            "FailureEnvelopeV1"
+        );
+
+        let mut source = String::new();
+        let mut emitted = BTreeSet::new();
+        emit_named_property_type(&mut source, &property, &mut emitted);
+        assert!(
+            source.is_empty(),
+            "shared type must not generate an ID wrapper"
+        );
     }
 }

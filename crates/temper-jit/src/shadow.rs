@@ -119,6 +119,7 @@ mod tests {
             initial_state: "Draft".into(),
             schema_digest: None,
             state_timeouts: vec![],
+            failure_routes: vec![],
             keys: vec![],
             vectors: vec![],
             rules: vec![

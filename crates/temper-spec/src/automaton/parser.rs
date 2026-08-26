@@ -6,6 +6,7 @@
 //! The hand-rolled TOML parser lives in [`super::toml_parser`] to keep this
 //! module focused on the public API and validation logic.
 
+use super::ResolvedFailureRoute;
 use super::toml_parser;
 use super::types::*;
 use crate::tlaplus::{Invariant as TlaInvariant, StateMachine, Transition};
@@ -111,6 +112,7 @@ fn is_platform_custom_effect_name(effect_name: &str) -> bool {
 fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), AutomatonParseError> {
     use super::types::{Effect, Integration, TriggerKind};
 
+    let resolved_failure_routes = super::failure_routes::resolve_failure_routes(automaton)?;
     let legacy_trigger_names: std::collections::BTreeSet<String> = automaton
         .integrations
         .iter()
@@ -214,6 +216,11 @@ fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), Auto
                         module: Some(module.clone()),
                         on_success: trigger.on_success.clone(),
                         on_failure: trigger.on_failure.clone(),
+                        failure_routes: routes_for_trigger(
+                            &resolved_failure_routes,
+                            &action.name,
+                            &trigger.name,
+                        ),
                         llm: trigger.llm,
                         config: trigger.config.clone(),
                     });
@@ -233,6 +240,11 @@ fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), Auto
                         module: None,
                         on_success: trigger.on_success.clone(),
                         on_failure: trigger.on_failure.clone(),
+                        failure_routes: routes_for_trigger(
+                            &resolved_failure_routes,
+                            &action.name,
+                            &trigger.name,
+                        ),
                         llm: trigger.llm,
                         config,
                     });
@@ -269,6 +281,11 @@ fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), Auto
                         module: None,
                         on_success: trigger.on_success.clone(),
                         on_failure: trigger.on_failure.clone(),
+                        failure_routes: routes_for_trigger(
+                            &resolved_failure_routes,
+                            &action.name,
+                            &trigger.name,
+                        ),
                         llm: false,
                         config,
                     });
@@ -278,6 +295,18 @@ fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), Auto
     }
     automaton.integrations.extend(synthesized);
     Ok(())
+}
+
+fn routes_for_trigger(
+    routes: &[ResolvedFailureRoute],
+    source_action: &str,
+    trigger_name: &str,
+) -> Vec<ResolvedFailureRoute> {
+    routes
+        .iter()
+        .filter(|route| route.source_action == source_action && route.trigger_name == trigger_name)
+        .cloned()
+        .collect()
 }
 
 /// Callback invoked for each liveness violation encountered at spec parse
@@ -849,6 +878,7 @@ fn validate_action_triggers(
                     trigger.name, action.name
                 )));
             }
+            super::failure_routes::validate_trigger(automaton, action, trigger)?;
 
             // Guard depth bound.
             if let Some(ref guard) = trigger.guard {

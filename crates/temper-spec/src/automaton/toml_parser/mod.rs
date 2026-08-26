@@ -416,6 +416,7 @@ impl ParseState {
             module: None,
             on_success: None,
             on_failure: None,
+            failure_routes: Vec::new(),
             llm: false,
             config: std::collections::BTreeMap::new(),
         });

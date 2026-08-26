@@ -76,6 +76,9 @@ pub struct TransitionTable {
     /// reconstructing scheduling metadata after the source commit.
     #[serde(default)]
     pub state_timeouts: Vec<temper_spec::automaton::StateTimeout>,
+    /// Validated typed trigger-failure category routes.
+    #[serde(default)]
+    pub failure_routes: Vec<temper_spec::automaton::ResolvedFailureRoute>,
     /// Ordered list of transition rules.
     pub rules: Vec<TransitionRule>,
     /// ADR-0153: declared unique/alternate keys the kernel indexes for
@@ -195,6 +198,8 @@ impl<'de> Deserialize<'de> for TransitionTable {
             schema_digest: Option<String>,
             #[serde(default)]
             state_timeouts: Vec<temper_spec::automaton::StateTimeout>,
+            #[serde(default)]
+            failure_routes: Vec<temper_spec::automaton::ResolvedFailureRoute>,
             rules: Vec<TransitionRule>,
             #[serde(default)]
             state_var_metadata: BTreeMap<String, StateVarMetadata>,
@@ -215,6 +220,7 @@ impl<'de> Deserialize<'de> for TransitionTable {
             initial_state: raw.initial_state,
             schema_digest: raw.schema_digest,
             state_timeouts: raw.state_timeouts,
+            failure_routes: raw.failure_routes,
             rules: raw.rules,
             keys: raw.keys,
             vectors: raw.vectors,
@@ -334,6 +340,7 @@ mod tests {
             initial_state: "Draft".to_string(),
             schema_digest: None,
             state_timeouts: vec![],
+            failure_routes: vec![],
             keys: vec![],
             vectors: vec![],
             rules: vec![

@@ -58,6 +58,9 @@ pub enum WasmError {
     /// WASM function invocation failed.
     #[error("invocation failed: {0}")]
     Invocation(String),
+    /// Guest execution began, so external effects may already have occurred.
+    #[error("guest execution failed: {0}")]
+    GuestExecution(String),
     /// Module exceeded its instruction fuel budget.
     #[error("fuel exhausted -- module exceeded instruction budget")]
     FuelExhausted,
@@ -495,7 +498,7 @@ impl WasmEngine {
             .map_err(|e| WasmError::Invocation(format!("failed to spawn WASM thread: {e}")))?;
 
         rx.await
-            .map_err(|e| WasmError::Invocation(format!("WASM thread terminated: {e}")))?
+            .map_err(|e| WasmError::GuestExecution(format!("WASM thread terminated: {e}")))?
     }
 
     fn invoke_blocking(
@@ -724,7 +727,7 @@ impl WasmEngine {
                 let mut len_bytes = [0u8; 4];
                 if let Err(e) = memory.read(&store, (result_ptr - 4) as usize, &mut len_bytes) {
                     store.data_mut().guest_spans.cleanup_unclosed();
-                    return Err(WasmError::Invocation(format!(
+                    return Err(WasmError::GuestExecution(format!(
                         "failed to read result length: {e}"
                     )));
                 }
@@ -740,21 +743,23 @@ impl WasmEngine {
                     result_len,
                 ) {
                     store.data_mut().guest_spans.cleanup_unclosed();
-                    return Err(WasmError::Invocation(
+                    return Err(WasmError::GuestExecution(
                         "result length exceeds guest linear memory".to_string(),
                     ));
                 }
                 let mut result_bytes = vec![0u8; result_len];
                 if let Err(e) = memory.read(&store, result_ptr as usize, &mut result_bytes) {
                     store.data_mut().guest_spans.cleanup_unclosed();
-                    return Err(WasmError::Invocation(format!("failed to read result: {e}")));
+                    return Err(WasmError::GuestExecution(format!(
+                        "failed to read result: {e}"
+                    )));
                 }
 
                 match String::from_utf8(result_bytes) {
                     Ok(result) => result,
                     Err(e) => {
                         store.data_mut().guest_spans.cleanup_unclosed();
-                        return Err(WasmError::Invocation(format!(
+                        return Err(WasmError::GuestExecution(format!(
                             "result is not valid UTF-8: {e}"
                         )));
                     }
