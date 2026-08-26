@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use temper_runtime::persistence::{
-    EventMetadata, KernelEventMetadata, PersistenceEnvelope, StreamDescriptorV1, StreamEntityRef,
-    StreamMutability, StreamStorageRefV1,
+    EventMetadata, KernelEventMetadata, PersistenceEnvelope, StreamDescriptorInputV1,
+    StreamDescriptorV1, StreamEntityRef, StreamMutability, StreamStorageRefV1,
 };
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
@@ -257,19 +257,19 @@ impl ServerState {
             .expected_current_sequence
             .checked_add(1)
             .ok_or_else(|| "historical stream sequence overflowed".to_string())?;
-        let descriptor = StreamDescriptorV1::new(
-            StreamEntityRef::new(&candidate.entity_type, &candidate.entity_id)
+        let descriptor = StreamDescriptorV1::new(StreamDescriptorInputV1 {
+            subject: StreamEntityRef::new(&candidate.entity_type, &candidate.entity_id)
                 .map_err(|error| error.to_string())?,
-            facts.authorization_parent,
-            &candidate.content_hash,
-            StreamStorageRefV1::new(&candidate.storage_object_id)
+            authorization_parent: facts.authorization_parent,
+            content_hash: candidate.content_hash.clone(),
+            storage: StreamStorageRefV1::new(&candidate.storage_object_id)
                 .map_err(|error| error.to_string())?,
-            candidate.byte_length,
-            candidate.content_type.clone(),
-            candidate.content_event_sequence,
-            descriptor_sequence,
-            candidate.mutability,
-        )
+            byte_length: candidate.byte_length,
+            content_type: candidate.content_type.clone(),
+            content_event_sequence: candidate.content_event_sequence,
+            descriptor_event_sequence: descriptor_sequence,
+            mutability: candidate.mutability,
+        })
         .map_err(|error| error.to_string())?;
         self.validate_stream_descriptor_capability(tenant, None, &descriptor)?;
         let state = self

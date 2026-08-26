@@ -165,6 +165,29 @@ pub struct StreamDescriptorV1 {
     mutability: StreamMutability,
 }
 
+/// Named inputs used to construct and validate a V1 stream descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamDescriptorInputV1 {
+    /// Entity whose `$value` this descriptor governs.
+    pub subject: StreamEntityRef,
+    /// Optional verified parent used for authorization.
+    pub authorization_parent: Option<StreamEntityRef>,
+    /// Platform-computed content digest.
+    pub content_hash: String,
+    /// Persisted opaque storage identity.
+    pub storage: StreamStorageRefV1,
+    /// Host-attested accepted byte count.
+    pub byte_length: u64,
+    /// Optional media type committed with the content.
+    pub content_type: Option<String>,
+    /// Domain event that published the content.
+    pub content_event_sequence: u64,
+    /// Event envelope that persisted this descriptor.
+    pub descriptor_event_sequence: u64,
+    /// Verified replacement semantics.
+    pub mutability: StreamMutability,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UncheckedStreamDescriptorV1 {
@@ -181,19 +204,18 @@ struct UncheckedStreamDescriptorV1 {
 
 impl StreamDescriptorV1 {
     /// Construct a validated descriptor for a normal commit or audited backfill.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        subject: StreamEntityRef,
-        authorization_parent: Option<StreamEntityRef>,
-        content_hash: impl Into<String>,
-        storage: StreamStorageRefV1,
-        byte_length: u64,
-        content_type: Option<String>,
-        content_event_sequence: u64,
-        descriptor_event_sequence: u64,
-        mutability: StreamMutability,
-    ) -> Result<Self, StreamDescriptorError> {
-        let content_hash = content_hash.into();
+    pub fn new(input: StreamDescriptorInputV1) -> Result<Self, StreamDescriptorError> {
+        let StreamDescriptorInputV1 {
+            subject,
+            authorization_parent,
+            content_hash,
+            storage,
+            byte_length,
+            content_type,
+            content_event_sequence,
+            descriptor_event_sequence,
+            mutability,
+        } = input;
         validate_required("content_hash", &content_hash, MAX_CONTENT_HASH_BYTES)?;
         if content_type
             .as_ref()
@@ -275,17 +297,17 @@ impl TryFrom<UncheckedStreamDescriptorV1> for StreamDescriptorV1 {
     type Error = StreamDescriptorError;
 
     fn try_from(value: UncheckedStreamDescriptorV1) -> Result<Self, Self::Error> {
-        Self::new(
-            value.subject,
-            value.authorization_parent,
-            value.content_hash,
-            value.storage,
-            value.byte_length,
-            value.content_type,
-            value.content_event_sequence,
-            value.descriptor_event_sequence,
-            value.mutability,
-        )
+        Self::new(StreamDescriptorInputV1 {
+            subject: value.subject,
+            authorization_parent: value.authorization_parent,
+            content_hash: value.content_hash,
+            storage: value.storage,
+            byte_length: value.byte_length,
+            content_type: value.content_type,
+            content_event_sequence: value.content_event_sequence,
+            descriptor_event_sequence: value.descriptor_event_sequence,
+            mutability: value.mutability,
+        })
     }
 }
 
@@ -326,17 +348,17 @@ mod tests {
     use super::*;
 
     fn descriptor() -> StreamDescriptorV1 {
-        StreamDescriptorV1::new(
-            StreamEntityRef::new("Temper.FS.File", "file-1").unwrap(),
-            None,
-            "sha256:abc",
-            StreamStorageRefV1::new("objects/ab/cd").unwrap(),
-            0,
-            Some("application/octet-stream".into()),
-            7,
-            7,
-            StreamMutability::Mutable,
-        )
+        StreamDescriptorV1::new(StreamDescriptorInputV1 {
+            subject: StreamEntityRef::new("Temper.FS.File", "file-1").unwrap(),
+            authorization_parent: None,
+            content_hash: "sha256:abc".into(),
+            storage: StreamStorageRefV1::new("objects/ab/cd").unwrap(),
+            byte_length: 0,
+            content_type: Some("application/octet-stream".into()),
+            content_event_sequence: 7,
+            descriptor_event_sequence: 7,
+            mutability: StreamMutability::Mutable,
+        })
         .unwrap()
     }
 

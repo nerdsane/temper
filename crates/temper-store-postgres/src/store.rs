@@ -1537,8 +1537,8 @@ mod tests {
     #[test]
     fn kernel_stream_metadata_roundtrips_with_historical_events() {
         use temper_runtime::persistence::{
-            KernelEventMetadata, StreamDescriptorV1, StreamEntityRef, StreamMutability,
-            StreamStorageRefV1,
+            KernelEventMetadata, StreamDescriptorInputV1, StreamDescriptorV1, StreamEntityRef,
+            StreamMutability, StreamStorageRefV1,
         };
 
         let database_url = match std::env::var("DATABASE_URL") {
@@ -1559,17 +1559,17 @@ mod tests {
             let historical = test_envelope("Created", serde_json::json!({}));
             let mut described = test_envelope("StreamUpdated", serde_json::json!({}));
             described.metadata.kernel = Some(KernelEventMetadata::V1 {
-                stream_descriptor: StreamDescriptorV1::new(
-                    StreamEntityRef::new("File", "file-1").unwrap(),
-                    None,
-                    "sha256:abc",
-                    StreamStorageRefV1::new("temper-fs/sha256:abc").unwrap(),
-                    3,
-                    None,
-                    2,
-                    2,
-                    StreamMutability::Mutable,
-                )
+                stream_descriptor: StreamDescriptorV1::new(StreamDescriptorInputV1 {
+                    subject: StreamEntityRef::new("File", "file-1").unwrap(),
+                    authorization_parent: None,
+                    content_hash: "sha256:abc".into(),
+                    storage: StreamStorageRefV1::new("temper-fs/sha256:abc").unwrap(),
+                    byte_length: 3,
+                    content_type: None,
+                    content_event_sequence: 2,
+                    descriptor_event_sequence: 2,
+                    mutability: StreamMutability::Mutable,
+                })
                 .unwrap(),
             });
             store

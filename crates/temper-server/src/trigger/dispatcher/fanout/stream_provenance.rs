@@ -1,5 +1,6 @@
 use temper_runtime::persistence::{
-    KernelEventMetadata, StreamDescriptorV1, StreamEntityRef, StreamMutability,
+    KernelEventMetadata, StreamDescriptorInputV1, StreamDescriptorV1, StreamEntityRef,
+    StreamMutability,
 };
 use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::{StreamCapabilityMutabilityV1, verify_stream_capabilities_v1};
@@ -75,18 +76,18 @@ pub(super) fn immutable_version_metadata(
     let target_sequence = target_current_sequence
         .checked_add(1)
         .ok_or_else(|| "immutable stream target sequence overflowed".to_string())?;
-    let descriptor = StreamDescriptorV1::new(
-        StreamEntityRef::new(&rule.then.entity_type, target_entity_id)
+    let descriptor = StreamDescriptorV1::new(StreamDescriptorInputV1 {
+        subject: StreamEntityRef::new(&rule.then.entity_type, target_entity_id)
             .map_err(|error| error.to_string())?,
-        Some(source.subject().clone()),
-        source.content_hash(),
-        source.storage().clone(),
-        source.byte_length(),
-        source.content_type().map(str::to_string),
-        target_sequence,
-        target_sequence,
-        StreamMutability::Immutable,
-    )
+        authorization_parent: Some(source.subject().clone()),
+        content_hash: source.content_hash().to_string(),
+        storage: source.storage().clone(),
+        byte_length: source.byte_length(),
+        content_type: source.content_type().map(str::to_string),
+        content_event_sequence: target_sequence,
+        descriptor_event_sequence: target_sequence,
+        mutability: StreamMutability::Immutable,
+    })
     .map_err(|error| error.to_string())?;
     Ok(Some(KernelEventMetadata::V1 {
         stream_descriptor: descriptor,
@@ -121,17 +122,17 @@ mod tests {
         );
         let state =
             crate::ServerState::from_registry(ActorSystem::new("stream-provenance-test"), registry);
-        let source = StreamDescriptorV1::new(
-            StreamEntityRef::new("File", "file-1").unwrap(),
-            None,
-            "sha256:abc",
-            StreamStorageRefV1::new("temper-fs/sha256:abc").unwrap(),
-            3,
-            Some("text/plain".into()),
-            2,
-            2,
-            StreamMutability::Mutable,
-        )
+        let source = StreamDescriptorV1::new(StreamDescriptorInputV1 {
+            subject: StreamEntityRef::new("File", "file-1").unwrap(),
+            authorization_parent: None,
+            content_hash: "sha256:abc".into(),
+            storage: StreamStorageRefV1::new("temper-fs/sha256:abc").unwrap(),
+            byte_length: 3,
+            content_type: Some("text/plain".into()),
+            content_event_sequence: 2,
+            descriptor_event_sequence: 2,
+            mutability: StreamMutability::Mutable,
+        })
         .unwrap();
         let delivery = BoundDelivery {
             delivery_id: "delivery-1".into(),

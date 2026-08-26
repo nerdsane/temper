@@ -303,8 +303,8 @@ fn resolve_descriptor_events(
 mod tests {
     use temper_runtime::ActorSystem;
     use temper_runtime::persistence::{
-        EventMetadata, EventStore, KernelEventMetadata, PersistenceEnvelope, StreamEntityRef,
-        StreamStorageRefV1,
+        EventMetadata, EventStore, KernelEventMetadata, PersistenceEnvelope,
+        StreamDescriptorInputV1, StreamEntityRef, StreamStorageRefV1,
     };
     use temper_store_sim::{SimEventStore, SimFaultConfig};
     use uuid::Uuid;
@@ -312,17 +312,17 @@ mod tests {
     use super::*;
 
     fn event(sequence: u64, mutability: StreamMutability) -> PersistenceEnvelope {
-        let descriptor = StreamDescriptorV1::new(
-            StreamEntityRef::new("File", "file-1").unwrap(),
-            None,
-            "sha256:abc",
-            StreamStorageRefV1::new("streams/abc").unwrap(),
-            3,
-            Some("text/plain".into()),
-            sequence,
-            sequence,
+        let descriptor = StreamDescriptorV1::new(StreamDescriptorInputV1 {
+            subject: StreamEntityRef::new("File", "file-1").unwrap(),
+            authorization_parent: None,
+            content_hash: "sha256:abc".into(),
+            storage: StreamStorageRefV1::new("streams/abc").unwrap(),
+            byte_length: 3,
+            content_type: Some("text/plain".into()),
+            content_event_sequence: sequence,
+            descriptor_event_sequence: sequence,
             mutability,
-        )
+        })
         .unwrap();
         PersistenceEnvelope {
             sequence_nr: sequence,
@@ -444,17 +444,17 @@ mod tests {
                 .unwrap(),
             b"abc"
         );
-        let corrupt_digest = StreamDescriptorV1::new(
-            descriptor.subject().clone(),
-            None,
-            "sha256:wrong",
-            descriptor.storage().clone(),
-            descriptor.byte_length(),
-            descriptor.content_type().map(str::to_string),
-            1,
-            1,
-            StreamMutability::Mutable,
-        )
+        let corrupt_digest = StreamDescriptorV1::new(StreamDescriptorInputV1 {
+            subject: descriptor.subject().clone(),
+            authorization_parent: None,
+            content_hash: "sha256:wrong".into(),
+            storage: descriptor.storage().clone(),
+            byte_length: descriptor.byte_length(),
+            content_type: descriptor.content_type().map(str::to_string),
+            content_event_sequence: 1,
+            descriptor_event_sequence: 1,
+            mutability: StreamMutability::Mutable,
+        })
         .unwrap();
         assert!(matches!(
             state

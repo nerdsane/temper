@@ -26,15 +26,17 @@ impl CommittedStreamReceiptV1 {
         mutability: temper_runtime::persistence::StreamMutability,
     ) -> Result<temper_runtime::persistence::StreamDescriptorV1, String> {
         temper_runtime::persistence::StreamDescriptorV1::new(
-            subject,
-            authorization_parent,
-            self.content_hash,
-            self.storage,
-            self.byte_length,
-            self.content_type,
-            event_sequence,
-            event_sequence,
-            mutability,
+            temper_runtime::persistence::StreamDescriptorInputV1 {
+                subject,
+                authorization_parent,
+                content_hash: self.content_hash,
+                storage: self.storage,
+                byte_length: self.byte_length,
+                content_type: self.content_type,
+                content_event_sequence: event_sequence,
+                descriptor_event_sequence: event_sequence,
+                mutability,
+            },
         )
         .map_err(|error| error.to_string())
     }
