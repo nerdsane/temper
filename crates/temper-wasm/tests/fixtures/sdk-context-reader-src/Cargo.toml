@@ -7,6 +7,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
 temper-wasm-sdk = { path = "../../../../temper-wasm-sdk" }
 
 [workspace]

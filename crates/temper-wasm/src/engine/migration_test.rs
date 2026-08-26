@@ -22,7 +22,7 @@ fn input() -> SchemaMigrationInputV1 {
         entity_type: "Example.Order".into(),
         entity_id: "order-1".into(),
         source_sequence: 7,
-        canonical_state_json: r#"{"Id":"order-1"}"#.into(),
+        canonical_state_json: r#"{"id":"order-1"}"#.into(),
         logical_context: SchemaMigrationLogicalContextV1 {
             batch_id: "batch-1".into(),
             item_index: 0,

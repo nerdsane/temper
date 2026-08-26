@@ -160,6 +160,19 @@ pub struct SchemaMigrationInputV1 {
     pub logical_context: SchemaMigrationLogicalContextV1,
 }
 
+impl SchemaMigrationInputV1 {
+    /// Deserialize the canonical source state into a typed snake_case IOA model.
+    ///
+    /// This method does not transform names or accept a runtime envelope in
+    /// place of the canonical migration state object.
+    pub fn source_state<T>(&self) -> Result<T, crate::state::StateDecodeError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        crate::state::decode_source_state(&self.canonical_state_json)
+    }
+}
+
 /// Closed result returned by `temper_schema_migrate_v1`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]

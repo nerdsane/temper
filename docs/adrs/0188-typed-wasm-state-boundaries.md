@@ -58,7 +58,14 @@ Serde failures surfaced as a typed boundary error.
 
 ### Decode migration source state without name adaptation
 
-`SchemaMigrationInputV1` will expose a generic source-state decoder for its
+The schema-migration service will use the verified source CSDL contract to
+canonicalize every stored property to its IOA snake_case name before producing
+`canonical_state_json`. Runtime-owned identity and lifecycle projections become
+`id` and `status`. Unknown properties, ambiguous contract mappings, and
+conflicting duplicate projections are rejected. Migration input does not retain
+PascalCase CSDL or runtime aliases.
+
+`SchemaMigrationInputV1` will expose a generic source-state decoder for that
 `canonical_state_json`. Migration code supplies a small snake_case Rust struct;
 the SDK parses the canonical JSON directly into that type. It does not probe
 PascalCase aliases or envelope shapes because migration source state is already

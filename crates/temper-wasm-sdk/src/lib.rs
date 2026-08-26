@@ -22,6 +22,10 @@ pub mod context;
 pub mod data;
 pub mod host;
 pub mod schema_deployment;
+pub mod state;
+
+#[cfg(test)]
+mod state_boundary_tests;
 
 #[cfg(target_arch = "wasm32")]
 pub mod http_stream;
@@ -153,6 +157,7 @@ pub mod http_stream {
 }
 
 pub use context::{Context, HttpRequest, HttpResponse, SubWrite, SubWriteBuilder, WasmSpan};
+pub use state::{StateDecodeError, decode_member_state, decode_source_state};
 
 /// Re-export serde_json types for convenience.
 pub use serde_json::{self, Value, json};
