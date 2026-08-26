@@ -20,6 +20,7 @@ pub(crate) use recovery::{
     list_collection_records_page, list_collection_workflow_ids_page, load_collection_record,
 };
 use source::active_workflow_append;
+pub(crate) use source::load_active_source_workflow_id;
 use source::{attach_active_workflow, ensure_source_journal};
 
 /// Reserved source-event field containing normalized collection starts.

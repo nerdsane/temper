@@ -390,6 +390,8 @@ pub struct QueryProjectionReplayParityDrift {
 #[derive(Clone)]
 // ADR-0025 Phase 4: remove record_store field after IOA entity migration complete
 pub struct ServerState {
+    /// Immutable operational gate for public collection workflows.
+    pub collection_workflow_mode: crate::trigger::collection_workflow::CollectionWorkflowMode,
     /// Capture losses this server could not record against any session.
     ///
     /// Read by conformance checking: a non-zero count means some stored
@@ -878,6 +880,8 @@ impl ServerState {
         let (agent_progress_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
         let (observe_refresh_tx, _) = tokio::sync::broadcast::channel(64); // determinism-ok: broadcast for external observation
         let state = Self {
+            collection_workflow_mode:
+                crate::trigger::collection_workflow::CollectionWorkflowMode::Enabled,
             capture_health: crate::trajectory_outbox::CaptureHealth::default(),
             actor_system: Arc::new(system),
             pg_actor_system: None,
@@ -1138,6 +1142,8 @@ impl ServerState {
         let (agent_progress_tx, _) = tokio::sync::broadcast::channel(256); // determinism-ok: broadcast for external observation
         let (observe_refresh_tx, _) = tokio::sync::broadcast::channel(64); // determinism-ok: broadcast for external observation
         let state = Self {
+            collection_workflow_mode:
+                crate::trigger::collection_workflow::CollectionWorkflowMode::Enabled,
             capture_health: crate::trajectory_outbox::CaptureHealth::default(),
             actor_system: Arc::new(system),
             pg_actor_system: None,

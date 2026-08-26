@@ -631,10 +631,35 @@ impl EntityActor {
             (key_rows, vector_rows, reconcile_vectors)
         };
         let append_start = Instant::now(); // determinism-ok: production-only event-store wait metric
+        let source_append = PersistenceAppend {
+            persistence_id: persistence_id.to_string(),
+            expected_sequence: state.sequence_nr,
+            events: vec![envelope],
+            key_rows: key_rows.clone(),
+            vector_rows: vector_rows.clone(),
+            reconcile_vectors,
+        };
         let collection_receipt = reaction_context
             .and_then(|context| context.receipt.as_ref())
             .filter(|receipt| receipt.collection.is_some());
-        let result = if let Some(receipt) = collection_receipt {
+        let table = self.table.read().expect("table lock poisoned").clone();
+        let collection_source_sequence = super::collection::commit_collection_source_action(
+            store,
+            source_append.clone(),
+            &table,
+            state,
+            self.tenant.as_str(),
+            &self.entity_type,
+            &self.entity_id,
+            &event.action,
+            reaction_context.map(|context| &context.authority),
+            self.schema_event_pin(&event.action),
+            reaction_context.and_then(|context| context.receipt.as_ref()),
+        )
+        .await?;
+        let result = if let Some(sequence) = collection_source_sequence {
+            Ok(sequence)
+        } else if let Some(receipt) = collection_receipt {
             let workflow_append = crate::trigger::collection_workflow::target_fence_append(
                 store,
                 self.tenant.as_str(),
@@ -642,16 +667,8 @@ impl EntityActor {
             )
             .await
             .map_err(PersistenceError::Storage)?;
-            let target_append = PersistenceAppend {
-                persistence_id: persistence_id.to_string(),
-                expected_sequence: state.sequence_nr,
-                events: vec![envelope],
-                key_rows: key_rows.clone(),
-                vector_rows: vector_rows.clone(),
-                reconcile_vectors,
-            };
             store
-                .append_batch(&[target_append, workflow_append])
+                .append_batch(&[source_append, workflow_append])
                 .await
                 .map(|results| results[0].sequence_nr)
         } else {
@@ -659,7 +676,7 @@ impl EntityActor {
                 .append_with_index_rows(
                     persistence_id,
                     state.sequence_nr,
-                    &[envelope],
+                    &source_append.events,
                     &key_rows,
                     &vector_rows,
                     reconcile_vectors,

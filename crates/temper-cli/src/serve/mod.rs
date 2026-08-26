@@ -75,6 +75,9 @@ pub async fn run(
     api_token_override: Option<String>,
     local_observe: Option<bool>,
 ) -> Result<()> {
+    let collection_workflow_mode =
+        temper_server::trigger::collection_workflow::CollectionWorkflowMode::from_env()
+            .map_err(anyhow::Error::msg)?;
     let _otel_guard = init_observability("temper-platform");
     temper_authz::init_metrics();
     temper_store_postgres::init_metrics();
@@ -90,11 +93,17 @@ pub async fn run(
     .await?;
 
     // Phase 2: Registry (restore + disk apps)
-    let (registry, tenant_policy_seed) =
-        bootstrap::build_registry(pg_pool.as_ref(), storage_stack.as_ref(), &apps).await?;
+    let (registry, tenant_policy_seed) = bootstrap::build_registry(
+        pg_pool.as_ref(),
+        storage_stack.as_ref(),
+        &apps,
+        collection_workflow_mode,
+    )
+    .await?;
 
     // Assemble platform state
     let mut state = PlatformState::with_registry(registry, api_key);
+    state.server.collection_workflow_mode = collection_workflow_mode;
     let mut pg_actor_runtime_cancel = None;
     state.api_token = api_token_override.or_else(|| std::env::var("TEMPER_API_KEY").ok());
     if state.api_token.is_some() {

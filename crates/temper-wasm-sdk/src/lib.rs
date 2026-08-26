@@ -18,6 +18,7 @@
 //! }
 //! ```
 
+pub mod collection;
 pub mod context;
 pub mod data;
 pub mod host;
@@ -233,6 +234,7 @@ macro_rules! temper_module {
 /// use temper_wasm_sdk::prelude::*;
 /// ```
 pub mod prelude {
+    pub use crate::collection::collection_member_id_v1;
     pub use crate::context::{
         Context, HttpRequest, HttpResponse, SubWrite, SubWriteBuilder, WasmSpan,
     };

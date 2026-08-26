@@ -76,6 +76,9 @@ pub struct TransitionTable {
     /// reconstructing scheduling metadata after the source commit.
     #[serde(default)]
     pub state_timeouts: Vec<temper_spec::automaton::StateTimeout>,
+    /// Verified bounded collection-workflow declarations used by runtime dispatch.
+    #[serde(default)]
+    pub collection_workflows: Vec<temper_spec::automaton::CollectionWorkflow>,
     /// Ordered list of transition rules.
     pub rules: Vec<TransitionRule>,
     /// ADR-0153: declared unique/alternate keys the kernel indexes for
@@ -195,6 +198,8 @@ impl<'de> Deserialize<'de> for TransitionTable {
             schema_digest: Option<String>,
             #[serde(default)]
             state_timeouts: Vec<temper_spec::automaton::StateTimeout>,
+            #[serde(default)]
+            collection_workflows: Vec<temper_spec::automaton::CollectionWorkflow>,
             rules: Vec<TransitionRule>,
             #[serde(default)]
             state_var_metadata: BTreeMap<String, StateVarMetadata>,
@@ -215,6 +220,7 @@ impl<'de> Deserialize<'de> for TransitionTable {
             initial_state: raw.initial_state,
             schema_digest: raw.schema_digest,
             state_timeouts: raw.state_timeouts,
+            collection_workflows: raw.collection_workflows,
             rules: raw.rules,
             keys: raw.keys,
             vectors: raw.vectors,
@@ -334,6 +340,7 @@ mod tests {
             initial_state: "Draft".to_string(),
             schema_digest: None,
             state_timeouts: vec![],
+            collection_workflows: vec![],
             keys: vec![],
             vectors: vec![],
             rules: vec![

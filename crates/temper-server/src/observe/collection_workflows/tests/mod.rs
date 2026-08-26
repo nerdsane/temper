@@ -151,6 +151,26 @@ fn limits_are_rejected_instead_of_clamped() {
 }
 
 #[tokio::test]
+async fn disabled_mode_hides_collection_observe() {
+    let (mut state, _store, _temp) = state().await;
+    state.collection_workflow_mode =
+        crate::trigger::collection_workflow::CollectionWorkflowMode::Disabled;
+    let error = handle_list_workflows(
+        State(state),
+        Some(context("disabled-observe", "reader")),
+        Query(WorkflowListQuery {
+            limit: None,
+            cursor: None,
+            status: None,
+        }),
+    )
+    .await
+    .expect_err("disabled mode must hide collection Observe");
+    assert_eq!(error.status, StatusCode::NOT_FOUND);
+    assert_eq!(error.category, "collection_workflows_disabled");
+}
+
+#[tokio::test]
 async fn list_and_member_pages_are_tenant_bound_paginated_and_redacted() {
     let (state, _store, _temp) = state().await;
     permit_reader(&state, "tenant-a");

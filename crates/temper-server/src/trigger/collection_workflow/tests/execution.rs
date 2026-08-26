@@ -63,6 +63,7 @@ async fn activated_start_co_commits_bounded_member_intents_for_recovery() {
         &intent,
         &mut record,
         &actions(),
+        None,
     )
     .await
     .expect("activated start");
@@ -157,6 +158,7 @@ async fn generated_control_races_converge_through_private_production_commits() {
             &start_intent,
             &mut record,
             &actions(),
+            None,
         )
         .await
         .unwrap();
@@ -211,6 +213,7 @@ async fn generated_control_races_converge_through_private_production_commits() {
             &control,
             workflow_sequence,
             &mut controlled,
+            None,
         )
         .await
         .unwrap();

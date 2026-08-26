@@ -1144,6 +1144,18 @@ pub(crate) async fn install_os_app_from_dir_with_plan(
             app_dir.display()
         )
     })?;
+    if plan.specs {
+        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+        for (entity_type, ioa_source) in &bundle.specs {
+            let existing_source = registry
+                .get_spec(&TenantId::new(tenant), entity_type)
+                .map(|existing| existing.ioa_source.as_str());
+            state
+                .server
+                .collection_workflow_mode
+                .require_spec_source(existing_source, ioa_source)?;
+        }
+    }
     if bundle.deployment_mode == AppDeploymentMode::Commons {
         state.server.enable_commons_guardrails(tenant);
     }

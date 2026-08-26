@@ -31,6 +31,7 @@ pub(crate) async fn commit_activated_start(
     intent: &super::CollectionStartIntentV1,
     record: &mut super::CollectionWorkflowRecordV1,
     actions: &super::CollectionExecutionActions<'_>,
+    source_fence_append: Option<temper_runtime::persistence::PersistenceAppend>,
 ) -> Result<super::CollectionLedgerCommitOutcome, String> {
     let mut superseded_append = None;
     if let Some(active_workflow_id) = super::active_source_workflow_id(store, record)
@@ -64,13 +65,16 @@ pub(crate) async fn commit_activated_start(
     }
     timeout_binding::bind_timeout_from_source(record, &source_append, actions.timeout_action)?;
     let intents = activate_start(record, 0, actions)?;
+    let mut extra_appends = Vec::with_capacity(2);
+    extra_appends.extend(superseded_append);
+    extra_appends.extend(source_fence_append);
     let outcome = super::commit_collection_start_with_intents(
         store,
         source_append,
         intent,
         record,
         &intents,
-        superseded_append.as_slice(),
+        &extra_appends,
     )
     .await
     .map_err(|error| error.to_string())?;
@@ -86,6 +90,7 @@ pub(crate) async fn commit_controlled(
     intent: &super::CollectionControlIntentV1,
     expected_workflow_sequence: u64,
     record: &mut super::CollectionWorkflowRecordV1,
+    source_fence_append: Option<temper_runtime::persistence::PersistenceAppend>,
 ) -> Result<super::CollectionLedgerCommitOutcome, String> {
     let intents = recover_progress(record, expected_workflow_sequence)?;
     let mut delivery_appends = Vec::new();
@@ -112,6 +117,7 @@ pub(crate) async fn commit_controlled(
                 .map_err(|error| error.to_string())?,
         );
     }
+    delivery_appends.extend(source_fence_append);
     let outcome = super::commit_collection_control_with_intents(
         store,
         source_append,
