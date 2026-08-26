@@ -40,6 +40,8 @@ mod canonical_defaults_tests;
 #[cfg(test)]
 mod entity_action_result_tests;
 #[cfg(test)]
+mod lifecycle_provenance_tests;
+#[cfg(test)]
 mod parity_tests;
 #[cfg(all(test, feature = "sim"))]
 mod schema_deployment_tests;

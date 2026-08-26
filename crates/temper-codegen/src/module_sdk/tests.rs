@@ -12,7 +12,7 @@ pub(super) const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
   <edmx:DataServices><Schema Namespace="Temper.App" xmlns="http://docs.oasis-open.org/odata/ns/edm">
     <EntityType Name="Task"><Key><PropertyRef Name="Id"/></Key>
       <Property Name="Id" Type="Edm.String" Nullable="false"/>
-      <Property Name="Status" Type="Edm.String" Nullable="false"/>
+      <Property Name="Status" Type="Edm.String" Nullable="false" DefaultValue="Open"/>
     </EntityType>
     <EntityType Name="Receipt"><Key><PropertyRef Name="Id"/></Key>
       <Property Name="Id" Type="Edm.String" Nullable="false"/>
@@ -20,6 +20,7 @@ pub(super) const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
     </EntityType>
     <EntityType Name="File" HasStream="true"><Key><PropertyRef Name="Id"/></Key>
       <Property Name="Id" Type="Edm.String" Nullable="false"/>
+      <Property Name="Status" Type="Edm.String" Nullable="false" DefaultValue="Open"/>
       <Property Name="Path" Type="Edm.String" Nullable="false"/>
     </EntityType>
     <EnumType Name="Outcome"><Member Name="Accepted"/><Member Name="Rejected"/></EnumType>
@@ -104,6 +105,52 @@ name = "lifecycle"
 type = "status"
 initial = "Open"
 "#;
+
+const TASK_IOA: &str = r#"
+[automaton]
+name = "Task"
+states = ["Open", "Done"]
+initial = "Open"
+"#;
+
+const FILE_IOA: &str = r#"
+[automaton]
+name = "File"
+states = ["Open", "Done"]
+initial = "Open"
+"#;
+
+fn ioa_sources() -> Vec<IoaSourceInput> {
+    vec![
+        IoaSourceInput {
+            entity_type: "Temper.App.Task".into(),
+            source: TASK_IOA.into(),
+        },
+        IoaSourceInput {
+            entity_type: "Temper.App.File".into(),
+            source: FILE_IOA.into(),
+        },
+    ]
+}
+
+pub(super) fn generate_module_sdk(
+    csdl: &CsdlDocument,
+    module_name: &str,
+    closure_digest: &str,
+    dependency_lock_digest: &str,
+    artifact_digest: &str,
+    grant: ModuleDataGrant,
+) -> Result<GeneratedModuleSdk, ModuleSdkCodegenError> {
+    super::generate_module_sdk(
+        csdl,
+        &ioa_sources(),
+        module_name,
+        closure_digest,
+        dependency_lock_digest,
+        artifact_digest,
+        grant,
+    )
+}
 
 pub(super) fn grant() -> ModuleDataGrant {
     let mut grant = ModuleDataGrant::default();

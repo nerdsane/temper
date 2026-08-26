@@ -31,6 +31,7 @@ pub fn generate_module_sdk(
         .ok_or_else(|| format!("module '{}' has no data grant", request.inputs.module))?;
     let generated = temper_codegen::generate_module_sdk(
         &resolved.csdl,
+        &resolved.ioa_sources,
         &request.inputs.module,
         &resolved.lock.digest,
         &resolved.lock.digest,
@@ -68,6 +69,7 @@ pub fn bind_module_sdk(request: BindModuleSdkRequest) -> Result<ModuleSdkBuildRe
         .ok_or_else(|| format!("module '{}' has no data grant", request.inputs.module))?;
     let generated = temper_codegen::generate_module_sdk(
         &resolved.csdl,
+        &resolved.ioa_sources,
         &request.inputs.module,
         &resolved.lock.digest,
         &resolved.lock.digest,

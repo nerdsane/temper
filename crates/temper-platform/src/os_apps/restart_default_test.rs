@@ -3,8 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use temper_runtime::tenant::TenantId;
 use temper_server::EntityState;
 use temper_wasm_sdk::data::{
-    ManifestEntityV1, ManifestPropertyV1, ModuleDataGrant, ModuleSdkManifest,
-    ModuleSdkMetadataDigests,
+    DataOperationKind, EntityDataGrant, ModuleDataGrant, ModuleSdkManifest,
 };
 
 use super::reconcile;
@@ -21,38 +20,48 @@ fn workspace_free_restart_preserves_canonical_default_behavior() {
         "worker",
         &artifact_digest,
     );
-    let binding = ModuleSdkManifest::new(
-        "worker",
-        ModuleSdkMetadataDigests {
-            closure: "closure".into(),
-            dependency_lock: "closure".into(),
-            schema: "schema".into(),
-        },
-        &artifact_digest,
-        ModuleDataGrant::default(),
-        vec![ManifestEntityV1 {
-            entity_type: "Temper.Example.Customer".into(),
-            entity_set: "Customers".into(),
-            generated_name: "Customer".into(),
-            properties: vec![ManifestPropertyV1 {
-                canonical_name: "FailureReason".into(),
-                generated_name: "failure_reason".into(),
-                type_name: "Edm.String".into(),
-                nullable: false,
-                default_value: Some(serde_json::json!("")),
-                enum_members: Vec::new(),
-            }],
-            actions: Vec::new(),
-        }],
-        BTreeSet::new(),
+    let csdl = temper_spec::csdl::parse_csdl(
+        r#"<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="Temper.Example" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EntityType Name="Customer"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/><Property Name="State" Type="Edm.String" Nullable="false" DefaultValue="Unconfigured"/><Property Name="FailureReason" Type="Edm.String" Nullable="false" DefaultValue=""/></EntityType><EntityContainer Name="Container"><EntitySet Name="Customers" EntityType="Temper.Example.Customer"/></EntityContainer></Schema></edmx:DataServices></edmx:Edmx>"#,
     )
-    .expect("valid binding");
+    .expect("restart fixture CSDL parses");
+    let binding = temper_codegen::generate_module_sdk(
+        &csdl,
+        &[temper_spec::bundle::IoaSourceInput {
+            entity_type: "Temper.Example.Customer".into(),
+            source: r#"[automaton]
+name = "Customer"
+states = ["Unconfigured", "Active"]
+initial = "Unconfigured"
+
+[[action]]
+name = "Activate"
+kind = "input"
+from = ["Unconfigured"]
+to = "Active"
+"#
+            .into(),
+        }],
+        "worker",
+        "closure",
+        "closure",
+        &artifact_digest,
+        ModuleDataGrant {
+            operations: BTreeSet::from([DataOperationKind::EntityGet]),
+            entities: vec![EntityDataGrant {
+                entity_type: "Temper.Example.Customer".into(),
+                ..EntityDataGrant::default()
+            }],
+            ..ModuleDataGrant::default()
+        },
+    )
+    .expect("valid generated binding")
+    .manifest;
     let entity_state: EntityState = serde_json::from_value(serde_json::json!({
         "entity_type": "Customer",
         "entity_id": "customer-1",
         "status": "Active",
         "item_count": 0,
-        "fields": {},
+        "fields": {"State": "Unconfigured"},
         "events": []
     }))
     .expect("sparse committed state");
@@ -87,5 +96,6 @@ fn workspace_free_restart_preserves_canonical_default_behavior() {
     .expect("post-restart canonical response");
     assert_eq!(restored.binding_digest(), digest_before);
     assert_eq!(after, before);
+    assert_eq!(after.get("State"), Some(&serde_json::json!("Active")));
     assert_eq!(after.get("FailureReason"), Some(&serde_json::json!("")));
 }

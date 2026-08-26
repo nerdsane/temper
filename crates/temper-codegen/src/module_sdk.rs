@@ -5,19 +5,21 @@ use std::collections::BTreeSet;
 use temper_spec::csdl::{Action, CsdlDocument, EntityType, emit_csdl_xml};
 use temper_wasm_sdk::data::{
     ArtifactModuleSdkBinding, DataOperationKind, EntityDataGrant, ManifestActionV1,
-    ManifestEntityV1, ManifestPropertyV1, ModuleDataGrant, ModuleSdkManifest,
-    ModuleSdkMetadataDigests, bind_module_sdk_artifact,
+    ManifestEntityV1, ManifestPropertyV1, ManifestValueSourceV1, ModuleDataGrant,
+    ModuleSdkManifest, ModuleSdkMetadataDigests, bind_module_sdk_artifact,
 };
 
 mod defaults;
 mod entity_results;
 mod names;
+mod property_sources;
 mod schema_helpers;
 mod source_types;
 mod types;
 use defaults::manifest_property;
 use entity_results::{emit_entity_value_types, generated_entity_names, validate_entity_results};
 use names::{reject_generated_collisions, rust_field_name};
+use property_sources::assign_entity_property_sources;
 use schema_helpers::{entity_sets, enum_members};
 use source_types::{emit_artifact_binding, emit_named_property_type, hex_sha256};
 mod client_emitter;
@@ -50,6 +52,41 @@ pub enum ModuleSdkCodegenError {
         symbol: String,
         type_name: String,
         value: String,
+    },
+    #[error("granted entity type '{0}' has no verified IOA source")]
+    MissingIoaSource(String),
+    #[error("verified IOA source for '{entity_type}' is invalid: {message}")]
+    InvalidIoaSource {
+        entity_type: String,
+        message: String,
+    },
+    #[error("entity '{entity_type}' has unsupported canonical key properties {key_properties:?}")]
+    UnsupportedEntityKey {
+        entity_type: String,
+        key_properties: Vec<String>,
+    },
+    #[error(
+        "entity '{entity_type}' has no canonical lifecycle property for IOA initial state '{initial_state}'"
+    )]
+    MissingLifecycleProperty {
+        entity_type: String,
+        initial_state: String,
+    },
+    #[error(
+        "entity '{entity_type}' has ambiguous canonical lifecycle properties {candidates:?} for IOA initial state '{initial_state}'"
+    )]
+    AmbiguousLifecycleProperty {
+        entity_type: String,
+        initial_state: String,
+        candidates: Vec<String>,
+    },
+    #[error(
+        "entity '{entity_type}' lifecycle property '{property}' default does not match IOA initial state '{initial_state}'"
+    )]
+    LifecycleDefaultMismatch {
+        entity_type: String,
+        property: String,
+        initial_state: String,
     },
     #[error(
         "bound action '{action}' on '{entity_type}' returns different entity type '{result_type}'"
@@ -87,6 +124,7 @@ pub fn package_generated_module_sdk(
 /// Generate a module-specific Rust client from a verified closure and exact grant.
 pub fn generate_module_sdk(
     csdl: &CsdlDocument,
+    ioa_sources: &[temper_spec::bundle::IoaSourceInput],
     module_name: &str,
     closure_digest: &str,
     dependency_lock_digest: &str,
@@ -137,7 +175,7 @@ pub fn generate_module_sdk(
                         .as_ref()
                         .is_some_and(|result| result.type_name == entity_grant.entity_type)
             });
-        let properties = if entity_value_required {
+        let mut properties = if entity_value_required {
             entity
                 .properties
                 .iter()
@@ -148,12 +186,21 @@ pub fn generate_module_sdk(
                         &property.type_name,
                         property.nullable,
                         property.default_value.as_deref(),
+                        ManifestValueSourceV1::StoredField,
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?
         } else {
             Vec::new()
         };
+        if entity_value_required {
+            assign_entity_property_sources(
+                &entity_grant.entity_type,
+                entity,
+                ioa_sources,
+                &mut properties,
+            )?;
+        }
         for property in &properties {
             used_symbols.insert(format!(
                 "property:{}:{}",
@@ -203,6 +250,7 @@ pub fn generate_module_sdk(
                                     &parameter.type_name,
                                     parameter.nullable,
                                     parameter.default_value.as_deref(),
+                                    ManifestValueSourceV1::Input,
                                 )
                             })
                             .collect::<Result<Vec<_>, _>>()?,
@@ -263,6 +311,7 @@ pub fn generate_module_sdk(
                         generated_name: "result".into(),
                         type_name: type_name.clone(),
                         nullable: false,
+                        source: ManifestValueSourceV1::Input,
                         default_value: None,
                         enum_members: action.result_enum_members.clone(),
                     },
@@ -405,5 +454,7 @@ fn resolve_entity<'a>(
 
 #[cfg(test)]
 mod default_tests;
+#[cfg(test)]
+mod property_sources_tests;
 #[cfg(test)]
 mod tests;

@@ -52,6 +52,7 @@ fn fallback_order_matches_declared_direction_and_null_rules() {
             generated_name: "estimate".into(),
             type_name: "Edm.Decimal".into(),
             nullable: true,
+            source: temper_wasm_sdk::data::ManifestValueSourceV1::StoredField,
             default_value: None,
             enum_members: Vec::new(),
         }],

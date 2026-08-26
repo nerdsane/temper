@@ -274,12 +274,28 @@ pub struct ManifestPropertyV1 {
     pub type_name: String,
     /// Whether the canonical value may be null.
     pub nullable: bool,
+    /// Immutable authority that supplies this canonical value.
+    pub source: ManifestValueSourceV1,
     /// Generation-validated canonical JSON value for the declared CSDL default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_value: Option<serde_json::Value>,
     /// Closed enum members, empty for non-enum properties.
     #[serde(default)]
     pub enum_members: Vec<String>,
+}
+
+/// Closed authority for one generated canonical value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManifestValueSourceV1 {
+    /// Value supplied in an action input object.
+    Input,
+    /// Value read from committed sparse entity fields.
+    StoredField,
+    /// Host-owned immutable entity identifier.
+    EntityId,
+    /// Host-owned persisted IOA lifecycle status.
+    LifecycleStatus,
 }
 
 /// Canonical action metadata used for typed generation and host validation.

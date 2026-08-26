@@ -1,7 +1,8 @@
 //! Bound-schema validation and shared governed write prechecks.
 
 use temper_wasm_sdk::data::{
-    ManifestEntityV1, ManifestPropertyV1, ModuleDataError, ModuleDataErrorKind,
+    ManifestEntityV1, ManifestPropertyV1, ManifestValueSourceV1, ModuleDataError,
+    ModuleDataErrorKind,
 };
 
 use crate::entity_actor::EntityState;
@@ -393,22 +394,24 @@ pub(super) fn canonical_entity_value(
         .expect("committed entity fields must be a JSON object");
     let mut canonical = serde_json::Map::new();
     for property in &schema.properties {
-        let normalized = temper_spec::to_snake_case(&property.canonical_name);
-        let value = fields
-            .get(&property.canonical_name)
-            .or_else(|| {
-                fields
-                    .iter()
-                    .find(|(name, _)| temper_spec::to_snake_case(name) == normalized)
-                    .map(|(_, value)| value)
-            })
-            .cloned()
-            .or_else(|| match normalized.as_str() {
-                "id" => Some(serde_json::Value::String(state.entity_id.clone())),
-                "status" => Some(serde_json::Value::String(state.status.clone())),
-                _ => None,
-            })
-            .or_else(|| property.default_value.clone());
+        let value = match property.source {
+            ManifestValueSourceV1::StoredField => stored_property_value(fields, property)
+                .cloned()
+                .or_else(|| property.default_value.clone()),
+            ManifestValueSourceV1::EntityId => {
+                Some(serde_json::Value::String(state.entity_id.clone()))
+            }
+            ManifestValueSourceV1::LifecycleStatus => {
+                Some(serde_json::Value::String(state.status.clone()))
+            }
+            ManifestValueSourceV1::Input => {
+                return Err(data_error(
+                    ModuleDataErrorKind::SchemaMismatch,
+                    "InvalidEntityPropertySource",
+                    "entity property has an input-only manifest source",
+                ));
+            }
+        };
         let Some(value) = value else {
             if property.nullable {
                 continue;
@@ -429,4 +432,17 @@ pub(super) fn canonical_entity_value(
         canonical.insert(property.canonical_name.clone(), value);
     }
     Ok(canonical)
+}
+
+fn stored_property_value<'a>(
+    fields: &'a serde_json::Map<String, serde_json::Value>,
+    property: &ManifestPropertyV1,
+) -> Option<&'a serde_json::Value> {
+    let normalized = temper_spec::to_snake_case(&property.canonical_name);
+    fields.get(&property.canonical_name).or_else(|| {
+        fields
+            .iter()
+            .find(|(name, _)| temper_spec::to_snake_case(name) == normalized)
+            .map(|(_, value)| value)
+    })
 }

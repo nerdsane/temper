@@ -16,39 +16,9 @@ use tower::ServiceExt;
 use super::{ApplicationDataInvocation, ModuleInvocationAuthority};
 use crate::state::ServerState;
 pub(super) const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
-<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="Temper.Example" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EnumType Name="Phase"><Member Name="Ready"/><Member Name="Done"/></EnumType><EntityType Name="Customer"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.Guid" Nullable="false"/><Property Name="Name" Type="Edm.String" Nullable="true"/><Property Name="Status" Type="Edm.String" Nullable="true"/><Property Name="RenameCount" Type="Edm.Int64" Nullable="true"/><Property Name="FailureReason" Type="Edm.String" Nullable="false" DefaultValue=""/><Property Name="Label" Type="Edm.String" Nullable="false" DefaultValue="unknown"/><Property Name="AttemptCount" Type="Edm.Int64" Nullable="false" DefaultValue="0"/><Property Name="Enabled" Type="Edm.Boolean" Nullable="false" DefaultValue="false"/><Property Name="Phase" Type="Temper.Example.Phase" Nullable="false" DefaultValue="Ready"/></EntityType><Action Name="Rename" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Example.Customer"/><Parameter Name="Name" Type="Edm.String" Nullable="false"/><ReturnType Type="Temper.Example.Customer" Nullable="false"/></Action><Action Name="Reject" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Example.Customer"/></Action><EntityContainer Name="Container"><EntitySet Name="Customers" EntityType="Temper.Example.Customer"/></EntityContainer></Schema></edmx:DataServices></edmx:Edmx>"#;
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="Temper.Example" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EnumType Name="Phase"><Member Name="Ready"/><Member Name="Done"/></EnumType><EntityType Name="Customer"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.Guid" Nullable="false"/><Property Name="Name" Type="Edm.String" Nullable="true"/><Property Name="Status" Type="Edm.String" Nullable="true" DefaultValue="Active"/><Property Name="RenameCount" Type="Edm.Int64" Nullable="true"/><Property Name="FailureReason" Type="Edm.String" Nullable="false" DefaultValue=""/><Property Name="Label" Type="Edm.String" Nullable="false" DefaultValue="unknown"/><Property Name="AttemptCount" Type="Edm.Int64" Nullable="false" DefaultValue="0"/><Property Name="Enabled" Type="Edm.Boolean" Nullable="false" DefaultValue="false"/><Property Name="Phase" Type="Temper.Example.Phase" Nullable="false" DefaultValue="Ready"/></EntityType><Action Name="Rename" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Example.Customer"/><Parameter Name="Name" Type="Edm.String" Nullable="false"/><ReturnType Type="Temper.Example.Customer" Nullable="false"/></Action><Action Name="Reject" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Example.Customer"/></Action><EntityContainer Name="Container"><EntitySet Name="Customers" EntityType="Temper.Example.Customer"/></EntityContainer></Schema></edmx:DataServices></edmx:Edmx>"#;
 
-fn manifest_property(
-    canonical_name: &str,
-    type_name: &str,
-    nullable: bool,
-    default_value: Option<serde_json::Value>,
-    enum_members: Vec<String>,
-) -> ManifestPropertyV1 {
-    ManifestPropertyV1 {
-        canonical_name: canonical_name.into(),
-        generated_name: temper_spec::to_snake_case(canonical_name),
-        type_name: type_name.into(),
-        nullable,
-        default_value,
-        enum_members,
-    }
-}
-
-mod file_capability_tests;
-
-pub(super) fn authenticated_router(state: ServerState, security: SecurityContext) -> Router {
-    crate::build_router(state).layer(Extension(AuthenticatedRequestContext::new(
-        TenantId::default(),
-        security,
-    )))
-}
-
-pub(super) fn invocation(
-    operations: BTreeSet<DataOperationKind>,
-    security: SecurityContext,
-) -> std::sync::Arc<ApplicationDataInvocation> {
-    const IOA: &str = r#"[automaton]
+pub(super) const IOA: &str = r#"[automaton]
 name = "Customer"
 states = ["Active", "Disabled"]
 initial = "Active"
@@ -72,6 +42,39 @@ kind = "input"
 from = ["Disabled"]
 to = "Disabled"
 "#;
+
+fn manifest_property(
+    canonical_name: &str,
+    type_name: &str,
+    nullable: bool,
+    default_value: Option<serde_json::Value>,
+    enum_members: Vec<String>,
+    source: temper_wasm_sdk::data::ManifestValueSourceV1,
+) -> ManifestPropertyV1 {
+    ManifestPropertyV1 {
+        canonical_name: canonical_name.into(),
+        generated_name: temper_spec::to_snake_case(canonical_name),
+        type_name: type_name.into(),
+        nullable,
+        source,
+        default_value,
+        enum_members,
+    }
+}
+
+mod file_capability_tests;
+
+pub(super) fn authenticated_router(state: ServerState, security: SecurityContext) -> Router {
+    crate::build_router(state).layer(Extension(AuthenticatedRequestContext::new(
+        TenantId::default(),
+        security,
+    )))
+}
+
+pub(super) fn invocation(
+    operations: BTreeSet<DataOperationKind>,
+    security: SecurityContext,
+) -> std::sync::Arc<ApplicationDataInvocation> {
     let state = ServerState::with_specs(
         ActorSystem::new("application-data-service-test"),
         parse_csdl(CSDL).expect("valid fixture CSDL"),
@@ -102,16 +105,45 @@ to = "Disabled"
             entity_set: "Customers".into(),
             generated_name: "Customer".into(),
             properties: vec![
-                manifest_property("Id", "Edm.Guid", false, None, Vec::new()),
-                manifest_property("Name", "Edm.String", true, None, Vec::new()),
-                manifest_property("Status", "Edm.String", true, None, Vec::new()),
-                manifest_property("RenameCount", "Edm.Int64", true, None, Vec::new()),
+                manifest_property(
+                    "Id",
+                    "Edm.Guid",
+                    false,
+                    None,
+                    Vec::new(),
+                    temper_wasm_sdk::data::ManifestValueSourceV1::EntityId,
+                ),
+                manifest_property(
+                    "Name",
+                    "Edm.String",
+                    true,
+                    None,
+                    Vec::new(),
+                    temper_wasm_sdk::data::ManifestValueSourceV1::StoredField,
+                ),
+                manifest_property(
+                    "Status",
+                    "Edm.String",
+                    true,
+                    None,
+                    Vec::new(),
+                    temper_wasm_sdk::data::ManifestValueSourceV1::LifecycleStatus,
+                ),
+                manifest_property(
+                    "RenameCount",
+                    "Edm.Int64",
+                    true,
+                    None,
+                    Vec::new(),
+                    temper_wasm_sdk::data::ManifestValueSourceV1::StoredField,
+                ),
                 manifest_property(
                     "FailureReason",
                     "Edm.String",
                     false,
                     Some(serde_json::json!("")),
                     Vec::new(),
+                    temper_wasm_sdk::data::ManifestValueSourceV1::StoredField,
                 ),
                 manifest_property(
                     "Label",
@@ -119,6 +151,7 @@ to = "Disabled"
                     false,
                     Some(serde_json::json!("unknown")),
                     Vec::new(),
+                    temper_wasm_sdk::data::ManifestValueSourceV1::StoredField,
                 ),
                 manifest_property(
                     "AttemptCount",
@@ -126,6 +159,7 @@ to = "Disabled"
                     false,
                     Some(serde_json::json!(0)),
                     Vec::new(),
+                    temper_wasm_sdk::data::ManifestValueSourceV1::StoredField,
                 ),
                 manifest_property(
                     "Enabled",
@@ -133,6 +167,7 @@ to = "Disabled"
                     false,
                     Some(serde_json::json!(false)),
                     Vec::new(),
+                    temper_wasm_sdk::data::ManifestValueSourceV1::StoredField,
                 ),
                 manifest_property(
                     "Phase",
@@ -140,6 +175,7 @@ to = "Disabled"
                     false,
                     Some(serde_json::json!("Ready")),
                     vec!["Done".into(), "Ready".into()],
+                    temper_wasm_sdk::data::ManifestValueSourceV1::StoredField,
                 ),
             ],
             actions: vec![
@@ -160,6 +196,7 @@ to = "Disabled"
                         false,
                         None,
                         Vec::new(),
+                        temper_wasm_sdk::data::ManifestValueSourceV1::Input,
                     )],
                     result_type: Some("Temper.Example.Customer".into()),
                     result_enum_members: Vec::new(),

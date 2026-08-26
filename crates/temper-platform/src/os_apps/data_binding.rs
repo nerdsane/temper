@@ -36,6 +36,7 @@ pub(super) fn verify_bundle_data_bindings(
             module_name,
             config,
             &closure.csdl,
+            &closure.ioa_sources,
             &closure.lock_digest,
         )?
         .ok_or_else(|| format!("module '{module_name}' data binding was not activated"))?;
@@ -49,6 +50,7 @@ pub(super) fn verify_module_config_data_binding(
     module_name: &str,
     config: &WasmModuleManifest,
     csdl_source: Option<&str>,
+    ioa_sources: &[(String, String)],
     closure_id: &str,
 ) -> Result<Option<ModuleSdkManifest>, String> {
     if config.data.is_none() {
@@ -58,7 +60,15 @@ pub(super) fn verify_module_config_data_binding(
         csdl_source.ok_or_else(|| "module data binding requires canonical CSDL".to_string())?;
     let csdl = temper_spec::csdl::parse_csdl(csdl_source)
         .map_err(|error| format!("module data binding CSDL is invalid: {error}"))?;
-    verify_module_config_data_binding_with_csdl(wasm, module_name, config, &csdl, closure_id)
+    let qualified_ioa = qualify_ioa_sources(&csdl, ioa_sources)?;
+    verify_module_config_data_binding_with_csdl(
+        wasm,
+        module_name,
+        config,
+        &csdl,
+        &qualified_ioa,
+        closure_id,
+    )
 }
 
 fn verify_module_config_data_binding_with_csdl(
@@ -66,6 +76,7 @@ fn verify_module_config_data_binding_with_csdl(
     module_name: &str,
     config: &WasmModuleManifest,
     csdl: &temper_spec::csdl::CsdlDocument,
+    ioa_sources: &[temper_spec::bundle::IoaSourceInput],
     closure_id: &str,
 ) -> Result<Option<ModuleSdkManifest>, String> {
     let Some(grant) = &config.data else {
@@ -81,6 +92,7 @@ fn verify_module_config_data_binding_with_csdl(
     }
     let regenerated = temper_codegen::generate_module_sdk(
         csdl,
+        ioa_sources,
         module_name,
         closure_id,
         closure_id,
@@ -89,6 +101,44 @@ fn verify_module_config_data_binding_with_csdl(
     )
     .map_err(|error| format!("module data binding regeneration failed: {error}"))?;
     verify_module_data_binding(wasm, module_name, grant, binding, &regenerated.manifest).map(Some)
+}
+
+fn qualify_ioa_sources(
+    csdl: &temper_spec::csdl::CsdlDocument,
+    sources: &[(String, String)],
+) -> Result<Vec<temper_spec::bundle::IoaSourceInput>, String> {
+    let entity_types = csdl
+        .schemas
+        .iter()
+        .flat_map(|schema| {
+            schema.entity_types.iter().map(move |entity| {
+                (
+                    entity.name.as_str(),
+                    format!("{}.{}", schema.namespace, entity.name),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    sources
+        .iter()
+        .map(|(short_name, source)| {
+            let matches = entity_types
+                .iter()
+                .filter(|(candidate, _)| *candidate == short_name)
+                .map(|(_, qualified)| qualified.clone())
+                .collect::<Vec<_>>();
+            if matches.len() != 1 {
+                return Err(format!(
+                    "IOA type '{short_name}' resolves to {} CSDL entity types",
+                    matches.len()
+                ));
+            }
+            Ok(temper_spec::bundle::IoaSourceInput {
+                entity_type: matches[0].clone(),
+                source: source.clone(),
+            })
+        })
+        .collect()
 }
 
 pub(super) fn verify_module_data_binding(
@@ -196,7 +246,19 @@ mod tests {
     use temper_spec::csdl::parse_csdl;
     use temper_wasm_sdk::data::{DataOperationKind, EntityDataGrant};
 
-    const CSDL: &str = r#"<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="Temper.App" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EntityType Name="Task"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/></EntityType><EntityContainer Name="Container"><EntitySet Name="Tasks" EntityType="Temper.App.Task"/></EntityContainer></Schema></edmx:DataServices></edmx:Edmx>"#;
+    const CSDL: &str = r#"<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="Temper.App" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EntityType Name="Task"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/><Property Name="State" Type="Edm.String" Nullable="false" DefaultValue="Open"/></EntityType><EntityContainer Name="Container"><EntitySet Name="Tasks" EntityType="Temper.App.Task"/></EntityContainer></Schema></edmx:DataServices></edmx:Edmx>"#;
+    const IOA: &str = r#"[automaton]
+name = "Task"
+states = ["Open", "Done"]
+initial = "Open"
+"#;
+
+    fn qualified_ioa() -> Vec<temper_spec::bundle::IoaSourceInput> {
+        vec![temper_spec::bundle::IoaSourceInput {
+            entity_type: "Temper.App.Task".into(),
+            source: IOA.into(),
+        }]
+    }
 
     fn grant() -> ModuleDataGrant {
         ModuleDataGrant {
@@ -224,13 +286,21 @@ mod tests {
     #[test]
     fn exact_binding_must_be_carried_by_loaded_artifact() {
         let csdl = parse_csdl(CSDL).unwrap();
-        let generated =
-            temper_codegen::generate_module_sdk(&csdl, "worker", "closure", "closure", "", grant())
-                .unwrap();
+        let generated = temper_codegen::generate_module_sdk(
+            &csdl,
+            &qualified_ioa(),
+            "worker",
+            "closure",
+            "closure",
+            "",
+            grant(),
+        )
+        .unwrap();
         let packaged =
             temper_codegen::package_generated_module_sdk(b"\0asm\x01\0\0\0", generated).unwrap();
         let regenerated = temper_codegen::generate_module_sdk(
             &csdl,
+            &qualified_ioa(),
             "worker",
             "closure",
             "closure",
@@ -275,6 +345,7 @@ mod tests {
                 "worker",
                 &config,
                 Some(CSDL),
+                &[("Task".into(), IOA.into())],
                 "different-closure",
             )
             .is_err(),

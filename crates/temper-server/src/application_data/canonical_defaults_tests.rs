@@ -8,7 +8,7 @@ use temper_wasm_sdk::data::{
     ModuleDataErrorKind, ModuleDataGrant,
 };
 
-use super::tests::{CSDL, call, invocation, response_error};
+use super::tests::{CSDL, IOA, call, invocation, response_error};
 
 #[derive(Debug, serde::Deserialize)]
 struct GeneratedCustomer {
@@ -96,6 +96,10 @@ async fn sparse_server_responses_decode_through_the_generated_client() {
 
     let generated = temper_codegen::generate_module_sdk(
         &temper_spec::csdl::parse_csdl(CSDL).expect("fixture CSDL parses"),
+        &[temper_spec::bundle::IoaSourceInput {
+            entity_type: "Temper.Example.Customer".into(),
+            source: IOA.into(),
+        }],
         "worker",
         "closure",
         "closure",
@@ -203,6 +207,7 @@ async fn canonical_read_fails_closed_when_required_property_has_no_value_or_defa
             generated_name: "required_without_default".into(),
             type_name: "Edm.String".into(),
             nullable: false,
+            source: temper_wasm_sdk::data::ManifestValueSourceV1::StoredField,
             default_value: None,
             enum_members: Vec::new(),
         });

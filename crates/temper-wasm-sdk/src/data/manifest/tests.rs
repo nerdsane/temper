@@ -115,6 +115,7 @@ fn semantic_hashes_change_when_a_used_property_changes() {
         generated_name: name.to_lowercase(),
         type_name: "Edm.String".into(),
         nullable,
+        source: ManifestValueSourceV1::StoredField,
         default_value: None,
         enum_members: Vec::new(),
     };
@@ -147,17 +148,24 @@ fn semantic_hashes_change_when_a_used_property_changes() {
         old.used_symbol_hashes().unwrap(),
         defaulted.used_symbol_hashes().unwrap()
     );
+
+    let mut lifecycle_property = property("Id", false);
+    lifecycle_property.source = ManifestValueSourceV1::LifecycleStatus;
+    let lifecycle = manifest(vec![lifecycle_property]);
+    assert_ne!(
+        old.used_symbol_hashes().unwrap(),
+        lifecycle.used_symbol_hashes().unwrap()
+    );
 }
 
 #[test]
-fn older_property_metadata_without_default_restores_as_none() {
-    let property: ManifestPropertyV1 = serde_json::from_value(serde_json::json!({
+fn property_metadata_without_source_fails_closed() {
+    let property = serde_json::from_value::<ManifestPropertyV1>(serde_json::json!({
         "canonical_name": "Id",
         "generated_name": "id",
         "type_name": "Edm.String",
         "nullable": false,
         "enum_members": []
-    }))
-    .unwrap();
-    assert!(property.default_value.is_none());
+    }));
+    assert!(property.is_err());
 }
