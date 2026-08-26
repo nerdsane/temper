@@ -23,6 +23,7 @@ const CSDL: &str = r#"
         <Property Name="Owner" Type="Temper.Generated.User" Nullable="false"/>
         <Property Name="Estimate" Type="Edm.Decimal" Nullable="true"/>
         <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="FailureReason" Type="Edm.String" Nullable="false" DefaultValue=""/>
       </EntityType>
       <Action Name="Complete" IsBound="true">
         <Parameter Name="binding" Type="Temper.Generated.File" Nullable="false"/>
@@ -121,7 +122,8 @@ fn generated_entity_action_decodes_and_advances_the_next_read() {
         "Status": "Done",
         "Owner": "user-1",
         "Estimate": null,
-        "CreatedAt": "2026-08-24T12:00:00Z"
+        "CreatedAt": "2026-08-24T12:00:00Z",
+        "FailureReason": ""
     });
     let commit = CommitToken {
         entity_type: FileClient::ENTITY_TYPE.into(),
@@ -149,6 +151,7 @@ fn generated_entity_action_decodes_and_advances_the_next_read() {
     let read = client.get("file-1").expect("sequence-aware keyed read");
     assert_eq!(read.sequence, commit.sequence);
     assert_eq!(read.value.status, TemperGeneratedTaskStatus::Done);
+    assert_eq!(read.value.failure_reason, "");
 
     let requests = take_native_data_requests_for_test();
     assert_eq!(

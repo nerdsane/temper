@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use temper_authz::SecurityContext;
 use temper_wasm_sdk::data::{DataOperationKind, DataOperationV1, DataOutcomeV1, DataResultV1};
 
+use super::canonical_defaults_tests::assert_generated_customer_defaults;
 use super::tests::{call, invocation};
 
 #[tokio::test]
@@ -68,6 +69,7 @@ async fn entity_action_result_matches_sequence_aware_keyed_read() {
     assert_eq!(action_value["RenameCount"], serde_json::json!(1));
     assert!(action_value.get("id").is_none());
     assert!(action_value.get("status").is_none());
+    assert_generated_customer_defaults(action_value.clone(), Some("After"));
 
     let read = call(
         &invocation,

@@ -14,6 +14,7 @@ required-features = ["observe"]
 default = []
 observe = ["temper-verify"]
 sim = ["dep:temper-store-sim"]
+test-helpers = []
 
 [dependencies]
 temper-runtime = { workspace = true }
@@ -75,6 +76,7 @@ tempfile = "3"
 pprof = { version = "0.14", features = ["prost-codec"] }
 
 [dev-dependencies]
+temper-codegen = { workspace = true }
 tokio-test = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

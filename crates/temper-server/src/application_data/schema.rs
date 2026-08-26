@@ -30,37 +30,42 @@ fn property_accepts(property: &ManifestPropertyV1, value: &serde_json::Value) ->
             .is_some_and(|number| i32::try_from(number).is_ok()),
         "Edm.Int64" => value.as_i64().is_some(),
         "Edm.Single" | "Edm.Double" => value.as_f64().is_some_and(f64::is_finite),
-        "Edm.Decimal" => value.as_str().is_some_and(canonical_decimal),
+        "Edm.Decimal" => value.as_str().is_some_and(decimal_lexical),
         "Edm.Guid" => value
             .as_str()
-            .and_then(|text| uuid::Uuid::parse_str(text).ok())
-            .is_some_and(|guid| {
-                guid.hyphenated().to_string() == value.as_str().unwrap_or_default()
-            }),
+            .is_some_and(|text| guid_lexical(text) && uuid::Uuid::parse_str(text).is_ok()),
         "Edm.DateTimeOffset" => value
             .as_str()
             .is_some_and(|text| chrono::DateTime::parse_from_rfc3339(text).is_ok()),
-        "Edm.String" | "Edm.Binary" => value.is_string(),
+        "Edm.String" => value.is_string(),
+        "Edm.Binary" => value.as_str().is_some_and(binary_lexical),
         // CSDL references and named scalar aliases cross this ABI as canonical strings.
         _ => value.is_string(),
     }
 }
 
-fn canonical_decimal(value: &str) -> bool {
-    if value.is_empty() || value.starts_with('+') || value.ends_with('.') {
+fn decimal_lexical(value: &str) -> bool {
+    if matches!(value, "NaN" | "INF" | "-INF") {
         return false;
     }
-    let unsigned = value.strip_prefix('-').unwrap_or(value);
-    if unsigned.is_empty() {
+    let unsigned = value.strip_prefix(['+', '-']).unwrap_or(value);
+    let exponent_index = unsigned.find(['e', 'E']);
+    let (mantissa, exponent) = exponent_index.map_or((unsigned, None), |index| {
+        (&unsigned[..index], Some(&unsigned[index + 1..]))
+    });
+    if exponent.is_some_and(|exponent| {
+        let digits = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+        digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit())
+    }) || unsigned.matches(['e', 'E']).count() > 1
+    {
         return false;
     }
-    let mut parts = unsigned.split('.');
+    let mut parts = mantissa.split('.');
     let whole = parts.next().unwrap_or_default();
     let fraction = parts.next();
     if parts.next().is_some()
         || whole.is_empty()
         || !whole.bytes().all(|byte| byte.is_ascii_digit())
-        || (whole.len() > 1 && whole.starts_with('0'))
     {
         return false;
     }
@@ -68,12 +73,66 @@ fn canonical_decimal(value: &str) -> bool {
         .is_none_or(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
+fn guid_lexical(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
+
+fn binary_lexical(value: &str) -> bool {
+    let unpadded = value.trim_end_matches('=');
+    let padding = value.len() - unpadded.len();
+    if padding > 2
+        || unpadded
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    {
+        return false;
+    }
+    match unpadded.len() % 4 {
+        0 => padding == 0,
+        2 => {
+            matches!(padding, 0 | 2)
+                && matches!(unpadded.as_bytes().last(), Some(b'A' | b'Q' | b'g' | b'w'))
+        }
+        3 => {
+            padding <= 1
+                && matches!(
+                    unpadded.as_bytes().last(),
+                    Some(
+                        b'A' | b'E'
+                            | b'I'
+                            | b'M'
+                            | b'Q'
+                            | b'U'
+                            | b'Y'
+                            | b'c'
+                            | b'g'
+                            | b'k'
+                            | b'o'
+                            | b's'
+                            | b'w'
+                            | b'0'
+                            | b'4'
+                            | b'8'
+                    )
+                )
+        }
+        _ => false,
+    }
+}
+
 impl ApplicationDataInvocation {
     pub(super) fn canonical_entity_value(
         &self,
         entity_type: &str,
         state: &EntityState,
-    ) -> serde_json::Map<String, serde_json::Value> {
+    ) -> Result<serde_json::Map<String, serde_json::Value>, ModuleDataError> {
         let schema = self
             .authority
             .binding
@@ -144,10 +203,11 @@ impl ApplicationDataInvocation {
             }
         }
         if require_non_nullable
-            && entity
-                .properties
-                .iter()
-                .any(|property| !property.nullable && !value.contains_key(&property.canonical_name))
+            && entity.properties.iter().any(|property| {
+                !property.nullable
+                    && property.default_value.is_none()
+                    && !value.contains_key(&property.canonical_name)
+            })
         {
             return Err(data_error(
                 ModuleDataErrorKind::SchemaMismatch,
@@ -323,10 +383,10 @@ impl ApplicationDataInvocation {
     }
 }
 
-fn canonical_entity_value(
+pub(super) fn canonical_entity_value(
     schema: &ManifestEntityV1,
     state: &EntityState,
-) -> serde_json::Map<String, serde_json::Value> {
+) -> Result<serde_json::Map<String, serde_json::Value>, ModuleDataError> {
     let fields = state
         .fields
         .as_object()
@@ -347,10 +407,26 @@ fn canonical_entity_value(
                 "id" => Some(serde_json::Value::String(state.entity_id.clone())),
                 "status" => Some(serde_json::Value::String(state.status.clone())),
                 _ => None,
-            });
-        if let Some(value) = value {
-            canonical.insert(property.canonical_name.clone(), value);
+            })
+            .or_else(|| property.default_value.clone());
+        let Some(value) = value else {
+            if property.nullable {
+                continue;
+            }
+            return Err(data_error(
+                ModuleDataErrorKind::SchemaMismatch,
+                "MissingRequiredProperty",
+                "required property is absent and has no declared default",
+            ));
+        };
+        if !property_accepts(property, &value) {
+            return Err(data_error(
+                ModuleDataErrorKind::SchemaMismatch,
+                "PropertyTypeMismatch",
+                "entity property value does not match the bound schema",
+            ));
         }
+        canonical.insert(property.canonical_name.clone(), value);
     }
-    canonical
+    Ok(canonical)
 }

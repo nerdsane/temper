@@ -15,6 +15,25 @@ use tower::ServiceExt;
 
 use super::{ApplicationDataInvocation, ModuleInvocationAuthority};
 use crate::state::ServerState;
+pub(super) const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="Temper.Example" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EnumType Name="Phase"><Member Name="Ready"/><Member Name="Done"/></EnumType><EntityType Name="Customer"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.Guid" Nullable="false"/><Property Name="Name" Type="Edm.String" Nullable="true"/><Property Name="Status" Type="Edm.String" Nullable="true"/><Property Name="RenameCount" Type="Edm.Int64" Nullable="true"/><Property Name="FailureReason" Type="Edm.String" Nullable="false" DefaultValue=""/><Property Name="Label" Type="Edm.String" Nullable="false" DefaultValue="unknown"/><Property Name="AttemptCount" Type="Edm.Int64" Nullable="false" DefaultValue="0"/><Property Name="Enabled" Type="Edm.Boolean" Nullable="false" DefaultValue="false"/><Property Name="Phase" Type="Temper.Example.Phase" Nullable="false" DefaultValue="Ready"/></EntityType><Action Name="Rename" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Example.Customer"/><Parameter Name="Name" Type="Edm.String" Nullable="false"/><ReturnType Type="Temper.Example.Customer" Nullable="false"/></Action><Action Name="Reject" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Example.Customer"/></Action><EntityContainer Name="Container"><EntitySet Name="Customers" EntityType="Temper.Example.Customer"/></EntityContainer></Schema></edmx:DataServices></edmx:Edmx>"#;
+
+fn manifest_property(
+    canonical_name: &str,
+    type_name: &str,
+    nullable: bool,
+    default_value: Option<serde_json::Value>,
+    enum_members: Vec<String>,
+) -> ManifestPropertyV1 {
+    ManifestPropertyV1 {
+        canonical_name: canonical_name.into(),
+        generated_name: temper_spec::to_snake_case(canonical_name),
+        type_name: type_name.into(),
+        nullable,
+        default_value,
+        enum_members,
+    }
+}
 
 mod file_capability_tests;
 
@@ -29,8 +48,6 @@ pub(super) fn invocation(
     operations: BTreeSet<DataOperationKind>,
     security: SecurityContext,
 ) -> std::sync::Arc<ApplicationDataInvocation> {
-    const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
-<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="Temper.Example" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EntityType Name="Customer"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.Guid" Nullable="false"/><Property Name="Name" Type="Edm.String" Nullable="true"/><Property Name="Status" Type="Edm.String" Nullable="true"/><Property Name="RenameCount" Type="Edm.Int64" Nullable="true"/></EntityType><Action Name="Rename" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Example.Customer"/><Parameter Name="Name" Type="Edm.String" Nullable="false"/><ReturnType Type="Temper.Example.Customer" Nullable="false"/></Action><Action Name="Reject" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Example.Customer"/></Action><EntityContainer Name="Container"><EntitySet Name="Customers" EntityType="Temper.Example.Customer"/></EntityContainer></Schema></edmx:DataServices></edmx:Edmx>"#;
     const IOA: &str = r#"[automaton]
 name = "Customer"
 states = ["Active", "Disabled"]
@@ -85,34 +102,45 @@ to = "Disabled"
             entity_set: "Customers".into(),
             generated_name: "Customer".into(),
             properties: vec![
-                ManifestPropertyV1 {
-                    canonical_name: "Id".into(),
-                    generated_name: "id".into(),
-                    type_name: "Edm.Guid".into(),
-                    nullable: false,
-                    enum_members: Vec::new(),
-                },
-                ManifestPropertyV1 {
-                    canonical_name: "Name".into(),
-                    generated_name: "name".into(),
-                    type_name: "Edm.String".into(),
-                    nullable: true,
-                    enum_members: Vec::new(),
-                },
-                ManifestPropertyV1 {
-                    canonical_name: "Status".into(),
-                    generated_name: "status".into(),
-                    type_name: "Edm.String".into(),
-                    nullable: true,
-                    enum_members: Vec::new(),
-                },
-                ManifestPropertyV1 {
-                    canonical_name: "RenameCount".into(),
-                    generated_name: "rename_count".into(),
-                    type_name: "Edm.Int64".into(),
-                    nullable: true,
-                    enum_members: Vec::new(),
-                },
+                manifest_property("Id", "Edm.Guid", false, None, Vec::new()),
+                manifest_property("Name", "Edm.String", true, None, Vec::new()),
+                manifest_property("Status", "Edm.String", true, None, Vec::new()),
+                manifest_property("RenameCount", "Edm.Int64", true, None, Vec::new()),
+                manifest_property(
+                    "FailureReason",
+                    "Edm.String",
+                    false,
+                    Some(serde_json::json!("")),
+                    Vec::new(),
+                ),
+                manifest_property(
+                    "Label",
+                    "Edm.String",
+                    false,
+                    Some(serde_json::json!("unknown")),
+                    Vec::new(),
+                ),
+                manifest_property(
+                    "AttemptCount",
+                    "Edm.Int64",
+                    false,
+                    Some(serde_json::json!(0)),
+                    Vec::new(),
+                ),
+                manifest_property(
+                    "Enabled",
+                    "Edm.Boolean",
+                    false,
+                    Some(serde_json::json!(false)),
+                    Vec::new(),
+                ),
+                manifest_property(
+                    "Phase",
+                    "Temper.Example.Phase",
+                    false,
+                    Some(serde_json::json!("Ready")),
+                    vec!["Done".into(), "Ready".into()],
+                ),
             ],
             actions: vec![
                 ManifestActionV1 {
@@ -126,13 +154,13 @@ to = "Disabled"
                 ManifestActionV1 {
                     canonical_name: "Rename".into(),
                     generated_name: "rename".into(),
-                    parameters: vec![ManifestPropertyV1 {
-                        canonical_name: "Name".into(),
-                        generated_name: "name".into(),
-                        type_name: "Edm.String".into(),
-                        nullable: false,
-                        enum_members: Vec::new(),
-                    }],
+                    parameters: vec![manifest_property(
+                        "Name",
+                        "Edm.String",
+                        false,
+                        None,
+                        Vec::new(),
+                    )],
                     result_type: Some("Temper.Example.Customer".into()),
                     result_enum_members: Vec::new(),
                     composite: false,
@@ -231,12 +259,16 @@ async fn successful_create_and_read_share_governed_service() {
         },
     )
     .await;
-    assert!(matches!(
-        read.outcome,
-        DataOutcomeV1::Ok {
-            result: temper_wasm_sdk::data::DataResultV1::Entity { .. }
-        }
-    ));
+    let DataOutcomeV1::Ok {
+        result: temper_wasm_sdk::data::DataResultV1::Entity { value, .. },
+    } = read.outcome
+    else {
+        panic!("keyed read should return the created entity")
+    };
+    super::canonical_defaults_tests::assert_generated_customer_defaults(
+        serde_json::Value::Object(value),
+        None,
+    );
     let impossible = call(
         &invocation,
         DataOperationV1::EntityGet {
@@ -263,12 +295,17 @@ async fn successful_create_and_read_share_governed_service() {
         },
     )
     .await;
-    assert!(matches!(
-        page.outcome,
-        DataOutcomeV1::Ok {
-            result: temper_wasm_sdk::data::DataResultV1::Page { .. }
-        }
-    ));
+    let DataOutcomeV1::Ok {
+        result: temper_wasm_sdk::data::DataResultV1::Page { values, .. },
+    } = page.outcome
+    else {
+        panic!("query should return a canonical page")
+    };
+    assert_eq!(values.len(), 1);
+    super::canonical_defaults_tests::assert_generated_customer_defaults(
+        serde_json::Value::Object(values[0].value.clone()),
+        None,
+    );
     let batch = call(
         &invocation,
         DataOperationV1::Batch {

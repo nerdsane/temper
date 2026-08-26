@@ -6723,6 +6723,7 @@ dependencies = [
  "temper-wasm-sdk",
  "tempfile",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -6963,6 +6964,7 @@ dependencies = [
  "sqlx",
  "temper-actor-runtime",
  "temper-authz",
+ "temper-codegen",
  "temper-evolution",
  "temper-jit",
  "temper-observe",

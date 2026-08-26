@@ -39,6 +39,7 @@ futures = { workspace = true }
 tempfile = "3.27.0"
 
 [dev-dependencies]
+temper-server = { workspace = true, features = ["test-helpers"] }
 tokio-test = { workspace = true }
 tower = { workspace = true }
 hyper = { workspace = true }

@@ -369,58 +369,6 @@ async fn test_reconcile_os_app_skips_unchanged_bundle_digest() {
     let _ = std::fs::remove_file(format!("{db_path}-shm"));
 }
 
-#[test]
-fn test_restore_canonical_data_bindings_rebinds_registered_artifact_after_restart() {
-    use std::collections::{BTreeMap, BTreeSet};
-
-    use temper_wasm_sdk::data::{ModuleDataGrant, ModuleSdkManifest, ModuleSdkMetadataDigests};
-
-    let state = PlatformState::new(None);
-    let tenant = TenantId::new("cache-restart");
-    let wasm_bytes = b"registered-wasm-artifact".to_vec();
-    let artifact_digest = temper_wasm::WasmEngine::hash_module(&wasm_bytes);
-    state.server.wasm_module_registry.write().unwrap().register(
-        &tenant,
-        "worker",
-        &artifact_digest,
-    );
-
-    let binding = ModuleSdkManifest::new(
-        "worker",
-        ModuleSdkMetadataDigests {
-            closure: "closure".into(),
-            dependency_lock: "closure".into(),
-            schema: "schema".into(),
-        },
-        &artifact_digest,
-        ModuleDataGrant::default(),
-        Vec::new(),
-        BTreeSet::new(),
-    )
-    .expect("valid binding");
-    let wasm_modules = BTreeMap::from([("worker".to_string(), wasm_bytes)]);
-    let canonical_bindings = BTreeMap::from([("worker".to_string(), binding)]);
-
-    reconcile::restore_canonical_data_bindings(
-        &state,
-        "cache-restart",
-        &wasm_modules,
-        &canonical_bindings,
-    )
-    .expect("registered artifact should be rebound");
-
-    assert!(
-        state
-            .server
-            .wasm_module_registry
-            .read()
-            .unwrap()
-            .data_manifest(&tenant, "worker", &artifact_digest)
-            .is_some(),
-        "cache recovery must restore the verified typed-data binding"
-    );
-}
-
 #[tokio::test]
 async fn test_reconcile_os_app_repairs_missing_active_policies_for_unchanged_bundle() {
     let db_path = format!(

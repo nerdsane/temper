@@ -196,12 +196,7 @@ impl ApplicationDataInvocation {
                     .await
                     .map_err(internal_error)?
             };
-            let object = response
-                .state
-                .fields
-                .as_object()
-                .cloned()
-                .unwrap_or_default();
+            let object = self.canonical_entity_value(entity_type, &response.state)?;
             if self
                 .authorize_value("read", entity_type, Some(&id), Some(&object))
                 .is_err()
