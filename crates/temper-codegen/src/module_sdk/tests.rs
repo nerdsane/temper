@@ -5,6 +5,8 @@ use temper_spec::{
 };
 use temper_wasm_sdk::data::{DataOperationKind, EntityDataGrant};
 
+mod golden_surfaces;
+
 const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
   <edmx:DataServices><Schema Namespace="Temper.App" xmlns="http://docs.oasis-open.org/odata/ns/edm">
@@ -16,6 +18,10 @@ const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
       <Property Name="Id" Type="Edm.String" Nullable="false"/>
       <Property Name="Status" Type="Edm.String" Nullable="false"/>
     </EntityType>
+    <EntityType Name="File" HasStream="true"><Key><PropertyRef Name="Id"/></Key>
+      <Property Name="Id" Type="Edm.String" Nullable="false"/>
+      <Property Name="Path" Type="Edm.String" Nullable="false"/>
+    </EntityType>
     <EnumType Name="Outcome"><Member Name="Accepted"/><Member Name="Rejected"/></EnumType>
     <Action Name="StartWork" IsBound="true"><Parameter Name="binding" Type="Temper.App.Task" Nullable="false"/><ReturnType Type="Temper.App.Task" Nullable="false"/></Action>
     <Action Name="MaybeStart" IsBound="true"><Parameter Name="binding" Type="Temper.App.Task" Nullable="false"/><ReturnType Type="Temper.App.Task" Nullable="true"/></Action>
@@ -23,7 +29,10 @@ const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
     <Action Name="Outcome" IsBound="true"><Parameter Name="binding" Type="Temper.App.Task" Nullable="false"/><ReturnType Type="Temper.App.Outcome" Nullable="false"/></Action>
     <Action Name="Reset" IsBound="true"><Parameter Name="binding" Type="Temper.App.Task" Nullable="false"/></Action>
     <Action Name="IssueReceipt" IsBound="true"><Parameter Name="binding" Type="Temper.App.Task" Nullable="false"/><ReturnType Type="Temper.App.Receipt" Nullable="false"/></Action>
-    <EntityContainer Name="Container"><EntitySet Name="Tasks" EntityType="Temper.App.Task"/></EntityContainer>
+    <EntityContainer Name="Container">
+      <EntitySet Name="Tasks" EntityType="Temper.App.Task"/>
+      <EntitySet Name="Files" EntityType="Temper.App.File"/>
+    </EntityContainer>
   </Schema></edmx:DataServices>
 </edmx:Edmx>"#;
 
@@ -297,6 +306,10 @@ fn canonical_action_order_keeps_generated_sdk_and_binding_identical() {
     assert_eq!(first.source, second.source);
     assert_eq!(first.manifest, second.manifest);
     assert_eq!(first.manifest.grant_digest, second.manifest.grant_digest);
+    assert_eq!(
+        first.manifest.binding_digest().unwrap(),
+        second.manifest.binding_digest().unwrap()
+    );
 
     let first = package_generated_module_sdk(b"\0asm\x01\0\0\0", first).unwrap();
     let second = package_generated_module_sdk(b"\0asm\x01\0\0\0", second).unwrap();
@@ -318,7 +331,13 @@ fn generation_is_deterministic_and_scoped() {
     assert_eq!(first.source, second.source);
     assert_eq!(first.manifest, second.manifest);
     assert!(first.source.contains("TaskClient"));
-    assert!(!first.source.contains("EntityPatch"));
+    assert!(!first.source.contains("TaskCreate"));
+    assert!(!first.source.contains("TaskPatch"));
+    assert!(!first.source.contains("TaskFilter"));
+    assert!(!first.source.contains("TaskOrder"));
+    assert!(!first.source.contains("pub fn query("));
+    assert!(!first.source.contains("pub fn create("));
+    assert!(!first.source.contains("pub fn patch("));
     assert!(first.source.contains("pub status: String"));
     assert!(first.source.contains("pub fn start_work"));
     assert!(first.source.contains("pub fn maybe_start"));

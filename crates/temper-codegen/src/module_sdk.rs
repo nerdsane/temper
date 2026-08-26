@@ -4,9 +4,9 @@ use std::collections::BTreeSet;
 
 use temper_spec::csdl::{Action, CsdlDocument, EntityType, emit_csdl_xml};
 use temper_wasm_sdk::data::{
-    ArtifactModuleSdkBinding, EntityDataGrant, ManifestActionV1, ManifestEntityV1,
-    ManifestPropertyV1, ModuleDataGrant, ModuleSdkManifest, ModuleSdkMetadataDigests,
-    bind_module_sdk_artifact,
+    ArtifactModuleSdkBinding, DataOperationKind, EntityDataGrant, ManifestActionV1,
+    ManifestEntityV1, ManifestPropertyV1, ModuleDataGrant, ModuleSdkManifest,
+    ModuleSdkMetadataDigests, bind_module_sdk_artifact,
 };
 
 mod entity_results;
@@ -114,17 +114,36 @@ pub fn generate_module_sdk(
             .clone();
         used_symbols.insert(entity_grant.entity_type.clone());
         used_symbols.insert(entity_set.to_string());
-        let properties = entity
-            .properties
-            .iter()
-            .map(|property| ManifestPropertyV1 {
-                canonical_name: property.name.clone(),
-                generated_name: rust_field_name(&property.name),
-                type_name: property.type_name.clone(),
-                nullable: property.nullable,
-                enum_members: enum_members(csdl, &property.type_name),
-            })
-            .collect::<Vec<_>>();
+        let entity_value_required = [
+            DataOperationKind::EntityGet,
+            DataOperationKind::EntityQuery,
+            DataOperationKind::EntityCreate,
+            DataOperationKind::EntityPatch,
+        ]
+        .into_iter()
+        .any(|operation| grant.permits(operation, &entity_grant.entity_type, None))
+            || actions.iter().any(|action| {
+                granted_action_operation(&grant, entity_grant, &action.name).is_some()
+                    && action
+                        .return_type
+                        .as_ref()
+                        .is_some_and(|result| result.type_name == entity_grant.entity_type)
+            });
+        let properties = if entity_value_required {
+            entity
+                .properties
+                .iter()
+                .map(|property| ManifestPropertyV1 {
+                    canonical_name: property.name.clone(),
+                    generated_name: rust_field_name(&property.name),
+                    type_name: property.type_name.clone(),
+                    nullable: property.nullable,
+                    enum_members: enum_members(csdl, &property.type_name),
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         for property in &properties {
             used_symbols.insert(format!(
                 "property:{}:{}",
@@ -156,6 +175,7 @@ pub fn generate_module_sdk(
         }
         let manifest_actions = actions
             .into_iter()
+            .filter(|action| granted_action_operation(&grant, entity_grant, &action.name).is_some())
             .map(|action| {
                 used_symbols.insert(action.name.clone());
                 let manifest_action = ManifestActionV1 {
@@ -210,8 +230,10 @@ pub fn generate_module_sdk(
                 .iter()
                 .map(|action| (&action.canonical_name, &action.generated_name)),
         )?;
-        for property in &properties {
-            emit_named_property_type(&mut source, property, &mut generated_named_types);
+        if entity_value_required {
+            for property in &properties {
+                emit_named_property_type(&mut source, property, &mut generated_named_types);
+            }
         }
         for action in &manifest_actions {
             for parameter in &action.parameters {
@@ -233,7 +255,9 @@ pub fn generate_module_sdk(
                 );
             }
         }
-        emit_entity_value_types(&mut source, &generated, &properties);
+        if entity_value_required {
+            emit_entity_value_types(&mut source, &generated, &properties);
+        }
         emit_entity_client(
             &mut source,
             EntityClientSpec {
@@ -255,10 +279,7 @@ pub fn generate_module_sdk(
         });
     }
     entities.sort_by(|left, right| left.entity_type.cmp(&right.entity_type));
-    if grant
-        .operations
-        .contains(&temper_wasm_sdk::data::DataOperationKind::Batch)
-    {
+    if grant.operations.contains(&DataOperationKind::Batch) {
         source.push_str("pub fn execute_batch(data: &mut DataClient, items: Vec<BatchItemV1>) -> Result<DataResultV1, ModuleDataError> { data.call(DataOperationV1::Batch { items }) }\n\n");
     }
     let manifest = ModuleSdkManifest::new(
@@ -276,6 +297,32 @@ pub fn generate_module_sdk(
     .map_err(ModuleSdkCodegenError::Manifest)?;
     emit_artifact_binding(&mut source, &manifest);
     Ok(GeneratedModuleSdk { source, manifest })
+}
+
+fn granted_action_operation(
+    grant: &ModuleDataGrant,
+    entity: &EntityDataGrant,
+    action: &str,
+) -> Option<DataOperationKind> {
+    if entity.composite_actions.contains(action)
+        && grant.permits(
+            DataOperationKind::CompositeInvoke,
+            &entity.entity_type,
+            Some(action),
+        )
+    {
+        return Some(DataOperationKind::CompositeInvoke);
+    }
+    if entity.actions.contains(action)
+        && grant.permits(
+            DataOperationKind::ActionInvoke,
+            &entity.entity_type,
+            Some(action),
+        )
+    {
+        return Some(DataOperationKind::ActionInvoke);
+    }
+    None
 }
 
 fn resolve_entity<'a>(
