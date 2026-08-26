@@ -13,6 +13,8 @@ use temper_wasm::{
 
 /// Pre-built echo integration WASM binary (avoids needing wasm32 target in CI).
 const ECHO_WASM: &[u8] = include_bytes!("fixtures/echo_integration.wasm");
+/// Pre-built raw-ABI module that exercises a legacy terminal failure.
+const LOCAL_TDATA_WASM: &[u8] = include_bytes!("fixtures/local_tdata_integration.wasm");
 /// Pre-built SDK-backed module that exercises `temper_wasm_sdk::Context::from_host`.
 const SDK_CONTEXT_READER_WASM: &[u8] = include_bytes!("fixtures/sdk_context_reader.wasm");
 const WAT_DATA_RESPONSE_LIFECYCLE: &str = r#"
@@ -189,6 +191,32 @@ async fn invoke_with_http_failure_still_succeeds() {
 
     assert!(result.success, "echo module handles HTTP errors gracefully");
     assert_eq!(result.callback_action, "EchoSucceeded");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invoke_raw_module_terminal_failure_uses_result_payload_only() {
+    let engine = WasmEngine::new().expect("engine should create");
+    let hash = engine
+        .compile_and_cache(LOCAL_TDATA_WASM)
+        .expect("local TData module should compile");
+    let host = Arc::new(SimWasmHost::new().with_default_response(403, "denied"));
+
+    let streams = Arc::new(RwLock::new(StreamRegistry::default()));
+    let result = engine
+        .invoke(
+            &hash,
+            &build_context(),
+            host,
+            &WasmResourceLimits::default(),
+            streams,
+        )
+        .await
+        .expect("guest terminal failure should decode");
+
+    assert!(!result.success);
+    assert_eq!(result.callback_action, "callback");
+    assert_eq!(result.callback_params["error"], "local TData denied");
+    assert_eq!(result.error.as_deref(), Some("local TData denied"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -51,7 +51,7 @@ pub(super) fn decode_terminal_result(
 
     match terminal {
         TerminalResult::Success(result) => {
-            if !result.success || result.action.is_empty() {
+            if !result.success {
                 return Err(InvalidGuestResultKind::InvalidShape);
             }
             Ok(WasmInvocationResult {
@@ -109,6 +109,18 @@ mod tests {
         .expect("valid success");
         assert!(success.success);
         assert_eq!(success.callback_action, "Done");
+
+        let side_effect_only = decode_terminal_result(
+            r#"{"action":"","params":{"stored":true},"success":true}"#,
+            7,
+        )
+        .expect("valid side-effect-only success");
+        assert!(side_effect_only.success);
+        assert!(side_effect_only.callback_action.is_empty());
+        assert_eq!(
+            side_effect_only.callback_params,
+            serde_json::json!({"stored": true})
+        );
 
         let legacy = decode_terminal_result(
             r#"{"action":"callback","error":"failed","params":{"error":"failed"},"success":false}"#,

@@ -347,6 +347,10 @@ mod terminal_result_tests {
             r#"{"action":"ChargeSucceeded","params":{"provider_id":"p-1"},"success":true}"#
         );
         assert_eq!(
+            encode_success_result("", &json!({"stored": true})),
+            r#"{"action":"","params":{"stored":true},"success":true}"#
+        );
+        assert_eq!(
             encode_error_result("provider rejected request"),
             r#"{"action":"callback","params":{"error":"provider rejected request"},"success":false,"error":"provider rejected request"}"#
         );

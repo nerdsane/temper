@@ -90,11 +90,26 @@ fn wmo_code_to_condition(code: i32) -> &'static str {
 
 fn fail(reason: &str) {
     log("error", reason);
+    let escaped = escape_json(reason);
     let result = format!(
-        r#"{{"action":"FetchFailed","params":{{"reason":"{}"}},"success":false}}"#,
-        reason
+        r#"{{"action":"callback","params":{{"error":"{escaped}"}},"success":false,"error":"{escaped}"}}"#
     );
     set_result(&result);
+}
+
+fn escape_json(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 #[unsafe(no_mangle)]

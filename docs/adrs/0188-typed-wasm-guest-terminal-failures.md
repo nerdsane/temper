@@ -58,8 +58,10 @@ Success preserves the existing SDK wire form:
 ```
 
 Its allowed top-level fields are exactly `action`, `params`, and `success`.
-`action` is a non-empty string, `params` is any JSON value within the complete
-result budget, and `success` is the literal `true`.
+`action` is a string, `params` is any JSON value within the complete result
+budget, and `success` is the literal `true`. An empty `action` preserves the
+existing side-effect-only convention: the invocation succeeds without
+dispatching a callback.
 
 Legacy failure preserves the existing `set_error_result(&str)` wire form:
 
