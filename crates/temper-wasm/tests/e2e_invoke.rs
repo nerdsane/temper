@@ -82,8 +82,16 @@ fn build_context() -> WasmInvocationContext {
 fn build_large_context(blob_len: usize) -> WasmInvocationContext {
     let mut ctx = build_context();
     ctx.entity_state = serde_json::json!({
-        "status": "Pending",
-        "large_blob": "x".repeat(blob_len),
+        "status": "Running",
+        "fields": {
+            "large_blob": "x".repeat(blob_len),
+            "attempts": 99,
+            "ready": false,
+            "tags": ["stale"]
+        },
+        "counters": {"attempts": 3},
+        "booleans": {"ready": true},
+        "lists": {"tags": ["typed", "bounded"]},
     });
     ctx
 }
@@ -216,12 +224,16 @@ async fn invoke_sdk_module_with_large_context_succeeds() {
         result.callback_params["trigger_action"].as_str(),
         Some("TriggerEcho")
     );
-    assert!(
-        result.callback_params["entity_state_len"]
-            .as_u64()
-            .unwrap_or_default()
-            > 4_000_000,
-        "entity state should include the large payload"
+    assert_eq!(
+        result.callback_params["large_blob_len"].as_u64(),
+        Some(4_000_000),
+    );
+    assert_eq!(result.callback_params["status"], "Running");
+    assert_eq!(result.callback_params["attempts"], 3);
+    assert_eq!(result.callback_params["ready"], true);
+    assert_eq!(
+        result.callback_params["tags"],
+        serde_json::json!(["typed", "bounded"])
     );
 }
 

@@ -1,3 +1,4 @@
+use super::source_state::{canonicalize_migration_source_state, migration_source_properties};
 use super::*;
 
 impl GovernedSchemaDeploymentService<'_> {
@@ -72,6 +73,8 @@ impl GovernedSchemaDeploymentService<'_> {
                         .to_string()
                 })
                 .collect::<Vec<_>>();
+            let source_properties =
+                migration_source_properties(&source.bundle.canonical_csdl, &source_entity_types)?;
             let (journal, _) = self.state.event_journal().ok_or_else(|| {
                 ServiceError::new(
                     "backend_unavailable",
@@ -160,12 +163,17 @@ impl GovernedSchemaDeploymentService<'_> {
                 {
                     continue;
                 }
-                let mut migratable_fields = source_state.state.fields.clone();
-                if let Some(fields) = migratable_fields.as_object_mut() {
-                    fields.remove(crate::entity_actor::SCHEMA_PIN_FIELD);
-                    collapse_runtime_alias(fields, "Id", "id")?;
-                    collapse_runtime_alias(fields, "Status", "status")?;
-                }
+                let property_names = source_properties.get(&entity_type).ok_or_else(|| {
+                    ServiceError::new(
+                        "migration_rejected",
+                        format!("source CSDL has no entity type '{entity_type}'"),
+                        false,
+                    )
+                })?;
+                let migratable_fields = canonicalize_migration_source_state(
+                    &source_state.state.fields,
+                    property_names,
+                )?;
                 let canonical_state_json = canonical_json_object(&migratable_fields)?;
                 let input = SchemaMigrationInputV1 {
                     abi_version: 1,
@@ -433,19 +441,30 @@ impl GovernedSchemaDeploymentService<'_> {
 
 pub(super) fn collapse_runtime_alias(
     fields: &mut serde_json::Map<String, serde_json::Value>,
+    legacy: &str,
     canonical: &str,
-    generated: &str,
 ) -> Result<(), ServiceError> {
-    match (fields.get(canonical), fields.get(generated)) {
-        (Some(canonical_value), Some(generated_value)) if canonical_value != generated_value => {
+    match (fields.get(legacy), fields.get(canonical)) {
+        (Some(legacy_value), Some(canonical_value)) if legacy_value != canonical_value => {
             Err(ServiceError::new(
                 "migration_rejected",
-                format!("runtime-owned aliases '{canonical}' and '{generated}' disagree"),
+                format!("runtime-owned aliases '{legacy}' and '{canonical}' disagree"),
                 false,
             ))
         }
         (Some(_), Some(_)) => {
-            fields.remove(generated);
+            fields.remove(legacy);
+            Ok(())
+        }
+        (Some(_), None) => {
+            let value = fields.remove(legacy).ok_or_else(|| {
+                ServiceError::new(
+                    "migration_failed",
+                    format!("runtime-owned alias '{legacy}' disappeared during canonicalization"),
+                    false,
+                )
+            })?;
+            fields.insert(canonical.to_string(), value);
             Ok(())
         }
         _ => Ok(()),
