@@ -3,6 +3,7 @@
 mod entry;
 mod failure;
 mod principal;
+mod stream_provenance;
 mod telemetry;
 
 use crate::request_context::AgentContext;
@@ -15,6 +16,7 @@ use failure::{
     reaction_authorization_decision_id, reaction_authorization_failure, reaction_dispatch_failure,
 };
 use principal::resolve_trigger_principal;
+use stream_provenance::{immutable_version_metadata, stream_provenance_failure};
 use telemetry::{ReactionFanoutCounts, record_reaction_fanout_span};
 
 impl ReactionDispatcher {
@@ -53,13 +55,10 @@ impl ReactionDispatcher {
             return Vec::new();
         }
 
-        let rule_count = rules.len();
-        let mut fired_count = 0usize;
-        let mut guard_skipped_count = 0usize;
-        let mut target_resolve_error_count = 0usize;
-        let mut authz_denied_count = 0usize;
-        let mut dispatch_error_count = 0usize;
-        let mut success_count = 0usize;
+        let mut counts = ReactionFanoutCounts {
+            rule_count: rules.len(),
+            ..ReactionFanoutCounts::default()
+        };
         let mut results = Vec::new();
 
         for rule in rules {
@@ -96,7 +95,7 @@ impl ReactionDispatcher {
                 let passed =
                     guard::evaluate_with_resolved(guard, fields, to_state, &resolved, &rule.name);
                 if !passed {
-                    guard_skipped_count += 1;
+                    counts.guard_skipped_count += 1;
                     tracing::debug!(
                         rule = rule.name,
                         cross_entity_queries = queries.len(),
@@ -113,7 +112,7 @@ impl ReactionDispatcher {
             {
                 Some(id) => id,
                 None => {
-                    target_resolve_error_count += 1;
+                    counts.target_resolve_error_count += 1;
                     tracing::warn!(
                         rule = rule.name,
                         "Could not resolve target entity ID for reaction"
@@ -189,14 +188,20 @@ impl ReactionDispatcher {
                             serde_json::Value::String(response.state.status.clone()),
                         );
                         attrs.insert("has_spec".into(), serde_json::Value::Bool(true));
-                        (attrs, response.state.status)
+                        (attrs, response.state.status, response.state.sequence_nr)
                     }),
                 None => state
                     .load_authz_resource_snapshot(tenant, &rule.then.entity_type, &target_entity_id)
                     .await
-                    .map(|snapshot| (snapshot.resource_attrs, snapshot.current_state.state.status)),
+                    .map(|snapshot| {
+                        (
+                            snapshot.resource_attrs,
+                            snapshot.current_state.state.status,
+                            snapshot.current_state.state.sequence_nr,
+                        )
+                    }),
             };
-            let (authz_resource_attrs, authz_status) = match authz_snapshot {
+            let (authz_resource_attrs, authz_status, authz_sequence) = match authz_snapshot {
                 Ok(snapshot) => snapshot,
                 Err(e) => {
                     tracing::warn!(
@@ -230,7 +235,7 @@ impl ReactionDispatcher {
                 let failure = reaction_authorization_failure(&denial);
                 let decision_id = reaction_authorization_decision_id(&denial);
                 let reason = denial.to_string();
-                authz_denied_count += 1;
+                counts.authz_denied_count += 1;
                 tracing::warn!(
                     rule = rule.name,
                     target_entity = %rule.then.entity_type,
@@ -254,7 +259,26 @@ impl ReactionDispatcher {
 
             // Fire the target action via the core dispatch (no reaction cascade
             // to avoid infinite async recursion — we handle cascading ourselves).
-            fired_count += 1;
+            counts.fired_count += 1;
+            let kernel_metadata = match immutable_version_metadata(
+                state,
+                tenant,
+                dispatch_ctx.schema_pin.as_ref(),
+                &rule,
+                &target_entity_id,
+                authz_sequence,
+                bound_delivery.as_ref(),
+            ) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    counts.dispatch_error_count += 1;
+                    results.push(stream_provenance_failure(&rule.name, error, depth));
+                    continue;
+                }
+            };
+            if kernel_metadata.is_some() {
+                dispatch_ctx.expected_entity_sequence = Some(authz_sequence);
+            }
             let reaction_context = if let Some(delivery) = bound_delivery.as_ref() {
                 let descendant_rules = if let Some(pin) = dispatch_ctx.schema_pin.as_ref() {
                     state
@@ -328,7 +352,7 @@ impl ReactionDispatcher {
                         }),
                     }),
                     Err(error) => {
-                        dispatch_error_count += 1;
+                        counts.dispatch_error_count += 1;
                         results.push(ReactionResult {
                             rule_name: rule.name.clone(),
                             success: false,
@@ -355,6 +379,7 @@ impl ReactionDispatcher {
                     false,
                     reaction_context,
                     None,
+                    kernel_metadata,
                 )
                 .await;
 
@@ -408,7 +433,7 @@ impl ReactionDispatcher {
                         (None, None)
                     };
                     if response.success && descendant_error.is_none() {
-                        success_count += 1;
+                        counts.success_count += 1;
                     }
                     results.push(ReactionResult {
                         rule_name: rule.name.clone(),
@@ -444,7 +469,7 @@ impl ReactionDispatcher {
                 }
                 Err(e) => {
                     let failure = reaction_dispatch_failure(&e);
-                    dispatch_error_count += 1;
+                    counts.dispatch_error_count += 1;
                     tracing::warn!(
                         rule = rule.name,
                         error = %e,
@@ -463,16 +488,8 @@ impl ReactionDispatcher {
             }
         }
 
-        record_reaction_fanout_span(ReactionFanoutCounts {
-            rule_count,
-            fired_count,
-            guard_skipped_count,
-            target_resolve_error_count,
-            authz_denied_count,
-            dispatch_error_count,
-            success_count,
-            result_count: results.len(),
-        });
+        counts.result_count = results.len();
+        record_reaction_fanout_span(counts);
 
         results
     }

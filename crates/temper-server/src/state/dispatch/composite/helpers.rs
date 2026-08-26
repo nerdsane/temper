@@ -342,6 +342,7 @@ pub(super) fn composite_event_envelope(
             correlation_id: sim_uuid(),
             timestamp: sim_now(),
             actor_id: persistence_id.to_string(),
+            kernel: None,
         },
     })
 }
@@ -363,6 +364,7 @@ pub(super) fn composite_envelope(
             correlation_id: sim_uuid(),
             timestamp: event.timestamp,
             actor_id: persistence_id.to_string(),
+            kernel: None,
         },
     })
 }

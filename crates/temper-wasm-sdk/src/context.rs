@@ -218,6 +218,18 @@ impl Drop for WasmSpan {
 }
 
 impl Context {
+    /// Deserialize the current exact runtime envelope into typed IOA member state.
+    ///
+    /// The caller's type should use the snake_case names declared by the IOA
+    /// contract. Runtime counters, booleans, lists, and lifecycle status are
+    /// flattened by the SDK before deserialization.
+    pub fn member_state<T>(&self) -> Result<T, crate::state::StateDecodeError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        crate::state::decode_member_state(&self.entity_state)
+    }
+
     /// Parse the invocation context from the host.
     ///
     /// Reads the context JSON via `host_get_context` and deserializes it.

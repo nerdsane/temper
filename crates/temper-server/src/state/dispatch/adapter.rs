@@ -519,6 +519,7 @@ impl crate::state::ServerState {
                     idempotency_key: Some(idempotency_key.clone()),
                     expected_sequence: None,
                     reaction_context: None,
+                    kernel_metadata: None,
                     expected_authorization_precondition: None,
                 },
                 &policy,
@@ -659,6 +660,7 @@ impl crate::state::ServerState {
                         callback_params,
                         agent_ctx,
                         false,
+                        None,
                         None,
                         None,
                     )

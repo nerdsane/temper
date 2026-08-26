@@ -7,6 +7,9 @@ mod lifecycle;
 mod migration;
 mod registry;
 mod runner;
+#[cfg(test)]
+mod runner_tests;
+mod source_state;
 mod supervisor;
 mod support;
 #[cfg(test)]

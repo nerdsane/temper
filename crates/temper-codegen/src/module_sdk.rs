@@ -15,6 +15,7 @@ mod names;
 mod property_sources;
 mod schema_helpers;
 mod source_types;
+mod stream_capabilities;
 mod types;
 use defaults::manifest_property;
 use entity_results::{emit_entity_value_types, generated_entity_names, validate_entity_results};
@@ -22,6 +23,7 @@ use names::{reject_generated_collisions, rust_field_name};
 use property_sources::assign_entity_property_sources;
 use schema_helpers::{entity_sets, enum_members};
 use source_types::{emit_artifact_binding, emit_named_property_type, hex_sha256};
+use stream_capabilities::stream_capabilities_for_grant;
 mod client_emitter;
 use client_emitter::{EntityClientSpec, emit_entity_client};
 pub use types::{GeneratedModuleSdk, PackagedModuleSdk};
@@ -98,6 +100,8 @@ pub enum ModuleSdkCodegenError {
     },
     #[error("failed to construct module SDK manifest: {0}")]
     Manifest(String),
+    #[error("invalid verified stream capability: {0}")]
+    StreamCapability(String),
     #[error("failed to bind compiled module artifact: {0}")]
     ArtifactBinding(String),
 }
@@ -135,6 +139,7 @@ pub fn generate_module_sdk(
         .validate()
         .map_err(ModuleSdkCodegenError::InvalidGrant)?;
     let schema_digest = hex_sha256(emit_csdl_xml(csdl).as_bytes());
+    let stream_capabilities = stream_capabilities_for_grant(csdl, &grant)?;
     let entity_sets = entity_sets(csdl);
     validate_entity_results(csdl, &grant)?;
     let generated_entity_names = generated_entity_names(csdl, &grant)?;
@@ -346,7 +351,7 @@ pub fn generate_module_sdk(
     if grant.operations.contains(&DataOperationKind::Batch) {
         source.push_str("pub fn execute_batch(data: &mut DataClient, items: Vec<BatchItemV1>) -> Result<DataResultV1, ModuleDataError> { data.call(DataOperationV1::Batch { items }) }\n\n");
     }
-    let manifest = ModuleSdkManifest::new(
+    let mut manifest = ModuleSdkManifest::new(
         module_name,
         ModuleSdkMetadataDigests {
             closure: closure_digest.into(),
@@ -359,6 +364,7 @@ pub fn generate_module_sdk(
         used_symbols,
     )
     .map_err(ModuleSdkCodegenError::Manifest)?;
+    manifest.stream_capabilities = stream_capabilities;
     emit_artifact_binding(&mut source, &manifest);
     Ok(GeneratedModuleSdk { source, manifest })
 }

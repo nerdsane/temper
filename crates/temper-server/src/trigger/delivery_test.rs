@@ -53,6 +53,7 @@ fn intent() -> PersistedReactionIntent {
         source_sequence: 42,
         source_to_state: "Confirmed".to_string(),
         source_fields: json!({"payment_id": "payment-9"}),
+        source_stream_descriptor: None,
         guard_passed: true,
         target_entity_id: Some("payment-9".to_string()),
         trigger_name: "create-payment".to_string(),

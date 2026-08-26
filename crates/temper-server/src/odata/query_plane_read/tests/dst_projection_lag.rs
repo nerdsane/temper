@@ -151,6 +151,7 @@ fn envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope
             correlation_id: sim_uuid(),
             timestamp: sim_now(),
             actor_id: "dst-lag".to_string(),
+            kernel: None,
         },
     }
 }

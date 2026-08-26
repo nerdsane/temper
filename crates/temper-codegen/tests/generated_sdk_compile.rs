@@ -25,6 +25,7 @@ const CSDL: &str = r#"
         <Property Name="Estimate" Type="Edm.Decimal" Nullable="true"/>
         <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
         <Property Name="FailureReason" Type="Edm.String" Nullable="false" DefaultValue=""/>
+        <Annotation Term="Temper.Vocab.Stream.Mutability" String="Mutable"/>
       </EntityType>
       <Action Name="Complete" IsBound="true">
         <Parameter Name="binding" Type="Temper.Generated.File" Nullable="false"/>

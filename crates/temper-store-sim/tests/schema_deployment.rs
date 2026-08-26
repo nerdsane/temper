@@ -74,6 +74,7 @@ fn test_event(sequence_nr: u64) -> PersistenceEnvelope {
             correlation_id: sim_uuid(),
             timestamp: sim_now(),
             actor_id: "pin-write-fence-contract".into(),
+            kernel: None,
         },
     }
 }
@@ -551,6 +552,7 @@ async fn activation_compares_receipt_predecessor_and_fence_atomically() {
                     correlation_id: sim_uuid(),
                     timestamp: sim_now(),
                     actor_id: "pin-contract".into(),
+                    kernel: None,
                 },
             }],
         )
@@ -578,6 +580,7 @@ async fn activation_compares_receipt_predecessor_and_fence_atomically() {
                     correlation_id: sim_uuid(),
                     timestamp: sim_now(),
                     actor_id: "pin-collision-contract".into(),
+                    kernel: None,
                 },
             }],
         )

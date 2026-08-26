@@ -2055,6 +2055,7 @@ mod tests {
                 correlation_id: uuid::Uuid::new_v4(),
                 timestamp: Utc::now(),
                 actor_id: "migration-smoke".to_string(),
+                kernel: None,
             },
         };
         source

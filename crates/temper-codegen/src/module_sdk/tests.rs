@@ -22,6 +22,19 @@ pub(super) const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
       <Property Name="Id" Type="Edm.String" Nullable="false"/>
       <Property Name="Status" Type="Edm.String" Nullable="false" DefaultValue="Open"/>
       <Property Name="Path" Type="Edm.String" Nullable="false"/>
+      <NavigationProperty Name="Versions" Type="Collection(Temper.App.FileVersion)"/>
+      <Annotation Term="Temper.Vocab.Stream.Mutability" String="Mutable"/>
+      <Annotation Term="Temper.Vocab.Stream.VersionEntityType" String="Temper.App.FileVersion"/>
+      <Annotation Term="Temper.Vocab.Stream.VersionCollection" NavigationPropertyPath="Versions"/>
+    </EntityType>
+    <EntityType Name="FileVersion"><Key><PropertyRef Name="Id"/></Key>
+      <Property Name="Id" Type="Edm.String" Nullable="false"/>
+      <Property Name="FileId" Type="Edm.String" Nullable="false"/>
+      <NavigationProperty Name="File" Type="Temper.App.File">
+        <ReferentialConstraint Property="FileId" ReferencedProperty="Id"/>
+      </NavigationProperty>
+      <Annotation Term="Temper.Vocab.Stream.Mutability" String="Immutable"/>
+      <Annotation Term="Temper.Vocab.Stream.AuthorizationParent" NavigationPropertyPath="File"/>
     </EntityType>
     <EnumType Name="Outcome"><Member Name="Accepted"/><Member Name="Rejected"/></EnumType>
     <Action Name="StartWork" IsBound="true"><Parameter Name="binding" Type="Temper.App.Task" Nullable="false"/><ReturnType Type="Temper.App.Task" Nullable="false"/></Action>
@@ -33,6 +46,7 @@ pub(super) const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
     <EntityContainer Name="Container">
       <EntitySet Name="Tasks" EntityType="Temper.App.Task"/>
       <EntitySet Name="Files" EntityType="Temper.App.File"/>
+      <EntitySet Name="FileVersions" EntityType="Temper.App.FileVersion"/>
     </EntityContainer>
   </Schema></edmx:DataServices>
 </edmx:Edmx>"#;

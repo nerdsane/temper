@@ -99,6 +99,11 @@ pub struct PersistedReactionIntent {
     pub source_to_state: String,
     /// Exact post-transition source fields used for resolution and guards.
     pub source_fields: serde_json::Value,
+    /// Kernel-attested source stream descriptor, when the source commit
+    /// published stream content. Targets must not infer this authority from
+    /// user-controlled action fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_stream_descriptor: Option<temper_runtime::persistence::StreamDescriptorV1>,
     /// Guard decision made from the committed source post-state and the
     /// pre-transition cross-entity snapshot.
     pub guard_passed: bool,
@@ -344,6 +349,7 @@ pub(crate) fn delivery_record_append(
             correlation_id: sim_uuid(),
             timestamp: sim_now(),
             actor_id: persistence_id.clone(),
+            kernel: None,
         },
     };
     Ok(temper_runtime::persistence::PersistenceAppend {

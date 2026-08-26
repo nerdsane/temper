@@ -162,6 +162,7 @@ pub struct Annotation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AnnotationValue {
     String(String),
+    NavigationPropertyPath(String),
     Float(f64),
     Bool(bool),
     Int(i64),

@@ -47,6 +47,7 @@ async fn ensure_entity_loaded_returns_false_when_no_transition_table_exists() {
             correlation_id: uuid::Uuid::new_v4(),
             timestamp: sim_now(),
             actor_id: pid.to_string(),
+            kernel: None,
         },
     };
     store
@@ -129,6 +130,7 @@ async fn list_entity_ids_lazy_populates_only_requested_type() {
                     correlation_id: uuid::Uuid::new_v4(),
                     timestamp: sim_now(),
                     actor_id: "tenant-a:Order:ord-1".to_string(),
+                    kernel: None,
                 },
             }],
         )
@@ -148,6 +150,7 @@ async fn list_entity_ids_lazy_populates_only_requested_type() {
                     correlation_id: uuid::Uuid::new_v4(),
                     timestamp: sim_now(),
                     actor_id: "tenant-a:Task:task-1".to_string(),
+                    kernel: None,
                 },
             }],
         )
@@ -277,6 +280,7 @@ async fn delete_failure_does_not_remove_live_entity_from_index() {
             correlation_id: uuid::Uuid::new_v4(),
             timestamp: sim_now(),
             actor_id: "concurrency-racer".to_string(),
+            kernel: None,
         },
     };
     store

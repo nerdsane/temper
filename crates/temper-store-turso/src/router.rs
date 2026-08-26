@@ -960,6 +960,7 @@ mod tests {
                 correlation_id: uuid::Uuid::nil(),
                 timestamp: chrono::Utc::now(),
                 actor_id: "test".to_string(),
+                kernel: None,
             },
         }];
         let seq = router

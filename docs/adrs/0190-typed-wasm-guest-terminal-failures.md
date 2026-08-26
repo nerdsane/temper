@@ -1,4 +1,4 @@
-# ADR-0188: Typed WASM Guest Terminal Failures
+# ADR-0190: Typed WASM Guest Terminal Failures
 
 - Status: Proposed
 - Date: 2026-08-26

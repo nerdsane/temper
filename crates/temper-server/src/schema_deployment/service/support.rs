@@ -261,7 +261,7 @@ pub(super) fn verify_migration_determinism<'a>(
             entity_type: entity_type.clone(),
             entity_id: "temper-migration-verification".into(),
             source_sequence: 0,
-            canonical_state_json: r#"{"Id":"temper-migration-verification"}"#.into(),
+            canonical_state_json: r#"{"id":"temper-migration-verification"}"#.into(),
             logical_context: SchemaMigrationLogicalContextV1 {
                 batch_id: "temper-migration-verification".into(),
                 item_index: u32::try_from(item_index).map_err(|_| {

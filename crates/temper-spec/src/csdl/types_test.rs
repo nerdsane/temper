@@ -233,12 +233,13 @@ fn csdl_document_schemas_by_namespace() {
 #[test]
 fn annotation_value_variants() {
     let s = AnnotationValue::String("hello".into());
+    let n = AnnotationValue::NavigationPropertyPath("Versions".into());
     let f = AnnotationValue::Float(2.72);
     let b = AnnotationValue::Bool(true);
     let i = AnnotationValue::Int(42);
     let c = AnnotationValue::Collection(vec!["a".into()]);
     let r = AnnotationValue::Record(HashMap::from([("k".into(), "v".into())]));
-    for value in [&s, &f, &b, &i, &c, &r] {
+    for value in [&s, &n, &f, &b, &i, &c, &r] {
         assert!(!format!("{value:?}").is_empty());
     }
 }

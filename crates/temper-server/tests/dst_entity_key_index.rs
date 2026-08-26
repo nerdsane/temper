@@ -44,6 +44,7 @@ async fn dispatch(
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                kernel_metadata: None,
                 expected_authorization_precondition: None,
             },
             Duration::from_secs(5),
@@ -179,6 +180,7 @@ fn test_envelope() -> PersistenceEnvelope {
             correlation_id: sim_uuid(),
             timestamp: sim_now(),
             actor_id: "test".to_string(),
+            kernel: None,
         },
     }
 }

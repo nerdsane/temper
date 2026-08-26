@@ -16,6 +16,7 @@ fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnv
             correlation_id: uuid::Uuid::new_v4(),
             timestamp: chrono::Utc::now(),
             actor_id: "redis-test".to_string(),
+            kernel: None,
         },
     }
 }
@@ -66,6 +67,52 @@ async fn append_and_read_events_roundtrip() {
     assert_eq!(partial.len(), 1);
     assert_eq!(partial[0].sequence_nr, 2);
     assert_eq!(partial[0].event_type, "OrderApproved");
+}
+
+#[tokio::test]
+async fn kernel_stream_metadata_roundtrips_with_historical_events() {
+    use temper_runtime::persistence::{
+        KernelEventMetadata, StreamDescriptorInputV1, StreamDescriptorV1, StreamEntityRef,
+        StreamMutability, StreamStorageRefV1,
+    };
+
+    let Some(store) = make_store().await else {
+        eprintln!("REDIS_URL not set, skipping test");
+        return;
+    };
+    let pid = unique_persistence_id();
+    let historical = test_envelope("Created", serde_json::json!({}));
+    let mut described = test_envelope("StreamUpdated", serde_json::json!({}));
+    described.metadata.kernel = Some(KernelEventMetadata::V1 {
+        stream_descriptor: StreamDescriptorV1::new(StreamDescriptorInputV1 {
+            subject: StreamEntityRef::new("File", "file-1").unwrap(),
+            authorization_parent: None,
+            content_hash: "sha256:abc".into(),
+            storage: StreamStorageRefV1::new("temper-fs/sha256:abc").unwrap(),
+            byte_length: 3,
+            content_type: None,
+            content_event_sequence: 2,
+            descriptor_event_sequence: 2,
+            mutability: StreamMutability::Mutable,
+        })
+        .unwrap(),
+    });
+    store
+        .append(&pid, 0, &[historical, described])
+        .await
+        .unwrap();
+    let events = store.read_events(&pid, 0).await.unwrap();
+    assert!(events[0].metadata.kernel.is_none());
+    assert_eq!(
+        events[1]
+            .metadata
+            .kernel
+            .as_ref()
+            .unwrap()
+            .stream_descriptor()
+            .descriptor_event_sequence(),
+        2
+    );
 }
 
 #[path = "tests/scoped_schema_pin_test.rs"]

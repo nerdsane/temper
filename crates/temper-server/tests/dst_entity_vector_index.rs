@@ -42,6 +42,7 @@ async fn dispatch(
                 idempotency_key: None,
                 expected_sequence: None,
                 reaction_context: None,
+                kernel_metadata: None,
                 expected_authorization_precondition: None,
             },
             Duration::from_secs(5),

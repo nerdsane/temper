@@ -16,6 +16,7 @@ fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnv
             correlation_id: uuid::Uuid::new_v4(),
             timestamp: chrono::Utc::now(),
             actor_id: "store-projection-test".to_string(),
+            kernel: None,
         },
     }
 }
