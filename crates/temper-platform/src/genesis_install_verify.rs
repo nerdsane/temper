@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 
 use temper_server::platform_store::InstalledAppRecord;
 
-use crate::os_apps::{WasmModuleManifest, get_os_app};
+use crate::genesis_install::reconcile_materialized_app_closure;
+use crate::os_apps::{WasmModuleManifest, get_os_app, os_app_bundle_digest};
 use crate::recovery::{InstalledAppRuntimeRecoveryOutcome, recover_installed_app_runtime_state};
 use crate::state::PlatformState;
 
@@ -46,6 +47,26 @@ pub(crate) fn classify_install_verify(
     }
 }
 
+/// Verify every app in a freshly-reconciled Genesis closure is runtime-ready.
+///
+/// A Genesis install materializes and reconciles a whole closure — the root app plus its
+/// dependency apps — so verification must cover every ref, not just the root. A dependency whose
+/// required wasm does not compile is the same "failed to compile lazy-loaded WASM module" break,
+/// one level down. Returns true only when all refs verify.
+pub(crate) async fn verify_install_closure_runtime_ready(
+    platform: &PlatformState,
+    ps: &dyn temper_server::platform_store::PlatformStore,
+    tenant: &str,
+    app_names: &[String],
+) -> bool {
+    for app_name in app_names {
+        if !verify_install_runtime_ready(platform, ps, tenant, app_name).await {
+            return false;
+        }
+    }
+    true
+}
+
 /// Verify a freshly-reconciled Genesis app is runtime-ready and every app-required wasm module
 /// compiles.
 ///
@@ -58,7 +79,7 @@ pub(crate) fn classify_install_verify(
 ///    lazy-loaded (or eager-but-broken) would otherwise install cleanly and only blow up at first
 ///    load — the "failed to compile lazy-loaded WASM module" prod break. Compiling here turns that
 ///    into an install-time rollback trigger.
-pub(crate) async fn verify_install_runtime_ready(
+pub async fn verify_install_runtime_ready(
     platform: &PlatformState,
     ps: &dyn temper_server::platform_store::PlatformStore,
     tenant: &str,
@@ -135,6 +156,91 @@ pub(crate) fn platform_store(
         .storage_stack
         .as_ref()
         .and_then(|stack| stack.platform.clone())
+}
+
+/// Re-reconcile the prior bundle and restore its provenance record — the network-free core of
+/// rollback, and the seam the deterministic simulator drives.
+///
+/// `reconcile_os_app` overwrites the durable record with a local-provenance row, so after
+/// re-reconciling the prior bundle this restores the prior Genesis provenance record. If the prior
+/// version itself does not reach runtime-ready, that is a hard both-broken error: neither the new
+/// nor the previous version is serviceable.
+///
+/// Public for the deterministic simulator (`dst_genesis_install_rollback`), which drives this exact
+/// production rollback effect against the simulated platform store under injected faults.
+pub async fn restore_prior_install(
+    platform: &PlatformState,
+    ps: &dyn temper_server::platform_store::PlatformStore,
+    tenant: &str,
+    prior: &InstalledAppRecord,
+) -> Result<(), String> {
+    reconcile_materialized_app_closure(platform, tenant, &prior.app_name)
+        .await
+        .map_err(|error| {
+            format!(
+                "rollback re-reconcile of {} failed: {error}",
+                prior.app_name
+            )
+        })?;
+    if !verify_install_runtime_ready(platform, ps, tenant, &prior.app_name).await {
+        return Err(format!(
+            "rollback target {} for app {} is also not runtime-ready (both new and previous versions are broken)",
+            prior.app_ref, prior.app_name
+        ));
+    }
+    // Do not label whatever the catalog just reconciled with the prior record's digest unless it
+    // actually IS the prior bundle. A corrupted cache or a concurrent catalog replacement could
+    // reconcile different (ready) bytes; restoring the old digest onto them would be a lie.
+    if !prior.bundle_digest.is_empty() {
+        match os_app_bundle_digest(&prior.app_name).map(|digest| digest.bundle_digest) {
+            Some(reconciled) if reconciled == prior.bundle_digest => {}
+            other => {
+                return Err(format!(
+                    "rollback of {} reconciled a bundle whose digest ({:?}) does not match the previous record ({}); refusing to mislabel it",
+                    prior.app_name, other, prior.bundle_digest
+                ));
+            }
+        }
+    }
+    ps.record_installed_app_metadata(prior)
+        .await
+        .map_err(|error| {
+            format!(
+                "failed to restore previous install record for {}: {error}",
+                prior.app_name
+            )
+        })?;
+    Ok(())
+}
+
+/// Mark an installed-app record `failed` so nothing treats a version that did not reach
+/// runtime-ready as healthy. Used when an install fails verification and there is no prior version
+/// to roll back to (`reconcile_os_app` leaves the record `status = "installed"`).
+pub(crate) async fn mark_install_failed(
+    ps: &dyn temper_server::platform_store::PlatformStore,
+    tenant: &str,
+    app_name: &str,
+) {
+    match ps.get_installed_app(tenant, app_name).await {
+        Ok(Some(mut record)) => {
+            record.status = "failed".to_string();
+            if let Err(error) = ps.record_installed_app_metadata(&record).await {
+                tracing::warn!(
+                    tenant,
+                    app = %app_name,
+                    error = %error,
+                    "Failed to mark install record failed after verification failure"
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(error) => tracing::warn!(
+            tenant,
+            app = %app_name,
+            error = %error,
+            "Could not read install record to mark it failed after verification failure"
+        ),
+    }
 }
 
 #[cfg(test)]

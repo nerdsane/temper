@@ -57,3 +57,20 @@ Repos/worktrees:
   touching follow-latest. Making Genesis `LatestVersionHash` auto-authoritative for `follow_latest`
   apps is speculative (no such app is bootstrapped today) → deferred, recorded not dropped. Team lead
   will flag to the owner for possible veto; not blocking.
+
+## D6 — three-review panel run + dispositions
+- **Panel:** Fable (fresh subagent, xhigh) and Codex (`gpt-5.6-sol`, xhigh, read-only) ran adversarially on both diffs. **Grok was unavailable** — its CLI 402'd (out of credits) and is mis-provisioned to `z-ai/glm-5.2`, not Grok 4.6 (the off-laptop trio gap, ARN-405). Surfaced to the team lead; not silently skipped.
+- **No P0 blockers.** ~13 findings each, strong overlap. Fixed in-scope:
+  - Prior-record read swallowed store errors (`.ok().flatten()`) → now propagates; the install aborts before mutating (rollback safety net). [genesis_install.rs]
+  - Verification only probed the ROOT app → now verifies EVERY app in the closure (`verify_install_closure_runtime_ready`). [genesis_install_verify.rs]
+  - Rollback restored only the root record → now restores ALL captured dependency provenance records. [genesis_install.rs]
+  - `FailNoRollback` left the record `status="installed"` for a broken version → now marks it `failed`. [mark_install_failed]
+  - Store-less instances were forced to `FailNoRollback` (regression) → a successful reconcile with no store now commits (prior behavior). [genesis_install.rs]
+  - Commit ignored provenance-write failures → the ROOT provenance write is now enforced (install fails if it can't persist), deps best-effort. [record_genesis_install_metadata → Result]
+  - Rollback wrote the prior record without proving the reconciled bundle matches it → digest-integrity check before restore. [restore_prior_install]
+  - `ensure_prior_bundle_available` trusted `is_dir()` → now confirms the cache yields the app at the expected digest, else re-materializes. 
+  - Bootstrap read-error fell through to reinstalling the pin (downgrade risk) → now SKIPS on an indeterminate read. [startup.rs]
+  - DST P18 was near-tautological → reworked to a faithful, non-tautological invariant (partial local state → restored prior good on Ok; never a bogus Genesis provenance on faulted Err); 64 seeds heavy faults; fails-before-fix confirmed. Coverage boundary documented in the test.
+  - temperpaw: WARN when keeping an install whose hash ≠ the env pin (operator visibility for the intended non-upgrade); restored the recovery-outcome diagnostic log.
+- **Deferred to ARN-423 (residual risks, tracked not dropped):** additive-reconcile rollback (v2-only artifacts not removed), non-atomic rollback with no durable intent, in-memory-vs-durable verification, forward-path catalog-selection integrity, and temperpaw bootstrap compile-heal (needs the temper-pin bump; `verify_install_runtime_ready` is now `pub` for it). These need a transactional versioned-state layer — the ARN-420 Temper-native deploy future.
+- **Greptile:** requested on both PRs.
