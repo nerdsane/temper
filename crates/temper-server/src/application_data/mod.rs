@@ -9,16 +9,12 @@ mod schema;
 mod schema_deployment;
 mod service;
 mod streams;
+mod target;
 mod telemetry;
 
 #[cfg(feature = "test-helpers")]
 /// Canonicalize committed entity state with the production module-data response path.
-pub fn canonicalize_entity_for_test(
-    schema: &temper_wasm_sdk::data::ManifestEntityV1,
-    state: &crate::EntityState,
-) -> Result<serde_json::Map<String, serde_json::Value>, temper_wasm_sdk::data::ModuleDataError> {
-    schema::canonical_entity_value(schema, state)
-}
+pub use schema::canonicalize_entity_for_test;
 
 pub(crate) use service::GovernedApplicationDataService;
 
@@ -27,12 +23,13 @@ use temper_wasm_sdk::data::{
     DataResultV1, ModuleDataError, ModuleDataErrorKind,
 };
 
-use crate::request_context::AgentContext;
 use helpers::{
     commit, compact_committed_results, data_error, extract_id, internal_error, short_type,
     validate_value_budget, write_result,
 };
-pub(crate) use invocation::{ApplicationDataInvocation, ModuleInvocationAuthority};
+pub(crate) use invocation::{
+    ApplicationDataInvocation, ModuleDataTarget, ModuleInvocationAuthority,
+};
 use telemetry::{record_operation_fields, result_kind};
 
 #[cfg(test)]
@@ -45,6 +42,8 @@ mod lifecycle_provenance_tests;
 mod parity_tests;
 #[cfg(all(test, feature = "sim"))]
 mod schema_deployment_tests;
+#[cfg(all(test, feature = "sim"))]
+mod scoped_tests;
 #[cfg(test)]
 mod telemetry_span_tests;
 #[cfg(test)]
@@ -281,10 +280,7 @@ impl ApplicationDataInvocation {
     ) -> Result<DataResultV1, ModuleDataError> {
         self.require(DataOperationKind::EntityGet, entity_type, None)?;
         tracing::Span::current().record("consistency_path", "authoritative");
-        let response = GovernedApplicationDataService::new(&self.state)
-            .get(&self.authority.tenant, short_type(entity_type), entity_id)
-            .await
-            .map_err(internal_error)?;
+        let response = self.get_target_entity(entity_type, entity_id).await?;
         let value = self.canonical_entity_value(entity_type, &response.state)?;
         self.authorize_value("read", entity_type, Some(entity_id), Some(&value))?;
         if minimum.is_some_and(|minimum| response.state.sequence_nr < minimum) {
@@ -309,10 +305,7 @@ impl ApplicationDataInvocation {
         self.validate_entity_object(entity_type, &value, true)?;
         let entity_id = extract_id(&value)?;
         self.authorize_value("create", entity_type, Some(&entity_id), Some(&value))?;
-        if self
-            .state
-            .entity_exists(&self.authority.tenant, short_type(entity_type), &entity_id)
-        {
+        if self.target_entity_exists(entity_type, &entity_id).await? {
             return Err(data_error(
                 ModuleDataErrorKind::AlreadyExists,
                 "EntityAlreadyExists",
@@ -329,15 +322,31 @@ impl ApplicationDataInvocation {
             .await;
         self.run_governed_write_prechecks(entity_type, &entity_id, "Create", "create", &fields)
             .await?;
-        let response = GovernedApplicationDataService::new(&self.state)
-            .create(
-                &self.authority.tenant,
-                short_type(entity_type),
-                &entity_id,
-                value.clone().into(),
-            )
-            .await
-            .map_err(internal_error)?;
+        let service = GovernedApplicationDataService::new(&self.state);
+        let response = match &self.authority.target {
+            ModuleDataTarget::TenantGlobal => {
+                service
+                    .create(
+                        &self.authority.tenant,
+                        short_type(entity_type),
+                        &entity_id,
+                        value.clone().into(),
+                    )
+                    .await
+            }
+            ModuleDataTarget::Scoped(pin) => {
+                service
+                    .create_scoped(
+                        &self.authority.tenant,
+                        short_type(entity_type),
+                        &entity_id,
+                        value.clone().into(),
+                        pin.clone(),
+                    )
+                    .await
+            }
+        }
+        .map_err(internal_error)?;
         Ok(write_result(
             entity_type,
             &entity_id,
@@ -355,11 +364,7 @@ impl ApplicationDataInvocation {
     ) -> Result<DataResultV1, ModuleDataError> {
         self.require(DataOperationKind::EntityPatch, entity_type, None)?;
         self.validate_entity_object(entity_type, &value, false)?;
-        let current = self
-            .state
-            .get_tenant_entity_state(&self.authority.tenant, short_type(entity_type), entity_id)
-            .await
-            .map_err(internal_error)?;
+        let current = self.get_target_entity(entity_type, entity_id).await?;
         let current_value = current
             .state
             .fields
@@ -379,16 +384,33 @@ impl ApplicationDataInvocation {
             .await;
         self.run_governed_write_prechecks(entity_type, entity_id, "Patch", "patch", &prospective)
             .await?;
-        let response = GovernedApplicationDataService::new(&self.state)
-            .patch(
-                &self.authority.tenant,
-                short_type(entity_type),
-                entity_id,
-                value.into(),
-                expected,
-            )
-            .await
-            .map_err(internal_error)?;
+        let service = GovernedApplicationDataService::new(&self.state);
+        let response = match &self.authority.target {
+            ModuleDataTarget::TenantGlobal => {
+                service
+                    .patch(
+                        &self.authority.tenant,
+                        short_type(entity_type),
+                        entity_id,
+                        value.into(),
+                        expected,
+                    )
+                    .await
+            }
+            ModuleDataTarget::Scoped(pin) => {
+                service
+                    .patch_scoped(
+                        &self.authority.tenant,
+                        short_type(entity_type),
+                        entity_id,
+                        value.into(),
+                        expected,
+                        pin.clone(),
+                    )
+                    .await
+            }
+        }
+        .map_err(internal_error)?;
         if !response.success {
             return Err(internal_error(
                 response
@@ -416,11 +438,7 @@ impl ApplicationDataInvocation {
         self.require(kind, entity_type, Some(action))?;
         self.validate_action_params(entity_type, action, &params)?;
         self.authorize(action, entity_type, Some(entity_id))?;
-        let current = self
-            .state
-            .get_tenant_entity_state(&self.authority.tenant, short_type(entity_type), entity_id)
-            .await
-            .map_err(internal_error)?;
+        let current = self.get_target_entity(entity_type, entity_id).await?;
         self.state
             .enforce_commons_verified_owner_for_action(
                 &self.authority.tenant,
@@ -436,12 +454,7 @@ impl ApplicationDataInvocation {
                     "commons account verification rejected the action",
                 )
             })?;
-        let agent = AgentContext {
-            security_ctx: Some(self.authority.security.clone()),
-            agent_id: Some(self.authority.security.principal.id.clone()),
-            expected_entity_sequence: expected,
-            ..AgentContext::default()
-        };
+        let agent = self.operation_agent_context(expected);
         let response = GovernedApplicationDataService::new(&self.state)
             .action(
                 &self.authority.tenant,

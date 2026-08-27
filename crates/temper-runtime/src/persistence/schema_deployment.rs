@@ -42,6 +42,15 @@ pub struct SchemaExecutionPin {
     pub bundle_digest: String,
 }
 
+/// Canonical generated-client authority retained with one scoped module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopedModuleDataBinding {
+    /// Stable lowercase SHA-256 digest of the canonical manifest JSON.
+    pub binding_digest: String,
+    /// Canonical serialized `ModuleSdkManifest` bytes represented as UTF-8.
+    pub canonical_manifest_json: String,
+}
+
 /// Immutable schema evidence committed with one entity action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaEventPin {
@@ -70,6 +79,9 @@ pub struct SchemaBundleRecord {
     pub cedar_policies: BTreeMap<String, String>,
     /// Stable WASM logical name to immutable module digest.
     pub wasm_module_digests: BTreeMap<String, String>,
+    /// Exact typed-data manifests keyed by scoped module name.
+    #[serde(default)]
+    pub wasm_module_data_bindings: BTreeMap<String, ScopedModuleDataBinding>,
     /// Optional migration module logical name used for durable artifact lookup.
     pub migration_module_name: Option<String>,
     /// Optional migration module digest.

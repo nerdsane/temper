@@ -108,6 +108,7 @@ async fn submit_verified_durable_pin(
                 ]),
                 cedar_policies: std::collections::BTreeMap::new(),
                 wasm_module_digests: std::collections::BTreeMap::new(),
+                wasm_module_data_bindings: std::collections::BTreeMap::new(),
                 migration_module_name: migration_target.then(|| "state-timeout-test".into()),
                 migration_module_digest: migration_target
                     .then(|| format!("sha256:{}", "5".repeat(64))),

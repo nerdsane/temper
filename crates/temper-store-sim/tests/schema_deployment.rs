@@ -55,6 +55,7 @@ fn command_with_predecessor(
             canonical_ioa: BTreeMap::from([("Example.Task".into(), "[automaton]".into())]),
             cedar_policies: BTreeMap::new(),
             wasm_module_digests: BTreeMap::new(),
+            wasm_module_data_bindings: BTreeMap::new(),
             migration_module_name: None,
             migration_module_digest: None,
             migration_abi_version: None,

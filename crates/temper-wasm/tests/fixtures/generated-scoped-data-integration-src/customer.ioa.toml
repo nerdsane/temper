@@ -1,0 +1,4 @@
+[automaton]
+name = "Customer"
+states = ["Active"]
+initial = "Active"

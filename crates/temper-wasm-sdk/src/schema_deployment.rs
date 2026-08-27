@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 mod stream_descriptor;
 pub use stream_descriptor::*;
+mod wasm_artifact;
+pub use wasm_artifact::*;
 
 /// Closed ABI identifier for schema-deployment host calls.
 pub const SCHEMA_DEPLOYMENT_ABI_V1: &str = "temper-schema-deployment/v1";
@@ -34,14 +36,6 @@ pub struct SchemaIoaSourceV1 {
 pub struct SchemaPolicyArtifactV1 {
     pub name: String,
     pub source: String,
-}
-
-/// One immutable WASM module binding.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SchemaWasmArtifactV1 {
-    pub name: String,
-    pub artifact_digest: String,
 }
 
 /// Optional closed migration module binding.

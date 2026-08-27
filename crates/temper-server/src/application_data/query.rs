@@ -15,8 +15,8 @@ use crate::storage::QueryFieldIndexOrderTarget;
 use crate::storage::{QueryFieldIndexOrder, QueryFieldIndexOrderDirection};
 
 use super::{
-    ApplicationDataInvocation, GovernedApplicationDataService, data_error, internal_error,
-    short_type,
+    ApplicationDataInvocation, GovernedApplicationDataService, ModuleDataTarget, data_error,
+    internal_error, short_type,
 };
 
 #[path = "query/decimal.rs"]
@@ -126,48 +126,33 @@ impl ApplicationDataInvocation {
             .collect::<Vec<_>>();
         let service = GovernedApplicationDataService::new(&self.state);
         let mut fallback_responses = BTreeMap::new();
-        let ids = match service
-            .query_candidates(
-                &self.authority.tenant,
-                short_type(entity_type),
-                &projected_order,
-                start,
-                scan_budget.saturating_add(1),
-            )
-            .await
-            .map_err(internal_error)?
-        {
-            Some(ids) => {
-                tracing::Span::current().record("consistency_path", "query_plane");
-                ids
-            }
-            None => {
-                tracing::Span::current().record("consistency_path", "authoritative_fallback");
+        let ids = match &self.authority.target {
+            ModuleDataTarget::Scoped(pin) => {
+                tracing::Span::current().record("consistency_path", "scoped_authoritative");
                 let mut ids = service
-                    .bounded_fallback_candidates(
+                    .bounded_scoped_candidates(
                         &self.authority.tenant,
                         short_type(entity_type),
-                        scan_budget,
+                        pin,
+                        scan_budget.saturating_add(1),
                     )
+                    .await
                     .map_err(|_| {
                         data_error(
                             ModuleDataErrorKind::ConsistencyUnavailable,
                             "BoundedQueryFallbackUnavailable",
-                            "authoritative query fallback cannot be bounded",
+                            "scoped authoritative query cannot be bounded",
                         )
                     })?;
                 if ids.len() > scan_budget {
                     return Err(data_error(
                         ModuleDataErrorKind::BudgetExceeded,
                         "QueryFallbackBudgetExceeded",
-                        "authoritative query fallback exceeds the bounded scan budget",
+                        "scoped authoritative query exceeds the bounded scan budget",
                     ));
                 }
                 for id in &ids {
-                    let response = service
-                        .get(&self.authority.tenant, short_type(entity_type), id)
-                        .await
-                        .map_err(internal_error)?;
+                    let response = self.get_target_entity(entity_type, id).await?;
                     fallback_responses.insert(id.clone(), response);
                 }
                 ids.sort_by(|left, right| {
@@ -182,6 +167,60 @@ impl ApplicationDataInvocation {
                 });
                 ids.into_iter().skip(start).collect()
             }
+            ModuleDataTarget::TenantGlobal => match service
+                .query_candidates(
+                    &self.authority.tenant,
+                    short_type(entity_type),
+                    &projected_order,
+                    start,
+                    scan_budget.saturating_add(1),
+                )
+                .await
+                .map_err(internal_error)?
+            {
+                Some(ids) => {
+                    tracing::Span::current().record("consistency_path", "query_plane");
+                    ids
+                }
+                None => {
+                    tracing::Span::current().record("consistency_path", "authoritative_fallback");
+                    let mut ids = service
+                        .bounded_fallback_candidates(
+                            &self.authority.tenant,
+                            short_type(entity_type),
+                            scan_budget,
+                        )
+                        .map_err(|_| {
+                            data_error(
+                                ModuleDataErrorKind::ConsistencyUnavailable,
+                                "BoundedQueryFallbackUnavailable",
+                                "authoritative query fallback cannot be bounded",
+                            )
+                        })?;
+                    if ids.len() > scan_budget {
+                        return Err(data_error(
+                            ModuleDataErrorKind::BudgetExceeded,
+                            "QueryFallbackBudgetExceeded",
+                            "authoritative query fallback exceeds the bounded scan budget",
+                        ));
+                    }
+                    for id in &ids {
+                        let response = self.get_target_entity(entity_type, id).await?;
+                        fallback_responses.insert(id.clone(), response);
+                    }
+                    ids.sort_by(|left, right| {
+                        compare_fallback_entities(
+                            left,
+                            fallback_responses.get(left),
+                            right,
+                            fallback_responses.get(right),
+                            order_by,
+                            schema_entity,
+                        )
+                    });
+                    ids.into_iter().skip(start).collect()
+                }
+            },
         };
         let has_unscanned_candidate = ids.len() > scan_budget;
         let mut values = Vec::new();
@@ -191,10 +230,7 @@ impl ApplicationDataInvocation {
             let response = if let Some(response) = fallback_responses.remove(&id) {
                 response
             } else {
-                service
-                    .get(&self.authority.tenant, short_type(entity_type), &id)
-                    .await
-                    .map_err(internal_error)?
+                self.get_target_entity(entity_type, &id).await?
             };
             let object = self.canonical_entity_value(entity_type, &response.state)?;
             if self

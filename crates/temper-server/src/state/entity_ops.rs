@@ -1285,6 +1285,18 @@ impl ServerState {
             .await
     }
 
+    /// Whether one exact scoped entity journal carries the supplied immutable pin.
+    pub(crate) async fn scoped_entity_exists(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: &SchemaExecutionPin,
+    ) -> Result<bool, String> {
+        self.scoped_entity_pin_matches(tenant, entity_type, entity_id, schema_pin)
+            .await
+    }
+
     /// Read a scoped entity for dispatch, initializing it only at the active pin.
     pub(crate) async fn get_or_initialize_scoped_entity_state(
         &self,

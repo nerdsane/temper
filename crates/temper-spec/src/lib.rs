@@ -27,7 +27,7 @@ pub use automaton::{
 pub use bundle::{
     BundleError, BundleErrorCode, CanonicalIoaSpec, IoaSourceInput, MigrationArtifactInput,
     PolicyArtifactInput, ScopedBundleBudgets, ScopedSpecBundle, ScopedSpecBundleInput,
-    WasmArtifactInput,
+    WasmArtifactInput, scoped_module_data_closure_digest,
 };
 pub use cross_invariant::{
     CrossInvariant, CrossInvariantLintFinding, CrossInvariantLintSeverity, CrossInvariantOperator,

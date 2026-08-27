@@ -8,8 +8,18 @@ use temper_jit::table::TransitionTable;
 use temper_spec::automaton::{Automaton, Integration, Webhook};
 use temper_spec::cross_invariant::{CrossInvariantSpec, DeletePolicy};
 use temper_spec::csdl::CsdlDocument;
+use temper_wasm_sdk::data::ModuleSdkManifest;
 
 use crate::trigger::types::ReactionRule;
+
+/// Exact immutable WASM descriptor owned by one scoped schema bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedModuleDescriptor {
+    /// Canonical lowercase `sha256:<hex>` artifact identity.
+    pub artifact_digest: String,
+    /// Verified generated-client manifest, when typed data is granted.
+    pub data_binding: Option<ModuleSdkManifest>,
+}
 
 /// Verification status for a single entity type.
 #[derive(Debug, Clone, serde::Serialize)]

@@ -14,7 +14,7 @@ use temper_runtime::persistence::schema_deployment::{
 };
 use temper_runtime::tenant::TenantId;
 use temper_server::ServerState;
-use temper_server::registry::SpecRegistry;
+use temper_server::registry::{ScopedModuleDescriptor, SpecRegistry};
 use temper_server::request_context::AgentContext;
 use temper_server::state::{DispatchExtOptions, PendingDecision};
 use temper_server::storage::StorageStack;
@@ -177,6 +177,7 @@ async fn persist_active_scoped_echo_bundle(
     tenant: &TenantId,
     scope: &SchemaScope,
     digest: &str,
+    artifact_digest: &str,
 ) {
     store
         .submit_schema_bundle(SubmitSchemaBundle {
@@ -191,7 +192,11 @@ async fn persist_active_scoped_echo_bundle(
                     ECHO_IOA.to_string(),
                 )]),
                 cedar_policies: std::collections::BTreeMap::new(),
-                wasm_module_digests: std::collections::BTreeMap::new(),
+                wasm_module_digests: std::collections::BTreeMap::from([(
+                    "echo_integration".to_string(),
+                    artifact_digest.to_string(),
+                )]),
+                wasm_module_data_bindings: std::collections::BTreeMap::new(),
                 migration_module_name: None,
                 migration_module_digest: None,
                 migration_abi_version: None,
@@ -502,15 +507,24 @@ async fn scoped_wasm_integration_uses_the_pinned_bundle_spec() {
         id: "scoped-wasm-dispatch".to_string(),
     };
     let digest = format!("sha256:{}", "a".repeat(64));
+    let module_hash = temper_wasm::WasmEngine::hash_module(ECHO_WASM);
+    let artifact_digest = format!("sha256:{module_hash}");
     let mut registry = SpecRegistry::new();
     registry
-        .stage_scoped_bundle(
+        .stage_scoped_bundle_with_modules(
             tenant.clone(),
             scope.clone(),
             digest.clone(),
             parse_csdl(ECHO_CSDL_XML).expect("CSDL should parse"),
             ECHO_CSDL_XML.to_string(),
             &[("EchoTest", ECHO_IOA)],
+            std::collections::BTreeMap::from([(
+                "echo_integration".to_string(),
+                ScopedModuleDescriptor {
+                    artifact_digest: artifact_digest.clone(),
+                    data_binding: None,
+                },
+            )]),
         )
         .expect("scoped echo bundle should stage");
     registry
@@ -529,13 +543,14 @@ async fn scoped_wasm_integration_uses_the_pinned_bundle_spec() {
     let store = TursoEventStore::new(&db_url, None)
         .await
         .expect("create scoped test store");
-    persist_active_scoped_echo_bundle(&store, &tenant, &scope, &digest).await;
+    persist_active_scoped_echo_bundle(&store, &tenant, &scope, &digest, &artifact_digest).await;
     state.set_storage_stack(StorageStack::from_turso(store));
     install_echo_http_policy(&state);
     let hash = state
         .wasm_engine
         .compile_and_cache(ECHO_WASM)
         .expect("echo module should compile");
+    assert_eq!(hash, module_hash);
     state
         .wasm_module_registry
         .write()

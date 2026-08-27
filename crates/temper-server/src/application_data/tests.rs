@@ -215,6 +215,7 @@ pub(super) fn invocation(
         "Customer".into(),
         security,
         binding,
+        super::ModuleDataTarget::TenantGlobal,
     );
     ApplicationDataInvocation::new(state, authority)
 }

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Scoped" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Customer">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Name" Type="Edm.String" Nullable="true"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false" DefaultValue="Active"/>
+      </EntityType>
+      <EntityType Name="Worker">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false" DefaultValue="Idle"/>
+      </EntityType>
+      <EntityContainer Name="Container">
+        <EntitySet Name="Customers" EntityType="Temper.Scoped.Customer"/>
+        <EntitySet Name="Workers" EntityType="Temper.Scoped.Worker"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

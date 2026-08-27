@@ -138,6 +138,7 @@ impl ServerState {
             Ok(response) => return Ok(response),
             Err(FileStreamContentError::BlobStore(error))
                 if !descriptor_required
+                    && agent_ctx.schema_pin.is_none()
                     && blob_endpoint.as_deref().is_some_and(|endpoint| {
                         !crate::blob_store::is_local_internal_blob_endpoint(endpoint)
                     }) =>
@@ -183,14 +184,16 @@ impl ServerState {
         // blob write is intentionally NOT joined concurrently here: it must not
         // happen if the workspace refuses the write (otherwise an orphaned blob
         // would be left behind on guard rejection).
-        let file_state = self
-            .get_tenant_entity_state(tenant, "File", file_id)
-            .await
-            .map_err(|e| {
-                FileStreamContentError::State(format!(
-                    "failed to load File('{file_id}') state: {e}"
-                ))
-            })?;
+        let file_state = match agent_ctx.schema_pin.as_ref() {
+            Some(pin) => {
+                self.get_scoped_entity_state(tenant, "File", file_id, pin.clone())
+                    .await
+            }
+            None => self.get_tenant_entity_state(tenant, "File", file_id).await,
+        }
+        .map_err(|e| {
+            FileStreamContentError::State(format!("failed to load File('{file_id}') state: {e}"))
+        })?;
 
         let workspace_id = file_state
             .state
@@ -198,8 +201,27 @@ impl ServerState {
             .get("workspace_id")
             .and_then(|value| value.as_str())
             .unwrap_or_default();
-        self.reject_write_if_workspace_not_active(tenant, workspace_id)
-            .await?;
+        if let Some(pin) = agent_ctx.schema_pin.as_ref() {
+            if !workspace_id.is_empty() {
+                let workspace = self
+                    .get_scoped_entity_state(tenant, "Workspace", workspace_id, pin.clone())
+                    .await
+                    .map_err(|error| {
+                        FileStreamContentError::State(format!(
+                            "failed to load scoped Workspace('{workspace_id}') state: {error}"
+                        ))
+                    })?;
+                if workspace.state.status != "Active" {
+                    return Err(FileStreamContentError::ActionRejected(format!(
+                        "workspace '{workspace_id}' is '{}', not 'Active'; it does not accept new file content",
+                        workspace.state.status
+                    )));
+                }
+            }
+        } else {
+            self.reject_write_if_workspace_not_active(tenant, workspace_id)
+                .await?;
+        }
         if agent_ctx
             .expected_entity_sequence
             .is_some_and(|expected| expected != file_state.state.sequence_nr)

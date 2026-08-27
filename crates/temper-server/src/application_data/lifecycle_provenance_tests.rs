@@ -73,6 +73,7 @@ async fn state_lifecycle_projects_transition_through_generated_action_and_keyed_
         "SolverSession".into(),
         SecurityContext::system(),
         generated.manifest.clone(),
+        super::ModuleDataTarget::TenantGlobal,
     );
     let invocation = ApplicationDataInvocation::new(state, authority);
     let id = "018f1f80-7b2d-7000-8000-000000000001";

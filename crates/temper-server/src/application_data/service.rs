@@ -60,6 +60,32 @@ impl<'a> GovernedApplicationDataService<'a> {
             .await
     }
 
+    /// Read one canonical actor state through an exact immutable scoped pin.
+    pub(crate) async fn get_scoped(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: temper_runtime::persistence::schema_deployment::SchemaExecutionPin,
+    ) -> Result<EntityResponse, String> {
+        self.state
+            .get_scoped_entity_state(tenant, entity_type, entity_id, schema_pin)
+            .await
+    }
+
+    /// Whether an exact scoped entity already exists under the supplied pin.
+    pub(crate) async fn exists_scoped(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: &temper_runtime::persistence::schema_deployment::SchemaExecutionPin,
+    ) -> Result<bool, String> {
+        self.state
+            .scoped_entity_exists(tenant, entity_type, entity_id, schema_pin)
+            .await
+    }
+
     /// Read a stable ordered page from the query plane when available.
     pub(crate) async fn query_candidates(
         &self,
@@ -140,6 +166,19 @@ impl<'a> GovernedApplicationDataService<'a> {
             .ok_or_else(|| "BoundedAuthoritativeFallbackUnavailable".into())
     }
 
+    /// Enumerate an exact scoped journal set within a caller-owned work budget.
+    pub(crate) async fn bounded_scoped_candidates(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        schema_pin: &temper_runtime::persistence::schema_deployment::SchemaExecutionPin,
+        budget: usize,
+    ) -> Result<Vec<String>, String> {
+        self.state
+            .list_scoped_entity_ids_bounded(tenant, entity_type, schema_pin, budget)
+            .await
+    }
+
     /// Read the currently indexed IDs for bounded projection-coverage repair.
     pub(crate) fn indexed_candidates(&self, tenant: &TenantId, entity_type: &str) -> Vec<String> {
         self.state.list_entity_ids(tenant, entity_type)
@@ -202,7 +241,6 @@ impl<'a> GovernedApplicationDataService<'a> {
     }
 
     /// Patch through one immutable task-scoped actor.
-    #[expect(dead_code, reason = "reserved for the typed scoped-data adapter")]
     pub(crate) async fn patch_scoped(
         &self,
         tenant: &TenantId,
