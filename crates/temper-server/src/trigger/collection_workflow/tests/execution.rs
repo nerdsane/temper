@@ -87,6 +87,15 @@ async fn activated_start_co_commits_bounded_member_intents_for_recovery() {
         intents[0].target_entity_id.as_deref(),
         Some(record.members[0].member_id.as_str())
     );
+    for intent in &intents {
+        let rule: crate::trigger::types::ReactionRule =
+            serde_json::from_value(intent.rule.clone()).expect("bound collection rule");
+        assert_eq!(
+            rule.principal.as_deref(),
+            Some("wasm-runtime"),
+            "kernel-owned collection deliveries must not inherit caller authority"
+        );
+    }
 }
 
 #[test]
@@ -127,6 +136,9 @@ fn recovery_reconstructs_cancel_and_exact_join_from_bound_actions() {
     let cancellation = recover_progress(&mut record, 2).unwrap();
     assert_eq!(cancellation.len(), 1);
     assert_eq!(cancellation[0].kind, DeliveryKind::CollectionCancellation);
+    let cancellation_rule: crate::trigger::types::ReactionRule =
+        serde_json::from_value(cancellation[0].rule.clone()).unwrap();
+    assert_eq!(cancellation_rule.principal.as_deref(), Some("wasm-runtime"));
     record
         .record_member_controlled_terminal(
             &member_id,
@@ -139,6 +151,9 @@ fn recovery_reconstructs_cancel_and_exact_join_from_bound_actions() {
     let joins = recover_progress(&mut record, 3).unwrap();
     assert_eq!(joins.len(), 1);
     assert_eq!(joins[0].kind, DeliveryKind::CollectionJoin);
+    let join_rule: crate::trigger::types::ReactionRule =
+        serde_json::from_value(joins[0].rule.clone()).unwrap();
+    assert_eq!(join_rule.principal.as_deref(), Some("wasm-runtime"));
     assert_eq!(
         joins[0].authority,
         serde_json::json!({"principal": "test-agent"})
@@ -232,6 +247,21 @@ async fn generated_control_races_converge_through_private_production_commits() {
                 .is_err()
         );
 
+        let mut original = ReactionDeliveryRecord::pending(member_intent.clone());
+        original.attempts = 1;
+        original.fencing_token = 1;
+        original.status = ReactionDeliveryStatus::Succeeded;
+        assert!(
+            commit_terminal_delivery(&store, 0, &original)
+                .await
+                .expect("controlled receipted original closes before its cancellation")
+        );
+        let (closed_original, _) =
+            crate::trigger::delivery::load_delivery_record(&store, member_intent.clone())
+                .await
+                .unwrap();
+        assert_eq!(closed_original.status, ReactionDeliveryStatus::Succeeded);
+
         let controlled_events = store
             .read_events(
                 &collection_workflow_journal_id(&tenant, &record.workflow_id),
@@ -253,21 +283,6 @@ async fn generated_control_races_converge_through_private_production_commits() {
                 .await
                 .unwrap()
         );
-
-        let mut original = ReactionDeliveryRecord::pending(member_intent.clone());
-        original.attempts = 1;
-        original.fencing_token = 1;
-        original.status = ReactionDeliveryStatus::Succeeded;
-        assert!(
-            commit_terminal_delivery(&store, 0, &original)
-                .await
-                .expect("controlled receipted original closes as a workflow no-op")
-        );
-        let (closed_original, _) =
-            crate::trigger::delivery::load_delivery_record(&store, member_intent.clone())
-                .await
-                .unwrap();
-        assert_eq!(closed_original.status, ReactionDeliveryStatus::Succeeded);
 
         let (completed, _) = load_collection_record(&store, &tenant, &record.workflow_id)
             .await

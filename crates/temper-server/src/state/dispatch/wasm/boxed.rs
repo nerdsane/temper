@@ -91,6 +91,8 @@ pub(in crate::state::dispatch) fn dispatch_wasm_callback_boxed<'a>(
     callback_params: serde_json::Value,
     agent_context: &'a AgentContext,
     mode: WasmDispatchMode,
+    integration_name: &'a str,
+    module_name: &'a str,
 ) -> BoxFuture<'a, Result<Option<EntityResponse>, String>> {
     state
         .dispatch_wasm_callback(
@@ -99,6 +101,8 @@ pub(in crate::state::dispatch) fn dispatch_wasm_callback_boxed<'a>(
             callback_params,
             agent_context,
             mode,
+            integration_name,
+            module_name,
         )
         .boxed()
 }

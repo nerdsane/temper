@@ -4,11 +4,11 @@
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum CollectionWorkflowMode {
     /// Declarations, starts, controls, recovery, joins, and Observe are active.
-    #[default]
     Enabled,
     /// New starts are rejected while existing work can quiesce.
     Draining,
     /// New declarations and starts are rejected after quiescence.
+    #[default]
     Disabled,
 }
 
@@ -16,7 +16,8 @@ impl CollectionWorkflowMode {
     /// Parse the exact supported configuration vocabulary.
     pub fn parse(value: Option<&str>) -> Result<Self, String> {
         match value {
-            None | Some("enabled") => Ok(Self::Enabled),
+            None => Ok(Self::Disabled),
+            Some("enabled") => Ok(Self::Enabled),
             Some("draining") => Ok(Self::Draining),
             Some("disabled") => Ok(Self::Disabled),
             Some(other) => Err(format!(
@@ -100,10 +101,10 @@ mod tests {
     use super::CollectionWorkflowMode;
 
     #[test]
-    fn mode_defaults_enabled_and_accepts_exact_vocabulary() {
+    fn mode_defaults_disabled_and_accepts_exact_vocabulary() {
         assert_eq!(
             CollectionWorkflowMode::parse(None),
-            Ok(CollectionWorkflowMode::Enabled)
+            Ok(CollectionWorkflowMode::Disabled)
         );
         assert_eq!(
             CollectionWorkflowMode::parse(Some("enabled")),

@@ -11,6 +11,14 @@ use super::super::types::{MAX_REACTION_DEPTH, ReactionResult, ReactionRule};
 use super::{BoundDelivery, ReactionDispatcher, effective_trigger_security_context};
 use telemetry::{ReactionFanoutCounts, record_reaction_fanout_span};
 
+fn await_bound_delivery_integration(bound_delivery: Option<&BoundDelivery>) -> bool {
+    bound_delivery.is_some_and(|delivery| {
+        delivery.collection.as_ref().is_some_and(|context| {
+            context.role == crate::trigger::collection_workflow::CollectionDeliveryRole::Member
+        })
+    })
+}
+
 impl ReactionDispatcher {
     #[expect(
         clippy::too_many_arguments,
@@ -336,7 +344,7 @@ impl ReactionDispatcher {
                     &rule.then.action,
                     effective_params,
                     &dispatch_ctx,
-                    false,
+                    await_bound_delivery_integration(bound_delivery.as_ref()),
                     reaction_context,
                     None,
                 )
@@ -485,5 +493,59 @@ fn resolve_trigger_principal(
             ctx
         }
         _ => invoking_ctx.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::await_bound_delivery_integration;
+    use crate::trigger::collection_workflow::{
+        CollectionDeliveryActions, CollectionDeliveryContext, CollectionDeliveryRole,
+    };
+    use crate::trigger::dispatcher::BoundDelivery;
+
+    fn bound(role: CollectionDeliveryRole) -> BoundDelivery {
+        BoundDelivery {
+            delivery_id: "delivery".to_string(),
+            root_delivery_id: "root".to_string(),
+            fencing_token: 1,
+            target_entity_id: Some("target".to_string()),
+            expected_target_sequence: None,
+            state_timeout_state: None,
+            collection: Some(CollectionDeliveryContext {
+                workflow_id: "workflow".to_string(),
+                member_id: Some("member".to_string()),
+                control_epoch: 0,
+                attempts: 1,
+                max_attempts: 5,
+                role,
+                terminal_classification: None,
+                actions: CollectionDeliveryActions {
+                    member_entity: "Member".to_string(),
+                    member_action: "Start".to_string(),
+                    member_cancel_action: "Cancel".to_string(),
+                    timeout_action: "Timeout".to_string(),
+                    on_success: "Succeeded".to_string(),
+                    on_partial_failure: "PartiallyFailed".to_string(),
+                    on_failure: "Failed".to_string(),
+                    on_cancelled: "Cancelled".to_string(),
+                    on_timed_out: "TimedOut".to_string(),
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn only_collection_member_delivery_awaits_its_integration() {
+        assert!(await_bound_delivery_integration(Some(&bound(
+            CollectionDeliveryRole::Member
+        ))));
+        assert!(!await_bound_delivery_integration(Some(&bound(
+            CollectionDeliveryRole::Cancellation
+        ))));
+        assert!(!await_bound_delivery_integration(Some(&bound(
+            CollectionDeliveryRole::Join
+        ))));
+        assert!(!await_bound_delivery_integration(None));
     }
 }

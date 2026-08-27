@@ -7,10 +7,33 @@ use crate::request_context::AgentContext;
 use crate::state::pending_decisions::PendingDecision;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 use crate::state::wasm_invocation_log::WasmInvocationEntry;
+use sha2::{Digest, Sha256};
 use temper_observe::wide_event;
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 use tracing::{Instrument, instrument};
+
+fn callback_agent_context(
+    agent_ctx: &AgentContext,
+    integration_name: &str,
+    module_name: &str,
+    callback_action: &str,
+) -> AgentContext {
+    let mut callback_ctx = agent_ctx.clone();
+    callback_ctx.idempotency_key = agent_ctx.idempotency_key.as_ref().map(|parent| {
+        let mut digest = Sha256::new();
+        digest.update(b"temper-wasm-callback-v1\0");
+        digest.update(parent.as_bytes());
+        digest.update(b"\0");
+        digest.update(integration_name.as_bytes());
+        digest.update(b"\0");
+        digest.update(module_name.as_bytes());
+        digest.update(b"\0");
+        digest.update(callback_action.as_bytes());
+        format!("wasm-callback:{:x}", digest.finalize())
+    });
+    callback_ctx
+}
 
 impl crate::state::ServerState {
     /// Record a WASM invocation (persist log entry + emit observability events).
@@ -137,6 +160,8 @@ impl crate::state::ServerState {
                 params,
                 ctx.agent_ctx,
                 ctx.mode,
+                integration_name,
+                module_name,
             )
             .await;
         }
@@ -156,6 +181,8 @@ impl crate::state::ServerState {
         callback_params: serde_json::Value,
         agent_ctx: &AgentContext,
         mode: WasmDispatchMode,
+        integration_name: &str,
+        module_name: &str,
     ) -> Result<Option<EntityResponse>, String> {
         match mode {
             WasmDispatchMode::Inline => {
@@ -164,6 +191,12 @@ impl crate::state::ServerState {
                 // its own WASM trigger; returning before that nested trigger
                 // commits lets concurrent requests observe stale detailed
                 // fields while counters advance.
+                let callback_ctx = callback_agent_context(
+                    agent_ctx,
+                    integration_name,
+                    module_name,
+                    callback_action,
+                );
                 let resp = super::dispatch_tenant_action_core_boxed(
                     self,
                     entity_ref.tenant,
@@ -171,7 +204,7 @@ impl crate::state::ServerState {
                     entity_ref.entity_id,
                     callback_action,
                     callback_params,
-                    agent_ctx,
+                    &callback_ctx,
                     true,
                     None,
                     None,
@@ -322,5 +355,42 @@ impl crate::state::ServerState {
         }
         self.enqueue_trajectory_entry(traj);
         Some(decision_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::callback_agent_context;
+    use crate::request_context::AgentContext;
+
+    #[test]
+    fn inline_wasm_callback_has_distinct_stable_idempotency() {
+        let parent = AgentContext {
+            idempotency_key: Some("member-delivery".to_string()),
+            ..AgentContext::default()
+        };
+
+        let first = callback_agent_context(
+            &parent,
+            "validate-task",
+            "validate_arc_dataset",
+            "RecordValidated",
+        );
+        let replay = callback_agent_context(
+            &parent,
+            "validate-task",
+            "validate_arc_dataset",
+            "RecordValidated",
+        );
+        let other_integration = callback_agent_context(
+            &parent,
+            "audit-task",
+            "audit_arc_dataset",
+            "RecordValidated",
+        );
+
+        assert_ne!(first.idempotency_key, parent.idempotency_key);
+        assert_eq!(first.idempotency_key, replay.idempotency_key);
+        assert_ne!(first.idempotency_key, other_integration.idempotency_key);
     }
 }

@@ -332,10 +332,12 @@ pub(crate) async fn commit_terminal_delivery(
             .iter()
             .find(|member| member.member_id == member_id)
         && member.delivery_id.as_deref() == Some(delivery.intent.delivery_id.as_str())
-        && matches!(
+        && (matches!(
             member.status,
             CollectionMemberStatus::Cancelled | CollectionMemberStatus::TimedOut
-        )
+        ) || (record.requested_outcome.is_some()
+            && member.status == CollectionMemberStatus::InFlight
+            && member.receipt.is_some()))
     {
         crate::trigger::delivery::append_delivery_record(
             store,

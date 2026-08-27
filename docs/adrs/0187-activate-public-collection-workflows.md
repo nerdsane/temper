@@ -47,11 +47,24 @@ ledger records; and hand bounded admission, member/cancel delivery, joins, and
 recovery to the existing collection runtime. Installed declarations may reload
 during draining because recovery is not new authoring.
 
+Collection member, cancellation, and join intents declare the exact
+`service:wasm-runtime` principal instead of inheriting the initiating operator.
+Member delivery awaits its bound WASM integration; a committed member `Start`
+receipt is admission evidence, not completion evidence. Inline WASM callbacks
+derive a distinct stable idempotency key from the parent delivery, integration,
+module, and callback action so a callback cannot reuse the cached `Start`
+response or collide with another integration's callback.
+
+If collection control races recovery, the original receipted delivery closes
+as a workflow no-op and the fenced cancellation owns member terminalization.
+Exact durable completion evidence and timeout-aware lease renewal for an
+interrupted post-`Start` member remain activation prerequisites.
+
 ### Activation has three startup-validated modes
 
 `TEMPER_COLLECTION_WORKFLOW_MODE` accepts exactly `enabled`, `draining`, or
-`disabled` and defaults to `enabled` in this release. Any other value fails
-startup.
+`disabled` and defaults to `disabled`. Explicit activation remains gated on the
+recovery prerequisites above. Any other value fails startup.
 
 - `enabled` accepts declarations and new starts.
 - `draining` loads installed declarations and preserves controls, recovery,

@@ -290,7 +290,7 @@ fn intent(
         resolve_target: TargetResolver::Static {
             entity_id: target_entity_id.clone(),
         },
-        principal: None,
+        principal: Some("wasm-runtime".to_string()),
         drop_ok: false,
     };
     let (authority, schema_pin) = match kind {
