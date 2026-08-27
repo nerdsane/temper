@@ -52,6 +52,7 @@ fn existing_source_append_serializes_with_migration_cutover() {
                     expected_predecessor: None,
                     expected_fence: source.fence,
                     verification_receipt_id: "race-source-verify".into(),
+                    stream_publication_fence: None,
                     operation: operation("race-source-activate"),
                 })
                 .await
@@ -109,11 +110,13 @@ fn existing_source_append_serializes_with_migration_cutover() {
             .begin()
             .await
             .expect("begin append transaction");
+        let event = test_event(2, "Timeout", &persistence_id);
         crate::store::assert_scoped_journal_write_fence(
             &mut append_tx,
             &tenant,
             "Example.Task",
             &journal_entity_id,
+            std::slice::from_ref(&event),
         )
         .await
         .expect("ready migration permits and locks pre-cutover append");
@@ -146,7 +149,6 @@ fn existing_source_append_serializes_with_migration_cutover() {
         .fetch_one(&mut *append_tx)
         .await
         .expect("load source segment");
-        let event = test_event(2, "Timeout", &persistence_id);
         sqlx::query(
             "INSERT INTO events
              (tenant, entity_type, entity_id, sequence_nr, segment_index, event_type, payload, metadata)

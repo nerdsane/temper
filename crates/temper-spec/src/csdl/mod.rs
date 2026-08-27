@@ -9,6 +9,7 @@ pub use merge::merge_csdl;
 pub use parser::{CsdlParseError, parse_csdl};
 pub use stream_capability::{
     StreamCapabilityError, StreamCapabilityMutabilityV1, VerifiedStreamCapabilityV1,
-    verify_stream_capabilities_v1,
+    VerifiedStreamMigrationProvenanceV1, stream_capability_set_digest_v1,
+    verify_stream_capabilities_v1, verify_stream_migration_automata_v1,
 };
 pub use types::*;

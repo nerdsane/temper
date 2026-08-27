@@ -16,7 +16,23 @@ pub(crate) async fn try_file_stream_fast_path(
     if !matches!(entity_type, "File" | "FileVersion") {
         return None;
     }
-    if !state.stream_descriptor_contract_activated(tenant, None, entity_type) {
+    let activated = match state
+        .stream_descriptor_contract_activated(tenant, None, entity_type)
+        .await
+    {
+        Ok(activated) => activated,
+        Err(error) => {
+            return Some(
+                odata_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error.stable_code(),
+                    "Authoritative stream descriptor fence storage is unavailable",
+                )
+                .into_response(),
+            );
+        }
+    };
+    if !activated {
         return None;
     }
     Some(

@@ -1,6 +1,6 @@
 # ADR-0188: Durable Stream Descriptor Authority
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-26
 - Deciders: Temper core maintainers
 - Related:
@@ -295,18 +295,20 @@ schemas without teaching the kernel their vocabulary.
 
 ### Sub-Decision 6: Migrate Historical Streams Explicitly
 
-Existing current Files and FileVersions predate kernel descriptors. They will
-be migrated before the descriptor requirement is activated for their tenant.
-The migration is an explicit, idempotent TemperFS contract migration, not a
-permanent runtime fallback.
+Existing stream subjects may predate kernel descriptors. They are migrated
+before the descriptor requirement is activated for their tenant. Migration is
+an explicit, idempotent platform operation driven by a verified, digest-bound
+provenance mapping, not an application inventory API or permanent runtime
+fallback. TemperFS Files and FileVersions are the first rollout of this generic
+contract.
 
 For each historical stream, the migration will:
 
-1. resolve its content identity through the exact historical TemperFS schema
-   version and event contract;
+1. resolve its content identity through the exact verified historical schema
+   version and publication-event mapping;
 2. obtain the actual byte length from bounded blob metadata/stat rather than
    trusting a historical size field;
-3. verify the digest and resolve FileVersion ownership from historical
+3. verify the digest and resolve any authorization parent from historical
    relationship/event provenance;
 4. append a reserved `StreamDescriptorBackfilled` kernel event whose
    `content_event_sequence` identifies the historical content publication and
@@ -350,29 +352,113 @@ source of stream truth.
 support are established before execution. Runtime field discovery would
 reintroduce ambient schema dependence after artifact binding.
 
+### Sub-Decision 8: Govern Migration Through Deployment Evidence
+
+Historical migration is a platform deployment operation, not an application
+inventory API. Temper exposes bounded start, advance, inspect, and unresolved
+listing operations through the existing schema-deployment HTTP and typed WASM
+surface. The host supplies tenant and principal authority. A caller supplies
+only an immutable deployment target, positive budgets, and idempotency data;
+it cannot supply entity identities, journal sequences, blob identities, or
+descriptor facts.
+
+The verified stream capability carries a closed migration-only provenance
+mapping for the publication action, content-hash parameter, byte-length
+parameter, optional content-type parameter, authorization-parent parameter,
+and versioned storage-key contract. Bundle verification proves those bindings
+against the canonical CSDL and IOA before the platform stages a migration
+target. The canonical mapping is included in the stream-capability digest.
+This mapping interprets historical journal facts; it never becomes an
+application-state fallback for descriptor reads.
+
+Migration jobs page authoritative journals in deterministic subject order,
+derive candidates inside Temper, stat and hash blob bytes through bounded
+storage operations, and append only verified descriptors. Jobs durably own
+their cursor, latest per-subject outcomes, cumulative unresolved set, page
+receipts, budgets, and completion receipt. Re-running a repaired subject may
+replace an unresolved outcome, while an exact request replay returns the
+original receipt without duplicating a descriptor.
+
+Completion evidence binds the tenant, deployment kind and identity, source and
+target bundle digests, canonical stream-capability digest, descriptor contract
+version, and the exact durable per-capability publication generations observed
+by a stable complete pass. Every stream publication advances its capability's
+generation in the same storage transaction as its event append. The job stores
+the complete generation map rather than only a combined token. Activation uses
+that stored map as its compare-and-set input, so it cannot silently rebase the
+receipt onto a newer generation; a publication after inventory makes the
+evidence stale without a race window.
+
+Both task-scoped schema activation and tenant-global installed-app reconcile
+enforce the same evidence contract. A target without
+`DescriptorContractVersion=1` remains reader-first and requires no receipt. A
+target that activates version 1 stays staged while evidence is absent, stale,
+or has unresolved subjects. The storage fence rejects descriptor-less
+publications after activation even if the in-memory registry has not yet
+observed the new pointer. For a task cutover, the fence is selective: it blocks
+only the verified descriptor-less publication action on predecessor-pinned
+journals. Ordinary predecessor actions and descriptor-bearing publications
+remain available.
+
+**Why this approach**: deployment already owns verification, immutable bundle
+identity, Cedar authorization, and atomic activation. Binding migration to that
+boundary keeps privileged inventory in the kernel, gives application workflows
+a typed progress surface, and prevents every activation path from bypassing
+the same durable proof.
+
+### Operator Contract
+
+Operators submit the exact task-bundle or installed-application target through
+`POST /api/v1/schema-deployments/stream-descriptor-migrations`, then advance it
+with bounded calls to
+`POST /api/v1/schema-deployments/stream-descriptor-migrations/{job_id}/advance`.
+Progress is read with `GET` on the job URI; unresolved classifications are read
+with `POST` to its `/unresolved` endpoint so the bounded cursor request remains
+in the authenticated body. The typed WASM schema-deployment ABI exposes
+the same four operations and receipts. Tenant identity always comes from the
+authenticated invocation, and Cedar authorizes the concrete task scope or
+installed application rather than a caller-provided surrogate.
+
+Start and advance mutations require stable idempotency keys. Exact replays
+return the originally committed receipt, including its request ID, cursor,
+page outcomes, and committed sequence. Each advance is limited to 256 subjects,
+1,024 events per subject, and 2 GiB of blob verification work; callers may
+choose smaller positive budgets. A job stores at most 1,024 mutation receipts
+and a 4 MiB state payload. Operators repair missing or corrupt blobs or invalid
+publication facts at their authoritative source, then advance the same job;
+the retry cursor rotates through unresolved subjects so one persistent fault
+cannot starve later repairs.
+
+Activation remains denied until a stable complete pass has no unresolved
+subjects. A concurrent publication before cutover makes completion stale and
+the next advance reopens inventory. Task activation and installed-app reconcile
+compare and install publication fences atomically with the observed
+generations. Completion evidence is a cutover prerequisite, not a perpetual
+steady-state check: exact task activation replays use the durable activation
+receipt, and unchanged installed-app reconcile uses the exact durable semantic,
+publication-action, and capability fence. Normal post-cutover writes therefore
+do not reopen migration. Rollback keeps the prior descriptor-aware deployment
+active; migration records and descriptor events are append-only and are never
+deleted as a rollback action.
+
 ## Rollout Plan
 
-1. **ADR** — Merge this decision with no runtime behavior change.
-2. **Complete kernel implementation** — In one implementation effort, add the
-   descriptor types and optional version-tagged event envelope, host-attested
-   storage receipt and durable storage reference, closed CSDL stream vocabulary,
-   `StreamCapabilityV1` verification and artifact binding, deterministic trigger
-   provenance, persistence/replay, metadata-only resolution, pre-fetch budget
-   gate, current and versioned typed reads, OData parity, structured errors,
-   telemetry, migration tooling, and all readiness tests. Do not activate the
-   requirement with any of those pieces deferred.
-3. **Reader-first deployment** — Deploy descriptor-aware binaries with strict
-   admission and descriptor writes disabled. Prove every writer, replay worker,
-   and rollback candidate decodes and preserves old and new envelope versions.
-4. **Historical migration** — Inventory every deployed File/FileVersion stream,
-   run the idempotent migration, and prove that descriptor counts, ownership,
-   hashes, lengths, and unresolved records match the inventory before
-   activation.
-5. **Activation** — Migrate TemperFS/TemperPaw bundles to artifacts bound to the
-   descriptor contract and add the distinct `DescriptorContractVersion=1`
-   marker only after the migration-complete and fleet-ready evidence is durable.
-   Keep the prior deployment live until activation and rollback gates pass.
-6. **Live verification** — Exercise current and versioned typed reads after a
+1. **Reader-first foundation** — PR #68 supplies descriptor-aware event
+   metadata, replay, reads and writes, verified stream capabilities, and the
+   inactive versioned marker. Keep the marker absent while governed migration
+   evidence is unavailable.
+2. **Governed migration and gate** — Issue #73 adds the verified provenance
+   mapping, platform-owned bounded jobs, durable completion evidence,
+   publication-generation fencing, typed progress operations, and activation
+   checks for both scoped bundles and installed apps in one implementation PR.
+3. **Historical migration** — Inventory every deployed stream subject, run the
+   idempotent migration, and prove descriptor counts, ownership, hashes,
+   lengths, and unresolved records match the inventory before activation.
+4. **Activation** — Migrate TemperFS/TemperPaw bundles to artifacts bound to the
+   descriptor contract and add `DescriptorContractVersion=1` only after exact
+   migration-complete and fleet-ready evidence is durable. Keep the prior
+   deployment live until activation and rollback gates pass.
+5. **Live verification** — Exercise current and versioned typed reads after a
    real restart, verify exact content and budget rejection, and use Datadog to
    prove descriptor resolution precedes blob fetch and that no rejected open
    reads content bytes.

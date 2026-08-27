@@ -778,6 +778,101 @@ impl EventStore for TenantStoreRouter {
             .await
     }
 
+    async fn list_unscoped_entity_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        after_entity_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        self.store_for_tenant(tenant)
+            .await?
+            .list_unscoped_entity_ids_page(tenant, entity_type, after_entity_id, limit)
+            .await
+    }
+
+    async fn unscoped_entity_type_write_version(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<u64, PersistenceError> {
+        self.store_for_tenant(tenant)
+            .await?
+            .unscoped_entity_type_write_version(tenant, entity_type)
+            .await
+    }
+
+    async fn activate_unscoped_stream_publication_fence(
+        &self,
+        tenant: &str,
+        fence: &temper_runtime::persistence::schema_deployment::StreamPublicationFence,
+    ) -> Result<(), PersistenceError> {
+        self.store_for_tenant(tenant)
+            .await?
+            .activate_unscoped_stream_publication_fence(tenant, fence)
+            .await
+    }
+
+    async fn deactivate_unscoped_stream_publication_fence(
+        &self,
+        tenant: &str,
+        application_id: &str,
+        semantic_digest: Option<&str>,
+    ) -> Result<(), PersistenceError> {
+        self.store_for_tenant(tenant)
+            .await?
+            .deactivate_unscoped_stream_publication_fence(tenant, application_id, semantic_digest)
+            .await
+    }
+
+    async fn get_unscoped_stream_publication_fence(
+        &self,
+        tenant: &str,
+        application_id: &str,
+    ) -> Result<
+        Option<temper_runtime::persistence::schema_deployment::StreamPublicationFence>,
+        PersistenceError,
+    > {
+        self.store_for_tenant(tenant)
+            .await?
+            .get_unscoped_stream_publication_fence(tenant, application_id)
+            .await
+    }
+
+    async fn unscoped_stream_publication_fence_active(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        publication_action: &str,
+        capability_digest: &str,
+    ) -> Result<bool, PersistenceError> {
+        self.store_for_tenant(tenant)
+            .await?
+            .unscoped_stream_publication_fence_active(
+                tenant,
+                entity_type,
+                publication_action,
+                capability_digest,
+            )
+            .await
+    }
+
+    async fn restore_unscoped_stream_publication_fence(
+        &self,
+        tenant: &str,
+        expected_current_semantic_digest: &str,
+        fence: &temper_runtime::persistence::schema_deployment::StreamPublicationFence,
+    ) -> Result<(), PersistenceError> {
+        self.store_for_tenant(tenant)
+            .await?
+            .restore_unscoped_stream_publication_fence(
+                tenant,
+                expected_current_semantic_digest,
+                fence,
+            )
+            .await
+    }
+
     async fn list_scoped_entity_ids_page(
         &self,
         tenant: &str,

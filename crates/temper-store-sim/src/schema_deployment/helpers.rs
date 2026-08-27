@@ -9,6 +9,59 @@ pub(super) fn validate_digest(name: &str, value: &str) -> Result<(), SchemaDeplo
     Ok(())
 }
 
+pub(super) fn validate_task_stream_publication_fence(
+    inner: &SimEventStoreInner,
+    tenant: &str,
+    scope: &SchemaScope,
+    expected_predecessor: Option<&str>,
+    publication_fence: Option<&StreamPublicationFence>,
+) -> Result<(), SchemaDeploymentStoreError> {
+    let Some(publication_fence) = publication_fence else {
+        return Ok(());
+    };
+    let StreamPublicationFence::TaskScoped {
+        source_bundle_digest,
+        expected_write_version,
+        ..
+    } = publication_fence
+    else {
+        return Err(SchemaDeploymentStoreError::InvalidInput(
+            "installed-application fence cannot activate a task bundle".into(),
+        ));
+    };
+    if expected_predecessor != Some(source_bundle_digest.as_str()) {
+        return Err(SchemaDeploymentStoreError::PredecessorMismatch);
+    }
+    let suffix = scoped_journal_pin_suffix(&SchemaExecutionPin {
+        scope: scope.clone(),
+        bundle_digest: source_bundle_digest.clone(),
+    });
+    let write_version = inner
+        .journals
+        .iter()
+        .filter(|(persistence_id, _)| {
+            parse_persistence_id_parts(persistence_id).ok().is_some_and(
+                |(found_tenant, _, entity_id)| {
+                    found_tenant == tenant && entity_id.ends_with(&suffix)
+                },
+            )
+        })
+        .try_fold(0_u64, |total, (_, events)| {
+            u64::try_from(events.len())
+                .ok()
+                .and_then(|count| total.checked_add(count))
+        })
+        .ok_or_else(|| {
+            SchemaDeploymentStoreError::BackendUnavailable(
+                "stream publication generation overflowed".into(),
+            )
+        })?;
+    if write_version != *expected_write_version {
+        return Err(SchemaDeploymentStoreError::StaleFence);
+    }
+    Ok(())
+}
+
 pub(super) fn validate_migration_command(
     command: &CreateSchemaMigration,
 ) -> Result<(), SchemaDeploymentStoreError> {

@@ -26,7 +26,11 @@ impl ModuleDataGrant {
             | DataOperationKind::SchemaBundleRetire
             | DataOperationKind::SchemaMigrationStart
             | DataOperationKind::SchemaMigrationGet
-            | DataOperationKind::SchemaMigrationRetry => true,
+            | DataOperationKind::SchemaMigrationRetry
+            | DataOperationKind::StreamDescriptorMigrationStart
+            | DataOperationKind::StreamDescriptorMigrationAdvance
+            | DataOperationKind::StreamDescriptorMigrationGet
+            | DataOperationKind::StreamDescriptorMigrationListUnresolved => true,
             DataOperationKind::ActionInvoke => {
                 action.is_some_and(|name| entity.actions.contains(name))
             }

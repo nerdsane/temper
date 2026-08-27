@@ -190,6 +190,7 @@ async fn activate_durable_pin(
             expected_predecessor: predecessor_digest,
             expected_fence: verified.fence,
             verification_receipt_id: "scoped-reaction-verification".into(),
+            stream_publication_fence: None,
             operation: SchemaOperationIdentity {
                 idempotency_key: format!("activate-scoped-reaction-{operation_suffix}"),
                 request_digest: format!("sha256:{}", "4".repeat(64)),

@@ -40,6 +40,7 @@ tempfile = "3.27.0"
 
 [dev-dependencies]
 temper-server = { workspace = true, features = ["test-helpers"] }
+temper-store-sim.workspace = true
 tokio-test = { workspace = true }
 tower = { workspace = true }
 hyper = { workspace = true }

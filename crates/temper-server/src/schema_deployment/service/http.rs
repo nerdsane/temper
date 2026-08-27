@@ -201,3 +201,94 @@ pub(crate) async fn retry_migration_http(
             .await,
     )
 }
+
+pub(crate) async fn start_stream_descriptor_migration_http(
+    State(state): State<ServerState>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
+    axum::Json(request): axum::Json<StartStreamDescriptorMigrationRequestV1>,
+) -> Response {
+    let (tenant, security) = match http_context(authenticated.as_deref()) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    stream_descriptor_http_response(
+        GovernedSchemaDeploymentService::new(&state)
+            .start_stream_descriptor_migration(&tenant, &security, request)
+            .await,
+    )
+}
+
+pub(crate) async fn advance_stream_descriptor_migration_http(
+    State(state): State<ServerState>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
+    Path(job_id): Path<String>,
+    axum::Json(request): axum::Json<AdvanceStreamDescriptorMigrationRequestV1>,
+) -> Response {
+    if request.job_id != job_id {
+        return stream_descriptor_http_response(Err(ServiceError::new(
+            "scope_mismatch",
+            "path and request identity differ",
+            false,
+        )));
+    }
+    let (tenant, security) = match http_context(authenticated.as_deref()) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    stream_descriptor_http_response(
+        GovernedSchemaDeploymentService::new(&state)
+            .advance_stream_descriptor_migration(&tenant, &security, request)
+            .await,
+    )
+}
+
+pub(crate) async fn get_stream_descriptor_migration_http(
+    State(state): State<ServerState>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+) -> Response {
+    let (tenant, security) = match http_context(authenticated.as_deref()) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let request_id = headers
+        .get("x-temper-request-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&job_id)
+        .to_string();
+    stream_descriptor_http_response(
+        GovernedSchemaDeploymentService::new(&state)
+            .get_stream_descriptor_migration(
+                &tenant,
+                &security,
+                GetStreamDescriptorMigrationRequestV1 { request_id, job_id },
+            )
+            .await,
+    )
+}
+
+pub(crate) async fn list_unresolved_stream_descriptors_http(
+    State(state): State<ServerState>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
+    Path(job_id): Path<String>,
+    axum::Json(request): axum::Json<ListUnresolvedStreamDescriptorsRequestV1>,
+) -> Response {
+    if request.job_id != job_id {
+        return unresolved_stream_descriptor_http_response(Err(ServiceError::new(
+            "scope_mismatch",
+            "path and request identity differ",
+            false,
+        )));
+    }
+    let (tenant, security) = match http_context(authenticated.as_deref()) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    unresolved_stream_descriptor_http_response(
+        GovernedSchemaDeploymentService::new(&state)
+            .list_unresolved_stream_descriptors(&tenant, &security, request)
+            .await,
+    )
+}

@@ -292,6 +292,7 @@ async fn persist_task_schema_bundle_in_scope(
             expected_predecessor: predecessor.map(str::to_string),
             expected_fence: verified.fence,
             verification_receipt_id: format!("{operation_tag}-verification"),
+            stream_publication_fence: None,
             operation: SchemaOperationIdentity {
                 idempotency_key: format!("{operation_tag}-activate"),
                 request_digest: format!("sha256:{}", "4".repeat(64)),

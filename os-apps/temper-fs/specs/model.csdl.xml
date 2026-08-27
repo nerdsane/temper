@@ -132,6 +132,12 @@
         <Annotation Term="Temper.Vocab.Stream.Mutability" String="Mutable"/>
         <Annotation Term="Temper.Vocab.Stream.VersionEntityType" String="Temper.FS.FileVersion"/>
         <Annotation Term="Temper.Vocab.Stream.VersionCollection" NavigationPropertyPath="Versions"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationPublicationAction" String="StreamUpdated"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationContentHashParameter" String="content_hash"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationByteLengthParameter" String="size_bytes"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationContentTypeParameter" String="mime_type"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationStorageContractVersion" Int="1"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationStorageKeyPrefix" String="temper-fs/"/>
       </EntityType>
 
       <EntityType Name="FileVersion">
@@ -160,6 +166,13 @@
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/file_version.cedar"/>
         <Annotation Term="Temper.Vocab.Stream.Mutability" String="Immutable"/>
         <Annotation Term="Temper.Vocab.Stream.AuthorizationParent" NavigationPropertyPath="File"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationPublicationAction" String="Create"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationContentHashParameter" String="content_hash"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationByteLengthParameter" String="size_bytes"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationContentTypeParameter" String="mime_type"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationAuthorizationParentParameter" String="file_id"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationStorageContractVersion" Int="1"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationStorageKeyPrefix" String="temper-fs/"/>
       </EntityType>
 
       <!-- ============ Bound Actions ============ -->

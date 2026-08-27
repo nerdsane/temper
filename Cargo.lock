@@ -6882,6 +6882,7 @@ dependencies = [
  "temper-runtime",
  "temper-server",
  "temper-spec",
+ "temper-store-sim",
  "temper-store-turso",
  "temper-verify",
  "temper-wasm",

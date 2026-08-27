@@ -163,6 +163,7 @@ fn postgres_schema_migration_contract() {
                     expected_predecessor: None,
                     expected_fence: source.fence,
                     verification_receipt_id: "source-verify".to_string(),
+                    stream_publication_fence: None,
                     operation: operation("source-activate"),
                 })
                 .await
@@ -487,6 +488,7 @@ fn postgres_schema_migration_contract() {
             expected_predecessor: None,
             expected_fence: 1,
             verification_receipt_id: "race-first".into(),
+            stream_publication_fence: None,
             operation: operation("race-activate-first"),
         };
         let second = ActivateSchemaBundle {
@@ -496,6 +498,7 @@ fn postgres_schema_migration_contract() {
             expected_predecessor: None,
             expected_fence: 1,
             verification_receipt_id: "race-second".into(),
+            stream_publication_fence: None,
             operation: operation("race-activate-second"),
         };
         let (first_result, second_result) = tokio::join!(
@@ -540,6 +543,7 @@ fn postgres_schema_migration_contract() {
             expected_predecessor: None,
             expected_fence: 1,
             verification_receipt_id: "replay-verify".into(),
+            stream_publication_fence: None,
             operation: operation("concurrent-replay"),
         };
         let (left, right) = tokio::join!(

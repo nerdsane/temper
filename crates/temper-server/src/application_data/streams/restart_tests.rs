@@ -6,6 +6,9 @@ use std::sync::{Arc, RwLock};
 
 use sha2::{Digest as _, Sha256};
 use temper_authz::SecurityContext;
+use temper_runtime::persistence::schema_deployment::{
+    StreamPublicationFence, UnscopedStreamPublicationBinding,
+};
 use temper_runtime::persistence::{
     EventMetadata, EventStore, PersistenceEnvelope, StreamMutability,
 };
@@ -137,6 +140,46 @@ async fn typed_current_and_version_reads_survive_restart_and_reject_cross_file()
             )
             .await
             .unwrap();
+        let persistence_id = format!("default:File:{file_id}");
+        let mut settled_events = None;
+        for _ in 0..256 {
+            let events = store.read_events(&persistence_id, 0).await.unwrap();
+            if events
+                .iter()
+                .any(|event| event.event_type == "RecordVersion")
+            {
+                settled_events = Some(events);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let events = settled_events.expect("File.RecordVersion reaction did not settle");
+        let content_event_sequence = events
+            .iter()
+            .rev()
+            .find(|event| event.event_type == "StreamUpdated")
+            .unwrap()
+            .sequence_nr;
+        let receipt = state
+            .backfill_stream_descriptor_inventory_page_v1(
+                &tenant,
+                &format!("typed-file-{file_id}-final"),
+                true,
+                &[StreamDescriptorBackfillCandidateV1 {
+                    entity_type: "File".into(),
+                    entity_id: file_id.into(),
+                    content_hash: content_hash.clone(),
+                    storage_object_id: format!("temper-fs/{content_hash}"),
+                    byte_length: body.len() as u64,
+                    content_type: Some("text/plain".into()),
+                    content_event_sequence,
+                    expected_current_sequence: events.last().unwrap().sequence_nr,
+                    mutability: StreamMutability::Mutable,
+                }],
+            )
+            .await
+            .unwrap();
+        assert!(receipt.migration_complete, "{receipt:?}");
     }
     store
         .append(
@@ -173,7 +216,7 @@ async fn typed_current_and_version_reads_survive_restart_and_reject_cross_file()
         )
         .await
         .unwrap();
-    state
+    let receipt = state
         .backfill_stream_descriptor_inventory_page_v1(
             &tenant,
             "typed-version-final",
@@ -189,6 +232,44 @@ async fn typed_current_and_version_reads_survive_restart_and_reject_cross_file()
                 expected_current_sequence: 1,
                 mutability: StreamMutability::Immutable,
             }],
+        )
+        .await
+        .unwrap();
+    assert!(receipt.migration_complete, "{receipt:?}");
+    let capabilities = temper_spec::csdl::verify_stream_capabilities_v1(
+        &temper_spec::csdl::parse_csdl(&csdl).unwrap(),
+    )
+    .unwrap();
+    let mut bindings = BTreeMap::new();
+    for capability in capabilities
+        .iter()
+        .filter(|capability| capability.descriptor_contract_v1_active)
+    {
+        let entity_type = capability.subject_type.rsplit('.').next().unwrap();
+        let provenance = capability.migration_provenance.as_ref().unwrap();
+        bindings.insert(
+            entity_type.to_string(),
+            UnscopedStreamPublicationBinding {
+                publication_action: provenance.publication_action.clone(),
+                capability_digest: temper_spec::csdl::stream_capability_set_digest_v1(
+                    std::slice::from_ref(capability),
+                )
+                .unwrap(),
+                expected_write_version: store
+                    .unscoped_entity_type_write_version("default", entity_type)
+                    .await
+                    .unwrap(),
+            },
+        );
+    }
+    store
+        .activate_unscoped_stream_publication_fence(
+            "default",
+            &StreamPublicationFence::InstalledApplication {
+                application_id: "temper-fs".into(),
+                semantic_digest: format!("sha256:{}", "f".repeat(64)),
+                bindings,
+            },
         )
         .await
         .unwrap();
@@ -309,13 +390,15 @@ fn read_all(mut opened: OpenedFileRead) -> Result<Vec<u8>, ModuleDataError> {
 pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
     let result = (|| -> Result<(), String> {
         let mut client = FileClient::new();
-        let current = client.open_file_read("file-1").map_err(|error| error.to_string())?;
+        let current = client
+            .open_file_read("file-1")
+            .map_err(|error| format!("current read: {error}"))?;
         if read_all(current).map_err(|error| error.to_string())? != b"typed restart bytes" {
             return Err("generated current File read returned different bytes".into());
         }
         let version = client
             .open_file_version_read("file-1", "version-1")
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("version read: {error}"))?;
         if read_all(version).map_err(|error| error.to_string())? != b"typed restart bytes" {
             return Err("generated immutable FileVersion read returned different bytes".into());
         }

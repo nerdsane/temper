@@ -83,6 +83,7 @@ async fn governed_migration_materializes_shadow_and_atomically_cuts_over() {
                 expected_predecessor: None,
                 expected_fence: source_verified.fence,
                 verification_receipt_id: "source-verification".into(),
+                stream_descriptor_completion_receipt_id: None,
             },
         )
         .await
@@ -102,6 +103,7 @@ async fn governed_migration_materializes_shadow_and_atomically_cuts_over() {
                 expected_predecessor: None,
                 expected_fence: source_verified.fence,
                 verification_receipt_id: "source-verification".into(),
+                stream_descriptor_completion_receipt_id: None,
             },
         )
         .await

@@ -12,6 +12,12 @@ const VALID: &str = r#"<?xml version="1.0"?>
         <Annotation Term="Temper.Vocab.Stream.Mutability" String="Mutable"/>
         <Annotation Term="Temper.Vocab.Stream.VersionEntityType" String="Temper.FS.FileVersion"/>
         <Annotation Term="Temper.Vocab.Stream.VersionCollection" NavigationPropertyPath="Versions"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationPublicationAction" String="StreamUpdated"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationContentHashParameter" String="content_hash"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationByteLengthParameter" String="size_bytes"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationContentTypeParameter" String="mime_type"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationStorageContractVersion" Int="1"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationStorageKeyPrefix" String="temper-fs/"/>
       </EntityType>
       <EntityType Name="FileVersion">
         <Key><PropertyRef Name="Id"/></Key>
@@ -22,6 +28,13 @@ const VALID: &str = r#"<?xml version="1.0"?>
         </NavigationProperty>
         <Annotation Term="Temper.Vocab.Stream.Mutability" String="Immutable"/>
         <Annotation Term="Temper.Vocab.Stream.AuthorizationParent" NavigationPropertyPath="File"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationPublicationAction" String="Create"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationContentHashParameter" String="content_hash"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationByteLengthParameter" String="size_bytes"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationContentTypeParameter" String="mime_type"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationAuthorizationParentParameter" String="file_id"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationStorageContractVersion" Int="1"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationStorageKeyPrefix" String="temper-fs/"/>
       </EntityType>
     </Schema>
   </edmx:DataServices>
@@ -39,6 +52,18 @@ fn verifies_mutual_current_and_version_capabilities() {
     assert_eq!(
         capabilities[1].authorization_parent_type.as_deref(),
         Some("Temper.FS.File")
+    );
+    assert_eq!(
+        capabilities[1]
+            .migration_provenance
+            .as_ref()
+            .and_then(|provenance| provenance.authorization_parent_parameter.as_deref()),
+        Some("file_id")
+    );
+    assert_eq!(
+        stream_capability_set_digest_v1(&capabilities).unwrap(),
+        stream_capability_set_digest_v1(&capabilities.iter().rev().cloned().collect::<Vec<_>>())
+            .unwrap()
     );
 }
 
@@ -87,5 +112,31 @@ fn descriptor_contract_activation_is_distinct_and_closed() {
     assert!(matches!(
         verify_stream_capabilities_v1(&parse_csdl(&unsupported).unwrap()),
         Err(StreamCapabilityError::UnsupportedDescriptorContract { .. })
+    ));
+}
+
+#[test]
+fn activated_contract_requires_complete_migration_provenance() {
+    let without_provenance = VALID
+        .lines()
+        .filter(|line| !line.contains("Stream.Migration"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace(
+            "<Annotation Term=\"Temper.Vocab.Stream.Mutability\" String=\"Mutable\"/>",
+            "<Annotation Term=\"Temper.Vocab.Stream.Mutability\" String=\"Mutable\"/>\n        <Annotation Term=\"Temper.Vocab.Stream.DescriptorContractVersion\" Int=\"1\"/>",
+        );
+    assert!(matches!(
+        verify_stream_capabilities_v1(&parse_csdl(&without_provenance).unwrap()),
+        Err(StreamCapabilityError::MissingMigrationProvenance(_))
+    ));
+
+    let missing_parent = VALID.replace(
+        "        <Annotation Term=\"Temper.Vocab.Stream.MigrationAuthorizationParentParameter\" String=\"file_id\"/>\n",
+        "",
+    );
+    assert!(matches!(
+        verify_stream_capabilities_v1(&parse_csdl(&missing_parent).unwrap()),
+        Err(StreamCapabilityError::MigrationParentBinding { .. })
     ));
 }

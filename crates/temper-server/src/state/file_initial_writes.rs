@@ -166,11 +166,11 @@ impl ServerState {
         )?;
         push_synthetic_event(&mut state, &mut events, stream_event);
 
-        let kernel_metadata = if self.stream_descriptor_contract_activated(
-            tenant,
-            agent_ctx.schema_pin.as_ref(),
-            "File",
-        ) {
+        let kernel_metadata = if self
+            .stream_descriptor_contract_activated(tenant, agent_ctx.schema_pin.as_ref(), "File")
+            .await
+            .map_err(|error| FileStreamContentError::State(error.to_string()))?
+        {
             let descriptor = receipt
                 .into_descriptor(
                     temper_runtime::persistence::StreamEntityRef::new("File", file_id)

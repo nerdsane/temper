@@ -138,6 +138,11 @@ fn validate_bundle_contracts(
         }
     }
 
+    let stream_capabilities = crate::csdl::verify_stream_capabilities_v1(&csdl)
+        .map_err(|error| BundleError::new(BundleErrorCode::InvalidBundle, error.to_string()))?;
+    crate::csdl::verify_stream_migration_automata_v1(&stream_capabilities, &automata)
+        .map_err(|error| BundleError::new(BundleErrorCode::InvalidBundle, error))?;
+
     let mut findings = lint_automata_bundle(&automata);
     findings.extend(lint_csdl_reference_contracts(&csdl, &automata));
     findings.sort_by(|left, right| {

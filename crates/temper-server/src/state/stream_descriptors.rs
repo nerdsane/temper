@@ -9,6 +9,29 @@ use super::ServerState;
 
 const DESCRIPTOR_REPLAY_EVENT_BUDGET: usize = 1_024;
 
+fn active_stream_publication_binding(
+    config: &crate::registry::TenantConfig,
+    entity_type: &str,
+) -> Option<(String, String)> {
+    let capabilities = verify_stream_capabilities_v1(&config.csdl).ok()?;
+    let mut matches = capabilities
+        .iter()
+        .filter(|capability| capability.subject_type.rsplit('.').next() == Some(entity_type));
+    let capability = matches.next()?;
+    if matches.next().is_some() || !capability.descriptor_contract_v1_active {
+        return None;
+    }
+    let publication_action = capability
+        .migration_provenance
+        .as_ref()?
+        .publication_action
+        .clone();
+    let capability_digest =
+        temper_spec::csdl::stream_capability_set_digest_v1(std::slice::from_ref(capability))
+            .ok()?;
+    Some((publication_action, capability_digest))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum StreamDescriptorResolutionError {
     #[error("event journal is unavailable")]
@@ -45,33 +68,70 @@ pub(crate) struct ResolvedStreamContent {
 }
 
 impl ServerState {
-    pub(crate) fn stream_descriptor_contract_activated(
+    pub(crate) async fn stream_descriptor_contract_activated(
         &self,
         tenant: &TenantId,
         schema_pin: Option<&temper_runtime::persistence::schema_deployment::SchemaExecutionPin>,
         entity_type: &str,
-    ) -> bool {
-        let registry = self
-            .registry
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let config = match schema_pin {
-            Some(pin) => {
-                registry.get_scoped_config_at_digest(tenant, &pin.scope, &pin.bundle_digest)
-            }
-            None => registry.get_tenant(tenant),
+    ) -> Result<bool, StreamDescriptorResolutionError> {
+        let declared_binding = {
+            let registry = self
+                .registry
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let config = match schema_pin {
+                Some(pin) => {
+                    registry.get_scoped_config_at_digest(tenant, &pin.scope, &pin.bundle_digest)
+                }
+                None => registry.get_tenant(tenant),
+            };
+            config.and_then(|config| active_stream_publication_binding(config, entity_type))
         };
-        config.is_some_and(|config| {
-            verify_stream_capabilities_v1(&config.csdl).is_ok_and(|capabilities| {
-                let matches = capabilities
-                    .iter()
-                    .filter(|capability| {
-                        capability.subject_type.rsplit('.').next() == Some(entity_type)
-                    })
-                    .collect::<Vec<_>>();
-                matches.len() == 1 && matches[0].descriptor_contract_v1_active
-            })
-        })
+        if let Some(pin) = schema_pin {
+            if declared_binding.is_some() {
+                return Ok(true);
+            }
+            let Some(store) = self.schema_deployment_store() else {
+                return Err(StreamDescriptorResolutionError::JournalUnavailable);
+            };
+            let Some(pointer) = store
+                .active_schema_pointer(tenant.as_str(), &pin.scope)
+                .await
+                .map_err(|error| StreamDescriptorResolutionError::Storage(error.to_string()))?
+            else {
+                return Ok(false);
+            };
+            if pointer.predecessor_digest.as_deref() != Some(pin.bundle_digest.as_str())
+                || !pointer
+                    .stream_publication_bindings
+                    .contains_key(entity_type)
+            {
+                return Ok(false);
+            }
+            let registry = self
+                .registry
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            return Ok(registry
+                .get_scoped_config_at_digest(tenant, &pin.scope, &pointer.bundle_digest)
+                .and_then(|config| active_stream_publication_binding(config, entity_type))
+                .is_some());
+        }
+        let Some((publication_action, capability_digest)) = declared_binding else {
+            return Ok(false);
+        };
+        let Some((journal, _)) = self.event_journal() else {
+            return Err(StreamDescriptorResolutionError::JournalUnavailable);
+        };
+        journal
+            .unscoped_stream_publication_fence_active(
+                tenant.as_str(),
+                entity_type,
+                &publication_action,
+                &capability_digest,
+            )
+            .await
+            .map_err(|error| StreamDescriptorResolutionError::Storage(error.to_string()))
     }
 
     pub(crate) fn validate_stream_descriptor_capability(

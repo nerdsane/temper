@@ -23,4 +23,20 @@ pub(crate) fn router() -> Router<crate::state::ServerState> {
             "/migrations/{scope_id}/{job_id}",
             get(service::get_migration_http).post(service::retry_migration_http),
         )
+        .route(
+            "/stream-descriptor-migrations",
+            post(service::start_stream_descriptor_migration_http),
+        )
+        .route(
+            "/stream-descriptor-migrations/{job_id}",
+            get(service::get_stream_descriptor_migration_http),
+        )
+        .route(
+            "/stream-descriptor-migrations/{job_id}/advance",
+            post(service::advance_stream_descriptor_migration_http),
+        )
+        .route(
+            "/stream-descriptor-migrations/{job_id}/unresolved",
+            post(service::list_unresolved_stream_descriptors_http),
+        )
 }

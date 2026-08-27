@@ -68,6 +68,18 @@ impl ApplicationDataInvocation {
             SchemaDeploymentOperationV1::RetryMigration(_) => {
                 DataOperationKind::SchemaMigrationRetry
             }
+            SchemaDeploymentOperationV1::StartStreamDescriptorMigration(_) => {
+                DataOperationKind::StreamDescriptorMigrationStart
+            }
+            SchemaDeploymentOperationV1::AdvanceStreamDescriptorMigration(_) => {
+                DataOperationKind::StreamDescriptorMigrationAdvance
+            }
+            SchemaDeploymentOperationV1::GetStreamDescriptorMigration(_) => {
+                DataOperationKind::StreamDescriptorMigrationGet
+            }
+            SchemaDeploymentOperationV1::ListUnresolvedStreamDescriptors(_) => {
+                DataOperationKind::StreamDescriptorMigrationListUnresolved
+            }
         };
         if !self.authority.binding.grant.operations.contains(&kind) {
             return Err(schema_error(
@@ -192,6 +204,72 @@ impl ApplicationDataInvocation {
                     .await
                 {
                     Ok(receipt) => SchemaDeploymentResponseV1::Migration { receipt },
+                    Err(error) => SchemaDeploymentResponseV1::Error {
+                        error: error.into_contract(),
+                    },
+                };
+            }
+            SchemaDeploymentOperationV1::StartStreamDescriptorMigration(request) => {
+                return match service
+                    .start_stream_descriptor_migration(
+                        self.authority.tenant.as_str(),
+                        &self.authority.security,
+                        request,
+                    )
+                    .await
+                {
+                    Ok(receipt) => {
+                        SchemaDeploymentResponseV1::StreamDescriptorMigration { receipt }
+                    }
+                    Err(error) => SchemaDeploymentResponseV1::Error {
+                        error: error.into_contract(),
+                    },
+                };
+            }
+            SchemaDeploymentOperationV1::AdvanceStreamDescriptorMigration(request) => {
+                return match service
+                    .advance_stream_descriptor_migration(
+                        self.authority.tenant.as_str(),
+                        &self.authority.security,
+                        request,
+                    )
+                    .await
+                {
+                    Ok(receipt) => {
+                        SchemaDeploymentResponseV1::StreamDescriptorMigration { receipt }
+                    }
+                    Err(error) => SchemaDeploymentResponseV1::Error {
+                        error: error.into_contract(),
+                    },
+                };
+            }
+            SchemaDeploymentOperationV1::GetStreamDescriptorMigration(request) => {
+                return match service
+                    .get_stream_descriptor_migration(
+                        self.authority.tenant.as_str(),
+                        &self.authority.security,
+                        request,
+                    )
+                    .await
+                {
+                    Ok(receipt) => {
+                        SchemaDeploymentResponseV1::StreamDescriptorMigration { receipt }
+                    }
+                    Err(error) => SchemaDeploymentResponseV1::Error {
+                        error: error.into_contract(),
+                    },
+                };
+            }
+            SchemaDeploymentOperationV1::ListUnresolvedStreamDescriptors(request) => {
+                return match service
+                    .list_unresolved_stream_descriptors(
+                        self.authority.tenant.as_str(),
+                        &self.authority.security,
+                        request,
+                    )
+                    .await
+                {
+                    Ok(page) => SchemaDeploymentResponseV1::UnresolvedStreamDescriptors { page },
                     Err(error) => SchemaDeploymentResponseV1::Error {
                         error: error.into_contract(),
                     },

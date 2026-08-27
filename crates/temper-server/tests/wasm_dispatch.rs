@@ -245,6 +245,7 @@ async fn persist_active_scoped_echo_bundle(
             expected_predecessor: None,
             expected_fence: verified.fence,
             verification_receipt_id: "scoped-echo-verification".to_string(),
+            stream_publication_fence: None,
             operation: SchemaOperationIdentity {
                 idempotency_key: "scoped-echo-activate".to_string(),
                 request_digest: format!("sha256:{}", "4".repeat(64)),

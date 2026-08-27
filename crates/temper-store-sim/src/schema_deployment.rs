@@ -9,6 +9,8 @@ mod pointer_methods;
 mod migration_batch_methods;
 #[macro_use]
 mod migration_cutover_methods;
+#[macro_use]
+mod retire_methods;
 
 use helpers::*;
 
@@ -22,15 +24,21 @@ use temper_runtime::persistence::schema_deployment::{
     SchemaDeploymentStore, SchemaDeploymentStoreError, SchemaMigrationBatchReceipt,
     SchemaMigrationJob, SchemaMigrationRetryReservation, SchemaMigrationShadowRow,
     SchemaMigrationStatus, SchemaMigrationValidationReceipt, SchemaOperationIdentity, SchemaScope,
-    SchemaVerificationReceipt, SchemaVerificationReplay, SubmitSchemaBundle,
-    SubmitSchemaBundleOutcome,
+    SchemaVerificationReceipt, SchemaVerificationReplay, StreamPublicationFence,
+    SubmitSchemaBundle, SubmitSchemaBundleOutcome,
 };
+use temper_runtime::persistence::schema_deployment::{
+    SchemaExecutionPin, scoped_journal_pin_suffix,
+};
+use temper_runtime::tenant::parse_persistence_id_parts;
 
 use crate::{SimEventStore, SimEventStoreInner};
 
 /// Deterministic pre-commit failure points for schema lifecycle transactions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SimSchemaFaultPoint {
+    /// Fail while reading the active scope pointer.
+    ActivePointerRead,
     /// Fail before an immutable bundle and its idempotency record commit.
     SubmitBundle,
     /// Fail before a verification lease and fence commit.
@@ -121,6 +129,20 @@ impl SimSchemaDeploymentState {
                     SchemaMigrationStatus::CutOver | SchemaMigrationStatus::Completed
                 )
         })
+    }
+
+    pub(super) fn scoped_stream_publication_action<'a>(
+        &'a self,
+        tenant: &str,
+        scope: &SchemaScope,
+        digest: &str,
+        entity_type: &str,
+    ) -> Option<&'a str> {
+        self.active
+            .get(&(tenant.to_string(), scope.clone()))
+            .filter(|pointer| pointer.stream_fenced_source_bundle_digest.as_deref() == Some(digest))
+            .and_then(|pointer| pointer.stream_publication_bindings.get(entity_type))
+            .map(String::as_str)
     }
 }
 

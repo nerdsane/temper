@@ -25,6 +25,8 @@ mod app_catalog;
 mod closure_bootstrap;
 mod data_binding;
 mod entity_aliases;
+#[cfg(test)]
+mod installed_stream_reconcile_test;
 mod policy_rows;
 mod reconcile;
 mod reconcile_digest;

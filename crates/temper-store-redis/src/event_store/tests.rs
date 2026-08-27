@@ -117,6 +117,8 @@ async fn kernel_stream_metadata_roundtrips_with_historical_events() {
 
 #[path = "tests/scoped_schema_pin_test.rs"]
 mod scoped_schema_pin;
+#[path = "tests/stream_publication.rs"]
+mod stream_publication;
 
 #[tokio::test]
 async fn append_with_wrong_sequence_fails() {

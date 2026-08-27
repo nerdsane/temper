@@ -116,11 +116,10 @@ impl ServerState {
         agent_ctx: &crate::request_context::AgentContext,
         expected_authorization_precondition: Option<String>,
     ) -> Result<crate::entity_actor::EntityResponse, FileStreamContentError> {
-        let descriptor_required = self.stream_descriptor_contract_activated(
-            tenant,
-            agent_ctx.schema_pin.as_ref(),
-            "File",
-        );
+        let descriptor_required = self
+            .stream_descriptor_contract_activated(tenant, agent_ctx.schema_pin.as_ref(), "File")
+            .await
+            .map_err(|error| FileStreamContentError::State(error.to_string()))?;
         let blob_endpoint = self
             .secrets_vault
             .as_ref()
@@ -220,11 +219,11 @@ impl ServerState {
             })?;
         let content_hash = receipt.content_hash().to_string();
         let byte_length = receipt.byte_length();
-        let kernel_metadata = if self.stream_descriptor_contract_activated(
-            tenant,
-            agent_ctx.schema_pin.as_ref(),
-            "File",
-        ) {
+        let kernel_metadata = if self
+            .stream_descriptor_contract_activated(tenant, agent_ctx.schema_pin.as_ref(), "File")
+            .await
+            .map_err(|error| FileStreamContentError::State(error.to_string()))?
+        {
             let event_sequence = file_state.state.sequence_nr.checked_add(1).ok_or_else(|| {
                 FileStreamContentError::State("File event sequence exhausted".into())
             })?;

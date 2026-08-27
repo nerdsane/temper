@@ -16,7 +16,7 @@ use fred::prelude::*;
 use fred::types::scripts::Script;
 use serde::{Deserialize, Serialize};
 use temper_runtime::persistence::schema_deployment::{
-    SchemaScope, scoped_journal_pin_prefix, split_scoped_journal_entity_id,
+    SchemaScope, StreamPublicationFence, scoped_journal_pin_prefix, split_scoped_journal_entity_id,
 };
 use temper_runtime::persistence::{
     EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
@@ -26,14 +26,22 @@ use temper_runtime::tenant::parse_persistence_id_parts;
 
 use crate::keys::{decode_lex_component, encode_lex_component};
 
+#[macro_use]
+#[path = "event_store/event_store_core.rs"]
+mod event_store_core;
+#[macro_use]
+#[path = "event_store/event_store_schema.rs"]
+mod event_store_schema;
+
 /// Lua script for atomic append: check expected sequence, append events, and index the journal.
 ///
 /// KEYS[1] = seq_key, KEYS[2] = events_key, KEYS[3] = entities_key,
-/// KEYS[4] = journals_key
+/// KEYS[4] = journals_key, KEYS[5] = unscoped index, KEYS[6] = generation,
+/// KEYS[7] = publication fence
 /// ARGV[1] = expected_seq (string-encoded integer)
 /// ARGV[2] = entity_ref_json (for SADD into entities set)
 /// ARGV[3] = journal_member (order-preserving encoded type and id)
-/// ARGV[4..N] = serialized event JSONs
+/// ARGV[4] = unscoped member or empty, ARGV[5..N] = serialized event JSONs
 ///
 /// Returns: `{1, new_seq}` on success, `{0, current_seq}` on conflict.
 const APPEND_LUA: &str = r#"
@@ -41,25 +49,82 @@ local seq_key = KEYS[1]
 local events_key = KEYS[2]
 local entities_key = KEYS[3]
 local journals_key = KEYS[4]
+local unscoped_index_key = KEYS[5]
+local generation_key = KEYS[6]
+local fence_key = KEYS[7]
 local expected = tonumber(ARGV[1])
 local entity_ref = ARGV[2]
 local journal_member = ARGV[3]
+local unscoped_member = ARGV[4]
 
 local current = tonumber(redis.call('GET', seq_key) or '0')
 if current ~= expected then
     return {0, current}
 end
 
-for i = 4, #ARGV do
+if unscoped_member ~= '' then
+    local fence_json = redis.call('GET', fence_key)
+    if fence_json then
+        local fence = cjson.decode(fence_json)
+        for i = 5, #ARGV do
+            local event = cjson.decode(ARGV[i])
+            if event.event_type == fence.publication_action
+                and (not event.metadata.kernel or event.metadata.kernel == cjson.null) then
+                return {-1, current}
+            end
+        end
+    end
+end
+
+for i = 5, #ARGV do
     redis.call('RPUSH', events_key, ARGV[i])
 end
 
-local new_seq = expected + (#ARGV - 3)
+local event_count = #ARGV - 4
+local new_seq = expected + event_count
 redis.call('SET', seq_key, tostring(new_seq))
 redis.call('SADD', entities_key, entity_ref)
 redis.call('ZADD', journals_key, 0, journal_member)
+if unscoped_member ~= '' then
+    redis.call('ZADD', unscoped_index_key, 0, unscoped_member)
+    redis.call('INCRBY', generation_key, event_count)
+end
 
 return {1, new_seq}
+"#;
+
+/// Atomically validate generations and replace an installed application's fences.
+const ACTIVATE_UNSCOPED_FENCE_LUA: &str = r#"
+local current_pointer = redis.call('GET', KEYS[1]) or ''
+if current_pointer ~= ARGV[1] then
+    return {-2}
+end
+local binding_count = tonumber(ARGV[2])
+for i = 1, binding_count do
+    local expected = tonumber(ARGV[2 + (i - 1) * 2 + 1])
+    if expected >= 0 then
+        local actual = tonumber(redis.call('GET', KEYS[2 + (i - 1) * 2]) or '0')
+        if actual ~= expected then
+            return {0, i, actual}
+        end
+    end
+end
+for i = 1, binding_count do
+    local fence_json = ARGV[2 + (i - 1) * 2 + 2]
+    local fence_key = KEYS[3 + (i - 1) * 2]
+    if fence_json == '' then
+        redis.call('DEL', fence_key)
+    else
+        redis.call('SET', fence_key, fence_json)
+    end
+end
+local new_pointer = ARGV[3 + binding_count * 2]
+if new_pointer == '' then
+    redis.call('DEL', KEYS[1])
+else
+    redis.call('SET', KEYS[1], new_pointer)
+end
+return {1}
 "#;
 
 /// Lua script for one atomic, same-tenant multi-journal append.
@@ -75,17 +140,31 @@ local key_index = 1
 
 for append_index = 1, append_count do
     local expected = tonumber(ARGV[arg_index])
-    local event_count = tonumber(ARGV[arg_index + 3])
+    local unscoped_member = ARGV[arg_index + 3]
+    local event_count = tonumber(ARGV[arg_index + 4])
     local current = tonumber(redis.call('GET', KEYS[key_index]) or '0')
     if current ~= expected then
         return {0, append_index, current}
     end
-    arg_index = arg_index + 4 + event_count
-    key_index = key_index + 2
+    if unscoped_member ~= '' then
+        local fence_json = redis.call('GET', KEYS[key_index + 4])
+        if fence_json then
+            local fence = cjson.decode(fence_json)
+            for event_offset = 1, event_count do
+                local event = cjson.decode(ARGV[arg_index + 4 + event_offset])
+                if event.event_type == fence.publication_action
+                    and (not event.metadata.kernel or event.metadata.kernel == cjson.null) then
+                    return {-1, append_index, current}
+                end
+            end
+        end
+    end
+    arg_index = arg_index + 5 + event_count
+    key_index = key_index + 5
 end
 
-local entities_key = KEYS[append_count * 2 + 1]
-local journals_key = KEYS[append_count * 2 + 2]
+local entities_key = KEYS[append_count * 5 + 1]
+local journals_key = KEYS[append_count * 5 + 2]
 local result = {1}
 arg_index = 2
 key_index = 1
@@ -94,20 +173,41 @@ for append_index = 1, append_count do
     local expected = tonumber(ARGV[arg_index])
     local entity_ref = ARGV[arg_index + 1]
     local journal_member = ARGV[arg_index + 2]
-    local event_count = tonumber(ARGV[arg_index + 3])
+    local unscoped_member = ARGV[arg_index + 3]
+    local event_count = tonumber(ARGV[arg_index + 4])
     for event_offset = 1, event_count do
-        redis.call('RPUSH', KEYS[key_index + 1], ARGV[arg_index + 3 + event_offset])
+        redis.call('RPUSH', KEYS[key_index + 1], ARGV[arg_index + 4 + event_offset])
     end
     local new_seq = expected + event_count
     redis.call('SET', KEYS[key_index], tostring(new_seq))
     redis.call('SADD', entities_key, entity_ref)
     redis.call('ZADD', journals_key, 0, journal_member)
+    if unscoped_member ~= '' then
+        redis.call('ZADD', KEYS[key_index + 2], 0, unscoped_member)
+        redis.call('INCRBY', KEYS[key_index + 3], event_count)
+    end
     table.insert(result, new_seq)
-    arg_index = arg_index + 4 + event_count
-    key_index = key_index + 2
+    arg_index = arg_index + 5 + event_count
+    key_index = key_index + 5
 end
 
 return result
+"#;
+
+/// Atomically advances the bounded historical-journal index backfill.
+const BACKFILL_UNSCOPED_INDEX_LUA: &str = r#"
+local current = redis.call('GET', KEYS[1]) or ''
+if current ~= ARGV[1] then
+    return {0}
+end
+for i = 4, #ARGV do
+    redis.call('ZADD', KEYS[2], 0, ARGV[i])
+end
+redis.call('SET', KEYS[1], ARGV[2])
+if ARGV[3] == '1' then
+    redis.call('SET', KEYS[3], '1')
+end
+return {1}
 "#;
 
 /// Redis-backed event store.
@@ -116,6 +216,8 @@ pub struct RedisEventStore {
     client: Arc<fred::clients::Client>,
     append_script: Script,
     append_batch_script: Script,
+    activate_unscoped_fence_script: Script,
+    backfill_unscoped_index_script: Script,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -160,6 +262,8 @@ impl RedisEventStore {
             client: Arc::new(client),
             append_script: Script::from_lua(APPEND_LUA),
             append_batch_script: Script::from_lua(APPEND_BATCH_LUA),
+            activate_unscoped_fence_script: Script::from_lua(ACTIVATE_UNSCOPED_FENCE_LUA),
+            backfill_unscoped_index_script: Script::from_lua(BACKFILL_UNSCOPED_INDEX_LUA),
         })
     }
 
@@ -221,6 +325,54 @@ impl RedisEventStore {
 
     fn tenant_journals_key(tenant: &str) -> String {
         format!("{}:journals:{tenant}", crate::keys::PREFIX)
+    }
+
+    fn unscoped_journals_key(tenant: &str, entity_type: &str) -> String {
+        format!(
+            "{}:unscoped_journals:{tenant}:{}",
+            crate::keys::PREFIX,
+            encode_lex_component(entity_type)
+        )
+    }
+
+    fn unscoped_index_cursor_key(tenant: &str, entity_type: &str) -> String {
+        format!(
+            "{}:unscoped_journals_cursor:{tenant}:{}",
+            crate::keys::PREFIX,
+            encode_lex_component(entity_type)
+        )
+    }
+
+    fn unscoped_index_complete_key(tenant: &str, entity_type: &str) -> String {
+        format!(
+            "{}:unscoped_journals_complete:{tenant}:{}",
+            crate::keys::PREFIX,
+            encode_lex_component(entity_type)
+        )
+    }
+
+    fn unscoped_generation_key(tenant: &str, entity_type: &str) -> String {
+        format!(
+            "{}:unscoped_generation:{tenant}:{}",
+            crate::keys::PREFIX,
+            encode_lex_component(entity_type)
+        )
+    }
+
+    fn unscoped_fence_key(tenant: &str, entity_type: &str) -> String {
+        format!(
+            "{}:unscoped_fence:{tenant}:{}",
+            crate::keys::PREFIX,
+            encode_lex_component(entity_type)
+        )
+    }
+
+    fn unscoped_application_fence_key(tenant: &str, application_id: &str) -> String {
+        format!(
+            "{}:unscoped_application_fence:{tenant}:{}",
+            crate::keys::PREFIX,
+            encode_lex_component(application_id)
+        )
     }
 
     fn journal_member(entity_type: &str, entity_id: &str) -> String {
@@ -346,548 +498,8 @@ impl RedisEventStore {
 }
 
 impl EventStore for RedisEventStore {
-    async fn append(
-        &self,
-        persistence_id: &str,
-        expected_sequence: u64,
-        events: &[PersistenceEnvelope],
-    ) -> Result<u64, PersistenceError> {
-        let (tenant, entity_type, entity_id) =
-            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
-        let seq_key = Self::seq_key(tenant, entity_type, entity_id);
-        let events_key = Self::events_key(tenant, entity_type, entity_id);
-        let entities_key = Self::tenant_entities_key(tenant);
-        let journals_key = Self::tenant_journals_key(tenant);
-
-        // Pre-serialize events with provisional sequence numbers.
-        let mut args: Vec<String> = Vec::with_capacity(events.len() + 3);
-        args.push(expected_sequence.to_string());
-
-        let entity_ref = EntityRef {
-            entity_type: entity_type.to_string(),
-            entity_id: entity_id.to_string(),
-        };
-        let entity_ref_json = serde_json::to_string(&entity_ref)
-            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-        args.push(entity_ref_json);
-        args.push(Self::journal_member(entity_type, entity_id));
-
-        let mut seq = expected_sequence;
-        for event in events {
-            seq += 1;
-            let mut env = event.clone();
-            env.sequence_nr = seq;
-            let encoded = serde_json::to_string(&env)
-                .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-            args.push(encoded);
-        }
-
-        let keys = vec![seq_key, events_key, entities_key, journals_key];
-        let result: Vec<i64> = self
-            .append_script
-            .evalsha_with_reload(&self.client, keys, args)
-            .await
-            .map_err(storage_error)?;
-
-        match result.as_slice() {
-            [1, new_seq] => {
-                let new_seq = *new_seq as u64;
-                self.update_segment_after_append(
-                    tenant,
-                    entity_type,
-                    entity_id,
-                    expected_sequence,
-                    new_seq,
-                )
-                .await?;
-                Ok(new_seq)
-            }
-            [0, actual] => Err(PersistenceError::ConcurrencyViolation {
-                expected: expected_sequence,
-                actual: *actual as u64,
-            }),
-            other => Err(PersistenceError::Storage(format!(
-                "unexpected Lua script result: {other:?}"
-            ))),
-        }
-    }
-
-    async fn append_batch(
-        &self,
-        appends: &[PersistenceAppend],
-    ) -> Result<Vec<PersistenceAppendResult>, PersistenceError> {
-        if appends.is_empty() {
-            return Ok(Vec::new());
-        }
-        // Redis has no query-plane projections; match `append_with_index_rows`
-        // by accepting and intentionally ignoring derived projection rows.
-        if let [append] = appends {
-            let sequence_nr = self
-                .append(
-                    &append.persistence_id,
-                    append.expected_sequence,
-                    &append.events,
-                )
-                .await?;
-            return Ok(vec![PersistenceAppendResult {
-                persistence_id: append.persistence_id.clone(),
-                sequence_nr,
-            }]);
-        }
-
-        let mut seen = std::collections::BTreeSet::new();
-        let mut parsed = Vec::with_capacity(appends.len());
-        let mut tenant_name: Option<&str> = None;
-        for append in appends {
-            if !seen.insert(append.persistence_id.as_str()) {
-                return Err(PersistenceError::Storage(format!(
-                    "duplicate persistence_id '{}' in append_batch",
-                    append.persistence_id
-                )));
-            }
-            let (tenant, entity_type, entity_id) =
-                parse_persistence_id_parts(&append.persistence_id)
-                    .map_err(PersistenceError::Storage)?;
-            if tenant_name.is_some_and(|expected| expected != tenant) {
-                return Err(PersistenceError::Storage(
-                    "append_batch cannot span Redis tenant indexes".to_string(),
-                ));
-            }
-            tenant_name = Some(tenant);
-            parsed.push((tenant, entity_type, entity_id));
-        }
-        let tenant = tenant_name.expect("non-empty appends set tenant");
-        let mut keys = Vec::with_capacity(appends.len() * 2 + 2);
-        let mut args = Vec::new();
-        args.push(appends.len().to_string());
-        for (append, (_, entity_type, entity_id)) in appends.iter().zip(parsed.iter()) {
-            keys.push(Self::seq_key(tenant, entity_type, entity_id));
-            keys.push(Self::events_key(tenant, entity_type, entity_id));
-            args.push(append.expected_sequence.to_string());
-            let entity_ref = EntityRef {
-                entity_type: (*entity_type).to_string(),
-                entity_id: (*entity_id).to_string(),
-            };
-            args.push(
-                serde_json::to_string(&entity_ref)
-                    .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
-            );
-            args.push(Self::journal_member(entity_type, entity_id));
-            args.push(append.events.len().to_string());
-            let mut sequence = append.expected_sequence;
-            for event in &append.events {
-                sequence += 1;
-                let mut stored = event.clone();
-                stored.sequence_nr = sequence;
-                args.push(
-                    serde_json::to_string(&stored)
-                        .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
-                );
-            }
-        }
-        keys.push(Self::tenant_entities_key(tenant));
-        keys.push(Self::tenant_journals_key(tenant));
-        let result: Vec<i64> = self
-            .append_batch_script
-            .evalsha_with_reload(&self.client, keys, args)
-            .await
-            .map_err(storage_error)?;
-        if result.first() == Some(&0) {
-            let [_, append_index, actual] = result.as_slice() else {
-                return Err(PersistenceError::Storage(format!(
-                    "unexpected Redis append_batch conflict result: {result:?}"
-                )));
-            };
-            let index = usize::try_from(*append_index)
-                .ok()
-                .and_then(|index| index.checked_sub(1))
-                .filter(|index| *index < appends.len())
-                .ok_or_else(|| {
-                    PersistenceError::Storage(
-                        "Redis append_batch returned an invalid conflict index".to_string(),
-                    )
-                })?;
-            return Err(PersistenceError::ConcurrencyViolation {
-                expected: appends[index].expected_sequence,
-                actual: *actual as u64,
-            });
-        }
-        if result.len() != appends.len() + 1 || result.first() != Some(&1) {
-            return Err(PersistenceError::Storage(format!(
-                "unexpected Redis append_batch result: {result:?}"
-            )));
-        }
-
-        let mut results = Vec::with_capacity(appends.len());
-        for (((append, (tenant, entity_type, entity_id)), new_sequence), result_index) in appends
-            .iter()
-            .zip(parsed.iter())
-            .zip(result.iter().skip(1))
-            .zip(0..appends.len())
-        {
-            let new_sequence = u64::try_from(*new_sequence).map_err(|_| {
-                PersistenceError::Storage(format!(
-                    "Redis append_batch returned a negative sequence at index {result_index}"
-                ))
-            })?;
-            self.update_segment_after_append(
-                tenant,
-                entity_type,
-                entity_id,
-                append.expected_sequence,
-                new_sequence,
-            )
-            .await?;
-            results.push(PersistenceAppendResult {
-                persistence_id: append.persistence_id.clone(),
-                sequence_nr: new_sequence,
-            });
-        }
-        Ok(results)
-    }
-
-    async fn read_events(
-        &self,
-        persistence_id: &str,
-        from_sequence: u64,
-    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
-        let (tenant, entity_type, entity_id) =
-            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
-        let events_key = Self::events_key(tenant, entity_type, entity_id);
-
-        // Events are stored via RPUSH with sequential indices starting at 0.
-        // Event at index i has sequence_nr = i + 1.
-        // To read events with sequence_nr > from_sequence, start at index from_sequence.
-        let start_index = from_sequence as i64;
-        let encoded_events: Vec<String> = self
-            .client
-            .lrange(&events_key, start_index, -1)
-            .await
-            .map_err(storage_error)?;
-
-        let mut out = Vec::with_capacity(encoded_events.len());
-        for encoded in encoded_events {
-            let env: PersistenceEnvelope = serde_json::from_str(&encoded)
-                .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-            out.push(env);
-        }
-        out.sort_by_key(|e| e.sequence_nr);
-        Ok(out)
-    }
-
-    async fn read_events_limited(
-        &self,
-        persistence_id: &str,
-        from_sequence: u64,
-        limit: usize,
-    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let (tenant, entity_type, entity_id) =
-            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
-        let events_key = Self::events_key(tenant, entity_type, entity_id);
-        let end = from_sequence
-            .saturating_add(limit as u64)
-            .saturating_sub(1)
-            .min(i64::MAX as u64) as i64;
-        let encoded_events: Vec<String> = self
-            .client
-            .lrange(&events_key, from_sequence.min(i64::MAX as u64) as i64, end)
-            .await
-            .map_err(storage_error)?;
-        encoded_events
-            .into_iter()
-            .map(|encoded| {
-                serde_json::from_str(&encoded)
-                    .map_err(|error| PersistenceError::Serialization(error.to_string()))
-            })
-            .collect()
-    }
-
-    async fn read_latest_events(
-        &self,
-        persistence_id: &str,
-        limit: usize,
-    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let (tenant, entity_type, entity_id) =
-            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
-        let events_key = Self::events_key(tenant, entity_type, entity_id);
-        let start = -(limit.min(i64::MAX as usize) as i64);
-        let encoded_events: Vec<String> = self
-            .client
-            .lrange(&events_key, start, -1)
-            .await
-            .map_err(storage_error)?;
-        encoded_events
-            .into_iter()
-            .map(|encoded| {
-                serde_json::from_str(&encoded)
-                    .map_err(|error| PersistenceError::Serialization(error.to_string()))
-            })
-            .collect()
-    }
-
-    async fn save_snapshot(
-        &self,
-        persistence_id: &str,
-        sequence_nr: u64,
-        snapshot: &[u8],
-    ) -> Result<(), PersistenceError> {
-        let (tenant, entity_type, entity_id) =
-            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
-        let key = Self::snapshot_key(tenant, entity_type, entity_id);
-        let record = SnapshotRecord {
-            sequence_nr,
-            snapshot: snapshot.to_vec(),
-        };
-        let encoded = serde_json::to_string(&record)
-            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-        let _: () = self
-            .client
-            .set(&key, encoded, None, None, false)
-            .await
-            .map_err(storage_error)?;
-
-        let history_key = Self::snapshot_history_key(tenant, entity_type, entity_id, sequence_nr);
-        let history = SnapshotHistoryRecord {
-            sequence_nr,
-            snapshot: snapshot.to_vec(),
-            created_at: chrono::Utc::now(),
-        };
-        let encoded_history = serde_json::to_string(&history)
-            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-        let _: () = self
-            .client
-            .set(&history_key, encoded_history, None, None, false)
-            .await
-            .map_err(storage_error)?;
-
-        let current_segment_key = Self::current_segment_key(tenant, entity_type, entity_id);
-        let current_segment_raw: Option<String> = self
-            .client
-            .get(&current_segment_key)
-            .await
-            .map_err(storage_error)?;
-        let current_segment = current_segment_raw
-            .and_then(|raw| raw.parse::<u64>().ok())
-            .unwrap_or(0);
-        let segment_key = Self::segment_key(tenant, entity_type, entity_id, current_segment);
-        let existing: Option<String> =
-            self.client.get(&segment_key).await.map_err(storage_error)?;
-        let mut segment = existing
-            .as_deref()
-            .map(serde_json::from_str::<SegmentRecord>)
-            .transpose()
-            .map_err(|e| PersistenceError::Serialization(e.to_string()))?
-            .unwrap_or_else(|| SegmentRecord {
-                segment_index: current_segment,
-                start_sequence_nr: 1,
-                end_sequence_nr: Some(sequence_nr),
-                snapshot_sequence: Some(sequence_nr),
-                event_count: sequence_nr,
-                sealed_at: None,
-                created_at: chrono::Utc::now(),
-            });
-        segment.end_sequence_nr = Some(sequence_nr);
-        segment.snapshot_sequence = Some(sequence_nr);
-        segment.event_count = sequence_nr.saturating_sub(segment.start_sequence_nr) + 1;
-        segment.sealed_at = Some(chrono::Utc::now());
-        let encoded_segment = serde_json::to_string(&segment)
-            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-        let _: () = self
-            .client
-            .set(&segment_key, encoded_segment, None, None, false)
-            .await
-            .map_err(storage_error)?;
-
-        let next_segment = current_segment + 1;
-        let next_segment_key = Self::segment_key(tenant, entity_type, entity_id, next_segment);
-        let next = SegmentRecord {
-            segment_index: next_segment,
-            start_sequence_nr: sequence_nr + 1,
-            end_sequence_nr: None,
-            snapshot_sequence: None,
-            event_count: 0,
-            sealed_at: None,
-            created_at: chrono::Utc::now(),
-        };
-        let encoded_next = serde_json::to_string(&next)
-            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-        let _: () = self
-            .client
-            .set(&next_segment_key, encoded_next, None, None, false)
-            .await
-            .map_err(storage_error)?;
-        let _: () = self
-            .client
-            .set(
-                &current_segment_key,
-                next_segment.to_string(),
-                None,
-                None,
-                false,
-            )
-            .await
-            .map_err(storage_error)?;
-        Ok(())
-    }
-
-    async fn load_snapshot(
-        &self,
-        persistence_id: &str,
-    ) -> Result<Option<(u64, Vec<u8>)>, PersistenceError> {
-        let (tenant, entity_type, entity_id) =
-            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
-        let key = Self::snapshot_key(tenant, entity_type, entity_id);
-        let encoded: Option<String> = self.client.get(&key).await.map_err(storage_error)?;
-        let Some(encoded) = encoded else {
-            return Ok(None);
-        };
-        let record: SnapshotRecord = serde_json::from_str(&encoded)
-            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-        Ok(Some((record.sequence_nr, record.snapshot)))
-    }
-
-    async fn list_entity_ids(
-        &self,
-        tenant: &str,
-    ) -> Result<Vec<(String, String)>, PersistenceError> {
-        let key = Self::tenant_entities_key(tenant);
-        let members: Vec<String> = self.client.smembers(&key).await.map_err(storage_error)?;
-
-        let mut out = Vec::with_capacity(members.len());
-        for encoded in members {
-            let entity_ref: EntityRef = serde_json::from_str(&encoded)
-                .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-            out.push((entity_ref.entity_type, entity_ref.entity_id));
-        }
-
-        out.sort();
-        out.dedup();
-        Ok(out)
-    }
-
-    async fn list_entity_ids_by_type(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-    ) -> Result<Vec<String>, PersistenceError> {
-        let key = Self::tenant_entities_key(tenant);
-        let members: Vec<String> = self.client.smembers(&key).await.map_err(storage_error)?;
-
-        let mut out = Vec::new();
-        for encoded in members {
-            let entity_ref: EntityRef = serde_json::from_str(&encoded)
-                .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-            if entity_ref.entity_type == entity_type {
-                out.push(entity_ref.entity_id);
-            }
-        }
-
-        out.sort();
-        out.dedup();
-        Ok(out)
-    }
-
-    async fn list_journal_ids_page(
-        &self,
-        tenant: &str,
-        entity_type: Option<&str>,
-        after: Option<(&str, &str)>,
-        limit: usize,
-    ) -> Result<Vec<(String, String)>, PersistenceError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let key = Self::tenant_journals_key(tenant);
-        let (min, max) = match entity_type {
-            Some(wanted) => {
-                if after.is_some_and(|(after_type, _)| after_type > wanted) {
-                    return Ok(Vec::new());
-                }
-                let prefix = format!("{}!", encode_lex_component(wanted));
-                let min = match after {
-                    Some((after_type, after_id)) if after_type == wanted => {
-                        format!("({}", Self::journal_member(after_type, after_id))
-                    }
-                    _ => format!("[{prefix}"),
-                };
-                (min, format!("[{prefix}~"))
-            }
-            None => (
-                after.map_or_else(
-                    || "-".to_string(),
-                    |(after_type, after_id)| {
-                        format!("({}", Self::journal_member(after_type, after_id))
-                    },
-                ),
-                "+".to_string(),
-            ),
-        };
-        let count = limit.min(i64::MAX as usize) as i64;
-        let members: Vec<String> = self
-            .client
-            .zrangebylex(&key, min, max, Some((0, count)))
-            .await
-            .map_err(storage_error)?;
-        members
-            .into_iter()
-            .map(|member| Self::parse_journal_member(&member))
-            .collect()
-    }
-
-    async fn scoped_entity_bundle_digests(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        entity_id: &str,
-        scope: &SchemaScope,
-        limit: usize,
-    ) -> Result<Vec<String>, PersistenceError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let key = Self::tenant_journals_key(tenant);
-        let type_prefix = encode_lex_component(entity_type);
-        let entity_prefix = encode_lex_component(&scoped_journal_pin_prefix(entity_id, scope));
-        let member_prefix = format!("{type_prefix}!{entity_prefix}");
-        const PIN_SCAN_BUDGET: usize = 256;
-        let count = PIN_SCAN_BUDGET.min(i64::MAX as usize) as i64;
-        let members: Vec<String> = self
-            .client
-            .zrangebylex(
-                &key,
-                format!("[{member_prefix}"),
-                format!("[{member_prefix}~"),
-                Some((0, count)),
-            )
-            .await
-            .map_err(storage_error)?;
-        let scan_budget_exhausted = members.len() == PIN_SCAN_BUDGET;
-        let mut digests = Vec::new();
-        for member in members {
-            let (_, scoped_id) = Self::parse_journal_member(&member)?;
-            if let Some((found_entity_id, pin)) = split_scoped_journal_entity_id(&scoped_id)
-                && found_entity_id == entity_id
-                && &pin.scope == scope
-            {
-                digests.push(pin.bundle_digest);
-                if digests.len() == limit {
-                    break;
-                }
-            }
-        }
-        if scan_budget_exhausted && digests.len() < limit {
-            return Err(PersistenceError::Storage(
-                "scoped entity pin scan budget exhausted".to_string(),
-            ));
-        }
-        Ok(digests)
-    }
+    redis_event_store_core_methods!();
+    redis_event_store_schema_methods!();
 }
 
 #[cfg(test)]

@@ -52,6 +52,12 @@ const FILE_CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
         <Property Name="size_bytes" Type="Edm.Int64"/>
         <Annotation Term="Temper.Vocab.Stream.Mutability" String="Mutable"/>
         <Annotation Term="Temper.Vocab.Stream.DescriptorContractVersion" Int="1"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationPublicationAction" String="StreamUpdated"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationContentHashParameter" String="content_hash"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationByteLengthParameter" String="size_bytes"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationContentTypeParameter" String="mime_type"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationStorageContractVersion" Int="1"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationStorageKeyPrefix" String="temper-fs/"/>
       </EntityType>
       <EntityContainer Name="Container">
         <EntitySet Name="Files" EntityType="Temper.FileReadFastPathTest.File"/>

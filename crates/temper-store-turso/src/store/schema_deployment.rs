@@ -12,10 +12,11 @@ use temper_runtime::persistence::schema_deployment::{
     ClaimSchemaVerificationOutcome, CommitSchemaMigrationBatch, CreateSchemaMigration,
     CreateSchemaMigrationOutcome, ReserveSchemaMigrationRetry, RetireSchemaBundle,
     RetireSchemaBundleOutcome, SchemaActivePointer, SchemaDeploymentRecord, SchemaDeploymentStatus,
-    SchemaDeploymentStore, SchemaDeploymentStoreError, SchemaMigrationJob,
+    SchemaDeploymentStore, SchemaDeploymentStoreError, SchemaExecutionPin, SchemaMigrationJob,
     SchemaMigrationRetryReservation, SchemaMigrationShadowRow, SchemaMigrationValidationReceipt,
     SchemaOperationIdentity, SchemaScope, SchemaVerificationReceipt, SchemaVerificationReplay,
-    SubmitSchemaBundle, SubmitSchemaBundleOutcome,
+    StreamPublicationFence, SubmitSchemaBundle, SubmitSchemaBundleOutcome,
+    scoped_journal_pin_suffix,
 };
 
 use super::{TursoEventStore, write_gate::WritePriority};

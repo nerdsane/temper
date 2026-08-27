@@ -2,150 +2,21 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
-
 use super::{Annotation, AnnotationValue, CsdlDocument, EntityType, NavigationProperty};
+
+mod migration;
+pub use migration::{
+    VerifiedStreamMigrationProvenanceV1, stream_capability_set_digest_v1,
+    verify_stream_migration_automata_v1,
+};
+mod types;
+pub use types::{StreamCapabilityError, StreamCapabilityMutabilityV1, VerifiedStreamCapabilityV1};
 
 const MUTABILITY_TERM: &str = "Temper.Vocab.Stream.Mutability";
 const VERSION_ENTITY_TYPE_TERM: &str = "Temper.Vocab.Stream.VersionEntityType";
 const VERSION_COLLECTION_TERM: &str = "Temper.Vocab.Stream.VersionCollection";
 const AUTHORIZATION_PARENT_TERM: &str = "Temper.Vocab.Stream.AuthorizationParent";
 const DESCRIPTOR_CONTRACT_TERM: &str = "Temper.Vocab.Stream.DescriptorContractVersion";
-
-/// Closed stream replacement semantics emitted by CSDL verification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StreamCapabilityMutabilityV1 {
-    /// A later verified content commit may replace the descriptor.
-    Mutable,
-    /// The first descriptor is permanent for the subject.
-    Immutable,
-}
-
-/// Canonical stream semantics proven from CSDL navigation metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct VerifiedStreamCapabilityV1 {
-    /// Fully qualified stream subject type.
-    pub subject_type: String,
-    /// Verified replacement semantics.
-    pub mutability: StreamCapabilityMutabilityV1,
-    /// Fully qualified immutable version type, when declared by a mutable stream.
-    pub version_entity_type: Option<String>,
-    /// Canonical collection navigation from the mutable subject to its versions.
-    pub version_collection_navigation: Option<String>,
-    /// Canonical navigation from an immutable subject to its authorization parent.
-    pub authorization_parent_navigation: Option<String>,
-    /// Fully qualified authorization-parent type.
-    pub authorization_parent_type: Option<String>,
-    /// Whether this schema version activates strict descriptor contract V1.
-    pub descriptor_contract_v1_active: bool,
-}
-
-/// A stable schema-verification failure for the stream vocabulary.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum StreamCapabilityError {
-    /// An entity type occurred more than once in the document.
-    #[error("duplicate CSDL entity type '{0}'")]
-    DuplicateEntityType(String),
-    /// A closed stream annotation occurred more than once.
-    #[error("entity '{entity_type}' has duplicate annotation '{term}'")]
-    DuplicateAnnotation {
-        /// Fully qualified entity type.
-        entity_type: String,
-        /// Exact vocabulary term.
-        term: &'static str,
-    },
-    /// A stream entity omitted its required mutability declaration.
-    #[error("stream entity '{0}' is missing Temper.Vocab.Stream.Mutability")]
-    MissingMutability(String),
-    /// A closed annotation used the wrong CSDL value kind.
-    #[error("entity '{entity_type}' annotation '{term}' requires {expected}")]
-    InvalidAnnotationValue {
-        /// Fully qualified entity type.
-        entity_type: String,
-        /// Exact vocabulary term.
-        term: &'static str,
-        /// Required CSDL value kind.
-        expected: &'static str,
-    },
-    /// Mutability contained a value outside the closed vocabulary.
-    #[error("entity '{entity_type}' has unknown stream mutability '{value}'")]
-    UnknownMutability {
-        /// Fully qualified entity type.
-        entity_type: String,
-        /// Rejected value.
-        value: String,
-    },
-    /// A mutable direct stream did not expose OData `$value`.
-    #[error("mutable stream entity '{0}' must declare HasStream=true")]
-    MutableWithoutHasStream(String),
-    /// Only one half of a version contract was declared.
-    #[error("entity '{0}' must declare both VersionEntityType and VersionCollection")]
-    IncompleteVersionContract(String),
-    /// An immutable stream omitted its parent navigation.
-    #[error("immutable stream entity '{0}' must declare AuthorizationParent")]
-    MissingAuthorizationParent(String),
-    /// A declaration is forbidden for the chosen mutability.
-    #[error("entity '{entity_type}' annotation '{term}' is incompatible with its mutability")]
-    IncompatibleAnnotation {
-        /// Fully qualified entity type.
-        entity_type: String,
-        /// Exact vocabulary term.
-        term: &'static str,
-    },
-    /// A referenced type is absent.
-    #[error("entity '{entity_type}' references unknown stream type '{target_type}'")]
-    UnknownTargetType {
-        /// Declaring entity type.
-        entity_type: String,
-        /// Missing fully qualified type.
-        target_type: String,
-    },
-    /// A named navigation is absent or ambiguous.
-    #[error("entity '{entity_type}' does not have exactly one navigation '{navigation}'")]
-    InvalidNavigation {
-        /// Declaring entity type.
-        entity_type: String,
-        /// Canonical navigation name.
-        navigation: String,
-    },
-    /// A navigation target or collection shape is incorrect.
-    #[error(
-        "entity '{entity_type}' navigation '{navigation}' must target '{expected_target}' with collection={expected_collection}"
-    )]
-    NavigationTargetMismatch {
-        /// Declaring entity type.
-        entity_type: String,
-        /// Canonical navigation name.
-        navigation: String,
-        /// Required fully qualified target.
-        expected_target: String,
-        /// Required collection shape.
-        expected_collection: bool,
-    },
-    /// Parent ownership could not be proven from referential constraints.
-    #[error(
-        "entity '{entity_type}' navigation '{navigation}' has invalid parent referential constraints"
-    )]
-    InvalidReferentialConstraint {
-        /// Immutable child type.
-        entity_type: String,
-        /// Parent navigation name.
-        navigation: String,
-    },
-    /// The declared version and parent navigation are not mutual.
-    #[error("stream version contract for '{0}' is not mutual")]
-    NonMutualVersionContract(String),
-    /// An activation marker selected an unsupported descriptor contract.
-    #[error("entity '{entity_type}' activates unsupported stream descriptor contract {version}")]
-    UnsupportedDescriptorContract {
-        /// Fully qualified entity type.
-        entity_type: String,
-        /// Unsupported contract version.
-        version: i64,
-    },
-}
 
 /// Verify every stream declaration and return capabilities in subject-type order.
 pub fn verify_stream_capabilities_v1(
@@ -172,6 +43,12 @@ pub fn verify_stream_capabilities_v1(
         let version_navigation = path_annotation(qualified, entity, VERSION_COLLECTION_TERM)?;
         let parent_navigation = path_annotation(qualified, entity, AUTHORIZATION_PARENT_TERM)?;
         let descriptor_contract_v1_active = descriptor_contract_active(qualified, entity)?;
+        let migration_provenance = migration::verified_migration_provenance(
+            qualified,
+            entity,
+            parent_navigation.is_some(),
+            descriptor_contract_v1_active,
+        )?;
 
         let capability = match mutability {
             StreamCapabilityMutabilityV1::Mutable => {
@@ -204,6 +81,7 @@ pub fn verify_stream_capabilities_v1(
                     version_collection_navigation: version_navigation,
                     authorization_parent_navigation: None,
                     authorization_parent_type: None,
+                    migration_provenance,
                     descriptor_contract_v1_active,
                 }
             }
@@ -245,6 +123,7 @@ pub fn verify_stream_capabilities_v1(
                     version_collection_navigation: None,
                     authorization_parent_navigation: Some(navigation),
                     authorization_parent_type: Some(parent_type.to_string()),
+                    migration_provenance,
                     descriptor_contract_v1_active,
                 }
             }
@@ -286,7 +165,7 @@ fn stream_annotations(entity: &EntityType) -> impl Iterator<Item = &Annotation> 
                 | VERSION_COLLECTION_TERM
                 | AUTHORIZATION_PARENT_TERM
                 | DESCRIPTOR_CONTRACT_TERM
-        )
+        ) || migration::migration_annotations().contains(&annotation.term.as_str())
     })
 }
 
@@ -313,7 +192,7 @@ fn descriptor_contract_active(
     }
 }
 
-fn exact_annotation<'a>(
+pub(super) fn exact_annotation<'a>(
     entity_type: &str,
     entity: &'a EntityType,
     term: &'static str,

@@ -154,11 +154,16 @@ impl ApplicationDataInvocation {
                     "Artifact stream subject type is invalid",
                 )
             })?;
-        if !self.state.stream_descriptor_contract_activated(
-            &self.authority.tenant,
-            None,
-            current_runtime_type,
-        ) {
+        if !self
+            .state
+            .stream_descriptor_contract_activated(
+                &self.authority.tenant,
+                None,
+                current_runtime_type,
+            )
+            .await
+            .map_err(stream_descriptor_error)?
+        {
             return Err(data_error(
                 ModuleDataErrorKind::ConsistencyUnavailable,
                 "StreamDescriptorContractInactive",
@@ -182,11 +187,12 @@ impl ApplicationDataInvocation {
                         "Artifact has no verified immutable version capability",
                     )
                 })?;
-            if !self.state.stream_descriptor_contract_activated(
-                &self.authority.tenant,
-                None,
-                version_type,
-            ) {
+            if !self
+                .state
+                .stream_descriptor_contract_activated(&self.authority.tenant, None, version_type)
+                .await
+                .map_err(stream_descriptor_error)?
+            {
                 return Err(data_error(
                     ModuleDataErrorKind::ConsistencyUnavailable,
                     "StreamDescriptorContractInactive",

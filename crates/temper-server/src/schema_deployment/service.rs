@@ -10,6 +10,7 @@ mod runner;
 #[cfg(test)]
 mod runner_tests;
 mod source_state;
+mod stream_descriptor;
 mod supervisor;
 mod support;
 #[cfg(test)]
@@ -17,6 +18,9 @@ mod support_test;
 mod validation;
 
 use error::ServiceError;
+use stream_descriptor::{
+    stream_descriptor_http_response, unresolved_stream_descriptor_http_response,
+};
 
 pub(crate) use http::*;
 use support::*;
@@ -46,12 +50,16 @@ use temper_spec::{
     ScopedSpecBundle, ScopedSpecBundleInput, WasmArtifactInput,
 };
 use temper_wasm_sdk::schema_deployment::{
-    ActivateSchemaBundleRequestV1, GetSchemaBundleRequestV1, GetSchemaMigrationRequestV1,
-    RetireSchemaBundleRequestV1, RetrySchemaMigrationRequestV1, SchemaBundleBudgetsV1,
-    SchemaDeploymentErrorV1, SchemaDeploymentReceiptV1, SchemaDeploymentResponseV1,
-    SchemaMigrationBudgetsV1, SchemaMigrationInputV1, SchemaMigrationLogicalContextV1,
-    SchemaMigrationOutputV1, SchemaMigrationReceiptV1, SchemaScopeV1,
-    StartSchemaMigrationRequestV1, SubmitSchemaBundleRequestV1, VerifySchemaBundleRequestV1,
+    ActivateSchemaBundleRequestV1, AdvanceStreamDescriptorMigrationRequestV1,
+    GetSchemaBundleRequestV1, GetSchemaMigrationRequestV1, GetStreamDescriptorMigrationRequestV1,
+    ListUnresolvedStreamDescriptorsRequestV1, RetireSchemaBundleRequestV1,
+    RetrySchemaMigrationRequestV1, SchemaBundleBudgetsV1, SchemaDeploymentErrorV1,
+    SchemaDeploymentReceiptV1, SchemaDeploymentResponseV1, SchemaMigrationBudgetsV1,
+    SchemaMigrationInputV1, SchemaMigrationLogicalContextV1, SchemaMigrationOutputV1,
+    SchemaMigrationReceiptV1, SchemaScopeV1, StartSchemaMigrationRequestV1,
+    StartStreamDescriptorMigrationRequestV1, StreamDescriptorMigrationReceiptV1,
+    StreamDescriptorMigrationTargetV1, SubmitSchemaBundleRequestV1,
+    UnresolvedStreamDescriptorPageV1, VerifySchemaBundleRequestV1,
 };
 
 use crate::authz::{DenialInput, record_authz_denial, require_authenticated_context};
@@ -123,6 +131,58 @@ impl<'a> GovernedSchemaDeploymentService<'a> {
                     action,
                     resource_type: "SchemaDeployment",
                     resource_id: &scope.id,
+                    resource_attrs: serde_json::Value::Object(attributes.into_iter().collect()),
+                    reason: &denial.to_string(),
+                    module_name: None,
+                    from_status: None,
+                    intent: None,
+                    session_id: None,
+                    spec_governed: None,
+                },
+            )
+            .await;
+            return Err(ServiceError::authorization(pending.id));
+        }
+        Ok(())
+    }
+
+    async fn authorize_installed_application_stream_migration(
+        &self,
+        tenant: &str,
+        security: &SecurityContext,
+        action: &str,
+        application_id: &str,
+        semantic_digest: Option<&str>,
+    ) -> Result<(), ServiceError> {
+        let mut attributes = BTreeMap::from([
+            (
+                "scope_kind".into(),
+                serde_json::Value::String("installed_application".into()),
+            ),
+            (
+                "application_id".into(),
+                serde_json::Value::String(application_id.into()),
+            ),
+        ]);
+        if let Some(digest) = semantic_digest {
+            attributes.insert("semantic_digest".into(), digest.into());
+        }
+        if let Err(denial) = self.state.authorize_with_context(
+            security,
+            action,
+            "InstalledApplicationStreamMigration",
+            &attributes,
+            tenant,
+        ) {
+            let pending = record_authz_denial(
+                self.state,
+                DenialInput {
+                    tenant,
+                    security_ctx: security,
+                    agent_id_override: None,
+                    action,
+                    resource_type: "InstalledApplicationStreamMigration",
+                    resource_id: application_id,
                     resource_attrs: serde_json::Value::Object(attributes.into_iter().collect()),
                     reason: &denial.to_string(),
                     module_name: None,

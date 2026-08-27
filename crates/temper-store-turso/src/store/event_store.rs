@@ -39,6 +39,7 @@ async fn assert_scoped_journal_write_fence(
     tenant: &str,
     entity_type: &str,
     entity_id: &str,
+    events: &[PersistenceEnvelope],
 ) -> Result<(), PersistenceError> {
     let Some((_, pin)) = split_scoped_journal_entity_id(entity_id) else {
         return Ok(());
@@ -60,6 +61,41 @@ async fn assert_scoped_journal_write_fence(
         return Err(PersistenceError::Storage(
             "migrated scoped schema write fence".into(),
         ));
+    }
+    for event in events
+        .iter()
+        .filter(|event| event.metadata.kernel.is_none())
+    {
+        let mut descriptor_fence_rows = tx
+            .query(
+                "SELECT 1 FROM schema_active_pointers AS pointers,
+                     json_each(json_extract(pointers.pointer_json, '$.stream_publication_bindings')) AS binding
+                 WHERE pointers.tenant = ?1
+                   AND json_extract(pointers.pointer_json, '$.scope.kind') = 'task'
+                   AND json_extract(pointers.pointer_json, '$.scope.id') = ?2
+                   AND json_extract(pointers.pointer_json, '$.stream_fenced_source_bundle_digest') = ?3
+                   AND binding.key = ?4 AND binding.value = ?5
+                 LIMIT 1",
+                params![
+                    tenant,
+                    pin.scope.id.as_str(),
+                    pin.bundle_digest.as_str(),
+                    entity_type,
+                    event.event_type.as_str()
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+        if descriptor_fence_rows
+            .next()
+            .await
+            .map_err(storage_error)?
+            .is_some()
+        {
+            return Err(PersistenceError::Storage(
+                "stream descriptor source publication fence".into(),
+            ));
+        }
     }
     let mut existing_rows = tx
         .query(
@@ -96,6 +132,51 @@ async fn assert_scoped_journal_write_fence(
         return Err(PersistenceError::Storage(
             "stale scoped schema write fence".into(),
         ));
+    }
+    Ok(())
+}
+
+async fn unscoped_publication_is_fenced(
+    tx: &libsql::Transaction,
+    tenant: &str,
+    entity_type: &str,
+    event_type: &str,
+) -> Result<bool, PersistenceError> {
+    let mut rows = tx
+        .query(
+            "SELECT 1 FROM schema_active_pointers AS pointers,
+                 json_each(json_extract(pointers.pointer_json, '$.bindings')) AS binding
+             WHERE pointers.tenant = ?1
+               AND pointers.scope_kind = 'installed_application'
+               AND binding.key = ?2
+               AND json_extract(binding.value, '$.publication_action') = ?3
+             LIMIT 1",
+            params![tenant, entity_type, event_type],
+        )
+        .await
+        .map_err(storage_error)?;
+    Ok(rows.next().await.map_err(storage_error)?.is_some())
+}
+
+async fn assert_unscoped_stream_publication_fence(
+    tx: &libsql::Transaction,
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+    events: &[PersistenceEnvelope],
+) -> Result<(), PersistenceError> {
+    if split_scoped_journal_entity_id(entity_id).is_some() {
+        return Ok(());
+    }
+    for event in events
+        .iter()
+        .filter(|event| event.metadata.kernel.is_none())
+    {
+        if unscoped_publication_is_fenced(tx, tenant, entity_type, &event.event_type).await? {
+            return Err(PersistenceError::Storage(
+                "stream descriptor publication fence".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -973,6 +1054,315 @@ impl EventStore for TursoEventStore {
         Ok(out)
     }
 
+    async fn list_unscoped_entity_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        after_entity_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.configured_connection().await?;
+        let limit = limit.min(i64::MAX as usize) as i64;
+        let scoped_pattern = format!("*:schema:task:*:sha256:{}", "?".repeat(64));
+        let mut rows = conn
+            .query(
+                "SELECT DISTINCT entity_id FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2
+                   AND (?3 IS NULL OR entity_id > ?3)
+                   AND entity_id NOT GLOB ?4
+                 ORDER BY entity_id LIMIT ?5",
+                params![tenant, entity_type, after_entity_id, scoped_pattern, limit],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut output = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            output.push(row.get::<String>(0).map_err(storage_error)?);
+        }
+        Ok(output)
+    }
+
+    async fn unscoped_entity_type_write_version(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<u64, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let scoped_pattern = format!("*:schema:task:*:sha256:{}", "?".repeat(64));
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id NOT GLOB ?3",
+                params![tenant, entity_type, scoped_pattern],
+            )
+            .await
+            .map_err(storage_error)?;
+        let Some(row) = rows.next().await.map_err(storage_error)? else {
+            return Ok(0);
+        };
+        let count = row.get::<i64>(0).map_err(storage_error)?;
+        u64::try_from(count)
+            .map_err(|_| PersistenceError::Storage("invalid global write version".into()))
+    }
+
+    async fn activate_unscoped_stream_publication_fence(
+        &self,
+        tenant: &str,
+        fence: &temper_runtime::persistence::schema_deployment::StreamPublicationFence,
+    ) -> Result<(), PersistenceError> {
+        let temper_runtime::persistence::schema_deployment::StreamPublicationFence::InstalledApplication {
+            application_id,
+            semantic_digest: _,
+            bindings,
+        } = fence
+        else {
+            return Err(PersistenceError::Storage(
+                "task fence cannot activate global stream publications".into(),
+            ));
+        };
+        let _permit = self
+            .acquire_write_permit("stream_publication_fence", WritePriority::High)
+            .await?;
+        let conn = self.configured_connection().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+        let scoped_pattern = format!("*:schema:task:*:sha256:{}", "?".repeat(64));
+        for (entity_type, binding) in bindings {
+            let mut rows = tx
+                .query(
+                    "SELECT COUNT(*) FROM events
+                     WHERE tenant = ?1 AND entity_type = ?2 AND entity_id NOT GLOB ?3",
+                    params![tenant, entity_type.as_str(), scoped_pattern.as_str()],
+                )
+                .await
+                .map_err(storage_error)?;
+            let actual = if let Some(row) = rows.next().await.map_err(storage_error)? {
+                let count = row.get::<i64>(0).map_err(storage_error)?;
+                u64::try_from(count)
+                    .map_err(|_| PersistenceError::Storage("invalid global write version".into()))?
+            } else {
+                0
+            };
+            drop(rows);
+            if actual != binding.expected_write_version {
+                return Err(PersistenceError::ConcurrencyViolation {
+                    expected: binding.expected_write_version,
+                    actual,
+                });
+            }
+        }
+        let pointer_json = serde_json::to_string(fence)
+            .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+        tx.execute(
+            "INSERT INTO schema_active_pointers (tenant, scope_kind, scope_id, pointer_json)
+             VALUES (?1, 'installed_application', ?2, ?3)
+             ON CONFLICT(tenant, scope_kind, scope_id)
+             DO UPDATE SET pointer_json = excluded.pointer_json",
+            params![tenant, application_id.as_str(), pointer_json],
+        )
+        .await
+        .map_err(storage_error)?;
+        tx.commit().await.map_err(storage_error)?;
+        Ok(())
+    }
+
+    async fn deactivate_unscoped_stream_publication_fence(
+        &self,
+        tenant: &str,
+        application_id: &str,
+        semantic_digest: Option<&str>,
+    ) -> Result<(), PersistenceError> {
+        let _permit = self
+            .acquire_write_permit("stream_publication_fence_remove", WritePriority::High)
+            .await?;
+        let conn = self.configured_connection().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+        let mut rows = tx
+            .query(
+                "SELECT pointer_json FROM schema_active_pointers
+                 WHERE tenant = ?1 AND scope_kind = 'installed_application' AND scope_id = ?2",
+                params![tenant, application_id],
+            )
+            .await
+            .map_err(storage_error)?;
+        let pointer = rows
+            .next()
+            .await
+            .map_err(storage_error)?
+            .map(|row| row.get::<String>(0))
+            .transpose()
+            .map_err(storage_error)?;
+        drop(rows);
+        if let Some(pointer) = pointer {
+            let fence: temper_runtime::persistence::schema_deployment::StreamPublicationFence =
+                serde_json::from_str(&pointer)
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+            let temper_runtime::persistence::schema_deployment::StreamPublicationFence::InstalledApplication {
+                application_id: found_application,
+                semantic_digest: found_digest,
+                ..
+            } = fence
+            else {
+                return Err(PersistenceError::Storage(
+                    "installed application publication fence is invalid".into(),
+                ));
+            };
+            if found_application == application_id
+                && semantic_digest.is_none_or(|expected| found_digest == expected)
+            {
+                tx.execute(
+                    "DELETE FROM schema_active_pointers
+                     WHERE tenant = ?1 AND scope_kind = 'installed_application' AND scope_id = ?2",
+                    params![tenant, application_id],
+                )
+                .await
+                .map_err(storage_error)?;
+            }
+        }
+        tx.commit().await.map_err(storage_error)?;
+        Ok(())
+    }
+
+    async fn get_unscoped_stream_publication_fence(
+        &self,
+        tenant: &str,
+        application_id: &str,
+    ) -> Result<
+        Option<temper_runtime::persistence::schema_deployment::StreamPublicationFence>,
+        PersistenceError,
+    > {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT pointer_json FROM schema_active_pointers
+                 WHERE tenant = ?1 AND scope_kind = 'installed_application' AND scope_id = ?2",
+                params![tenant, application_id],
+            )
+            .await
+            .map_err(storage_error)?;
+        rows.next()
+            .await
+            .map_err(storage_error)?
+            .map(|row| row.get::<String>(0))
+            .transpose()
+            .map_err(storage_error)?
+            .map(|pointer| serde_json::from_str(&pointer))
+            .transpose()
+            .map_err(|error| PersistenceError::Serialization(error.to_string()))
+    }
+
+    async fn unscoped_stream_publication_fence_active(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        publication_action: &str,
+        capability_digest: &str,
+    ) -> Result<bool, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT EXISTS (
+                     SELECT 1 FROM schema_active_pointers AS pointers,
+                         json_each(json_extract(pointers.pointer_json, '$.bindings')) AS binding
+                     WHERE pointers.tenant = ?1
+                       AND pointers.scope_kind = 'installed_application'
+                       AND binding.key = ?2
+                       AND json_extract(binding.value, '$.publication_action') = ?3
+                       AND json_extract(binding.value, '$.capability_digest') = ?4
+                 )",
+                params![tenant, entity_type, publication_action, capability_digest],
+            )
+            .await
+            .map_err(storage_error)?;
+        let Some(row) = rows.next().await.map_err(storage_error)? else {
+            return Ok(false);
+        };
+        row.get::<i64>(0)
+            .map(|active| active != 0)
+            .map_err(storage_error)
+    }
+
+    async fn restore_unscoped_stream_publication_fence(
+        &self,
+        tenant: &str,
+        expected_current_semantic_digest: &str,
+        fence: &temper_runtime::persistence::schema_deployment::StreamPublicationFence,
+    ) -> Result<(), PersistenceError> {
+        let temper_runtime::persistence::schema_deployment::StreamPublicationFence::InstalledApplication {
+            application_id,
+            ..
+        } = fence
+        else {
+            return Err(PersistenceError::Storage(
+                "task fence cannot restore global stream publications".into(),
+            ));
+        };
+        let _permit = self
+            .acquire_write_permit("stream_publication_fence_restore", WritePriority::High)
+            .await?;
+        let conn = self.configured_connection().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+        let mut rows = tx
+            .query(
+                "SELECT pointer_json FROM schema_active_pointers
+                 WHERE tenant = ?1 AND scope_kind = 'installed_application' AND scope_id = ?2",
+                params![tenant, application_id.clone()],
+            )
+            .await
+            .map_err(storage_error)?;
+        let current = rows
+            .next()
+            .await
+            .map_err(storage_error)?
+            .map(|row| row.get::<String>(0))
+            .transpose()
+            .map_err(storage_error)?;
+        drop(rows);
+        let Some(current) = current else {
+            return Err(PersistenceError::Storage(
+                "installed application publication fence changed concurrently".into(),
+            ));
+        };
+        let current: temper_runtime::persistence::schema_deployment::StreamPublicationFence =
+            serde_json::from_str(&current)
+                .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+        if !matches!(
+            current,
+            temper_runtime::persistence::schema_deployment::StreamPublicationFence::InstalledApplication {
+                semantic_digest,
+                ..
+            } if semantic_digest == expected_current_semantic_digest
+        ) {
+            return Err(PersistenceError::Storage(
+                "installed application publication fence changed concurrently".into(),
+            ));
+        }
+        let pointer = serde_json::to_string(fence)
+            .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+        tx.execute(
+            "INSERT INTO schema_active_pointers (tenant, scope_kind, scope_id, pointer_json)
+             VALUES (?1, 'installed_application', ?2, ?3)
+             ON CONFLICT(tenant, scope_kind, scope_id)
+             DO UPDATE SET pointer_json = excluded.pointer_json",
+            params![tenant, application_id.clone(), pointer],
+        )
+        .await
+        .map_err(storage_error)?;
+        tx.commit().await.map_err(storage_error)?;
+        Ok(())
+    }
+
     async fn list_scoped_entity_ids_page(
         &self,
         tenant: &str,
@@ -1176,7 +1566,9 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
 
-        assert_scoped_journal_write_fence(&tx, tenant, entity_type, entity_id).await?;
+        assert_scoped_journal_write_fence(&tx, tenant, entity_type, entity_id, events).await?;
+        assert_unscoped_stream_publication_fence(&tx, tenant, entity_type, entity_id, events)
+            .await?;
 
         let select_start = std::time::Instant::now();
         let rows_result = tx
@@ -1360,7 +1752,16 @@ impl TursoEventStore {
             let (tenant, entity_type, entity_id) =
                 parse_persistence_id_parts(&append.persistence_id)
                     .map_err(PersistenceError::Storage)?;
-            assert_scoped_journal_write_fence(&tx, tenant, entity_type, entity_id).await?;
+            assert_scoped_journal_write_fence(&tx, tenant, entity_type, entity_id, &append.events)
+                .await?;
+            assert_unscoped_stream_publication_fence(
+                &tx,
+                tenant,
+                entity_type,
+                entity_id,
+                &append.events,
+            )
+            .await?;
 
             if append.expected_sequence == 0 && !append.events.is_empty() {
                 parsed.push((
@@ -1613,7 +2014,15 @@ impl TursoEventStore {
                      SELECT COALESCE(MAX(sequence_nr), 0)
                      FROM events
                      WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
-                 ) = ?9",
+                 ) = ?9
+                   AND (?10 = 1 OR NOT EXISTS (
+                       SELECT 1 FROM schema_active_pointers AS pointers,
+                           json_each(json_extract(pointers.pointer_json, '$.bindings')) AS binding
+                       WHERE pointers.tenant = ?1
+                         AND pointers.scope_kind = 'installed_application'
+                         AND binding.key = ?2
+                         AND json_extract(binding.value, '$.publication_action') = ?6
+                   ))",
                 params![
                     tenant,
                     entity_type,
@@ -1623,7 +2032,8 @@ impl TursoEventStore {
                     event.event_type.as_str(),
                     payload_json,
                     metadata_json,
-                    expected_sequence as i64
+                    expected_sequence as i64,
+                    i64::from(event.metadata.kernel.is_some())
                 ],
             )
             .await;
@@ -1660,6 +2070,27 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
             return Ok(new_seq);
+        }
+
+        if event.metadata.kernel.is_none() {
+            let mut rows = conn
+                .query(
+                    "SELECT 1 FROM schema_active_pointers AS pointers,
+                         json_each(json_extract(pointers.pointer_json, '$.bindings')) AS binding
+                     WHERE pointers.tenant = ?1
+                       AND pointers.scope_kind = 'installed_application'
+                       AND binding.key = ?2
+                       AND json_extract(binding.value, '$.publication_action') = ?3
+                     LIMIT 1",
+                    params![tenant, entity_type, event.event_type.as_str()],
+                )
+                .await
+                .map_err(storage_error)?;
+            if rows.next().await.map_err(storage_error)?.is_some() {
+                return Err(PersistenceError::Storage(
+                    "stream descriptor publication fence".into(),
+                ));
+            }
         }
 
         let actual = current_sequence(&conn, tenant, entity_type, entity_id).await?;

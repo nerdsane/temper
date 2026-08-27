@@ -149,6 +149,12 @@ pub struct SchemaActivePointer {
     pub bundle_digest: String,
     /// Bundle that was active immediately before this pointer.
     pub predecessor_digest: Option<String>,
+    /// Predecessor whose descriptor-less publications are durably fenced.
+    #[serde(default)]
+    pub stream_fenced_source_bundle_digest: Option<String>,
+    /// Publication actions selectively fenced on the predecessor journals.
+    #[serde(default)]
+    pub stream_publication_bindings: BTreeMap<String, String>,
     /// Monotonic activation fence.
     pub fence: u64,
     /// Monotonic committed sequence.

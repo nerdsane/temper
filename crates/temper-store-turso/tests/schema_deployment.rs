@@ -82,6 +82,7 @@ fn activation_command(
         expected_predecessor: predecessor.map(str::to_string),
         expected_fence: fence,
         verification_receipt_id: receipt_id.into(),
+        stream_publication_fence: None,
         operation: operation(key),
     }
 }

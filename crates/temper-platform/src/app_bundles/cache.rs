@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use super::MAX_BUNDLE_FILE_BYTES;
 use super::types::{
-    BundleBlob, CanonicalBundleManifestV1, InstallBundleRequest, InstallBundleResult,
+    BundleBlob, CanonicalBundleManifestV1, InstallBundleMigrationRequired, InstallBundleRequest,
+    InstallBundleResult,
 };
 use super::validation::{
     digest_hex, validate_blob_file, validate_manifest, validate_materialized_view,
@@ -13,6 +14,9 @@ use super::workspace::sha256_prefixed;
 use crate::os_apps::{OsAppReconcileResult, reconcile_os_app_from_dir};
 use crate::state::PlatformState;
 use base64::Engine as _;
+
+mod fs;
+use fs::{replace_directory, set_read_only};
 
 /// Validate, cache, materialize, and install one local canonical bundle.
 pub async fn install_local_bundle(
@@ -29,6 +33,7 @@ pub async fn install_local_bundle(
     let mut added = Vec::new();
     let mut updated = Vec::new();
     let mut skipped = Vec::new();
+    let mut migration_required = None;
     if let Some(result) = outcome.root_result {
         match result {
             OsAppReconcileResult::Skipped { app_name, .. } => skipped.push(app_name),
@@ -36,6 +41,19 @@ pub async fn install_local_bundle(
                 added = install.added;
                 updated = install.updated;
                 skipped = install.skipped;
+            }
+            OsAppReconcileResult::MigrationRequired {
+                app_name,
+                semantic_digest,
+                capability_digest,
+                descriptor_contract_version,
+            } => {
+                migration_required = Some(InstallBundleMigrationRequired {
+                    application_id: app_name,
+                    semantic_digest,
+                    capability_digest,
+                    descriptor_contract_version,
+                });
             }
         }
     }
@@ -47,6 +65,7 @@ pub async fn install_local_bundle(
         added,
         updated,
         skipped,
+        migration_required,
     })
 }
 
@@ -194,6 +213,9 @@ pub(super) async fn reconcile_materialized_bundle(
             Some((manifest, view)),
         )
         .await?;
+        if matches!(result, OsAppReconcileResult::MigrationRequired { .. }) {
+            return Ok((order, Some(result)));
+        }
         if app_name == &manifest.root_app {
             root_result = Some(result);
         }
@@ -427,54 +449,6 @@ fn quarantine_file(path: &Path) -> Result<PathBuf, String> {
     })?;
     sync_directory(parent)?;
     Ok(quarantine)
-}
-
-fn set_read_only(path: &Path) -> Result<(), String> {
-    let mut permissions = std::fs::metadata(path)
-        .map_err(|error| format!("stat cache file '{}': {error}", path.display()))?
-        .permissions();
-    permissions.set_readonly(true);
-    std::fs::set_permissions(path, permissions)
-        .map_err(|error| format!("protect cache file '{}': {error}", path.display()))
-}
-
-fn replace_directory(staged: PathBuf, destination: &Path) -> Result<(), String> {
-    if !destination.exists() {
-        std::fs::rename(&staged, destination)
-            .map_err(|error| format!("publish bundle view '{}': {error}", destination.display()))?;
-        return sync_directory(
-            destination
-                .parent()
-                .ok_or_else(|| "bundle view destination has no parent".to_string())?,
-        );
-    }
-    let parent = destination
-        .parent()
-        .ok_or_else(|| "bundle view destination has no parent".to_string())?;
-    let backup = tempfile::Builder::new()
-        .prefix(".bundle-view-backup-")
-        .tempdir_in(parent)
-        .map_err(|error| format!("stage bundle view backup: {error}"))?
-        .keep();
-    std::fs::remove_dir(&backup).map_err(|error| format!("prepare bundle view backup: {error}"))?;
-    std::fs::rename(destination, &backup)
-        .map_err(|error| format!("backup bundle view '{}': {error}", destination.display()))?;
-    if let Err(error) = std::fs::rename(&staged, destination) {
-        let rollback = std::fs::rename(&backup, destination);
-        return match rollback {
-            Ok(()) => Err(format!(
-                "publish bundle view '{}': {error}",
-                destination.display()
-            )),
-            Err(rollback_error) => Err(format!(
-                "publish bundle view '{}': {error}; rollback failed: {rollback_error}",
-                destination.display()
-            )),
-        };
-    }
-    std::fs::remove_dir_all(&backup)
-        .map_err(|error| format!("remove bundle view backup '{}': {error}", backup.display()))?;
-    sync_directory(parent)
 }
 
 #[cfg(test)]
