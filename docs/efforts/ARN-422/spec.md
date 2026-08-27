@@ -1,4 +1,4 @@
-# Spec / RFC — ARN-421: Genesis app-install is source of truth (verify + rollback + env-pin-as-floor)
+# Spec / RFC — ARN-422: Genesis app-install is source of truth (verify + rollback + env-pin-as-floor)
 
 One contract, three expressions (temper rule): this spec.md, the DST invariant **P18** in
 `crates/temper-server/tests/common/platform_invariants.rs`, and the scenario

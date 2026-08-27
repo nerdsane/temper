@@ -4,7 +4,7 @@
 - Date: 2026-08-27
 - Deciders: Temper core maintainers
 - Related:
-  - ARN-421 (effort), ARN-420 (deploy/verify/rollback pipeline), ARN-411 (SDLC loop epic)
+  - ARN-422 (effort), ARN-420 (deploy/verify/rollback pipeline), ARN-411 (SDLC loop epic)
   - `crates/temper-platform/src/genesis_install.rs` (install path)
   - `crates/temper-platform/src/recovery.rs` (`recover_installed_app_runtime_state`)
   - `crates/temper-server/tests/dst_genesis_install_rollback.rs` (invariant P18)

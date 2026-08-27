@@ -1,6 +1,6 @@
-# Intent — ARN-421
+# Intent — ARN-422
 
-Linear: https://linear.app/arni-build/issue/ARN-421 (child of ARN-411 epic, related-to ARN-420).
+Linear: https://linear.app/arni-build/issue/ARN-422 (child of ARN-411 epic, related-to ARN-420).
 
 Make Genesis the single source of truth for how apps are installed, so the SDLC deploy loop closes
 correctly. An app version published to Genesis must be what actually runs; installing it must be one
@@ -9,7 +9,7 @@ to the last-good pinned hash on failure; and a redeploy must never silently reve
 back to a stale env pin.
 
 This is the in-kernel layer beneath ARN-420's bash deploy pipeline. ARN-420 orchestrates
-deploy→verify→rollback from the outside (Datadog health, Genesis publish); ARN-421 makes the kernel's
+deploy→verify→rollback from the outside (Datadog health, Genesis publish); ARN-422 makes the kernel's
 own install operation verified-or-reverted, so every caller — the agent tool `temper_publish_app` /
 `install_app`, the `/paw/apps/install-from-genesis` endpoint, and startup bootstrap — inherits it.
 

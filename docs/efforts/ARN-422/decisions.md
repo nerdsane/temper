@@ -1,4 +1,4 @@
-# Decision log — ARN-421
+# Decision log — ARN-422
 
 Repos/worktrees:
 - temperpaw: branch `claude/genesis-install-sot` (off origin/main 52a569b4d)
