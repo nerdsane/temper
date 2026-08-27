@@ -34,6 +34,9 @@ use cache_paths::{
     app_cache_dir, replace_directory, validate_git_object_id, validate_identity_component,
 };
 
+use crate::genesis_install_verify::{
+    InstallVerifyDecision, classify_install_verify, platform_store, verify_install_runtime_ready,
+};
 use crate::os_apps::{
     AppManifest, InstallResult, OsAppReconcileResult, add_os_apps_dir_preferred,
     os_app_bundle_digest, reconcile_os_app, resolve_os_app_install_order,
@@ -430,13 +433,127 @@ pub async fn list_genesis_follow_latest_updates(
     updates
 }
 
+/// Roll a failed Genesis install back to the previously-installed pinned version.
+///
+/// Re-materializes the prior ref's closure if its cache was evicted, then delegates to
+/// [`restore_prior_install`] to re-reconcile the prior bundle and restore its provenance record.
+async fn rollback_to_prior(
+    platform: &PlatformState,
+    ps: &dyn temper_server::platform_store::PlatformStore,
+    tenant: &str,
+    prior: &InstalledAppRecord,
+) -> Result<(), String> {
+    ensure_prior_bundle_available(platform, prior).await?;
+    restore_prior_install(platform, ps, tenant, prior).await
+}
+
+/// Make sure the prior version's bundle is resolvable from the app catalog before rollback.
+///
+/// Prefers the prior ref's on-disk cache; if it was evicted, re-materializes the closure from the
+/// prior record's registry coordinates. Best-effort when the prior ref is unpinned or carries no
+/// registry URL — rollback then relies on whatever bundle the catalog already resolves for the app.
+async fn ensure_prior_bundle_available(
+    platform: &PlatformState,
+    prior: &InstalledAppRecord,
+) -> Result<(), String> {
+    let prior_ref = parse_registry_app_ref(&prior.app_ref)?;
+    let Some(prior_hash) = prior_ref.version_hash.clone() else {
+        return Ok(());
+    };
+    let cache_key = format!(
+        "{}/{}@{}",
+        prior_ref.owner,
+        prior_ref.name,
+        prior_hash.trim_start_matches('@')
+    );
+    let cache_root = genesis_cache_root(&platform.server, &cache_key);
+    if cache_root.is_dir() {
+        add_os_apps_dir_preferred(cache_root);
+        return Ok(());
+    }
+    if prior.registry_url.trim().is_empty() {
+        return Ok(());
+    }
+    let registry_url = normalize_registry_url(&prior.registry_url)?;
+    let registry_tenant = if prior.registry_tenant.trim().is_empty() {
+        "default".to_string()
+    } else {
+        prior.registry_tenant.trim().to_string()
+    };
+    std::fs::create_dir_all(&cache_root).map_err(|error| {
+        format!(
+            "create Genesis rollback cache '{}': {error}",
+            cache_root.display()
+        )
+    })?;
+    materialize_registry_app_closure_via_bundle(
+        &registry_url,
+        &registry_tenant,
+        prior_ref,
+        &cache_root,
+    )
+    .await
+    .map_err(|error| {
+        format!(
+            "failed to re-materialize previous version {} for rollback: {error}",
+            prior.app_ref
+        )
+    })?;
+    add_os_apps_dir_preferred(cache_root);
+    Ok(())
+}
+
+/// Re-reconcile the prior bundle and restore its provenance record — the network-free core of
+/// rollback, and the seam the deterministic simulator drives.
+///
+/// `reconcile_os_app` overwrites the durable record with a local-provenance row, so after
+/// re-reconciling the prior bundle this restores the prior Genesis provenance record. If the prior
+/// version itself does not reach runtime-ready, that is a hard both-broken error: neither the new
+/// nor the previous version is serviceable.
+///
+/// Public for the deterministic simulator (`dst_genesis_install_rollback`), which drives this exact
+/// production rollback effect against the simulated platform store under injected faults.
+pub async fn restore_prior_install(
+    platform: &PlatformState,
+    ps: &dyn temper_server::platform_store::PlatformStore,
+    tenant: &str,
+    prior: &InstalledAppRecord,
+) -> Result<(), String> {
+    reconcile_materialized_app_closure(platform, tenant, &prior.app_name)
+        .await
+        .map_err(|error| {
+            format!(
+                "rollback re-reconcile of {} failed: {error}",
+                prior.app_name
+            )
+        })?;
+    if !verify_install_runtime_ready(platform, ps, tenant, &prior.app_name).await {
+        return Err(format!(
+            "rollback target {} for app {} is also not runtime-ready (both new and previous versions are broken)",
+            prior.app_ref, prior.app_name
+        ));
+    }
+    ps.record_installed_app_metadata(prior)
+        .await
+        .map_err(|error| {
+            format!(
+                "failed to restore previous install record for {}: {error}",
+                prior.app_name
+            )
+        })?;
+    Ok(())
+}
+
 /// Install a pinned Genesis app ref into this Temper instance from a registry URL.
 ///
 /// This is the local-instance counterpart to spec-owned `App.Install`: agent,
 /// CLI, and admin clients call one semantic install operation, while this
 /// helper materializes the pinned Git-native Genesis closure into the local
 /// app catalog and then runs the normal Temper installer against this
-/// instance's storage backend.
+/// instance's storage backend. The install is verified-or-reverted: after
+/// reconciling the pinned closure it checks the root app is runtime-ready
+/// (incl. required-wasm compile) and, if not, rolls back to the previously
+/// installed pinned version so a bad publish never leaves the tenant broken.
 pub async fn install_genesis_app_from_registry(
     platform: &PlatformState,
     request: GenesisRegistryInstallRequest,
@@ -520,87 +637,143 @@ pub async fn install_genesis_app_from_registry(
         .map(|app_ref| app_ref.name.clone())
         .collect();
 
+    // Capture the previously-installed pinned version BEFORE mutating the catalog or store, so a
+    // failed install can be rolled back to it. reconcile overwrites the durable record, so this
+    // read must happen first.
+    let ps = platform_store(platform);
+    let prior_root_record = match &ps {
+        Some(ps) => ps
+            .get_installed_app(&request.tenant, &root_ref.name)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+
     add_os_apps_dir_preferred(cache_root.clone());
 
     let install_platform = platform.clone();
     let reconcile_started = Instant::now();
-    let install =
+    let reconcile_result =
         reconcile_materialized_app_closure(&install_platform, &request.tenant, &root_ref.name)
-            .await?;
-    log_genesis_install_phase(
-        &request.app_ref,
-        "install_reconcile",
-        reconcile_started,
-        materialized.len(),
-        install.wasm_modules.len(),
-    );
-    let root_closure_id = format!(
-        "genesis:{}:{}",
-        request.app_ref,
-        root_hash.trim_start_matches('@')
-    );
+            .await;
 
-    for materialized_ref in &materialized_refs {
-        let Some(version_hash) = materialized_ref.version_hash.as_deref() else {
-            continue;
-        };
-        let app_ref = format!(
-            "{}/{}@{}",
-            materialized_ref.owner,
-            materialized_ref.name,
-            version_hash.trim_start_matches('@')
-        );
-        let closure_id =
-            if materialized_ref.owner == root_ref.owner && materialized_ref.name == root_ref.name {
-                root_closure_id.clone()
-            } else {
-                format!(
-                    "genesis:{}:{}",
-                    app_ref,
+    // Verify the new version reached runtime-ready — specs/policies/wasm registered AND every
+    // app-required wasm module compiles. A reconcile error, or no store to verify against, counts
+    // as not-ready and routes through the same decision.
+    let new_version_ready = match (&reconcile_result, &ps) {
+        (Ok(_), Some(ps)) => {
+            verify_install_runtime_ready(
+                &install_platform,
+                ps.as_ref(),
+                &request.tenant,
+                &root_ref.name,
+            )
+            .await
+        }
+        _ => false,
+    };
+
+    match classify_install_verify(new_version_ready, prior_root_record.as_ref()) {
+        InstallVerifyDecision::Commit => {
+            let install = reconcile_result.expect("Commit implies a successful reconcile");
+            log_genesis_install_phase(
+                &request.app_ref,
+                "install_reconcile",
+                reconcile_started,
+                materialized.len(),
+                install.wasm_modules.len(),
+            );
+            let root_closure_id = format!(
+                "genesis:{}:{}",
+                request.app_ref,
+                root_hash.trim_start_matches('@')
+            );
+
+            for materialized_ref in &materialized_refs {
+                let Some(version_hash) = materialized_ref.version_hash.as_deref() else {
+                    continue;
+                };
+                let app_ref = format!(
+                    "{}/{}@{}",
+                    materialized_ref.owner,
+                    materialized_ref.name,
                     version_hash.trim_start_matches('@')
+                );
+                let closure_id = if materialized_ref.owner == root_ref.owner
+                    && materialized_ref.name == root_ref.name
+                {
+                    root_closure_id.clone()
+                } else {
+                    format!(
+                        "genesis:{}:{}",
+                        app_ref,
+                        version_hash.trim_start_matches('@')
+                    )
+                };
+                record_genesis_install_metadata(
+                    &install_platform,
+                    GenesisInstallMetadata {
+                        target_tenant: &request.tenant,
+                        app_name: &materialized_ref.name,
+                        app_ref: &app_ref,
+                        version_hash,
+                        closure_id: &closure_id,
+                        registry_url: &registry_url,
+                        registry_tenant: &registry_tenant,
+                        follow_policy: &follow_policy,
+                    },
                 )
-            };
-        record_genesis_install_metadata(
-            &install_platform,
-            GenesisInstallMetadata {
-                target_tenant: &request.tenant,
-                app_name: &materialized_ref.name,
-                app_ref: &app_ref,
-                version_hash,
-                closure_id: &closure_id,
-                registry_url: &registry_url,
-                registry_tenant: &registry_tenant,
-                follow_policy: &follow_policy,
-            },
-        )
-        .await;
-    }
-    log_genesis_install_phase(
-        &request.app_ref,
-        "total",
-        install_started,
-        materialized.len(),
-        0,
-    );
+                .await;
+            }
+            log_genesis_install_phase(
+                &request.app_ref,
+                "total",
+                install_started,
+                materialized.len(),
+                0,
+            );
 
-    Ok(GenesisRegistryInstallResult {
-        app_ref: request.app_ref,
-        tenant: request.tenant,
-        registry_url,
-        registry_tenant,
-        follow_policy,
-        closure_id: root_closure_id,
-        materialized_path: cache_root.display().to_string(),
-        materialized_apps: materialized,
-        added: install.added,
-        updated: install.updated,
-        skipped: install.skipped,
-        wasm_modules: install.wasm_modules,
-        agents: install.agents,
-        agent_skills: install.skills,
-        adrs: install.adrs_bootstrapped,
-        seed_instances: install.seed_instances,
-    })
+            Ok(GenesisRegistryInstallResult {
+                app_ref: request.app_ref,
+                tenant: request.tenant,
+                registry_url,
+                registry_tenant,
+                follow_policy,
+                closure_id: root_closure_id,
+                materialized_path: cache_root.display().to_string(),
+                materialized_apps: materialized,
+                added: install.added,
+                updated: install.updated,
+                skipped: install.skipped,
+                wasm_modules: install.wasm_modules,
+                agents: install.agents,
+                agent_skills: install.skills,
+                adrs: install.adrs_bootstrapped,
+                seed_instances: install.seed_instances,
+            })
+        }
+        InstallVerifyDecision::RollBackToPrevious => {
+            let prior =
+                prior_root_record.expect("RollBackToPrevious implies a prior installed record");
+            let ps = ps.expect("RollBackToPrevious implies a platform store");
+            rollback_to_prior(&install_platform, ps.as_ref(), &request.tenant, &prior).await?;
+            Err(format!(
+                "Genesis install of {} failed runtime verification; rolled back to previous pinned ref {}",
+                request.app_ref, prior.app_ref
+            ))
+        }
+        InstallVerifyDecision::FailNoRollback => match reconcile_result {
+            Err(error) => Err(format!(
+                "Genesis install of {} failed: {error}",
+                request.app_ref
+            )),
+            Ok(_) => Err(format!(
+                "Genesis install of {} failed runtime verification and no previous install exists to roll back to",
+                request.app_ref
+            )),
+        },
+    }
 }
 
 async fn reconcile_materialized_app_closure(
