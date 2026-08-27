@@ -104,6 +104,33 @@ pub(super) fn verify_module_config_data_binding_with_csdl(
     verify_module_data_binding(wasm, module_name, grant, binding, &regenerated.manifest).map(Some)
 }
 
+pub(super) fn verify_local_module_config_data_binding(
+    wasm: &[u8],
+    module_name: &str,
+    config: &WasmModuleManifest,
+    app_dir: &std::path::Path,
+    dependency_roots: &[std::path::PathBuf],
+) -> Result<Option<ModuleSdkManifest>, String> {
+    let resolved = crate::module_sdk_build::resolve_local_module(
+        &crate::module_sdk_build::LocalModuleSdkInputs {
+            app: app_dir.to_path_buf(),
+            module: module_name.to_string(),
+            dependency_roots: dependency_roots.to_vec(),
+            app_manifest: None,
+            source_out: None,
+            lock: None,
+        },
+    )?;
+    verify_module_config_data_binding_with_csdl(
+        wasm,
+        module_name,
+        config,
+        &resolved.csdl,
+        &resolved.ioa_sources,
+        &resolved.lock_digest,
+    )
+}
+
 #[cfg(test)]
 fn qualify_ioa_sources(
     csdl: &temper_spec::csdl::CsdlDocument,

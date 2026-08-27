@@ -1466,23 +1466,12 @@ pub(crate) async fn install_os_app_from_dir_with_plan(
                 }
                 (Some(_), Some(_)) => None,
                 (Some(config), None) if config.data.is_some() => {
-                    let resolved = crate::module_sdk_build::resolve_local_module(
-                        &crate::module_sdk_build::LocalModuleSdkInputs {
-                            app: app_dir.to_path_buf(),
-                            module: module_name.clone(),
-                            dependency_roots: local_module_dependency_roots.clone(),
-                            app_manifest: None,
-                            source_out: None,
-                            lock: None,
-                        },
-                    )?;
-                    data_binding::verify_module_config_data_binding_with_csdl(
+                    data_binding::verify_local_module_config_data_binding(
                         wasm_bytes,
                         module_name,
                         config,
-                        &resolved.csdl,
-                        &resolved.ioa_sources,
-                        &resolved.lock_digest,
+                        app_dir,
+                        &local_module_dependency_roots,
                     )?
                 }
                 (Some(_), None) => None,
