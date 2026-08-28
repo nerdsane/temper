@@ -49,11 +49,19 @@ jobs:
           import os as _os
           body=subprocess.run(["gh","api",f"repos/{_os.environ.get('GITHUB_REPOSITORY','')}/issues/{n}/comments",
                               "--paginate","-q",".[].body"],capture_output=True,text=True).stdout
+          import base64
           rec=None
-          for m in re.finditer(r"<!--\s*sdlc-review-record\s*(\{.*?\})\s*-->", body, re.S):
-              try: cand=json.loads(m.group(1))
-              except Exception: continue
+          def _consider(txt, b64):
+              global rec
+              try:
+                  cand=json.loads(base64.b64decode(txt).decode() if b64 else txt)
+              except Exception:
+                  return
               if cand.get("commit")==head: rec=cand
+          for m in re.finditer(r"<!--\s*sdlc-review-record-b64\s*([A-Za-z0-9+/=\s]+?)\s*-->", body):
+              _consider(m.group(1).strip(), True)
+          for m in re.finditer(r"<!--\s*sdlc-review-record\s*(\{.*?\})\s*-->", body, re.S):
+              _consider(m.group(1), False)
           if not rec:
               print(f"::error::no review record for head {head[:10]}. Owner: run the panel "
                     "(interrogate, or stack/review/run-cloud-panel.py on a computer copy) and post it "

@@ -78,12 +78,19 @@ jobs:
           repo=os.environ.get("GITHUB_REPOSITORY","")
           body=subprocess.run(["gh","api",f"repos/{repo}/issues/{n}/comments",
                               "--paginate","-q",".[].body"],capture_output=True,text=True).stdout
+          import base64
           rec=None
+          def _consider(txt, b64):
+              global rec
+              try:
+                  cand=json.loads(base64.b64decode(txt).decode() if b64 else txt)
+              except Exception:
+                  return
+              if cand.get("commit")==head: rec=cand
+          for m in re.finditer(r"<!--\s*sdlc-proof-record-b64\s*([A-Za-z0-9+/=\s]+?)\s*-->", body):
+              _consider(m.group(1).strip(), True)
           for m in re.finditer(r"<!--\s*sdlc-proof-record\s*(\{.*?\})\s*-->", body, re.S):
-              try: cand=json.loads(m.group(1))
-              except Exception: continue
-              # the record must be FOR this head - the code being merged
-              if cand.get("commit") == head: rec=cand
+              _consider(m.group(1), False)
           if not rec:
               print(f"::error::no proof record for head {head} on the PR - run the verify skill against the current head and post it (bash stack/proof/post-proof-record.sh)")
               sys.exit(1)
