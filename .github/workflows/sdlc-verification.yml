@@ -1,0 +1,136 @@
+# The verification gate: proof of implementation (SDLC loop: the "test + verify" stage). Vendor into a repo as
+# .github/workflows/sdlc-verification.yml. The agent writes .proof/proof.json plus its
+# evidence (transcripts, screenshots) into .proof/ in the workspace - never
+# committed. This workflow validates the proof, renders the report, deploys it
+# to an access-controlled Vercel preview, and posts one PR comment (updated in
+# place) with the inline summary + the private report link.
+#
+# Required repo/org secrets (Rita provisions once in Vercel + GitHub):
+#   VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID  (a dedicated "proof-reports"
+#   Vercel project with Deployment Protection / Vercel Authentication ON, so
+#   preview URLs are team-only). If the secrets are absent the gate still
+#   validates and posts the summary; the report falls back to the CI artifact.
+name: sdlc-verification
+on:
+  # A PR comment does NOT re-trigger pull_request workflows, so a proof record
+  # posted after this gate ran red would leave the check stale. Two re-trigger
+  # paths exist: post-proof-record.sh ends by re-running the latest completed
+  # sdlc-verification run for the head (the normal path), and adding any label
+  # fires the `labeled` type as a manual fallback.
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, edited]
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    # The `secrets` context is NOT allowed in step-level `if:`; hoist the presence
+    # test into job-level env (which may read secrets) and gate the step on env.
+    env:
+      HAS_VERCEL: ${{ secrets.VERCEL_TOKEN != '' && secrets.VERCEL_ORG_ID != '' && secrets.VERCEL_PROJECT_ID != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }   # scope needs real history; a depth-1 diff fails
+      - name: Fetch the proof toolkit from stack
+        env:
+          STACK_TOKEN: ${{ secrets.STACK_TOKEN }}
+        run: |
+          if [ -z "${STACK_TOKEN:-}" ]; then
+            echo "::error::STACK_TOKEN unavailable - fork PRs cannot run the gates (GitHub withholds secrets from forks); a maintainer re-pushes the branch in-repo to run them"; exit 1; fi
+          git clone --depth 1 https://x-access-token:${STACK_TOKEN}@github.com/arni-labs/stack /tmp/stack || {
+            echo "::error::cannot reach arni-labs/stack for the proof toolkit"; exit 1; }
+          python3 -m pip install --quiet jsonschema || true
+      - name: Does this change need proof?
+        id: scope
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # proof is for behavior changes. A PR touching only docs/workflows/agent
+          # config has nothing to drive - it passes without proof. A FAILED diff is
+          # NOT "no code changed": it fails the gate loudly instead of skipping proof.
+          if ! git diff --name-only "${PR_BASE}...${PR_HEAD}" > /tmp/changed.txt; then
+            echo "::error::git diff ${PR_BASE}...${PR_HEAD} failed - cannot scope this PR, refusing to skip proof"
+            exit 1
+          fi
+          # NOTE: no blanket .md exclusion - in these repos agent instructions and
+          # skills (os-apps/**/SKILL.md, APP.md) are runtime behavior. Only genuinely
+          # inert paths are excluded.
+          CODE=$(grep -vE '^(\.github/|docs/|\.claude/|\.cursor/|README)' /tmp/changed.txt || true)
+          if [ -z "$CODE" ]; then echo "needs=false" >> "$GITHUB_OUTPUT"; echo "No app code changed - proof not required."; else echo "needs=true" >> "$GITHUB_OUTPUT"; fi
+      - name: Get the proof record from the PR (not committed)
+        if: steps.scope.outputs.needs == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          GH_REPO_FULL: ${{ github.repository }}
+          PR_GH_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          mkdir -p .proof
+          python3 - <<'PY'
+          import json, os, re, subprocess, sys
+          n=os.environ["PR_NUM"]; head=os.environ["PR_HEAD"]
+          body=subprocess.run(["gh","pr","view",n,"--json","comments","-q",".comments[].body"],
+                              capture_output=True,text=True).stdout
+          rec=None
+          for m in re.finditer(r"<!--\s*sdlc-proof-record\s*(\{.*?\})\s*-->", body, re.S):
+              try: cand=json.loads(m.group(1))
+              except Exception: continue
+              # the record must be FOR this head - the code being merged
+              if cand.get("commit") == head: rec=cand
+          if not rec:
+              print(f"::error::no proof record for head {head} on the PR - run the verify skill against the current head and post it (bash stack/proof/post-proof-record.sh)")
+              sys.exit(1)
+          json.dump(rec, open(".proof/proof.json","w"))
+          print("proof record for the current head loaded from the PR")
+          PY
+      - name: Validate proof (the gate)
+        if: steps.scope.outputs.needs == 'true'
+        run: |
+          FDIR=$(ls -d .agents/skills/verify-*/features 2>/dev/null | head -1)
+          # evidence must be URLs: CI has no local evidence files (never committed),
+          # so a record citing local paths is unverifiable here
+          python3 /tmp/stack/proof/validate.py .proof/proof.json --require-url-evidence ${FDIR:+--features-dir "$FDIR"}
+      - name: Render report + summary
+        if: steps.scope.outputs.needs == 'true'
+        run: |
+          python3 /tmp/stack/proof/render.py .proof/proof.json --out .proof/index.html --assets-dir .proof > .proof/summary.md
+          cat .proof/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Deploy report to access-controlled Vercel
+        id: vercel
+        # only when there is a report (scope needs proof) and Vercel is configured
+        if: ${{ steps.scope.outputs.needs == 'true' && env.HAS_VERCEL == 'true' }}
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          npm i -g vercel@latest >/dev/null 2>&1
+          URL=$(vercel deploy .proof --yes --token "$VERCEL_TOKEN" 2>/dev/null | tail -1)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: steps.scope.outputs.needs == 'true'
+        with:
+          name: proof-report
+          path: .proof/index.html
+      - name: Post PR comment (updated in place)
+        if: steps.scope.outputs.needs == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const summary = fs.readFileSync('.proof/summary.md','utf8');
+            const url = '${{ steps.vercel.outputs.url }}';
+            const link = url
+              ? `\n\n**[Open the full report (team-only)](${url})**`
+              : `\n\n_Full report: the \`proof-report\` artifact on this run (Vercel secrets not set)._`;
+            const body = "<!-- sdlc-verification -->\n" + summary + link;
+            const {data: comments} = await github.rest.issues.listComments({...context.repo, issue_number: context.issue.number});
+            const mine = comments.find(c => c.body.includes('<!-- sdlc-verification -->'));
+            if (mine) await github.rest.issues.updateComment({...context.repo, comment_id: mine.id, body});
+            else await github.rest.issues.createComment({...context.repo, issue_number: context.issue.number, body});
