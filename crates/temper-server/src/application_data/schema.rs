@@ -7,7 +7,16 @@ use temper_wasm_sdk::data::{
 
 use crate::entity_actor::EntityState;
 
-use super::{ApplicationDataInvocation, data_error, short_type};
+use super::{ApplicationDataInvocation, ModuleDataTarget, data_error, short_type};
+
+#[cfg(feature = "test-helpers")]
+/// Canonicalize committed entity state with the production module-data response path.
+pub fn canonicalize_entity_for_test(
+    schema: &ManifestEntityV1,
+    state: &EntityState,
+) -> Result<serde_json::Map<String, serde_json::Value>, ModuleDataError> {
+    canonical_entity_value(schema, state)
+}
 
 fn property_accepts(property: &ManifestPropertyV1, value: &serde_json::Value) -> bool {
     if value.is_null() {
@@ -309,15 +318,34 @@ impl ApplicationDataInvocation {
                 )
             }
         })?;
-        self.state
-            .check_verification_gate(&self.authority.tenant, short_type(entity_type))
-            .map_err(|_| {
-                data_error(
-                    ModuleDataErrorKind::VerificationFailed,
-                    "VerificationGateRejected",
-                    "entity specification is not verified",
-                )
-            })?;
+        let schema_available = match &self.authority.target {
+            ModuleDataTarget::TenantGlobal => self
+                .state
+                .check_verification_gate(&self.authority.tenant, short_type(entity_type))
+                .is_ok(),
+            ModuleDataTarget::Scoped(pin) => self
+                .state
+                .registry
+                .read()
+                .map(|registry| {
+                    registry
+                        .get_scoped_spec_at_digest(
+                            &self.authority.tenant,
+                            &pin.scope,
+                            &pin.bundle_digest,
+                            short_type(entity_type),
+                        )
+                        .is_some()
+                })
+                .unwrap_or(false),
+        };
+        if !schema_available {
+            return Err(data_error(
+                ModuleDataErrorKind::VerificationFailed,
+                "VerificationGateRejected",
+                "entity specification is not verified",
+            ));
+        }
         crate::odata::common::run_write_prechecks(
             &self.state,
             &self.authority.tenant,
@@ -325,7 +353,7 @@ impl ApplicationDataInvocation {
             entity_id,
             (action, operation),
             fields,
-            None,
+            self.authority.target.schema_pin(),
         )
         .await
         .map_err(|_| {

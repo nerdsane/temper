@@ -18,6 +18,8 @@ pub struct WasmArtifactInput {
     pub name: String,
     /// Immutable lowercase SHA-256 digest of module bytes.
     pub artifact_digest: String,
+    /// Optional canonical typed-data manifest digest bound into bundle identity.
+    pub data_binding_digest: Option<String>,
 }
 
 /// Optional pure migration module descriptor.

@@ -83,6 +83,7 @@ fn invocation(state: ServerState, binding: ModuleSdkManifest) -> Arc<Application
             "File".into(),
             SecurityContext::system(),
             binding,
+            super::super::ModuleDataTarget::TenantGlobal,
         ),
     )
 }

@@ -7,7 +7,9 @@ use serde_json::{Value, json};
 use tracing::{Instrument, Span, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use crate::application_data::{ApplicationDataInvocation, ModuleInvocationAuthority};
+use crate::application_data::{
+    ApplicationDataInvocation, ModuleDataTarget, ModuleInvocationAuthority,
+};
 use crate::entity_actor::{EntityResponse, EntityState};
 use crate::request_context::AgentContext;
 use crate::secrets::template::resolve_secret_templates;
@@ -164,6 +166,37 @@ struct WasmDispatchCtx<'a> {
     agent_ctx: &'a AgentContext,
     dispatch_idempotency_key: Option<&'a str>,
     mode: WasmDispatchMode,
+    schema_target: ModuleDataTarget,
+}
+
+#[derive(Clone)]
+struct ResolvedWasmModule {
+    hash: String,
+    data_binding: Option<temper_wasm_sdk::data::ModuleSdkManifest>,
+    scoped: bool,
+}
+
+fn module_data_target(
+    entity_state: &EntityState,
+    agent_ctx: &AgentContext,
+) -> Result<ModuleDataTarget, String> {
+    let actor_pin = entity_state
+        .fields
+        .get(crate::entity_actor::SCHEMA_PIN_FIELD)
+        .map(|value| {
+            serde_json::from_value::<
+                temper_runtime::persistence::schema_deployment::SchemaExecutionPin,
+            >(value.clone())
+            .map_err(|error| format!("scoped actor schema pin is invalid: {error}"))
+        })
+        .transpose()?;
+    match (actor_pin, agent_ctx.schema_pin.as_ref()) {
+        (None, None) => Ok(ModuleDataTarget::TenantGlobal),
+        (Some(actor), Some(context)) if &actor == context => Ok(ModuleDataTarget::Scoped(actor)),
+        (Some(_), None) => Err("scoped WASM dispatch is missing its host schema pin".into()),
+        (None, Some(_)) => Err("tenant-global WASM dispatch received a scoped schema pin".into()),
+        (Some(_), Some(_)) => Err("WASM dispatch schema pin does not match actor state".into()),
+    }
 }
 
 fn agent_ctx_for_composite_wasm_result(
@@ -466,16 +499,17 @@ impl crate::state::ServerState {
             req.entity_id,
             Some(req.action),
         );
+        let schema_target = module_data_target(req.entity_state, req.agent_ctx)?;
         let integrations = {
             let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
-            let spec = match req.agent_ctx.schema_pin.as_ref() {
-                Some(pin) => registry.get_scoped_spec_at_digest(
+            let spec = match &schema_target {
+                ModuleDataTarget::TenantGlobal => registry.get_spec(req.tenant, req.entity_type),
+                ModuleDataTarget::Scoped(pin) => registry.get_scoped_spec_at_digest(
                     req.tenant,
                     &pin.scope,
                     &pin.bundle_digest,
                     req.entity_type,
                 ),
-                None => registry.get_spec(req.tenant, req.entity_type),
             };
             spec.map(|spec| spec.integrations.clone())
                 .unwrap_or_default()
@@ -491,6 +525,7 @@ impl crate::state::ServerState {
             agent_ctx: req.agent_ctx,
             dispatch_idempotency_key: req.dispatch_idempotency_key,
             mode: req.mode,
+            schema_target,
         };
         let mut last_response: Option<EntityResponse> = None;
 
@@ -586,24 +621,65 @@ impl crate::state::ServerState {
         active_span.record("otel.name", format!("wasm:{module_name}").as_str());
         active_span.record("wasm.module", module_name.as_str());
 
-        let module_hash = {
-            let wasm_reg = self.wasm_module_registry.read().unwrap(); // ci-ok: infallible lock
-            wasm_reg
-                .get_hash(ctx.entity_ref.tenant, &module_name)
-                .map(|s| s.to_string())
+        let resolved_module = match &ctx.schema_target {
+            ModuleDataTarget::TenantGlobal => {
+                let wasm_reg = self.wasm_module_registry.read().unwrap(); // ci-ok: infallible lock
+                wasm_reg
+                    .get_hash(ctx.entity_ref.tenant, &module_name)
+                    .map(|hash| ResolvedWasmModule {
+                        hash: hash.to_string(),
+                        data_binding: wasm_reg
+                            .data_manifest(ctx.entity_ref.tenant, &module_name, hash)
+                            .cloned(),
+                        scoped: false,
+                    })
+            }
+            ModuleDataTarget::Scoped(pin) => {
+                let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
+                registry
+                    .get_scoped_module_at_digest(
+                        ctx.entity_ref.tenant,
+                        &pin.scope,
+                        &pin.bundle_digest,
+                        &module_name,
+                    )
+                    .and_then(|descriptor| {
+                        descriptor
+                            .artifact_digest
+                            .strip_prefix("sha256:")
+                            .map(|hash| ResolvedWasmModule {
+                                hash: hash.to_string(),
+                                data_binding: descriptor.data_binding.clone(),
+                                scoped: true,
+                            })
+                    })
+            }
         };
 
-        let Some(hash) = module_hash else {
+        let Some(resolved_module) = resolved_module else {
             return self
                 .handle_module_not_found(ctx, integration, &module_name)
                 .await;
         };
+        let hash = resolved_module.hash.clone();
         let cache_result = instrument_wasm_dispatch_phase_result(
             active_parent_span.clone(),
             ctx,
             &module_name,
             WASM_DISPATCH_PHASE_MODULE_CACHE,
-            self.ensure_wasm_module_cached(ctx.entity_ref.tenant, &module_name, &hash),
+            async {
+                if resolved_module.scoped {
+                    self.ensure_scoped_wasm_module_cached(
+                        ctx.entity_ref.tenant,
+                        &module_name,
+                        &hash,
+                    )
+                    .await
+                } else {
+                    self.ensure_wasm_module_cached(ctx.entity_ref.tenant, &module_name, &hash)
+                        .await
+                }
+            },
         )
         .await;
         if let Err(error) = cache_result {
@@ -816,11 +892,7 @@ impl crate::state::ServerState {
                     production_host_builder =
                         production_host_builder.with_secret_resolver(resolver);
                 }
-                let data_binding = self.wasm_module_registry.read().ok().and_then(|registry| {
-                    registry
-                        .data_manifest(ctx.entity_ref.tenant, &module_name, &hash)
-                        .cloned()
-                });
+                let data_binding = resolved_module.data_binding.clone();
                 if let (Some(binding), Some(security)) =
                     (data_binding.clone(), ctx.agent_ctx.security_ctx.clone())
                 {
@@ -833,6 +905,7 @@ impl crate::state::ServerState {
                         ctx.entity_ref.entity_type.to_string(),
                         security,
                         binding,
+                        ctx.schema_target.clone(),
                     );
                     let service = ApplicationDataInvocation::new(self.clone(), authority);
                     let (data, read, write) = service.callbacks();

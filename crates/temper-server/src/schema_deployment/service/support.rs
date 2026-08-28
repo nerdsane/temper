@@ -1,6 +1,12 @@
 use super::*;
 
 #[cfg(feature = "observe")]
+#[path = "support/data_binding.rs"]
+mod data_binding;
+#[cfg(feature = "observe")]
+use data_binding::verify_scoped_module_data_bindings;
+
+#[cfg(feature = "observe")]
 pub(super) async fn verify_bundle(
     state: &ServerState,
     record: &SchemaDeploymentRecord,
@@ -24,12 +30,15 @@ pub(super) async fn verify_bundle(
             return Ok(false);
         };
         if state
-            .ensure_wasm_module_cached(&tenant, module_name, hash)
+            .ensure_scoped_wasm_module_cached(&tenant, module_name, hash)
             .await
             .is_err()
         {
             return Ok(false);
         }
+    }
+    if !verify_scoped_module_data_bindings(state, record).await? {
+        return Ok(false);
     }
     if let (Some(module_name), Some(digest)) = (
         record.bundle.migration_module_name.as_deref(),
@@ -42,7 +51,7 @@ pub(super) async fn verify_bundle(
             return Ok(false);
         };
         if state
-            .ensure_wasm_module_cached(&tenant, module_name, hash)
+            .ensure_scoped_wasm_module_cached(&tenant, module_name, hash)
             .await
             .is_err()
         {

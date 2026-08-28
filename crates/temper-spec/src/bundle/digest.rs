@@ -7,6 +7,24 @@ use super::{
     ScopedBundleBudgets, WasmArtifactInput,
 };
 
+pub(super) fn module_data_closure_digest(
+    canonical_csdl: &str,
+    ioa_specs: &[CanonicalIoaSpec],
+) -> String {
+    let mut hasher = Sha256::new();
+    digest_frame(
+        &mut hasher,
+        b"contract",
+        b"temper.scoped-module-data-closure/v1",
+    );
+    digest_frame(&mut hasher, b"csdl", canonical_csdl.as_bytes());
+    for spec in ioa_specs {
+        digest_frame(&mut hasher, b"ioa_name", spec.entity_type.as_bytes());
+        digest_frame(&mut hasher, b"ioa_source", spec.canonical_source.as_bytes());
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "the digest boundary enumerates every authoritative v1 section explicitly"
@@ -50,6 +68,16 @@ pub(super) fn bundle_digest(
             b"wasm_digest",
             module.artifact_digest.as_bytes(),
         );
+        if let Some(binding_digest) = &module.data_binding_digest {
+            digest_frame(&mut hasher, b"wasm_data_binding_present", b"1");
+            digest_frame(
+                &mut hasher,
+                b"wasm_data_binding_digest",
+                binding_digest.as_bytes(),
+            );
+        } else {
+            digest_frame(&mut hasher, b"wasm_data_binding_present", b"0");
+        }
     }
     digest_migration(&mut hasher, migration);
     digest_budgets(&mut hasher, budgets);

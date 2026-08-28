@@ -1,5 +1,7 @@
 //! Governed transport-neutral schema deployment service and HTTP adapter.
 
+#[cfg(all(test, feature = "observe"))]
+mod scoped_module_data_e2e_tests;
 mod service;
 
 use axum::Router;

@@ -12,7 +12,7 @@ mod digest;
 mod types;
 
 use csdl::canonical_csdl;
-use digest::bundle_digest;
+use digest::{bundle_digest, module_data_closure_digest};
 pub use types::{
     BundleError, BundleErrorCode, CanonicalIoaSpec, IoaSourceInput, MigrationArtifactInput,
     PolicyArtifactInput, ScopedBundleBudgets, ScopedSpecBundle, ScopedSpecBundleInput,
@@ -87,6 +87,26 @@ impl ScopedSpecBundle {
             digest,
         })
     }
+}
+
+/// Compute the immutable generated-client closure for scoped CSDL and IOA inputs.
+///
+/// Module artifacts and the enclosing scoped bundle are deliberately excluded
+/// so guest compilation cannot create a digest cycle.
+pub fn scoped_module_data_closure_digest(
+    csdl_xml: &str,
+    ioa_sources: Vec<IoaSourceInput>,
+) -> Result<String, BundleError> {
+    if csdl_xml.len() > MAX_CSDL_BYTES {
+        return Err(BundleError::new(
+            BundleErrorCode::BudgetExceeded,
+            format!("CSDL exceeds v1 byte budget {MAX_CSDL_BYTES}"),
+        ));
+    }
+    let canonical_csdl = canonical_csdl(csdl_xml)?;
+    let ioa_specs = canonical_ioa_specs(ioa_sources)?;
+    validate_bundle_contracts(&canonical_csdl, &ioa_specs)?;
+    Ok(module_data_closure_digest(&canonical_csdl, &ioa_specs))
 }
 
 fn validate_bundle_contracts(
@@ -307,6 +327,9 @@ fn canonical_wasm_modules(
             ));
         }
         validate_artifact_digest("WASM module", &module.artifact_digest)?;
+        if let Some(binding_digest) = &module.data_binding_digest {
+            validate_artifact_digest("WASM module data binding", binding_digest)?;
+        }
     }
     modules.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(modules)

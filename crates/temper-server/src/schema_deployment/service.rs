@@ -242,12 +242,25 @@ impl<'a> GovernedSchemaDeploymentService<'a> {
                 .collect(),
             wasm_modules: request
                 .wasm_modules
-                .into_iter()
-                .map(|module| WasmArtifactInput {
-                    name: module.name,
-                    artifact_digest: module.artifact_digest,
+                .iter()
+                .map(|module| {
+                    let data_binding_digest = module
+                        .data_binding
+                        .as_ref()
+                        .map(|binding| {
+                            binding
+                                .binding_digest()
+                                .map(|digest| format!("sha256:{digest}"))
+                        })
+                        .transpose()
+                        .map_err(|error| ServiceError::new("invalid_bundle", error, false))?;
+                    Ok(WasmArtifactInput {
+                        name: module.name.clone(),
+                        artifact_digest: module.artifact_digest.clone(),
+                        data_binding_digest,
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, ServiceError>>()?,
             migration: request.migration.map(|migration| MigrationArtifactInput {
                 name: migration.name,
                 artifact_digest: migration.artifact_digest,
@@ -284,6 +297,32 @@ impl<'a> GovernedSchemaDeploymentService<'a> {
                 .iter()
                 .map(|module| (module.name.clone(), module.artifact_digest.clone()))
                 .collect(),
+            wasm_module_data_bindings: request
+                .wasm_modules
+                .iter()
+                .filter_map(|module| {
+                    module.data_binding.as_ref().map(|binding| {
+                        let manifest_json = serde_json::to_string(binding);
+                        let binding_digest = binding
+                            .binding_digest()
+                            .map(|digest| format!("sha256:{digest}"));
+                        (module.name.clone(), manifest_json, binding_digest)
+                    })
+                })
+                .map(|(name, manifest_json, binding_digest)| {
+                    Ok((
+                        name,
+                        temper_runtime::persistence::schema_deployment::ScopedModuleDataBinding {
+                            binding_digest: binding_digest.map_err(|error| {
+                                ServiceError::new("invalid_bundle", error, false)
+                            })?,
+                            canonical_manifest_json: manifest_json.map_err(|error| {
+                                ServiceError::new("invalid_bundle", error.to_string(), false)
+                            })?,
+                        },
+                    ))
+                })
+                .collect::<Result<std::collections::BTreeMap<_, _>, ServiceError>>()?,
             migration_module_name: compiled.migration().map(|migration| migration.name.clone()),
             migration_module_digest: compiled
                 .migration()

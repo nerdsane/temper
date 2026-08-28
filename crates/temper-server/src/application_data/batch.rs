@@ -5,7 +5,7 @@ use temper_wasm_sdk::data::{
     ModuleDataErrorKind,
 };
 
-use super::{ApplicationDataInvocation, data_error, internal_error, short_type};
+use super::{ApplicationDataInvocation, data_error};
 
 impl ApplicationDataInvocation {
     pub(super) async fn check_sequence(
@@ -15,11 +15,7 @@ impl ApplicationDataInvocation {
         expected: Option<u64>,
     ) -> Result<(), ModuleDataError> {
         if let Some(expected) = expected {
-            let current = self
-                .state
-                .get_tenant_entity_state(&self.authority.tenant, short_type(entity_type), entity_id)
-                .await
-                .map_err(internal_error)?;
+            let current = self.get_target_entity(entity_type, entity_id).await?;
             if current.state.sequence_nr != expected {
                 return Err(data_error(
                     ModuleDataErrorKind::Conflict,

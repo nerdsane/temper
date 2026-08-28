@@ -239,6 +239,7 @@ async fn persist_task_schema_bundle_in_scope(
                 )]),
                 cedar_policies: std::collections::BTreeMap::new(),
                 wasm_module_digests: std::collections::BTreeMap::new(),
+                wasm_module_data_bindings: std::collections::BTreeMap::new(),
                 migration_module_name: None,
                 migration_module_digest: None,
                 migration_abi_version: None,

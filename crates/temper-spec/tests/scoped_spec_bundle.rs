@@ -1,7 +1,7 @@
 use temper_spec::{
     BundleErrorCode, IoaSourceInput, MigrationArtifactInput, PolicyArtifactInput,
     ScopedBundleBudgets, ScopedSpecBundle, ScopedSpecBundleInput, WasmArtifactInput,
-    parse_automaton, parse_csdl,
+    parse_automaton, parse_csdl, scoped_module_data_closure_digest,
 };
 
 const ALPHA_IOA: &str = r#"
@@ -307,10 +307,12 @@ fn named_artifacts_are_ordered_and_line_endings_are_canonical() {
         WasmArtifactInput {
             name: "z-module".into(),
             artifact_digest: digest_b.clone(),
+            data_binding_digest: None,
         },
         WasmArtifactInput {
             name: "a-module".into(),
             artifact_digest: digest_a.clone(),
+            data_binding_digest: None,
         },
     ];
     first.migration = Some(MigrationArtifactInput {
@@ -334,10 +336,12 @@ fn named_artifacts_are_ordered_and_line_endings_are_canonical() {
         WasmArtifactInput {
             name: "a-module".into(),
             artifact_digest: digest_a,
+            data_binding_digest: None,
         },
         WasmArtifactInput {
             name: "z-module".into(),
             artifact_digest: digest_b,
+            data_binding_digest: None,
         },
     ];
     second.migration = first.migration.clone();
@@ -346,6 +350,60 @@ fn named_artifacts_are_ordered_and_line_endings_are_canonical() {
         ScopedSpecBundle::compile(first).unwrap(),
         ScopedSpecBundle::compile(second).unwrap()
     );
+}
+
+#[test]
+fn module_data_binding_digest_is_part_of_bundle_identity() {
+    let artifact_digest = format!("sha256:{}", "a".repeat(64));
+    let mut unbound = input(ORDERED_CSDL, vec![("Example.Alpha", ALPHA_IOA)]);
+    unbound.wasm_modules = vec![WasmArtifactInput {
+        name: "worker".into(),
+        artifact_digest: artifact_digest.clone(),
+        data_binding_digest: None,
+    }];
+    let mut bound = unbound.clone();
+    bound.wasm_modules[0].data_binding_digest = Some(format!("sha256:{}", "b".repeat(64)));
+
+    assert_ne!(
+        ScopedSpecBundle::compile(unbound).unwrap().digest(),
+        ScopedSpecBundle::compile(bound).unwrap().digest(),
+        "typed-data authority must be immutable bundle content"
+    );
+}
+
+#[test]
+fn module_data_closure_digest_is_canonical_and_excludes_artifacts() {
+    let ordered = scoped_module_data_closure_digest(
+        ORDERED_CSDL,
+        vec![
+            IoaSourceInput {
+                entity_type: "Example.Alpha".into(),
+                source: ALPHA_IOA.into(),
+            },
+            IoaSourceInput {
+                entity_type: "Example.Beta".into(),
+                source: BETA_IOA.into(),
+            },
+        ],
+    )
+    .unwrap();
+    let reordered = scoped_module_data_closure_digest(
+        REORDERED_CSDL,
+        vec![
+            IoaSourceInput {
+                entity_type: "Example.Beta".into(),
+                source: BETA_IOA.into(),
+            },
+            IoaSourceInput {
+                entity_type: "Example.Alpha".into(),
+                source: ALPHA_IOA.into(),
+            },
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(ordered, reordered);
+    assert!(ordered.starts_with("sha256:"));
 }
 
 #[test]

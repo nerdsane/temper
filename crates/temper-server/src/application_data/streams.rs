@@ -7,13 +7,13 @@ use temper_wasm_sdk::data::{
     ModuleDataBudgets, ModuleDataError, ModuleDataErrorKind,
 };
 
-use crate::request_context::AgentContext;
-
 use super::{ApplicationDataInvocation, data_error};
 
 #[path = "streams/descriptor_error.rs"]
 mod descriptor_error;
 use descriptor_error::{invalid_stream, stream_descriptor_error, stream_registry_unavailable};
+#[path = "streams/registry.rs"]
+mod registry;
 
 enum FileStream {
     Read {
@@ -43,76 +43,6 @@ pub(super) struct FileStreamRegistry {
     max_open: usize,
     max_bytes: u64,
     buffers: temper_wasm::StreamRegistry,
-}
-
-impl FileStreamRegistry {
-    pub(super) fn new(budgets: &ModuleDataBudgets) -> Self {
-        Self {
-            next_handle: 1,
-            streams: BTreeMap::new(),
-            max_open: budgets.max_open_streams as usize,
-            max_bytes: budgets.max_stream_bytes,
-            buffers: temper_wasm::StreamRegistry::new(),
-        }
-    }
-
-    fn insert(&mut self, stream: FileStream, bytes: Vec<u8>) -> Result<u32, ModuleDataError> {
-        if self.streams.len() >= self.max_open {
-            return Err(data_error(
-                ModuleDataErrorKind::BudgetExceeded,
-                "OpenStreamBudgetExceeded",
-                "File stream budget exhausted",
-            ));
-        }
-        let handle = self.next_handle;
-        self.next_handle = self.next_handle.checked_add(1).ok_or_else(|| {
-            data_error(
-                ModuleDataErrorKind::BudgetExceeded,
-                "StreamHandleExhausted",
-                "File stream handles exhausted",
-            )
-        })?;
-        self.buffers.register_stream(&handle.to_string(), bytes);
-        self.streams.insert(handle, stream);
-        Ok(handle)
-    }
-
-    fn read(&mut self, handle: u32, max: usize) -> Result<Vec<u8>, i32> {
-        if max == 0 {
-            return Ok(Vec::new());
-        }
-        let FileStream::Read { offset } = self.streams.get(&handle).ok_or(-3)? else {
-            return Err(-3);
-        };
-        let offset = *offset;
-        let stream_id = handle.to_string();
-        let bytes = self.buffers.get_stream(&stream_id).ok_or(-3)?;
-        if offset == bytes.len() {
-            self.take(handle);
-            return Ok(Vec::new());
-        }
-        let end = offset.saturating_add(max).min(bytes.len());
-        if end as u64 > self.max_bytes {
-            return Err(-4);
-        }
-        let chunk = bytes[offset..end].to_vec();
-        if let Some(FileStream::Read { offset }) = self.streams.get_mut(&handle) {
-            *offset = end;
-        }
-        Ok(chunk)
-    }
-
-    fn write(&mut self, handle: u32, bytes: &[u8]) -> Result<usize, i32> {
-        let FileStream::Write { committing, .. } = self.streams.get(&handle).ok_or(-3)? else {
-            return Err(-3);
-        };
-        if *committing {
-            return Err(-3);
-        }
-        self.buffers
-            .append_stream_bounded(&handle.to_string(), bytes, self.max_bytes as usize)
-            .ok_or(-4)
-    }
 }
 
 impl ApplicationDataInvocation {
@@ -158,7 +88,7 @@ impl ApplicationDataInvocation {
             .state
             .stream_descriptor_contract_activated(
                 &self.authority.tenant,
-                None,
+                self.authority.target.schema_pin(),
                 current_runtime_type,
             )
             .await
@@ -170,11 +100,7 @@ impl ApplicationDataInvocation {
                 "Stream descriptor admission is not activated for this tenant schema",
             ));
         }
-        let file_state = self
-            .state
-            .get_tenant_entity_state(&self.authority.tenant, current_runtime_type, &file_id)
-            .await
-            .map_err(super::internal_error)?;
+        let file_state = self.get_target_entity(&file_type, &file_id).await?;
         let (subject_type, subject_id) = if let Some(version_id) = &version_id {
             let version_type = current_capability
                 .version_entity_type
@@ -189,7 +115,11 @@ impl ApplicationDataInvocation {
                 })?;
             if !self
                 .state
-                .stream_descriptor_contract_activated(&self.authority.tenant, None, version_type)
+                .stream_descriptor_contract_activated(
+                    &self.authority.tenant,
+                    self.authority.target.schema_pin(),
+                    version_type,
+                )
                 .await
                 .map_err(stream_descriptor_error)?
             {
@@ -205,9 +135,27 @@ impl ApplicationDataInvocation {
         };
         let descriptor = self
             .state
-            .resolve_stream_descriptor(&self.authority.tenant, subject_type, subject_id)
+            .resolve_stream_descriptor_at_target(
+                &self.authority.tenant,
+                subject_type,
+                subject_id,
+                self.authority.target.schema_pin(),
+            )
             .await
             .map_err(stream_descriptor_error)?;
+        self.state
+            .validate_stream_descriptor_capability(
+                &self.authority.tenant,
+                self.authority.target.schema_pin(),
+                &descriptor,
+            )
+            .map_err(|error| {
+                data_error(
+                    ModuleDataErrorKind::SchemaMismatch,
+                    "StreamDescriptorCapabilityMismatch",
+                    &error,
+                )
+            })?;
         if version_id.is_some() {
             let parent = descriptor.authorization_parent();
             if descriptor.mutability() != temper_runtime::persistence::StreamMutability::Immutable
@@ -323,12 +271,7 @@ impl ApplicationDataInvocation {
             .lock()
             .map_err(|_| stream_registry_unavailable())?
             .begin_commit(handle)?;
-        let agent = AgentContext {
-            security_ctx: Some(self.authority.security.clone()),
-            agent_id: Some(self.authority.security.principal.id.clone()),
-            expected_entity_sequence: attempt.expected_sequence,
-            ..AgentContext::default()
-        };
+        let agent = self.operation_agent_context(attempt.expected_sequence);
         let result = async {
             self.check_sequence(
                 &attempt.entity_type,
