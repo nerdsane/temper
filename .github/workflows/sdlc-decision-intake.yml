@@ -1,0 +1,85 @@
+# Owner decision intake: event-driven pickup of a human ruling on a stalled PR.
+# Vendor as .github/workflows/sdlc-decision-intake.yml.
+#
+# When the convergence breaker stalls a PR, the owner responds - whenever they
+# get to it, days later is fine - with a PR comment starting "DECISION:". This
+# workflow fires on that comment event (no polling, no agent required, and
+# issue_comment workflows run the DEFAULT branch's code, so a PR cannot tamper
+# with it), records the ruling in the PR body's standing decisions, and adds the
+# converge-ack label - which itself re-triggers the review gate. The pipeline
+# resumes with the ruling in the intent every reviewer reads.
+name: sdlc-decision-intake
+on:
+  issue_comment:
+    types: [created]
+concurrency:
+  group: sdlc-intake-${{ github.event.issue.number }}
+  cancel-in-progress: false   # serialize: concurrent rulings must not clobber
+permissions:
+  pull-requests: write
+  actions: write        # re-run the review gate directly: GITHUB_TOKEN-created
+                        # label events are suppressed by GitHub, so the labeled
+                        # trigger alone would never fire
+jobs:
+  intake:
+    # only PR comments, only from the repo's own people, only DECISION: comments
+    if: >-
+      github.event.issue.pull_request != null &&
+      (startsWith(github.event.comment.body, 'DECISION:') || startsWith(github.event.comment.body, 'RESOLVE:'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record the ruling and re-arm the gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUM: ${{ github.event.issue.number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          COMMENT_URL: ${{ github.event.comment.html_url }}
+          STACK_TOKEN: ${{ secrets.STACK_TOKEN }}
+        run: |
+          set -euo pipefail
+          # RESOLVE needs only a re-run: the adjudication step reads comments
+          # LIVE, so replaying the old event payload is fine. DECISION changes
+          # the PR BODY (the intent reviewers read) and a rerun replays the
+          # ORIGINAL payload - so the body edit must fire a real `edited` event,
+          # which requires a PAT (GITHUB_TOKEN-created events are suppressed).
+          if [[ "$COMMENT_BODY" == RESOLVE:* ]]; then
+            HEAD=$(gh pr view "$PR_NUM" --json headRefOid -q .headRefOid)
+            RUN=$(gh run list --workflow sdlc-review --limit 200 --json databaseId,headSha,status -q "[.[] | select(.headSha == \"$HEAD\" and .status == \"completed\")][0].databaseId" || true)
+            if [ -n "${RUN:-}" ] && [ "$RUN" != "null" ]; then
+              gh run rerun "$RUN" && echo "review gate re-run - RESOLVE comments are read live"
+            else
+              echo "no completed review run for this head - RESOLVE applies on the next run"
+            fi
+            exit 0
+          fi
+          if [ -z "${STACK_TOKEN:-}" ]; then
+            echo "::error::STACK_TOKEN is not set - the body edit would use GITHUB_TOKEN, whose events are suppressed, and the gate would silently never re-arm"
+            exit 1
+          fi
+          export GH_TOKEN="$STACK_TOKEN"
+          gh pr view "$PR_NUM" --json body -q .body > /tmp/body.md
+          python3 - <<'PY'
+          import os
+          body = open("/tmp/body.md").read()
+          ruling = os.environ["COMMENT_BODY"].removeprefix("DECISION:").strip()
+          author = os.environ["COMMENT_AUTHOR"]
+          url = os.environ["COMMENT_URL"]
+          entry = f"\n\n**Owner ruling** (by @{author}, [source]({url})): {ruling}"
+          header = "## Standing design decisions"
+          i = body.find(header)
+          if i >= 0:
+              # insert at the end of the standing-decisions SECTION (before the
+              # next ## heading), not at the end of the whole body
+              j = body.find("\n## ", i + len(header))
+              body = body + entry if j < 0 else body[:j] + entry + "\n" + body[j:]
+          else:
+              body += f"\n\n{header} (reviewers: judged and held - do not re-raise without a NEW failure scenario)\n{entry}"
+          open("/tmp/body.md","w").write(body)
+          PY
+          gh pr edit "$PR_NUM" --body-file /tmp/body.md
+          gh label create converge-ack -d "owner decided after convergence stall - re-arms the review gate" -c "0e8a16" 2>/dev/null || true
+          gh pr edit "$PR_NUM" --add-label converge-ack
+          gh pr comment "$PR_NUM" --body "Ruling recorded in the standing decisions; review gate re-armed. The next panel round reads it as intent."
+          echo "body edited with PAT - the edited event re-runs the gate with the fresh payload"
