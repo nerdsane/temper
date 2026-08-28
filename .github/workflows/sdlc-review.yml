@@ -111,7 +111,11 @@ jobs:
           # a quoted RESOLVE: mid-comment is discussion, not a ruling
           for c in comments:
               if not c.strip().startswith("RESOLVE:"): continue
-              for m in re.finditer(r"^RESOLVE:\s*(\S+)\s+(.+)$", c, re.M):
+              # rulings are the comment's leading RESOLVE: lines only - the first
+              # other line ends them, so quoted syntax below cannot adjudicate
+              for line in c.strip().splitlines():
+                  m = re.match(r"RESOLVE:\s*(\S+)\s+(.+)$", line)
+                  if not m: break
                   resolutions[m.group(1)]=m.group(2).strip()
           if resolutions:
               r=json.load(open(".review/review.json")); hit=0

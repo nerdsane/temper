@@ -1,4 +1,4 @@
-# Decisions & Tradeoffs
+## Decisions & Tradeoffs
 
 **Decision:** vendor byte-identical workflows rather than adapt them per repo.
 **Came up because:** temper has heavy kernel CI already.
