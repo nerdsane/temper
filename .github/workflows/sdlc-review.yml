@@ -27,7 +27,7 @@ jobs:
   review:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
         with: { fetch-depth: 0 }
       - name: Fetch the review toolkit from stack
         env:
@@ -100,11 +100,19 @@ jobs:
           import json, os, re, subprocess
           n=os.environ["PR_NUM"]
           import os as _os
-          body=subprocess.run(["gh","api",f"repos/{_os.environ.get('GITHUB_REPOSITORY','')}/issues/{n}/comments",
-                              "--paginate","-q",".[].body"],capture_output=True,text=True).stdout
+          raw=subprocess.run(["gh","api",f"repos/{_os.environ.get('GITHUB_REPOSITORY','')}/issues/{n}/comments",
+                              "--paginate","-q","[.[].body]"],capture_output=True,text=True).stdout
+          comments=[]
+          for chunk in raw.strip().splitlines():
+              try: comments += json.loads(chunk)
+              except Exception: pass
           resolutions={}
-          for m in re.finditer(r"^RESOLVE:\s*(\S+)\s+(.+)$", body, re.M):
-              resolutions[m.group(1)]=m.group(2).strip()
+          # an adjudication comment BEGINS with RESOLVE: (same contract as intake) -
+          # a quoted RESOLVE: mid-comment is discussion, not a ruling
+          for c in comments:
+              if not c.strip().startswith("RESOLVE:"): continue
+              for m in re.finditer(r"^RESOLVE:\s*(\S+)\s+(.+)$", c, re.M):
+                  resolutions[m.group(1)]=m.group(2).strip()
           if resolutions:
               r=json.load(open(".review/review.json")); hit=0
               for f in r.get("findings",[]):
@@ -129,11 +137,15 @@ jobs:
           CHANGED=$(git diff --name-only "origin/${PR_BASE_REF}...HEAD") \
             || { echo "::error::cannot diff against base - failing closed"; exit 1; }
           if grep -q '^\.github/workflows/' <<<"$CHANGED"; then
+            gh pr merge "$PR_NUM" --disable-auto 2>/dev/null || true
+            gh label create human-review --color D93F0B --description "SDLC: routed to a human decision" 2>/dev/null || true
             gh pr edit "$PR_NUM" --add-label human-review 2>/dev/null || true
             echo "workflow files changed - a human presses merge"; exit 0; fi
           if [ "$RISK" = "low" ]; then
             gh pr merge "$PR_NUM" --squash --auto && echo "auto-merge enabled: panel risk low"
           else
+            # an earlier low-risk run may have armed auto-merge; revoke it
+            gh pr merge "$PR_NUM" --disable-auto 2>/dev/null || true
             gh pr edit "$PR_NUM" --add-label human-review 2>/dev/null || true
             echo "panel risk $RISK - a human presses merge"
           fi

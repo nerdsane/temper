@@ -31,7 +31,7 @@ jobs:
     env:
       HAS_VERCEL: ${{ secrets.VERCEL_TOKEN != '' && secrets.VERCEL_ORG_ID != '' && secrets.VERCEL_PROJECT_ID != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
         with: { fetch-depth: 0 }   # scope needs real history; a depth-1 diff fails
       - name: Fetch the proof toolkit from stack
         env:
@@ -68,8 +68,6 @@ jobs:
           PR_NUM: ${{ github.event.pull_request.number }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
-          GH_REPO_FULL: ${{ github.repository }}
-          PR_GH_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           mkdir -p .proof
           python3 - <<'PY'
