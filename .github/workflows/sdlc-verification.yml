@@ -60,15 +60,6 @@ jobs:
           # skills (os-apps/**/SKILL.md, APP.md) are runtime behavior. Only genuinely
           # inert paths are excluded.
           CODE=$(grep -vE '^(\.github/workflows/|docs/|\.claude/|\.cursor/|README)' /tmp/changed.txt || true)
-          if [ -n "$CODE" ]; then
-            # formatting-only churn has nothing to drive - but only in languages
-            # where whitespace is inert (never python/yaml/make, where it is behavior)
-            INSENSITIVE=$(grep -E '\.(rs|toml|json|lock)$' <<<"$CODE" || true)
-            if [ "$INSENSITIVE" = "$CODE" ] && git diff --ignore-all-space --quiet "${PR_BASE}...${PR_HEAD}" -- $CODE; then
-              CODE=""
-              echo "In-scope changes are whitespace-only - proof not required."
-            fi
-          fi
           if [ -z "$CODE" ]; then echo "needs=false" >> "$GITHUB_OUTPUT"; echo "No app code changed - proof not required."; else echo "needs=true" >> "$GITHUB_OUTPUT"; fi
       - name: Get the proof record from the PR (not committed)
         if: steps.scope.outputs.needs == 'true'

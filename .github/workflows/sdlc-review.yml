@@ -136,12 +136,12 @@ jobs:
           CHANGED=$(git diff --name-only "origin/${PR_BASE_REF}...HEAD") \
             || { echo "::error::cannot diff against base - failing closed"; exit 1; }
           disarm() {
-            # revoking a stale auto-merge must not fail silently - only
-            # "nothing was armed" is a benign failure
-            local out
-            if out=$(gh pr merge "$PR_NUM" --disable-auto 2>&1); then return 0; fi
-            if grep -qi "auto.merge" <<<"$out"; then return 0; fi
-            echo "::error::could not revoke auto-merge: $out"; exit 1
+            # deterministic revoke: skip when nothing is armed, and any failure
+            # to revoke an ARMED auto-merge is fatal - no message matching
+            local armed
+            armed=$(gh pr view "$PR_NUM" --json autoMergeRequest -q '.autoMergeRequest != null')
+            [ "$armed" = "true" ] || return 0
+            gh pr merge "$PR_NUM" --disable-auto || { echo "::error::auto-merge is armed and could not be revoked"; exit 1; }
           }
           if grep -q '^\.github/workflows/' <<<"$CHANGED"; then
             disarm
