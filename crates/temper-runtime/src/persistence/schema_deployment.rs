@@ -1,9 +1,11 @@
 //! Durable semantic contract for task-scoped schema deployment.
 
+mod bootstrap;
 mod journal_identity;
 mod operation;
 mod store;
 
+pub use bootstrap::*;
 pub use journal_identity::*;
 pub use operation::*;
 pub use store::SchemaDeploymentStore;
@@ -406,6 +408,9 @@ pub enum SchemaDeploymentStoreError {
     /// One key was reused with different canonical input.
     #[error("idempotency_conflict")]
     IdempotencyConflict,
+    /// Another bootstrap operation already owns the exact scoped target.
+    #[error("bootstrap_target_conflict")]
+    BootstrapTargetConflict,
     /// The requested immutable deployment does not exist.
     #[error("schema deployment not found")]
     NotFound,

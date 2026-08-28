@@ -65,6 +65,90 @@ pub trait SchemaDeploymentStore: Send + Sync + 'static {
         Output = Result<Option<SchemaActivePointer>, SchemaDeploymentStoreError>,
     > + Send;
 
+    /// Atomically resolve an activation, reserve caller idempotency, and own one target.
+    fn reserve_schema_bootstrap(
+        &self,
+        command: ReserveSchemaBootstrap,
+    ) -> impl std::future::Future<
+        Output = Result<ReserveSchemaBootstrapOutcome, SchemaDeploymentStoreError>,
+    > + Send {
+        let _ = command;
+        async {
+            Err(SchemaDeploymentStoreError::BackendUnavailable(
+                "schema bootstrap storage is unavailable".into(),
+            ))
+        }
+    }
+
+    /// Read one exact bootstrap operation for replay or recovery.
+    fn get_schema_bootstrap(
+        &self,
+        tenant: &str,
+        caller_authority: &str,
+        idempotency_key: &str,
+    ) -> impl std::future::Future<
+        Output = Result<Option<SchemaBootstrapOperation>, SchemaDeploymentStoreError>,
+    > + Send {
+        let _ = (tenant, caller_authority, idempotency_key);
+        async { Ok(None) }
+    }
+
+    /// List incomplete bootstrap operations in stable key order.
+    fn list_incomplete_schema_bootstraps(
+        &self,
+        limit: usize,
+    ) -> impl std::future::Future<
+        Output = Result<Vec<SchemaBootstrapOperation>, SchemaDeploymentStoreError>,
+    > + Send {
+        let _ = limit;
+        async { Ok(Vec::new()) }
+    }
+
+    /// Record the authoritative creation sequence with compare-and-set semantics.
+    fn record_schema_bootstrap_created(
+        &self,
+        command: RecordSchemaBootstrapCreated,
+    ) -> impl std::future::Future<
+        Output = Result<SchemaBootstrapOperation, SchemaDeploymentStoreError>,
+    > + Send {
+        let _ = command;
+        async {
+            Err(SchemaDeploymentStoreError::BackendUnavailable(
+                "schema bootstrap storage is unavailable".into(),
+            ))
+        }
+    }
+
+    /// Persist an exact initial-action rejection before receipt finalization.
+    fn record_schema_bootstrap_action_failure(
+        &self,
+        command: RecordSchemaBootstrapActionFailure,
+    ) -> impl std::future::Future<
+        Output = Result<SchemaBootstrapOperation, SchemaDeploymentStoreError>,
+    > + Send {
+        let _ = command;
+        async {
+            Err(SchemaDeploymentStoreError::BackendUnavailable(
+                "schema bootstrap storage is unavailable".into(),
+            ))
+        }
+    }
+
+    /// Persist the exact terminal receipt with compare-and-set semantics.
+    fn complete_schema_bootstrap(
+        &self,
+        command: CompleteSchemaBootstrap,
+    ) -> impl std::future::Future<
+        Output = Result<SchemaBootstrapOperation, SchemaDeploymentStoreError>,
+    > + Send {
+        let _ = command;
+        async {
+            Err(SchemaDeploymentStoreError::BackendUnavailable(
+                "schema bootstrap storage is unavailable".into(),
+            ))
+        }
+    }
+
     /// Atomically create one immutable migration job and idempotency mapping.
     fn create_schema_migration(
         &self,

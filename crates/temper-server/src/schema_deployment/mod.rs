@@ -8,6 +8,7 @@ use axum::Router;
 use axum::routing::{get, post};
 
 pub(crate) use service::GovernedSchemaDeploymentService;
+pub(crate) use service::bootstrap::BootstrapInvocationIdentity;
 
 /// Versioned HTTP routes backed by the shared governed service.
 pub(crate) fn router() -> Router<crate::state::ServerState> {

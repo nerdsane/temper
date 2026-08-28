@@ -2,6 +2,8 @@
 
 #[macro_use]
 mod core_methods;
+#[macro_use]
+mod bootstrap_methods;
 mod helpers;
 #[macro_use]
 mod pointer_methods;
@@ -18,17 +20,20 @@ use std::collections::BTreeMap;
 
 use temper_runtime::persistence::schema_deployment::{
     ActivateSchemaBundle, ActivateSchemaBundleOutcome, ClaimSchemaVerification,
-    ClaimSchemaVerificationOutcome, CommitSchemaMigrationBatch, CreateSchemaMigration,
-    CreateSchemaMigrationOutcome, ReserveSchemaMigrationRetry, RetireSchemaBundle,
-    RetireSchemaBundleOutcome, SchemaActivePointer, SchemaDeploymentRecord, SchemaDeploymentStatus,
-    SchemaDeploymentStore, SchemaDeploymentStoreError, SchemaMigrationBatchReceipt,
-    SchemaMigrationJob, SchemaMigrationRetryReservation, SchemaMigrationShadowRow,
-    SchemaMigrationStatus, SchemaMigrationValidationReceipt, SchemaOperationIdentity, SchemaScope,
-    SchemaVerificationReceipt, SchemaVerificationReplay, StreamPublicationFence,
-    SubmitSchemaBundle, SubmitSchemaBundleOutcome,
+    ClaimSchemaVerificationOutcome, CommitSchemaMigrationBatch, CompleteSchemaBootstrap,
+    CreateSchemaMigration, CreateSchemaMigrationOutcome, RecordSchemaBootstrapActionFailure,
+    RecordSchemaBootstrapCreated, ReserveSchemaBootstrap, ReserveSchemaBootstrapOutcome,
+    ReserveSchemaMigrationRetry, RetireSchemaBundle, RetireSchemaBundleOutcome,
+    SchemaActivePointer, SchemaBootstrapOperation, SchemaBootstrapStatus, SchemaDeploymentRecord,
+    SchemaDeploymentStatus, SchemaDeploymentStore, SchemaDeploymentStoreError,
+    SchemaMigrationBatchReceipt, SchemaMigrationJob, SchemaMigrationRetryReservation,
+    SchemaMigrationShadowRow, SchemaMigrationStatus, SchemaMigrationValidationReceipt,
+    SchemaOperationIdentity, SchemaScope, SchemaVerificationReceipt, SchemaVerificationReplay,
+    StreamPublicationFence, SubmitSchemaBundle, SubmitSchemaBundleOutcome,
 };
 use temper_runtime::persistence::schema_deployment::{
-    SchemaExecutionPin, scoped_journal_pin_suffix,
+    SchemaExecutionPin, scoped_journal_pin_suffix, validate_schema_bootstrap_failure,
+    validate_schema_bootstrap_receipt, validate_schema_bootstrap_reservation,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -51,6 +56,14 @@ pub enum SimSchemaFaultPoint {
     RetireBundle,
     /// Fail before a migration job and its idempotency record commit.
     CreateMigration,
+    /// Fail before a bootstrap reservation and target claim commit.
+    ReserveBootstrap,
+    /// Fail before creation progress commits.
+    RecordBootstrapCreated,
+    /// Fail before durable initial-action rejection evidence commits.
+    RecordBootstrapActionFailure,
+    /// Fail before a bootstrap receipt commits.
+    CompleteBootstrap,
     /// Fail before a migration retry reservation commits.
     ReserveMigrationRetry,
     /// Fail before a migration lease and fence commit.
@@ -71,12 +84,16 @@ type DeploymentKey = (String, SchemaScope, String);
 type ScopeKey = (String, SchemaScope);
 type OperationIdempotencyKey = (String, String, String);
 type OperationIdempotencyValue = (String, String, Option<String>);
+type BootstrapOperationKey = (String, String, String);
+type BootstrapTargetKey = (String, SchemaExecutionPin, String, String);
 
 #[derive(Debug, Default)]
 pub(super) struct SimSchemaDeploymentState {
     deployments: BTreeMap<DeploymentKey, SchemaDeploymentRecord>,
     idempotency: BTreeMap<OperationIdempotencyKey, OperationIdempotencyValue>,
     active: BTreeMap<ScopeKey, SchemaActivePointer>,
+    bootstraps: BTreeMap<BootstrapOperationKey, SchemaBootstrapOperation>,
+    bootstrap_targets: BTreeMap<BootstrapTargetKey, BootstrapOperationKey>,
     verification_receipts:
         BTreeMap<(String, SchemaScope, String, String), SchemaVerificationReceipt>,
     migrations: BTreeMap<(String, String), SchemaMigrationJob>,
@@ -228,6 +245,7 @@ impl SimEventStore {
 
 impl SchemaDeploymentStore for SimEventStore {
     impl_schema_core_methods!();
+    impl_schema_bootstrap_methods!();
     impl_schema_migration_batch_methods!();
     impl_schema_migration_cutover_methods!();
 }

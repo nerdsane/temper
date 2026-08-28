@@ -16,6 +16,8 @@ mod telemetry;
 /// Canonicalize committed entity state with the production module-data response path.
 pub use schema::canonicalize_entity_for_test;
 
+pub(crate) use schema::canonical_manifest_entity_value_from_parts;
+pub(crate) use schema::{validate_manifest_action_params, validate_manifest_entity_object};
 pub(crate) use service::GovernedApplicationDataService;
 
 use temper_wasm_sdk::data::{

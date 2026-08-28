@@ -94,6 +94,117 @@ impl SchemaDeploymentStoreDyn for TenantStoreRouter {
         SchemaDeploymentStore::retire_schema_bundle(&store, command).await
     }
 
+    async fn reserve_schema_bootstrap(
+        &self,
+        command: ReserveSchemaBootstrap,
+    ) -> Result<ReserveSchemaBootstrapOutcome, SchemaDeploymentStoreError> {
+        let store = self
+            .store_for_tenant(&command.tenant)
+            .await
+            .map_err(|error| SchemaDeploymentStoreError::BackendUnavailable(error.to_string()))?;
+        SchemaDeploymentStore::reserve_schema_bootstrap(&store, command).await
+    }
+
+    async fn get_schema_bootstrap(
+        &self,
+        tenant: &str,
+        caller_authority: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<SchemaBootstrapOperation>, SchemaDeploymentStoreError> {
+        let store = self
+            .store_for_tenant(tenant)
+            .await
+            .map_err(|error| SchemaDeploymentStoreError::BackendUnavailable(error.to_string()))?;
+        SchemaDeploymentStore::get_schema_bootstrap(
+            &store,
+            tenant,
+            caller_authority,
+            idempotency_key,
+        )
+        .await
+    }
+
+    async fn list_incomplete_schema_bootstraps(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<SchemaBootstrapOperation>, SchemaDeploymentStoreError> {
+        if limit == 0 {
+            return Err(SchemaDeploymentStoreError::InvalidInput(
+                "bootstrap list budget must be positive".into(),
+            ));
+        }
+        let mut tenants = self
+            .list_tenants()
+            .await
+            .map_err(|error| SchemaDeploymentStoreError::BackendUnavailable(error.to_string()))?;
+        tenants.push("temper-system".into());
+        tenants.sort();
+        tenants.dedup();
+        let mut operations = Vec::new();
+        for tenant in tenants {
+            if operations.len() == limit {
+                break;
+            }
+            let store = self.store_for_tenant(&tenant).await.map_err(|error| {
+                SchemaDeploymentStoreError::BackendUnavailable(error.to_string())
+            })?;
+            operations.extend(
+                SchemaDeploymentStore::list_incomplete_schema_bootstraps(
+                    &store,
+                    limit - operations.len(),
+                )
+                .await?,
+            );
+        }
+        operations.sort_by(|left, right| {
+            (
+                &left.command.tenant,
+                &left.command.caller_authority,
+                &left.command.idempotency_key,
+            )
+                .cmp(&(
+                    &right.command.tenant,
+                    &right.command.caller_authority,
+                    &right.command.idempotency_key,
+                ))
+        });
+        operations.truncate(limit);
+        Ok(operations)
+    }
+
+    async fn record_schema_bootstrap_created(
+        &self,
+        command: RecordSchemaBootstrapCreated,
+    ) -> Result<SchemaBootstrapOperation, SchemaDeploymentStoreError> {
+        let store = self
+            .store_for_tenant(&command.tenant)
+            .await
+            .map_err(|error| SchemaDeploymentStoreError::BackendUnavailable(error.to_string()))?;
+        SchemaDeploymentStore::record_schema_bootstrap_created(&store, command).await
+    }
+
+    async fn record_schema_bootstrap_action_failure(
+        &self,
+        command: RecordSchemaBootstrapActionFailure,
+    ) -> Result<SchemaBootstrapOperation, SchemaDeploymentStoreError> {
+        let store = self
+            .store_for_tenant(&command.tenant)
+            .await
+            .map_err(|error| SchemaDeploymentStoreError::BackendUnavailable(error.to_string()))?;
+        SchemaDeploymentStore::record_schema_bootstrap_action_failure(&store, command).await
+    }
+
+    async fn complete_schema_bootstrap(
+        &self,
+        command: CompleteSchemaBootstrap,
+    ) -> Result<SchemaBootstrapOperation, SchemaDeploymentStoreError> {
+        let store = self
+            .store_for_tenant(&command.tenant)
+            .await
+            .map_err(|error| SchemaDeploymentStoreError::BackendUnavailable(error.to_string()))?;
+        SchemaDeploymentStore::complete_schema_bootstrap(&store, command).await
+    }
+
     async fn create_schema_migration(
         &self,
         command: CreateSchemaMigration,

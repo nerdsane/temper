@@ -49,7 +49,7 @@ fn embedded_migration_streams_preserve_every_published_boundary() {
             .iter()
             .map(|migration| migration.version)
             .collect::<Vec<_>>(),
-        (1..=13).collect::<Vec<_>>()
+        (1..=14).collect::<Vec<_>>()
     );
     assert_eq!(
         LEGACY_UPSTREAM_MIGRATOR

@@ -192,40 +192,7 @@ impl ApplicationDataInvocation {
                     "entity type is absent from the bound schema",
                 )
             })?;
-        for (name, field_value) in value {
-            let property = entity
-                .properties
-                .iter()
-                .find(|property| property.canonical_name == *name)
-                .ok_or_else(|| {
-                    data_error(
-                        ModuleDataErrorKind::SchemaMismatch,
-                        "UnknownProperty",
-                        "property is absent from the bound schema",
-                    )
-                })?;
-            if !property_accepts(property, field_value) {
-                return Err(data_error(
-                    ModuleDataErrorKind::SchemaMismatch,
-                    "PropertyTypeMismatch",
-                    "property value does not match the bound schema",
-                ));
-            }
-        }
-        if require_non_nullable
-            && entity.properties.iter().any(|property| {
-                !property.nullable
-                    && property.default_value.is_none()
-                    && !value.contains_key(&property.canonical_name)
-            })
-        {
-            return Err(data_error(
-                ModuleDataErrorKind::SchemaMismatch,
-                "MissingRequiredProperty",
-                "required property is absent",
-            ));
-        }
-        Ok(())
+        validate_manifest_entity_object(entity, value, require_non_nullable)
     }
 
     pub(super) fn validate_action_params(
@@ -234,57 +201,20 @@ impl ApplicationDataInvocation {
         action: &str,
         params: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), ModuleDataError> {
-        let action = self
+        let entity = self
             .authority
             .binding
             .entities
             .iter()
             .find(|entity| entity.entity_type == entity_type)
-            .and_then(|entity| {
-                entity
-                    .actions
-                    .iter()
-                    .find(|candidate| candidate.canonical_name == action)
-            })
             .ok_or_else(|| {
                 data_error(
                     ModuleDataErrorKind::SchemaMismatch,
-                    "UnknownAction",
-                    "action is absent from the bound schema",
+                    "UnknownEntityType",
+                    "entity type is absent from the bound schema",
                 )
             })?;
-        for (name, value) in params {
-            let parameter = action
-                .parameters
-                .iter()
-                .find(|parameter| parameter.canonical_name == *name)
-                .ok_or_else(|| {
-                    data_error(
-                        ModuleDataErrorKind::SchemaMismatch,
-                        "UnknownActionParameter",
-                        "action parameter is absent from the bound schema",
-                    )
-                })?;
-            if !property_accepts(parameter, value) {
-                return Err(data_error(
-                    ModuleDataErrorKind::SchemaMismatch,
-                    "ActionParameterTypeMismatch",
-                    "action parameter does not match the bound schema",
-                ));
-            }
-        }
-        if action
-            .parameters
-            .iter()
-            .any(|parameter| !parameter.nullable && !params.contains_key(&parameter.canonical_name))
-        {
-            return Err(data_error(
-                ModuleDataErrorKind::SchemaMismatch,
-                "MissingActionParameter",
-                "required action parameter is absent",
-            ));
-        }
-        Ok(())
+        validate_manifest_action_params(entity, action, params)
     }
 
     pub(super) async fn run_governed_write_prechecks(
@@ -412,12 +342,118 @@ impl ApplicationDataInvocation {
     }
 }
 
+pub(crate) fn validate_manifest_entity_object(
+    entity: &ManifestEntityV1,
+    value: &serde_json::Map<String, serde_json::Value>,
+    require_non_nullable: bool,
+) -> Result<(), ModuleDataError> {
+    for (name, field_value) in value {
+        let property = entity
+            .properties
+            .iter()
+            .find(|property| property.canonical_name == *name)
+            .ok_or_else(|| {
+                data_error(
+                    ModuleDataErrorKind::SchemaMismatch,
+                    "UnknownProperty",
+                    "property is absent from the bound schema",
+                )
+            })?;
+        if !property_accepts(property, field_value) {
+            return Err(data_error(
+                ModuleDataErrorKind::SchemaMismatch,
+                "PropertyTypeMismatch",
+                "property value does not match the bound schema",
+            ));
+        }
+    }
+    if require_non_nullable
+        && entity.properties.iter().any(|property| {
+            !property.nullable
+                && property.source == ManifestValueSourceV1::StoredField
+                && property.default_value.is_none()
+                && !value.contains_key(&property.canonical_name)
+        })
+    {
+        return Err(data_error(
+            ModuleDataErrorKind::SchemaMismatch,
+            "MissingRequiredProperty",
+            "required property is absent",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_manifest_action_params(
+    entity: &ManifestEntityV1,
+    action: &str,
+    params: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), ModuleDataError> {
+    let action = entity
+        .actions
+        .iter()
+        .find(|candidate| candidate.canonical_name == action)
+        .ok_or_else(|| {
+            data_error(
+                ModuleDataErrorKind::SchemaMismatch,
+                "UnknownAction",
+                "action is absent from the bound schema",
+            )
+        })?;
+    for (name, value) in params {
+        let parameter = action
+            .parameters
+            .iter()
+            .find(|parameter| parameter.canonical_name == *name)
+            .ok_or_else(|| {
+                data_error(
+                    ModuleDataErrorKind::SchemaMismatch,
+                    "UnknownActionParameter",
+                    "action parameter is absent from the bound schema",
+                )
+            })?;
+        if !property_accepts(parameter, value) {
+            return Err(data_error(
+                ModuleDataErrorKind::SchemaMismatch,
+                "ActionParameterTypeMismatch",
+                "action parameter does not match the bound schema",
+            ));
+        }
+    }
+    if action
+        .parameters
+        .iter()
+        .any(|parameter| !parameter.nullable && !params.contains_key(&parameter.canonical_name))
+    {
+        return Err(data_error(
+            ModuleDataErrorKind::SchemaMismatch,
+            "MissingActionParameter",
+            "required action parameter is absent",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn canonical_entity_value(
     schema: &ManifestEntityV1,
     state: &EntityState,
 ) -> Result<serde_json::Map<String, serde_json::Value>, ModuleDataError> {
-    let fields = state
-        .fields
+    canonical_manifest_entity_value_from_parts(
+        schema,
+        &state.entity_id,
+        &state.status,
+        &state.fields,
+    )
+}
+
+/// Render exact entity parts through one generated manifest entity.
+pub(crate) fn canonical_manifest_entity_value_from_parts(
+    schema: &ManifestEntityV1,
+    entity_id: &str,
+    status: &str,
+    state_fields: &serde_json::Value,
+) -> Result<serde_json::Map<String, serde_json::Value>, ModuleDataError> {
+    let fields = state_fields
         .as_object()
         .expect("committed entity fields must be a JSON object");
     let mut canonical = serde_json::Map::new();
@@ -427,10 +463,10 @@ pub(super) fn canonical_entity_value(
                 .cloned()
                 .or_else(|| property.default_value.clone()),
             ManifestValueSourceV1::EntityId => {
-                Some(serde_json::Value::String(state.entity_id.clone()))
+                Some(serde_json::Value::String(entity_id.to_string()))
             }
             ManifestValueSourceV1::LifecycleStatus => {
-                Some(serde_json::Value::String(state.status.clone()))
+                Some(serde_json::Value::String(status.to_string()))
             }
             ManifestValueSourceV1::Input => {
                 return Err(data_error(

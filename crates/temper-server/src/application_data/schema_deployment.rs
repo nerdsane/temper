@@ -7,6 +7,7 @@ use temper_wasm_sdk::schema_deployment::{
 };
 
 use super::ApplicationDataInvocation;
+use crate::schema_deployment::BootstrapInvocationIdentity;
 use crate::schema_deployment::GovernedSchemaDeploymentService;
 
 impl ApplicationDataInvocation {
@@ -55,7 +56,7 @@ impl ApplicationDataInvocation {
                 false,
             ));
         }
-        let kind = match request.operation {
+        let kind = match &request.operation {
             SchemaDeploymentOperationV1::Submit(_) => DataOperationKind::SchemaBundleSubmit,
             SchemaDeploymentOperationV1::GetBundle(_) => DataOperationKind::SchemaBundleGet,
             SchemaDeploymentOperationV1::Verify(_) => DataOperationKind::SchemaBundleVerify,
@@ -67,6 +68,9 @@ impl ApplicationDataInvocation {
             SchemaDeploymentOperationV1::GetMigration(_) => DataOperationKind::SchemaMigrationGet,
             SchemaDeploymentOperationV1::RetryMigration(_) => {
                 DataOperationKind::SchemaMigrationRetry
+            }
+            SchemaDeploymentOperationV1::BootstrapDispatch(_) => {
+                DataOperationKind::SchemaBootstrapDispatch
             }
             SchemaDeploymentOperationV1::StartStreamDescriptorMigration(_) => {
                 DataOperationKind::StreamDescriptorMigrationStart
@@ -85,6 +89,22 @@ impl ApplicationDataInvocation {
             return Err(schema_error(
                 "authorization_denied",
                 "module data grant does not permit this schema deployment operation",
+                false,
+            ));
+        }
+        if let SchemaDeploymentOperationV1::BootstrapDispatch(bootstrap) = &request.operation
+            && !self.authority.binding.grant.permits(
+                kind,
+                &bootstrap.entity_type,
+                bootstrap
+                    .initial_action
+                    .as_ref()
+                    .map(|action| action.action.as_str()),
+            )
+        {
+            return Err(schema_error(
+                "authorization_denied",
+                "module data grant does not permit bootstrap for this entity type",
                 false,
             ));
         }
@@ -204,6 +224,33 @@ impl ApplicationDataInvocation {
                     .await
                 {
                     Ok(receipt) => SchemaDeploymentResponseV1::Migration { receipt },
+                    Err(error) => SchemaDeploymentResponseV1::Error {
+                        error: error.into_contract(),
+                    },
+                };
+            }
+            SchemaDeploymentOperationV1::BootstrapDispatch(request) => {
+                return match service
+                    .bootstrap_dispatch(
+                        self.authority.tenant.as_str(),
+                        &self.authority.security,
+                        BootstrapInvocationIdentity {
+                            module_name: self.authority.module_name.clone(),
+                            artifact_digest: self.authority.artifact_digest.clone(),
+                            grant_digest: self.authority.grant_digest.clone(),
+                            trigger: self.authority.trigger.clone(),
+                            max_response_bytes: self
+                                .authority
+                                .binding
+                                .grant
+                                .budgets
+                                .max_response_bytes,
+                        },
+                        request,
+                    )
+                    .await
+                {
+                    Ok(receipt) => SchemaDeploymentResponseV1::Bootstrap { receipt },
                     Err(error) => SchemaDeploymentResponseV1::Error {
                         error: error.into_contract(),
                     },
