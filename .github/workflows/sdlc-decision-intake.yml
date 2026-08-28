@@ -73,7 +73,7 @@ jobs:
               # insert at the end of the standing-decisions SECTION (before the
               # next ## heading), not at the end of the whole body
               j = body.find("\n## ", i + len(header))
-              body = body + entry if j < 0 else body[:j] + entry + body[j:]
+              body = body + entry if j < 0 else body[:j] + entry + "\n" + body[j:]
           else:
               body += f"\n\n{header} (reviewers: judged and held - do not re-raise without a NEW failure scenario)\n{entry}"
           open("/tmp/body.md","w").write(body)

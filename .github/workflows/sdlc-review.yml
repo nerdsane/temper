@@ -23,6 +23,7 @@ concurrency:
 permissions:
   contents: write        # routing enables auto-merge
   pull-requests: write
+  issues: write          # label create/apply is the Issues API
 jobs:
   review:
     runs-on: ubuntu-latest
@@ -46,8 +47,7 @@ jobs:
           python3 - <<'PY'
           import json, os, re, subprocess, sys
           n=os.environ["PR_NUM"]; head=os.environ["PR_HEAD"]
-          import os as _os
-          body=subprocess.run(["gh","api",f"repos/{_os.environ.get('GITHUB_REPOSITORY','')}/issues/{n}/comments",
+          body=subprocess.run(["gh","api",f"repos/{os.environ.get('GITHUB_REPOSITORY','')}/issues/{n}/comments",
                               "--paginate","-q",".[].body"],capture_output=True,text=True).stdout
           import base64
           rec=None
@@ -97,13 +97,10 @@ jobs:
           python3 - <<'PY'
           import json, os, re, subprocess
           n=os.environ["PR_NUM"]
-          import os as _os
-          raw=subprocess.run(["gh","api",f"repos/{_os.environ.get('GITHUB_REPOSITORY','')}/issues/{n}/comments",
-                              "--paginate","-q","[.[].body]"],capture_output=True,text=True).stdout
-          comments=[]
-          for chunk in raw.strip().splitlines():
-              try: comments += json.loads(chunk)
-              except Exception: pass
+          raw=subprocess.run(["gh","api",f"repos/{os.environ.get('GITHUB_REPOSITORY','')}/issues/{n}/comments",
+                              "--paginate","-q",".[].body | @base64"],capture_output=True,text=True).stdout
+          import base64 as _b64
+          comments=[_b64.b64decode(l).decode() for l in raw.split() if l]
           resolutions={}
           # an adjudication comment BEGINS with RESOLVE: (same contract as intake) -
           # a quoted RESOLVE: mid-comment is discussion, not a ruling
@@ -138,8 +135,16 @@ jobs:
           RISK=$(python3 -c "import json; print(json.load(open('.review/review.json')).get('risk','high'))")
           CHANGED=$(git diff --name-only "origin/${PR_BASE_REF}...HEAD") \
             || { echo "::error::cannot diff against base - failing closed"; exit 1; }
+          disarm() {
+            # revoking a stale auto-merge must not fail silently - only
+            # "nothing was armed" is a benign failure
+            local out
+            if out=$(gh pr merge "$PR_NUM" --disable-auto 2>&1); then return 0; fi
+            if grep -qi "auto.merge" <<<"$out"; then return 0; fi
+            echo "::error::could not revoke auto-merge: $out"; exit 1
+          }
           if grep -q '^\.github/workflows/' <<<"$CHANGED"; then
-            gh pr merge "$PR_NUM" --disable-auto 2>/dev/null || true
+            disarm
             gh label create human-review --color D93F0B --description "SDLC: routed to a human decision" 2>/dev/null || true
             gh pr edit "$PR_NUM" --add-label human-review 2>/dev/null || true
             echo "workflow files changed - a human presses merge"; exit 0; fi
@@ -147,7 +152,7 @@ jobs:
             gh pr merge "$PR_NUM" --squash --auto && echo "auto-merge enabled: panel risk low"
           else
             # an earlier low-risk run may have armed auto-merge; revoke it
-            gh pr merge "$PR_NUM" --disable-auto 2>/dev/null || true
+            disarm
             gh pr edit "$PR_NUM" --add-label human-review 2>/dev/null || true
             echo "panel risk $RISK - a human presses merge"
           fi
