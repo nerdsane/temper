@@ -38,7 +38,9 @@ async fn bootstrap_dispatch_creates_actions_and_replays_exact_receipt_after_cold
         SecurityContext::system(),
     );
     let mut state = original.state.clone();
-    state.data_dir = tempfile::tempdir().unwrap().keep();
+    state.data_dir = tempfile::tempdir()
+        .expect("bootstrap test data directory should be created")
+        .keep();
     let store = temper_store_sim::SimEventStore::no_faults(780);
     state.storage_stack = Some(std::sync::Arc::new(StorageStack::from_sim(
         store.clone(),
@@ -60,10 +62,10 @@ async fn bootstrap_dispatch_creates_actions_and_replays_exact_receipt_after_cold
         .state
         .storage_stack
         .as_ref()
-        .unwrap()
+        .expect("bootstrap test storage stack should be installed")
         .schema_deployments
         .as_ref()
-        .unwrap();
+        .expect("bootstrap test schema deployment store should be installed");
     let claimed = schema_store
         .claim_schema_verification(ClaimSchemaVerification {
             tenant: "default".into(),
@@ -127,13 +129,13 @@ async fn bootstrap_dispatch_creates_actions_and_replays_exact_receipt_after_cold
         initial_fields: serde_json::json!({"Name":"before"})
             .as_object()
             .cloned()
-            .unwrap(),
+            .expect("bootstrap initial fields fixture should be an object"),
         initial_action: Some(BootstrapActionV1 {
             action: "Rename".into(),
             parameters: serde_json::json!({"Name":"after"})
                 .as_object()
                 .cloned()
-                .unwrap(),
+                .expect("bootstrap action parameter fixture should be an object"),
         }),
     };
     let first = call_bootstrap(&invocation, request.clone()).await;
@@ -151,8 +153,12 @@ async fn bootstrap_dispatch_creates_actions_and_replays_exact_receipt_after_cold
     assert_eq!(receipt.pin.bundle_digest, submitted.bundle_digest);
     assert_eq!(receipt.creation_sequence, Some(1));
     assert_eq!(receipt.action_sequence, Some(2));
-    assert_eq!(receipt.action_result.as_ref().unwrap()["Name"], "after");
-    assert_eq!(receipt.action_result.as_ref().unwrap()["RenameCount"], 1);
+    let action_result = receipt
+        .action_result
+        .as_ref()
+        .expect("successful bootstrap action should return its result");
+    assert_eq!(action_result["Name"], "after");
+    assert_eq!(action_result["RenameCount"], 1);
     assert!(receipt.failure.is_none());
 
     let crash_request = BootstrapDispatchRequestV1 {
@@ -164,13 +170,13 @@ async fn bootstrap_dispatch_creates_actions_and_replays_exact_receipt_after_cold
         initial_fields: serde_json::json!({"Name":"before"})
             .as_object()
             .cloned()
-            .unwrap(),
+            .expect("crash-window initial fields fixture should be an object"),
         initial_action: Some(BootstrapActionV1 {
             action: "Rename".into(),
             parameters: serde_json::json!({"Name":"after"})
                 .as_object()
                 .cloned()
-                .unwrap(),
+                .expect("crash-window action parameter fixture should be an object"),
         }),
     };
     store.fail_next_schema_operations(temper_store_sim::SimSchemaFaultPoint::CompleteBootstrap, 1);
@@ -207,14 +213,12 @@ async fn bootstrap_dispatch_creates_actions_and_replays_exact_receipt_after_cold
         panic!("the interrupted coordinator should recover from its exact journal event")
     };
     assert_eq!(recovered_action.action_sequence, Some(2));
-    assert_eq!(
-        recovered_action.action_result.as_ref().unwrap()["Name"],
-        "after"
-    );
-    assert_eq!(
-        recovered_action.action_result.as_ref().unwrap()["RenameCount"],
-        1
-    );
+    let recovered_action_result = recovered_action
+        .action_result
+        .as_ref()
+        .expect("recovered bootstrap action should retain its exact result");
+    assert_eq!(recovered_action_result["Name"], "after");
+    assert_eq!(recovered_action_result["RenameCount"], 1);
 
     let rejected_request = BootstrapDispatchRequestV1 {
         request_id: "bootstrap-rejected-request".into(),
@@ -371,7 +375,7 @@ async fn bootstrap_dispatch_creates_actions_and_replays_exact_receipt_after_cold
             initial_fields: serde_json::json!({"Unknown":"value"})
                 .as_object()
                 .cloned()
-                .unwrap(),
+                .expect("invalid initial fields fixture should be an object"),
             initial_action: None,
         },
     )
@@ -416,7 +420,7 @@ async fn bootstrap_dispatch_creates_actions_and_replays_exact_receipt_after_cold
             parameters: serde_json::json!({"Name":"concurrent"})
                 .as_object()
                 .cloned()
-                .unwrap(),
+                .expect("concurrent action parameter fixture should be an object"),
         }),
     };
     let (left, right) = tokio::join!(
@@ -435,7 +439,9 @@ async fn bootstrap_dispatch_creates_actions_and_replays_exact_receipt_after_cold
         ActorSystem::new("bootstrap-e2e-restart"),
         SpecRegistry::new(),
     );
-    restarted_state.data_dir = tempfile::tempdir().unwrap().keep();
+    restarted_state.data_dir = tempfile::tempdir()
+        .expect("restart test data directory should be created")
+        .keep();
     restarted_state.storage_stack = Some(std::sync::Arc::new(StorageStack::from_sim(store, None)));
     let restarted = ApplicationDataInvocation::new(restarted_state, invocation.authority.clone());
     let replay = call_bootstrap(&restarted, request).await;
