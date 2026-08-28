@@ -54,7 +54,11 @@ jobs:
             fi
             exit 0
           fi
-          if [ -n "${STACK_TOKEN:-}" ]; then export GH_TOKEN="$STACK_TOKEN"; fi
+          if [ -z "${STACK_TOKEN:-}" ]; then
+            echo "::error::STACK_TOKEN is not set - the body edit would use GITHUB_TOKEN, whose events are suppressed, and the gate would silently never re-arm"
+            exit 1
+          fi
+          export GH_TOKEN="$STACK_TOKEN"
           gh pr view "$PR_NUM" --json body -q .body > /tmp/body.md
           python3 - <<'PY'
           import os
@@ -64,9 +68,12 @@ jobs:
           url = os.environ["COMMENT_URL"]
           entry = f"\n\n**Owner ruling** (by @{author}, [source]({url})): {ruling}"
           header = "## Standing design decisions"
-          if header in body:
-              # append the ruling at the end of the standing-decisions section
-              body += entry
+          i = body.find(header)
+          if i >= 0:
+              # insert at the end of the standing-decisions SECTION (before the
+              # next ## heading), not at the end of the whole body
+              j = body.find("\n## ", i + len(header))
+              body = body + entry if j < 0 else body[:j] + entry + body[j:]
           else:
               body += f"\n\n{header} (reviewers: judged and held - do not re-raise without a NEW failure scenario)\n{entry}"
           open("/tmp/body.md","w").write(body)

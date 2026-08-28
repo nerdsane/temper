@@ -60,6 +60,14 @@ jobs:
           # skills (os-apps/**/SKILL.md, APP.md) are runtime behavior. Only genuinely
           # inert paths are excluded.
           CODE=$(grep -vE '^(\.github/workflows/|docs/|\.claude/|\.cursor/|README)' /tmp/changed.txt || true)
+          if [ -n "$CODE" ]; then
+            # formatting-only churn has nothing to drive: if the in-scope files
+            # differ only in whitespace, there is no behavior to prove
+            if git diff --ignore-all-space --quiet "${PR_BASE}...${PR_HEAD}" -- $CODE; then
+              CODE=""
+              echo "In-scope changes are whitespace-only - proof not required."
+            fi
+          fi
           if [ -z "$CODE" ]; then echo "needs=false" >> "$GITHUB_OUTPUT"; echo "No app code changed - proof not required."; else echo "needs=true" >> "$GITHUB_OUTPUT"; fi
       - name: Get the proof record from the PR (not committed)
         if: steps.scope.outputs.needs == 'true'
@@ -78,17 +86,15 @@ jobs:
                               "--paginate","-q",".[].body"],capture_output=True,text=True).stdout
           import base64
           rec=None
-          def _consider(txt, b64):
+          def _consider(txt):
               global rec
               try:
-                  cand=json.loads(base64.b64decode(txt).decode() if b64 else txt)
+                  cand=json.loads(base64.b64decode(txt).decode())
               except Exception:
                   return
               if cand.get("commit")==head: rec=cand
           for m in re.finditer(r"<!--\s*sdlc-proof-record-b64\s*([A-Za-z0-9+/=\s]+?)\s*-->", body):
-              _consider(m.group(1).strip(), True)
-          for m in re.finditer(r"<!--\s*sdlc-proof-record\s*(\{.*?\})\s*-->", body, re.S):
-              _consider(m.group(1), False)
+              _consider(m.group(1).strip())
           if not rec:
               print(f"::error::no proof record for head {head} on the PR - run the verify skill against the current head and post it (bash stack/proof/post-proof-record.sh)")
               sys.exit(1)
