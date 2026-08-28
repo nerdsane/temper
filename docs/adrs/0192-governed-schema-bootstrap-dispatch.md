@@ -39,16 +39,20 @@ that the persistence history cannot support.
 
 Add `SchemaDeploymentOperationV1::BootstrapDispatch`. Do not add a
 scope-selecting `DataOperationV1` variant. The request contains an idempotency
-key, entity type, entity identifier, initial fields, and an optional initial
-action with parameters. It contains no tenant, principal, scope, bundle digest,
-module alias, grant selector, or schema pin.
+key, the original activation receipt identity, entity type, entity identifier,
+initial fields, and an optional initial action with parameters. It contains no
+tenant, principal, scope, bundle digest, module alias, grant selector, or schema
+pin.
 
 The host invocation resolves tenant and caller authority from the authenticated
-WASM invocation. The schema-deployment service resolves `(scope,
-bundle_digest)` from the durable active deployment pointer and constructs the
-exact `SchemaExecutionPin`. The pointer must still name the same verified,
-active bundle when the operation reservation is created. A stale, retired,
-predecessor, mismatched, or unverified bundle fails closed.
+WASM invocation. The schema-deployment service uses the opaque activation
+receipt identity to find the unique durable active pointer that accepted that
+activation, resolves `(scope, bundle_digest)` from the pointer, and constructs
+the exact `SchemaExecutionPin`. The receipt identity is a lookup key into
+host-owned deployment state, not scope authority by itself. The pointer must
+still name the same verified, active bundle when the operation reservation is
+created. A missing, stale, retired, predecessor, mismatched, or unverified
+bundle fails closed.
 
 **Why this approach**: schema deployment owns activation and is the only
 authority that can turn a mutable active pointer into a new immutable pin.
@@ -120,13 +124,24 @@ scoped creation, records the authoritative creation sequence, performs the
 optional action, and persists the final receipt. Store updates use
 compare-and-set progress so concurrent retries converge on one record.
 
+A terminal validation or authorization failure before creation atomically
+releases the target ownership claim while retaining the completed operation and
+its exact replay receipt. This prevents an unauthorized or malformed request
+from poisoning an otherwise absent target. Once creation commits, ownership is
+retained permanently because the journal now exists and belongs to that
+operation.
+
 On recovery, an incomplete reservation resumes only after confirming its target
 ownership claim. The deterministic journal identity makes an already committed
 creation observable as the same entity for that owning operation, and the
-action's durable idempotency key prevents duplicate dispatch. An unowned
-pre-existing journal is a conflict, never a replay. The authoritative persisted
-receipt, not a reconstructed approximation, is returned for every completed
-replay after cache eviction or cold restart.
+action's durable idempotency key prevents duplicate dispatch. The action event
+also co-commits the exact post-action outcome, so recovery after action commit
+does not substitute newer actor state or depend on the bounded actor cache. An
+action rejection has no actor event, so the coordinator persists that bounded
+rejection as a fenced progress checkpoint before it finalizes the receipt. An
+unowned pre-existing journal is a conflict, never a replay. The authoritative
+persisted receipt, not a reconstructed approximation, is returned for every
+completed replay after cache eviction or cold restart.
 
 This is not a cross-store transaction. If creation commits and the optional
 action rejects, times out, or exhausts a budget, the entity remains committed
@@ -213,8 +228,9 @@ transport errors or polling eventually consistent projections.
 
 ### Risks
 
-- A recovery race could dispatch the action twice. A durable action
-  idempotency key and store progress compare-and-set make retries converge.
+- A recovery race could dispatch the action twice or reconstruct its result
+  from newer state. A durable action idempotency key, co-committed exact action
+  outcome, and store progress compare-and-set make retries converge.
 - Two independently idempotent operations could race for one entity journal.
   The atomic target ownership claim admits only one operation and recovery
   verifies ownership before observing an existing journal.

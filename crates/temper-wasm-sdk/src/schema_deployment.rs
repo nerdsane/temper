@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 mod stream_descriptor;
 pub use stream_descriptor::*;
+mod bootstrap;
+pub use bootstrap::*;
 mod wasm_artifact;
 pub use wasm_artifact::*;
 
@@ -289,6 +291,7 @@ pub enum SchemaDeploymentOperationV1 {
     StartMigration(StartSchemaMigrationRequestV1),
     GetMigration(GetSchemaMigrationRequestV1),
     RetryMigration(RetrySchemaMigrationRequestV1),
+    BootstrapDispatch(BootstrapDispatchRequestV1),
     StartStreamDescriptorMigration(StartStreamDescriptorMigrationRequestV1),
     AdvanceStreamDescriptorMigration(AdvanceStreamDescriptorMigrationRequestV1),
     GetStreamDescriptorMigration(GetStreamDescriptorMigrationRequestV1),
@@ -312,6 +315,9 @@ pub enum SchemaDeploymentResponseV1 {
     },
     Migration {
         receipt: SchemaMigrationReceiptV1,
+    },
+    Bootstrap {
+        receipt: BootstrapDispatchReceiptV1,
     },
     StreamDescriptorMigration {
         receipt: StreamDescriptorMigrationReceiptV1,
@@ -392,6 +398,14 @@ impl SchemaDeploymentClient {
     ) -> Result<SchemaMigrationReceiptV1, SchemaDeploymentErrorV1> {
         call_migration(SchemaDeploymentOperationV1::RetryMigration(request))
     }
+
+    /// Bootstrap one entity under the exact still-active deployment receipt.
+    pub fn bootstrap_dispatch(
+        &self,
+        request: BootstrapDispatchRequestV1,
+    ) -> Result<BootstrapDispatchReceiptV1, SchemaDeploymentErrorV1> {
+        call_bootstrap(SchemaDeploymentOperationV1::BootstrapDispatch(request))
+    }
 }
 
 fn call(
@@ -411,6 +425,7 @@ fn call(
     match response {
         SchemaDeploymentResponseV1::Ok { receipt } => Ok(receipt),
         SchemaDeploymentResponseV1::Migration { .. }
+        | SchemaDeploymentResponseV1::Bootstrap { .. }
         | SchemaDeploymentResponseV1::StreamDescriptorMigration { .. }
         | SchemaDeploymentResponseV1::UnresolvedStreamDescriptors { .. } => Err(local_error(
             "backend_unavailable",
@@ -436,10 +451,37 @@ fn call_migration(
     match call_host(&bytes)? {
         SchemaDeploymentResponseV1::Migration { receipt } => Ok(receipt),
         SchemaDeploymentResponseV1::Ok { .. }
+        | SchemaDeploymentResponseV1::Bootstrap { .. }
         | SchemaDeploymentResponseV1::StreamDescriptorMigration { .. }
         | SchemaDeploymentResponseV1::UnresolvedStreamDescriptors { .. } => Err(local_error(
             "backend_unavailable",
             "schema deployment host returned a bundle receipt".into(),
+        )),
+        SchemaDeploymentResponseV1::Error { error } => Err(error),
+    }
+}
+
+fn call_bootstrap(
+    operation: SchemaDeploymentOperationV1,
+) -> Result<BootstrapDispatchReceiptV1, SchemaDeploymentErrorV1> {
+    let request = SchemaDeploymentRequestV1 {
+        abi: SCHEMA_DEPLOYMENT_ABI_V1.into(),
+        operation,
+    };
+    let bytes = serde_json::to_vec(&request).map_err(|error| {
+        local_error(
+            "invalid_bootstrap",
+            format!("failed to encode schema bootstrap request: {error}"),
+        )
+    })?;
+    match call_host(&bytes)? {
+        SchemaDeploymentResponseV1::Bootstrap { receipt } => Ok(receipt),
+        SchemaDeploymentResponseV1::Ok { .. }
+        | SchemaDeploymentResponseV1::Migration { .. }
+        | SchemaDeploymentResponseV1::StreamDescriptorMigration { .. }
+        | SchemaDeploymentResponseV1::UnresolvedStreamDescriptors { .. } => Err(local_error(
+            "backend_unavailable",
+            "schema deployment host returned a non-bootstrap receipt".into(),
         )),
         SchemaDeploymentResponseV1::Error { error } => Err(error),
     }

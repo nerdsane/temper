@@ -26,6 +26,7 @@ use temper_wasm_sdk::schema_deployment::{
 };
 use tower::ServiceExt;
 
+mod bootstrap;
 mod migration;
 mod stream_descriptor_gate_tests;
 

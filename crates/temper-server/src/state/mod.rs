@@ -799,6 +799,36 @@ impl ServerState {
                         tracing::error!(job_id, error = %error.message(), "schema migration supervisor cycle failed");
                     }
                 }
+                let Some(store) = state
+                    .storage_stack
+                    .as_ref()
+                    .and_then(|stack| stack.schema_deployments.as_ref())
+                else {
+                    return;
+                };
+                match store.list_incomplete_schema_bootstraps(128).await {
+                    Ok(operations) => {
+                        for operation in operations {
+                            let entity_id = operation.command.entity_id.clone();
+                            if let Err(error) =
+                                crate::schema_deployment::GovernedSchemaDeploymentService::new(
+                                    &state,
+                                )
+                                .drive_bootstrap(operation)
+                                .await
+                            {
+                                tracing::error!(
+                                    entity_id,
+                                    error = %error.message(),
+                                    "schema bootstrap recovery cycle failed"
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "schema bootstrap recovery scan failed");
+                    }
+                }
             }
         });
     }

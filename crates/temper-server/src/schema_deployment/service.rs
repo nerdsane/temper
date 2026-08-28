@@ -1,5 +1,6 @@
 //! Shared schema-deployment semantics used by HTTP and typed WASM adapters.
 
+pub(crate) mod bootstrap;
 mod completion;
 mod error;
 mod http;

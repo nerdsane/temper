@@ -4,9 +4,11 @@ mod router;
 
 use temper_runtime::persistence::schema_deployment::{
     ActivateSchemaBundle, ActivateSchemaBundleOutcome, ClaimSchemaVerification,
-    ClaimSchemaVerificationOutcome, CommitSchemaMigrationBatch, CreateSchemaMigration,
-    CreateSchemaMigrationOutcome, ReserveSchemaMigrationRetry, RetireSchemaBundle,
-    RetireSchemaBundleOutcome, SchemaActivePointer, SchemaDeploymentRecord, SchemaDeploymentStore,
+    ClaimSchemaVerificationOutcome, CommitSchemaMigrationBatch, CompleteSchemaBootstrap,
+    CreateSchemaMigration, CreateSchemaMigrationOutcome, RecordSchemaBootstrapActionFailure,
+    RecordSchemaBootstrapCreated, ReserveSchemaBootstrap, ReserveSchemaBootstrapOutcome,
+    ReserveSchemaMigrationRetry, RetireSchemaBundle, RetireSchemaBundleOutcome,
+    SchemaActivePointer, SchemaBootstrapOperation, SchemaDeploymentRecord, SchemaDeploymentStore,
     SchemaDeploymentStoreError, SchemaMigrationJob, SchemaMigrationRetryReservation,
     SchemaMigrationShadowRow, SchemaMigrationValidationReceipt, SchemaScope,
     SchemaVerificationReceipt, SubmitSchemaBundle, SubmitSchemaBundleOutcome,
@@ -52,6 +54,32 @@ pub trait SchemaDeploymentStoreDyn: Send + Sync {
         tenant: &str,
         scope: &SchemaScope,
     ) -> Result<Option<SchemaActivePointer>, SchemaDeploymentStoreError>;
+    async fn reserve_schema_bootstrap(
+        &self,
+        command: ReserveSchemaBootstrap,
+    ) -> Result<ReserveSchemaBootstrapOutcome, SchemaDeploymentStoreError>;
+    async fn get_schema_bootstrap(
+        &self,
+        tenant: &str,
+        caller_authority: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<SchemaBootstrapOperation>, SchemaDeploymentStoreError>;
+    async fn list_incomplete_schema_bootstraps(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<SchemaBootstrapOperation>, SchemaDeploymentStoreError>;
+    async fn record_schema_bootstrap_created(
+        &self,
+        command: RecordSchemaBootstrapCreated,
+    ) -> Result<SchemaBootstrapOperation, SchemaDeploymentStoreError>;
+    async fn record_schema_bootstrap_action_failure(
+        &self,
+        command: RecordSchemaBootstrapActionFailure,
+    ) -> Result<SchemaBootstrapOperation, SchemaDeploymentStoreError>;
+    async fn complete_schema_bootstrap(
+        &self,
+        command: CompleteSchemaBootstrap,
+    ) -> Result<SchemaBootstrapOperation, SchemaDeploymentStoreError>;
     async fn create_schema_migration(
         &self,
         command: CreateSchemaMigration,
@@ -176,6 +204,50 @@ macro_rules! impl_schema_store {
                 command: RetireSchemaBundle,
             ) -> Result<RetireSchemaBundleOutcome, SchemaDeploymentStoreError> {
                 SchemaDeploymentStore::retire_schema_bundle(self, command).await
+            }
+            async fn reserve_schema_bootstrap(
+                &self,
+                command: ReserveSchemaBootstrap,
+            ) -> Result<ReserveSchemaBootstrapOutcome, SchemaDeploymentStoreError> {
+                SchemaDeploymentStore::reserve_schema_bootstrap(self, command).await
+            }
+            async fn get_schema_bootstrap(
+                &self,
+                tenant: &str,
+                caller_authority: &str,
+                idempotency_key: &str,
+            ) -> Result<Option<SchemaBootstrapOperation>, SchemaDeploymentStoreError> {
+                SchemaDeploymentStore::get_schema_bootstrap(
+                    self,
+                    tenant,
+                    caller_authority,
+                    idempotency_key,
+                )
+                .await
+            }
+            async fn list_incomplete_schema_bootstraps(
+                &self,
+                limit: usize,
+            ) -> Result<Vec<SchemaBootstrapOperation>, SchemaDeploymentStoreError> {
+                SchemaDeploymentStore::list_incomplete_schema_bootstraps(self, limit).await
+            }
+            async fn record_schema_bootstrap_created(
+                &self,
+                command: RecordSchemaBootstrapCreated,
+            ) -> Result<SchemaBootstrapOperation, SchemaDeploymentStoreError> {
+                SchemaDeploymentStore::record_schema_bootstrap_created(self, command).await
+            }
+            async fn record_schema_bootstrap_action_failure(
+                &self,
+                command: RecordSchemaBootstrapActionFailure,
+            ) -> Result<SchemaBootstrapOperation, SchemaDeploymentStoreError> {
+                SchemaDeploymentStore::record_schema_bootstrap_action_failure(self, command).await
+            }
+            async fn complete_schema_bootstrap(
+                &self,
+                command: CompleteSchemaBootstrap,
+            ) -> Result<SchemaBootstrapOperation, SchemaDeploymentStoreError> {
+                SchemaDeploymentStore::complete_schema_bootstrap(self, command).await
             }
             async fn create_schema_migration(
                 &self,

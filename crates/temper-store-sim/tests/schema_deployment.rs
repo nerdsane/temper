@@ -1023,3 +1023,6 @@ async fn randomized_multi_tenant_activation_interleavings_preserve_one_scope_win
 
 #[path = "schema_deployment/migration.rs"]
 mod migration;
+
+#[path = "schema_deployment/bootstrap.rs"]
+mod bootstrap;

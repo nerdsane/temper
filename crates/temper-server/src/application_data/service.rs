@@ -331,6 +331,29 @@ impl<'a> GovernedApplicationDataService<'a> {
         params: serde_json::Value,
         agent: &AgentContext,
     ) -> Result<EntityResponse, String> {
+        if agent.idempotency_key.as_deref().is_some_and(|key| {
+            key.starts_with(crate::entity_actor::SCHEMA_BOOTSTRAP_ACTION_IDEMPOTENCY_PREFIX)
+        }) {
+            return Err("reserved schema-bootstrap idempotency identity".into());
+        }
+        self.action_with_options(tenant, entity_type, entity_id, action, params, agent, true)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Invoke the initial action through the host-only schema-bootstrap path.
+    pub(crate) async fn action_for_schema_bootstrap(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        action: &str,
+        params: serde_json::Value,
+        agent: &AgentContext,
+    ) -> Result<EntityResponse, String> {
+        debug_assert!(agent.idempotency_key.as_deref().is_some_and(|key| {
+            key.starts_with(crate::entity_actor::SCHEMA_BOOTSTRAP_ACTION_IDEMPOTENCY_PREFIX)
+        }));
         self.action_with_options(tenant, entity_type, entity_id, action, params, agent, true)
             .await
             .map_err(|error| error.to_string())

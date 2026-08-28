@@ -27,6 +27,7 @@ impl ModuleDataGrant {
             | DataOperationKind::SchemaMigrationStart
             | DataOperationKind::SchemaMigrationGet
             | DataOperationKind::SchemaMigrationRetry
+            | DataOperationKind::SchemaBootstrapDispatch
             | DataOperationKind::StreamDescriptorMigrationStart
             | DataOperationKind::StreamDescriptorMigrationAdvance
             | DataOperationKind::StreamDescriptorMigrationGet

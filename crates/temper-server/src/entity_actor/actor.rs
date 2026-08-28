@@ -50,6 +50,13 @@ use super::types::{
 /// Reserved state/event field holding immutable scoped schema evidence.
 pub const SCHEMA_PIN_FIELD: &str = "_temper_schema_pin_v1";
 
+/// Reserved event field containing the exact post-action bootstrap outcome.
+pub(crate) const SCHEMA_BOOTSTRAP_ACTION_OUTCOME_FIELD: &str =
+    "_temper_schema_bootstrap_action_outcome_v1";
+
+/// Domain prefix for initial-action identities owned by the bootstrap coordinator.
+pub(crate) const SCHEMA_BOOTSTRAP_ACTION_IDEMPOTENCY_PREFIX: &str = "schema-bootstrap-action:";
+
 pub(crate) fn schema_event_pin(
     execution: &SchemaExecutionPin,
     entity_type: &str,
@@ -173,6 +180,8 @@ pub struct EntityActor {
     pub(super) initial_fields: serde_json::Value,
     /// Pre-resolved durable target evidence for bootstrap creation.
     initial_reference_evidence: BTreeMap<String, bool>,
+    /// Durable identity attached only to the first Created event.
+    creation_idempotency_key: Option<String>,
     /// Optional event journal for persistence. None = in-memory only.
     pub(super) event_journal: Option<BoxedEventStore>,
     /// Optional async snapshot writer. Event appends remain synchronous.
@@ -311,6 +320,7 @@ impl EntityActor {
             table,
             initial_fields,
             initial_reference_evidence: BTreeMap::new(),
+            creation_idempotency_key: None,
             event_journal: None,
             snapshot_queue: None,
             event_backend: None,
@@ -337,6 +347,7 @@ impl EntityActor {
             table,
             initial_fields,
             initial_reference_evidence: BTreeMap::new(),
+            creation_idempotency_key: None,
             event_journal: Some(store),
             snapshot_queue: None,
             event_backend: Some(backend),
@@ -370,6 +381,16 @@ impl EntityActor {
     /// Attach durable target-existence evidence for bootstrap validation.
     pub fn with_initial_reference_evidence(mut self, evidence: BTreeMap<String, bool>) -> Self {
         self.initial_reference_evidence = evidence;
+        self
+    }
+
+    /// Bind the first durable Created event to one coordinator operation.
+    pub fn with_creation_idempotency_key(mut self, key: String) -> Self {
+        assert!(
+            !key.trim().is_empty(),
+            "creation idempotency key must not be empty"
+        );
+        self.creation_idempotency_key = Some(key);
         self
     }
 
@@ -468,6 +489,22 @@ impl EntityActor {
                     SCHEMA_PIN_FIELD.to_string(),
                     serde_json::to_value(pin)
                         .map_err(|e| PersistenceError::Serialization(e.to_string()))?,
+                );
+        }
+        if event
+            .idempotency_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with(SCHEMA_BOOTSTRAP_ACTION_IDEMPOTENCY_PREFIX))
+        {
+            payload
+                .as_object_mut()
+                .expect("serialized entity event must be an object")
+                .insert(
+                    SCHEMA_BOOTSTRAP_ACTION_OUTCOME_FIELD.to_string(),
+                    serde_json::json!({
+                        "fields": state.fields,
+                        "status": state.status,
+                    }),
                 );
         }
         let source_sequence = state.sequence_nr + 1;
@@ -1501,7 +1538,7 @@ impl Actor for EntityActor {
                 to_status: state.status.clone(),
                 timestamp: sim_now(),
                 params: initial_params,
-                idempotency_key: None,
+                idempotency_key: self.creation_idempotency_key.clone(),
             };
 
             if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend)
