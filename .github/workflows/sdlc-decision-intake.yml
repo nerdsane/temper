@@ -12,6 +12,9 @@ name: sdlc-decision-intake
 on:
   issue_comment:
     types: [created]
+concurrency:
+  group: sdlc-intake-${{ github.event.issue.number }}
+  cancel-in-progress: false   # serialize: concurrent rulings must not clobber
 permissions:
   pull-requests: write
   actions: write        # re-run the review gate directly: GITHUB_TOKEN-created

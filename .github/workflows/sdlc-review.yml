@@ -46,8 +46,9 @@ jobs:
           python3 - <<'PY'
           import json, os, re, subprocess, sys
           n=os.environ["PR_NUM"]; head=os.environ["PR_HEAD"]
-          body=subprocess.run(["gh","pr","view",n,"--json","comments","-q",".comments[].body"],
-                              capture_output=True,text=True).stdout
+          import os as _os
+          body=subprocess.run(["gh","api",f"repos/{_os.environ.get('GITHUB_REPOSITORY','')}/issues/{n}/comments",
+                              "--paginate","-q",".[].body"],capture_output=True,text=True).stdout
           rec=None
           for m in re.finditer(r"<!--\s*sdlc-review-record\s*(\{.*?\})\s*-->", body, re.S):
               try: cand=json.loads(m.group(1))
@@ -90,8 +91,9 @@ jobs:
           python3 - <<'PY'
           import json, os, re, subprocess
           n=os.environ["PR_NUM"]
-          body=subprocess.run(["gh","pr","view",n,"--json","comments","-q",".comments[].body"],
-                              capture_output=True,text=True).stdout
+          import os as _os
+          body=subprocess.run(["gh","api",f"repos/{_os.environ.get('GITHUB_REPOSITORY','')}/issues/{n}/comments",
+                              "--paginate","-q",".[].body"],capture_output=True,text=True).stdout
           resolutions={}
           for m in re.finditer(r"^RESOLVE:\s*(\S+)\s+(.+)$", body, re.M):
               resolutions[m.group(1)]=m.group(2).strip()
@@ -105,6 +107,7 @@ jobs:
               print(f"adjudications applied: {hit}")
           PY
       - name: Validate the record (the gate)
+        id: validate
         env:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: python3 /tmp/stack/review/validate.py .review/review.json --require-commit "$PR_HEAD"
@@ -135,8 +138,9 @@ jobs:
             if (!fs.existsSync('.review/review.json')) return;
             const r = JSON.parse(fs.readFileSync('.review/review.json','utf8'));
             const open = (r.findings||[]).filter(f => f.severity==='act-on' && !f.resolved).length;
+            const validated = '${{ steps.validate.outcome }}' === 'success';
             const body = "<!-- sdlc-review -->\n" +
-              `### Review — ${r.effort}: **${open ? 'FAIL' : 'PASS'}**\n` +
+              `### Review — ${r.effort}: **${(validated && !open) ? 'PASS' : 'FAIL'}**\n` +
               `Panel: ${(r.reviewers_ran||[]).join(', ')}` +
               (r.reviewers_skipped?.length ? ` (skipped: ${r.reviewers_skipped.map(s=>s.reviewer).join(', ')})` : '') +
               `\nOpen act-on findings: **${open}** · risk: ${r.risk||'?'}\n`;

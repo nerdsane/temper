@@ -59,7 +59,7 @@ jobs:
           # NOTE: no blanket .md exclusion - in these repos agent instructions and
           # skills (os-apps/**/SKILL.md, APP.md) are runtime behavior. Only genuinely
           # inert paths are excluded.
-          CODE=$(grep -vE '^(\.github/|docs/|\.claude/|\.cursor/|README)' /tmp/changed.txt || true)
+          CODE=$(grep -vE '^(\.github/workflows/|docs/|\.claude/|\.cursor/|README)' /tmp/changed.txt || true)
           if [ -z "$CODE" ]; then echo "needs=false" >> "$GITHUB_OUTPUT"; echo "No app code changed - proof not required."; else echo "needs=true" >> "$GITHUB_OUTPUT"; fi
       - name: Get the proof record from the PR (not committed)
         if: steps.scope.outputs.needs == 'true'
@@ -75,8 +75,9 @@ jobs:
           python3 - <<'PY'
           import json, os, re, subprocess, sys
           n=os.environ["PR_NUM"]; head=os.environ["PR_HEAD"]
-          body=subprocess.run(["gh","pr","view",n,"--json","comments","-q",".comments[].body"],
-                              capture_output=True,text=True).stdout
+          repo=os.environ.get("GITHUB_REPOSITORY","")
+          body=subprocess.run(["gh","api",f"repos/{repo}/issues/{n}/comments",
+                              "--paginate","-q",".[].body"],capture_output=True,text=True).stdout
           rec=None
           for m in re.finditer(r"<!--\s*sdlc-proof-record\s*(\{.*?\})\s*-->", body, re.S):
               try: cand=json.loads(m.group(1))
