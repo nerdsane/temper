@@ -588,20 +588,108 @@ impl crate::state::ServerState {
         active_span.record("otel.name", format!("wasm:{module_name}").as_str());
         active_span.record("wasm.module", module_name.as_str());
 
-        let module_hash = {
+        let awaited_owner = ctx
+            .dispatch_idempotency_key
+            .and_then(|delivery_id| self.awaited_execution_owner(delivery_id, ctx.agent_ctx));
+        let completed_digest = if let Some(owner) = awaited_owner.as_ref() {
+            owner
+                .snapshot()
+                .await
+                .0
+                .awaited_execution
+                .filter(|evidence| {
+                    evidence.phase != crate::trigger::delivery::AwaitedExecutionPhase::Executing
+                })
+                .map(|evidence| evidence.identity.module_digest)
+        } else {
+            None
+        };
+        let module_hash = completed_digest.or_else(|| {
             let wasm_reg = self.wasm_module_registry.read().unwrap(); // ci-ok: infallible lock
             wasm_reg
                 .get_hash(ctx.entity_ref.tenant, &module_name)
                 .map(|s| s.to_string())
-        };
+        });
 
         let Some(hash) = module_hash else {
             let error_str = format!("WASM module '{}' not found", module_name);
             record_wasm_error_on_span(active_span, &error_str);
+            if let Some(owner) = awaited_owner.as_ref() {
+                let success_callback = integration.on_success.as_deref().ok_or_else(|| {
+                    format!(
+                        "collection member integration '{}' has no static success callback",
+                        integration.name
+                    )
+                })?;
+                owner
+                    .bind(
+                        &integration.name,
+                        &module_name,
+                        "module-unavailable",
+                        success_callback,
+                        integration.on_failure.as_deref(),
+                        temper_runtime::scheduler::sim_now(),
+                    )
+                    .await?;
+            }
             return self
-                .handle_module_not_found(ctx, integration, &module_name)
+                .handle_wasm_failure(
+                    ctx,
+                    &integration.name,
+                    &module_name,
+                    &integration.on_failure,
+                    error_str,
+                    0,
+                )
                 .await;
         };
+        let awaited_replay = if let Some(owner) = awaited_owner.as_ref() {
+            let success_callback = integration.on_success.as_deref().ok_or_else(|| {
+                format!(
+                    "collection member integration '{}' has no static success callback",
+                    integration.name
+                )
+            })?;
+            Some(
+                owner
+                    .bind(
+                        &integration.name,
+                        &module_name,
+                        &hash,
+                        success_callback,
+                        integration.on_failure.as_deref(),
+                        temper_runtime::scheduler::sim_now(),
+                    )
+                    .await?,
+            )
+        } else {
+            None
+        };
+        if let Some(replay) = awaited_replay.as_ref()
+            && replay.phase != crate::trigger::delivery::AwaitedExecutionPhase::Executing
+        {
+            if replay.phase == crate::trigger::delivery::AwaitedExecutionPhase::CallbackAccepted {
+                return Ok(None);
+            }
+            let Some(callback_action) = replay.callback_action.as_deref() else {
+                return Err(replay
+                    .execution_failure
+                    .map(|failure| format!("{failure:?}"))
+                    .unwrap_or_else(|| "awaited WASM execution failed".to_string()));
+            };
+            let callback_response = self
+                .dispatch_wasm_callback(
+                    ctx.entity_ref,
+                    callback_action,
+                    replay.callback_params.clone().unwrap_or_default(),
+                    ctx.agent_ctx,
+                    ctx.mode,
+                    &integration.name,
+                    &module_name,
+                )
+                .await?;
+            return Ok(callback_response);
+        }
         instrument_wasm_dispatch_phase_result(
             active_parent_span.clone(),
             ctx,
@@ -1076,52 +1164,6 @@ impl crate::state::ServerState {
         }
     }
 
-    /// Handle module-not-found: log, observe, dispatch on_failure callback.
-    async fn handle_module_not_found(
-        &self,
-        ctx: &WasmDispatchCtx<'_>,
-        integration: &temper_spec::automaton::Integration,
-        module_name: &str,
-    ) -> Result<Option<EntityResponse>, String> {
-        tracing::warn!(
-            tenant = %ctx.entity_ref.tenant,
-            entity_type = ctx.entity_ref.entity_type,
-            module = %module_name,
-            "WASM module not found in registry"
-        );
-        let error_str = format!("WASM module '{}' not found", module_name);
-        self.record_invocation(
-            ctx.entity_ref,
-            module_name,
-            ctx.action,
-            integration.on_failure.clone(),
-            false,
-            Some(error_str.clone()),
-            0,
-            None,
-        )
-        .await;
-
-        if let Some(ref cb) = integration.on_failure {
-            let params = serde_json::json!({
-                "error": error_str,
-                "integration": integration.name.clone(),
-            });
-            return self
-                .dispatch_wasm_callback(
-                    ctx.entity_ref,
-                    cb,
-                    params,
-                    ctx.agent_ctx,
-                    ctx.mode,
-                    &integration.name,
-                    module_name,
-                )
-                .await;
-        }
-        Ok(None)
-    }
-
     /// Invoke the WASM module and handle success/failure/error results.
     #[allow(clippy::too_many_arguments)]
     async fn invoke_and_handle_result(
@@ -1141,6 +1183,19 @@ impl crate::state::ServerState {
         // Existing action-triggered invocations don't use streams — pass empty registry.
         let streams = Arc::new(std::sync::RwLock::new(StreamRegistry::default()));
         let phase_parent_span = Span::current();
+        let awaited_owner = ctx
+            .dispatch_idempotency_key
+            .and_then(|delivery_id| self.awaited_execution_owner(delivery_id, ctx.agent_ctx));
+        let awaited_execution_id = if let Some(owner) = awaited_owner.as_ref() {
+            owner
+                .snapshot()
+                .await
+                .0
+                .awaited_execution
+                .map(|evidence| evidence.identity.execution_id)
+        } else {
+            None
+        };
         let invoke_result = instrument_wasm_dispatch_phase_result(
             phase_parent_span.clone(),
             ctx,
@@ -1345,6 +1400,20 @@ impl crate::state::ServerState {
                     )
                     .await
                     .map_err(|e| e.to_string())?;
+                if let (Some(owner), Some(execution_id)) =
+                    (awaited_owner.as_ref(), awaited_execution_id.as_deref())
+                {
+                    owner
+                        .complete(
+                            execution_id,
+                            true,
+                            integration.on_success.as_deref(),
+                            Some(callback_params.clone()),
+                            None,
+                            temper_runtime::scheduler::sim_now(),
+                        )
+                        .await?;
+                }
 
                 // Determine callback action: prefer static on_success from spec,
                 // fall back to dynamic callback_action from WASM result. Composite

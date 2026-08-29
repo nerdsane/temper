@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use super::super::{Automaton, TriggerKind};
+use super::super::{Automaton, Effect, TriggerKind};
 use super::BundleLintFinding;
 
 pub(super) fn lint_workflows(
@@ -101,6 +101,86 @@ pub(super) fn lint_workflows(
                     ),
                 ));
             }
+            if role == "member_action" {
+                lint_member_integration(entity_name, workflow, member, action, findings);
+            }
+        }
+    }
+}
+
+fn lint_member_integration(
+    source_entity: &str,
+    workflow: &super::super::CollectionWorkflow,
+    member: &Automaton,
+    action: &super::super::Action,
+    findings: &mut Vec<BundleLintFinding>,
+) {
+    let effects = action
+        .effect
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Trigger { name } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if effects.len() != 1 {
+        findings.push(BundleLintFinding::error(
+            source_entity,
+            "collection_member_integration_count",
+            format!(
+                "collection_workflow '{}' member action '{}.{}' must trigger exactly one integration",
+                workflow.name, workflow.member_entity, workflow.member_action
+            ),
+        ));
+        return;
+    }
+    let effect_name = effects[0];
+    let matching = member
+        .integrations
+        .iter()
+        .filter(|integration| integration.trigger == effect_name)
+        .collect::<Vec<_>>();
+    if matching.len() != 1 || matching[0].integration_type != "wasm" {
+        findings.push(BundleLintFinding::error(
+            source_entity,
+            "collection_member_integration_not_wasm",
+            format!(
+                "collection_workflow '{}' member action '{}.{}' effect '{}' must resolve uniquely to WASM",
+                workflow.name, workflow.member_entity, workflow.member_action, effect_name
+            ),
+        ));
+        return;
+    }
+    let integration = matching[0];
+    let Some(success) = integration.on_success.as_deref() else {
+        findings.push(BundleLintFinding::error(
+            source_entity,
+            "collection_member_success_callback_missing",
+            format!(
+                "collection_workflow '{}' member WASM integration '{}' requires static on_success",
+                workflow.name, integration.name
+            ),
+        ));
+        return;
+    };
+    for callback in std::iter::once(success).chain(integration.on_failure.as_deref()) {
+        let Some(callback_action) = member.actions.iter().find(|action| action.name == callback)
+        else {
+            continue;
+        };
+        if callback_action
+            .effect
+            .iter()
+            .any(|effect| matches!(effect, Effect::Trigger { .. }))
+        {
+            findings.push(BundleLintFinding::error(
+                source_entity,
+                "collection_member_callback_integration_forbidden",
+                format!(
+                    "collection_workflow '{}' callback '{}.{}' cannot trigger another integration",
+                    workflow.name, workflow.member_entity, callback
+                ),
+            ));
         }
     }
 }
@@ -206,5 +286,143 @@ pub(super) fn lint_role_uniqueness(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automaton::parse_automaton;
+
+    fn workflow() -> super::super::super::CollectionWorkflow {
+        super::super::super::CollectionWorkflow {
+            name: "checks".to_string(),
+            start_action: "StartChecks".to_string(),
+            cancel_action: "CancelChecks".to_string(),
+            timeout_action: "ChecksTimedOut".to_string(),
+            roster_field: "members".to_string(),
+            member_entity: "CheckRun".to_string(),
+            member_action: "Start".to_string(),
+            member_cancel_action: "Cancel".to_string(),
+            max_members: 8,
+            max_concurrency: 2,
+            max_attempts: 3,
+            on_success: "Succeeded".to_string(),
+            on_partial_failure: "PartiallyFailed".to_string(),
+            on_failure: "Failed".to_string(),
+            on_cancelled: "Cancelled".to_string(),
+            on_timed_out: "TimedOut".to_string(),
+        }
+    }
+
+    fn member() -> Automaton {
+        parse_automaton(
+            r#"
+[automaton]
+name = "CheckRun"
+states = ["Pending", "Done", "Failed"]
+initial = "Pending"
+allow_indefinite_states = ["Pending", "Done", "Failed"]
+
+[[action]]
+name = "Start"
+from = ["Pending"]
+to = "Pending"
+effect = [{ type = "trigger", name = "run_check" }]
+
+[[action]]
+name = "Succeeded"
+from = ["Pending"]
+to = "Done"
+
+[[action]]
+name = "Failed"
+from = ["Pending"]
+to = "Failed"
+
+[[integration]]
+name = "check"
+trigger = "run_check"
+type = "wasm"
+module = "check.wasm"
+on_success = "Succeeded"
+on_failure = "Failed"
+"#,
+        )
+        .expect("member spec")
+    }
+
+    #[test]
+    fn member_contract_requires_exactly_one_direct_wasm_integration() {
+        let mut member = member();
+        let workflow = workflow();
+        let mut findings = Vec::new();
+        let action = member
+            .actions
+            .iter()
+            .find(|action| action.name == "Start")
+            .unwrap();
+        lint_member_integration("Batch", &workflow, &member, action, &mut findings);
+        assert!(findings.is_empty());
+
+        member
+            .actions
+            .iter_mut()
+            .find(|action| action.name == "Start")
+            .unwrap()
+            .effect
+            .clear();
+        let action = member
+            .actions
+            .iter()
+            .find(|action| action.name == "Start")
+            .unwrap();
+        lint_member_integration("Batch", &workflow, &member, action, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.code == "collection_member_integration_count")
+        );
+    }
+
+    #[test]
+    fn member_contract_requires_static_success_and_forbids_nested_callback_integration() {
+        let workflow = workflow();
+        let mut missing = member();
+        missing.integrations[0].on_success = None;
+        let action = missing
+            .actions
+            .iter()
+            .find(|action| action.name == "Start")
+            .unwrap();
+        let mut findings = Vec::new();
+        lint_member_integration("Batch", &workflow, &missing, action, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.code == "collection_member_success_callback_missing")
+        );
+
+        let mut nested = member();
+        nested
+            .actions
+            .iter_mut()
+            .find(|action| action.name == "Succeeded")
+            .unwrap()
+            .effect = vec![Effect::Trigger {
+            name: "another".to_string(),
+        }];
+        let action = nested
+            .actions
+            .iter()
+            .find(|action| action.name == "Start")
+            .unwrap();
+        findings.clear();
+        lint_member_integration("Batch", &workflow, &nested, action, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.code == "collection_member_callback_integration_forbidden")
+        );
     }
 }

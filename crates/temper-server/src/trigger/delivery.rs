@@ -1,6 +1,7 @@
 //! Durable reaction delivery identities and lifecycle records (ADR-0158).
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use temper_runtime::persistence::schema_deployment::SchemaEventPin;
 use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
@@ -32,6 +33,8 @@ pub const MAX_AUTOMATIC_ATTEMPTS: u32 = 5;
 pub const MAX_MANUAL_RETRIES: u32 = 3;
 /// Private synthetic entity type used for one journal per logical delivery.
 pub const REACTION_DELIVERY_ENTITY_TYPE: &str = "_ReactionDelivery";
+/// Maximum private callback evidence retained for one awaited integration.
+pub const MAX_AWAITED_CALLBACK_EVIDENCE_BYTES: usize = 128 * 1024;
 /// Bounded rule and authority snapshot supplied to the entity actor at commit.
 #[derive(Debug, Clone)]
 pub struct ReactionCommitContext {
@@ -71,6 +74,16 @@ pub struct ReactionReceipt {
     /// Collection workflow fence checked at the target commit boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection: Option<crate::trigger::collection_workflow::CollectionDeliveryContext>,
+    /// Awaited callback whose acceptance must be co-committed with the target event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) awaited_callback: Option<AwaitedCallbackReceiptV1>,
+}
+
+/// Exact awaited execution authorized to commit one callback target event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AwaitedCallbackReceiptV1 {
+    pub(crate) execution_id: String,
+    pub(crate) callback_action: String,
 }
 
 /// Immutable normalized reaction input committed with the source event.
@@ -150,6 +163,74 @@ pub enum ReactionDeliveryStatus {
     DeadLettered,
 }
 
+/// Immutable identity of the single awaited WASM integration bound to a
+/// collection-member delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AwaitedExecutionIdentityV1 {
+    pub(crate) execution_id: String,
+    pub(crate) integration_name: String,
+    pub(crate) module_name: String,
+    pub(crate) module_digest: String,
+    pub(crate) success_callback: String,
+    pub(crate) failure_callback: Option<String>,
+    pub(crate) schema_pin: Option<SchemaEventPin>,
+    pub(crate) deadline: DateTime<Utc>,
+}
+
+/// Durable boundary reached by one awaited collection-member integration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AwaitedExecutionPhase {
+    Executing,
+    ExecutionSucceeded,
+    ExecutionFailed,
+    CallbackAccepted,
+}
+
+/// Closed failure outcomes retained without relying on diagnostic strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AwaitedExecutionFailureClass {
+    ModuleFailure,
+    CallbackRejected,
+    CallbackTimeout,
+    CallbackStorageFailure,
+}
+
+/// Typed ownership failure evidence independent of execution completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AwaitedOwnerFailureClass {
+    RenewalLost,
+    StorageFailure,
+    DeadlineElapsed,
+}
+
+/// Last fenced owner failure retained for recovery and diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AwaitedOwnerFailureEvidenceV1 {
+    pub(crate) class: AwaitedOwnerFailureClass,
+    pub(crate) fencing_token: u64,
+    pub(crate) occurred_at: DateTime<Utc>,
+}
+
+/// Private replay evidence for an awaited integration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct AwaitedExecutionEvidenceV1 {
+    pub(crate) identity: AwaitedExecutionIdentityV1,
+    pub(crate) phase: AwaitedExecutionPhase,
+    pub(crate) fencing_token: u64,
+    pub(crate) started_at: DateTime<Utc>,
+    pub(crate) completed_at: Option<DateTime<Utc>>,
+    pub(crate) callback_action: Option<String>,
+    pub(crate) callback_params: Option<serde_json::Value>,
+    pub(crate) callback_digest: Option<String>,
+    pub(crate) callback_accepted_at: Option<DateTime<Utc>>,
+    pub(crate) callback_sequence: Option<u64>,
+    pub(crate) execution_failure: Option<AwaitedExecutionFailureClass>,
+    pub(crate) callback_failure: Option<AwaitedExecutionFailureClass>,
+}
+
 impl ReactionDeliveryStatus {
     /// Whether normal automatic delivery work has ended.
     pub(crate) const fn is_terminal(self) -> bool {
@@ -186,6 +267,12 @@ pub struct ReactionDeliveryRecord {
     pub transient_failure: bool,
     /// Sanitized last failure reason.
     pub last_error: Option<String>,
+    /// Exact private execution evidence for an awaited collection member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) awaited_execution: Option<AwaitedExecutionEvidenceV1>,
+    /// Typed failure from the most recent awaited execution owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) awaited_owner_failure: Option<AwaitedOwnerFailureEvidenceV1>,
 }
 
 impl ReactionDeliveryRecord {
@@ -202,6 +289,8 @@ impl ReactionDeliveryRecord {
             next_attempt_at,
             transient_failure: false,
             last_error: None,
+            awaited_execution: None,
+            awaited_owner_failure: None,
         }
     }
 
@@ -244,6 +333,219 @@ impl ReactionDeliveryRecord {
     pub fn begin_dispatch(&mut self, fencing_token: u64) -> Result<(), String> {
         self.require_fence(fencing_token, ReactionDeliveryStatus::Claimed)?;
         self.status = ReactionDeliveryStatus::Dispatching;
+        Ok(())
+    }
+
+    /// Bind the current fenced owner to one immutable awaited execution.
+    pub(crate) fn bind_awaited_execution(
+        &mut self,
+        fencing_token: u64,
+        identity: AwaitedExecutionIdentityV1,
+        now: DateTime<Utc>,
+    ) -> Result<(), String> {
+        self.require_fence(fencing_token, ReactionDeliveryStatus::Dispatching)?;
+        if now >= identity.deadline {
+            return Err("awaited execution deadline has elapsed".to_string());
+        }
+        if let Some(evidence) = self.awaited_execution.as_mut() {
+            if evidence.identity != identity {
+                return Err("awaited execution identity mismatch".to_string());
+            }
+            evidence.fencing_token = fencing_token;
+            if evidence.phase == AwaitedExecutionPhase::Executing {
+                evidence.started_at = now;
+            }
+            return Ok(());
+        }
+        self.awaited_execution = Some(AwaitedExecutionEvidenceV1 {
+            identity,
+            phase: AwaitedExecutionPhase::Executing,
+            fencing_token,
+            started_at: now,
+            completed_at: None,
+            callback_action: None,
+            callback_params: None,
+            callback_digest: None,
+            callback_accepted_at: None,
+            callback_sequence: None,
+            execution_failure: None,
+            callback_failure: None,
+        });
+        Ok(())
+    }
+
+    /// Renew the short owner lease without extending the workflow deadline.
+    pub(crate) fn renew_awaited_execution(
+        &mut self,
+        fencing_token: u64,
+        execution_id: &str,
+        now: DateTime<Utc>,
+        lease: Duration,
+    ) -> Result<DateTime<Utc>, String> {
+        self.require_fence(fencing_token, ReactionDeliveryStatus::Dispatching)?;
+        if lease <= Duration::zero() {
+            return Err("delivery lease must be positive".to_string());
+        }
+        if self.lease_expires_at.is_none_or(|expiry| now >= expiry) {
+            return Err("awaited execution lease has expired".to_string());
+        }
+        let evidence = self
+            .awaited_execution
+            .as_ref()
+            .ok_or_else(|| "awaited execution is not bound".to_string())?;
+        if evidence.fencing_token != fencing_token || evidence.identity.execution_id != execution_id
+        {
+            return Err("stale awaited execution owner".to_string());
+        }
+        if evidence.phase == AwaitedExecutionPhase::CallbackAccepted {
+            return Err("awaited execution callback is already accepted".to_string());
+        }
+        if now >= evidence.identity.deadline {
+            return Err("awaited execution deadline has elapsed".to_string());
+        }
+        let expiry = (now + lease).min(evidence.identity.deadline);
+        self.lease_expires_at = Some(expiry);
+        Ok(expiry)
+    }
+
+    /// Retain a typed failure from the exact current execution owner.
+    pub(crate) fn record_awaited_owner_failure(
+        &mut self,
+        fencing_token: u64,
+        class: AwaitedOwnerFailureClass,
+        now: DateTime<Utc>,
+    ) -> Result<(), String> {
+        self.require_fence(fencing_token, ReactionDeliveryStatus::Dispatching)?;
+        self.awaited_owner_failure = Some(AwaitedOwnerFailureEvidenceV1 {
+            class,
+            fencing_token,
+            occurred_at: now,
+        });
+        Ok(())
+    }
+
+    /// Persist exact callback replay evidence after the WASM boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_awaited_completion(
+        &mut self,
+        fencing_token: u64,
+        execution_id: &str,
+        succeeded: bool,
+        callback_action: Option<&str>,
+        callback_params: Option<serde_json::Value>,
+        failure_class: Option<AwaitedExecutionFailureClass>,
+        now: DateTime<Utc>,
+    ) -> Result<(), String> {
+        self.require_fence(fencing_token, ReactionDeliveryStatus::Dispatching)?;
+        if self.lease_expires_at.is_none_or(|expiry| now >= expiry) {
+            return Err("awaited execution lease has expired".to_string());
+        }
+        let encoded = callback_params
+            .as_ref()
+            .map(serde_json::to_vec)
+            .transpose()
+            .map_err(|error| format!("awaited callback evidence is invalid: {error}"))?;
+        if encoded
+            .as_ref()
+            .is_some_and(|bytes| bytes.len() > MAX_AWAITED_CALLBACK_EVIDENCE_BYTES)
+        {
+            return Err("CompletionEvidenceBudgetExceeded".to_string());
+        }
+        let evidence = self
+            .awaited_execution
+            .as_mut()
+            .ok_or_else(|| "awaited execution is not bound".to_string())?;
+        if evidence.fencing_token != fencing_token || evidence.identity.execution_id != execution_id
+        {
+            return Err("stale awaited execution owner".to_string());
+        }
+        if evidence.phase != AwaitedExecutionPhase::Executing {
+            return Err("awaited execution is not executing".to_string());
+        }
+        if now > evidence.identity.deadline {
+            return Err("awaited execution deadline has elapsed".to_string());
+        }
+        evidence.phase = if succeeded {
+            AwaitedExecutionPhase::ExecutionSucceeded
+        } else {
+            AwaitedExecutionPhase::ExecutionFailed
+        };
+        evidence.completed_at = Some(now);
+        evidence.callback_action = callback_action.map(str::to_string);
+        evidence.callback_digest = encoded.map(|bytes| {
+            let mut digest = Sha256::new();
+            digest.update(b"temper-awaited-callback-v1\0");
+            digest.update(bytes);
+            format!("sha256:{:x}", digest.finalize())
+        });
+        evidence.callback_params = callback_params;
+        evidence.execution_failure = failure_class;
+        Ok(())
+    }
+
+    /// Mark the exact callback accepted by the target entity.
+    pub(crate) fn accept_awaited_callback(
+        &mut self,
+        fencing_token: u64,
+        execution_id: &str,
+        callback_action: &str,
+        callback_sequence: u64,
+        now: DateTime<Utc>,
+    ) -> Result<(), String> {
+        self.require_fence(fencing_token, ReactionDeliveryStatus::Dispatching)?;
+        if self.lease_expires_at.is_none_or(|expiry| now >= expiry) {
+            return Err("awaited execution lease has expired".to_string());
+        }
+        let evidence = self
+            .awaited_execution
+            .as_mut()
+            .ok_or_else(|| "awaited execution is not bound".to_string())?;
+        if evidence.fencing_token != fencing_token || evidence.identity.execution_id != execution_id
+        {
+            return Err("stale awaited execution owner".to_string());
+        }
+        if !matches!(
+            evidence.phase,
+            AwaitedExecutionPhase::ExecutionSucceeded | AwaitedExecutionPhase::ExecutionFailed
+        ) || evidence.callback_action.as_deref() != Some(callback_action)
+        {
+            return Err("awaited callback does not match completion evidence".to_string());
+        }
+        if now > evidence.identity.deadline {
+            return Err("awaited execution deadline has elapsed".to_string());
+        }
+        evidence.phase = AwaitedExecutionPhase::CallbackAccepted;
+        evidence.callback_failure = None;
+        evidence.callback_accepted_at = Some(now);
+        evidence.callback_sequence = Some(callback_sequence);
+        Ok(())
+    }
+
+    /// Retain a typed failed callback attempt without discarding replay evidence.
+    pub(crate) fn record_awaited_callback_failure(
+        &mut self,
+        fencing_token: u64,
+        class: AwaitedExecutionFailureClass,
+        now: DateTime<Utc>,
+    ) -> Result<(), String> {
+        self.require_fence(fencing_token, ReactionDeliveryStatus::Dispatching)?;
+        if self.lease_expires_at.is_none_or(|expiry| now >= expiry) {
+            return Err("awaited execution lease has expired".to_string());
+        }
+        let evidence = self
+            .awaited_execution
+            .as_mut()
+            .ok_or_else(|| "awaited execution is not bound".to_string())?;
+        if evidence.fencing_token != fencing_token
+            || evidence.callback_action.is_none()
+            || !matches!(
+                evidence.phase,
+                AwaitedExecutionPhase::ExecutionSucceeded | AwaitedExecutionPhase::ExecutionFailed
+            )
+        {
+            return Err("stale or unresolved awaited callback owner".to_string());
+        }
+        evidence.callback_failure = Some(class);
         Ok(())
     }
 

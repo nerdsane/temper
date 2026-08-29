@@ -1,8 +1,9 @@
 use super::{
-    DeliveryKind, PersistedReactionIntent, REACTION_INTENTS_FIELD, ReactionDeliveryRecord,
-    ReactionDeliveryStatus, ReactionReceipt, append_delivery_record, attach_intents,
-    attach_receipt, delivery_journal_id, extract_intents, extract_receipt, load_delivery_record,
-    stable_delivery_id, state_timeout_intents,
+    AwaitedExecutionIdentityV1, AwaitedExecutionPhase, DeliveryKind,
+    MAX_AWAITED_CALLBACK_EVIDENCE_BYTES, PersistedReactionIntent, REACTION_INTENTS_FIELD,
+    ReactionDeliveryRecord, ReactionDeliveryStatus, ReactionReceipt, append_delivery_record,
+    attach_intents, attach_receipt, delivery_journal_id, extract_intents, extract_receipt,
+    load_delivery_record, stable_delivery_id, state_timeout_intents,
 };
 use chrono::{Duration, TimeZone, Utc};
 use serde_json::json;
@@ -268,10 +269,190 @@ fn receipt_round_trips_inside_the_atomic_target_event_payload() {
         state_timeout_state: None,
         schema_pin: None,
         collection: None,
+        awaited_callback: None,
     };
 
     attach_receipt(&mut payload, &receipt).unwrap();
     assert_eq!(extract_receipt(&payload).unwrap(), Some(receipt));
+}
+
+#[test]
+fn awaited_execution_requires_exact_fence_and_bounded_callback_evidence() {
+    let now = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
+    let deadline = now + Duration::minutes(2);
+    let mut delivery = ReactionDeliveryRecord::pending(intent());
+    let fence = delivery.claim(now, Duration::seconds(30)).unwrap();
+    delivery.begin_dispatch(fence).unwrap();
+    let identity = AwaitedExecutionIdentityV1 {
+        execution_id: "execution-1".to_string(),
+        integration_name: "check".to_string(),
+        module_name: "check.wasm".to_string(),
+        module_digest: "sha256:abc".to_string(),
+        success_callback: "Checked".to_string(),
+        failure_callback: Some("CheckFailed".to_string()),
+        schema_pin: None,
+        deadline,
+    };
+    delivery
+        .bind_awaited_execution(fence, identity, now)
+        .unwrap();
+    for (elapsed, expected) in [(20, 50), (40, 70), (65, 95)] {
+        assert_eq!(
+            delivery
+                .renew_awaited_execution(
+                    fence,
+                    "execution-1",
+                    now + Duration::seconds(elapsed),
+                    Duration::seconds(30),
+                )
+                .unwrap(),
+            now + Duration::seconds(expected)
+        );
+    }
+    assert_eq!(
+        delivery
+            .renew_awaited_execution(
+                fence,
+                "execution-1",
+                now + Duration::seconds(90),
+                Duration::seconds(30),
+            )
+            .unwrap(),
+        deadline
+    );
+    assert!(
+        delivery
+            .record_awaited_completion(
+                fence + 1,
+                "execution-1",
+                true,
+                Some("Checked"),
+                Some(json!({"ok": true})),
+                None,
+                now,
+            )
+            .is_err()
+    );
+    delivery
+        .record_awaited_completion(
+            fence,
+            "execution-1",
+            true,
+            Some("Checked"),
+            Some(json!({"ok": true})),
+            None,
+            now,
+        )
+        .unwrap();
+    delivery
+        .accept_awaited_callback(fence, "execution-1", "Checked", 7, now)
+        .unwrap();
+    assert_eq!(
+        delivery.awaited_execution.as_ref().unwrap().phase,
+        AwaitedExecutionPhase::CallbackAccepted
+    );
+
+    let mut oversized = ReactionDeliveryRecord::pending(intent());
+    let fence = oversized.claim(now, Duration::seconds(30)).unwrap();
+    oversized.begin_dispatch(fence).unwrap();
+    oversized
+        .bind_awaited_execution(
+            fence,
+            AwaitedExecutionIdentityV1 {
+                execution_id: "execution-2".to_string(),
+                integration_name: "check".to_string(),
+                module_name: "check.wasm".to_string(),
+                module_digest: "sha256:abc".to_string(),
+                success_callback: "Checked".to_string(),
+                failure_callback: None,
+                schema_pin: None,
+                deadline,
+            },
+            now,
+        )
+        .unwrap();
+    assert!(
+        oversized
+            .record_awaited_completion(
+                fence,
+                "execution-2",
+                true,
+                Some("Checked"),
+                Some(json!({"payload": "x".repeat(MAX_AWAITED_CALLBACK_EVIDENCE_BYTES)})),
+                None,
+                now,
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn expired_awaited_owner_cannot_complete_after_fenced_takeover() {
+    let now = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
+    let deadline = now + Duration::minutes(2);
+    let identity = AwaitedExecutionIdentityV1 {
+        execution_id: "execution-takeover".to_string(),
+        integration_name: "check".to_string(),
+        module_name: "check.wasm".to_string(),
+        module_digest: "sha256:abc".to_string(),
+        success_callback: "Checked".to_string(),
+        failure_callback: None,
+        schema_pin: None,
+        deadline,
+    };
+    let mut delivery = ReactionDeliveryRecord::pending(intent());
+    let old_fence = delivery.claim(now, Duration::seconds(30)).unwrap();
+    delivery.begin_dispatch(old_fence).unwrap();
+    delivery
+        .bind_awaited_execution(old_fence, identity.clone(), now)
+        .unwrap();
+
+    let takeover_at = now + Duration::seconds(31);
+    assert!(
+        delivery
+            .record_awaited_completion(
+                old_fence,
+                "execution-takeover",
+                true,
+                Some("Checked"),
+                Some(json!({"late": true})),
+                None,
+                takeover_at,
+            )
+            .is_err(),
+        "an expired owner must fail before recovery raises the fence"
+    );
+    assert!(delivery.recover_expired_lease(takeover_at));
+    let new_fence = delivery.claim(takeover_at, Duration::seconds(30)).unwrap();
+    delivery.begin_dispatch(new_fence).unwrap();
+    delivery
+        .bind_awaited_execution(new_fence, identity, takeover_at)
+        .unwrap();
+    assert_eq!(new_fence, old_fence + 1);
+    assert!(
+        delivery
+            .record_awaited_completion(
+                old_fence,
+                "execution-takeover",
+                true,
+                Some("Checked"),
+                Some(json!({"ok": true})),
+                None,
+                takeover_at,
+            )
+            .is_err()
+    );
+    delivery
+        .record_awaited_completion(
+            new_fence,
+            "execution-takeover",
+            true,
+            Some("Checked"),
+            Some(json!({"ok": true})),
+            None,
+            takeover_at,
+        )
+        .unwrap();
 }
 
 #[test]
@@ -329,4 +510,59 @@ async fn delivery_journal_restores_state_and_fences_competing_writers() {
         delivery_journal_id(&intent()),
         "tenant-a:_ReactionDelivery:reaction-v1-a"
     );
+}
+
+async fn prove_awaited_evidence_round_trip(store: BoxedEventStore, tenant: String) {
+    let now = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
+    let mut persisted_intent = intent();
+    persisted_intent.tenant = tenant;
+    persisted_intent.delivery_id = format!("reaction-v1-{}", uuid::Uuid::new_v4());
+    persisted_intent.root_delivery_id = persisted_intent.delivery_id.clone();
+    let mut record = ReactionDeliveryRecord::pending(persisted_intent.clone());
+    let fence = record.claim(now, Duration::seconds(30)).unwrap();
+    record.begin_dispatch(fence).unwrap();
+    record
+        .bind_awaited_execution(
+            fence,
+            AwaitedExecutionIdentityV1 {
+                execution_id: "backend-execution".to_string(),
+                integration_name: "check".to_string(),
+                module_name: "check.wasm".to_string(),
+                module_digest: "sha256:backend".to_string(),
+                success_callback: "Checked".to_string(),
+                failure_callback: None,
+                schema_pin: None,
+                deadline: now + Duration::minutes(1),
+            },
+            now,
+        )
+        .unwrap();
+    record
+        .record_awaited_completion(
+            fence,
+            "backend-execution",
+            true,
+            Some("Checked"),
+            Some(json!({"backend": true})),
+            None,
+            now,
+        )
+        .unwrap();
+    append_delivery_record(&store, 0, &record).await.unwrap();
+    let (restored, _) = load_delivery_record(&store, persisted_intent)
+        .await
+        .unwrap();
+    assert_eq!(restored, record);
+}
+
+#[tokio::test]
+async fn turso_round_trips_awaited_execution_evidence() {
+    let (_guard, _clock, _ids) = install_deterministic_context(415);
+    let dir = tempfile::tempdir().unwrap();
+    let db_url = format!("file:{}", dir.path().join("awaited.db").display());
+    let store = temper_store_turso::TursoEventStore::new(&db_url, None)
+        .await
+        .unwrap();
+    prove_awaited_evidence_round_trip(BoxedEventStore::new(store), "awaited-turso".to_string())
+        .await;
 }

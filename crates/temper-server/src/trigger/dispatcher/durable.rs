@@ -199,7 +199,12 @@ impl ReactionDispatcher {
             return Ok(Vec::new());
         }
 
-        if let Some(target_entity_id) = intent.target_entity_id.as_deref() {
+        let awaited_collection_member = intent.collection.as_ref().is_some_and(|context| {
+            context.role == crate::trigger::collection_workflow::CollectionDeliveryRole::Member
+        });
+        if !awaited_collection_member
+            && let Some(target_entity_id) = intent.target_entity_id.as_deref()
+        {
             let target_persistence_id = match intent.schema_pin.as_ref() {
                 Some(pin) => format!(
                     "{}:{}:{}",
@@ -304,8 +309,26 @@ impl ReactionDispatcher {
                 return Ok(Vec::new());
             }
         };
+        let claim_lease = if awaited_collection_member {
+            let deadline = intent
+                .collection
+                .as_ref()
+                .and_then(|context| context.execution_deadline)
+                .ok_or_else(|| "collection member execution deadline is missing".to_string())?;
+            let remaining = deadline - now;
+            if remaining <= chrono::Duration::zero() {
+                record.status = ReactionDeliveryStatus::Rejected;
+                record.last_error = Some("AwaitedExecutionDeadlineElapsed".to_string());
+                persist_terminal_delivery(&store, sequence, &record).await?;
+                record_delivery_terminal_metrics(&record);
+                return Ok(Vec::new());
+            }
+            remaining.min(chrono::Duration::seconds(30))
+        } else {
+            chrono::Duration::seconds(30)
+        };
         let fencing_token = record
-            .claim(now, chrono::Duration::seconds(30))
+            .claim(now, claim_lease)
             .map_err(|error| error.to_string())?;
         sequence = match append_delivery_record(&store, sequence, &record).await {
             Ok(sequence) => sequence,
@@ -329,46 +352,143 @@ impl ReactionDispatcher {
             .await
             .map_err(|error| error.to_string())?;
 
-        let invoking_ctx = AgentContext {
+        let mut invoking_ctx = AgentContext {
             security_ctx: Some(security_ctx),
             idempotency_key: Some(intent.delivery_id.clone()),
             schema_pin: intent.schema_pin.as_ref().map(|pin| pin.execution.clone()),
             ..AgentContext::default()
         };
+        if awaited_collection_member {
+            invoking_ctx.observation_metadata.insert(
+                crate::state::AWAITED_EXECUTION_FENCE_METADATA.to_string(),
+                fencing_token.to_string(),
+            );
+        }
         let drop_ok = rule.drop_ok;
-        let results = self
-            .dispatch_rules(
-                state,
-                &TenantId::new(&intent.tenant),
-                &intent.source_entity_type,
-                &intent.source_entity_id,
-                &intent.source_action,
-                &intent.source_to_state,
-                &intent.source_fields,
-                intent.depth,
-                &invoking_ctx,
-                vec![rule],
-                Some(BoundDelivery {
-                    delivery_id: intent.delivery_id.clone(),
-                    root_delivery_id: intent.root_delivery_id.clone(),
-                    fencing_token,
-                    target_entity_id: intent.target_entity_id.clone(),
-                    expected_target_sequence,
-                    state_timeout_state: intent
-                        .state_timeout
-                        .as_ref()
-                        .map(|clock| clock.state.clone()),
-                    collection: intent.collection.clone().map(|mut collection| {
-                        collection.attempts = u8::try_from(record.attempts).unwrap_or(u8::MAX);
-                        collection
-                    }),
+        let awaited_owner = if awaited_collection_member {
+            let deadline = intent
+                .collection
+                .as_ref()
+                .and_then(|context| context.execution_deadline)
+                .ok_or_else(|| "collection member execution deadline is missing".to_string())?;
+            let owner = crate::trigger::dispatcher::AwaitedExecutionOwner::new(
+                store.clone(),
+                record.clone(),
+                sequence,
+                deadline,
+            );
+            state.register_awaited_execution_owner(
+                &intent.delivery_id,
+                fencing_token,
+                owner.clone(),
+            );
+            Some(owner)
+        } else {
+            None
+        };
+        let dispatch_tenant = TenantId::new(&intent.tenant);
+        let dispatch = self.dispatch_rules(
+            state,
+            &dispatch_tenant,
+            &intent.source_entity_type,
+            &intent.source_entity_id,
+            &intent.source_action,
+            &intent.source_to_state,
+            &intent.source_fields,
+            intent.depth,
+            &invoking_ctx,
+            vec![rule],
+            Some(BoundDelivery {
+                delivery_id: intent.delivery_id.clone(),
+                root_delivery_id: intent.root_delivery_id.clone(),
+                fencing_token,
+                target_entity_id: intent.target_entity_id.clone(),
+                expected_target_sequence,
+                state_timeout_state: intent
+                    .state_timeout
+                    .as_ref()
+                    .map(|clock| clock.state.clone()),
+                collection: intent.collection.clone().map(|mut collection| {
+                    collection.attempts = u8::try_from(record.attempts).unwrap_or(u8::MAX);
+                    collection
                 }),
+            }),
+        );
+        let results = if let Some(owner) = awaited_owner.as_ref() {
+            let result = crate::trigger::dispatcher::run_with_renewal(
+                owner,
+                &intent.delivery_id,
+                intent.kind,
+                dispatch,
+                temper_runtime::scheduler::sim_now,
             )
             .await;
+            state.remove_awaited_execution_owner(&intent.delivery_id, fencing_token);
+            let result = result?;
+            (record, sequence) =
+                crate::trigger::delivery::load_delivery_record(&store, intent.clone())
+                    .await
+                    .map_err(|error| error.to_string())?;
+            result
+        } else {
+            dispatch.await
+        };
 
         record.lease_expires_at = None;
         record.next_attempt_at = None;
-        if results.iter().any(|result| result.success) {
+        let awaited_callback_accepted = record.awaited_execution.as_ref().is_some_and(|evidence| {
+            evidence.phase == crate::trigger::delivery::AwaitedExecutionPhase::CallbackAccepted
+        });
+        let awaited_callback_pending = record.awaited_execution.as_ref().is_some_and(|evidence| {
+            evidence.callback_action.is_some() && !awaited_callback_accepted
+        });
+        let awaited_callback_failure = record
+            .awaited_execution
+            .as_ref()
+            .and_then(|evidence| evidence.callback_failure);
+        let awaited_failure = record
+            .awaited_execution
+            .as_ref()
+            .and_then(|evidence| evidence.execution_failure);
+        if awaited_collection_member && awaited_callback_pending {
+            let error = results
+                .iter()
+                .find_map(|result| result.error.clone())
+                .unwrap_or_else(|| {
+                    "AwaitedExecutionIncomplete: exact callback acceptance evidence is absent"
+                        .to_string()
+                });
+            let transient = matches!(
+                awaited_callback_failure,
+                Some(
+                    crate::trigger::delivery::AwaitedExecutionFailureClass::CallbackTimeout
+                        | crate::trigger::delivery::AwaitedExecutionFailureClass::CallbackStorageFailure
+                )
+            );
+            record.transient_failure = transient;
+            record.last_error = Some(error);
+            record.status = if awaited_callback_failure.is_none() {
+                ReactionDeliveryStatus::Rejected
+            } else if transient && record.attempts < automatic_attempt_budget {
+                record.next_attempt_at = Some(
+                    temper_runtime::scheduler::sim_now() + automatic_retry_backoff(record.attempts),
+                );
+                ReactionDeliveryStatus::Pending
+            } else if transient {
+                ReactionDeliveryStatus::DeadLettered
+            } else {
+                ReactionDeliveryStatus::Rejected
+            };
+        } else if awaited_collection_member && awaited_failure.is_some() {
+            record.status = ReactionDeliveryStatus::Rejected;
+            record.last_error = awaited_failure.map(|failure| format!("{failure:?}"));
+        } else if awaited_collection_member && !awaited_callback_accepted {
+            record.status = ReactionDeliveryStatus::Rejected;
+            record.last_error = Some(
+                "AwaitedExecutionIncomplete: exact callback acceptance evidence is absent"
+                    .to_string(),
+            );
+        } else if results.iter().any(|result| result.success) {
             record.status = ReactionDeliveryStatus::Succeeded;
             record.last_error = None;
         } else if results.is_empty() {

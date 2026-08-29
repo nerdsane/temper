@@ -13,6 +13,25 @@ use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 use tracing::{Instrument, instrument};
 
+fn awaited_callback_failure_class(
+    error: &crate::state::DispatchError,
+) -> crate::trigger::delivery::AwaitedExecutionFailureClass {
+    match error {
+        crate::state::DispatchError::Transient {
+            source: temper_runtime::actor::ActorError::AskTimeout(_),
+            ..
+        }
+        | crate::state::DispatchError::Deferred { .. } => {
+            crate::trigger::delivery::AwaitedExecutionFailureClass::CallbackTimeout
+        }
+        crate::state::DispatchError::Transient { .. }
+        | crate::state::DispatchError::Internal(_) => {
+            crate::trigger::delivery::AwaitedExecutionFailureClass::CallbackStorageFailure
+        }
+        _ => crate::trigger::delivery::AwaitedExecutionFailureClass::CallbackRejected,
+    }
+}
+
 fn callback_agent_context(
     agent_ctx: &AgentContext,
     integration_name: &str,
@@ -36,6 +55,117 @@ fn callback_agent_context(
 }
 
 impl crate::state::ServerState {
+    async fn awaited_callback_commit_context(
+        &self,
+        entity_ref: WasmEntityRef<'_>,
+        callback_action: &str,
+        callback_params: &serde_json::Value,
+        agent_ctx: &AgentContext,
+    ) -> Result<Option<crate::trigger::delivery::ReactionCommitContext>, String> {
+        let Some(delivery_id) = agent_ctx.idempotency_key.as_deref() else {
+            return Ok(None);
+        };
+        let Some(owner) = self.awaited_execution_owner(delivery_id, agent_ctx) else {
+            return Ok(None);
+        };
+        let (delivery, _) = owner.snapshot().await;
+        let evidence = delivery
+            .awaited_execution
+            .as_ref()
+            .ok_or_else(|| "awaited callback has no durable execution evidence".to_string())?;
+        if evidence.callback_action.as_deref() != Some(callback_action) {
+            return Err("awaited callback action does not match completion evidence".to_string());
+        }
+        let collection = delivery
+            .intent
+            .collection
+            .clone()
+            .ok_or_else(|| "awaited callback delivery has no collection fence".to_string())?;
+        let rules = if let Some(pin) = agent_ctx.schema_pin.as_ref() {
+            self.registry
+                .read()
+                .map_err(|_| "registry lock poisoned".to_string())?
+                .scoped_reaction_candidates_at_digest(
+                    entity_ref.tenant,
+                    &pin.scope,
+                    &pin.bundle_digest,
+                    entity_ref.entity_type,
+                    callback_action,
+                )
+        } else {
+            self.reaction_dispatcher
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .map_or_else(Vec::new, |dispatcher| {
+                    dispatcher.candidate_rules(
+                        entity_ref.tenant,
+                        entity_ref.entity_type,
+                        callback_action,
+                    )
+                })
+        };
+        let guard_source = match agent_ctx.schema_pin.as_ref() {
+            Some(pin) => {
+                self.get_or_initialize_scoped_entity_state(
+                    entity_ref.tenant,
+                    entity_ref.entity_type,
+                    entity_ref.entity_id,
+                    pin.clone(),
+                )
+                .await
+            }
+            None => {
+                self.get_tenant_entity_state(
+                    entity_ref.tenant,
+                    entity_ref.entity_type,
+                    entity_ref.entity_id,
+                )
+                .await
+            }
+        }
+        .map_err(|error| error.to_string())?;
+        let expected_source_sequence = guard_source.state.sequence_nr;
+        let mut guard_fields = guard_source.state.fields;
+        if let (Some(fields), Some(params)) =
+            (guard_fields.as_object_mut(), callback_params.as_object())
+        {
+            fields.extend(params.clone());
+        }
+        let resolved_guards = crate::trigger::dispatcher::resolve_rule_guard_inputs(
+            self,
+            entity_ref.tenant,
+            &rules,
+            &guard_fields,
+            agent_ctx.schema_pin.as_ref(),
+        )
+        .await;
+        Ok(Some(crate::trigger::delivery::ReactionCommitContext {
+            rules,
+            authority: delivery.intent.authority.clone(),
+            depth: delivery.intent.depth + 1,
+            root_delivery_id: Some(delivery.intent.root_delivery_id.clone()),
+            expected_source_sequence,
+            resolved_guards,
+            receipt: Some(crate::trigger::delivery::ReactionReceipt {
+                delivery_id: delivery.intent.delivery_id.clone(),
+                fencing_token: delivery.fencing_token,
+                received_at: sim_now(),
+                state_timeout_state: delivery
+                    .intent
+                    .state_timeout
+                    .as_ref()
+                    .map(|timeout| timeout.state.clone()),
+                schema_pin: delivery.intent.schema_pin.clone(),
+                collection: Some(collection),
+                awaited_callback: Some(crate::trigger::delivery::AwaitedCallbackReceiptV1 {
+                    execution_id: evidence.identity.execution_id.clone(),
+                    callback_action: callback_action.to_string(),
+                }),
+            }),
+        }))
+    }
+
     /// Record a WASM invocation (persist log entry + emit observability events).
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn record_invocation(
@@ -153,7 +283,34 @@ impl crate::state::ServerState {
                 params["decision_id"] = serde_json::json!(did);
                 params["authz_denied"] = serde_json::json!(true);
             }
-            return super::dispatch_wasm_callback_boxed(
+            let awaited_owner = ctx
+                .dispatch_idempotency_key
+                .and_then(|delivery_id| self.awaited_execution_owner(delivery_id, ctx.agent_ctx));
+            let execution_id = if let Some(owner) = awaited_owner.as_ref() {
+                owner
+                    .snapshot()
+                    .await
+                    .0
+                    .awaited_execution
+                    .map(|evidence| evidence.identity.execution_id)
+            } else {
+                None
+            };
+            if let (Some(owner), Some(execution_id)) =
+                (awaited_owner.as_ref(), execution_id.as_deref())
+            {
+                owner
+                    .complete(
+                        execution_id,
+                        false,
+                        Some(cb),
+                        Some(params.clone()),
+                        Some(crate::trigger::delivery::AwaitedExecutionFailureClass::ModuleFailure),
+                        sim_now(),
+                    )
+                    .await?;
+            }
+            let response = super::dispatch_wasm_callback_boxed(
                 self,
                 ctx.entity_ref,
                 cb,
@@ -163,7 +320,27 @@ impl crate::state::ServerState {
                 integration_name,
                 module_name,
             )
-            .await;
+            .await?;
+            return Ok(response);
+        }
+
+        if let Some(owner) = ctx
+            .dispatch_idempotency_key
+            .and_then(|delivery_id| self.awaited_execution_owner(delivery_id, ctx.agent_ctx))
+        {
+            let (record, _) = owner.snapshot().await;
+            if let Some(evidence) = record.awaited_execution {
+                owner
+                    .complete(
+                        &evidence.identity.execution_id,
+                        false,
+                        None,
+                        None,
+                        Some(crate::trigger::delivery::AwaitedExecutionFailureClass::ModuleFailure),
+                        sim_now(),
+                    )
+                    .await?;
+            }
         }
 
         // No declared recovery: propagate the failure instead of swallowing it
@@ -174,6 +351,7 @@ impl crate::state::ServerState {
     }
 
     #[instrument(skip_all, fields(otel.name = "dispatch.dispatch_wasm_callback", callback_action))]
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn dispatch_wasm_callback(
         &self,
         entity_ref: WasmEntityRef<'_>,
@@ -197,7 +375,15 @@ impl crate::state::ServerState {
                     module_name,
                     callback_action,
                 );
-                let resp = super::dispatch_tenant_action_core_boxed(
+                let reaction_context = self
+                    .awaited_callback_commit_context(
+                        entity_ref,
+                        callback_action,
+                        &callback_params,
+                        agent_ctx,
+                    )
+                    .await?;
+                let dispatch = super::dispatch_tenant_action_core_boxed(
                     self,
                     entity_ref.tenant,
                     entity_ref.entity_type,
@@ -206,11 +392,49 @@ impl crate::state::ServerState {
                     callback_params,
                     &callback_ctx,
                     true,
-                    None,
+                    reaction_context,
                     None,
                 )
-                .await
-                .map_err(|e| e.to_string())?;
+                .await;
+                let awaited_owner = agent_ctx
+                    .idempotency_key
+                    .as_deref()
+                    .and_then(|delivery_id| self.awaited_execution_owner(delivery_id, agent_ctx));
+                let resp = match dispatch {
+                    Ok(response) => response,
+                    Err(error) => {
+                        if let Some(owner) = awaited_owner.as_ref()
+                            && let Err(evidence_error) = owner
+                                .record_callback_failure(
+                                    awaited_callback_failure_class(&error),
+                                    sim_now(),
+                                )
+                                .await
+                        {
+                            tracing::error!(
+                                callback = callback_action,
+                                error = %evidence_error,
+                                "failed to persist awaited callback failure evidence"
+                            );
+                        }
+                        return Err(error.to_string());
+                    }
+                };
+                if !resp.success
+                    && let Some(owner) = awaited_owner
+                    && let Err(evidence_error) = owner
+                        .record_callback_failure(
+                            crate::trigger::delivery::AwaitedExecutionFailureClass::CallbackRejected,
+                            sim_now(),
+                        )
+                        .await
+                {
+                    tracing::error!(
+                        callback = callback_action,
+                        error = %evidence_error,
+                        "failed to persist awaited callback rejection evidence"
+                    );
+                }
                 Ok(Some(resp))
             }
             WasmDispatchMode::Background => {

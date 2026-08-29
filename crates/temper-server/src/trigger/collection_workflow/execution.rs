@@ -7,6 +7,14 @@ use super::{
 use crate::storage::BoxedEventStore;
 use crate::trigger::delivery::{ReactionDeliveryRecord, ReactionDeliveryStatus};
 
+/// Failure class while constructing an atomic collection lifecycle fence.
+pub(crate) enum DeliveryFenceError {
+    /// Durable workflow state no longer authorizes this exact delivery owner.
+    FenceLost(String),
+    /// The workflow journal could not be read or encoded.
+    Storage(String),
+}
+
 mod metrics;
 mod outcome;
 mod receipt;
@@ -223,14 +231,34 @@ fn validate_loaded_fence(
     Ok(())
 }
 
+/// Build a no-op workflow append that atomically fences a delivery lifecycle write.
+pub(crate) async fn delivery_fence_append(
+    store: &BoxedEventStore,
+    tenant: &str,
+    delivery_id: &str,
+    context: &CollectionDeliveryContext,
+    event_type: &str,
+) -> Result<temper_runtime::persistence::PersistenceAppend, DeliveryFenceError> {
+    let (record, sequence) = load_collection_record(store, tenant, &context.workflow_id)
+        .await
+        .map_err(|error| DeliveryFenceError::Storage(error.to_string()))?
+        .ok_or_else(|| {
+            DeliveryFenceError::FenceLost("collection workflow journal is missing".to_string())
+        })?;
+    validate_loaded_fence(&record, delivery_id, context).map_err(DeliveryFenceError::FenceLost)?;
+    super::workflow_append(&record, sequence, event_type)
+        .map_err(|error| DeliveryFenceError::Storage(error.to_string()))
+}
+
 /// Build the workflow side of the atomic target+fence commit. The returned
 /// append carries the exact sequence read here; a concurrent control append
 /// makes the whole target batch fail optimistic concurrency.
-pub(crate) async fn target_fence_append(
+pub(crate) async fn target_fence_appends(
     store: &BoxedEventStore,
     tenant: &str,
     receipt: &crate::trigger::delivery::ReactionReceipt,
-) -> Result<temper_runtime::persistence::PersistenceAppend, String> {
+    callback_sequence: u64,
+) -> Result<Vec<temper_runtime::persistence::PersistenceAppend>, String> {
     let context = receipt
         .collection
         .as_ref()
@@ -261,13 +289,15 @@ pub(crate) async fn target_fence_append(
                 delivery_id: receipt.delivery_id.clone(),
                 fencing_token: receipt.fencing_token,
             };
-            record.record_member_receipt(
-                member_id,
-                &receipt.delivery_id,
-                context.control_epoch,
-                context.attempts,
-                member_receipt,
-            )?;
+            if receipt.awaited_callback.is_none() {
+                record.record_member_receipt(
+                    member_id,
+                    &receipt.delivery_id,
+                    context.control_epoch,
+                    context.attempts,
+                    member_receipt,
+                )?;
+            }
         }
         CollectionDeliveryRole::Cancellation
         | CollectionDeliveryRole::Join
@@ -275,9 +305,48 @@ pub(crate) async fn target_fence_append(
         | CollectionDeliveryRole::CancellationDescendant
         | CollectionDeliveryRole::JoinDescendant => {}
     }
-    let append = super::workflow_append(&record, sequence, "CollectionWorkflow::TargetCommittedV1")
-        .map_err(|error| error.to_string())?;
-    Ok(append)
+    let workflow_append =
+        super::workflow_append(&record, sequence, "CollectionWorkflow::TargetCommittedV1")
+            .map_err(|error| error.to_string())?;
+    let mut appends = vec![workflow_append];
+    if let Some(callback) = receipt.awaited_callback.as_ref() {
+        let intent = super::find_collection_intent(store, &record, &receipt.delivery_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "awaited callback delivery intent is missing".to_string())?;
+        let (mut delivery, delivery_sequence) =
+            crate::trigger::delivery::load_delivery_record(store, intent)
+                .await
+                .map_err(|error| error.to_string())?;
+        delivery.accept_awaited_callback(
+            receipt.fencing_token,
+            &callback.execution_id,
+            &callback.callback_action,
+            callback_sequence,
+            temper_runtime::scheduler::sim_now(),
+        )?;
+        appends.push(
+            crate::trigger::delivery::delivery_record_append(delivery_sequence, &delivery)
+                .map_err(|error| error.to_string())?,
+        );
+    }
+    Ok(appends)
+}
+
+/// Build the single workflow fence append used by non-awaited target commits.
+pub(crate) async fn target_fence_append(
+    store: &BoxedEventStore,
+    tenant: &str,
+    receipt: &crate::trigger::delivery::ReactionReceipt,
+) -> Result<temper_runtime::persistence::PersistenceAppend, String> {
+    if receipt.awaited_callback.is_some() {
+        return Err("awaited callback requires an atomic target batch".to_string());
+    }
+    let mut appends = target_fence_appends(store, tenant, receipt, 0).await?;
+    if appends.len() != 1 {
+        return Err("non-awaited target produced an invalid fence batch".to_string());
+    }
+    Ok(appends.remove(0))
 }
 
 fn member<'a>(

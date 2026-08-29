@@ -53,6 +53,7 @@ fn source_append(
                 state_timeout_state: Some("Running".to_string()),
                 schema_pin: None,
                 collection: None,
+                awaited_callback: None,
             },
         )
         .unwrap();

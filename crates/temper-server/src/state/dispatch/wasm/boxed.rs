@@ -84,6 +84,7 @@ pub(in crate::state::dispatch::wasm) fn handle_wasm_failure_boxed<'a>(
 }
 
 /// Heap-allocate an inline or background WASM callback dispatch.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::state::dispatch) fn dispatch_wasm_callback_boxed<'a>(
     state: &'a crate::state::ServerState,
     entity_ref: WasmEntityRef<'a>,

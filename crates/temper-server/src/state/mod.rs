@@ -78,6 +78,12 @@ use crate::adapters::AdapterRegistry;
 use crate::entity_actor::{EntityMsg, SnapshotWriteQueue};
 use crate::events::EntityStateChange;
 use crate::idempotency::IdempotencyCache;
+
+pub(crate) const AWAITED_EXECUTION_FENCE_METADATA: &str = "temper.awaited_execution_fence";
+
+fn awaited_owner_key(delivery_id: &str, fencing_token: u64) -> String {
+    format!("{delivery_id}:{fencing_token}")
+}
 use crate::internal_invocation::InternalInvocationCredentialStore;
 use crate::ots_trajectory_outbox::OtsTrajectoryOutbox;
 use crate::registry::SpecRegistry;
@@ -476,6 +482,9 @@ pub struct ServerState {
     ///
     /// Wrapped in `RwLock` so hot-loaded specs can refresh reaction rules at runtime.
     pub reaction_dispatcher: Arc<RwLock<Option<Arc<ReactionDispatcher>>>>,
+    /// Active fenced awaited executions keyed by durable delivery identity.
+    pub(crate) awaited_execution_owners:
+        Arc<Mutex<BTreeMap<String, Arc<crate::trigger::dispatcher::AwaitedExecutionOwner>>>>,
     /// Generation used to retire recovery workers after a dispatcher rebuild.
     reaction_recovery_generation: Arc<std::sync::atomic::AtomicU64>,
     /// Lifetime sentinel held by server-owned state clones, but not recovery workers.
@@ -823,6 +832,45 @@ impl ServerState {
             .map(|stack| (stack.events.clone(), stack.backend))
     }
 
+    /// Register one exact fenced in-process awaited executor.
+    pub(crate) fn register_awaited_execution_owner(
+        &self,
+        delivery_id: &str,
+        fencing_token: u64,
+        owner: Arc<crate::trigger::dispatcher::AwaitedExecutionOwner>,
+    ) {
+        self.awaited_execution_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(awaited_owner_key(delivery_id, fencing_token), owner);
+    }
+
+    /// Resolve only the awaited owner bound to this private dispatch fence.
+    pub(crate) fn awaited_execution_owner(
+        &self,
+        delivery_id: &str,
+        agent_ctx: &crate::request_context::AgentContext,
+    ) -> Option<Arc<crate::trigger::dispatcher::AwaitedExecutionOwner>> {
+        let fencing_token = agent_ctx
+            .observation_metadata
+            .get(AWAITED_EXECUTION_FENCE_METADATA)?
+            .parse::<u64>()
+            .ok()?;
+        self.awaited_execution_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&awaited_owner_key(delivery_id, fencing_token))
+            .cloned()
+    }
+
+    /// Release one exact fenced owner without disturbing a takeover owner.
+    pub(crate) fn remove_awaited_execution_owner(&self, delivery_id: &str, fencing_token: u64) {
+        self.awaited_execution_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&awaited_owner_key(delivery_id, fencing_token));
+    }
+
     /// Return the durable schema-deployment capability when configured.
     pub(crate) fn schema_deployment_store(&self) -> Option<Arc<dyn SchemaDeploymentStoreDyn>> {
         self.storage_stack
@@ -914,6 +962,7 @@ impl ServerState {
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,
             reaction_dispatcher: Arc::new(RwLock::new(None)),
+            awaited_execution_owners: Arc::new(Mutex::new(BTreeMap::new())),
             reaction_recovery_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             reaction_recovery_owner: Arc::new(()),
             schema_migration_supervisor_tx: Arc::new(Mutex::new(None)),
@@ -1178,6 +1227,7 @@ impl ServerState {
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,
             reaction_dispatcher: Arc::new(RwLock::new(None)),
+            awaited_execution_owners: Arc::new(Mutex::new(BTreeMap::new())),
             reaction_recovery_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             reaction_recovery_owner: Arc::new(()),
             schema_migration_supervisor_tx: Arc::new(Mutex::new(None)),

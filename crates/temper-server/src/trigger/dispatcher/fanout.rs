@@ -319,6 +319,7 @@ impl ReactionDispatcher {
                             state_timeout_state: delivery.state_timeout_state.clone(),
                             schema_pin: None,
                             collection: delivery.collection.clone(),
+                            awaited_callback: None,
                         }),
                     }),
                     Err(error) => {
@@ -518,6 +519,9 @@ mod tests {
                 control_epoch: 0,
                 attempts: 1,
                 max_attempts: 5,
+                execution_deadline: Some(
+                    temper_runtime::scheduler::sim_now() + chrono::Duration::minutes(1),
+                ),
                 role,
                 terminal_classification: None,
                 actions: CollectionDeliveryActions {

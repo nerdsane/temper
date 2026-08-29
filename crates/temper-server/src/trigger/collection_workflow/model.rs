@@ -280,6 +280,9 @@ pub struct CollectionDeliveryContext {
     pub(crate) max_attempts: u8,
     #[serde(default)]
     pub(crate) attempts: u8,
+    /// Absolute workflow deadline that bounds awaited member execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) execution_deadline: Option<DateTime<Utc>>,
 }
 
 /// Schema-pinned action names needed for deterministic continuation.

@@ -119,6 +119,7 @@ pub(crate) fn admit_collection_window(
                     actions: actions.owned(),
                     max_attempts: record.budgets.max_attempts,
                     attempts: 0,
+                    execution_deadline: record.timeout_binding.as_ref().map(|clock| clock.deadline),
                 },
             },
         )?);
@@ -186,6 +187,7 @@ pub(crate) fn collection_cancellation_intents(
                 actions: actions.owned(),
                 max_attempts: record.budgets.max_attempts,
                 attempts: 0,
+                execution_deadline: record.timeout_binding.as_ref().map(|clock| clock.deadline),
             },
         })?);
     }
@@ -235,6 +237,7 @@ pub(crate) fn collection_join_intent(
                 actions: actions.owned(),
                 max_attempts: record.budgets.max_attempts,
                 attempts: 0,
+                execution_deadline: record.timeout_binding.as_ref().map(|clock| clock.deadline),
             },
         },
     )?))

@@ -10,7 +10,10 @@ use temper_runtime::tenant::TenantId;
 use super::registry::ReactionRegistry;
 
 mod durable;
+mod execution_owner;
 mod fanout;
+
+pub(crate) use execution_owner::{AwaitedExecutionOwner, run_with_renewal};
 
 pub(crate) fn effective_trigger_security_context(
     agent_ctx: &crate::request_context::AgentContext,

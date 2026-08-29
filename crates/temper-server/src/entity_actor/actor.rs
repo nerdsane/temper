@@ -660,17 +660,28 @@ impl EntityActor {
         let result = if let Some(sequence) = collection_source_sequence {
             Ok(sequence)
         } else if let Some(receipt) = collection_receipt {
-            let workflow_append = crate::trigger::collection_workflow::target_fence_append(
+            let fence_appends = crate::trigger::collection_workflow::target_fence_appends(
                 store,
                 self.tenant.as_str(),
                 receipt,
+                state.sequence_nr + 1,
             )
             .await
             .map_err(PersistenceError::Storage)?;
-            store
-                .append_batch(&[source_append, workflow_append])
+            let mut appends = Vec::with_capacity(1 + fence_appends.len());
+            appends.push(source_append);
+            appends.extend(fence_appends);
+            let result = store
+                .append_batch(&appends)
                 .await
-                .map(|results| results[0].sequence_nr)
+                .map(|results| results[0].sequence_nr);
+            if result.is_ok() && receipt.awaited_callback.is_some() {
+                crate::runtime_metrics::record_reaction_delivery_event(
+                    crate::trigger::delivery::DeliveryKind::CollectionMember.metric_label(),
+                    "awaited_callback_accepted",
+                );
+            }
+            result
         } else {
             store
                 .append_with_index_rows(
