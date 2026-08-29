@@ -5,6 +5,20 @@ use temper_runtime::tenant::TenantId;
 use super::super::super::types::ReactionRule;
 use super::TimeoutClockStatus;
 
+fn rejected(reason: impl Into<String>) -> TimeoutClockStatus {
+    TimeoutClockStatus::Rejected(
+        reason.into(),
+        crate::trigger::delivery::DurableFailureKind::TimeoutClockInvalid,
+    )
+}
+
+fn superseded(reason: impl Into<String>) -> TimeoutClockStatus {
+    TimeoutClockStatus::Superseded(
+        reason.into(),
+        crate::trigger::delivery::DurableFailureKind::TimeoutGenerationSuperseded,
+    )
+}
+
 pub(super) async fn validate_timeout_clock(
     state: &crate::ServerState,
     store: &crate::storage::BoxedEventStore,
@@ -19,14 +33,10 @@ pub(super) async fn validate_timeout_clock(
         return TimeoutClockStatus::Current(intent.source_sequence);
     };
     if clock.clock_sequence != intent.source_sequence || clock.state != intent.source_to_state {
-        return TimeoutClockStatus::Rejected(
-            "state-timeout clock does not match its committed source event".to_string(),
-        );
+        return rejected("state-timeout clock does not match its committed source event");
     }
     if intent.not_before.is_none() {
-        return TimeoutClockStatus::Rejected(
-            "state-timeout intent is missing its absolute deadline".to_string(),
-        );
+        return rejected("state-timeout intent is missing its absolute deadline");
     }
 
     if intent
@@ -34,17 +44,13 @@ pub(super) async fn validate_timeout_clock(
         .as_ref()
         .is_some_and(|pin| pin.execution.bundle_digest != clock.schema_digest)
     {
-        return TimeoutClockStatus::Rejected(
-            "state-timeout scoped schema digest does not match committed clock".to_string(),
-        );
+        return rejected("state-timeout scoped schema digest does not match committed clock");
     }
 
     let tenant = TenantId::new(&intent.tenant);
     if let Some(pin) = intent.schema_pin.as_ref() {
         let Some(deployment_store) = state.schema_deployment_store() else {
-            return TimeoutClockStatus::Rejected(
-                "state-timeout scoped migration status is unavailable".to_string(),
-            );
+            return rejected("state-timeout scoped migration status is unavailable");
         };
         let active = match deployment_store
             .active_schema_pointer(&intent.tenant, &pin.execution.scope)
@@ -52,7 +58,7 @@ pub(super) async fn validate_timeout_clock(
         {
             Ok(pointer) => pointer,
             Err(error) => {
-                return TimeoutClockStatus::Rejected(format!(
+                return rejected(format!(
                     "state-timeout scoped migration check failed: {error}"
                 ));
             }
@@ -90,14 +96,14 @@ pub(super) async fn validate_timeout_clock(
                         .is_some_and(|(_, migration)| migration)
                 }),
                 Err(error) => {
-                    return TimeoutClockStatus::Rejected(format!(
+                    return rejected(format!(
                         "state-timeout migration target audit failed: {error}"
                     ));
                 }
             };
             if migrated {
-                return TimeoutClockStatus::Superseded(
-                    "state-timeout source entity was migrated to a successor schema".to_string(),
+                return superseded(
+                    "state-timeout source entity was migrated to a successor schema",
                 );
             }
         }
@@ -126,13 +132,13 @@ pub(super) async fn validate_timeout_clock(
     let current = match current {
         Ok(response) => response,
         Err(error) => {
-            return TimeoutClockStatus::Rejected(format!(
+            return rejected(format!(
                 "state-timeout source state could not be recovered: {error}"
             ));
         }
     };
     if current.state.status != clock.state {
-        return TimeoutClockStatus::Superseded(format!(
+        return superseded(format!(
             "state-timeout source left expected state '{}'",
             clock.state
         ));
@@ -158,18 +164,14 @@ pub(super) async fn validate_timeout_clock(
         )
     });
     let Some(table) = table else {
-        return TimeoutClockStatus::Rejected(
-            "state-timeout exact schema could not be recovered".to_string(),
-        );
+        return rejected("state-timeout exact schema could not be recovered");
     };
     let actual_digest = intent.schema_pin.as_ref().map_or_else(
         || transition_table_digest(&table).ok(),
         |pin| Some(pin.execution.bundle_digest.clone()),
     );
     if actual_digest.as_deref() != Some(clock.schema_digest.as_str()) {
-        return TimeoutClockStatus::Rejected(
-            "state-timeout schema changed after the clock committed".to_string(),
-        );
+        return rejected("state-timeout schema changed after the clock committed");
     }
     let declaration = table
         .state_timeouts
@@ -187,9 +189,7 @@ pub(super) async fn validate_timeout_clock(
         })
         .map(|(_, declaration)| declaration);
     let Some(declaration) = declaration else {
-        return TimeoutClockStatus::Rejected(
-            "state-timeout declaration identity is absent from the exact schema".to_string(),
-        );
+        return rejected("state-timeout declaration identity is absent from the exact schema");
     };
     let expected_deadline = i64::try_from(declaration.after_seconds)
         .ok()
@@ -208,9 +208,7 @@ pub(super) async fn validate_timeout_clock(
         || rule.then.action != declaration.on_timeout
         || expected_params.as_ref() != Some(&rule.then.params)
     {
-        return TimeoutClockStatus::Rejected(
-            "state-timeout intent does not match its exact declaration".to_string(),
-        );
+        return rejected("state-timeout intent does not match its exact declaration");
     }
     let persistence_id = match intent.schema_pin.as_ref() {
         Some(pin) => format!(
@@ -229,13 +227,14 @@ pub(super) async fn validate_timeout_clock(
     };
     let committed_occurrences = current.state.state_timeout_occurrences(&clock.state);
     if clock.occurrence_ordinal != committed_occurrences.saturating_add(1) {
-        return TimeoutClockStatus::Rejected(
-            "state-timeout occurrence ordinal does not follow durable receipt evidence".to_string(),
+        return rejected(
+            "state-timeout occurrence ordinal does not follow durable receipt evidence",
         );
     }
     if clock.occurrence_ordinal > u64::from(clock.max_occurrences) {
         return TimeoutClockStatus::Superseded(
             "state-timeout occurrence budget exhausted".to_string(),
+            crate::trigger::delivery::DurableFailureKind::TimeoutOccurrenceBudgetExhausted,
         );
     }
 
@@ -249,14 +248,13 @@ pub(super) async fn validate_timeout_clock(
     {
         Ok(events) => events,
         Err(error) => {
-            return TimeoutClockStatus::Rejected(format!(
-                "state-timeout clock audit failed: {error}"
-            ));
+            return rejected(format!("state-timeout clock audit failed: {error}"));
         }
     };
     if later.len() > STATE_TIMEOUT_CLOCK_AUDIT_BUDGET {
         return TimeoutClockStatus::Rejected(
             "state-timeout clock audit budget exhausted".to_string(),
+            crate::trigger::delivery::DurableFailureKind::TimeoutClockAuditBudgetExhausted,
         );
     }
     for envelope in later {
@@ -264,7 +262,7 @@ pub(super) async fn validate_timeout_clock(
             match serde_json::from_value::<crate::entity_actor::EntityEvent>(envelope.payload) {
                 Ok(event) => event,
                 Err(error) => {
-                    return TimeoutClockStatus::Rejected(format!(
+                    return rejected(format!(
                         "state-timeout clock audit found malformed event: {error}"
                     ));
                 }
@@ -272,7 +270,7 @@ pub(super) async fn validate_timeout_clock(
         if event.from_status != event.to_status
             || clock.reset_on.iter().any(|action| action == &event.action)
         {
-            return TimeoutClockStatus::Superseded(format!(
+            return superseded(format!(
                 "state-timeout clock was superseded by source event {}",
                 envelope.sequence_nr
             ));

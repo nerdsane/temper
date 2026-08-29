@@ -1,6 +1,110 @@
 //! Unit tests for WASM dispatch, including the ADR-0166 callback-param gate.
 use super::*;
 
+fn state_with_schema_pin(
+    pin: Option<&temper_runtime::persistence::schema_deployment::SchemaExecutionPin>,
+) -> EntityState {
+    let mut fields = serde_json::Map::new();
+    if let Some(pin) = pin {
+        fields.insert(
+            crate::entity_actor::SCHEMA_PIN_FIELD.into(),
+            serde_json::to_value(pin).expect("schema pin serializes"),
+        );
+    }
+    EntityState {
+        entity_type: "Task".into(),
+        entity_id: "task-1".into(),
+        status: "Created".into(),
+        item_count: 0,
+        counters: std::collections::BTreeMap::new(),
+        booleans: std::collections::BTreeMap::new(),
+        lists: std::collections::BTreeMap::new(),
+        fields: Value::Object(fields),
+        events: std::collections::VecDeque::new(),
+        total_event_count: 0,
+        events_since_snapshot: 0,
+        last_snapshot_sequence_nr: 0,
+        sequence_nr: 0,
+        processed_idempotency_keys: std::collections::BTreeMap::new(),
+    }
+}
+
+#[test]
+fn module_data_target_requires_exact_actor_and_host_schema_provenance() {
+    use temper_runtime::persistence::schema_deployment::{
+        SchemaExecutionPin, SchemaScope, SchemaScopeKind,
+    };
+
+    let pin = SchemaExecutionPin {
+        scope: SchemaScope {
+            kind: SchemaScopeKind::Task,
+            id: "task-1".into(),
+        },
+        bundle_digest: "sha256:bundle-one".into(),
+    };
+    let other_pin = SchemaExecutionPin {
+        bundle_digest: "sha256:bundle-two".into(),
+        ..pin.clone()
+    };
+    let scoped_state = state_with_schema_pin(Some(&pin));
+    let scoped_context = AgentContext {
+        schema_pin: Some(pin.clone()),
+        ..AgentContext::default()
+    };
+
+    assert_eq!(
+        module_data_target(&scoped_state, &scoped_context).unwrap(),
+        ModuleDataTarget::Scoped(pin.clone())
+    );
+    assert!(
+        module_data_target(&scoped_state, &AgentContext::default())
+            .unwrap_err()
+            .contains("missing its host schema pin")
+    );
+    assert!(
+        module_data_target(
+            &scoped_state,
+            &AgentContext {
+                schema_pin: Some(other_pin),
+                ..AgentContext::default()
+            }
+        )
+        .unwrap_err()
+        .contains("does not match actor state")
+    );
+    assert_eq!(
+        module_data_target(&state_with_schema_pin(None), &AgentContext::default()).unwrap(),
+        ModuleDataTarget::TenantGlobal
+    );
+    assert!(
+        module_data_target(&state_with_schema_pin(None), &scoped_context)
+            .unwrap_err()
+            .contains("tenant-global")
+    );
+}
+
+#[test]
+fn tenant_global_takeover_keeps_bound_digest_after_module_name_replacement() {
+    let tenant = TenantId::new("tenant-a");
+    let mut registry = crate::wasm_registry::WasmModuleRegistry::new();
+    registry.register(&tenant, "worker", "old-digest");
+
+    let bound_digest = registry
+        .get_hash(&tenant, "worker")
+        .expect("initial module should resolve")
+        .to_string();
+    registry.register(&tenant, "worker", "replacement-digest");
+
+    let recovered =
+        resolve_tenant_global_module(&registry, &tenant, "worker", Some(bound_digest.as_str()))
+            .expect("takeover should resolve the bound execution artifact");
+    let fresh = resolve_tenant_global_module(&registry, &tenant, "worker", None)
+        .expect("a fresh execution should resolve the replacement artifact");
+
+    assert_eq!(recovered.hash, "old-digest");
+    assert_eq!(fresh.hash, "replacement-digest");
+}
+
 #[test]
 fn internal_http_issuer_refuses_system_and_accepts_resolved_agents() {
     let state = crate::state::ServerState::from_registry(
@@ -215,6 +319,7 @@ fn llm_root_span_stays_on_active_trace() {
         config: std::collections::BTreeMap::new(),
         on_success: None,
         on_failure: None,
+        failure_routes: Vec::new(),
         llm: true,
     };
     let agent_ctx = AgentContext {
@@ -242,6 +347,7 @@ fn llm_root_span_stays_on_active_trace() {
             agent_ctx: &agent_ctx,
             dispatch_idempotency_key: None,
             mode: WasmDispatchMode::Inline,
+            schema_target: ModuleDataTarget::TenantGlobal,
         };
         let span = build_llm_root_span(&ctx, &integration, &entity_state, "provider_caller");
         let has_opt_out = span

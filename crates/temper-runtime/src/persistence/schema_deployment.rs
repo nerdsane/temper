@@ -1,9 +1,11 @@
 //! Durable semantic contract for task-scoped schema deployment.
 
+mod bootstrap;
 mod journal_identity;
 mod operation;
 mod store;
 
+pub use bootstrap::*;
 pub use journal_identity::*;
 pub use operation::*;
 pub use store::SchemaDeploymentStore;
@@ -42,6 +44,15 @@ pub struct SchemaExecutionPin {
     pub bundle_digest: String,
 }
 
+/// Canonical generated-client authority retained with one scoped module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopedModuleDataBinding {
+    /// Stable lowercase SHA-256 digest of the canonical manifest JSON.
+    pub binding_digest: String,
+    /// Canonical serialized `ModuleSdkManifest` bytes represented as UTF-8.
+    pub canonical_manifest_json: String,
+}
+
 /// Immutable schema evidence committed with one entity action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaEventPin {
@@ -70,6 +81,9 @@ pub struct SchemaBundleRecord {
     pub cedar_policies: BTreeMap<String, String>,
     /// Stable WASM logical name to immutable module digest.
     pub wasm_module_digests: BTreeMap<String, String>,
+    /// Exact typed-data manifests keyed by scoped module name.
+    #[serde(default)]
+    pub wasm_module_data_bindings: BTreeMap<String, ScopedModuleDataBinding>,
     /// Optional migration module logical name used for durable artifact lookup.
     pub migration_module_name: Option<String>,
     /// Optional migration module digest.
@@ -149,6 +163,12 @@ pub struct SchemaActivePointer {
     pub bundle_digest: String,
     /// Bundle that was active immediately before this pointer.
     pub predecessor_digest: Option<String>,
+    /// Predecessor whose descriptor-less publications are durably fenced.
+    #[serde(default)]
+    pub stream_fenced_source_bundle_digest: Option<String>,
+    /// Publication actions selectively fenced on the predecessor journals.
+    #[serde(default)]
+    pub stream_publication_bindings: BTreeMap<String, String>,
     /// Monotonic activation fence.
     pub fence: u64,
     /// Monotonic committed sequence.
@@ -388,6 +408,9 @@ pub enum SchemaDeploymentStoreError {
     /// One key was reused with different canonical input.
     #[error("idempotency_conflict")]
     IdempotencyConflict,
+    /// Another bootstrap operation already owns the exact scoped target.
+    #[error("bootstrap_target_conflict")]
+    BootstrapTargetConflict,
     /// The requested immutable deployment does not exist.
     #[error("schema deployment not found")]
     NotFound,

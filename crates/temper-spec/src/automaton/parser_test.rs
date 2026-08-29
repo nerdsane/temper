@@ -5,6 +5,8 @@ use super::parse_automaton;
 mod collection;
 #[path = "parser_core_test.rs"]
 mod core;
+#[path = "parser_failure_routes_test.rs"]
+mod failure_routes;
 #[path = "parser_features_test.rs"]
 mod features;
 #[path = "parser_integrations_test.rs"]

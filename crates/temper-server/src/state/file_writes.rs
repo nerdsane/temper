@@ -1,9 +1,8 @@
 use std::sync::{Arc, RwLock};
 
-use sha2::{Digest, Sha256};
 use temper_wasm::{StreamRegistry, WasmInvocationContext};
 
-use super::{DispatchCommand, DispatchExtOptions, ServerState};
+use super::{DispatchCommand, ServerState};
 
 struct FileStreamAction<'a> {
     tenant: &'a temper_runtime::tenant::TenantId,
@@ -13,6 +12,7 @@ struct FileStreamAction<'a> {
     agent_ctx: &'a crate::request_context::AgentContext,
     await_reactions: bool,
     expected_authorization_precondition: Option<String>,
+    kernel_metadata: Option<temper_runtime::persistence::KernelEventMetadata>,
 }
 
 /// Error returned by the native/File `$value` content upload path.
@@ -116,6 +116,10 @@ impl ServerState {
         agent_ctx: &crate::request_context::AgentContext,
         expected_authorization_precondition: Option<String>,
     ) -> Result<crate::entity_actor::EntityResponse, FileStreamContentError> {
+        let descriptor_required = self
+            .stream_descriptor_contract_activated(tenant, agent_ctx.schema_pin.as_ref(), "File")
+            .await
+            .map_err(|error| FileStreamContentError::State(error.to_string()))?;
         let blob_endpoint = self
             .secrets_vault
             .as_ref()
@@ -133,9 +137,11 @@ impl ServerState {
         match native_result {
             Ok(response) => return Ok(response),
             Err(FileStreamContentError::BlobStore(error))
-                if blob_endpoint.as_deref().is_some_and(|endpoint| {
-                    !crate::blob_store::is_local_internal_blob_endpoint(endpoint)
-                }) =>
+                if !descriptor_required
+                    && agent_ctx.schema_pin.is_none()
+                    && blob_endpoint.as_deref().is_some_and(|endpoint| {
+                        !crate::blob_store::is_local_internal_blob_endpoint(endpoint)
+                    }) =>
             {
                 tracing::warn!(
                     tenant = %tenant,
@@ -173,21 +179,21 @@ impl ServerState {
         agent_ctx: &crate::request_context::AgentContext,
         expected_authorization_precondition: Option<String>,
     ) -> Result<crate::entity_actor::EntityResponse, FileStreamContentError> {
-        let (content_hash, blob_key) = content_hash_and_native_blob_key(body);
-
         // Load File state first so we can read its `workspace_id` and reject a
         // write into a non-Active workspace BEFORE persisting any bytes. The
         // blob write is intentionally NOT joined concurrently here: it must not
         // happen if the workspace refuses the write (otherwise an orphaned blob
         // would be left behind on guard rejection).
-        let file_state = self
-            .get_tenant_entity_state(tenant, "File", file_id)
-            .await
-            .map_err(|e| {
-                FileStreamContentError::State(format!(
-                    "failed to load File('{file_id}') state: {e}"
-                ))
-            })?;
+        let file_state = match agent_ctx.schema_pin.as_ref() {
+            Some(pin) => {
+                self.get_scoped_entity_state(tenant, "File", file_id, pin.clone())
+                    .await
+            }
+            None => self.get_tenant_entity_state(tenant, "File", file_id).await,
+        }
+        .map_err(|e| {
+            FileStreamContentError::State(format!("failed to load File('{file_id}') state: {e}"))
+        })?;
 
         let workspace_id = file_state
             .state
@@ -195,8 +201,27 @@ impl ServerState {
             .get("workspace_id")
             .and_then(|value| value.as_str())
             .unwrap_or_default();
-        self.reject_write_if_workspace_not_active(tenant, workspace_id)
-            .await?;
+        if let Some(pin) = agent_ctx.schema_pin.as_ref() {
+            if !workspace_id.is_empty() {
+                let workspace = self
+                    .get_scoped_entity_state(tenant, "Workspace", workspace_id, pin.clone())
+                    .await
+                    .map_err(|error| {
+                        FileStreamContentError::State(format!(
+                            "failed to load scoped Workspace('{workspace_id}') state: {error}"
+                        ))
+                    })?;
+                if workspace.state.status != "Active" {
+                    return Err(FileStreamContentError::ActionRejected(format!(
+                        "workspace '{workspace_id}' is '{}', not 'Active'; it does not accept new file content",
+                        workspace.state.status
+                    )));
+                }
+            }
+        } else {
+            self.reject_write_if_workspace_not_active(tenant, workspace_id)
+                .await?;
+        }
         if agent_ctx
             .expected_entity_sequence
             .is_some_and(|expected| expected != file_state.state.sequence_nr)
@@ -206,13 +231,39 @@ impl ServerState {
             ));
         }
 
-        self.put_content_addressed_blob(tenant, &blob_key, body, None)
+        let receipt = self
+            .put_stream_content_attested(tenant, "temper-fs/", body, Some(mime_type))
             .await
             .map_err(|e| {
                 FileStreamContentError::BlobStore(format!(
-                    "failed to persist blob '{blob_key}': {e}"
+                    "failed to persist attested File stream: {e}"
                 ))
             })?;
+        let content_hash = receipt.content_hash().to_string();
+        let byte_length = receipt.byte_length();
+        let kernel_metadata = if self
+            .stream_descriptor_contract_activated(tenant, agent_ctx.schema_pin.as_ref(), "File")
+            .await
+            .map_err(|error| FileStreamContentError::State(error.to_string()))?
+        {
+            let event_sequence = file_state.state.sequence_nr.checked_add(1).ok_or_else(|| {
+                FileStreamContentError::State("File event sequence exhausted".into())
+            })?;
+            let descriptor = receipt
+                .into_descriptor(
+                    temper_runtime::persistence::StreamEntityRef::new("File", file_id)
+                        .map_err(|error| FileStreamContentError::State(error.to_string()))?,
+                    None,
+                    event_sequence,
+                    temper_runtime::persistence::StreamMutability::Mutable,
+                )
+                .map_err(FileStreamContentError::State)?;
+            Some(temper_runtime::persistence::KernelEventMetadata::V1 {
+                stream_descriptor: descriptor,
+            })
+        } else {
+            None
+        };
 
         let version_number = file_state
             .state
@@ -234,7 +285,9 @@ impl ServerState {
             action: "StreamUpdated",
             params: serde_json::json!({
                 "content_hash": content_hash,
-                "size_bytes": body.len() as i64,
+                "size_bytes": i64::try_from(byte_length).map_err(|_| {
+                    FileStreamContentError::State("File byte length exceeds i64".into())
+                })?,
                 "mime_type": mime_type,
                 "version_number": version_number,
                 "previous_version_id": previous_version_id,
@@ -243,6 +296,7 @@ impl ServerState {
             agent_ctx,
             await_reactions: false,
             expected_authorization_precondition,
+            kernel_metadata,
         })
         .await
         .map_err(|error| FileStreamContentError::ActionRejected(error.to_string()))
@@ -352,6 +406,7 @@ impl ServerState {
             agent_ctx,
             await_reactions: true,
             expected_authorization_precondition,
+            kernel_metadata: None,
         })
         .await
         .map_err(FileStreamContentError::ActionRejected)
@@ -361,47 +416,21 @@ impl ServerState {
         &self,
         request: FileStreamAction<'_>,
     ) -> Result<crate::entity_actor::EntityResponse, String> {
-        let options = DispatchExtOptions {
-            agent_ctx: request.agent_ctx,
-            await_integration: false,
-            await_reactions: request.await_reactions,
-        };
-        match request.expected_authorization_precondition {
-            Some(expected) => self
-                .dispatch_tenant_action_ext_typed_if_current(
-                    DispatchCommand {
-                        tenant: request.tenant,
-                        entity_type: "File",
-                        entity_id: request.file_id,
-                        action: request.action,
-                        params: request.params,
-                        agent_ctx: options.agent_ctx,
-                        await_integration: options.await_integration,
-                        await_reactions: options.await_reactions,
-                    },
-                    expected,
-                )
-                .await
-                .map_err(|error| error.to_string()),
-            None => self
-                .dispatch_tenant_action_ext_typed(
-                    request.tenant,
-                    "File",
-                    request.file_id,
-                    request.action,
-                    request.params,
-                    options,
-                )
-                .await
-                .map_err(|error| error.to_string()),
-        }
+        self.dispatch_typed_checked_with_kernel(
+            DispatchCommand {
+                tenant: request.tenant,
+                entity_type: "File",
+                entity_id: request.file_id,
+                action: request.action,
+                params: request.params,
+                agent_ctx: request.agent_ctx,
+                await_integration: false,
+                await_reactions: request.await_reactions,
+            },
+            request.expected_authorization_precondition,
+            request.kernel_metadata,
+        )
+        .await
+        .map_err(|error| error.to_string())
     }
-}
-
-pub(super) fn content_hash_and_native_blob_key(body: &[u8]) -> (String, String) {
-    let mut hasher = Sha256::new();
-    hasher.update(body);
-    let content_hash = format!("sha256:{:x}", hasher.finalize());
-    let blob_key = format!("temper-fs/{content_hash}");
-    (content_hash, blob_key)
 }

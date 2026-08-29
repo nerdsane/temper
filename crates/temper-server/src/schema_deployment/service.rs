@@ -1,5 +1,6 @@
 //! Shared schema-deployment semantics used by HTTP and typed WASM adapters.
 
+pub(crate) mod bootstrap;
 mod completion;
 mod error;
 mod http;
@@ -7,6 +8,10 @@ mod lifecycle;
 mod migration;
 mod registry;
 mod runner;
+#[cfg(test)]
+mod runner_tests;
+mod source_state;
+mod stream_descriptor;
 mod supervisor;
 mod support;
 #[cfg(test)]
@@ -14,6 +19,9 @@ mod support_test;
 mod validation;
 
 use error::ServiceError;
+use stream_descriptor::{
+    stream_descriptor_http_response, unresolved_stream_descriptor_http_response,
+};
 
 pub(crate) use http::*;
 use support::*;
@@ -43,12 +51,16 @@ use temper_spec::{
     ScopedSpecBundle, ScopedSpecBundleInput, WasmArtifactInput,
 };
 use temper_wasm_sdk::schema_deployment::{
-    ActivateSchemaBundleRequestV1, GetSchemaBundleRequestV1, GetSchemaMigrationRequestV1,
-    RetireSchemaBundleRequestV1, RetrySchemaMigrationRequestV1, SchemaBundleBudgetsV1,
-    SchemaDeploymentErrorV1, SchemaDeploymentReceiptV1, SchemaDeploymentResponseV1,
-    SchemaMigrationBudgetsV1, SchemaMigrationInputV1, SchemaMigrationLogicalContextV1,
-    SchemaMigrationOutputV1, SchemaMigrationReceiptV1, SchemaScopeV1,
-    StartSchemaMigrationRequestV1, SubmitSchemaBundleRequestV1, VerifySchemaBundleRequestV1,
+    ActivateSchemaBundleRequestV1, AdvanceStreamDescriptorMigrationRequestV1,
+    GetSchemaBundleRequestV1, GetSchemaMigrationRequestV1, GetStreamDescriptorMigrationRequestV1,
+    ListUnresolvedStreamDescriptorsRequestV1, RetireSchemaBundleRequestV1,
+    RetrySchemaMigrationRequestV1, SchemaBundleBudgetsV1, SchemaDeploymentErrorV1,
+    SchemaDeploymentReceiptV1, SchemaDeploymentResponseV1, SchemaMigrationBudgetsV1,
+    SchemaMigrationInputV1, SchemaMigrationLogicalContextV1, SchemaMigrationOutputV1,
+    SchemaMigrationReceiptV1, SchemaScopeV1, StartSchemaMigrationRequestV1,
+    StartStreamDescriptorMigrationRequestV1, StreamDescriptorMigrationReceiptV1,
+    StreamDescriptorMigrationTargetV1, SubmitSchemaBundleRequestV1,
+    UnresolvedStreamDescriptorPageV1, VerifySchemaBundleRequestV1,
 };
 
 use crate::authz::{DenialInput, record_authz_denial, require_authenticated_context};
@@ -135,6 +147,58 @@ impl<'a> GovernedSchemaDeploymentService<'a> {
         Ok(())
     }
 
+    async fn authorize_installed_application_stream_migration(
+        &self,
+        tenant: &str,
+        security: &SecurityContext,
+        action: &str,
+        application_id: &str,
+        semantic_digest: Option<&str>,
+    ) -> Result<(), ServiceError> {
+        let mut attributes = BTreeMap::from([
+            (
+                "scope_kind".into(),
+                serde_json::Value::String("installed_application".into()),
+            ),
+            (
+                "application_id".into(),
+                serde_json::Value::String(application_id.into()),
+            ),
+        ]);
+        if let Some(digest) = semantic_digest {
+            attributes.insert("semantic_digest".into(), digest.into());
+        }
+        if let Err(denial) = self.state.authorize_with_context(
+            security,
+            action,
+            "InstalledApplicationStreamMigration",
+            &attributes,
+            tenant,
+        ) {
+            let pending = record_authz_denial(
+                self.state,
+                DenialInput {
+                    tenant,
+                    security_ctx: security,
+                    agent_id_override: None,
+                    action,
+                    resource_type: "InstalledApplicationStreamMigration",
+                    resource_id: application_id,
+                    resource_attrs: serde_json::Value::Object(attributes.into_iter().collect()),
+                    reason: &denial.to_string(),
+                    module_name: None,
+                    from_status: None,
+                    intent: None,
+                    session_id: None,
+                    spec_governed: None,
+                },
+            )
+            .await;
+            return Err(ServiceError::authorization(pending.id));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn submit(
         &self,
         tenant: &str,
@@ -179,12 +243,25 @@ impl<'a> GovernedSchemaDeploymentService<'a> {
                 .collect(),
             wasm_modules: request
                 .wasm_modules
-                .into_iter()
-                .map(|module| WasmArtifactInput {
-                    name: module.name,
-                    artifact_digest: module.artifact_digest,
+                .iter()
+                .map(|module| {
+                    let data_binding_digest = module
+                        .data_binding
+                        .as_ref()
+                        .map(|binding| {
+                            binding
+                                .binding_digest()
+                                .map(|digest| format!("sha256:{digest}"))
+                        })
+                        .transpose()
+                        .map_err(|error| ServiceError::new("invalid_bundle", error, false))?;
+                    Ok(WasmArtifactInput {
+                        name: module.name.clone(),
+                        artifact_digest: module.artifact_digest.clone(),
+                        data_binding_digest,
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, ServiceError>>()?,
             migration: request.migration.map(|migration| MigrationArtifactInput {
                 name: migration.name,
                 artifact_digest: migration.artifact_digest,
@@ -221,6 +298,32 @@ impl<'a> GovernedSchemaDeploymentService<'a> {
                 .iter()
                 .map(|module| (module.name.clone(), module.artifact_digest.clone()))
                 .collect(),
+            wasm_module_data_bindings: request
+                .wasm_modules
+                .iter()
+                .filter_map(|module| {
+                    module.data_binding.as_ref().map(|binding| {
+                        let manifest_json = serde_json::to_string(binding);
+                        let binding_digest = binding
+                            .binding_digest()
+                            .map(|digest| format!("sha256:{digest}"));
+                        (module.name.clone(), manifest_json, binding_digest)
+                    })
+                })
+                .map(|(name, manifest_json, binding_digest)| {
+                    Ok((
+                        name,
+                        temper_runtime::persistence::schema_deployment::ScopedModuleDataBinding {
+                            binding_digest: binding_digest.map_err(|error| {
+                                ServiceError::new("invalid_bundle", error, false)
+                            })?,
+                            canonical_manifest_json: manifest_json.map_err(|error| {
+                                ServiceError::new("invalid_bundle", error.to_string(), false)
+                            })?,
+                        },
+                    ))
+                })
+                .collect::<Result<std::collections::BTreeMap<_, _>, ServiceError>>()?,
             migration_module_name: compiled.migration().map(|migration| migration.name.clone()),
             migration_module_digest: compiled
                 .migration()

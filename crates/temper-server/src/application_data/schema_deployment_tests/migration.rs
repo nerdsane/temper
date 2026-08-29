@@ -83,6 +83,7 @@ async fn governed_migration_materializes_shadow_and_atomically_cuts_over() {
                 expected_predecessor: None,
                 expected_fence: source_verified.fence,
                 verification_receipt_id: "source-verification".into(),
+                stream_descriptor_completion_receipt_id: None,
             },
         )
         .await
@@ -102,6 +103,7 @@ async fn governed_migration_materializes_shadow_and_atomically_cuts_over() {
                 expected_predecessor: None,
                 expected_fence: source_verified.fence,
                 verification_receipt_id: "source-verification".into(),
+                stream_descriptor_completion_receipt_id: None,
             },
         )
         .await
@@ -459,7 +461,26 @@ async fn governed_migration_materializes_shadow_and_atomically_cuts_over() {
         .unwrap();
     assert_eq!(target_state.state.fields["Id"], "task-1");
     assert_eq!(
-        target_state.state.fields["Title"],
+        target_state.state.fields["title"],
         "changed-during-migration"
     );
+
+    #[derive(serde::Deserialize)]
+    struct TypedSourceState {
+        id: String,
+        title: String,
+    }
+    let shadow_rows = store
+        .page_schema_migration_shadow("default", &migrated.job_id, None, 10)
+        .await
+        .unwrap();
+    let task_1 = shadow_rows
+        .iter()
+        .find(|row| row.entity_id == "task-1")
+        .expect("task-1 migration output");
+    let typed: TypedSourceState =
+        temper_wasm_sdk::decode_source_state(&task_1.canonical_state_json)
+            .expect("real migration output should retain typed snake_case source state");
+    assert_eq!(typed.id, "task-1");
+    assert_eq!(typed.title, "changed-during-migration");
 }

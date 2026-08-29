@@ -8,9 +8,12 @@ use temper_runtime::persistence::schema_deployment::{
     SchemaDeploymentStatus, SchemaDeploymentStore, SchemaDeploymentStoreError,
     SchemaMigrationBatchReceipt, SchemaMigrationBudgets, SchemaMigrationShadowRow,
     SchemaMigrationStatus, SchemaMigrationValidationReceipt, SchemaOperationIdentity, SchemaScope,
-    SchemaScopeKind, SchemaVerificationReceipt, SubmitSchemaBundle, SubmitSchemaBundleOutcome,
+    SchemaScopeKind, SchemaVerificationReceipt, StreamPublicationFence, SubmitSchemaBundle,
+    SubmitSchemaBundleOutcome, UnscopedStreamPublicationBinding,
 };
-use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
+use temper_runtime::persistence::{
+    EventMetadata, EventStore, PersistenceAppend, PersistenceEnvelope,
+};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_store_sim::{SimEventStore, SimSchemaFaultPoint};
 
@@ -52,6 +55,7 @@ fn command_with_predecessor(
             canonical_ioa: BTreeMap::from([("Example.Task".into(), "[automaton]".into())]),
             cedar_policies: BTreeMap::new(),
             wasm_module_digests: BTreeMap::new(),
+            wasm_module_data_bindings: BTreeMap::new(),
             migration_module_name: None,
             migration_module_digest: None,
             migration_abi_version: None,
@@ -74,6 +78,7 @@ fn test_event(sequence_nr: u64) -> PersistenceEnvelope {
             correlation_id: sim_uuid(),
             timestamp: sim_now(),
             actor_id: "pin-write-fence-contract".into(),
+            kernel: None,
         },
     }
 }
@@ -140,6 +145,7 @@ fn activation_command(
         expected_predecessor: predecessor.map(str::to_string),
         expected_fence: fence,
         verification_receipt_id: receipt_id.into(),
+        stream_publication_fence: None,
         operation: operation(key),
     }
 }
@@ -291,6 +297,267 @@ async fn active_pointer_change_preserves_existing_pin_writes_but_fences_new_old_
             .unwrap(),
         1
     );
+}
+
+#[tokio::test]
+async fn activation_rejects_a_stale_stream_publication_generation_atomically() {
+    let store = SimEventStore::no_faults(81);
+    let source = format!("sha256:{}", "8".repeat(64));
+    let target = format!("sha256:{}", "9".repeat(64));
+    store
+        .submit_schema_bundle(command(
+            "stream-source-submit",
+            &format!("sha256:{}", "6".repeat(64)),
+            &source,
+        ))
+        .await
+        .unwrap();
+    let source_fence = verify_bundle(&store, "stream-source", &source, 1).await;
+    activated(
+        store
+            .activate_schema_bundle(activation_command(
+                "stream-source-activate",
+                &source,
+                None,
+                source_fence,
+                "stream-source-receipt",
+            ))
+            .await
+            .unwrap(),
+    );
+    let persistence_id = scoped_persistence_id("Task", "stream-subject", &source);
+    store
+        .append(&persistence_id, 0, &[test_event(1)])
+        .await
+        .unwrap();
+    store
+        .submit_schema_bundle(command_with_predecessor(
+            "stream-target-submit",
+            &format!("sha256:{}", "7".repeat(64)),
+            &target,
+            Some(&source),
+        ))
+        .await
+        .unwrap();
+    let target_fence = verify_bundle(&store, "stream-target", &target, 2).await;
+    let mut stale = activation_command(
+        "stream-target-activate-stale",
+        &target,
+        Some(&source),
+        target_fence,
+        "stream-target-receipt",
+    );
+    stale.stream_publication_fence = Some(StreamPublicationFence::TaskScoped {
+        source_bundle_digest: source.clone(),
+        expected_write_version: 1,
+        bindings: BTreeMap::from([("Order".into(), "Publish".into())]),
+    });
+    store
+        .append(&persistence_id, 1, &[test_event(2)])
+        .await
+        .unwrap();
+    assert_eq!(
+        store.activate_schema_bundle(stale).await.unwrap_err(),
+        SchemaDeploymentStoreError::StaleFence
+    );
+    let mut current = activation_command(
+        "stream-target-activate-current",
+        &target,
+        Some(&source),
+        target_fence,
+        "stream-target-receipt",
+    );
+    current.stream_publication_fence = Some(StreamPublicationFence::TaskScoped {
+        source_bundle_digest: source,
+        expected_write_version: 2,
+        bindings: BTreeMap::from([("Order".into(), "Publish".into())]),
+    });
+    assert!(matches!(
+        store.activate_schema_bundle(current).await.unwrap(),
+        ActivateSchemaBundleOutcome::Activated(_)
+    ));
+}
+
+#[tokio::test]
+async fn installed_application_fence_is_atomic_tenant_scoped_and_action_scoped() {
+    let store = SimEventStore::no_faults(82);
+    let persistence_id = "tenant-a:File:file-1";
+    let mut publication = test_event(1);
+    publication.event_type = "StreamUpdated".into();
+    store
+        .append(persistence_id, 0, &[publication])
+        .await
+        .unwrap();
+
+    let stale = StreamPublicationFence::InstalledApplication {
+        application_id: "temper-fs".into(),
+        semantic_digest: format!("sha256:{}", "a".repeat(64)),
+        bindings: BTreeMap::from([
+            (
+                "File".into(),
+                UnscopedStreamPublicationBinding {
+                    publication_action: "StreamUpdated".into(),
+                    capability_digest: format!("sha256:{}", "1".repeat(64)),
+                    expected_write_version: 0,
+                },
+            ),
+            (
+                "FileVersion".into(),
+                UnscopedStreamPublicationBinding {
+                    publication_action: "Create".into(),
+                    capability_digest: format!("sha256:{}", "2".repeat(64)),
+                    expected_write_version: 0,
+                },
+            ),
+        ]),
+    };
+    assert!(matches!(
+        store
+            .activate_unscoped_stream_publication_fence("tenant-a", &stale)
+            .await
+            .unwrap_err(),
+        temper_runtime::persistence::PersistenceError::ConcurrencyViolation {
+            expected: 0,
+            actual: 1
+        }
+    ));
+
+    let current = StreamPublicationFence::InstalledApplication {
+        application_id: "temper-fs".into(),
+        semantic_digest: format!("sha256:{}", "a".repeat(64)),
+        bindings: BTreeMap::from([
+            (
+                "File".into(),
+                UnscopedStreamPublicationBinding {
+                    publication_action: "StreamUpdated".into(),
+                    capability_digest: format!("sha256:{}", "1".repeat(64)),
+                    expected_write_version: 1,
+                },
+            ),
+            (
+                "FileVersion".into(),
+                UnscopedStreamPublicationBinding {
+                    publication_action: "Create".into(),
+                    capability_digest: format!("sha256:{}", "2".repeat(64)),
+                    expected_write_version: 0,
+                },
+            ),
+        ]),
+    };
+    store
+        .activate_unscoped_stream_publication_fence("tenant-a", &current)
+        .await
+        .unwrap();
+    let mut stale_replacement = current.clone();
+    let StreamPublicationFence::InstalledApplication {
+        semantic_digest,
+        bindings,
+        ..
+    } = &mut stale_replacement
+    else {
+        unreachable!();
+    };
+    *semantic_digest = format!("sha256:{}", "9".repeat(64));
+    bindings.get_mut("File").unwrap().expected_write_version = 0;
+    assert!(matches!(
+        store
+            .activate_unscoped_stream_publication_fence("tenant-a", &stale_replacement)
+            .await
+            .unwrap_err(),
+        temper_runtime::persistence::PersistenceError::ConcurrencyViolation { .. }
+    ));
+    assert_eq!(
+        store
+            .get_unscoped_stream_publication_fence("tenant-a", "temper-fs")
+            .await
+            .unwrap(),
+        Some(current.clone())
+    );
+    assert!(
+        store
+            .unscoped_stream_publication_fence_active(
+                "tenant-a",
+                "File",
+                "StreamUpdated",
+                &format!("sha256:{}", "1".repeat(64)),
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .unscoped_stream_publication_fence_active(
+                "tenant-a",
+                "File",
+                "StreamUpdated",
+                &format!("sha256:{}", "9".repeat(64)),
+            )
+            .await
+            .unwrap()
+    );
+
+    let mut blocked = test_event(2);
+    blocked.event_type = "StreamUpdated".into();
+    assert!(matches!(
+        store.append(persistence_id, 1, &[blocked]).await.unwrap_err(),
+        temper_runtime::persistence::PersistenceError::Storage(message)
+            if message.contains("descriptor publication fence")
+    ));
+    let mut batch_blocked = test_event(2);
+    batch_blocked.event_type = "StreamUpdated".into();
+    assert!(matches!(
+        store
+            .append_batch(&[PersistenceAppend {
+                persistence_id: persistence_id.into(),
+                expected_sequence: 1,
+                events: vec![batch_blocked],
+                key_rows: Vec::new(),
+                vector_rows: Vec::new(),
+                reconcile_vectors: false,
+            }])
+            .await
+            .unwrap_err(),
+        temper_runtime::persistence::PersistenceError::Storage(message)
+            if message.contains("descriptor publication fence")
+    ));
+    store
+        .append(persistence_id, 1, &[test_event(2)])
+        .await
+        .unwrap();
+
+    let replacement = StreamPublicationFence::InstalledApplication {
+        application_id: "temper-fs".into(),
+        semantic_digest: format!("sha256:{}", "b".repeat(64)),
+        bindings: BTreeMap::from([(
+            "File".into(),
+            UnscopedStreamPublicationBinding {
+                publication_action: "StreamUpdated".into(),
+                capability_digest: format!("sha256:{}", "3".repeat(64)),
+                expected_write_version: 2,
+            },
+        )]),
+    };
+    store
+        .activate_unscoped_stream_publication_fence("tenant-a", &replacement)
+        .await
+        .unwrap();
+    let mut removed_capability_publication = test_event(1);
+    removed_capability_publication.event_type = "Create".into();
+    store
+        .append(
+            "tenant-a:FileVersion:version-1",
+            0,
+            &[removed_capability_publication],
+        )
+        .await
+        .unwrap();
+
+    let mut other_tenant_publication = test_event(1);
+    other_tenant_publication.event_type = "StreamUpdated".into();
+    store
+        .append("tenant-b:File:file-1", 0, &[other_tenant_publication])
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -551,6 +818,7 @@ async fn activation_compares_receipt_predecessor_and_fence_atomically() {
                     correlation_id: sim_uuid(),
                     timestamp: sim_now(),
                     actor_id: "pin-contract".into(),
+                    kernel: None,
                 },
             }],
         )
@@ -578,6 +846,7 @@ async fn activation_compares_receipt_predecessor_and_fence_atomically() {
                     correlation_id: sim_uuid(),
                     timestamp: sim_now(),
                     actor_id: "pin-collision-contract".into(),
+                    kernel: None,
                 },
             }],
         )
@@ -709,6 +978,7 @@ async fn randomized_multi_tenant_activation_interleavings_preserve_one_scope_win
                     expected_predecessor: None,
                     expected_fence: fence,
                     verification_receipt_id: receipt_id,
+                    stream_publication_fence: None,
                     operation: operation(&format!("activate-{seed}-{candidate}")),
                 },
             )
@@ -753,3 +1023,6 @@ async fn randomized_multi_tenant_activation_interleavings_preserve_one_scope_win
 
 #[path = "schema_deployment/migration.rs"]
 mod migration;
+
+#[path = "schema_deployment/bootstrap.rs"]
+mod bootstrap;

@@ -119,6 +119,7 @@ pub(super) async fn active_workflow_append(
                 correlation_id: sim_uuid(),
                 timestamp: sim_now(),
                 actor_id: persistence_id,
+                kernel: None,
             },
         }],
         key_rows: Vec::new(),

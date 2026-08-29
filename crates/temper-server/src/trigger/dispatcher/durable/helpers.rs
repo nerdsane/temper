@@ -1,19 +1,19 @@
 //! Classification, retry, and terminal metric helpers for durable deliveries.
 
-pub(super) fn is_transient_delivery_error(error: &str) -> bool {
-    let normalized = error.to_ascii_lowercase();
-    [
-        "timeout",
-        "temporar",
-        "mailbox",
-        "deferred",
-        "connection",
-        "storage",
-        "unavailable",
-        "sequenceconflict",
-    ]
-    .iter()
-    .any(|needle| normalized.contains(needle))
+pub(super) const fn is_transient_delivery_failure(
+    failure: crate::trigger::types::ReactionFailureKind,
+) -> bool {
+    use crate::trigger::types::ReactionFailureKind;
+
+    matches!(
+        failure,
+        ReactionFailureKind::TargetSnapshotUnavailable
+            | ReactionFailureKind::AuthorizationEngineUnavailable
+            | ReactionFailureKind::MailboxCapacityExhausted
+            | ReactionFailureKind::AcknowledgementLost
+            | ReactionFailureKind::DispatchDeferred
+            | ReactionFailureKind::PostCommitDescendantFailure
+    )
 }
 
 pub(super) fn is_expected_target_drop(error: &str) -> bool {

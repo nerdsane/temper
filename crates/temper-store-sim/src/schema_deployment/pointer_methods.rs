@@ -5,9 +5,10 @@ macro_rules! impl_schema_pointer_method {
             tenant: &str,
             scope: &SchemaScope,
         ) -> Result<Option<SchemaActivePointer>, SchemaDeploymentStoreError> {
-            let inner = self.inner.lock().map_err(|_| {
+            let mut inner = self.inner.lock().map_err(|_| {
                 SchemaDeploymentStoreError::BackendUnavailable("lock poisoned".into())
             })?;
+            inject_schema_failure(&mut inner, SimSchemaFaultPoint::ActivePointerRead)?;
             Ok(inner
                 .schema_deployments
                 .active

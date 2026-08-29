@@ -161,6 +161,7 @@ type = "same_id"
         source_sequence: 1,
         source_to_state: "Confirmed".to_string(),
         source_fields: serde_json::json!({}),
+        source_stream_descriptor: None,
         guard_passed: true,
         target_entity_id: Some("o1".to_string()),
         trigger_name: rule.name.clone(),
@@ -197,6 +198,7 @@ type = "same_id"
                     correlation_id: sim_uuid(),
                     timestamp: sim_now(),
                     actor_id: format!("{tenant_name}:Order:o1"),
+                    kernel: None,
                 },
             }],
         )
@@ -266,6 +268,7 @@ type = "same_id"
                         correlation_id: sim_uuid(),
                         timestamp: sim_now(),
                         actor_id: entity_id,
+                        kernel: None,
                     },
                 }],
             )
@@ -294,6 +297,7 @@ type = "same_id"
         source_sequence: 1,
         source_to_state: "Confirmed".to_string(),
         source_fields: serde_json::json!({}),
+        source_stream_descriptor: None,
         guard_passed: true,
         target_entity_id: Some("zzzz".to_string()),
         trigger_name: rule.name.clone(),
@@ -328,6 +332,7 @@ type = "same_id"
                     correlation_id: sim_uuid(),
                     timestamp: sim_now(),
                     actor_id: "zzzz".to_string(),
+                    kernel: None,
                 },
             }],
         )
@@ -405,6 +410,7 @@ type = "same_id"
         source_sequence: 1,
         source_to_state: "Confirmed".to_string(),
         source_fields: serde_json::json!({"guard_id": "guard"}),
+        source_stream_descriptor: None,
         guard_passed: true,
         target_entity_id: Some("target".to_string()),
         trigger_name: rule.name.clone(),

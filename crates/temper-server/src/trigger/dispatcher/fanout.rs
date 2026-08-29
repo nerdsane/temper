@@ -1,23 +1,25 @@
-//! Reaction rule evaluation, authorization, dispatch, and telemetry.
-
+mod awaited;
 mod entry;
+mod failure;
+mod principal;
+mod stream_provenance;
 mod telemetry;
+#[cfg(test)]
+mod tests;
 
 use crate::request_context::AgentContext;
 use crate::trigger::{guard, params, resolver};
 use temper_runtime::tenant::TenantId;
 
-use super::super::types::{MAX_REACTION_DEPTH, ReactionResult, ReactionRule};
+use super::super::types::{MAX_REACTION_DEPTH, ReactionFailureKind, ReactionResult, ReactionRule};
 use super::{BoundDelivery, ReactionDispatcher, effective_trigger_security_context};
+use awaited::await_bound_delivery_integration;
+use failure::{
+    reaction_authorization_decision_id, reaction_authorization_failure, reaction_dispatch_failure,
+};
+use principal::resolve_trigger_principal;
+use stream_provenance::{immutable_version_metadata, stream_provenance_failure};
 use telemetry::{ReactionFanoutCounts, record_reaction_fanout_span};
-
-fn await_bound_delivery_integration(bound_delivery: Option<&BoundDelivery>) -> bool {
-    bound_delivery.is_some_and(|delivery| {
-        delivery.collection.as_ref().is_some_and(|context| {
-            context.role == crate::trigger::collection_workflow::CollectionDeliveryRole::Member
-        })
-    })
-}
 
 impl ReactionDispatcher {
     #[expect(
@@ -55,13 +57,10 @@ impl ReactionDispatcher {
             return Vec::new();
         }
 
-        let rule_count = rules.len();
-        let mut fired_count = 0usize;
-        let mut guard_skipped_count = 0usize;
-        let mut target_resolve_error_count = 0usize;
-        let mut authz_denied_count = 0usize;
-        let mut dispatch_error_count = 0usize;
-        let mut success_count = 0usize;
+        let mut counts = ReactionFanoutCounts {
+            rule_count: rules.len(),
+            ..ReactionFanoutCounts::default()
+        };
         let mut results = Vec::new();
 
         for rule in rules {
@@ -98,7 +97,7 @@ impl ReactionDispatcher {
                 let passed =
                     guard::evaluate_with_resolved(guard, fields, to_state, &resolved, &rule.name);
                 if !passed {
-                    guard_skipped_count += 1;
+                    counts.guard_skipped_count += 1;
                     tracing::debug!(
                         rule = rule.name,
                         cross_entity_queries = queries.len(),
@@ -115,7 +114,7 @@ impl ReactionDispatcher {
             {
                 Some(id) => id,
                 None => {
-                    target_resolve_error_count += 1;
+                    counts.target_resolve_error_count += 1;
                     tracing::warn!(
                         rule = rule.name,
                         "Could not resolve target entity ID for reaction"
@@ -125,6 +124,8 @@ impl ReactionDispatcher {
                         success: false,
                         target_status: None,
                         error: Some("Could not resolve target entity ID".to_string()),
+                        failure: Some(ReactionFailureKind::TargetResolution),
+                        decision_id: None,
                         depth,
                     });
                     continue;
@@ -189,14 +190,20 @@ impl ReactionDispatcher {
                             serde_json::Value::String(response.state.status.clone()),
                         );
                         attrs.insert("has_spec".into(), serde_json::Value::Bool(true));
-                        (attrs, response.state.status)
+                        (attrs, response.state.status, response.state.sequence_nr)
                     }),
                 None => state
                     .load_authz_resource_snapshot(tenant, &rule.then.entity_type, &target_entity_id)
                     .await
-                    .map(|snapshot| (snapshot.resource_attrs, snapshot.current_state.state.status)),
+                    .map(|snapshot| {
+                        (
+                            snapshot.resource_attrs,
+                            snapshot.current_state.state.status,
+                            snapshot.current_state.state.sequence_nr,
+                        )
+                    }),
             };
-            let (authz_resource_attrs, authz_status) = match authz_snapshot {
+            let (authz_resource_attrs, authz_status, authz_sequence) = match authz_snapshot {
                 Ok(snapshot) => snapshot,
                 Err(e) => {
                     tracing::warn!(
@@ -211,6 +218,8 @@ impl ReactionDispatcher {
                         success: false,
                         target_status: None,
                         error: Some(e),
+                        failure: Some(ReactionFailureKind::TargetSnapshotUnavailable),
+                        decision_id: None,
                         depth,
                     });
                     continue;
@@ -225,8 +234,10 @@ impl ReactionDispatcher {
                 &authz_resource_attrs,
                 tenant.as_str(),
             ) {
+                let failure = reaction_authorization_failure(&denial);
+                let decision_id = reaction_authorization_decision_id(&denial);
                 let reason = denial.to_string();
-                authz_denied_count += 1;
+                counts.authz_denied_count += 1;
                 tracing::warn!(
                     rule = rule.name,
                     target_entity = %rule.then.entity_type,
@@ -241,6 +252,8 @@ impl ReactionDispatcher {
                     success: false,
                     target_status: Some(authz_status),
                     error: Some(reason),
+                    failure: Some(failure),
+                    decision_id,
                     depth,
                 });
                 continue;
@@ -248,7 +261,26 @@ impl ReactionDispatcher {
 
             // Fire the target action via the core dispatch (no reaction cascade
             // to avoid infinite async recursion — we handle cascading ourselves).
-            fired_count += 1;
+            counts.fired_count += 1;
+            let kernel_metadata = match immutable_version_metadata(
+                state,
+                tenant,
+                dispatch_ctx.schema_pin.as_ref(),
+                &rule,
+                &target_entity_id,
+                authz_sequence,
+                bound_delivery.as_ref(),
+            ) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    counts.dispatch_error_count += 1;
+                    results.push(stream_provenance_failure(&rule.name, error, depth));
+                    continue;
+                }
+            };
+            if kernel_metadata.is_some() {
+                dispatch_ctx.expected_entity_sequence = Some(authz_sequence);
+            }
             let reaction_context = if let Some(delivery) = bound_delivery.as_ref() {
                 let descendant_rules = if let Some(pin) = dispatch_ctx.schema_pin.as_ref() {
                     state
@@ -323,12 +355,14 @@ impl ReactionDispatcher {
                         }),
                     }),
                     Err(error) => {
-                        dispatch_error_count += 1;
+                        counts.dispatch_error_count += 1;
                         results.push(ReactionResult {
                             rule_name: rule.name.clone(),
                             success: false,
                             target_status: None,
                             error: Some(error),
+                            failure: Some(ReactionFailureKind::AuthorizationContextInvalid),
+                            decision_id: None,
                             depth,
                         });
                         continue;
@@ -348,13 +382,16 @@ impl ReactionDispatcher {
                     await_bound_delivery_integration(bound_delivery.as_ref()),
                     reaction_context,
                     None,
+                    kernel_metadata,
                 )
                 .await;
 
             match dispatch_result {
                 Ok(response) => {
                     let target_status = response.state.status.clone();
-                    let descendant_error = if response.success && bound_delivery.is_some() {
+                    let (descendant_error, descendant_failure) = if response.success
+                        && bound_delivery.is_some()
+                    {
                         match state
                             .materialize_committed_reaction_intents(
                                 tenant,
@@ -378,27 +415,39 @@ impl ReactionDispatcher {
                                             success: false,
                                             target_status: Some(target_status),
                                             error: Some(error),
+                                            failure: Some(
+                                                ReactionFailureKind::PostCommitDescendantFailure,
+                                            ),
+                                            decision_id: None,
                                             depth,
                                         }];
                                     }
                                 } else if !intents.is_empty() {
                                     self.notify_recovery(tenant);
                                 }
-                                None
+                                (None, None)
                             }
-                            Err(error) => Some(error.to_string()),
+                            Err(error) => (
+                                Some(error.to_string()),
+                                Some(ReactionFailureKind::PostCommitDescendantFailure),
+                            ),
                         }
                     } else {
-                        None
+                        (None, None)
                     };
                     if response.success && descendant_error.is_none() {
-                        success_count += 1;
+                        counts.success_count += 1;
                     }
                     results.push(ReactionResult {
                         rule_name: rule.name.clone(),
                         success: response.success && descendant_error.is_none(),
                         target_status: Some(target_status.clone()),
                         error: descendant_error.or_else(|| response.error.clone()),
+                        failure: descendant_failure.or_else(|| {
+                            (!response.success)
+                                .then_some(ReactionFailureKind::TargetTransitionRejected)
+                        }),
+                        decision_id: None,
                         depth,
                     });
 
@@ -422,7 +471,8 @@ impl ReactionDispatcher {
                     }
                 }
                 Err(e) => {
-                    dispatch_error_count += 1;
+                    let failure = reaction_dispatch_failure(&e);
+                    counts.dispatch_error_count += 1;
                     tracing::warn!(
                         rule = rule.name,
                         error = %e,
@@ -433,123 +483,17 @@ impl ReactionDispatcher {
                         success: false,
                         target_status: None,
                         error: Some(e.to_string()),
+                        failure: Some(failure),
+                        decision_id: None,
                         depth,
                     });
                 }
             }
         }
 
-        record_reaction_fanout_span(ReactionFanoutCounts {
-            rule_count,
-            fired_count,
-            guard_skipped_count,
-            target_resolve_error_count,
-            authz_denied_count,
-            dispatch_error_count,
-            success_count,
-            result_count: results.len(),
-        });
+        counts.result_count = results.len();
+        record_reaction_fanout_span(counts);
 
         results
-    }
-}
-
-/// Resolve an explicit reaction service principal or inherit the caller.
-fn resolve_trigger_principal(
-    declared_principal: Option<&str>,
-    invoking_ctx: &AgentContext,
-    rule_name: &str,
-    source_entity_type: &str,
-    source_entity_id: &str,
-    source_action: &str,
-) -> AgentContext {
-    match declared_principal {
-        Some(service_name) if !service_name.is_empty() => {
-            let mut ctx = AgentContext::for_service_inheriting(service_name, invoking_ctx);
-            // Preserve ADR-0048 behavior for declared reaction principals:
-            // existing trigger dispatch copied the caller's idempotency key.
-            ctx.idempotency_key = invoking_ctx.idempotency_key.clone();
-            if let Some(security_ctx) = ctx.security_ctx.as_mut() {
-                security_ctx.context_attrs.insert(
-                    "triggerRule".to_string(),
-                    serde_json::Value::String(rule_name.to_string()),
-                );
-                security_ctx.context_attrs.insert(
-                    "triggerSourceEntityType".to_string(),
-                    serde_json::Value::String(source_entity_type.to_string()),
-                );
-                security_ctx.context_attrs.insert(
-                    "triggerSourceEntityId".to_string(),
-                    serde_json::Value::String(source_entity_id.to_string()),
-                );
-                security_ctx.context_attrs.insert(
-                    "triggerSourceAction".to_string(),
-                    serde_json::Value::String(source_action.to_string()),
-                );
-                security_ctx.context_attrs.insert(
-                    "triggerDeclaredPrincipal".to_string(),
-                    serde_json::Value::Bool(true),
-                );
-            }
-            ctx
-        }
-        _ => invoking_ctx.clone(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::await_bound_delivery_integration;
-    use crate::trigger::collection_workflow::{
-        CollectionDeliveryActions, CollectionDeliveryContext, CollectionDeliveryRole,
-    };
-    use crate::trigger::dispatcher::BoundDelivery;
-
-    fn bound(role: CollectionDeliveryRole) -> BoundDelivery {
-        BoundDelivery {
-            delivery_id: "delivery".to_string(),
-            root_delivery_id: "root".to_string(),
-            fencing_token: 1,
-            target_entity_id: Some("target".to_string()),
-            expected_target_sequence: None,
-            state_timeout_state: None,
-            collection: Some(CollectionDeliveryContext {
-                workflow_id: "workflow".to_string(),
-                member_id: Some("member".to_string()),
-                control_epoch: 0,
-                attempts: 1,
-                max_attempts: 5,
-                execution_deadline: Some(
-                    temper_runtime::scheduler::sim_now() + chrono::Duration::minutes(1),
-                ),
-                role,
-                terminal_classification: None,
-                actions: CollectionDeliveryActions {
-                    member_entity: "Member".to_string(),
-                    member_action: "Start".to_string(),
-                    member_cancel_action: "Cancel".to_string(),
-                    timeout_action: "Timeout".to_string(),
-                    on_success: "Succeeded".to_string(),
-                    on_partial_failure: "PartiallyFailed".to_string(),
-                    on_failure: "Failed".to_string(),
-                    on_cancelled: "Cancelled".to_string(),
-                    on_timed_out: "TimedOut".to_string(),
-                },
-            }),
-        }
-    }
-
-    #[test]
-    fn only_collection_member_delivery_awaits_its_integration() {
-        assert!(await_bound_delivery_integration(Some(&bound(
-            CollectionDeliveryRole::Member
-        ))));
-        assert!(!await_bound_delivery_integration(Some(&bound(
-            CollectionDeliveryRole::Cancellation
-        ))));
-        assert!(!await_bound_delivery_integration(Some(&bound(
-            CollectionDeliveryRole::Join
-        ))));
-        assert!(!await_bound_delivery_integration(None));
     }
 }

@@ -1,6 +1,6 @@
 //! Cross-entity collection workflow linting.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::{Automaton, Effect, TriggerKind};
 use super::BundleLintFinding;
@@ -163,7 +163,16 @@ fn lint_member_integration(
         ));
         return;
     };
-    for callback in std::iter::once(success).chain(integration.on_failure.as_deref()) {
+    let callbacks = std::iter::once(success)
+        .chain(integration.on_failure.as_deref())
+        .chain(
+            integration
+                .failure_routes
+                .iter()
+                .map(|route| route.callback_action.as_str()),
+        )
+        .collect::<BTreeSet<_>>();
+    for callback in callbacks {
         let Some(callback_action) = member.actions.iter().find(|action| action.name == callback)
         else {
             continue;
@@ -247,6 +256,64 @@ pub(super) fn lint_role_uniqueness(
                         format!(
                             "collection role {entity}.{action} ({role}) aliases workflow '{}.{}'",
                             previous_entity, previous_workflow
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    for (source_entity, automaton) in automata {
+        for workflow in &automaton.collection_workflows {
+            let Some(member) = automata.get(&workflow.member_entity) else {
+                continue;
+            };
+            let Some(member_action) = member
+                .actions
+                .iter()
+                .find(|action| action.name == workflow.member_action)
+            else {
+                continue;
+            };
+            let effects = member_action
+                .effect
+                .iter()
+                .filter_map(|effect| match effect {
+                    Effect::Trigger { name } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if effects.len() != 1 {
+                continue;
+            }
+            let integrations = member
+                .integrations
+                .iter()
+                .filter(|integration| integration.trigger == effects[0])
+                .collect::<Vec<_>>();
+            if integrations.len() != 1 {
+                continue;
+            }
+            let integration = integrations[0];
+            let callbacks = integration
+                .on_success
+                .as_deref()
+                .into_iter()
+                .chain(integration.on_failure.as_deref())
+                .chain(
+                    integration
+                        .failure_routes
+                        .iter()
+                        .map(|route| route.callback_action.as_str()),
+                )
+                .collect::<BTreeSet<_>>();
+            for callback in callbacks {
+                if roles.contains_key(&(workflow.member_entity.clone(), callback.to_string())) {
+                    findings.push(BundleLintFinding::error(
+                        source_entity,
+                        "collection_member_callback_role_alias",
+                        format!(
+                            "collection_workflow '{}' callback '{}.{}' cannot also be a collection role action",
+                            workflow.name, workflow.member_entity, callback
                         ),
                     ));
                 }
@@ -423,6 +490,60 @@ on_failure = "Failed"
             findings
                 .iter()
                 .any(|finding| finding.code == "collection_member_callback_integration_forbidden")
+        );
+
+        let mut typed = member();
+        typed.integrations[0].on_failure = None;
+        typed.integrations[0].failure_routes = vec![crate::automaton::ResolvedFailureRoute {
+            source_action: "Start".to_string(),
+            trigger_name: "check".to_string(),
+            category: temper_failure::FailureCategory::Permanent,
+            callback_action: "Failed".to_string(),
+        }];
+        typed
+            .actions
+            .iter_mut()
+            .find(|action| action.name == "Failed")
+            .unwrap()
+            .effect = vec![Effect::Trigger {
+            name: "nested_typed_failure".to_string(),
+        }];
+        let action = typed
+            .actions
+            .iter()
+            .find(|action| action.name == "Start")
+            .unwrap();
+        findings.clear();
+        lint_member_integration("Batch", &workflow, &typed, action, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.code == "collection_member_callback_integration_forbidden")
+        );
+    }
+
+    #[test]
+    fn member_callback_cannot_alias_any_collection_role() {
+        let mut source = member();
+        source.automaton.name = "Batch".to_string();
+        source.collection_workflows = vec![workflow()];
+        let mut member = member();
+        let mut nested = workflow();
+        nested.name = "nested".to_string();
+        nested.start_action = "Failed".to_string();
+        member.collection_workflows = vec![nested];
+        let automata = BTreeMap::from([
+            ("Batch".to_string(), source),
+            ("CheckRun".to_string(), member),
+        ]);
+        let mut findings = Vec::new();
+
+        lint_role_uniqueness(&automata, &mut findings);
+
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.code == "collection_member_callback_role_alias")
         );
     }
 }

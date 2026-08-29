@@ -13,6 +13,8 @@
 
 pub(crate) mod action_enumeration;
 pub mod builder;
+#[cfg(test)]
+mod failure_routes_test;
 pub(crate) mod reference_contract;
 #[cfg(test)]
 mod reference_contract_test;

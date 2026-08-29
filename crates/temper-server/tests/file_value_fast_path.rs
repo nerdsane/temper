@@ -50,6 +50,14 @@ const FILE_CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
         <Property Name="mime_type" Type="Edm.String"/>
         <Property Name="has_content" Type="Edm.Boolean"/>
         <Property Name="size_bytes" Type="Edm.Int64"/>
+        <Annotation Term="Temper.Vocab.Stream.Mutability" String="Mutable"/>
+        <Annotation Term="Temper.Vocab.Stream.DescriptorContractVersion" Int="1"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationPublicationAction" String="StreamUpdated"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationContentHashParameter" String="content_hash"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationByteLengthParameter" String="size_bytes"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationContentTypeParameter" String="mime_type"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationStorageContractVersion" Int="1"/>
+        <Annotation Term="Temper.Vocab.Stream.MigrationStorageKeyPrefix" String="temper-fs/"/>
       </EntityType>
       <EntityContainer Name="Container">
         <EntitySet Name="Files" EntityType="Temper.FileReadFastPathTest.File"/>
@@ -1204,3 +1212,6 @@ async fn create_file_in_active_workspace_succeeds() {
     assert_eq!(response.state.status, "Ready");
     assert_eq!(response.state.fields["has_content"], true);
 }
+
+#[path = "file_value_fast_path/stream_migration.rs"]
+mod stream_migration_tests;

@@ -14,15 +14,21 @@ use temper_spec::{
 };
 use temper_wasm_sdk::data::DataOperationKind;
 use temper_wasm_sdk::schema_deployment::{
-    ActivateSchemaBundleRequestV1, GetSchemaBundleRequestV1, RetireSchemaBundleRequestV1,
+    ActivateSchemaBundleRequestV1, AdvanceStreamDescriptorMigrationRequestV1,
+    GetSchemaBundleRequestV1, GetStreamDescriptorMigrationRequestV1,
+    ListUnresolvedStreamDescriptorsRequestV1, RetireSchemaBundleRequestV1,
     RetrySchemaMigrationRequestV1, SCHEMA_DEPLOYMENT_ABI_V1, SchemaBundleBudgetsV1,
     SchemaDeploymentOperationV1, SchemaDeploymentRequestV1, SchemaDeploymentResponseV1,
     SchemaIoaSourceV1, SchemaMigrationArtifactV1, SchemaMigrationBudgetsV1, SchemaScopeV1,
-    StartSchemaMigrationRequestV1, SubmitSchemaBundleRequestV1,
+    StartSchemaMigrationRequestV1, StartStreamDescriptorMigrationRequestV1,
+    StreamDescriptorMigrationBudgetsV1, StreamDescriptorMigrationTargetV1,
+    SubmitSchemaBundleRequestV1,
 };
 use tower::ServiceExt;
 
+mod bootstrap;
 mod migration;
+mod stream_descriptor_gate_tests;
 
 use super::ApplicationDataInvocation;
 use super::tests::invocation;
@@ -38,6 +44,42 @@ const CSDL: &str = r#"<?xml version="1.0"?>
 <edmx:DataServices><Schema Namespace="Example" xmlns="http://docs.oasis-open.org/odata/ns/edm">
 <EntityType Name="Task"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/><Property Name="Title" Type="Edm.String"/></EntityType>
 <EntityContainer Name="Default"><EntitySet Name="Tasks" EntityType="Example.Task"/></EntityContainer>
+</Schema></edmx:DataServices></edmx:Edmx>"#;
+
+const STREAM_IOA: &str = r#"[automaton]
+name = "File"
+states = ["Ready"]
+initial = "Ready"
+
+[[action]]
+name = "StreamUpdated"
+kind = "input"
+from = ["Ready"]
+to = "Ready"
+params = ["content_hash", "size_bytes", "mime_type"]
+
+[[action]]
+name = "Touch"
+kind = "input"
+from = ["Ready"]
+to = "Ready"
+"#;
+
+const ACTIVE_STREAM_CSDL: &str = r#"<?xml version="1.0"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+<edmx:DataServices><Schema Namespace="Example" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+<EntityType Name="File" HasStream="true">
+<Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/>
+<Annotation Term="Temper.Vocab.Stream.Mutability" String="Mutable"/>
+<Annotation Term="Temper.Vocab.Stream.DescriptorContractVersion" Int="1"/>
+<Annotation Term="Temper.Vocab.Stream.MigrationPublicationAction" String="StreamUpdated"/>
+<Annotation Term="Temper.Vocab.Stream.MigrationContentHashParameter" String="content_hash"/>
+<Annotation Term="Temper.Vocab.Stream.MigrationByteLengthParameter" String="size_bytes"/>
+<Annotation Term="Temper.Vocab.Stream.MigrationContentTypeParameter" String="mime_type"/>
+<Annotation Term="Temper.Vocab.Stream.MigrationStorageContractVersion" Int="1"/>
+<Annotation Term="Temper.Vocab.Stream.MigrationStorageKeyPrefix" String="temper-fs/"/>
+</EntityType>
+<EntityContainer Name="Default"><EntitySet Name="Files" EntityType="Example.File"/></EntityContainer>
 </Schema></edmx:DataServices></edmx:Edmx>"#;
 
 fn request() -> SubmitSchemaBundleRequestV1 {
@@ -89,19 +131,32 @@ fn request() -> SubmitSchemaBundleRequestV1 {
 }
 
 fn schema_invocation() -> std::sync::Arc<ApplicationDataInvocation> {
+    schema_invocation_with_store().0
+}
+
+fn schema_invocation_with_store() -> (
+    std::sync::Arc<ApplicationDataInvocation>,
+    temper_store_sim::SimEventStore,
+) {
     let original = invocation(
         BTreeSet::from([
             DataOperationKind::SchemaBundleSubmit,
             DataOperationKind::SchemaBundleGet,
+            DataOperationKind::StreamDescriptorMigrationStart,
+            DataOperationKind::StreamDescriptorMigrationAdvance,
+            DataOperationKind::StreamDescriptorMigrationGet,
+            DataOperationKind::StreamDescriptorMigrationListUnresolved,
         ]),
         SecurityContext::system(),
     );
     let mut state = original.state.clone();
-    state.set_storage_stack(crate::storage::StorageStack::from_sim(
-        temper_store_sim::SimEventStore::no_faults(114),
-        None,
-    ));
-    ApplicationDataInvocation::new(state, original.authority.clone())
+    state.data_dir = tempfile::tempdir().unwrap().keep();
+    let store = temper_store_sim::SimEventStore::no_faults(114);
+    state.set_storage_stack(crate::storage::StorageStack::from_sim(store.clone(), None));
+    (
+        ApplicationDataInvocation::new(state, original.authority.clone()),
+        store,
+    )
 }
 
 fn schema_migration_invocation() -> std::sync::Arc<ApplicationDataInvocation> {
@@ -265,6 +320,7 @@ async fn activation_response_replay_after_retirement_does_not_resurrect_registry
         expected_predecessor: None,
         expected_fence: verified.fence,
         verification_receipt_id: verified.verification_receipt_id.clone().unwrap(),
+        stream_descriptor_completion_receipt_id: None,
     };
     let active = service
         .activate("default", &security, activation.clone())

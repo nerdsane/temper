@@ -18,6 +18,7 @@ pub mod types;
 
 pub use actor::{EntityActor, SCHEMA_PIN_FIELD};
 pub(crate) use actor::{
+    SCHEMA_BOOTSTRAP_ACTION_IDEMPOTENCY_PREFIX, SCHEMA_BOOTSTRAP_ACTION_OUTCOME_FIELD,
     recover_authoritative_entity_state_from_store, recover_entity_state_from_store,
     schema_event_pin,
 };

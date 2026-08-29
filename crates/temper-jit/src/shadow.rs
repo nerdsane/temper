@@ -120,6 +120,7 @@ mod tests {
             schema_digest: None,
             state_timeouts: vec![],
             collection_workflows: vec![],
+            failure_routes: vec![],
             keys: vec![],
             vectors: vec![],
             rules: vec![

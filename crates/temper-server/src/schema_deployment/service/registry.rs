@@ -26,6 +26,67 @@ impl GovernedSchemaDeploymentService<'_> {
             .iter()
             .map(|(entity, source)| (entity.as_str(), source.as_str()))
             .collect::<Vec<_>>();
+        let modules = record
+            .bundle
+            .wasm_module_digests
+            .iter()
+            .map(|(module_name, artifact_digest)| {
+                let data_binding = record
+                    .bundle
+                    .wasm_module_data_bindings
+                    .get(module_name)
+                    .map(|stored| {
+                        let manifest: temper_wasm_sdk::data::ModuleSdkManifest =
+                            serde_json::from_str(&stored.canonical_manifest_json).map_err(
+                                |error| {
+                                    ServiceError::new(
+                                        "invalid_bundle",
+                                        format!(
+                                            "scoped module '{module_name}' data binding is invalid: {error}"
+                                        ),
+                                        false,
+                                    )
+                                },
+                            )?;
+                        let actual = manifest
+                            .binding_digest()
+                            .map(|digest| format!("sha256:{digest}"))
+                            .map_err(|error| {
+                                ServiceError::new("invalid_bundle", error, false)
+                            })?;
+                        if actual != stored.binding_digest {
+                            return Err(ServiceError::new(
+                                "invalid_bundle",
+                                format!(
+                                    "scoped module '{module_name}' data binding digest mismatch"
+                                ),
+                                false,
+                            ));
+                        }
+                        Ok(manifest)
+                    })
+                    .transpose()?;
+                Ok((
+                    module_name.clone(),
+                    crate::registry::ScopedModuleDescriptor {
+                        artifact_digest: artifact_digest.clone(),
+                        data_binding,
+                    },
+                ))
+            })
+            .collect::<Result<std::collections::BTreeMap<_, _>, ServiceError>>()?;
+        if record
+            .bundle
+            .wasm_module_data_bindings
+            .keys()
+            .any(|module_name| !record.bundle.wasm_module_digests.contains_key(module_name))
+        {
+            return Err(ServiceError::new(
+                "invalid_bundle",
+                "scoped module data binding has no artifact descriptor",
+                false,
+            ));
+        }
         self.state
             .registry
             .write()
@@ -36,13 +97,14 @@ impl GovernedSchemaDeploymentService<'_> {
                     true,
                 )
             })?
-            .stage_scoped_bundle(
+            .stage_scoped_bundle_with_modules(
                 TenantId::new(&record.bundle.tenant),
                 record.bundle.scope.clone(),
                 record.bundle.digest.clone(),
                 csdl,
                 record.bundle.canonical_csdl.clone(),
                 &borrowed_sources,
+                modules,
             )
             .map_err(|error| ServiceError::new("invalid_bundle", error.to_string(), false))
     }

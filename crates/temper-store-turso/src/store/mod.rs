@@ -163,6 +163,18 @@ impl TursoEventStore {
         .await
         .map_err(storage_error)?;
         conn.execute(
+            schema::schema_deployment::CREATE_SCHEMA_BOOTSTRAP_OPERATIONS_TABLE,
+            (),
+        )
+        .await
+        .map_err(storage_error)?;
+        conn.execute(
+            schema::schema_deployment::CREATE_SCHEMA_BOOTSTRAP_TARGETS_TABLE,
+            (),
+        )
+        .await
+        .map_err(storage_error)?;
+        conn.execute(
             schema::schema_deployment::CREATE_SCHEMA_DEPLOYMENT_IDEMPOTENCY_TABLE,
             (),
         )

@@ -2,8 +2,12 @@
 
 mod collection;
 mod helpers;
+mod persistence;
 mod recovery;
+mod settlement;
 mod state_timeout;
+#[cfg(test)]
+mod tests;
 
 use crate::request_context::AgentContext;
 use temper_authz::SecurityContext;
@@ -13,29 +17,17 @@ use super::super::types::{MAX_REACTION_DEPTH, ReactionResult, ReactionRule};
 use super::{BoundDelivery, ReactionDispatcher};
 use helpers::{
     automatic_retry_backoff, collection_control_skip_reason, is_expected_target_drop,
-    is_transient_delivery_error, record_delivery_terminal_metrics,
+    is_transient_delivery_failure, record_delivery_terminal_metrics,
+};
+use persistence::{
+    assign_typed_failure, assign_typed_failure_with_decision, persist_terminal_delivery,
 };
 use state_timeout::validate_timeout_clock;
 
 enum TimeoutClockStatus {
     Current(u64),
-    Superseded(String),
-    Rejected(String),
-}
-
-async fn persist_terminal_delivery(
-    store: &crate::storage::BoxedEventStore,
-    sequence: u64,
-    record: &crate::trigger::delivery::ReactionDeliveryRecord,
-) -> Result<(), String> {
-    if !crate::trigger::collection_workflow::commit_terminal_delivery(store, sequence, record)
-        .await?
-    {
-        crate::trigger::delivery::append_delivery_record(store, sequence, record)
-            .await
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
+    Superseded(String, crate::trigger::delivery::DurableFailureKind),
+    Rejected(String, crate::trigger::delivery::DurableFailureKind),
 }
 
 impl ReactionDispatcher {
@@ -131,7 +123,11 @@ impl ReactionDispatcher {
             record.lease_expires_at = None;
             record.next_attempt_at = None;
             record.last_error = Some("automatic delivery attempt budget exhausted".to_string());
-            persist_terminal_delivery(&store, sequence, &record).await?;
+            assign_typed_failure(
+                &mut record,
+                crate::trigger::delivery::DurableFailureKind::AutomaticAttemptBudgetExhausted,
+            )?;
+            persist_terminal_delivery(state, &store, sequence, &record).await?;
             record_delivery_terminal_metrics(&record);
             return Ok(Vec::new());
         }
@@ -155,7 +151,11 @@ impl ReactionDispatcher {
         if !timeout_shape_matches_kind {
             record.status = ReactionDeliveryStatus::Rejected;
             record.last_error = Some("delivery kind and timeout evidence disagree".to_string());
-            persist_terminal_delivery(&store, sequence, &record).await?;
+            assign_typed_failure(
+                &mut record,
+                crate::trigger::delivery::DurableFailureKind::InvalidDeliveryShape,
+            )?;
+            persist_terminal_delivery(state, &store, sequence, &record).await?;
             record_delivery_terminal_metrics(&record);
             return Ok(Vec::new());
         }
@@ -165,7 +165,11 @@ impl ReactionDispatcher {
             Err(error) => {
                 record.status = ReactionDeliveryStatus::Rejected;
                 record.last_error = Some(format!("invalid persisted reaction rule: {error}"));
-                persist_terminal_delivery(&store, sequence, &record).await?;
+                assign_typed_failure(
+                    &mut record,
+                    crate::trigger::delivery::DurableFailureKind::InvalidPersistedRule,
+                )?;
+                persist_terminal_delivery(state, &store, sequence, &record).await?;
                 record_delivery_terminal_metrics(&record);
                 return Ok(Vec::new());
             }
@@ -181,20 +185,24 @@ impl ReactionDispatcher {
             .is_some_and(|expected| expected != intent.source_to_state)
         {
             record.status = ReactionDeliveryStatus::Skipped;
-            persist_terminal_delivery(&store, sequence, &record).await?;
+            persist_terminal_delivery(state, &store, sequence, &record).await?;
             record_delivery_terminal_metrics(&record);
             return Ok(Vec::new());
         }
         if !intent.guard_passed {
             record.status = ReactionDeliveryStatus::Skipped;
-            persist_terminal_delivery(&store, sequence, &record).await?;
+            persist_terminal_delivery(state, &store, sequence, &record).await?;
             record_delivery_terminal_metrics(&record);
             return Ok(Vec::new());
         }
         if intent.depth >= MAX_REACTION_DEPTH {
             record.status = ReactionDeliveryStatus::Rejected;
             record.last_error = Some("reaction cascade depth budget exhausted".to_string());
-            persist_terminal_delivery(&store, sequence, &record).await?;
+            assign_typed_failure(
+                &mut record,
+                crate::trigger::delivery::DurableFailureKind::CascadeDepthBudgetExhausted,
+            )?;
+            persist_terminal_delivery(state, &store, sequence, &record).await?;
             record_delivery_terminal_metrics(&record);
             return Ok(Vec::new());
         }
@@ -266,7 +274,7 @@ impl ReactionDispatcher {
                 record.status = ReactionDeliveryStatus::Succeeded;
                 record.lease_expires_at = None;
                 record.last_error = None;
-                persist_terminal_delivery(&store, sequence, &record).await?;
+                persist_terminal_delivery(state, &store, sequence, &record).await?;
                 record_delivery_terminal_metrics(&record);
                 return Ok(Vec::new());
             }
@@ -278,21 +286,23 @@ impl ReactionDispatcher {
                 TimeoutClockStatus::Current(sequence) => {
                     expected_target_sequence = Some(sequence);
                 }
-                TimeoutClockStatus::Superseded(reason) => {
+                TimeoutClockStatus::Superseded(reason, failure) => {
                     record.status = ReactionDeliveryStatus::Skipped;
                     record.lease_expires_at = None;
                     record.next_attempt_at = None;
                     record.last_error = Some(reason);
-                    persist_terminal_delivery(&store, sequence, &record).await?;
+                    assign_typed_failure(&mut record, failure)?;
+                    persist_terminal_delivery(state, &store, sequence, &record).await?;
                     record_delivery_terminal_metrics(&record);
                     return Ok(Vec::new());
                 }
-                TimeoutClockStatus::Rejected(reason) => {
+                TimeoutClockStatus::Rejected(reason, failure) => {
                     record.status = ReactionDeliveryStatus::Rejected;
                     record.lease_expires_at = None;
                     record.next_attempt_at = None;
                     record.last_error = Some(reason);
-                    persist_terminal_delivery(&store, sequence, &record).await?;
+                    assign_typed_failure(&mut record, failure)?;
+                    persist_terminal_delivery(state, &store, sequence, &record).await?;
                     record_delivery_terminal_metrics(&record);
                     return Ok(Vec::new());
                 }
@@ -304,7 +314,11 @@ impl ReactionDispatcher {
             Err(error) => {
                 record.status = ReactionDeliveryStatus::Rejected;
                 record.last_error = Some(format!("invalid persisted reaction authority: {error}"));
-                persist_terminal_delivery(&store, sequence, &record).await?;
+                assign_typed_failure(
+                    &mut record,
+                    crate::trigger::delivery::DurableFailureKind::InvalidPersistedAuthority,
+                )?;
+                persist_terminal_delivery(state, &store, sequence, &record).await?;
                 record_delivery_terminal_metrics(&record);
                 return Ok(Vec::new());
             }
@@ -319,7 +333,7 @@ impl ReactionDispatcher {
             if remaining <= chrono::Duration::zero() {
                 record.status = ReactionDeliveryStatus::Rejected;
                 record.last_error = Some("AwaitedExecutionDeadlineElapsed".to_string());
-                persist_terminal_delivery(&store, sequence, &record).await?;
+                persist_terminal_delivery(state, &store, sequence, &record).await?;
                 record_delivery_terminal_metrics(&record);
                 return Ok(Vec::new());
             }
@@ -412,6 +426,7 @@ impl ReactionDispatcher {
                     collection.attempts = u8::try_from(record.attempts).unwrap_or(u8::MAX);
                     collection
                 }),
+                source_stream_descriptor: intent.source_stream_descriptor.clone(),
             }),
         );
         let results = if let Some(owner) = awaited_owner.as_ref() {
@@ -434,155 +449,17 @@ impl ReactionDispatcher {
             dispatch.await
         };
 
-        record.lease_expires_at = None;
-        record.next_attempt_at = None;
-        let awaited_callback_accepted = record.awaited_execution.as_ref().is_some_and(|evidence| {
-            evidence.phase == crate::trigger::delivery::AwaitedExecutionPhase::CallbackAccepted
-        });
-        let awaited_callback_pending = record.awaited_execution.as_ref().is_some_and(|evidence| {
-            evidence.callback_action.is_some() && !awaited_callback_accepted
-        });
-        let awaited_callback_failure = record
-            .awaited_execution
-            .as_ref()
-            .and_then(|evidence| evidence.callback_failure);
-        let awaited_failure = record
-            .awaited_execution
-            .as_ref()
-            .and_then(|evidence| evidence.execution_failure);
-        if awaited_collection_member && awaited_callback_pending {
-            let error = results
-                .iter()
-                .find_map(|result| result.error.clone())
-                .unwrap_or_else(|| {
-                    "AwaitedExecutionIncomplete: exact callback acceptance evidence is absent"
-                        .to_string()
-                });
-            let transient = matches!(
-                awaited_callback_failure,
-                Some(
-                    crate::trigger::delivery::AwaitedExecutionFailureClass::CallbackTimeout
-                        | crate::trigger::delivery::AwaitedExecutionFailureClass::CallbackStorageFailure
-                )
-            );
-            record.transient_failure = transient;
-            record.last_error = Some(error);
-            record.status = if awaited_callback_failure.is_none() {
-                ReactionDeliveryStatus::Rejected
-            } else if transient && record.attempts < automatic_attempt_budget {
-                record.next_attempt_at = Some(
-                    temper_runtime::scheduler::sim_now() + automatic_retry_backoff(record.attempts),
-                );
-                ReactionDeliveryStatus::Pending
-            } else if transient {
-                ReactionDeliveryStatus::DeadLettered
-            } else {
-                ReactionDeliveryStatus::Rejected
-            };
-        } else if awaited_collection_member && awaited_failure.is_some() {
-            record.status = ReactionDeliveryStatus::Rejected;
-            record.last_error = awaited_failure.map(|failure| format!("{failure:?}"));
-        } else if awaited_collection_member && !awaited_callback_accepted {
-            record.status = ReactionDeliveryStatus::Rejected;
-            record.last_error = Some(
-                "AwaitedExecutionIncomplete: exact callback acceptance evidence is absent"
-                    .to_string(),
-            );
-        } else if results.iter().any(|result| result.success) {
-            record.status = ReactionDeliveryStatus::Succeeded;
-            record.last_error = None;
-        } else if results.is_empty() {
-            record.status = ReactionDeliveryStatus::Skipped;
-            record.last_error = None;
-        } else {
-            let error = results
-                .iter()
-                .find_map(|result| result.error.clone())
-                .unwrap_or_else(|| "reaction target rejected the action".to_string());
-            let migrated_timeout = intent.state_timeout.is_some()
-                && error.contains("migrated scoped schema write fence");
-            let collection_control_skip = collection_control_skip_reason(
-                intent.collection.as_ref().map(|context| context.role),
-                &error,
-            );
-            let transient = is_transient_delivery_error(&error);
-            let dropped_allowed = drop_ok && is_expected_target_drop(&error);
-            record.transient_failure = transient;
-            record.last_error = Some(error);
-            record.status = if migrated_timeout || collection_control_skip.is_some() {
-                ReactionDeliveryStatus::Skipped
-            } else if transient && record.attempts < automatic_attempt_budget {
-                crate::runtime_metrics::record_reaction_delivery_event(
-                    intent.kind.metric_label(),
-                    "automatic_retry_scheduled",
-                );
-                record.next_attempt_at = Some(
-                    temper_runtime::scheduler::sim_now() + automatic_retry_backoff(record.attempts),
-                );
-                ReactionDeliveryStatus::Pending
-            } else if transient {
-                ReactionDeliveryStatus::DeadLettered
-            } else if dropped_allowed {
-                ReactionDeliveryStatus::DroppedAllowed
-            } else {
-                ReactionDeliveryStatus::Rejected
-            };
-            if let Some(reason) = collection_control_skip {
-                record.last_error = Some(reason.to_string());
-            }
-        }
-        if record.status.is_terminal() {
-            persist_terminal_delivery(&store, sequence, &record).await?;
-        } else {
-            append_delivery_record(&store, sequence, &record)
-                .await
-                .map_err(|error| error.to_string())?;
-        }
-        record_delivery_terminal_metrics(&record);
-        Ok(results)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::helpers::{
-        collection_control_skip_reason, is_expected_target_drop, is_transient_delivery_error,
-    };
-
-    #[test]
-    fn source_snapshot_races_are_retried() {
-        assert!(is_transient_delivery_error("SequenceConflict"));
-    }
-
-    #[test]
-    fn drop_ok_only_classifies_target_state_mismatch() {
-        assert!(is_expected_target_drop(
-            "Action 'Capture' not valid from state 'Pending'"
-        ));
-        assert!(is_expected_target_drop(
-            "Action 'Capture' blocked from state 'Pending': guard failed"
-        ));
-        assert!(!is_expected_target_drop("authorization denied"));
-        assert!(!is_expected_target_drop("invalid persisted authority"));
-    }
-
-    #[test]
-    fn post_control_descendant_fence_has_stable_skip_reason() {
-        use crate::trigger::collection_workflow::CollectionDeliveryRole;
-
-        assert_eq!(
-            collection_control_skip_reason(
-                Some(CollectionDeliveryRole::MemberDescendant),
-                "stale collection control epoch at target commit",
-            ),
-            Some("CollectionControlBeforeDescendantCommit")
-        );
-        assert_eq!(
-            collection_control_skip_reason(
-                Some(CollectionDeliveryRole::Member),
-                "collection member descendant was fenced by lifecycle change",
-            ),
-            None
-        );
+        settlement::settle_dispatch(
+            state,
+            &store,
+            record,
+            sequence,
+            &intent,
+            awaited_collection_member,
+            automatic_attempt_budget,
+            drop_ok,
+            results,
+        )
+        .await
     }
 }

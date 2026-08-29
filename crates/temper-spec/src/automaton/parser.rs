@@ -6,6 +6,7 @@
 //! The hand-rolled TOML parser lives in [`super::toml_parser`] to keep this
 //! module focused on the public API and validation logic.
 
+use super::ResolvedFailureRoute;
 use super::toml_parser;
 use super::types::*;
 use crate::tlaplus::{Invariant as TlaInvariant, StateMachine, Transition};
@@ -67,6 +68,7 @@ pub fn parse_automaton_with_liveness(
     toml_str: &str,
     mode: LivenessEnforcement,
 ) -> Result<Automaton, AutomatonParseError> {
+    reject_injected_resolved_failure_routes(toml_str)?;
     let mut automaton: Automaton = toml_parser::parse_toml_to_automaton(toml_str)?;
     validate(&automaton)?;
     // ADR-0049: wire each state_timeout's `state` into the target action's
@@ -81,6 +83,29 @@ pub fn parse_automaton_with_liveness(
     // ADR-0050: enforce (or warn on) liveness coverage.
     check_liveness_coverage(&automaton, mode)?;
     Ok(automaton)
+}
+
+fn reject_injected_resolved_failure_routes(source: &str) -> Result<(), AutomatonParseError> {
+    let Ok(document) = toml::from_str::<toml::Value>(source) else {
+        return Ok(());
+    };
+    let has_injected_routes = document
+        .get("integration")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|integrations| {
+            integrations.iter().any(|integration| {
+                integration
+                    .as_table()
+                    .is_some_and(|table| table.contains_key("failure_routes"))
+            })
+        });
+    if has_injected_routes {
+        return Err(AutomatonParseError::Validation(
+            "top-level integration.failure_routes is reserved resolved metadata; declare routes under action.triggers"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// ADR-0046/0078: translate external `[[action.triggers]]` declarations into
@@ -111,6 +136,7 @@ fn is_platform_custom_effect_name(effect_name: &str) -> bool {
 fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), AutomatonParseError> {
     use super::types::{Effect, Integration, TriggerKind};
 
+    let resolved_failure_routes = super::failure_routes::resolve_failure_routes(automaton)?;
     let legacy_trigger_names: std::collections::BTreeSet<String> = automaton
         .integrations
         .iter()
@@ -214,6 +240,11 @@ fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), Auto
                         module: Some(module.clone()),
                         on_success: trigger.on_success.clone(),
                         on_failure: trigger.on_failure.clone(),
+                        failure_routes: routes_for_trigger(
+                            &resolved_failure_routes,
+                            &action.name,
+                            &trigger.name,
+                        ),
                         llm: trigger.llm,
                         config: trigger.config.clone(),
                     });
@@ -233,6 +264,11 @@ fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), Auto
                         module: None,
                         on_success: trigger.on_success.clone(),
                         on_failure: trigger.on_failure.clone(),
+                        failure_routes: routes_for_trigger(
+                            &resolved_failure_routes,
+                            &action.name,
+                            &trigger.name,
+                        ),
                         llm: trigger.llm,
                         config,
                     });
@@ -269,6 +305,11 @@ fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), Auto
                         module: None,
                         on_success: trigger.on_success.clone(),
                         on_failure: trigger.on_failure.clone(),
+                        failure_routes: routes_for_trigger(
+                            &resolved_failure_routes,
+                            &action.name,
+                            &trigger.name,
+                        ),
                         llm: false,
                         config,
                     });
@@ -278,6 +319,18 @@ fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), Auto
     }
     automaton.integrations.extend(synthesized);
     Ok(())
+}
+
+fn routes_for_trigger(
+    routes: &[ResolvedFailureRoute],
+    source_action: &str,
+    trigger_name: &str,
+) -> Vec<ResolvedFailureRoute> {
+    routes
+        .iter()
+        .filter(|route| route.source_action == source_action && route.trigger_name == trigger_name)
+        .cloned()
+        .collect()
 }
 
 /// Callback invoked for each liveness violation encountered at spec parse
@@ -849,6 +902,7 @@ fn validate_action_triggers(
                     trigger.name, action.name
                 )));
             }
+            super::failure_routes::validate_trigger(automaton, action, trigger)?;
 
             // Guard depth bound.
             if let Some(ref guard) = trigger.guard {

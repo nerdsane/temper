@@ -2,13 +2,15 @@ use std::collections::BTreeMap;
 
 use temper_runtime::persistence::schema_deployment::{
     ActivateSchemaBundle, ActivateSchemaBundleOutcome, ClaimSchemaVerification,
-    ClaimSchemaVerificationOutcome, CommitSchemaMigrationBatch, CreateSchemaMigration,
-    ReserveSchemaMigrationRetry, RetireSchemaBundle, RetireSchemaBundleOutcome,
-    SchemaActivePointer, SchemaBundleRecord, SchemaDeploymentRecord, SchemaDeploymentStatus,
-    SchemaDeploymentStore, SchemaDeploymentStoreError, SchemaExecutionPin,
-    SchemaMigrationBatchReceipt, SchemaMigrationBudgets, SchemaMigrationShadowRow,
-    SchemaMigrationStatus, SchemaMigrationValidationReceipt, SchemaOperationIdentity, SchemaScope,
-    SchemaScopeKind, SchemaVerificationReceipt, SubmitSchemaBundle, SubmitSchemaBundleOutcome,
+    ClaimSchemaVerificationOutcome, CommitSchemaMigrationBatch, CompleteSchemaBootstrap,
+    CreateSchemaMigration, RecordSchemaBootstrapCreated, ReserveSchemaBootstrap,
+    ReserveSchemaBootstrapOutcome, ReserveSchemaMigrationRetry, RetireSchemaBundle,
+    RetireSchemaBundleOutcome, SchemaActivePointer, SchemaBootstrapReceipt, SchemaBootstrapStatus,
+    SchemaBundleRecord, SchemaDeploymentRecord, SchemaDeploymentStatus, SchemaDeploymentStore,
+    SchemaDeploymentStoreError, SchemaExecutionPin, SchemaMigrationBatchReceipt,
+    SchemaMigrationBudgets, SchemaMigrationShadowRow, SchemaMigrationStatus,
+    SchemaMigrationValidationReceipt, SchemaOperationIdentity, SchemaScope, SchemaScopeKind,
+    SchemaVerificationReceipt, SubmitSchemaBundle, SubmitSchemaBundleOutcome,
 };
 use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
 use temper_store_turso::TursoEventStore;
@@ -31,6 +33,7 @@ fn command(key: &str, request_digest: &str, digest: &str) -> SubmitSchemaBundle 
             canonical_ioa: BTreeMap::from([("Example.Task".into(), "[automaton]".into())]),
             cedar_policies: BTreeMap::new(),
             wasm_module_digests: BTreeMap::new(),
+            wasm_module_data_bindings: BTreeMap::new(),
             migration_module_name: None,
             migration_module_digest: None,
             migration_abi_version: None,
@@ -82,6 +85,7 @@ fn activation_command(
         expected_predecessor: predecessor.map(str::to_string),
         expected_fence: fence,
         verification_receipt_id: receipt_id.into(),
+        stream_publication_fence: None,
         operation: operation(key),
     }
 }
@@ -108,6 +112,114 @@ fn retired(outcome: RetireSchemaBundleOutcome) -> SchemaDeploymentRecord {
         RetireSchemaBundleOutcome::Retired(record)
         | RetireSchemaBundleOutcome::Replayed(record) => record,
     }
+}
+
+fn bootstrap_command(activation_request_id: &str) -> ReserveSchemaBootstrap {
+    ReserveSchemaBootstrap {
+        tenant: "tenant-contract".into(),
+        caller_authority: format!("sha256:{}", "a".repeat(64)),
+        accepted_authority_json: r#"{"principal":"caller-a"}"#.into(),
+        idempotency_key: "bootstrap-contract".into(),
+        request_digest: format!("sha256:{}", "9".repeat(64)),
+        request_id: "bootstrap-contract-request".into(),
+        activation_request_id: activation_request_id.into(),
+        entity_type: "Example.Task".into(),
+        entity_id: "entity-contract".into(),
+        canonical_initial_fields_json: r#"{"Title":"first"}"#.into(),
+        initial_action: None,
+    }
+}
+
+#[tokio::test]
+async fn turso_bootstrap_coordinator_survives_store_reopen_with_exact_receipt() {
+    let directory = tempfile::tempdir().unwrap();
+    let url = format!("file:{}", directory.path().join("bootstrap.db").display());
+    let digest = format!("sha256:{}", "6".repeat(64));
+    let request_digest = format!("sha256:{}", "7".repeat(64));
+    let store = TursoEventStore::new(&url, None).await.unwrap();
+    store
+        .submit_schema_bundle(command("bootstrap-submit", &request_digest, &digest))
+        .await
+        .unwrap();
+    let verified = verified(&store, &digest, &request_digest, "bootstrap-verification").await;
+    let pointer = activated(
+        store
+            .activate_schema_bundle(activation_command(
+                "bootstrap-activate",
+                &digest,
+                None,
+                verified.fence,
+                "bootstrap-verification",
+            ))
+            .await
+            .unwrap(),
+    );
+    let command = bootstrap_command(&pointer.accepted_request_id);
+    let reserved = match store
+        .reserve_schema_bootstrap(command.clone())
+        .await
+        .unwrap()
+    {
+        ReserveSchemaBootstrapOutcome::Reserved(operation) => operation,
+        ReserveSchemaBootstrapOutcome::Replayed(_) => panic!("first reservation must be new"),
+    };
+    drop(store);
+
+    let reopened = TursoEventStore::new(&url, None).await.unwrap();
+    assert_eq!(
+        reopened.list_incomplete_schema_bootstraps(8).await.unwrap(),
+        vec![reserved.clone()]
+    );
+    let created = reopened
+        .record_schema_bootstrap_created(RecordSchemaBootstrapCreated {
+            tenant: command.tenant.clone(),
+            caller_authority: command.caller_authority.clone(),
+            idempotency_key: command.idempotency_key.clone(),
+            expected_sequence: reserved.committed_sequence,
+            creation_sequence: 1,
+        })
+        .await
+        .unwrap();
+    let receipt = SchemaBootstrapReceipt {
+        request_id: command.request_id.clone(),
+        pin: created.pin.clone(),
+        entity_type: command.entity_type.clone(),
+        entity_id: command.entity_id.clone(),
+        creation_sequence: Some(1),
+        action_sequence: None,
+        canonical_action_result_json: None,
+        failure: None,
+    };
+    let completed = reopened
+        .complete_schema_bootstrap(CompleteSchemaBootstrap {
+            tenant: command.tenant.clone(),
+            caller_authority: command.caller_authority.clone(),
+            idempotency_key: command.idempotency_key.clone(),
+            expected_sequence: created.committed_sequence,
+            receipt: receipt.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(completed.status, SchemaBootstrapStatus::Completed);
+    drop(reopened);
+
+    let replay_store = TursoEventStore::new(&url, None).await.unwrap();
+    let replay = match replay_store
+        .reserve_schema_bootstrap(command)
+        .await
+        .unwrap()
+    {
+        ReserveSchemaBootstrapOutcome::Replayed(operation) => operation,
+        ReserveSchemaBootstrapOutcome::Reserved(_) => panic!("cold retry must replay"),
+    };
+    assert_eq!(replay.receipt.as_ref(), Some(&receipt));
+    assert!(
+        replay_store
+            .list_incomplete_schema_bootstraps(8)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -291,6 +403,7 @@ async fn turso_schema_deployment_core_contract() {
                         correlation_id: temper_runtime::scheduler::sim_uuid(),
                         timestamp: temper_runtime::scheduler::sim_now(),
                         actor_id: "cross-scope-fence-contract".into(),
+                        kernel: None,
                     },
                 }],
             )
@@ -317,6 +430,7 @@ async fn turso_schema_deployment_core_contract() {
                     correlation_id: temper_runtime::scheduler::sim_uuid(),
                     timestamp: temper_runtime::scheduler::sim_now(),
                     actor_id: "pin-contract".into(),
+                    kernel: None,
                 },
             }],
         )
@@ -347,6 +461,7 @@ async fn turso_schema_deployment_core_contract() {
                     correlation_id: temper_runtime::scheduler::sim_uuid(),
                     timestamp: temper_runtime::scheduler::sim_now(),
                     actor_id: "pin-collision-contract".into(),
+                    kernel: None,
                 },
             }],
         )
@@ -548,6 +663,7 @@ async fn turso_schema_migration_contract() {
                 correlation_id: temper_runtime::scheduler::sim_uuid(),
                 timestamp: temper_runtime::scheduler::sim_now(),
                 actor_id: "migration-test".into(),
+                kernel: None,
             },
         },
     };

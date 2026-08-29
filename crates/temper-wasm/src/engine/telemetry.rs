@@ -9,7 +9,7 @@ use crate::metrics;
 use crate::stream::StreamRegistry;
 use crate::types::{WasmInvocationContext, WasmInvocationResult};
 
-use super::{HostState, WasmError};
+use super::{HostState, InvalidGuestResultKind, WasmError, result};
 
 pub(super) fn record_invocation_start(
     context: &WasmInvocationContext,
@@ -50,28 +50,8 @@ pub(super) fn map_invoke_error(
         _ => {
             let err = error.to_string();
             record_failure(context, needs_wasi, duration_ms, err.as_str());
-            WasmError::Invocation(err)
+            WasmError::GuestExecution(err)
         }
-    }
-}
-
-pub(super) fn empty_result(
-    context: &WasmInvocationContext,
-    needs_wasi: bool,
-    duration_ms: u64,
-) -> WasmInvocationResult {
-    record_failure(
-        context,
-        needs_wasi,
-        duration_ms as f64,
-        "module returned empty result",
-    );
-    WasmInvocationResult {
-        callback_action: String::new(),
-        callback_params: serde_json::Value::Null,
-        success: false,
-        error: Some("module returned empty result".to_string()),
-        duration_ms,
     }
 }
 
@@ -80,34 +60,19 @@ pub(super) fn parse_result_json(
     context: &WasmInvocationContext,
     needs_wasi: bool,
     duration_ms: u64,
-) -> Result<serde_json::Value, WasmError> {
-    serde_json::from_str(result_json).map_err(|error| {
-        let message = format!("failed to parse result JSON: {error}");
-        record_failure(context, needs_wasi, duration_ms as f64, &message);
-        WasmError::Invocation(message)
+) -> Result<WasmInvocationResult, WasmError> {
+    result::decode_terminal_result(result_json, duration_ms).map_err(|kind| {
+        record_invalid_result(context, needs_wasi, duration_ms as f64, kind);
+        WasmError::InvalidGuestResult(kind)
     })
 }
 
 pub(super) fn finalize_result(
     store: &Store<HostState>,
-    parsed: serde_json::Value,
+    result: WasmInvocationResult,
     context: &WasmInvocationContext,
     needs_wasi: bool,
-    duration_ms: u64,
 ) -> WasmInvocationResult {
-    let callback_action = parsed
-        .get("action")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let success = parsed
-        .get("success")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let error = parsed
-        .get("error")
-        .and_then(|v| v.as_str())
-        .map(String::from);
     let stream_count_after = store
         .data()
         .streams
@@ -115,14 +80,18 @@ pub(super) fn finalize_result(
         .map(|registry| registry.stream_count() as u64)
         .unwrap_or_default();
     tracing::Span::current().record("stream_count_after", stream_count_after);
-    tracing::Span::current().record("success", success);
-    tracing::Span::current().record("callback_action", callback_action.as_str());
-    if let Some(ref error_message) = error {
+    tracing::Span::current().record("success", result.success);
+    tracing::Span::current().record("callback_action", result.callback_action.as_str());
+    if let Some(ref error_message) = result.error {
         tracing::Span::current().record("error", error_message.as_str());
     }
-    if !success {
-        let error_message = error
-            .as_deref()
+    if !result.success {
+        let typed_code = result
+            .typed_failure
+            .as_ref()
+            .map(|failure| failure.code.as_str());
+        let error_message = typed_code
+            .or(result.error.as_deref())
             .unwrap_or("module returned unsuccessful result");
         let error_type = wasm_error_type(error_message);
         tracing::Span::current().record("error.type", error_type);
@@ -134,20 +103,19 @@ pub(super) fn finalize_result(
         &context.entity_type,
         &context.trigger_action,
         needs_wasi,
-        success,
-        duration_ms as f64,
+        result.success,
+        result.duration_ms as f64,
     );
+    result
+}
 
-    WasmInvocationResult {
-        callback_action,
-        callback_params: parsed
-            .get("params")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
-        success,
-        error,
-        duration_ms,
-    }
+fn record_invalid_result(
+    context: &WasmInvocationContext,
+    needs_wasi: bool,
+    duration_ms: f64,
+    kind: InvalidGuestResultKind,
+) {
+    record_failure(context, needs_wasi, duration_ms, kind.source_code());
 }
 
 fn record_failure(

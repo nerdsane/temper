@@ -86,6 +86,13 @@ pub enum OsAppReconcileResult {
         bundle_digest: String,
         install: Box<InstallResult>,
     },
+    /// Spec activation is fenced until the governed kernel migration completes.
+    MigrationRequired {
+        app_name: String,
+        semantic_digest: String,
+        capability_digest: String,
+        descriptor_contract_version: u16,
+    },
 }
 
 /// Parsed app.toml manifest.

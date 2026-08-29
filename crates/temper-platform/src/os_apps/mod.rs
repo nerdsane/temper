@@ -25,6 +25,8 @@ mod app_catalog;
 mod closure_bootstrap;
 mod data_binding;
 mod entity_aliases;
+#[cfg(test)]
+mod installed_stream_reconcile_test;
 mod policy_rows;
 mod reconcile;
 mod reconcile_digest;
@@ -1165,9 +1167,23 @@ pub(crate) async fn install_os_app_from_dir_with_plan(
     } else {
         UploadedWasmReplacementContext::default()
     };
-    let resolved_dependency_lock_id = match canonical_bindings {
-        Some(_) => None,
-        None => Some(os_app_closure_for_roots(&[app_name.to_string()])?.id),
+    let local_module_dependency_roots = if canonical_bindings.is_none()
+        && bundle
+            .wasm_module_configs
+            .values()
+            .any(|config| config.data.is_some())
+    {
+        catalog()
+            .read()
+            .unwrap() // ci-ok: infallible lock
+            .paths
+            .values()
+            .filter_map(|path| path.parent().map(Path::to_path_buf))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
     };
 
     if bundle.adrs.is_empty() {
@@ -1461,16 +1477,16 @@ pub(crate) async fn install_os_app_from_dir_with_plan(
                     })?)
                 }
                 (Some(_), Some(_)) => None,
-                (Some(config), None) => data_binding::verify_module_config_data_binding(
-                    wasm_bytes,
-                    module_name,
-                    config,
-                    bundle.csdl.as_deref(),
-                    &bundle.specs,
-                    resolved_dependency_lock_id
-                        .as_deref()
-                        .ok_or_else(|| "OS app closure identity is missing".to_string())?,
-                )?,
+                (Some(config), None) if config.data.is_some() => {
+                    data_binding::verify_local_module_config_data_binding(
+                        wasm_bytes,
+                        module_name,
+                        config,
+                        app_dir,
+                        &local_module_dependency_roots,
+                    )?
+                }
+                (Some(_), None) => None,
                 (None, _) => None,
             };
             let required = module_config.is_some_and(WasmModuleManifest::is_required);

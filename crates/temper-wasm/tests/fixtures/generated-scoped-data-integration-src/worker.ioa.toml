@@ -1,0 +1,29 @@
+[automaton]
+name = "Worker"
+states = ["Idle", "Pending", "Done", "Failed"]
+initial = "Idle"
+
+[[action]]
+name = "Run"
+kind = "input"
+from = ["Idle"]
+to = "Pending"
+
+[[action.triggers]]
+name = "generated_scoped_data"
+kind = "wasm"
+module = "scoped_client"
+on_success = "Completed"
+
+[[action]]
+name = "Completed"
+kind = "input"
+from = ["Pending"]
+to = "Done"
+
+[[action]]
+name = "RunFailed"
+kind = "input"
+from = ["Pending"]
+to = "Failed"
+params = [{ name = "failure", type = "failure_v1" }]

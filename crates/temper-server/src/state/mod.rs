@@ -25,6 +25,8 @@ mod runtime_metrics;
 mod schema_pin;
 pub(crate) use schema_pin::SCHEMA_PIN_MISMATCH_PREFIX;
 pub(crate) mod storage_caps;
+mod stream_descriptors;
+pub mod stream_migration;
 pub mod trajectory;
 pub mod wasm_invocation_log;
 
@@ -52,6 +54,7 @@ pub(crate) use published_artifacts::{
     PUBLISH_ARTIFACT_STALE_AUTHORIZATION, PublishArtifactAuthorization,
 };
 pub(crate) use query_projection_queue::{ProjectionEnqueueOutcome, QueryProjectionWriteQueue};
+pub(crate) use stream_descriptors::StreamDescriptorResolutionError;
 pub use trajectory::{TrajectoryEntry, TrajectorySource};
 pub use wasm_invocation_log::WasmInvocationEntry;
 
@@ -807,6 +810,36 @@ impl ServerState {
                         tracing::error!(job_id, error = %error.message(), "schema migration supervisor cycle failed");
                     }
                 }
+                let Some(store) = state
+                    .storage_stack
+                    .as_ref()
+                    .and_then(|stack| stack.schema_deployments.as_ref())
+                else {
+                    return;
+                };
+                match store.list_incomplete_schema_bootstraps(128).await {
+                    Ok(operations) => {
+                        for operation in operations {
+                            let entity_id = operation.command.entity_id.clone();
+                            if let Err(error) =
+                                crate::schema_deployment::GovernedSchemaDeploymentService::new(
+                                    &state,
+                                )
+                                .drive_bootstrap(operation)
+                                .await
+                            {
+                                tracing::error!(
+                                    entity_id,
+                                    error = %error.message(),
+                                    "schema bootstrap recovery cycle failed"
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "schema bootstrap recovery scan failed");
+                    }
+                }
             }
         });
     }
@@ -929,7 +962,7 @@ impl ServerState {
         let (observe_refresh_tx, _) = tokio::sync::broadcast::channel(64); // determinism-ok: broadcast for external observation
         let state = Self {
             collection_workflow_mode:
-                crate::trigger::collection_workflow::CollectionWorkflowMode::Enabled,
+                crate::trigger::collection_workflow::CollectionWorkflowMode::default(),
             capture_health: crate::trajectory_outbox::CaptureHealth::default(),
             actor_system: Arc::new(system),
             pg_actor_system: None,
@@ -1192,7 +1225,7 @@ impl ServerState {
         let (observe_refresh_tx, _) = tokio::sync::broadcast::channel(64); // determinism-ok: broadcast for external observation
         let state = Self {
             collection_workflow_mode:
-                crate::trigger::collection_workflow::CollectionWorkflowMode::Enabled,
+                crate::trigger::collection_workflow::CollectionWorkflowMode::default(),
             capture_health: crate::trajectory_outbox::CaptureHealth::default(),
             actor_system: Arc::new(system),
             pg_actor_system: None,

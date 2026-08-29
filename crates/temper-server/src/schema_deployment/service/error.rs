@@ -48,6 +48,9 @@ impl ServiceError {
             SchemaDeploymentStoreError::IdempotencyConflict => {
                 Self::new("idempotency_conflict", error.to_string(), false)
             }
+            SchemaDeploymentStoreError::BootstrapTargetConflict => {
+                Self::new("bootstrap_target_conflict", error.to_string(), false)
+            }
             SchemaDeploymentStoreError::NotFound => {
                 Self::new("invalid_bundle", error.to_string(), false)
             }

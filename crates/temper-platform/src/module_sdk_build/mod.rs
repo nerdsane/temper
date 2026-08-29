@@ -10,7 +10,7 @@ mod resolver;
 mod schema_conflicts;
 mod types;
 
-pub(crate) use resolver::resolve_materialized_module;
+pub(crate) use resolver::{resolve_local_module, resolve_materialized_module};
 
 const WASM_ARTIFACT_BYTES_BUDGET_V1: u64 = 256 * 1024 * 1024;
 

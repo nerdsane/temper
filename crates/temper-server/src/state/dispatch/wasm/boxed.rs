@@ -3,6 +3,7 @@ use futures_util::future::BoxFuture;
 
 use std::sync::Arc;
 
+use super::failure_routing::WasmFailure;
 use super::{
     HttpCallAuthzDenialTracker, WasmDispatchCtx, WasmDispatchMode, WasmDispatchRequest,
     WasmEntityRef,
@@ -65,21 +66,13 @@ pub(in crate::state::dispatch::wasm) fn invoke_and_handle_result_boxed<'a>(
 pub(in crate::state::dispatch::wasm) fn handle_wasm_failure_boxed<'a>(
     state: &'a crate::state::ServerState,
     ctx: &'a WasmDispatchCtx<'a>,
-    integration_name: &'a str,
+    integration: &'a temper_spec::automaton::Integration,
     module_name: &'a str,
-    on_failure: &'a Option<String>,
-    error: String,
+    failure: WasmFailure,
     duration_ms: u64,
 ) -> BoxFuture<'a, Result<Option<EntityResponse>, String>> {
     state
-        .handle_wasm_failure(
-            ctx,
-            integration_name,
-            module_name,
-            on_failure,
-            error,
-            duration_ms,
-        )
+        .handle_wasm_failure(ctx, integration, module_name, failure, duration_ms)
         .boxed()
 }
 
@@ -91,9 +84,11 @@ pub(in crate::state::dispatch) fn dispatch_wasm_callback_boxed<'a>(
     callback_action: &'a str,
     callback_params: serde_json::Value,
     agent_context: &'a AgentContext,
+    awaited_agent_context: Option<&'a AgentContext>,
     mode: WasmDispatchMode,
     integration_name: &'a str,
     module_name: &'a str,
+    preserve_idempotency: bool,
 ) -> BoxFuture<'a, Result<Option<EntityResponse>, String>> {
     state
         .dispatch_wasm_callback(
@@ -101,9 +96,11 @@ pub(in crate::state::dispatch) fn dispatch_wasm_callback_boxed<'a>(
             callback_action,
             callback_params,
             agent_context,
+            awaited_agent_context,
             mode,
             integration_name,
             module_name,
+            preserve_idempotency,
         )
         .boxed()
 }
@@ -136,6 +133,7 @@ pub(in crate::state::dispatch) fn dispatch_tenant_action_core_boxed<'a>(
             await_integration,
             reaction_context,
             expected_authorization_precondition,
+            None,
         )
         .boxed()
 }

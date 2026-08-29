@@ -67,6 +67,7 @@ fn merge_reaction_rules(
 pub struct SpecRegistry {
     tenants: BTreeMap<TenantId, TenantConfig>,
     scoped_bundles: BTreeMap<(TenantId, SchemaScope, String), TenantConfig>,
+    scoped_modules: BTreeMap<(TenantId, SchemaScope, String, String), ScopedModuleDescriptor>,
     active_scopes: BTreeMap<(TenantId, SchemaScope), String>,
     global_compatible_scopes: std::collections::BTreeSet<(TenantId, SchemaScope)>,
 }
@@ -87,8 +88,35 @@ impl SpecRegistry {
         csdl_xml: String,
         ioa_sources: &[(&str, &str)],
     ) -> Result<(), RegistryError> {
+        self.stage_scoped_bundle_with_modules(
+            tenant,
+            scope,
+            digest,
+            csdl,
+            csdl_xml,
+            ioa_sources,
+            BTreeMap::new(),
+        )
+    }
+
+    /// Stage one immutable scoped registry bundle and its exact module closure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the immutable staging boundary keeps every authority input explicit"
+    )]
+    pub fn stage_scoped_bundle_with_modules(
+        &mut self,
+        tenant: TenantId,
+        scope: SchemaScope,
+        digest: String,
+        csdl: CsdlDocument,
+        csdl_xml: String,
+        ioa_sources: &[(&str, &str)],
+        modules: BTreeMap<String, ScopedModuleDescriptor>,
+    ) -> Result<(), RegistryError> {
         let key = (tenant.clone(), scope.clone(), digest.clone());
         if let Some(existing) = self.scoped_bundles.get(&key) {
+            let existing_modules = self.scoped_modules_for_key(&tenant, &scope, &digest);
             let identical = existing.csdl_xml.as_str() == csdl_xml
                 && existing.entities.len() == ioa_sources.len()
                 && ioa_sources.iter().all(|(entity, source)| {
@@ -96,7 +124,8 @@ impl SpecRegistry {
                         .entities
                         .get(*entity)
                         .is_some_and(|spec| spec.ioa_source == *source)
-                });
+                })
+                && existing_modules == modules;
             if identical {
                 return Ok(());
             }
@@ -113,7 +142,28 @@ impl SpecRegistry {
             .remove(&tenant)
             .expect("successful isolated registration must create tenant config");
         self.scoped_bundles.insert(key, config);
+        for (module_name, descriptor) in modules {
+            self.scoped_modules.insert(
+                (tenant.clone(), scope.clone(), digest.clone(), module_name),
+                descriptor,
+            );
+        }
         Ok(())
+    }
+
+    fn scoped_modules_for_key(
+        &self,
+        tenant: &TenantId,
+        scope: &SchemaScope,
+        digest: &str,
+    ) -> BTreeMap<String, ScopedModuleDescriptor> {
+        self.scoped_modules
+            .iter()
+            .filter(|((known_tenant, known_scope, known_digest, _), _)| {
+                known_tenant == tenant && known_scope == scope && known_digest == digest
+            })
+            .map(|((_, _, _, name), descriptor)| (name.clone(), descriptor.clone()))
+            .collect()
     }
 
     /// Atomically select one already-staged immutable bundle for a scope.
@@ -263,6 +313,22 @@ impl SpecRegistry {
     ) -> Option<&EntitySpec> {
         self.get_scoped_config_at_digest(tenant, scope, digest)
             .and_then(|config| config.entities.get(entity_type))
+    }
+
+    /// Exact immutable scoped module descriptor without tenant-global fallback.
+    pub fn get_scoped_module_at_digest(
+        &self,
+        tenant: &TenantId,
+        scope: &SchemaScope,
+        digest: &str,
+        module_name: &str,
+    ) -> Option<&ScopedModuleDescriptor> {
+        self.scoped_modules.get(&(
+            tenant.clone(),
+            scope.clone(),
+            digest.to_string(),
+            module_name.to_string(),
+        ))
     }
 
     /// Snapshot reaction rules from one exact immutable scoped bundle.
@@ -968,6 +1034,54 @@ mod tests {
             registry
                 .get_scoped_table(&tenant, &task_scope(), "Task")
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn scoped_modules_resolve_only_for_the_exact_tenant_scope_and_digest() {
+        let mut registry = SpecRegistry::new();
+        let tenant = TenantId::new("alpha");
+        let scope = task_scope();
+        let digest = "sha256:bundle-one";
+        let descriptor = ScopedModuleDescriptor {
+            artifact_digest: format!("sha256:{}", "a".repeat(64)),
+            data_binding: None,
+        };
+        let (csdl, xml) = task_csdl();
+        registry
+            .stage_scoped_bundle_with_modules(
+                tenant.clone(),
+                scope.clone(),
+                digest.into(),
+                csdl,
+                xml,
+                &[("Task", ORDER_IOA)],
+                BTreeMap::from([("worker".into(), descriptor.clone())]),
+            )
+            .unwrap();
+
+        assert_eq!(
+            registry.get_scoped_module_at_digest(&tenant, &scope, digest, "worker"),
+            Some(&descriptor)
+        );
+        assert!(
+            registry
+                .get_scoped_module_at_digest(&TenantId::new("beta"), &scope, digest, "worker")
+                .is_none()
+        );
+        let other_scope = SchemaScope {
+            kind: SchemaScopeKind::Task,
+            id: "task-43".into(),
+        };
+        assert!(
+            registry
+                .get_scoped_module_at_digest(&tenant, &other_scope, digest, "worker")
+                .is_none()
+        );
+        assert!(
+            registry
+                .get_scoped_module_at_digest(&tenant, &scope, "sha256:other", "worker")
+                .is_none()
         );
     }
 

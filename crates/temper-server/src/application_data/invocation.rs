@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use temper_authz::SecurityContext;
+use temper_runtime::persistence::schema_deployment::SchemaExecutionPin;
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{TemperDataCallFn, TemperFileReadFn, TemperFileWriteFn};
 use temper_wasm_sdk::data::ModuleSdkManifest;
@@ -10,6 +11,25 @@ use temper_wasm_sdk::data::ModuleSdkManifest;
 use crate::state::ServerState;
 
 use super::streams::FileStreamRegistry;
+
+/// Host-owned data target selected before guest execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ModuleDataTarget {
+    /// Existing tenant-global application-data behavior.
+    TenantGlobal,
+    /// Exact immutable scoped schema selected by the actor boundary.
+    Scoped(SchemaExecutionPin),
+}
+
+impl ModuleDataTarget {
+    /// Return the exact immutable pin for scoped operations.
+    pub(crate) fn schema_pin(&self) -> Option<&SchemaExecutionPin> {
+        match self {
+            Self::TenantGlobal => None,
+            Self::Scoped(pin) => Some(pin),
+        }
+    }
+}
 
 /// Host-only authority captured at a module invocation boundary.
 #[derive(Clone)]
@@ -22,9 +42,14 @@ pub(crate) struct ModuleInvocationAuthority {
     pub(super) grant_digest: String,
     pub(super) security: SecurityContext,
     pub(super) binding: ModuleSdkManifest,
+    pub(super) target: ModuleDataTarget,
 }
 
 impl ModuleInvocationAuthority {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the host authority boundary keeps each immutable identity input explicit"
+    )]
     pub(crate) fn new(
         tenant: TenantId,
         module_name: String,
@@ -33,6 +58,7 @@ impl ModuleInvocationAuthority {
         triggering_entity_type: String,
         security: SecurityContext,
         binding: ModuleSdkManifest,
+        target: ModuleDataTarget,
     ) -> Self {
         let grant_digest = binding.grant_digest.clone();
         Self {
@@ -44,6 +70,7 @@ impl ModuleInvocationAuthority {
             grant_digest,
             security,
             binding,
+            target,
         }
     }
 }

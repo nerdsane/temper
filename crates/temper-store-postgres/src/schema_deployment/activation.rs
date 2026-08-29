@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use super::*;
 
 pub(super) async fn activate(
@@ -104,6 +106,48 @@ pub(super) async fn activate(
     if !receipt.is_some_and(|receipt| receipt.passed) {
         return Err(SchemaDeploymentStoreError::VerificationFailed);
     }
+    if let Some(publication_fence) = command.stream_publication_fence.as_ref() {
+        let StreamPublicationFence::TaskScoped {
+            source_bundle_digest,
+            expected_write_version,
+            ..
+        } = publication_fence
+        else {
+            return Err(SchemaDeploymentStoreError::InvalidInput(
+                "installed-application fence cannot activate a task bundle".into(),
+            ));
+        };
+        if expected_predecessor != Some(source_bundle_digest.as_str()) {
+            return Err(SchemaDeploymentStoreError::PredecessorMismatch);
+        }
+        crate::store::lock_scoped_publication_generation(
+            &mut tx,
+            tenant,
+            scope,
+            source_bundle_digest,
+            false,
+        )
+        .await
+        .map_err(backend)?;
+        let suffix = scoped_journal_pin_suffix(&SchemaExecutionPin {
+            scope: scope.clone(),
+            bundle_digest: source_bundle_digest.clone(),
+        });
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events
+             WHERE tenant = $1 AND right(entity_id, char_length($2)) = $2",
+        )
+        .bind(tenant)
+        .bind(suffix)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(backend)?;
+        let write_version =
+            u64::try_from(count).map_err(|_| backend("invalid stream publication generation"))?;
+        if write_version != *expected_write_version {
+            return Err(SchemaDeploymentStoreError::StaleFence);
+        }
+    }
     record.status = SchemaDeploymentStatus::Active;
     record.fence = record
         .fence
@@ -118,6 +162,22 @@ pub(super) async fn activate(
         scope: scope.clone(),
         bundle_digest: digest.to_string(),
         predecessor_digest: expected_predecessor.map(str::to_string),
+        stream_fenced_source_bundle_digest: command.stream_publication_fence.as_ref().and_then(
+            |fence| match fence {
+                StreamPublicationFence::TaskScoped {
+                    source_bundle_digest,
+                    ..
+                } => Some(source_bundle_digest.clone()),
+                StreamPublicationFence::InstalledApplication { .. } => None,
+            },
+        ),
+        stream_publication_bindings: command.stream_publication_fence.as_ref().map_or_else(
+            BTreeMap::new,
+            |fence| match fence {
+                StreamPublicationFence::TaskScoped { bindings, .. } => bindings.clone(),
+                StreamPublicationFence::InstalledApplication { .. } => BTreeMap::new(),
+            },
+        ),
         fence: record.fence,
         committed_sequence: record.committed_sequence,
         accepted_request_id: command.operation.request_id.clone(),

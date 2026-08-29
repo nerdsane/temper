@@ -48,6 +48,7 @@ async fn dispatch_action(
                 expected_sequence: None,
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             Duration::from_secs(5),
         )
@@ -70,6 +71,7 @@ async fn dispatch_action_with_preconditions(
                 expected_sequence: Some(expected_sequence),
                 reaction_context: None,
                 expected_authorization_precondition: None,
+                kernel_metadata: None,
             },
             Duration::from_secs(5),
         )

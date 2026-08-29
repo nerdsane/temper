@@ -1,9 +1,4 @@
-//! Runtime storage stack boundary.
-//!
-//! `temper_runtime::persistence::EventStore` uses `impl Future` return types,
-//! which is good for concrete backends but not dyn-object-safe. This module
-//! provides the boxed adapter used by the server-facing storage stack so
-//! backend selection is a composition step rather than business-code branching.
+//! Runtime storage stack and boxed event-store boundary for selectable backends.
 
 // Object-safe trait return types unavoidably use Pin<Box<dyn Future<Output =
 // nested-result>>> shapes. The `EventStoreFuture` alias is the explicit
@@ -43,6 +38,8 @@ mod metadata_impls;
 mod observe_read;
 mod policy_store;
 mod published_artifacts;
+#[macro_use]
+mod stream_publication_methods;
 pub use backend_label::{BackendLabel, DataOnlyCreateRecord, DataOnlyCreateStore, PolicyStoreRow};
 pub use policy_store::{BackendNamedStore, PolicyStore, TrajectorySink};
 mod query_plane_impls;
@@ -228,6 +225,8 @@ pub trait DynEventStore: Send + Sync {
         after: Option<(&'a str, &'a str)>,
         limit: usize,
     ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>>;
+
+    dyn_stream_publication_declarations!();
 
     fn list_scoped_entity_ids_page<'a>(
         &'a self,
@@ -551,6 +550,8 @@ where
             limit,
         ))
     }
+
+    dyn_stream_publication_impl!();
 
     fn list_scoped_entity_ids_page<'a>(
         &'a self,
@@ -885,6 +886,8 @@ impl BoxedEventStore {
             )
             .await
     }
+
+    boxed_stream_publication_methods!();
 
     /// Return the bounded durable bundle identities for one scoped entity.
     pub async fn scoped_entity_bundle_digests(

@@ -1,5 +1,8 @@
 use super::*;
-use temper_runtime::persistence::EventMetadata;
+use temper_runtime::persistence::{
+    EventMetadata, KernelEventMetadata, StreamDescriptorInputV1, StreamDescriptorV1,
+    StreamEntityRef, StreamMutability, StreamStorageRefV1,
+};
 
 fn test_envelope(seq: u64, event_type: &str) -> PersistenceEnvelope {
     PersistenceEnvelope {
@@ -12,6 +15,7 @@ fn test_envelope(seq: u64, event_type: &str) -> PersistenceEnvelope {
             correlation_id: uuid::Uuid::nil(),
             timestamp: chrono::DateTime::UNIX_EPOCH,
             actor_id: "test".to_string(),
+            kernel: None,
         },
     }
 }
@@ -31,6 +35,46 @@ async fn append_and_read_roundtrip() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].sequence_nr, 1);
     assert_eq!(events[0].event_type, "Created");
+}
+
+#[tokio::test]
+async fn mixed_version_kernel_metadata_roundtrips_without_reinterpretation() {
+    let store = SimEventStore::no_faults(1_187);
+    let pid = "default:File:file-1";
+    let mut historical = test_envelope(0, "Created");
+    historical.metadata.kernel = None;
+    let mut described = test_envelope(0, "StreamUpdated");
+    described.metadata.kernel = Some(KernelEventMetadata::V1 {
+        stream_descriptor: StreamDescriptorV1::new(StreamDescriptorInputV1 {
+            subject: StreamEntityRef::new("File", "file-1").unwrap(),
+            authorization_parent: None,
+            content_hash: "sha256:abc".into(),
+            storage: StreamStorageRefV1::new("temper-fs/sha256:abc").unwrap(),
+            byte_length: 3,
+            content_type: Some("text/plain".into()),
+            content_event_sequence: 2,
+            descriptor_event_sequence: 2,
+            mutability: StreamMutability::Mutable,
+        })
+        .unwrap(),
+    });
+    store
+        .append(pid, 0, &[historical, described])
+        .await
+        .unwrap();
+    let events = store.read_events(pid, 0).await.unwrap();
+    assert!(events[0].metadata.kernel.is_none());
+    assert_eq!(
+        events[1]
+            .metadata
+            .kernel
+            .as_ref()
+            .unwrap()
+            .stream_descriptor()
+            .storage()
+            .object_id(),
+        "temper-fs/sha256:abc"
+    );
 }
 
 #[tokio::test]

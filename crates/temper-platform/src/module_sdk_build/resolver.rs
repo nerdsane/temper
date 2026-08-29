@@ -31,7 +31,7 @@ pub(super) struct ResolvedCandidate {
     pub lock_source: String,
 }
 
-pub(crate) struct ResolvedMaterializedModule {
+pub(crate) struct ResolvedModuleDataClosure {
     pub(crate) csdl: CsdlDocument,
     pub(crate) ioa_sources: Vec<IoaSourceInput>,
     pub(crate) lock_digest: String,
@@ -116,12 +116,23 @@ pub(super) fn resolve(inputs: &LocalModuleSdkInputs) -> Result<ResolvedCandidate
     })
 }
 
+pub(crate) fn resolve_local_module(
+    inputs: &LocalModuleSdkInputs,
+) -> Result<ResolvedModuleDataClosure, String> {
+    let resolved = resolve(inputs)?;
+    Ok(ResolvedModuleDataClosure {
+        csdl: resolved.csdl,
+        ioa_sources: resolved.ioa_sources,
+        lock_digest: resolved.lock.digest,
+    })
+}
+
 pub(crate) fn resolve_materialized_module(
     view: &Path,
     manifest: &CanonicalBundleManifestV1,
     root_name: &str,
     module: &str,
-) -> Result<ResolvedMaterializedModule, String> {
+) -> Result<ResolvedModuleDataClosure, String> {
     let view = canonical_directory(view, "materialized bundle view")?;
     let candidates = manifest
         .apps
@@ -166,7 +177,7 @@ pub(crate) fn resolve_materialized_module(
         }
     }
     let resolved = compile_module_closure(root_name, module, &order, &loaded)?;
-    Ok(ResolvedMaterializedModule {
+    Ok(ResolvedModuleDataClosure {
         csdl: resolved.csdl,
         ioa_sources: resolved.ioa_sources,
         lock_digest: resolved.lock.digest,

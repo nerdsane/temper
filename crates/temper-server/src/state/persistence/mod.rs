@@ -20,6 +20,7 @@ pub(crate) enum TenantMetadataBackend {
 
 mod logs_and_secrets;
 mod spec_metadata;
+mod wasm_recovery;
 
 const BUNDLED_REPLACE_UPLOAD_SOURCE: &str = "bundled-replace-upload";
 
@@ -361,6 +362,56 @@ impl ServerState {
             })
     }
 
+    /// Ensure an immutable scoped module is cached by its exact artifact digest.
+    ///
+    /// Scoped bundles must not resolve through the tenant-global module alias,
+    /// which may name a newer artifact after activation or restart.
+    pub async fn ensure_scoped_wasm_module_cached(
+        &self,
+        tenant: &temper_runtime::tenant::TenantId,
+        module_name: &str,
+        expected_hash: &str,
+    ) -> Result<(), String> {
+        if self.wasm_engine.is_cached(expected_hash) {
+            return Ok(());
+        }
+        let wasm_bytes = self
+            .load_scoped_wasm_artifact_bytes(tenant, module_name, expected_hash)
+            .await?;
+        self.wasm_engine
+            .compile_and_cache(&wasm_bytes)
+            .map(|_| {
+                tracing::info!(
+                    tenant = %tenant,
+                    module = module_name,
+                    hash = expected_hash,
+                    "compiled immutable scoped WASM artifact"
+                );
+            })
+            .map_err(|error| {
+                format!("failed to compile scoped WASM module {tenant}/{module_name}: {error}")
+            })
+    }
+
+    /// Load and hash-check one immutable scoped artifact without using aliases.
+    pub(crate) async fn load_scoped_wasm_artifact_bytes(
+        &self,
+        tenant: &temper_runtime::tenant::TenantId,
+        module_name: &str,
+        expected_hash: &str,
+    ) -> Result<Vec<u8>, String> {
+        let wasm_bytes = self
+            .resolve_wasm_artifact_bytes(tenant, module_name, expected_hash, Vec::new())
+            .await?;
+        let actual_hash = temper_wasm::WasmEngine::hash_module(&wasm_bytes);
+        if actual_hash != expected_hash {
+            return Err(format!(
+                "scoped WASM artifact hash mismatch for {tenant}/{module_name}: expected={expected_hash} actual={actual_hash}"
+            ));
+        }
+        Ok(wasm_bytes)
+    }
+
     async fn resolve_wasm_artifact_bytes(
         &self,
         tenant: &TenantId,
@@ -417,55 +468,5 @@ impl ServerState {
                     store.backend_name()
                 )
             })
-    }
-
-    /// Load all WASM modules from the persistence backend and register them.
-    ///
-    /// Startup recovery now restores registry entries only; compilation is
-    /// deferred until first invoke via [`ensure_wasm_module_cached`].
-    pub async fn load_wasm_modules(&self) -> Result<usize, String> {
-        let Some(stack) = self.storage_stack.as_ref() else {
-            return Ok(0);
-        };
-
-        let mut recovered = 0usize;
-
-        if let Some(turso_provider) = stack.turso.as_ref() {
-            for turso in turso_provider.all_stores().await {
-                let rows = turso
-                    .load_wasm_modules_all_tenants()
-                    .await
-                    .map_err(|e| format!("failed to load WASM modules from turso: {e}"))?;
-                for row in rows {
-                    let hash = if row.sha256_hash.is_empty() {
-                        temper_wasm::WasmEngine::hash_module(&row.wasm_bytes)
-                    } else {
-                        row.sha256_hash.clone()
-                    };
-                    let tenant_id = temper_runtime::tenant::TenantId::new(&row.tenant);
-                    let mut wasm_reg = self.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
-                    wasm_reg.register(&tenant_id, &row.module_name, &hash);
-                    recovered += 1;
-                }
-            }
-            return Ok(recovered);
-        }
-
-        if let Some(platform) = stack.platform.as_ref() {
-            let rows = platform.load_wasm_modules_all_tenants().await?;
-            for row in rows {
-                let hash = if row.sha256_hash.is_empty() {
-                    temper_wasm::WasmEngine::hash_module(&row.wasm_bytes)
-                } else {
-                    row.sha256_hash
-                };
-                let tenant_id = temper_runtime::tenant::TenantId::new(&row.tenant);
-                let mut wasm_reg = self.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
-                wasm_reg.register(&tenant_id, &row.module_name, &hash);
-                recovered += 1;
-            }
-        }
-
-        Ok(recovered)
     }
 }

@@ -149,6 +149,10 @@ impl GovernedSchemaDeploymentService<'_> {
                 ServiceError::new("invalid_bundle", "schema deployment was not found", false)
             })?;
         self.stage_registry_bundle(&target)?;
+        let stream_target = StreamDescriptorMigrationTargetV1::TaskBundle {
+            scope: request.scope.clone(),
+            bundle_digest: request.bundle_digest.clone(),
+        };
         let operation = operation_identity(
             request.idempotency_key.clone(),
             request.request_id.clone(),
@@ -160,8 +164,25 @@ impl GovernedSchemaDeploymentService<'_> {
                 request.expected_predecessor.as_deref(),
                 request.expected_fence,
                 request.verification_receipt_id.as_str(),
+                request.stream_descriptor_completion_receipt_id.as_deref(),
             ),
         )?;
+        let exact_activation_replay = target.activation_pointer.as_ref().is_some_and(|pointer| {
+            pointer.bundle_digest == request.bundle_digest
+                && pointer.accepted_request_id == request.request_id
+        });
+        let stream_publication_fence = if exact_activation_replay {
+            None
+        } else {
+            self.state
+                .require_stream_descriptor_completion_v1(
+                    &TenantId::new(tenant),
+                    &stream_target,
+                    request.stream_descriptor_completion_receipt_id.as_deref(),
+                )
+                .await
+                .map_err(super::stream_descriptor::stream_error)?
+        };
         let outcome = self
             .store()?
             .activate_schema_bundle(ActivateSchemaBundle {
@@ -171,6 +192,7 @@ impl GovernedSchemaDeploymentService<'_> {
                 expected_predecessor: request.expected_predecessor.clone(),
                 expected_fence: request.expected_fence,
                 verification_receipt_id: request.verification_receipt_id.clone(),
+                stream_publication_fence,
                 operation,
             })
             .await
@@ -217,7 +239,7 @@ impl GovernedSchemaDeploymentService<'_> {
             status: "active".into(),
             fence: pointer.fence,
             verification_receipt_id: Some(request.verification_receipt_id),
-            migration_receipt_id: None,
+            migration_receipt_id: request.stream_descriptor_completion_receipt_id,
             committed_sequence: pointer.committed_sequence,
         })
     }

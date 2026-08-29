@@ -262,7 +262,12 @@ async fn wasm_guest_can_drive_structured_observability_span_lifecycle() {
         .await;
 
     assert!(
-        result.is_ok(),
+        matches!(
+            result,
+            Err(WasmError::InvalidGuestResult(
+                InvalidGuestResultKind::AbsentResult
+            ))
+        ),
         "guest span host functions should link and complete: {result:?}"
     );
 }
@@ -357,7 +362,13 @@ async fn host_call_respects_invocation_duration_budget() {
     let elapsed = start.elapsed();
 
     assert!(
-        result.is_ok() || matches!(result, Err(WasmError::Timeout(_))),
+        matches!(
+            result,
+            Err(WasmError::Timeout(_))
+                | Err(WasmError::InvalidGuestResult(
+                    InvalidGuestResultKind::AbsentResult
+                ))
+        ),
         "host-call budget expiry should return through the WASM invocation path, got: {result:?}"
     );
     assert!(
@@ -463,12 +474,16 @@ async fn memory_growth_denied_by_limiter() {
         .await;
 
     // The module traps (`unreachable`) if `memory.grow` returned anything other
-    // than -1, so a successful invocation proves the limiter actually denied the
-    // 1000-page growth (grow returned -1 per spec, not a crash). If the limiter
-    // had NOT fired, the grow would succeed and the module would trap — surfacing
-    // as an error, failing this assertion. Not vacuous.
+    // than -1, so reaching terminal-result validation proves the limiter denied
+    // the 1000-page growth. If the limiter had not fired, `unreachable` would
+    // surface as `GuestExecution` instead. Not vacuous.
     assert!(
-        result.is_ok(),
+        matches!(
+            result,
+            Err(WasmError::InvalidGuestResult(
+                InvalidGuestResultKind::AbsentResult
+            ))
+        ),
         "memory.grow must return -1 (limiter denied growth), got: {result:?}"
     );
 }
@@ -575,7 +590,15 @@ async fn wasi_preview1_module_invokes_end_to_end() {
         )
         .await;
 
-    assert!(result.is_ok(), "WASIp1 invocation failed: {result:?}");
+    assert!(
+        matches!(
+            result,
+            Err(WasmError::InvalidGuestResult(
+                InvalidGuestResultKind::AbsentResult
+            ))
+        ),
+        "WASIp1 invocation failed before terminal-result validation: {result:?}"
+    );
 }
 
 // ARN-169: the wasmtime 36 feature surface is pinned to match the 29 sandbox —
@@ -653,10 +676,15 @@ async fn table_growth_denied_past_cap() {
         )
         .await;
 
-    // The module traps if table.grow returned anything but -1, so a successful
-    // invocation proves the limiter denied the 2,000,000-element growth.
+    // The module traps if table.grow returned anything but -1, so reaching
+    // terminal-result validation proves the limiter denied the growth.
     assert!(
-        result.is_ok(),
+        matches!(
+            result,
+            Err(WasmError::InvalidGuestResult(
+                InvalidGuestResultKind::AbsentResult
+            ))
+        ),
         "table.grow past the cap must return -1 (limiter denied), got: {result:?}"
     );
 }

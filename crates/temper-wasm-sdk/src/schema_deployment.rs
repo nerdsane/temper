@@ -2,6 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
+mod stream_descriptor;
+pub use stream_descriptor::*;
+mod bootstrap;
+pub use bootstrap::*;
+mod wasm_artifact;
+pub use wasm_artifact::*;
+
 /// Closed ABI identifier for schema-deployment host calls.
 pub const SCHEMA_DEPLOYMENT_ABI_V1: &str = "temper-schema-deployment/v1";
 
@@ -31,14 +38,6 @@ pub struct SchemaIoaSourceV1 {
 pub struct SchemaPolicyArtifactV1 {
     pub name: String,
     pub source: String,
-}
-
-/// One immutable WASM module binding.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SchemaWasmArtifactV1 {
-    pub name: String,
-    pub artifact_digest: String,
 }
 
 /// Optional closed migration module binding.
@@ -115,6 +114,9 @@ pub struct ActivateSchemaBundleRequestV1 {
     pub expected_predecessor: Option<String>,
     pub expected_fence: u64,
     pub verification_receipt_id: String,
+    /// Required when the target activates a stream descriptor contract.
+    #[serde(default)]
+    pub stream_descriptor_completion_receipt_id: Option<String>,
 }
 
 /// Atomically retire the current active bundle while preserving pinned reads.
@@ -158,6 +160,19 @@ pub struct SchemaMigrationInputV1 {
     pub canonical_state_json: String,
     /// Deterministic batch-local position.
     pub logical_context: SchemaMigrationLogicalContextV1,
+}
+
+impl SchemaMigrationInputV1 {
+    /// Deserialize the canonical source state into a typed snake_case IOA model.
+    ///
+    /// This method does not transform names or accept a runtime envelope in
+    /// place of the canonical migration state object.
+    pub fn source_state<T>(&self) -> Result<T, crate::state::StateDecodeError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        crate::state::decode_source_state(&self.canonical_state_json)
+    }
 }
 
 /// Closed result returned by `temper_schema_migrate_v1`.
@@ -276,6 +291,11 @@ pub enum SchemaDeploymentOperationV1 {
     StartMigration(StartSchemaMigrationRequestV1),
     GetMigration(GetSchemaMigrationRequestV1),
     RetryMigration(RetrySchemaMigrationRequestV1),
+    BootstrapDispatch(BootstrapDispatchRequestV1),
+    StartStreamDescriptorMigration(StartStreamDescriptorMigrationRequestV1),
+    AdvanceStreamDescriptorMigration(AdvanceStreamDescriptorMigrationRequestV1),
+    GetStreamDescriptorMigration(GetStreamDescriptorMigrationRequestV1),
+    ListUnresolvedStreamDescriptors(ListUnresolvedStreamDescriptorsRequestV1),
 }
 
 /// Encoded typed WASM request; tenant and principal are intentionally absent.
@@ -290,9 +310,24 @@ pub struct SchemaDeploymentRequestV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum SchemaDeploymentResponseV1 {
-    Ok { receipt: SchemaDeploymentReceiptV1 },
-    Migration { receipt: SchemaMigrationReceiptV1 },
-    Error { error: SchemaDeploymentErrorV1 },
+    Ok {
+        receipt: SchemaDeploymentReceiptV1,
+    },
+    Migration {
+        receipt: SchemaMigrationReceiptV1,
+    },
+    Bootstrap {
+        receipt: BootstrapDispatchReceiptV1,
+    },
+    StreamDescriptorMigration {
+        receipt: StreamDescriptorMigrationReceiptV1,
+    },
+    UnresolvedStreamDescriptors {
+        page: UnresolvedStreamDescriptorPageV1,
+    },
+    Error {
+        error: SchemaDeploymentErrorV1,
+    },
 }
 
 /// Typed guest client over the invocation-bound schema-deployment host call.
@@ -363,6 +398,14 @@ impl SchemaDeploymentClient {
     ) -> Result<SchemaMigrationReceiptV1, SchemaDeploymentErrorV1> {
         call_migration(SchemaDeploymentOperationV1::RetryMigration(request))
     }
+
+    /// Bootstrap one entity under the exact still-active deployment receipt.
+    pub fn bootstrap_dispatch(
+        &self,
+        request: BootstrapDispatchRequestV1,
+    ) -> Result<BootstrapDispatchReceiptV1, SchemaDeploymentErrorV1> {
+        call_bootstrap(SchemaDeploymentOperationV1::BootstrapDispatch(request))
+    }
 }
 
 fn call(
@@ -381,7 +424,10 @@ fn call(
     let response = call_host(&bytes)?;
     match response {
         SchemaDeploymentResponseV1::Ok { receipt } => Ok(receipt),
-        SchemaDeploymentResponseV1::Migration { .. } => Err(local_error(
+        SchemaDeploymentResponseV1::Migration { .. }
+        | SchemaDeploymentResponseV1::Bootstrap { .. }
+        | SchemaDeploymentResponseV1::StreamDescriptorMigration { .. }
+        | SchemaDeploymentResponseV1::UnresolvedStreamDescriptors { .. } => Err(local_error(
             "backend_unavailable",
             "schema deployment host returned a migration receipt".into(),
         )),
@@ -404,7 +450,10 @@ fn call_migration(
     })?;
     match call_host(&bytes)? {
         SchemaDeploymentResponseV1::Migration { receipt } => Ok(receipt),
-        SchemaDeploymentResponseV1::Ok { .. } => Err(local_error(
+        SchemaDeploymentResponseV1::Ok { .. }
+        | SchemaDeploymentResponseV1::Bootstrap { .. }
+        | SchemaDeploymentResponseV1::StreamDescriptorMigration { .. }
+        | SchemaDeploymentResponseV1::UnresolvedStreamDescriptors { .. } => Err(local_error(
             "backend_unavailable",
             "schema deployment host returned a bundle receipt".into(),
         )),
@@ -412,15 +461,33 @@ fn call_migration(
     }
 }
 
-fn local_error(code: &str, message: String) -> SchemaDeploymentErrorV1 {
-    SchemaDeploymentErrorV1 {
-        code: code.into(),
-        message,
-        retryable: false,
-        decision_id: None,
+fn call_bootstrap(
+    operation: SchemaDeploymentOperationV1,
+) -> Result<BootstrapDispatchReceiptV1, SchemaDeploymentErrorV1> {
+    let request = SchemaDeploymentRequestV1 {
+        abi: SCHEMA_DEPLOYMENT_ABI_V1.into(),
+        operation,
+    };
+    let bytes = serde_json::to_vec(&request).map_err(|error| {
+        local_error(
+            "invalid_bootstrap",
+            format!("failed to encode schema bootstrap request: {error}"),
+        )
+    })?;
+    match call_host(&bytes)? {
+        SchemaDeploymentResponseV1::Bootstrap { receipt } => Ok(receipt),
+        SchemaDeploymentResponseV1::Ok { .. }
+        | SchemaDeploymentResponseV1::Migration { .. }
+        | SchemaDeploymentResponseV1::StreamDescriptorMigration { .. }
+        | SchemaDeploymentResponseV1::UnresolvedStreamDescriptors { .. } => Err(local_error(
+            "backend_unavailable",
+            "schema deployment host returned a non-bootstrap receipt".into(),
+        )),
+        SchemaDeploymentResponseV1::Error { error } => Err(error),
     }
 }
 
+use stream_descriptor::local_error;
 #[cfg(target_arch = "wasm32")]
 fn call_host(bytes: &[u8]) -> Result<SchemaDeploymentResponseV1, SchemaDeploymentErrorV1> {
     let handle =

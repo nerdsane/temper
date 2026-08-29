@@ -245,6 +245,8 @@ macro_rules! impl_schema_migration_cutover_methods {
                 scope: job.command.scope.clone(),
                 bundle_digest: job.command.target_bundle_digest.clone(),
                 predecessor_digest: Some(job.command.source_bundle_digest.clone()),
+                stream_fenced_source_bundle_digest: None,
+                stream_publication_bindings: BTreeMap::new(),
                 fence: target.fence,
                 committed_sequence: target.committed_sequence,
                 accepted_request_id: job.command.request_id.clone(),

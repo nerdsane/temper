@@ -86,6 +86,22 @@ pub struct InstallBundleResult {
     pub updated: Vec<String>,
     /// Entity types already matching the installed bundle.
     pub skipped: Vec<String>,
+    /// Exact stream migration gate that must complete before installation can continue.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub migration_required: Option<InstallBundleMigrationRequired>,
+}
+
+/// Exact governed stream migration target returned by a blocked bundle install.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallBundleMigrationRequired {
+    /// Application whose spec activation is fenced.
+    pub application_id: String,
+    /// Immutable semantic digest of its model closure.
+    pub semantic_digest: String,
+    /// Digest of the verified active stream capability set.
+    pub capability_digest: String,
+    /// Descriptor contract version required by the target.
+    pub descriptor_contract_version: u16,
 }
 
 /// Explicit local dependency lock file.

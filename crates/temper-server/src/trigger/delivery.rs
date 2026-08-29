@@ -1,19 +1,25 @@
 //! Durable reaction delivery identities and lifecycle records (ADR-0158).
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use temper_runtime::persistence::PersistenceError;
 use temper_runtime::persistence::schema_deployment::SchemaEventPin;
-use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
-use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 use super::types::ReactionRule;
-use crate::storage::BoxedEventStore;
 
+mod awaited;
+mod failure;
 mod identity;
 mod payload;
+mod persistence;
 mod state_timeout;
+pub(crate) use failure::{DurableFailureKind, delivery_failure_envelope};
 pub use identity::stable_delivery_id;
 pub use payload::{attach_intents, attach_receipt, extract_intents, extract_receipt};
+pub(crate) use persistence::delivery_record_append;
+pub use persistence::{
+    append_delivery_record, delivery_journal_id, find_delivery_record, initialize_delivery_record,
+    list_delivery_records, list_delivery_records_page, load_delivery_record,
+};
 pub(crate) use state_timeout::state_timeout_declaration_id;
 pub use state_timeout::{
     DeliveryKind, STATE_TIMEOUT_CLOCK_AUDIT_BUDGET, STATE_TIMEOUT_SERVICE,
@@ -110,6 +116,11 @@ pub struct PersistedReactionIntent {
     pub source_to_state: String,
     /// Exact post-transition source fields used for resolution and guards.
     pub source_fields: serde_json::Value,
+    /// Kernel-attested source stream descriptor, when the source commit
+    /// published stream content. Targets must not infer this authority from
+    /// user-controlled action fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_stream_descriptor: Option<temper_runtime::persistence::StreamDescriptorV1>,
     /// Guard decision made from the committed source post-state and the
     /// pre-transition cross-entity snapshot.
     pub guard_passed: bool,
@@ -273,6 +284,9 @@ pub struct ReactionDeliveryRecord {
     /// Typed failure from the most recent awaited execution owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) awaited_owner_failure: Option<AwaitedOwnerFailureEvidenceV1>,
+    /// Canonical typed failure for the latest terminal unsuccessful outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<temper_failure::FailureEnvelopeV1>,
 }
 
 impl ReactionDeliveryRecord {
@@ -291,6 +305,7 @@ impl ReactionDeliveryRecord {
             last_error: None,
             awaited_execution: None,
             awaited_owner_failure: None,
+            failure: None,
         }
     }
 
@@ -336,219 +351,6 @@ impl ReactionDeliveryRecord {
         Ok(())
     }
 
-    /// Bind the current fenced owner to one immutable awaited execution.
-    pub(crate) fn bind_awaited_execution(
-        &mut self,
-        fencing_token: u64,
-        identity: AwaitedExecutionIdentityV1,
-        now: DateTime<Utc>,
-    ) -> Result<(), String> {
-        self.require_fence(fencing_token, ReactionDeliveryStatus::Dispatching)?;
-        if now >= identity.deadline {
-            return Err("awaited execution deadline has elapsed".to_string());
-        }
-        if let Some(evidence) = self.awaited_execution.as_mut() {
-            if evidence.identity != identity {
-                return Err("awaited execution identity mismatch".to_string());
-            }
-            evidence.fencing_token = fencing_token;
-            if evidence.phase == AwaitedExecutionPhase::Executing {
-                evidence.started_at = now;
-            }
-            return Ok(());
-        }
-        self.awaited_execution = Some(AwaitedExecutionEvidenceV1 {
-            identity,
-            phase: AwaitedExecutionPhase::Executing,
-            fencing_token,
-            started_at: now,
-            completed_at: None,
-            callback_action: None,
-            callback_params: None,
-            callback_digest: None,
-            callback_accepted_at: None,
-            callback_sequence: None,
-            execution_failure: None,
-            callback_failure: None,
-        });
-        Ok(())
-    }
-
-    /// Renew the short owner lease without extending the workflow deadline.
-    pub(crate) fn renew_awaited_execution(
-        &mut self,
-        fencing_token: u64,
-        execution_id: &str,
-        now: DateTime<Utc>,
-        lease: Duration,
-    ) -> Result<DateTime<Utc>, String> {
-        self.require_fence(fencing_token, ReactionDeliveryStatus::Dispatching)?;
-        if lease <= Duration::zero() {
-            return Err("delivery lease must be positive".to_string());
-        }
-        if self.lease_expires_at.is_none_or(|expiry| now >= expiry) {
-            return Err("awaited execution lease has expired".to_string());
-        }
-        let evidence = self
-            .awaited_execution
-            .as_ref()
-            .ok_or_else(|| "awaited execution is not bound".to_string())?;
-        if evidence.fencing_token != fencing_token || evidence.identity.execution_id != execution_id
-        {
-            return Err("stale awaited execution owner".to_string());
-        }
-        if evidence.phase == AwaitedExecutionPhase::CallbackAccepted {
-            return Err("awaited execution callback is already accepted".to_string());
-        }
-        if now >= evidence.identity.deadline {
-            return Err("awaited execution deadline has elapsed".to_string());
-        }
-        let expiry = (now + lease).min(evidence.identity.deadline);
-        self.lease_expires_at = Some(expiry);
-        Ok(expiry)
-    }
-
-    /// Retain a typed failure from the exact current execution owner.
-    pub(crate) fn record_awaited_owner_failure(
-        &mut self,
-        fencing_token: u64,
-        class: AwaitedOwnerFailureClass,
-        now: DateTime<Utc>,
-    ) -> Result<(), String> {
-        self.require_fence(fencing_token, ReactionDeliveryStatus::Dispatching)?;
-        self.awaited_owner_failure = Some(AwaitedOwnerFailureEvidenceV1 {
-            class,
-            fencing_token,
-            occurred_at: now,
-        });
-        Ok(())
-    }
-
-    /// Persist exact callback replay evidence after the WASM boundary.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn record_awaited_completion(
-        &mut self,
-        fencing_token: u64,
-        execution_id: &str,
-        succeeded: bool,
-        callback_action: Option<&str>,
-        callback_params: Option<serde_json::Value>,
-        failure_class: Option<AwaitedExecutionFailureClass>,
-        now: DateTime<Utc>,
-    ) -> Result<(), String> {
-        self.require_fence(fencing_token, ReactionDeliveryStatus::Dispatching)?;
-        if self.lease_expires_at.is_none_or(|expiry| now >= expiry) {
-            return Err("awaited execution lease has expired".to_string());
-        }
-        let encoded = callback_params
-            .as_ref()
-            .map(serde_json::to_vec)
-            .transpose()
-            .map_err(|error| format!("awaited callback evidence is invalid: {error}"))?;
-        if encoded
-            .as_ref()
-            .is_some_and(|bytes| bytes.len() > MAX_AWAITED_CALLBACK_EVIDENCE_BYTES)
-        {
-            return Err("CompletionEvidenceBudgetExceeded".to_string());
-        }
-        let evidence = self
-            .awaited_execution
-            .as_mut()
-            .ok_or_else(|| "awaited execution is not bound".to_string())?;
-        if evidence.fencing_token != fencing_token || evidence.identity.execution_id != execution_id
-        {
-            return Err("stale awaited execution owner".to_string());
-        }
-        if evidence.phase != AwaitedExecutionPhase::Executing {
-            return Err("awaited execution is not executing".to_string());
-        }
-        if now > evidence.identity.deadline {
-            return Err("awaited execution deadline has elapsed".to_string());
-        }
-        evidence.phase = if succeeded {
-            AwaitedExecutionPhase::ExecutionSucceeded
-        } else {
-            AwaitedExecutionPhase::ExecutionFailed
-        };
-        evidence.completed_at = Some(now);
-        evidence.callback_action = callback_action.map(str::to_string);
-        evidence.callback_digest = encoded.map(|bytes| {
-            let mut digest = Sha256::new();
-            digest.update(b"temper-awaited-callback-v1\0");
-            digest.update(bytes);
-            format!("sha256:{:x}", digest.finalize())
-        });
-        evidence.callback_params = callback_params;
-        evidence.execution_failure = failure_class;
-        Ok(())
-    }
-
-    /// Mark the exact callback accepted by the target entity.
-    pub(crate) fn accept_awaited_callback(
-        &mut self,
-        fencing_token: u64,
-        execution_id: &str,
-        callback_action: &str,
-        callback_sequence: u64,
-        now: DateTime<Utc>,
-    ) -> Result<(), String> {
-        self.require_fence(fencing_token, ReactionDeliveryStatus::Dispatching)?;
-        if self.lease_expires_at.is_none_or(|expiry| now >= expiry) {
-            return Err("awaited execution lease has expired".to_string());
-        }
-        let evidence = self
-            .awaited_execution
-            .as_mut()
-            .ok_or_else(|| "awaited execution is not bound".to_string())?;
-        if evidence.fencing_token != fencing_token || evidence.identity.execution_id != execution_id
-        {
-            return Err("stale awaited execution owner".to_string());
-        }
-        if !matches!(
-            evidence.phase,
-            AwaitedExecutionPhase::ExecutionSucceeded | AwaitedExecutionPhase::ExecutionFailed
-        ) || evidence.callback_action.as_deref() != Some(callback_action)
-        {
-            return Err("awaited callback does not match completion evidence".to_string());
-        }
-        if now > evidence.identity.deadline {
-            return Err("awaited execution deadline has elapsed".to_string());
-        }
-        evidence.phase = AwaitedExecutionPhase::CallbackAccepted;
-        evidence.callback_failure = None;
-        evidence.callback_accepted_at = Some(now);
-        evidence.callback_sequence = Some(callback_sequence);
-        Ok(())
-    }
-
-    /// Retain a typed failed callback attempt without discarding replay evidence.
-    pub(crate) fn record_awaited_callback_failure(
-        &mut self,
-        fencing_token: u64,
-        class: AwaitedExecutionFailureClass,
-        now: DateTime<Utc>,
-    ) -> Result<(), String> {
-        self.require_fence(fencing_token, ReactionDeliveryStatus::Dispatching)?;
-        if self.lease_expires_at.is_none_or(|expiry| now >= expiry) {
-            return Err("awaited execution lease has expired".to_string());
-        }
-        let evidence = self
-            .awaited_execution
-            .as_mut()
-            .ok_or_else(|| "awaited execution is not bound".to_string())?;
-        if evidence.fencing_token != fencing_token
-            || evidence.callback_action.is_none()
-            || !matches!(
-                evidence.phase,
-                AwaitedExecutionPhase::ExecutionSucceeded | AwaitedExecutionPhase::ExecutionFailed
-            )
-        {
-            return Err("stale or unresolved awaited callback owner".to_string());
-        }
-        evidence.callback_failure = Some(class);
-        Ok(())
-    }
-
     /// Persist a bounded terminal transient failure.
     pub fn dead_letter(
         &mut self,
@@ -561,6 +363,7 @@ impl ReactionDeliveryRecord {
         self.lease_expires_at = None;
         self.transient_failure = transient;
         self.last_error = Some(error.to_string());
+        self.failure = None;
         Ok(())
     }
 
@@ -582,6 +385,7 @@ impl ReactionDeliveryRecord {
         self.status = ReactionDeliveryStatus::Pending;
         self.transient_failure = false;
         self.last_error = None;
+        self.failure = None;
         self.next_attempt_at = None;
         Ok(self.manual_retries)
     }
@@ -599,172 +403,6 @@ impl ReactionDeliveryRecord {
         }
         Ok(())
     }
-}
-
-/// Persistence ID of the private lifecycle journal for an intent.
-pub fn delivery_journal_id(intent: &PersistedReactionIntent) -> String {
-    format!(
-        "{}:{REACTION_DELIVERY_ENTITY_TYPE}:{}",
-        intent.tenant, intent.delivery_id
-    )
-}
-
-/// Append one fenced lifecycle snapshot to the delivery's private journal.
-pub async fn append_delivery_record(
-    store: &BoxedEventStore,
-    expected_sequence: u64,
-    record: &ReactionDeliveryRecord,
-) -> Result<u64, PersistenceError> {
-    let append = delivery_record_append(expected_sequence, record)?;
-    let results = store.append_batch(std::slice::from_ref(&append)).await?;
-    Ok(results[0].sequence_nr)
-}
-
-/// Build a delivery append for atomic composition with its owning workflow.
-pub(crate) fn delivery_record_append(
-    expected_sequence: u64,
-    record: &ReactionDeliveryRecord,
-) -> Result<temper_runtime::persistence::PersistenceAppend, PersistenceError> {
-    let payload = serde_json::to_value(record)
-        .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
-    let persistence_id = delivery_journal_id(&record.intent);
-    let envelope = PersistenceEnvelope {
-        sequence_nr: expected_sequence + 1,
-        event_type: format!("ReactionDelivery::{:?}", record.status),
-        payload,
-        metadata: EventMetadata {
-            event_id: sim_uuid(),
-            causation_id: sim_uuid(),
-            correlation_id: sim_uuid(),
-            timestamp: sim_now(),
-            actor_id: persistence_id.clone(),
-        },
-    };
-    Ok(temper_runtime::persistence::PersistenceAppend {
-        persistence_id,
-        expected_sequence,
-        events: vec![envelope],
-        key_rows: Vec::new(),
-        vector_rows: Vec::new(),
-        reconcile_vectors: false,
-    })
-}
-
-/// Restore the latest lifecycle snapshot, inferring `Pending` from the atomic
-/// source intent when no lifecycle journal exists yet.
-pub async fn load_delivery_record(
-    store: &BoxedEventStore,
-    intent: PersistedReactionIntent,
-) -> Result<(ReactionDeliveryRecord, u64), PersistenceError> {
-    let persistence_id = delivery_journal_id(&intent);
-    let events = store.read_events(&persistence_id, 0).await?;
-    let Some(latest) = events.last() else {
-        return Ok((ReactionDeliveryRecord::pending(intent), 0));
-    };
-    let record: ReactionDeliveryRecord = serde_json::from_value(latest.payload.clone())
-        .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
-    if record.intent.delivery_id != intent.delivery_id || record.intent.tenant != intent.tenant {
-        return Err(PersistenceError::Serialization(
-            "delivery journal identity does not match source intent".to_string(),
-        ));
-    }
-    Ok((record, latest.sequence_nr))
-}
-
-/// Materialize the inferred Pending state so it is immediately queryable.
-pub async fn initialize_delivery_record(
-    store: &BoxedEventStore,
-    intent: PersistedReactionIntent,
-) -> Result<(), PersistenceError> {
-    let (record, sequence) = load_delivery_record(store, intent).await?;
-    if sequence != 0 {
-        return Ok(());
-    }
-    match append_delivery_record(store, 0, &record).await {
-        Ok(_) | Err(PersistenceError::ConcurrencyViolation { .. }) => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-/// List bounded delivery records inferred from committed source intents.
-pub async fn list_delivery_records(
-    store: &BoxedEventStore,
-    tenant: &str,
-    limit: usize,
-) -> Result<Vec<(ReactionDeliveryRecord, u64)>, PersistenceError> {
-    list_delivery_records_page(store, tenant, None, limit).await
-}
-
-/// Read one keyset page of current delivery lifecycle records.
-pub async fn list_delivery_records_page(
-    store: &BoxedEventStore,
-    tenant: &str,
-    after_delivery_id: Option<&str>,
-    limit: usize,
-) -> Result<Vec<(ReactionDeliveryRecord, u64)>, PersistenceError> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    let mut records = Vec::new();
-    let mut after = after_delivery_id.map(|delivery_id| {
-        (
-            REACTION_DELIVERY_ENTITY_TYPE.to_string(),
-            delivery_id.to_string(),
-        )
-    });
-    while records.len() < limit {
-        let page = store
-            .list_journal_ids_page(
-                tenant,
-                Some(REACTION_DELIVERY_ENTITY_TYPE),
-                after
-                    .as_ref()
-                    .map(|(entity_type, entity_id)| (entity_type.as_str(), entity_id.as_str())),
-                limit.saturating_sub(records.len()).max(1),
-            )
-            .await?;
-        if page.is_empty() {
-            break;
-        }
-        after = page.last().cloned();
-        for (entity_type, entity_id) in page {
-            if entity_type != REACTION_DELIVERY_ENTITY_TYPE {
-                continue;
-            }
-            let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
-            let events = store.read_latest_events(&persistence_id, 1).await?;
-            if let Some(latest) = events.last() {
-                let record: ReactionDeliveryRecord = serde_json::from_value(latest.payload.clone())
-                    .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
-                records.push((record, latest.sequence_nr));
-                if records.len() >= limit {
-                    break;
-                }
-            }
-        }
-    }
-    Ok(records)
-}
-
-/// Find one tenant-scoped delivery record by stable identity.
-pub async fn find_delivery_record(
-    store: &BoxedEventStore,
-    tenant: &str,
-    delivery_id: &str,
-) -> Result<Option<(ReactionDeliveryRecord, u64)>, PersistenceError> {
-    let persistence_id = format!("{tenant}:{REACTION_DELIVERY_ENTITY_TYPE}:{delivery_id}");
-    let events = store.read_latest_events(&persistence_id, 1).await?;
-    let Some(latest) = events.last() else {
-        return Ok(None);
-    };
-    let record: ReactionDeliveryRecord = serde_json::from_value(latest.payload.clone())
-        .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
-    if record.intent.tenant != tenant || record.intent.delivery_id != delivery_id {
-        return Err(PersistenceError::Serialization(
-            "delivery journal identity does not match request".to_string(),
-        ));
-    }
-    Ok(Some((record, latest.sequence_nr)))
 }
 
 #[cfg(test)]

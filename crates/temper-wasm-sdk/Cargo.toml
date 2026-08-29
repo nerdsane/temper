@@ -13,6 +13,7 @@ crate-type = ["rlib"]
 test-helpers = []
 
 [dependencies]
+temper-failure = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = { workspace = true }

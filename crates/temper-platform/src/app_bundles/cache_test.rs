@@ -201,6 +201,7 @@ type = "Paw.FS.File"
 "#,
     )
     .unwrap();
+    std::fs::write(root.join("APP.md"), "# Root\n").unwrap();
     std::fs::write(
         root.join("temper.lock.toml"),
         "version = 1\n\n[[local]]\nname = \"dependency\"\npath = \"../dependency\"\n",
@@ -213,6 +214,7 @@ type = "Paw.FS.File"
         "name = \"dependency\"\nversion = \"2.0.0\"\n",
     )
     .unwrap();
+    std::fs::write(dependency.join("APP.md"), "# Dependency\n").unwrap();
     std::fs::write(dependency.join("specs/model.csdl.xml"), DEPENDENCY_CSDL).unwrap();
     std::fs::write(dependency.join("specs/file.ioa.toml"), ioa("File")).unwrap();
 
@@ -290,6 +292,18 @@ async fn locked_install_uses_dependency_metadata_lock_and_restores_without_sourc
         restore_local_bundle_cache_roots(&platform).await.unwrap(),
         1
     );
+}
+
+#[tokio::test]
+async fn local_catalog_install_uses_the_generated_module_sdk_closure() {
+    let (temp, root, _dependency) = bound_dependency_fixture();
+    let apps = root.parent().unwrap().to_path_buf();
+    crate::os_apps::add_os_apps_dir(apps);
+    let platform = bundle_test_platform(temp.path().join("data")).await;
+
+    crate::os_apps::install_os_app(&platform, "local-typed-module", "root")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

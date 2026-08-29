@@ -29,8 +29,10 @@ temper-observe = { workspace = true }
 temper-ots = { workspace = true }
 temper-authz = { workspace = true }
 temper-evolution = { workspace = true }
+temper-failure = { workspace = true }
 temper-wasm = { workspace = true }
 temper-wasm-sdk = { workspace = true }
+temper-codegen = { workspace = true }
 temper-sandbox = { workspace = true }
 temper-verify = { workspace = true, optional = true }
 temper-store-sim = { workspace = true, optional = true }
@@ -76,7 +78,6 @@ tempfile = "3"
 pprof = { version = "0.14", features = ["prost-codec"] }
 
 [dev-dependencies]
-temper-codegen = { workspace = true }
 tokio-test = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

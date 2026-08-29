@@ -38,6 +38,7 @@ async fn admitted_and_retrying_progress_is_derived_from_durable_delivery_after_r
         ActorSystem::new("collection-observe-retry-restarted"),
         SpecRegistry::new(),
     );
+    restarted.collection_workflow_mode = CollectionWorkflowMode::Enabled;
     restarted.set_storage_stack(StorageStack::from_turso(store));
     permit_reader(&restarted, "tenant-a");
     let retrying = handle_get_workflow(

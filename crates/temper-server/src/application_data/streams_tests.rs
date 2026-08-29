@@ -1,12 +1,26 @@
-use super::{FileStream, FileStreamRegistry, version_belongs_to_file};
+use super::{FileStream, FileStreamRegistry};
 use temper_wasm_sdk::data::ModuleDataBudgets;
 
 #[test]
-fn file_version_owner_must_match_authorized_file() {
-    let version = serde_json::json!({"FileId": "file-b"});
-    assert!(version_belongs_to_file(&version, "file-b"));
-    assert!(!version_belongs_to_file(&version, "file-a"));
-    assert!(!version_belongs_to_file(&serde_json::json!({}), "file-b"));
+fn typed_stream_admission_has_no_application_field_aliases() {
+    let source = include_str!("streams.rs");
+    for forbidden in [
+        "version_belongs_to_file",
+        "declared_stream_length",
+        "\"Size\"",
+        "\"size\"",
+        "\"ContentLength\"",
+        "\"content_length\"",
+        "\"SizeBytes\"",
+        "\"size_bytes\"",
+        "\"FileId\"",
+        "\"file_id\"",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "typed admission must not infer authority from '{forbidden}'"
+        );
+    }
 }
 
 #[test]

@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "CSDL + TLA+ specification parser for the Temper framework"
 
 [dependencies]
+temper-failure = { workspace = true }
 quick-xml = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

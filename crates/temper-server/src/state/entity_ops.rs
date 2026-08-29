@@ -20,6 +20,8 @@ use crate::registry::{VerificationDetail, VerificationStatus};
 use crate::runtime_metrics;
 use crate::storage::DataOnlyCreateRecord;
 
+mod bootstrap;
+
 fn actor_idle_timeout_secs() -> i64 {
     static ACTOR_IDLE_TIMEOUT: OnceLock<i64> = OnceLock::new();
     *ACTOR_IDLE_TIMEOUT.get_or_init(|| {
@@ -774,6 +776,7 @@ impl ServerState {
             initial_fields,
             BTreeMap::new(),
             None,
+            None,
         )
     }
 
@@ -793,9 +796,14 @@ impl ServerState {
             initial_fields,
             BTreeMap::new(),
             Some(schema_pin),
+            None,
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the actor spawn boundary keeps durable creation authority explicit"
+    )]
     fn get_or_spawn_tenant_actor_with_fields_and_reference_evidence(
         &self,
         tenant: &TenantId,
@@ -804,6 +812,7 @@ impl ServerState {
         initial_fields: serde_json::Value,
         initial_reference_evidence: BTreeMap<String, bool>,
         schema_pin: Option<SchemaExecutionPin>,
+        creation_idempotency_key: Option<String>,
     ) -> Option<ActorRef<EntityMsg>> {
         if schema_pin.is_none() && validate_global_entity_id(entity_id).is_err() {
             tracing::warn!(
@@ -891,6 +900,10 @@ impl ServerState {
         };
         let actor = match schema_pin {
             Some(pin) => actor.with_schema_pin(pin),
+            None => actor,
+        };
+        let actor = match creation_idempotency_key {
+            Some(key) => actor.with_creation_idempotency_key(key),
             None => actor,
         };
 
@@ -1285,6 +1298,18 @@ impl ServerState {
             .await
     }
 
+    /// Whether one exact scoped entity journal carries the supplied immutable pin.
+    pub(crate) async fn scoped_entity_exists(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: &SchemaExecutionPin,
+    ) -> Result<bool, String> {
+        self.scoped_entity_pin_matches(tenant, entity_type, entity_id, schema_pin)
+            .await
+    }
+
     /// Read a scoped entity for dispatch, initializing it only at the active pin.
     pub(crate) async fn get_or_initialize_scoped_entity_state(
         &self,
@@ -1421,6 +1446,7 @@ impl ServerState {
             entity_id,
             initial_fields,
             None,
+            None,
         )
         .await
     }
@@ -1440,6 +1466,7 @@ impl ServerState {
             entity_id,
             initial_fields,
             Some(schema_pin),
+            None,
         )
         .await
     }
@@ -1451,6 +1478,7 @@ impl ServerState {
         entity_id: &str,
         initial_fields: serde_json::Value,
         schema_pin: Option<SchemaExecutionPin>,
+        creation_idempotency_key: Option<String>,
     ) -> Result<EntityResponse, String> {
         let creating = match schema_pin.as_ref() {
             Some(pin) => {
@@ -1523,6 +1551,7 @@ impl ServerState {
                 initial_fields,
                 initial_reference_evidence,
                 schema_pin,
+                creation_idempotency_key.clone(),
             )
             .ok_or_else(|| {
                 format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
@@ -1537,6 +1566,22 @@ impl ServerState {
         .await
         .result
         .map_err(|e| format!("Actor query failed: {e}"))?;
+        if let Some(key) = creation_idempotency_key.as_deref()
+            && !self
+                .bootstrap_creation_is_owned_by(
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    materialization_pin.as_ref(),
+                    &response.state.processed_idempotency_keys,
+                    key,
+                )
+                .await?
+        {
+            return Err(
+                "BootstrapTargetConflict: existing journal is owned by another creation".into(),
+            );
+        }
 
         // ADR-0178: the bootstrap Created event may carry a durable timeout
         // intent for a timed initial state. Materialize its pending lifecycle
@@ -1758,6 +1803,7 @@ impl ServerState {
                 correlation_id: sim_uuid(),
                 timestamp: created.timestamp,
                 actor_id: persistence_id.clone(),
+                kernel: None,
             },
         };
 

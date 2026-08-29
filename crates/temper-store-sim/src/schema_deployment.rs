@@ -2,6 +2,8 @@
 
 #[macro_use]
 mod core_methods;
+#[macro_use]
+mod bootstrap_methods;
 mod helpers;
 #[macro_use]
 mod pointer_methods;
@@ -9,6 +11,8 @@ mod pointer_methods;
 mod migration_batch_methods;
 #[macro_use]
 mod migration_cutover_methods;
+#[macro_use]
+mod retire_methods;
 
 use helpers::*;
 
@@ -16,21 +20,30 @@ use std::collections::BTreeMap;
 
 use temper_runtime::persistence::schema_deployment::{
     ActivateSchemaBundle, ActivateSchemaBundleOutcome, ClaimSchemaVerification,
-    ClaimSchemaVerificationOutcome, CommitSchemaMigrationBatch, CreateSchemaMigration,
-    CreateSchemaMigrationOutcome, ReserveSchemaMigrationRetry, RetireSchemaBundle,
-    RetireSchemaBundleOutcome, SchemaActivePointer, SchemaDeploymentRecord, SchemaDeploymentStatus,
-    SchemaDeploymentStore, SchemaDeploymentStoreError, SchemaMigrationBatchReceipt,
-    SchemaMigrationJob, SchemaMigrationRetryReservation, SchemaMigrationShadowRow,
-    SchemaMigrationStatus, SchemaMigrationValidationReceipt, SchemaOperationIdentity, SchemaScope,
-    SchemaVerificationReceipt, SchemaVerificationReplay, SubmitSchemaBundle,
-    SubmitSchemaBundleOutcome,
+    ClaimSchemaVerificationOutcome, CommitSchemaMigrationBatch, CompleteSchemaBootstrap,
+    CreateSchemaMigration, CreateSchemaMigrationOutcome, RecordSchemaBootstrapActionFailure,
+    RecordSchemaBootstrapCreated, ReserveSchemaBootstrap, ReserveSchemaBootstrapOutcome,
+    ReserveSchemaMigrationRetry, RetireSchemaBundle, RetireSchemaBundleOutcome,
+    SchemaActivePointer, SchemaBootstrapOperation, SchemaBootstrapStatus, SchemaDeploymentRecord,
+    SchemaDeploymentStatus, SchemaDeploymentStore, SchemaDeploymentStoreError,
+    SchemaMigrationBatchReceipt, SchemaMigrationJob, SchemaMigrationRetryReservation,
+    SchemaMigrationShadowRow, SchemaMigrationStatus, SchemaMigrationValidationReceipt,
+    SchemaOperationIdentity, SchemaScope, SchemaVerificationReceipt, SchemaVerificationReplay,
+    StreamPublicationFence, SubmitSchemaBundle, SubmitSchemaBundleOutcome,
 };
+use temper_runtime::persistence::schema_deployment::{
+    SchemaExecutionPin, scoped_journal_pin_suffix, validate_schema_bootstrap_failure,
+    validate_schema_bootstrap_receipt, validate_schema_bootstrap_reservation,
+};
+use temper_runtime::tenant::parse_persistence_id_parts;
 
 use crate::{SimEventStore, SimEventStoreInner};
 
 /// Deterministic pre-commit failure points for schema lifecycle transactions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SimSchemaFaultPoint {
+    /// Fail while reading the active scope pointer.
+    ActivePointerRead,
     /// Fail before an immutable bundle and its idempotency record commit.
     SubmitBundle,
     /// Fail before a verification lease and fence commit.
@@ -43,6 +56,14 @@ pub enum SimSchemaFaultPoint {
     RetireBundle,
     /// Fail before a migration job and its idempotency record commit.
     CreateMigration,
+    /// Fail before a bootstrap reservation and target claim commit.
+    ReserveBootstrap,
+    /// Fail before creation progress commits.
+    RecordBootstrapCreated,
+    /// Fail before durable initial-action rejection evidence commits.
+    RecordBootstrapActionFailure,
+    /// Fail before a bootstrap receipt commits.
+    CompleteBootstrap,
     /// Fail before a migration retry reservation commits.
     ReserveMigrationRetry,
     /// Fail before a migration lease and fence commit.
@@ -63,12 +84,16 @@ type DeploymentKey = (String, SchemaScope, String);
 type ScopeKey = (String, SchemaScope);
 type OperationIdempotencyKey = (String, String, String);
 type OperationIdempotencyValue = (String, String, Option<String>);
+type BootstrapOperationKey = (String, String, String);
+type BootstrapTargetKey = (String, SchemaExecutionPin, String, String);
 
 #[derive(Debug, Default)]
 pub(super) struct SimSchemaDeploymentState {
     deployments: BTreeMap<DeploymentKey, SchemaDeploymentRecord>,
     idempotency: BTreeMap<OperationIdempotencyKey, OperationIdempotencyValue>,
     active: BTreeMap<ScopeKey, SchemaActivePointer>,
+    bootstraps: BTreeMap<BootstrapOperationKey, SchemaBootstrapOperation>,
+    bootstrap_targets: BTreeMap<BootstrapTargetKey, BootstrapOperationKey>,
     verification_receipts:
         BTreeMap<(String, SchemaScope, String, String), SchemaVerificationReceipt>,
     migrations: BTreeMap<(String, String), SchemaMigrationJob>,
@@ -121,6 +146,20 @@ impl SimSchemaDeploymentState {
                     SchemaMigrationStatus::CutOver | SchemaMigrationStatus::Completed
                 )
         })
+    }
+
+    pub(super) fn scoped_stream_publication_action<'a>(
+        &'a self,
+        tenant: &str,
+        scope: &SchemaScope,
+        digest: &str,
+        entity_type: &str,
+    ) -> Option<&'a str> {
+        self.active
+            .get(&(tenant.to_string(), scope.clone()))
+            .filter(|pointer| pointer.stream_fenced_source_bundle_digest.as_deref() == Some(digest))
+            .and_then(|pointer| pointer.stream_publication_bindings.get(entity_type))
+            .map(String::as_str)
     }
 }
 
@@ -206,6 +245,7 @@ impl SimEventStore {
 
 impl SchemaDeploymentStore for SimEventStore {
     impl_schema_core_methods!();
+    impl_schema_bootstrap_methods!();
     impl_schema_migration_batch_methods!();
     impl_schema_migration_cutover_methods!();
 }

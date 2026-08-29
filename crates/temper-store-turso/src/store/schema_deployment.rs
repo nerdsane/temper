@@ -1,6 +1,7 @@
 //! Turso transactions for ADR-0159 schema deployment lifecycle.
 
 mod activation;
+mod bootstrap;
 mod helpers;
 mod migration;
 #[macro_use]
@@ -9,13 +10,18 @@ mod migration_delegates;
 use libsql::{TransactionBehavior, params};
 use temper_runtime::persistence::schema_deployment::{
     ActivateSchemaBundle, ActivateSchemaBundleOutcome, ClaimSchemaVerification,
-    ClaimSchemaVerificationOutcome, CommitSchemaMigrationBatch, CreateSchemaMigration,
-    CreateSchemaMigrationOutcome, ReserveSchemaMigrationRetry, RetireSchemaBundle,
-    RetireSchemaBundleOutcome, SchemaActivePointer, SchemaDeploymentRecord, SchemaDeploymentStatus,
-    SchemaDeploymentStore, SchemaDeploymentStoreError, SchemaMigrationJob,
-    SchemaMigrationRetryReservation, SchemaMigrationShadowRow, SchemaMigrationValidationReceipt,
-    SchemaOperationIdentity, SchemaScope, SchemaVerificationReceipt, SchemaVerificationReplay,
-    SubmitSchemaBundle, SubmitSchemaBundleOutcome,
+    ClaimSchemaVerificationOutcome, CommitSchemaMigrationBatch, CompleteSchemaBootstrap,
+    CreateSchemaMigration, CreateSchemaMigrationOutcome, RecordSchemaBootstrapActionFailure,
+    RecordSchemaBootstrapCreated, ReserveSchemaBootstrap, ReserveSchemaBootstrapOutcome,
+    ReserveSchemaMigrationRetry, RetireSchemaBundle, RetireSchemaBundleOutcome,
+    SchemaActivePointer, SchemaBootstrapOperation, SchemaBootstrapStatus, SchemaDeploymentRecord,
+    SchemaDeploymentStatus, SchemaDeploymentStore, SchemaDeploymentStoreError, SchemaExecutionPin,
+    SchemaMigrationJob, SchemaMigrationRetryReservation, SchemaMigrationShadowRow,
+    SchemaMigrationValidationReceipt, SchemaOperationIdentity, SchemaScope,
+    SchemaVerificationReceipt, SchemaVerificationReplay, StreamPublicationFence,
+    SubmitSchemaBundle, SubmitSchemaBundleOutcome, scoped_journal_pin_suffix,
+    validate_schema_bootstrap_failure, validate_schema_bootstrap_receipt,
+    validate_schema_bootstrap_reservation,
 };
 
 use super::{TursoEventStore, write_gate::WritePriority};
@@ -24,6 +30,50 @@ use helpers::*;
 const SCOPE_KIND_TASK: &str = "task";
 
 impl SchemaDeploymentStore for TursoEventStore {
+    async fn reserve_schema_bootstrap(
+        &self,
+        command: ReserveSchemaBootstrap,
+    ) -> Result<ReserveSchemaBootstrapOutcome, SchemaDeploymentStoreError> {
+        bootstrap::reserve(self, command).await
+    }
+
+    async fn get_schema_bootstrap(
+        &self,
+        tenant: &str,
+        caller_authority: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<SchemaBootstrapOperation>, SchemaDeploymentStoreError> {
+        bootstrap::get(self, tenant, caller_authority, idempotency_key).await
+    }
+
+    async fn list_incomplete_schema_bootstraps(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<SchemaBootstrapOperation>, SchemaDeploymentStoreError> {
+        bootstrap::list_incomplete(self, limit).await
+    }
+
+    async fn record_schema_bootstrap_created(
+        &self,
+        command: RecordSchemaBootstrapCreated,
+    ) -> Result<SchemaBootstrapOperation, SchemaDeploymentStoreError> {
+        bootstrap::record_created(self, command).await
+    }
+
+    async fn complete_schema_bootstrap(
+        &self,
+        command: CompleteSchemaBootstrap,
+    ) -> Result<SchemaBootstrapOperation, SchemaDeploymentStoreError> {
+        bootstrap::complete(self, command).await
+    }
+
+    async fn record_schema_bootstrap_action_failure(
+        &self,
+        command: RecordSchemaBootstrapActionFailure,
+    ) -> Result<SchemaBootstrapOperation, SchemaDeploymentStoreError> {
+        bootstrap::record_action_failure(self, command).await
+    }
+
     async fn submit_schema_bundle(
         &self,
         command: SubmitSchemaBundle,

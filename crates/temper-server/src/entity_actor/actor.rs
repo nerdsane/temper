@@ -50,6 +50,13 @@ use super::types::{
 /// Reserved state/event field holding immutable scoped schema evidence.
 pub const SCHEMA_PIN_FIELD: &str = "_temper_schema_pin_v1";
 
+/// Reserved event field containing the exact post-action bootstrap outcome.
+pub(crate) const SCHEMA_BOOTSTRAP_ACTION_OUTCOME_FIELD: &str =
+    "_temper_schema_bootstrap_action_outcome_v1";
+
+/// Domain prefix for initial-action identities owned by the bootstrap coordinator.
+pub(crate) const SCHEMA_BOOTSTRAP_ACTION_IDEMPOTENCY_PREFIX: &str = "schema-bootstrap-action:";
+
 pub(crate) fn schema_event_pin(
     execution: &SchemaExecutionPin,
     entity_type: &str,
@@ -173,6 +180,8 @@ pub struct EntityActor {
     pub(super) initial_fields: serde_json::Value,
     /// Pre-resolved durable target evidence for bootstrap creation.
     initial_reference_evidence: BTreeMap<String, bool>,
+    /// Durable identity attached only to the first Created event.
+    creation_idempotency_key: Option<String>,
     /// Optional event journal for persistence. None = in-memory only.
     pub(super) event_journal: Option<BoxedEventStore>,
     /// Optional async snapshot writer. Event appends remain synchronous.
@@ -311,6 +320,7 @@ impl EntityActor {
             table,
             initial_fields,
             initial_reference_evidence: BTreeMap::new(),
+            creation_idempotency_key: None,
             event_journal: None,
             snapshot_queue: None,
             event_backend: None,
@@ -337,6 +347,7 @@ impl EntityActor {
             table,
             initial_fields,
             initial_reference_evidence: BTreeMap::new(),
+            creation_idempotency_key: None,
             event_journal: Some(store),
             snapshot_queue: None,
             event_backend: Some(backend),
@@ -370,6 +381,16 @@ impl EntityActor {
     /// Attach durable target-existence evidence for bootstrap validation.
     pub fn with_initial_reference_evidence(mut self, evidence: BTreeMap<String, bool>) -> Self {
         self.initial_reference_evidence = evidence;
+        self
+    }
+
+    /// Bind the first durable Created event to one coordinator operation.
+    pub fn with_creation_idempotency_key(mut self, key: String) -> Self {
+        assert!(
+            !key.trim().is_empty(),
+            "creation idempotency key must not be empty"
+        );
+        self.creation_idempotency_key = Some(key);
         self
     }
 
@@ -444,6 +465,10 @@ impl EntityActor {
     }
 
     /// Persist an event to the configured event store.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "event persistence binds backend, state, reaction, and kernel commit authority"
+    )]
     pub(super) async fn persist_event(
         &self,
         store: &BoxedEventStore,
@@ -452,6 +477,7 @@ impl EntityActor {
         state: &mut EntityState,
         event: &EntityEvent,
         reaction_context: Option<&crate::trigger::delivery::ReactionCommitContext>,
+        kernel_metadata: Option<&temper_runtime::persistence::KernelEventMetadata>,
     ) -> Result<u64, PersistenceError> {
         let mut payload = serde_json::to_value(event)
             .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
@@ -465,7 +491,65 @@ impl EntityActor {
                         .map_err(|e| PersistenceError::Serialization(e.to_string()))?,
                 );
         }
+        if event
+            .idempotency_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with(SCHEMA_BOOTSTRAP_ACTION_IDEMPOTENCY_PREFIX))
+        {
+            payload
+                .as_object_mut()
+                .expect("serialized entity event must be an object")
+                .insert(
+                    SCHEMA_BOOTSTRAP_ACTION_OUTCOME_FIELD.to_string(),
+                    serde_json::json!({
+                        "fields": state.fields,
+                        "status": state.status,
+                    }),
+                );
+        }
         let source_sequence = state.sequence_nr + 1;
+        if let Some(metadata) = kernel_metadata {
+            let descriptor = metadata.stream_descriptor();
+            if descriptor.subject().entity_type() != self.entity_type
+                || descriptor.subject().entity_id() != self.entity_id
+                || descriptor.content_event_sequence() != source_sequence
+                || descriptor.descriptor_event_sequence() != source_sequence
+            {
+                return Err(PersistenceError::Serialization(
+                    "kernel stream descriptor does not match the normal entity commit".into(),
+                ));
+            }
+            const IMMUTABLE_DESCRIPTOR_REPLAY_BUDGET: usize = 1_024;
+            let prior_events = store
+                .read_latest_events(
+                    persistence_id,
+                    IMMUTABLE_DESCRIPTOR_REPLAY_BUDGET.saturating_add(1),
+                )
+                .await?;
+            if prior_events.last().map_or(0, |event| event.sequence_nr) != state.sequence_nr {
+                return Err(PersistenceError::Serialization(
+                    "kernel stream descriptor history did not reach the actor journal tail".into(),
+                ));
+            }
+            if prior_events.len() > IMMUTABLE_DESCRIPTOR_REPLAY_BUDGET {
+                return Err(PersistenceError::Serialization(
+                    "kernel stream descriptor history exceeds its validation budget".into(),
+                ));
+            }
+            if let Some(prior) = prior_events
+                .iter()
+                .filter_map(|event| event.metadata.kernel.as_ref())
+                .map(|metadata| metadata.stream_descriptor())
+                .next_back()
+                && (prior.mutability() == temper_runtime::persistence::StreamMutability::Immutable
+                    || descriptor.mutability()
+                        == temper_runtime::persistence::StreamMutability::Immutable)
+            {
+                return Err(PersistenceError::Serialization(
+                    "immutable kernel stream descriptor cannot be replaced".into(),
+                ));
+            }
+        }
         let mut intents = Vec::new();
         if let Some(context) = reaction_context {
             intents.reserve(context.rules.len());
@@ -498,6 +582,8 @@ impl EntityActor {
                     source_sequence,
                     source_to_state: event.to_status.clone(),
                     source_fields: state.fields.clone(),
+                    source_stream_descriptor: kernel_metadata
+                        .map(|metadata| metadata.stream_descriptor().clone()),
                     guard_passed: rule.when.guard.as_ref().is_none_or(|guard| {
                         crate::trigger::guard::evaluate_with_resolved(
                             guard,
@@ -571,6 +657,7 @@ impl EntityActor {
                 correlation_id: sim_uuid(),
                 timestamp: event.timestamp,
                 actor_id: persistence_id.to_string(),
+                kernel: kernel_metadata.cloned(),
             },
         };
 
@@ -1039,6 +1126,48 @@ impl EntityActor {
                         continue;
                     }
 
+                    if env.event_type
+                        == crate::state::stream_migration::STREAM_DESCRIPTOR_BACKFILLED_EVENT
+                    {
+                        let event = parsed_event.map_err(|error| {
+                            ActorError::custom(format!(
+                                "invalid stream descriptor backfill event at sequence {}: {error}",
+                                env.sequence_nr
+                            ))
+                        })?;
+                        let Some(metadata) = env.metadata.kernel.as_ref() else {
+                            return Err(ActorError::custom(format!(
+                                "stream descriptor backfill event {} has no kernel metadata",
+                                env.sequence_nr
+                            )));
+                        };
+                        let descriptor = metadata.stream_descriptor();
+                        if descriptor.subject().entity_type() != state.entity_type
+                            || descriptor.subject().entity_id() != state.entity_id
+                            || descriptor.descriptor_event_sequence() != env.sequence_nr
+                            || !descriptor.is_backfill()
+                        {
+                            return Err(ActorError::custom(format!(
+                                "stream descriptor backfill event {} is inconsistent",
+                                env.sequence_nr
+                            )));
+                        }
+                        crate::state::stream_migration::validate_backfill_replay_provenance(
+                            store,
+                            persistence_id,
+                            descriptor,
+                        )
+                        .await
+                        .map_err(|error| {
+                            ActorError::custom(format!(
+                                "stream descriptor backfill event {} has invalid provenance: {error}",
+                                env.sequence_nr
+                            ))
+                        })?;
+                        state.record_committed_event(event, env.sequence_nr);
+                        continue;
+                    }
+
                     match parsed_event {
                         Ok(mut event) => {
                             if replay_policy.strict_event_validation() {
@@ -1437,7 +1566,7 @@ impl Actor for EntityActor {
                 to_status: state.status.clone(),
                 timestamp: sim_now(),
                 params: initial_params,
-                idempotency_key: None,
+                idempotency_key: self.creation_idempotency_key.clone(),
             };
 
             if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend)
@@ -1448,6 +1577,7 @@ impl Actor for EntityActor {
                     &self.persistence_id(),
                     &mut state,
                     &created,
+                    None,
                     None,
                 )
                 .await
@@ -1479,6 +1609,7 @@ impl Actor for EntityActor {
                 idempotency_key,
                 expected_sequence,
                 reaction_context,
+                kernel_metadata,
                 expected_authorization_precondition,
             } => {
                 // Capture start time for span duration (DST-safe: sim_now()
@@ -1711,6 +1842,7 @@ impl Actor for EntityActor {
                                 state,
                                 &event,
                                 reaction_context.as_deref(),
+                                kernel_metadata.as_deref(),
                             )
                             .await;
 
@@ -1882,6 +2014,7 @@ impl Actor for EntityActor {
                                             state,
                                             &retry_event,
                                             reaction_context.as_deref(),
+                                            kernel_metadata.as_deref(),
                                         )
                                         .await
                                     {
@@ -2216,6 +2349,7 @@ impl Actor for EntityActor {
                             &self.persistence_id(),
                             state,
                             &deleted,
+                            None,
                             None,
                         )
                         .await

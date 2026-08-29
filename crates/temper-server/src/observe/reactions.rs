@@ -47,6 +47,7 @@ struct ReactionDeliveryView {
     schema_digest: Option<String>,
     transient_failure: bool,
     last_error: Option<String>,
+    failure: Option<serde_json::Value>,
     principal_id: Option<String>,
     principal_kind: Option<String>,
 }
@@ -58,6 +59,7 @@ struct ReactionAttemptView {
     attempts: u32,
     manual_retries: u32,
     fencing_token: u64,
+    failure: Option<serde_json::Value>,
     recorded_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -89,7 +91,15 @@ impl From<&ReactionDeliveryRecord> for ReactionDeliveryView {
                 .as_ref()
                 .map(|clock| clock.schema_digest.clone()),
             transient_failure: record.transient_failure,
-            last_error: record.last_error.clone(),
+            last_error: record
+                .failure
+                .is_none()
+                .then(|| record.last_error.clone())
+                .flatten(),
+            failure: record
+                .failure
+                .as_ref()
+                .map(crate::failure_observation::redacted_failure_value),
             principal_id: principal
                 .and_then(|value| value.get("id"))
                 .and_then(serde_json::Value::as_str)
@@ -181,6 +191,10 @@ pub(crate) async fn handle_get_reaction(
                     attempts: snapshot.attempts,
                     manual_retries: snapshot.manual_retries,
                     fencing_token: snapshot.fencing_token,
+                    failure: snapshot
+                        .failure
+                        .as_ref()
+                        .map(crate::failure_observation::redacted_failure_value),
                     recorded_at: event.metadata.timestamp,
                 })
         })

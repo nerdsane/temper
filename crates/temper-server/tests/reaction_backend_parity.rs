@@ -167,6 +167,7 @@ async fn prove_durable_reaction_contract(
                         correlation_id: sim_uuid(),
                         timestamp: sim_now(),
                         actor_id: persistence_id.clone(),
+                        kernel: None,
                     },
                 }],
             )
@@ -272,6 +273,7 @@ async fn turso_journal_paging_retains_deleted_sources() {
                     correlation_id: sim_uuid(),
                     timestamp: sim_now(),
                     actor_id: persistence_id.to_string(),
+                    kernel: None,
                 },
             }],
         )

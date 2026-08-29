@@ -10,6 +10,10 @@ mod guest_read_bounds_test;
 mod guest_spans;
 mod host_functions;
 mod migration;
+mod result;
+#[cfg(test)]
+#[path = "result_contract_test.rs"]
+mod result_contract_test;
 mod telemetry;
 #[cfg(test)]
 mod tests;
@@ -28,10 +32,80 @@ use wasmtime_wasi::{WasiCtxBuilder, preview1};
 use crate::host_trait::WasmHost;
 use crate::stream::StreamRegistry;
 use crate::types::{
-    MAX_MODULE_SIZE, WasmInvocationContext, WasmInvocationResult, WasmResourceLimits,
+    MAX_MODULE_SIZE, MAX_WASM_RESULT_BYTES_V1, WasmInvocationContext, WasmInvocationResult,
+    WasmResourceLimits,
 };
 
 pub use migration::{PureMigrationError, PureMigrationLimits};
+
+/// Closed reasons a terminal guest result failed the v1 ABI contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidGuestResultKind {
+    /// The guest produced no result through either transport.
+    #[error("guest produced no terminal result")]
+    AbsentResult,
+    /// The guest called `host_set_result` more than once.
+    #[error("guest wrote multiple terminal results")]
+    MultipleWrites,
+    /// The guest used a host write and a non-zero return value together.
+    #[error("guest selected multiple terminal result transports")]
+    MultipleSources,
+    /// A signed or prefixed result length was invalid.
+    #[error("guest result length is invalid")]
+    InvalidLength,
+    /// The complete serialized result exceeded the v1 byte budget.
+    #[error("guest result exceeds the serialized byte budget")]
+    ResultTooLarge,
+    /// The result pointer range was outside guest linear memory.
+    #[error("guest result range is outside linear memory")]
+    OutOfBounds,
+    /// Result bytes were not valid UTF-8.
+    #[error("guest result is not valid UTF-8")]
+    InvalidUtf8,
+    /// Result bytes were not valid JSON.
+    #[error("guest result is not valid JSON")]
+    InvalidJson,
+    /// Result JSON did not match one exact terminal wire shape.
+    #[error("guest result does not match a terminal wire shape")]
+    InvalidShape,
+}
+
+impl InvalidGuestResultKind {
+    /// Stable kernel provenance code for this validation failure.
+    pub const fn source_code(self) -> &'static str {
+        match self {
+            Self::AbsentResult => "AbsentResult",
+            Self::MultipleWrites => "MultipleResultWrites",
+            Self::MultipleSources => "MultipleResultSources",
+            Self::InvalidLength => "InvalidResultLength",
+            Self::ResultTooLarge => "ResultTooLarge",
+            Self::OutOfBounds => "ResultOutOfBounds",
+            Self::InvalidUtf8 => "InvalidResultUtf8",
+            Self::InvalidJson => "InvalidResultJson",
+            Self::InvalidShape => "InvalidResultShape",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum GuestResultWrite {
+    None,
+    One(String),
+    Invalid(InvalidGuestResultKind),
+}
+
+impl GuestResultWrite {
+    pub(crate) fn record(&mut self, result: Result<String, InvalidGuestResultKind>) {
+        if !matches!(self, Self::None) {
+            *self = Self::Invalid(InvalidGuestResultKind::MultipleWrites);
+            return;
+        }
+        *self = match result {
+            Ok(result) => Self::One(result),
+            Err(kind) => Self::Invalid(kind),
+        };
+    }
+}
 
 pub(crate) use guest_spans::GuestSpanRegistry;
 
@@ -58,6 +132,12 @@ pub enum WasmError {
     /// WASM function invocation failed.
     #[error("invocation failed: {0}")]
     Invocation(String),
+    /// Guest execution began, so external effects may already have occurred.
+    #[error("guest execution failed: {0}")]
+    GuestExecution(String),
+    /// Guest execution completed but its terminal result violated the v1 ABI.
+    #[error("invalid guest terminal result: {0}")]
+    InvalidGuestResult(InvalidGuestResultKind),
     /// Module exceeded its instruction fuel budget.
     #[error("fuel exhausted -- module exceeded instruction budget")]
     FuelExhausted,
@@ -212,8 +292,8 @@ fn epoch_deadline_ticks(max_duration: Duration) -> u64 {
 pub(crate) struct HostState {
     /// Serialized invocation context JSON.
     pub(crate) context_json: String,
-    /// Result JSON set by the guest via host_set_result.
-    pub(crate) result_json: Option<String>,
+    /// Invocation-local cardinality and payload state for `host_set_result`.
+    pub(crate) guest_result_write: GuestResultWrite,
     /// Host capabilities (HTTP, secrets, logging).
     pub(crate) host: Arc<dyn WasmHost>,
     /// Wall-clock deadline shared by async host calls for this invocation.
@@ -495,7 +575,7 @@ impl WasmEngine {
             .map_err(|e| WasmError::Invocation(format!("failed to spawn WASM thread: {e}")))?;
 
         rx.await
-            .map_err(|e| WasmError::Invocation(format!("WASM thread terminated: {e}")))?
+            .map_err(|e| WasmError::GuestExecution(format!("WASM thread terminated: {e}")))?
     }
 
     fn invoke_blocking(
@@ -532,7 +612,7 @@ impl WasmEngine {
             .any(|imp| imp.module() == "wasi_snapshot_preview1");
         telemetry::record_invocation_start(&context, needs_wasi, &streams);
 
-        let (wasi_stderr_pipe, host_state) = {
+        let (_wasi_stderr_pipe, host_state) = {
             let phase = tracing::info_span!(
                 "wasm.invoke.prepare_host_state",
                 otel.name = "wasm.invoke.prepare_host_state",
@@ -562,7 +642,7 @@ impl WasmEngine {
             let export_llm_content = host.exports_llm_content();
             let host_state = HostState {
                 context_json: context_json.clone(),
-                result_json: None,
+                guest_result_write: GuestResultWrite::None,
                 host,
                 host_call_deadline: start.checked_add(limits.max_duration).unwrap_or(start),
                 limiter: MemoryLimiter {
@@ -715,75 +795,98 @@ impl WasmEngine {
                 result_bytes = tracing::field::Empty,
             );
             let _entered = phase.enter();
-            if let Some(ref host_result) = store.data().result_json {
-                phase.record("result_source", "host_set_result");
-                phase.record("result_bytes", host_result.len() as u64);
-                host_result.clone()
-            } else if result_ptr > 0 {
-                phase.record("result_source", "memory_ptr");
-                let mut len_bytes = [0u8; 4];
-                if let Err(e) = memory.read(&store, (result_ptr - 4) as usize, &mut len_bytes) {
+            match &store.data().guest_result_write {
+                GuestResultWrite::Invalid(kind) => {
+                    let kind = *kind;
                     store.data_mut().guest_spans.cleanup_unclosed();
-                    return Err(WasmError::Invocation(format!(
-                        "failed to read result length: {e}"
-                    )));
+                    return Err(WasmError::InvalidGuestResult(kind));
                 }
-                let result_len = u32::from_le_bytes(len_bytes) as usize;
-                phase.record("result_bytes", result_len as u64);
-
-                // ARN-226: bound the result allocation by the guest's memory size
-                // before allocating, so a forged length prefix can't drive a large
-                // host allocation ahead of the bounds check.
-                if !host_functions::guest_read_bounds_ok(
-                    memory.data_size(&store),
-                    result_ptr as usize,
-                    result_len,
-                ) {
+                GuestResultWrite::One(_) if result_ptr > 0 => {
                     store.data_mut().guest_spans.cleanup_unclosed();
-                    return Err(WasmError::Invocation(
-                        "result length exceeds guest linear memory".to_string(),
+                    return Err(WasmError::InvalidGuestResult(
+                        InvalidGuestResultKind::MultipleSources,
                     ));
                 }
-                let mut result_bytes = vec![0u8; result_len];
-                if let Err(e) = memory.read(&store, result_ptr as usize, &mut result_bytes) {
+                GuestResultWrite::One(_) if result_ptr < 0 => {
                     store.data_mut().guest_spans.cleanup_unclosed();
-                    return Err(WasmError::Invocation(format!("failed to read result: {e}")));
+                    return Err(WasmError::InvalidGuestResult(
+                        InvalidGuestResultKind::InvalidLength,
+                    ));
                 }
-
-                match String::from_utf8(result_bytes) {
-                    Ok(result) => result,
-                    Err(e) => {
+                GuestResultWrite::One(host_result) => {
+                    phase.record("result_source", "host_set_result");
+                    phase.record("result_bytes", host_result.len() as u64);
+                    host_result.clone()
+                }
+                GuestResultWrite::None if result_ptr >= 4 => {
+                    phase.record("result_source", "memory_ptr");
+                    let mut len_bytes = [0u8; 4];
+                    if let Err(e) = memory.read(&store, (result_ptr - 4) as usize, &mut len_bytes) {
                         store.data_mut().guest_spans.cleanup_unclosed();
-                        return Err(WasmError::Invocation(format!(
-                            "result is not valid UTF-8: {e}"
-                        )));
+                        tracing::warn!(error = %e, "failed to read guest result length");
+                        return Err(WasmError::InvalidGuestResult(
+                            InvalidGuestResultKind::OutOfBounds,
+                        ));
+                    }
+                    let result_len = u32::from_le_bytes(len_bytes) as usize;
+                    phase.record("result_bytes", result_len as u64);
+
+                    if result_len > MAX_WASM_RESULT_BYTES_V1 {
+                        store.data_mut().guest_spans.cleanup_unclosed();
+                        return Err(WasmError::InvalidGuestResult(
+                            InvalidGuestResultKind::ResultTooLarge,
+                        ));
+                    }
+
+                    // ARN-226: bound the result allocation by the guest's memory size
+                    // before allocating, so a forged length prefix can't drive a large
+                    // host allocation ahead of the bounds check.
+                    if !host_functions::guest_read_bounds_ok(
+                        memory.data_size(&store),
+                        result_ptr as usize,
+                        result_len,
+                    ) {
+                        store.data_mut().guest_spans.cleanup_unclosed();
+                        return Err(WasmError::InvalidGuestResult(
+                            InvalidGuestResultKind::OutOfBounds,
+                        ));
+                    }
+                    let mut result_bytes = vec![0u8; result_len];
+                    if let Err(e) = memory.read(&store, result_ptr as usize, &mut result_bytes) {
+                        store.data_mut().guest_spans.cleanup_unclosed();
+                        tracing::warn!(error = %e, "failed to read guest result bytes");
+                        return Err(WasmError::InvalidGuestResult(
+                            InvalidGuestResultKind::OutOfBounds,
+                        ));
+                    }
+
+                    match String::from_utf8(result_bytes) {
+                        Ok(result) => result,
+                        Err(e) => {
+                            store.data_mut().guest_spans.cleanup_unclosed();
+                            tracing::warn!(error = %e, "guest result is not valid UTF-8");
+                            return Err(WasmError::InvalidGuestResult(
+                                InvalidGuestResultKind::InvalidUtf8,
+                            ));
+                        }
                     }
                 }
-            } else {
-                phase.record("result_source", "empty");
-                phase.record("result_bytes", 0_u64);
-                String::new()
-            }
-        };
-
-        if result_json.is_empty() {
-            if let Some(ref pipe) = wasi_stderr_pipe {
-                let stderr_bytes: Vec<u8> = pipe.contents().into();
-                if !stderr_bytes.is_empty() {
-                    let stderr_str = String::from_utf8_lossy(&stderr_bytes);
-                    tracing::warn!(
-                        module = %context.trigger_action,
-                        entity_type = %context.entity_type,
-                        entity_id = %context.entity_id,
-                        stderr = %stderr_str,
-                        "WASI module returned empty result with stderr output"
-                    );
+                GuestResultWrite::None if result_ptr != 0 => {
+                    store.data_mut().guest_spans.cleanup_unclosed();
+                    return Err(WasmError::InvalidGuestResult(
+                        InvalidGuestResultKind::InvalidLength,
+                    ));
+                }
+                GuestResultWrite::None => {
+                    phase.record("result_source", "empty");
+                    phase.record("result_bytes", 0_u64);
+                    store.data_mut().guest_spans.cleanup_unclosed();
+                    return Err(WasmError::InvalidGuestResult(
+                        InvalidGuestResultKind::AbsentResult,
+                    ));
                 }
             }
-            let result = telemetry::empty_result(&context, needs_wasi, duration_ms);
-            store.data_mut().guest_spans.cleanup_unclosed();
-            return Ok(result);
-        }
+        };
 
         let parsed = {
             let phase = tracing::info_span!(
@@ -802,7 +905,7 @@ impl WasmEngine {
             }
         };
 
-        let result = telemetry::finalize_result(&store, parsed, &context, needs_wasi, duration_ms);
+        let result = telemetry::finalize_result(&store, parsed, &context, needs_wasi);
         store.data_mut().guest_spans.cleanup_unclosed();
         Ok(result)
     }

@@ -362,7 +362,7 @@ mod tests {
             entity_type: "Example.Order".into(),
             entity_id: "order-1".into(),
             source_sequence: 7,
-            canonical_state_json: r#"{"Id":"order-1","State":"Open"}"#.into(),
+            canonical_state_json: r#"{"id":"order-1","status":"Open"}"#.into(),
             logical_context: SchemaMigrationLogicalContextV1 {
                 batch_id: "batch-1".into(),
                 item_index: 0,
@@ -410,7 +410,7 @@ mod tests {
             .compile_and_cache(UNCHANGED_MODULE)
             .expect("compile migration fixture");
         let mut noncanonical = input();
-        noncanonical.canonical_state_json = "{ \"Id\": \"order-1\" }".into();
+        noncanonical.canonical_state_json = "{ \"id\": \"order-1\" }".into();
         assert!(matches!(
             engine.invoke_pure_migration(&hash, &noncanonical, limits()),
             Err(PureMigrationError::Rejected(message)) if message.contains("not canonical")

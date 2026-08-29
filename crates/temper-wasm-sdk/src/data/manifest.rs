@@ -9,8 +9,10 @@ use super::{DATA_ABI_VERSION_V1, ModuleSdkCompatibilityProof};
 
 mod operation;
 mod permissions;
+mod stream;
 
 pub use operation::DataOperationKind;
+pub use stream::*;
 
 /// Per-module application-data capability declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -349,6 +351,9 @@ pub struct ModuleSdkManifest {
     /// Exact canonical schema symbols used by generated source.
     #[serde(default)]
     pub used_symbols: BTreeSet<String>,
+    /// Verified stream semantics required by generated File operations.
+    #[serde(default)]
+    pub stream_capabilities: Vec<StreamCapabilityV1>,
     /// Optional host-verifiable proof for a pinned additive closure change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compatibility_proof: Option<ModuleSdkCompatibilityProof>,
@@ -395,6 +400,7 @@ impl ModuleSdkManifest {
             grant,
             entities,
             used_symbols,
+            stream_capabilities: Vec::new(),
             compatibility_proof: None,
         })
     }
@@ -422,6 +428,7 @@ impl ModuleSdkManifest {
         if digest_json(&self.used_symbols)? != self.used_symbols_digest {
             return Err("module used-symbol digest mismatch".into());
         }
+        stream::validate_stream_capabilities(&self.stream_capabilities)?;
         if self.generator_version != env!("CARGO_PKG_VERSION") {
             return Err("module SDK generator version mismatch".into());
         }

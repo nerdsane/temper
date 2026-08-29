@@ -46,6 +46,30 @@ CREATE TABLE IF NOT EXISTS schema_active_pointers (
     PRIMARY KEY(tenant, scope_kind, scope_id)
 );";
 
+/// Durable bootstrap operation reservations and exact receipts.
+pub const CREATE_SCHEMA_BOOTSTRAP_OPERATIONS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS schema_bootstrap_operations (
+    tenant TEXT NOT NULL,
+    caller_authority TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    operation_json TEXT NOT NULL,
+    PRIMARY KEY(tenant, caller_authority, idempotency_key)
+);";
+
+/// Atomic ownership of one exact scoped bootstrap target.
+pub const CREATE_SCHEMA_BOOTSTRAP_TARGETS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS schema_bootstrap_targets (
+    tenant TEXT NOT NULL,
+    scope_kind TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    bundle_digest TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    owner_caller_authority TEXT NOT NULL,
+    owner_idempotency_key TEXT NOT NULL,
+    PRIMARY KEY(tenant, scope_kind, scope_id, bundle_digest, entity_type, entity_id)
+);";
+
 /// Durable fenced migration jobs.
 pub const CREATE_SCHEMA_MIGRATION_JOBS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS schema_migration_jobs (

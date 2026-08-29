@@ -1,11 +1,14 @@
 //! Governed transport-neutral schema deployment service and HTTP adapter.
 
+#[cfg(all(test, feature = "observe"))]
+mod scoped_module_data_e2e_tests;
 mod service;
 
 use axum::Router;
 use axum::routing::{get, post};
 
 pub(crate) use service::GovernedSchemaDeploymentService;
+pub(crate) use service::bootstrap::BootstrapInvocationIdentity;
 
 /// Versioned HTTP routes backed by the shared governed service.
 pub(crate) fn router() -> Router<crate::state::ServerState> {
@@ -22,5 +25,21 @@ pub(crate) fn router() -> Router<crate::state::ServerState> {
         .route(
             "/migrations/{scope_id}/{job_id}",
             get(service::get_migration_http).post(service::retry_migration_http),
+        )
+        .route(
+            "/stream-descriptor-migrations",
+            post(service::start_stream_descriptor_migration_http),
+        )
+        .route(
+            "/stream-descriptor-migrations/{job_id}",
+            get(service::get_stream_descriptor_migration_http),
+        )
+        .route(
+            "/stream-descriptor-migrations/{job_id}/advance",
+            post(service::advance_stream_descriptor_migration_http),
+        )
+        .route(
+            "/stream-descriptor-migrations/{job_id}/unresolved",
+            post(service::list_unresolved_stream_descriptors_http),
         )
 }

@@ -7,7 +7,9 @@ use serde_json::{Value, json};
 use tracing::{Instrument, Span, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use crate::application_data::{ApplicationDataInvocation, ModuleInvocationAuthority};
+use crate::application_data::{
+    ApplicationDataInvocation, ModuleDataTarget, ModuleInvocationAuthority,
+};
 use crate::entity_actor::{EntityResponse, EntityState};
 use crate::request_context::AgentContext;
 use crate::secrets::template::resolve_secret_templates;
@@ -29,6 +31,7 @@ use super::{
 use replay_inputs::{extract_trajectory_actions_from_ots, has_replay_trajectory_input};
 
 mod boxed;
+pub(super) mod failure_routing;
 mod invocation_artifacts;
 mod local_tdata_host;
 mod replay_inputs;
@@ -38,6 +41,7 @@ pub(super) use boxed::{
     dispatch_wasm_integrations_boxed,
 };
 use boxed::{handle_wasm_failure_boxed, invoke_and_handle_result_boxed};
+use failure_routing::WasmFailure;
 use local_tdata_host::LocalTDataWasmHost;
 
 /// Build a request-bound internal HTTP capability issuer for a non-System caller.
@@ -162,6 +166,53 @@ struct WasmDispatchCtx<'a> {
     agent_ctx: &'a AgentContext,
     dispatch_idempotency_key: Option<&'a str>,
     mode: WasmDispatchMode,
+    schema_target: ModuleDataTarget,
+}
+
+#[derive(Clone)]
+struct ResolvedWasmModule {
+    hash: String,
+    data_binding: Option<temper_wasm_sdk::data::ModuleSdkManifest>,
+    scoped: bool,
+}
+
+fn resolve_tenant_global_module(
+    registry: &crate::wasm_registry::WasmModuleRegistry,
+    tenant: &TenantId,
+    module_name: &str,
+    pinned_digest: Option<&str>,
+) -> Option<ResolvedWasmModule> {
+    let hash = pinned_digest
+        .or_else(|| registry.get_hash(tenant, module_name))?
+        .to_string();
+    Some(ResolvedWasmModule {
+        data_binding: registry.data_manifest(tenant, module_name, &hash).cloned(),
+        hash,
+        scoped: false,
+    })
+}
+
+fn module_data_target(
+    entity_state: &EntityState,
+    agent_ctx: &AgentContext,
+) -> Result<ModuleDataTarget, String> {
+    let actor_pin = entity_state
+        .fields
+        .get(crate::entity_actor::SCHEMA_PIN_FIELD)
+        .map(|value| {
+            serde_json::from_value::<
+                temper_runtime::persistence::schema_deployment::SchemaExecutionPin,
+            >(value.clone())
+            .map_err(|error| format!("scoped actor schema pin is invalid: {error}"))
+        })
+        .transpose()?;
+    match (actor_pin, agent_ctx.schema_pin.as_ref()) {
+        (None, None) => Ok(ModuleDataTarget::TenantGlobal),
+        (Some(actor), Some(context)) if &actor == context => Ok(ModuleDataTarget::Scoped(actor)),
+        (Some(_), None) => Err("scoped WASM dispatch is missing its host schema pin".into()),
+        (None, Some(_)) => Err("tenant-global WASM dispatch received a scoped schema pin".into()),
+        (Some(_), Some(_)) => Err("WASM dispatch schema pin does not match actor state".into()),
+    }
 }
 
 fn agent_ctx_for_composite_wasm_result(
@@ -201,10 +252,6 @@ const WASM_DISPATCH_PHASE_LLMOBS_SUBMIT: &str = "dispatch.wasm.phase.llmobs_subm
 
 fn http_call_authz_denied_error(reason: &str) -> String {
     format!("{HTTP_CALL_AUTHZ_DENIED_PREFIX}: {reason}")
-}
-
-fn is_http_call_authz_denial(error: &str) -> bool {
-    error.contains(HTTP_CALL_AUTHZ_DENIED_PREFIX)
 }
 
 fn llmobs_service_name() -> String {
@@ -468,16 +515,17 @@ impl crate::state::ServerState {
             req.entity_id,
             Some(req.action),
         );
+        let schema_target = module_data_target(req.entity_state, req.agent_ctx)?;
         let integrations = {
             let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
-            let spec = match req.agent_ctx.schema_pin.as_ref() {
-                Some(pin) => registry.get_scoped_spec_at_digest(
+            let spec = match &schema_target {
+                ModuleDataTarget::TenantGlobal => registry.get_spec(req.tenant, req.entity_type),
+                ModuleDataTarget::Scoped(pin) => registry.get_scoped_spec_at_digest(
                     req.tenant,
                     &pin.scope,
                     &pin.bundle_digest,
                     req.entity_type,
                 ),
-                None => registry.get_spec(req.tenant, req.entity_type),
             };
             spec.map(|spec| spec.integrations.clone())
                 .unwrap_or_default()
@@ -493,6 +541,7 @@ impl crate::state::ServerState {
             agent_ctx: req.agent_ctx,
             dispatch_idempotency_key: req.dispatch_idempotency_key,
             mode: req.mode,
+            schema_target,
         };
         let mut last_response: Option<EntityResponse> = None;
 
@@ -591,30 +640,98 @@ impl crate::state::ServerState {
         let awaited_owner = ctx
             .dispatch_idempotency_key
             .and_then(|delivery_id| self.awaited_execution_owner(delivery_id, ctx.agent_ctx));
-        let completed_digest = if let Some(owner) = awaited_owner.as_ref() {
-            owner
-                .snapshot()
-                .await
-                .0
-                .awaited_execution
-                .filter(|evidence| {
-                    evidence.phase != crate::trigger::delivery::AwaitedExecutionPhase::Executing
-                })
-                .map(|evidence| evidence.identity.module_digest)
+        let awaited_evidence = if let Some(owner) = awaited_owner.as_ref() {
+            owner.snapshot().await.0.awaited_execution
         } else {
             None
         };
-        let module_hash = completed_digest.or_else(|| {
-            let wasm_reg = self.wasm_module_registry.read().unwrap(); // ci-ok: infallible lock
-            wasm_reg
-                .get_hash(ctx.entity_ref.tenant, &module_name)
-                .map(|s| s.to_string())
+        let completed_evidence = awaited_evidence.as_ref().is_some_and(|evidence| {
+            evidence.phase != crate::trigger::delivery::AwaitedExecutionPhase::Executing
         });
+        // Bound execution evidence is authoritative for both takeover and
+        // callback replay. A hot replacement under the same module name must
+        // never change the artifact selected by an existing logical execution.
+        let resolved_module = if completed_evidence {
+            Some(ResolvedWasmModule {
+                hash: awaited_evidence
+                    .as_ref()
+                    .expect("completed evidence is present")
+                    .identity
+                    .module_digest
+                    .clone(),
+                data_binding: None,
+                scoped: false,
+            })
+        } else if let Some(evidence) = awaited_evidence.as_ref() {
+            let pinned_hash = &evidence.identity.module_digest;
+            match &ctx.schema_target {
+                ModuleDataTarget::TenantGlobal => {
+                    let wasm_reg = self.wasm_module_registry.read().unwrap(); // ci-ok: infallible lock
+                    resolve_tenant_global_module(
+                        &wasm_reg,
+                        ctx.entity_ref.tenant,
+                        &module_name,
+                        Some(pinned_hash),
+                    )
+                }
+                ModuleDataTarget::Scoped(pin) => {
+                    let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
+                    registry
+                        .get_scoped_module_at_digest(
+                            ctx.entity_ref.tenant,
+                            &pin.scope,
+                            &pin.bundle_digest,
+                            &module_name,
+                        )
+                        .and_then(|descriptor| {
+                            (descriptor.artifact_digest.strip_prefix("sha256:")?
+                                == pinned_hash.as_str())
+                            .then(|| ResolvedWasmModule {
+                                hash: pinned_hash.clone(),
+                                data_binding: descriptor.data_binding.clone(),
+                                scoped: true,
+                            })
+                        })
+                }
+            }
+        } else {
+            match &ctx.schema_target {
+                ModuleDataTarget::TenantGlobal => {
+                    let wasm_reg = self.wasm_module_registry.read().unwrap(); // ci-ok: infallible lock
+                    resolve_tenant_global_module(
+                        &wasm_reg,
+                        ctx.entity_ref.tenant,
+                        &module_name,
+                        None,
+                    )
+                }
+                ModuleDataTarget::Scoped(pin) => {
+                    let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
+                    registry
+                        .get_scoped_module_at_digest(
+                            ctx.entity_ref.tenant,
+                            &pin.scope,
+                            &pin.bundle_digest,
+                            &module_name,
+                        )
+                        .and_then(|descriptor| {
+                            descriptor
+                                .artifact_digest
+                                .strip_prefix("sha256:")
+                                .map(|hash| ResolvedWasmModule {
+                                    hash: hash.to_string(),
+                                    data_binding: descriptor.data_binding.clone(),
+                                    scoped: true,
+                                })
+                        })
+                }
+            }
+        };
 
-        let Some(hash) = module_hash else {
-            let error_str = format!("WASM module '{}' not found", module_name);
-            record_wasm_error_on_span(active_span, &error_str);
-            if let Some(owner) = awaited_owner.as_ref() {
+        let Some(resolved_module) = resolved_module else {
+            if let Some(owner) = awaited_owner.as_ref()
+                && awaited_evidence.is_none()
+            {
                 let success_callback = integration.on_success.as_deref().ok_or_else(|| {
                     format!(
                         "collection member integration '{}' has no static success callback",
@@ -633,16 +750,10 @@ impl crate::state::ServerState {
                     .await?;
             }
             return self
-                .handle_wasm_failure(
-                    ctx,
-                    &integration.name,
-                    &module_name,
-                    &integration.on_failure,
-                    error_str,
-                    0,
-                )
+                .handle_module_not_found(ctx, integration, &module_name)
                 .await;
         };
+        let hash = resolved_module.hash.clone();
         let awaited_replay = if let Some(owner) = awaited_owner.as_ref() {
             let success_callback = integration.on_success.as_deref().ok_or_else(|| {
                 format!(
@@ -683,21 +794,46 @@ impl crate::state::ServerState {
                     callback_action,
                     replay.callback_params.clone().unwrap_or_default(),
                     ctx.agent_ctx,
+                    None,
                     ctx.mode,
                     &integration.name,
                     &module_name,
+                    false,
                 )
                 .await?;
             return Ok(callback_response);
         }
-        instrument_wasm_dispatch_phase_result(
+        let cache_result = instrument_wasm_dispatch_phase_result(
             active_parent_span.clone(),
             ctx,
             &module_name,
             WASM_DISPATCH_PHASE_MODULE_CACHE,
-            self.ensure_wasm_module_cached(ctx.entity_ref.tenant, &module_name, &hash),
+            async {
+                if resolved_module.scoped {
+                    self.ensure_scoped_wasm_module_cached(
+                        ctx.entity_ref.tenant,
+                        &module_name,
+                        &hash,
+                    )
+                    .await
+                } else {
+                    self.ensure_wasm_module_cached(ctx.entity_ref.tenant, &module_name, &hash)
+                        .await
+                }
+            },
         )
-        .await?;
+        .await;
+        if let Err(error) = cache_result {
+            return handle_wasm_failure_boxed(
+                self,
+                ctx,
+                integration,
+                &module_name,
+                WasmFailure::Setup(error),
+                0,
+            )
+            .await;
+        }
         let trigger_params = instrument_wasm_dispatch_phase(
             active_parent_span.clone(),
             ctx,
@@ -897,11 +1033,7 @@ impl crate::state::ServerState {
                     production_host_builder =
                         production_host_builder.with_secret_resolver(resolver);
                 }
-                let data_binding = self.wasm_module_registry.read().ok().and_then(|registry| {
-                    registry
-                        .data_manifest(ctx.entity_ref.tenant, &module_name, &hash)
-                        .cloned()
-                });
+                let data_binding = resolved_module.data_binding.clone();
                 if let (Some(binding), Some(security)) =
                     (data_binding.clone(), ctx.agent_ctx.security_ctx.clone())
                 {
@@ -914,6 +1046,7 @@ impl crate::state::ServerState {
                         ctx.entity_ref.entity_type.to_string(),
                         security,
                         binding,
+                        ctx.schema_target.clone(),
                     );
                     let service = ApplicationDataInvocation::new(self.clone(), authority);
                     let (data, read, write) = service.callbacks();
@@ -1164,6 +1297,32 @@ impl crate::state::ServerState {
         }
     }
 
+    /// Handle module-not-found through typed or legacy failure routing.
+    async fn handle_module_not_found(
+        &self,
+        ctx: &WasmDispatchCtx<'_>,
+        integration: &temper_spec::automaton::Integration,
+        module_name: &str,
+    ) -> Result<Option<EntityResponse>, String> {
+        tracing::warn!(
+            tenant = %ctx.entity_ref.tenant,
+            entity_type = ctx.entity_ref.entity_type,
+            module = %module_name,
+            "WASM module not found in registry"
+        );
+        handle_wasm_failure_boxed(
+            self,
+            ctx,
+            integration,
+            module_name,
+            WasmFailure::Engine(temper_wasm::WasmError::ModuleNotFound(
+                module_name.to_string(),
+            )),
+            0,
+        )
+        .await
+    }
+
     /// Invoke the WASM module and handle success/failure/error results.
     #[allow(clippy::too_many_arguments)]
     async fn invoke_and_handle_result(
@@ -1315,14 +1474,12 @@ impl crate::state::ServerState {
                 );
                 if let Some(reason) = denial_tracker.take_denial() {
                     let error_str = http_call_authz_denied_error(&reason);
-                    record_wasm_error_on_current_span(&error_str);
                     return handle_wasm_failure_boxed(
                         self,
                         ctx,
-                        &integration.name,
+                        integration,
                         module_name,
-                        &integration.on_failure,
-                        error_str,
+                        WasmFailure::Authorization(error_str),
                         result.duration_ms,
                     )
                     .await;
@@ -1442,9 +1599,11 @@ impl crate::state::ServerState {
                             callback_action,
                             callback_params,
                             ctx.agent_ctx,
+                            None,
                             ctx.mode,
                             &integration.name,
                             module_name,
+                            false,
                         ),
                     )
                     .await?;
@@ -1480,21 +1639,31 @@ impl crate::state::ServerState {
                                 "result": "failure",
                                 "callback_action": result.callback_action.clone(),
                                 "duration_ms": result.duration_ms,
-                                "error": result.error.clone(),
+                                "error": integration
+                                    .failure_routes
+                                    .is_empty()
+                                    .then(|| result.error.clone())
+                                    .flatten(),
                             }),
                         );
                     },
                 );
-                let mut error_str = result.error.unwrap_or_else(|| {
+                let typed_failure = result.typed_failure;
+                let error_str = result.error.unwrap_or_else(|| {
                     format!(
                         "WASM integration '{}' returned unsuccessful result",
                         integration.name
                     )
                 });
-                if let Some(reason) = denial_tracker.take_denial() {
-                    error_str = http_call_authz_denied_error(&reason);
-                }
-                record_wasm_error_on_current_span(&error_str);
+                let failure = match denial_tracker.take_denial() {
+                    Some(reason) => {
+                        WasmFailure::Authorization(http_call_authz_denied_error(&reason))
+                    }
+                    None => match typed_failure {
+                        Some(declaration) => WasmFailure::Guest(declaration),
+                        None => WasmFailure::Legacy(error_str),
+                    },
+                };
                 // A failed integration's effect never landed. `handle_wasm_failure`
                 // records the invocation, then either runs the declared
                 // `on_failure` recovery or — when none is declared — returns
@@ -1503,10 +1672,9 @@ impl crate::state::ServerState {
                 handle_wasm_failure_boxed(
                     self,
                     ctx,
-                    &integration.name,
+                    integration,
                     module_name,
-                    &integration.on_failure,
-                    error_str,
+                    failure,
                     result.duration_ms,
                 )
                 .await
@@ -1536,32 +1704,23 @@ impl crate::state::ServerState {
                                 "trigger_action": ctx.action,
                                 "result": "error",
                                 "duration_ms": 0,
-                                "error": e.to_string(),
+                                "error": integration
+                                    .failure_routes
+                                    .is_empty()
+                                    .then(|| e.to_string()),
                             }),
                         );
                     },
                 );
-                let mut error_str = e.to_string();
-                if let Some(reason) = denial_tracker.take_denial()
-                    && !is_http_call_authz_denial(&error_str)
-                {
-                    error_str = http_call_authz_denied_error(&reason);
-                }
-                record_wasm_error_on_current_span(&error_str);
+                let failure = denial_tracker.take_denial().map_or_else(
+                    || WasmFailure::Engine(e),
+                    |reason| WasmFailure::Authorization(http_call_authz_denied_error(&reason)),
+                );
                 // Same as the unsuccessful-result arm above: a host trap, fuel
                 // exhaustion, or panic also leaves the integration's effect
                 // unrealized. `handle_wasm_failure` records it and propagates
                 // `Err` when no `on_failure` is declared (ADR-0152).
-                handle_wasm_failure_boxed(
-                    self,
-                    ctx,
-                    &integration.name,
-                    module_name,
-                    &integration.on_failure,
-                    error_str,
-                    0,
-                )
-                .await
+                handle_wasm_failure_boxed(self, ctx, integration, module_name, failure, 0).await
             }
         }
     }

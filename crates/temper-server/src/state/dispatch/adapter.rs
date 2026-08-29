@@ -21,6 +21,9 @@ use temper_runtime::tenant::TenantId;
 use super::{
     WasmDispatchMode, WasmDispatchRequest, WasmEntityRef, record_workflow_span_attrs, retry,
 };
+use failure::{AdapterFailure, CredentialMintFailure};
+
+mod failure;
 
 const ADAPTER_INVOCATION_BUDGET_SECS: u64 = 60 * 60;
 const ADAPTER_CREDENTIAL_TTL_SECS: i64 = 61 * 60;
@@ -151,6 +154,7 @@ struct AdapterDispatchCtx<'a> {
     entity_ref: WasmEntityRef<'a>,
     action: &'a str,
     agent_ctx: &'a AgentContext,
+    dispatch_idempotency_key: Option<&'a str>,
     mode: WasmDispatchMode,
 }
 
@@ -162,6 +166,7 @@ pub(crate) struct AdapterDispatchInput<'a> {
     pub(crate) custom_effects: &'a [String],
     pub(crate) entity_state: &'a EntityState,
     pub(crate) agent_ctx: &'a AgentContext,
+    pub(crate) dispatch_idempotency_key: Option<&'a str>,
     pub(crate) action_params: &'a serde_json::Value,
 }
 
@@ -176,6 +181,7 @@ impl crate::state::ServerState {
         let custom_effects = input.custom_effects.to_vec();
         let entity_state = input.entity_state.clone();
         let agent_ctx = input.agent_ctx.clone();
+        let dispatch_idempotency_key = input.dispatch_idempotency_key.map(str::to_string);
         let action_params = input.action_params.clone();
         let workflow_root_entity_type = agent_ctx
             .workflow_root_entity_type
@@ -210,7 +216,7 @@ impl crate::state::ServerState {
                     custom_effects: &custom_effects,
                     entity_state: &entity_state,
                     agent_ctx: &agent_ctx,
-                    dispatch_idempotency_key: None,
+                    dispatch_idempotency_key: dispatch_idempotency_key.as_deref(),
                     action_params: &action_params,
                     mode: WasmDispatchMode::Background,
                 };
@@ -274,6 +280,7 @@ impl crate::state::ServerState {
             },
             action: req.action,
             agent_ctx: req.agent_ctx,
+            dispatch_idempotency_key: req.dispatch_idempotency_key,
             mode: req.mode,
         };
 
@@ -333,7 +340,9 @@ impl crate::state::ServerState {
                 .handle_adapter_failure(
                     ctx,
                     integration,
-                    format!("adapter '{adapter_type}' not found in registry"),
+                    AdapterFailure::MissingRegistry(format!(
+                        "adapter '{adapter_type}' not found in registry"
+                    )),
                     0,
                 )
                 .await;
@@ -353,8 +362,22 @@ impl crate::state::ServerState {
         // Mint a platform credential if the entity references an AgentType (ADR-0033).
         // The plaintext key is passed to the adapter and never persisted.
         let minted_credential = if adapter.requires_platform_credential() {
-            self.mint_agent_credential_if_needed(ctx.entity_ref.tenant, entity_state, ctx.agent_ctx)
-                .await?
+            match self
+                .mint_agent_credential_if_needed(ctx.entity_ref.tenant, entity_state, ctx.agent_ctx)
+                .await
+            {
+                Ok(credential) => credential,
+                Err(error) => {
+                    return self
+                        .handle_adapter_failure(
+                            ctx,
+                            integration,
+                            AdapterFailure::Credential(error),
+                            0,
+                        )
+                        .await;
+                }
+            }
         } else {
             None
         };
@@ -392,7 +415,7 @@ impl crate::state::ServerState {
             Ok(result) => result,
             Err(e) => {
                 return self
-                    .handle_adapter_failure(ctx, integration, e.to_string(), 0)
+                    .handle_adapter_failure(ctx, integration, AdapterFailure::Typed(e), 0)
                     .await;
             }
         };
@@ -413,6 +436,7 @@ impl crate::state::ServerState {
                     callback_params,
                     ctx.agent_ctx,
                     ctx.mode,
+                    false,
                 )
                 .await;
         }
@@ -421,8 +445,13 @@ impl crate::state::ServerState {
             .error
             .clone()
             .unwrap_or_else(|| "adapter returned unsuccessful result".to_string());
-        self.handle_adapter_failure(ctx, integration, error, result.duration_ms)
-            .await
+        self.handle_adapter_failure(
+            ctx,
+            integration,
+            AdapterFailure::Legacy(error),
+            result.duration_ms,
+        )
+        .await
     }
 
     async fn execute_adapter_with_credential_cleanup(
@@ -490,6 +519,7 @@ impl crate::state::ServerState {
                     idempotency_key: Some(idempotency_key.clone()),
                     expected_sequence: None,
                     reaction_context: None,
+                    kernel_metadata: None,
                     expected_authorization_precondition: None,
                 },
                 &policy,
@@ -520,14 +550,61 @@ impl crate::state::ServerState {
         Err(last_error)
     }
 
-    #[instrument(skip_all, fields(otel.name = "dispatch.handle_adapter_failure", integration = %integration.name))]
+    #[instrument(skip_all, fields(
+        otel.name = "dispatch.handle_adapter_failure",
+        integration = %integration.name,
+        error.type = tracing::field::Empty,
+        failure.category = tracing::field::Empty,
+        failure.code = tracing::field::Empty,
+    ))]
     async fn handle_adapter_failure(
         &self,
         ctx: &AdapterDispatchCtx<'_>,
         integration: &temper_spec::automaton::Integration,
-        error: String,
+        failure: AdapterFailure,
         duration_ms: u64,
     ) -> Result<Option<EntityResponse>, String> {
+        let error = failure.diagnostic();
+        if !integration.failure_routes.is_empty() {
+            let envelope = failure
+                .into_envelope(
+                    ctx.dispatch_idempotency_key
+                        .or(ctx.agent_ctx.idempotency_key.as_deref()),
+                    [
+                        ctx.entity_ref.tenant.as_str(),
+                        ctx.entity_ref.entity_type,
+                        ctx.entity_ref.entity_id,
+                        ctx.action,
+                        &integration.name,
+                    ],
+                )
+                .map_err(|error| format!("InvalidFailureAdapterOutput: {error}"))?;
+            self.record_typed_failure_observation(
+                ctx.entity_ref,
+                &integration.name,
+                ctx.action,
+                &envelope,
+                false,
+            );
+            let callback_action =
+                super::wasm::failure_routing::failure_callback(integration, envelope.category)?;
+            let callback_ctx = super::typed_failure::typed_failure_callback_context(
+                ctx.agent_ctx,
+                &envelope.operation.id,
+                callback_action,
+            );
+            return self
+                .dispatch_adapter_callback(
+                    ctx.entity_ref,
+                    callback_action,
+                    serde_json::json!({"failure": envelope}),
+                    &callback_ctx,
+                    ctx.mode,
+                    true,
+                )
+                .await;
+        }
+
         tracing::warn!(
             tenant = %ctx.entity_ref.tenant,
             entity_type = ctx.entity_ref.entity_type,
@@ -557,6 +634,7 @@ impl crate::state::ServerState {
             params,
             ctx.agent_ctx,
             ctx.mode,
+            false,
         )
         .await
     }
@@ -569,6 +647,7 @@ impl crate::state::ServerState {
         callback_params: serde_json::Value,
         agent_ctx: &AgentContext,
         mode: WasmDispatchMode,
+        preserve_idempotency: bool,
     ) -> Result<Option<EntityResponse>, String> {
         match mode {
             WasmDispatchMode::Inline => {
@@ -583,14 +662,18 @@ impl crate::state::ServerState {
                         false,
                         None,
                         None,
+                        None,
                     )
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(Some(resp))
             }
             WasmDispatchMode::Background => {
-                let callback_ctx =
-                    AgentContext::for_service_inheriting("platform-dispatch", agent_ctx);
+                let callback_ctx = super::typed_failure::background_callback_context(
+                    "platform-dispatch",
+                    agent_ctx,
+                    preserve_idempotency,
+                );
                 self.dispatch_tenant_action(
                     entity_ref.tenant,
                     entity_ref.entity_type,
@@ -624,7 +707,7 @@ impl crate::state::ServerState {
         tenant: &TenantId,
         entity_state: &EntityState,
         agent_ctx: &AgentContext,
-    ) -> Result<Option<MintedAdapterCredential>, String> {
+    ) -> Result<Option<MintedAdapterCredential>, CredentialMintFailure> {
         let agent_type_id = entity_state
             .fields
             .get("agent_type_id")
@@ -644,7 +727,9 @@ impl crate::state::ServerState {
         let agent_instance_id = sim_uuid().to_string();
         let expires_at = sim_now()
             .checked_add_signed(chrono::Duration::seconds(ADAPTER_CREDENTIAL_TTL_SECS))
-            .ok_or_else(|| "adapter credential expiry overflowed".to_string())?
+            .ok_or_else(|| {
+                CredentialMintFailure::Integrity("adapter credential expiry overflowed".to_string())
+            })?
             .to_rfc3339();
 
         let issue_params = serde_json::json!({
@@ -662,7 +747,9 @@ impl crate::state::ServerState {
         // against the credential resource so a low-privilege action cannot use
         // the platform as a deputy to mint a more privileged AgentType token.
         let security_ctx = agent_ctx.security_ctx.as_ref().ok_or_else(|| {
-            "adapter credential mint requires an explicit security context".to_string()
+            CredentialMintFailure::Authorization(
+                "adapter credential mint requires an explicit security context".to_string(),
+            )
         })?;
         let credential_attrs = BTreeMap::from([
             (
@@ -689,7 +776,11 @@ impl crate::state::ServerState {
             &credential_attrs,
             tenant.as_str(),
         )
-        .map_err(|denial| format!("adapter credential delegation denied: {denial}"))?;
+        .map_err(|denial| {
+            CredentialMintFailure::Authorization(format!(
+                "adapter credential delegation denied: {denial}"
+            ))
+        })?;
 
         // Create the AgentCredential entity using key_hash as entity ID for O(1) lookup.
         let dispatch_ctx = AgentContext::for_service_inheriting("platform-dispatch", agent_ctx);
@@ -718,14 +809,14 @@ impl crate::state::ServerState {
                     key_hash,
                 }))
             }
-            Ok(resp) => Err(format!(
+            Ok(resp) => Err(CredentialMintFailure::Integrity(format!(
                 "failed to mint required adapter credential: {}",
                 resp.error
                     .unwrap_or_else(|| "Issue action was rejected".to_string())
-            )),
-            Err(error) => Err(format!(
+            ))),
+            Err(error) => Err(CredentialMintFailure::DispatchAmbiguous(format!(
                 "failed to mint required adapter credential: {error}"
-            )),
+            ))),
         }
     }
 }

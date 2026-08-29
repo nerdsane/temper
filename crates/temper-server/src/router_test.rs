@@ -239,6 +239,7 @@ async fn persist_task_schema_bundle_in_scope(
                 )]),
                 cedar_policies: std::collections::BTreeMap::new(),
                 wasm_module_digests: std::collections::BTreeMap::new(),
+                wasm_module_data_bindings: std::collections::BTreeMap::new(),
                 migration_module_name: None,
                 migration_module_digest: None,
                 migration_abi_version: None,
@@ -292,6 +293,7 @@ async fn persist_task_schema_bundle_in_scope(
             expected_predecessor: predecessor.map(str::to_string),
             expected_fence: verified.fence,
             verification_receipt_id: format!("{operation_tag}-verification"),
+            stream_publication_fence: None,
             operation: SchemaOperationIdentity {
                 idempotency_key: format!("{operation_tag}-activate"),
                 request_digest: format!("sha256:{}", "4".repeat(64)),

@@ -2,8 +2,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use temper_runtime::tenant::TenantId;
 
+use crate::blob_store::MAX_RAW_BLOB_BYTES;
 use crate::response::{ODataStreamResponse, odata_error};
-use crate::state::{IndexedFileStreamRead, ServerState};
+use crate::state::{ServerState, StreamDescriptorResolutionError};
 
 pub(crate) async fn try_file_stream_fast_path(
     state: &ServerState,
@@ -12,117 +13,82 @@ pub(crate) async fn try_file_stream_fast_path(
     entity_type: &str,
     key: &str,
 ) -> Option<Response> {
-    match entity_type {
-        "File" => handle_indexed_file_stream(state, tenant, set_name, entity_type, key).await,
-        "FileVersion" => {
-            handle_indexed_file_version_stream(state, tenant, set_name, entity_type, key).await
+    if !matches!(entity_type, "File" | "FileVersion") {
+        return None;
+    }
+    let activated = match state
+        .stream_descriptor_contract_activated(tenant, None, entity_type)
+        .await
+    {
+        Ok(activated) => activated,
+        Err(error) => {
+            return Some(
+                odata_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error.stable_code(),
+                    "Authoritative stream descriptor fence storage is unavailable",
+                )
+                .into_response(),
+            );
         }
-        _ => None,
+    };
+    if !activated {
+        return None;
     }
-}
-
-async fn handle_indexed_file_stream(
-    state: &ServerState,
-    tenant: &TenantId,
-    set_name: &str,
-    entity_type: &str,
-    key: &str,
-) -> Option<Response> {
-    match state.read_file_stream_indexed(tenant, key).await {
-        Ok(read) => indexed_read_response_or_fallback(tenant, set_name, entity_type, key, read),
-        Err(error) => Some(index_error_response(tenant, entity_type, key, error)),
-    }
-}
-
-async fn handle_indexed_file_version_stream(
-    state: &ServerState,
-    tenant: &TenantId,
-    set_name: &str,
-    entity_type: &str,
-    key: &str,
-) -> Option<Response> {
-    match state.read_file_version_stream_indexed(tenant, key).await {
-        Ok(read) => indexed_read_response_or_fallback(tenant, set_name, entity_type, key, read),
-        Err(error) => Some(index_error_response(tenant, entity_type, key, error)),
-    }
-}
-
-fn indexed_read_response_or_fallback(
-    tenant: &TenantId,
-    set_name: &str,
-    entity_type: &str,
-    key: &str,
-    read: IndexedFileStreamRead,
-) -> Option<Response> {
-    match read {
-        IndexedFileStreamRead::Content {
-            content_hash,
-            mime_type,
-            bytes,
-        } => Some(
-            ODataStreamResponse {
+    Some(
+        match state
+            .open_stream_from_descriptor(tenant, entity_type, key, MAX_RAW_BLOB_BYTES as u64)
+            .await
+        {
+            Ok(resolved) => ODataStreamResponse {
                 status: StatusCode::OK,
-                body: bytes,
-                content_type: stream_content_type(&mime_type),
-                etag: Some(content_hash),
+                body: resolved.bytes,
+                content_type: resolved
+                    .descriptor
+                    .content_type()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("application/octet-stream")
+                    .to_string(),
+                etag: Some(resolved.descriptor.content_hash().to_string()),
             }
             .into_response(),
-        ),
-        IndexedFileStreamRead::NoContent { .. } => Some(
-            odata_error(
-                StatusCode::NOT_FOUND,
-                "NoContent",
-                &format!("{set_name}('{key}') has no content yet"),
+            Err(error @ StreamDescriptorResolutionError::Missing) => odata_error(
+                StatusCode::CONFLICT,
+                error.stable_code(),
+                &format!("{set_name}('{key}') has no committed stream descriptor"),
             )
             .into_response(),
-        ),
-        IndexedFileStreamRead::MissingIndex => {
-            tracing::warn!(
-                tenant = %tenant,
-                entity_type = %entity_type,
-                entity_id = %key,
-                "file stream projection missing; falling back to actor/WASM materialization"
-            );
-            None
-        }
-        IndexedFileStreamRead::StaleIndex { content_hash, .. } => {
-            tracing::warn!(
-                tenant = %tenant,
-                entity_type = %entity_type,
-                entity_id = %key,
-                content_hash = %content_hash,
-                "file stream projection blob missing; falling back to actor/WASM materialization"
-            );
-            None
-        }
-    }
-}
-
-fn index_error_response(
-    tenant: &TenantId,
-    entity_type: &str,
-    key: &str,
-    error: String,
-) -> Response {
-    tracing::error!(
-        tenant = %tenant,
-        entity_type = %entity_type,
-        entity_id = %key,
-        %error,
-        "file stream projection read failed"
-    );
-    odata_error(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "FileReadIndexUnavailable",
-        &error,
+            Err(error @ StreamDescriptorResolutionError::BudgetExceeded) => odata_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                error.stable_code(),
+                "Committed stream exceeds the platform read budget",
+            )
+            .into_response(),
+            Err(error @ StreamDescriptorResolutionError::Integrity(_)) => odata_error(
+                StatusCode::CONFLICT,
+                error.stable_code(),
+                &error.to_string(),
+            )
+            .into_response(),
+            Err(error @ StreamDescriptorResolutionError::Consistency(_)) => odata_error(
+                StatusCode::CONFLICT,
+                error.stable_code(),
+                &error.to_string(),
+            )
+            .into_response(),
+            Err(error @ StreamDescriptorResolutionError::ReplayBudgetExceeded) => odata_error(
+                StatusCode::CONFLICT,
+                error.stable_code(),
+                "Stream descriptor replay exceeded its event budget",
+            )
+            .into_response(),
+            Err(error @ StreamDescriptorResolutionError::JournalUnavailable)
+            | Err(error @ StreamDescriptorResolutionError::Storage(_)) => odata_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                error.stable_code(),
+                "Authoritative stream descriptor storage is unavailable",
+            )
+            .into_response(),
+        },
     )
-    .into_response()
-}
-
-fn stream_content_type(mime_type: &str) -> String {
-    if mime_type.trim().is_empty() {
-        "application/octet-stream".to_string()
-    } else {
-        mime_type.to_string()
-    }
 }

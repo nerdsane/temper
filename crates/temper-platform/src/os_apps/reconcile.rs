@@ -1,70 +1,23 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use temper_runtime::tenant::TenantId;
 use temper_server::platform_store::InstalledAppRecord;
 use temper_wasm_sdk::data::ModuleSdkManifest;
+use temper_wasm_sdk::schema_deployment::StreamDescriptorMigrationTargetV1;
 
 use super::{
     AppBundle, OsAppBundleDigest, OsAppInstallPlan, OsAppReconcileResult, catalog,
     digest_app_bundle_with_version, install_os_app_from_dir_with_plan, load_app_bundle,
-    os_app_dependencies, read_app_manifest, restore_app_specs_from_matching_digest,
+    read_app_manifest, restore_app_specs_from_matching_digest,
     tenant_has_ready_app_specs_for_bundle,
 };
 use crate::state::PlatformState;
 
-fn collect_install_order_with_dependencies(
-    app_name: &str,
-    visiting: &mut HashSet<String>,
-    visited: &mut HashSet<String>,
-    order: &mut Vec<String>,
-    dependencies: &impl Fn(&str) -> Vec<String>,
-) -> Result<(), String> {
-    if visited.contains(app_name) {
-        return Ok(());
-    }
-    if !visiting.insert(app_name.to_string()) {
-        return Err(format!("Cyclic OS app dependency detected at '{app_name}'"));
-    }
-    for dependency in dependencies(app_name) {
-        collect_install_order_with_dependencies(
-            &dependency,
-            visiting,
-            visited,
-            order,
-            dependencies,
-        )?;
-    }
-    visiting.remove(app_name);
-    visited.insert(app_name.to_string());
-    order.push(app_name.to_string());
-    Ok(())
-}
-
-/// Resolve a deduplicated dependency-first install order for a set of apps.
-pub fn resolve_os_app_install_order(app_names: &[String]) -> Result<Vec<String>, String> {
-    resolve_os_app_install_order_with_dependencies(app_names, |app_name| {
-        os_app_dependencies(app_name)
-    })
-}
-
-pub(super) fn resolve_os_app_install_order_with_dependencies(
-    app_names: &[String],
-    dependencies: impl Fn(&str) -> Vec<String>,
-) -> Result<Vec<String>, String> {
-    let mut visiting = HashSet::new();
-    let mut visited = HashSet::new();
-    let mut order = Vec::new();
-    for app_name in app_names {
-        collect_install_order_with_dependencies(
-            app_name,
-            &mut visiting,
-            &mut visited,
-            &mut order,
-            &dependencies,
-        )?;
-    }
-    Ok(order)
-}
+mod order;
+mod stream_contract;
+pub use order::resolve_os_app_install_order;
+#[cfg(test)]
+pub(super) use order::resolve_os_app_install_order_with_dependencies;
 
 pub(super) fn plan_reconcile_from_installed_record(
     record: &InstalledAppRecord,
@@ -317,125 +270,193 @@ pub(crate) async fn reconcile_os_app_from_dir(
         })
         .transpose()?;
 
-    if let Some(ps) = state
-        .server
-        .storage_stack
-        .as_ref()
-        .and_then(|stack| stack.platform.clone())
-    {
-        match ps.get_installed_app(tenant, app_name).await {
-            Ok(Some(record)) => {
-                let mut specs_ready = tenant_has_ready_app_specs_for_bundle(state, tenant, &bundle);
-                let wasm_registered = tenant_has_registered_wasm_for_bundle(state, tenant, &bundle);
-                let durable_wasm_ready =
-                    tenant_has_durable_wasm_for_bundle(state, tenant, &bundle).await;
-                let wasm_ready = wasm_registered && durable_wasm_ready;
-                let policies_active = tenant_has_active_policies_for_bundle(state, tenant, &bundle);
+    let (stream_contract_capability_digest, stream_contract_fence_already_active) =
+        match stream_contract::gate(state, tenant, app_name, &digest, &bundle).await? {
+            stream_contract::Gate::Ready {
+                capability_digest,
+                fence_already_active,
+            } => (capability_digest, fence_already_active),
+            stream_contract::Gate::MigrationRequired(result) => return Ok(result),
+        };
 
-                if wasm_ready && let Some(bindings) = canonical_bindings.as_ref() {
-                    restore_canonical_data_bindings(state, tenant, &bundle.wasm_modules, bindings)?;
-                }
+    let post_reconcile_digest = digest.clone();
+    let reconcile_result: Result<OsAppReconcileResult, String> = async {
+        if let Some(ps) = state
+            .server
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.platform.clone())
+        {
+            match ps.get_installed_app(tenant, app_name).await {
+                Ok(Some(record)) => {
+                    let mut specs_ready =
+                        tenant_has_ready_app_specs_for_bundle(state, tenant, &bundle);
+                    let wasm_registered =
+                        tenant_has_registered_wasm_for_bundle(state, tenant, &bundle);
+                    let durable_wasm_ready =
+                        tenant_has_durable_wasm_for_bundle(state, tenant, &bundle).await;
+                    let wasm_ready = wasm_registered && durable_wasm_ready;
+                    let policies_active =
+                        tenant_has_active_policies_for_bundle(state, tenant, &bundle);
 
-                if record.bundle_digest == digest.bundle_digest && !specs_ready {
-                    specs_ready = restore_app_specs_from_matching_digest(
-                        state,
-                        ps.as_ref(),
-                        tenant,
-                        app_name,
-                        &bundle,
-                    )
-                    .await;
-                }
+                    if wasm_ready && let Some(bindings) = canonical_bindings.as_ref() {
+                        restore_canonical_data_bindings(
+                            state,
+                            tenant,
+                            &bundle.wasm_modules,
+                            bindings,
+                        )?;
+                    }
 
-                if record.bundle_digest == digest.bundle_digest
-                    && specs_ready
-                    && wasm_ready
-                    && policies_active
-                {
+                    if record.bundle_digest == digest.bundle_digest && !specs_ready {
+                        specs_ready = restore_app_specs_from_matching_digest(
+                            state,
+                            ps.as_ref(),
+                            tenant,
+                            app_name,
+                            &bundle,
+                        )
+                        .await;
+                    }
+
+                    if record.bundle_digest == digest.bundle_digest
+                        && specs_ready
+                        && wasm_ready
+                        && policies_active
+                    {
+                        tracing::info!(
+                            tenant,
+                            app = %app_name,
+                            bundle_digest = %digest.bundle_digest,
+                            "OS app unchanged; skipping hot reconcile"
+                        );
+                        return Ok(OsAppReconcileResult::Skipped {
+                            app_name: app_name.to_string(),
+                            bundle_digest: digest.bundle_digest,
+                        });
+                    }
+
+                    if !specs_ready && record.spec_digest == digest.spec_digest {
+                        specs_ready = restore_app_specs_from_matching_digest(
+                            state,
+                            ps.as_ref(),
+                            tenant,
+                            app_name,
+                            &bundle,
+                        )
+                        .await;
+                    }
+                    let plan = plan_reconcile_from_installed_record(
+                        &record,
+                        &digest,
+                        specs_ready,
+                        wasm_ready,
+                        policies_active,
+                    );
+
                     tracing::info!(
                         tenant,
                         app = %app_name,
                         bundle_digest = %digest.bundle_digest,
-                        "OS app unchanged; skipping hot reconcile"
+                        specs = plan.specs,
+                        policies = plan.policies,
+                        wasm = plan.wasm,
+                        content = plan.content,
+                        seed = plan.seed,
+                        "OS app changed; running delta reconcile"
                     );
-                    return Ok(OsAppReconcileResult::Skipped {
-                        app_name: app_name.to_string(),
-                        bundle_digest: digest.bundle_digest,
-                    });
-                }
-
-                if !specs_ready && record.spec_digest == digest.spec_digest {
-                    specs_ready = restore_app_specs_from_matching_digest(
+                    let install = install_os_app_from_dir_with_plan(
                         state,
-                        ps.as_ref(),
                         tenant,
                         app_name,
-                        &bundle,
+                        app_dir,
+                        plan,
+                        canonical_bindings.as_ref(),
                     )
-                    .await;
+                    .await?;
+                    return Ok(OsAppReconcileResult::Installed {
+                        app_name: app_name.to_string(),
+                        bundle_digest: digest.bundle_digest,
+                        install: Box::new(install),
+                    });
                 }
-                let plan = plan_reconcile_from_installed_record(
-                    &record,
-                    &digest,
-                    specs_ready,
-                    wasm_ready,
-                    policies_active,
-                );
-
-                tracing::info!(
-                    tenant,
-                    app = %app_name,
-                    bundle_digest = %digest.bundle_digest,
-                    specs = plan.specs,
-                    policies = plan.policies,
-                    wasm = plan.wasm,
-                    content = plan.content,
-                    seed = plan.seed,
-                    "OS app changed; running delta reconcile"
-                );
-                let install = install_os_app_from_dir_with_plan(
-                    state,
-                    tenant,
-                    app_name,
-                    app_dir,
-                    plan,
-                    canonical_bindings.as_ref(),
-                )
-                .await?;
-                return Ok(OsAppReconcileResult::Installed {
-                    app_name: app_name.to_string(),
-                    bundle_digest: digest.bundle_digest,
-                    install: Box::new(install),
-                });
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(
-                    tenant,
-                    app = %app_name,
-                    error = %error,
-                    "Failed to read OS app digest metadata; falling back to reconcile"
-                );
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        tenant,
+                        app = %app_name,
+                        error = %error,
+                        "Failed to read OS app digest metadata; falling back to reconcile"
+                    );
+                }
             }
         }
+
+        let install = install_os_app_from_dir_with_plan(
+            state,
+            tenant,
+            app_name,
+            app_dir,
+            OsAppInstallPlan::all(),
+            canonical_bindings.as_ref(),
+        )
+        .await?;
+        Ok(OsAppReconcileResult::Installed {
+            app_name: app_name.to_string(),
+            bundle_digest: digest.bundle_digest,
+            install: Box::new(install),
+        })
     }
-
-    let install = install_os_app_from_dir_with_plan(
-        state,
-        tenant,
-        app_name,
-        app_dir,
-        OsAppInstallPlan::all(),
-        canonical_bindings.as_ref(),
-    )
-    .await?;
-    Ok(OsAppReconcileResult::Installed {
-        app_name: app_name.to_string(),
-        bundle_digest: digest.bundle_digest,
-        install: Box::new(install),
-    })
+    .await;
+    match reconcile_result {
+        Ok(result) => {
+            if let Some(capability_digest) = stream_contract_capability_digest.as_ref()
+                && !stream_contract_fence_already_active
+            {
+                let target = StreamDescriptorMigrationTargetV1::InstalledApplication {
+                    application_id: app_name.into(),
+                    semantic_digest: post_reconcile_digest.spec_digest.clone(),
+                };
+                let fence = match state
+                    .server
+                    .require_stream_descriptor_completion_v1(&TenantId::new(tenant), &target, None)
+                    .await
+                {
+                    Ok(Some(fence)) => fence,
+                    Err(error)
+                        if error.starts_with("backend unavailable:")
+                            || error.starts_with("stale fence:") =>
+                    {
+                        return Err(error);
+                    }
+                    Ok(None) | Err(_) => {
+                        return Ok(OsAppReconcileResult::MigrationRequired {
+                            app_name: app_name.into(),
+                            semantic_digest: post_reconcile_digest.spec_digest,
+                            capability_digest: capability_digest.clone(),
+                            descriptor_contract_version: 1,
+                        });
+                    }
+                };
+                state
+                    .server
+                    .activate_installed_application_stream_fence_v1(&TenantId::new(tenant), &fence)
+                    .await?;
+            } else if stream_contract_capability_digest.is_none() {
+                state
+                    .server
+                    .deactivate_installed_application_stream_fence_v1(
+                        &TenantId::new(tenant),
+                        app_name,
+                        None,
+                    )
+                    .await?;
+            }
+            Ok(result)
+        }
+        Err(error) => Err(error),
+    }
 }
-
 /// ARN-68: after a reconcile registers changed specs, re-key any type whose declared
 /// key-set changed (a newly-declared `[[key]]` on an already-installed type, e.g.
 /// Directory `ws_path` added after `name_parent`). The once-per-boot startup key-index
@@ -450,8 +471,8 @@ pub(super) fn spawn_key_index_rekey_after_spec_change(state: &PlatformState, ten
     let tenant = tenant_id.clone();
     tokio::spawn(async move {
         server.populate_key_index_from_snapshots(&tenant).await;
-        // ADR-0155: same race for a newly declared [[vector]] path — a late reconcile
-        // registers it after boot, so re-index existing entities here (watermark-gated,
+        // ADR-0155: same race for a newly declared [[vector]] path — re-index existing
+        // entities here (watermark-gated,
         // unchanged types skip) so they are immediately rankable by Temper.Nearest.
         server.populate_vector_index_from_snapshots(&tenant).await;
     });

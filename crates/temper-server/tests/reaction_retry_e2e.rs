@@ -36,6 +36,7 @@ async fn awaited_drain_waits_for_logical_retry_and_completes_it() {
         source_sequence: 1,
         source_to_state: "Confirmed".to_string(),
         source_fields: serde_json::json!({}),
+        source_stream_descriptor: None,
         guard_passed: true,
         target_entity_id: Some("o1".to_string()),
         trigger_name: rule.name.clone(),
@@ -70,6 +71,7 @@ async fn awaited_drain_waits_for_logical_retry_and_completes_it() {
                     correlation_id: sim_uuid(),
                     timestamp: sim_now(),
                     actor_id: format!("{tenant_name}:Order:o1"),
+                    kernel: None,
                 },
             }],
         )

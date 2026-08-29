@@ -40,4 +40,14 @@ pub enum DataOperationKind {
     SchemaMigrationGet,
     /// Retry a failed schema migration.
     SchemaMigrationRetry,
+    /// Bootstrap one entity through a still-active schema deployment.
+    SchemaBootstrapDispatch,
+    /// Create a governed stream-descriptor migration job.
+    StreamDescriptorMigrationStart,
+    /// Advance one bounded stream-descriptor inventory page.
+    StreamDescriptorMigrationAdvance,
+    /// Read stream-descriptor migration progress.
+    StreamDescriptorMigrationGet,
+    /// Read redacted unresolved stream-descriptor classifications.
+    StreamDescriptorMigrationListUnresolved,
 }

@@ -13,6 +13,8 @@ use temper_wasm::{
 
 /// Pre-built echo integration WASM binary (avoids needing wasm32 target in CI).
 const ECHO_WASM: &[u8] = include_bytes!("fixtures/echo_integration.wasm");
+/// Pre-built raw-ABI module that exercises a legacy terminal failure.
+const LOCAL_TDATA_WASM: &[u8] = include_bytes!("fixtures/local_tdata_integration.wasm");
 /// Pre-built SDK-backed module that exercises `temper_wasm_sdk::Context::from_host`.
 const SDK_CONTEXT_READER_WASM: &[u8] = include_bytes!("fixtures/sdk_context_reader.wasm");
 const WAT_DATA_RESPONSE_LIFECYCLE: &str = r#"
@@ -82,8 +84,16 @@ fn build_context() -> WasmInvocationContext {
 fn build_large_context(blob_len: usize) -> WasmInvocationContext {
     let mut ctx = build_context();
     ctx.entity_state = serde_json::json!({
-        "status": "Pending",
-        "large_blob": "x".repeat(blob_len),
+        "status": "Running",
+        "fields": {
+            "large_blob": "x".repeat(blob_len),
+            "attempts": 99,
+            "ready": false,
+            "tags": ["stale"]
+        },
+        "counters": {"attempts": 3},
+        "booleans": {"ready": true},
+        "lists": {"tags": ["typed", "bounded"]},
     });
     ctx
 }
@@ -192,6 +202,32 @@ async fn invoke_with_http_failure_still_succeeds() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn invoke_raw_module_terminal_failure_uses_result_payload_only() {
+    let engine = WasmEngine::new().expect("engine should create");
+    let hash = engine
+        .compile_and_cache(LOCAL_TDATA_WASM)
+        .expect("local TData module should compile");
+    let host = Arc::new(SimWasmHost::new().with_default_response(403, "denied"));
+
+    let streams = Arc::new(RwLock::new(StreamRegistry::default()));
+    let result = engine
+        .invoke(
+            &hash,
+            &build_context(),
+            host,
+            &WasmResourceLimits::default(),
+            streams,
+        )
+        .await
+        .expect("guest terminal failure should decode");
+
+    assert!(!result.success);
+    assert_eq!(result.callback_action, "callback");
+    assert_eq!(result.callback_params["error"], "local TData denied");
+    assert_eq!(result.error.as_deref(), Some("local TData denied"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn invoke_sdk_module_with_large_context_succeeds() {
     let engine = WasmEngine::new().expect("engine should create");
     let hash = engine
@@ -216,12 +252,16 @@ async fn invoke_sdk_module_with_large_context_succeeds() {
         result.callback_params["trigger_action"].as_str(),
         Some("TriggerEcho")
     );
-    assert!(
-        result.callback_params["entity_state_len"]
-            .as_u64()
-            .unwrap_or_default()
-            > 4_000_000,
-        "entity state should include the large payload"
+    assert_eq!(
+        result.callback_params["large_blob_len"].as_u64(),
+        Some(4_000_000),
+    );
+    assert_eq!(result.callback_params["status"], "Running");
+    assert_eq!(result.callback_params["attempts"], 3);
+    assert_eq!(result.callback_params["ready"], true);
+    assert_eq!(
+        result.callback_params["tags"],
+        serde_json::json!(["typed", "bounded"])
     );
 }
 

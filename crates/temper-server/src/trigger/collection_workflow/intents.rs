@@ -322,6 +322,7 @@ fn intent(
         source_sequence: sequence + 1,
         source_to_state: format!("{:?}", record.status),
         source_fields: serde_json::json!({"workflow_id": record.workflow_id, "control_epoch": record.control_epoch}),
+        source_stream_descriptor: None,
         guard_passed: true,
         target_entity_id: Some(target_entity_id),
         trigger_name,
