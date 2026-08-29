@@ -53,6 +53,28 @@ impl RandomMode {
     }
 }
 
+/// CI seed sharding: split the `0..total` seed range across parallel CI shards.
+///
+/// Reads `TEMPER_DST_SHARD_COUNT` (default 1) and `TEMPER_DST_SHARD_INDEX` (default 0);
+/// shard `i` of `n` runs the seeds where `seed % n == i`. The union of every shard is the
+/// full `0..total` range, so coverage is identical to an unsharded run — sharding only
+/// divides the wall-clock, never the coverage. With no env set (local runs) it yields every
+/// seed. Each seed is self-contained, so which shard runs it does not change the outcome.
+fn shard_seeds(total: u64) -> impl Iterator<Item = u64> {
+    // determinism-ok: CI shard selection happens before deterministic seeds are installed.
+    let count = std::env::var("TEMPER_DST_SHARD_COUNT")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(1);
+    let index = std::env::var("TEMPER_DST_SHARD_INDEX")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+        % count;
+    (0..total).filter(move |seed| seed % count == index)
+}
+
 /// Run a full workload: generate `num_ops` operations and execute them.
 ///
 /// When `check_invariants_inline` is true, `CheckInvariants` ops actually
@@ -153,7 +175,7 @@ async fn dst_random_workload_no_faults() {
     let seeds = mode.seeds(100, 10);
     let ops = mode.ops(50, 20);
 
-    for seed in 0..seeds {
+    for seed in shard_seeds(seeds) {
         let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
         let mut harness = SimPlatformHarness::no_faults(seed);
 
@@ -179,7 +201,7 @@ async fn dst_random_workload_event_faults() {
     let seeds = mode.seeds(50, 5);
     let ops = mode.ops(30, 15);
 
-    for seed in 0..seeds {
+    for seed in shard_seeds(seeds) {
         let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
         let mut harness = SimPlatformHarness::new(
             seed,
@@ -213,7 +235,7 @@ async fn dst_random_workload_platform_faults() {
     let seeds = mode.seeds(50, 5);
     let ops = mode.ops(30, 15);
 
-    for seed in 0..seeds {
+    for seed in shard_seeds(seeds) {
         let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
         let mut harness = SimPlatformHarness::new(
             seed,
@@ -247,7 +269,7 @@ async fn dst_random_workload_combined_faults() {
     let seeds = mode.seeds(50, 5);
     let ops = mode.ops(30, 15);
 
-    for seed in 0..seeds {
+    for seed in shard_seeds(seeds) {
         let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
         let mut harness = SimPlatformHarness::new(
             seed,
@@ -283,7 +305,7 @@ async fn dst_random_workload_determinism() {
     let seeds = mode.seeds(10, 3);
     let ops = mode.ops(50, 20);
 
-    for seed in 0..seeds {
+    for seed in shard_seeds(seeds) {
         let mut results = Vec::new();
 
         for _run in 0..2 {
