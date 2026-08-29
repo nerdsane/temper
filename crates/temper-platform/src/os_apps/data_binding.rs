@@ -1,13 +1,40 @@
 //! Artifact-carried module SDK binding verification.
 
+use temper_runtime::tenant::TenantId;
 use temper_wasm_sdk::data::{
     ArtifactModuleSdkBinding, ModuleDataBudgets, ModuleDataGrant, ModuleSdkManifest,
     read_module_sdk_artifact_binding,
 };
 
 use crate::app_bundles::CanonicalBundleManifestV1;
+use crate::state::PlatformState;
 
 use super::{AppBundle, WasmModuleManifest};
+
+pub(super) fn admit_collection_specs(
+    state: &PlatformState,
+    tenant: &str,
+    bundle: &AppBundle,
+    specs_enabled: bool,
+) -> Result<(), String> {
+    if !specs_enabled {
+        return Ok(());
+    }
+    let registry = state
+        .registry
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (entity_type, ioa_source) in &bundle.specs {
+        let existing_source = registry
+            .get_spec(&TenantId::new(tenant), entity_type)
+            .map(|existing| existing.ioa_source.as_str());
+        state
+            .server
+            .collection_workflow_mode
+            .require_spec_source(existing_source, ioa_source)?;
+    }
+    Ok(())
+}
 
 pub(super) fn verify_bundle_data_bindings(
     bundle: &AppBundle,

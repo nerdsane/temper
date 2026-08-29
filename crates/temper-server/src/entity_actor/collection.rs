@@ -15,7 +15,10 @@ use crate::trigger::collection_workflow::{
 use crate::trigger::delivery::ReactionReceipt;
 
 /// Commit a source start/control action through the collection ledger when declared.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "collection commit identity remains explicit"
+)]
 pub(super) async fn commit_collection_source_action(
     store: &BoxedEventStore,
     source_append: PersistenceAppend,

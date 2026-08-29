@@ -251,7 +251,6 @@ impl AwaitedExecutionOwner {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn complete(
         &self,
         execution_id: &str,

@@ -20,7 +20,10 @@ fn persisted_authorization_reason(raw_reason: &str, typed_routes: bool) -> &str 
 }
 impl crate::state::ServerState {
     /// Record a WASM invocation (persist log entry + emit observability events).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "callback receipt fields remain explicit"
+    )]
     pub(super) async fn record_invocation(
         &self,
         entity_ref: WasmEntityRef<'_>,
@@ -262,7 +265,10 @@ impl crate::state::ServerState {
     }
 
     #[instrument(skip_all, fields(otel.name = "dispatch.dispatch_wasm_callback", callback_action))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "callback dispatch preserves separate authorities"
+    )]
     pub(super) async fn dispatch_wasm_callback(
         &self,
         entity_ref: WasmEntityRef<'_>,

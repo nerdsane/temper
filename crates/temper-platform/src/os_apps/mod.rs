@@ -3,7 +3,6 @@
 //! OS apps are spec bundles (IOA TOML + CSDL + Cedar policies) loaded from
 //! the `os-apps/` directory in local development and tests. Agents discover them via
 //! `list_os_apps()` / `install_os_app()`.
-//!
 //! Install reuses [`crate::bootstrap::bootstrap_tenant_specs`] so every app goes through the same verification cascade as system specs.
 
 use std::collections::BTreeMap;
@@ -1146,18 +1145,7 @@ pub(crate) async fn install_os_app_from_dir_with_plan(
             app_dir.display()
         )
     })?;
-    if plan.specs {
-        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
-        for (entity_type, ioa_source) in &bundle.specs {
-            let existing_source = registry
-                .get_spec(&TenantId::new(tenant), entity_type)
-                .map(|existing| existing.ioa_source.as_str());
-            state
-                .server
-                .collection_workflow_mode
-                .require_spec_source(existing_source, ioa_source)?;
-        }
-    }
+    data_binding::admit_collection_specs(state, tenant, &bundle, plan.specs)?;
     if bundle.deployment_mode == AppDeploymentMode::Commons {
         state.server.enable_commons_guardrails(tenant);
     }

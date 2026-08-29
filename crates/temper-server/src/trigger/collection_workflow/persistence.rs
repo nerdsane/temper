@@ -22,7 +22,6 @@ pub(crate) use recovery::{
 use source::active_workflow_append;
 pub(crate) use source::load_active_source_workflow_id;
 use source::{attach_active_workflow, ensure_source_journal};
-
 /// Reserved source-event field containing normalized collection starts.
 pub(crate) const COLLECTION_START_INTENTS_FIELD: &str = "_temper_collection_starts_v1";
 /// Reserved source-event field containing normalized collection controls.

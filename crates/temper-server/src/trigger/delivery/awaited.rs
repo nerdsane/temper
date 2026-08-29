@@ -90,7 +90,10 @@ impl ReactionDeliveryRecord {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "durable execution identity is explicit"
+    )]
     pub(crate) fn record_awaited_completion(
         &mut self,
         fencing_token: u64,
