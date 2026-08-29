@@ -97,6 +97,10 @@ pub enum ActorError {
 
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// Cross-namespace persistence denied (ARN-215).
+    #[error("namespace capability denied: {0}")]
+    NamespaceDenied(String),
 }
 
 /// The actor's interface to the system. Passed to `handle()`.
@@ -111,6 +115,9 @@ pub struct ActorContext {
     pub(crate) mailbox: Option<std::sync::Arc<dyn crate::mailbox::Mailbox>>,
     /// Pool for spawn/lookup operations.
     pub(crate) pool: Option<deadpool_postgres::Pool>,
+    /// Explicit grants for cross-namespace load/upsert (ADR-0164 / ARN-215).
+    /// Own namespace is always allowed without a grant.
+    cross_namespace_grants: std::sync::Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl ActorContext {
@@ -125,7 +132,57 @@ impl ActorContext {
             pending_tells: Mutex::new(Vec::new()),
             mailbox,
             pool,
+            cross_namespace_grants: std::sync::Mutex::new(std::collections::BTreeSet::new()),
         }
+    }
+
+    /// Grant cross-namespace load/upsert for a same-tenant namespace (ARN-215).
+    ///
+    /// Own namespace is always allowed without a grant. Grants are additive.
+    ///
+    /// # Security contract
+    ///
+    /// Grants are **type-enforced to the caller's tenant root** (first path
+    /// segment of `self_handle.namespace`). A handler cannot self-grant into
+    /// another tenant's namespace tree. Path separators, `..`, NUL, and empty
+    /// strings are rejected. Untrusted payload segments (e.g. `process_id`)
+    /// must still be validated by the caller before composition — see
+    /// `temper-agents` process-id checks.
+    ///
+    /// Returns [`ActorError::NamespaceDenied`] when the grant would cross
+    /// tenant roots or fails structural validation.
+    pub fn grant_cross_namespace(&self, namespace: impl Into<String>) -> Result<(), ActorError> {
+        let ns = namespace.into();
+        self.validate_grant_target(&ns)?;
+        // Recover poison so a prior panic does not silently drop later grants.
+        self.cross_namespace_grants
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(ns);
+        Ok(())
+    }
+
+    /// Reject grants outside the actor's tenant root or with path traversal.
+    fn validate_grant_target(&self, namespace: &str) -> Result<(), ActorError> {
+        if namespace.is_empty()
+            || namespace.contains('\0')
+            || namespace.contains('\\')
+            || namespace.contains("..")
+            || namespace.starts_with('/')
+        {
+            return Err(ActorError::NamespaceDenied(format!(
+                "invalid grant namespace '{namespace}'"
+            )));
+        }
+        let self_root = self.self_handle.namespace.split('/').next().unwrap_or("");
+        let grant_root = namespace.split('/').next().unwrap_or("");
+        if self_root.is_empty() || grant_root != self_root {
+            return Err(ActorError::NamespaceDenied(format!(
+                "actor '{}' cannot grant namespace '{}' outside tenant root '{}'",
+                self.self_handle.namespace, namespace, self_root
+            )));
+        }
+        Ok(())
     }
 
     /// This actor's own address.
@@ -133,12 +190,34 @@ impl ActorContext {
         &self.self_handle
     }
 
+    /// Fail closed unless `namespace` is self or explicitly granted (ARN-215).
+    fn require_namespace_access(&self, namespace: &str) -> Result<(), ActorError> {
+        if namespace == self.self_handle.namespace {
+            return Ok(());
+        }
+        let granted = self
+            .cross_namespace_grants
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(namespace);
+        if granted {
+            return Ok(());
+        }
+        Err(ActorError::NamespaceDenied(format!(
+            "actor '{}' cannot access namespace '{}' without an explicit grant",
+            self.self_handle.namespace, namespace
+        )))
+    }
+
     /// Load raw state bytes for an actor instance.
+    ///
+    /// Cross-namespace reads require a prior [`grant_cross_namespace`].
     pub async fn load_actor_state(
         &self,
         namespace: &str,
         actor_type: &str,
     ) -> Result<Option<Vec<u8>>, ActorError> {
+        self.require_namespace_access(namespace)?;
         let Some(pool) = &self.pool else {
             return Err(ActorError::Internal("no pool in ActorContext".into()));
         };
@@ -158,12 +237,15 @@ impl ActorContext {
 
     /// Best-effort spawn/update of an actor instance with explicit state bytes.
     /// Used by integrations to persist auxiliary entities (e.g. Message).
+    ///
+    /// Cross-namespace writes require a prior [`grant_cross_namespace`].
     pub async fn upsert_actor_state(
         &self,
         namespace: &str,
         actor_type: &str,
         state: Vec<u8>,
     ) -> Result<(), ActorError> {
+        self.require_namespace_access(namespace)?;
         let Some(pool) = &self.pool else {
             return Err(ActorError::Internal("no pool in ActorContext".into()));
         };
@@ -332,4 +414,46 @@ pub trait Actor: Send + Sync + 'static {
         state: &mut Vec<u8>,
         message: &Message,
     ) -> Result<(), ActorError>;
+}
+
+#[cfg(test)]
+mod namespace_cap_tests {
+    use super::*;
+
+    #[test]
+    fn same_namespace_allowed_without_grant() {
+        let ctx = ActorContext::new(ActorHandle::new("ns-a", "Process"), None, None);
+        assert!(ctx.require_namespace_access("ns-a").is_ok());
+    }
+
+    #[test]
+    fn cross_namespace_denied_without_grant() {
+        let ctx = ActorContext::new(ActorHandle::new("ns-a", "Process"), None, None);
+        let err = ctx.require_namespace_access("ns-b").unwrap_err();
+        assert!(matches!(err, ActorError::NamespaceDenied(_)));
+    }
+
+    #[test]
+    fn same_tenant_child_allowed_after_grant() {
+        let ctx = ActorContext::new(ActorHandle::new("ns-a", "Process"), None, None);
+        ctx.grant_cross_namespace("ns-a/child")
+            .expect("same-tenant child grant");
+        assert!(ctx.require_namespace_access("ns-a/child").is_ok());
+    }
+
+    #[test]
+    fn grant_rejects_other_tenant_root() {
+        let ctx = ActorContext::new(ActorHandle::new("ns-a", "Process"), None, None);
+        let err = ctx.grant_cross_namespace("ns-b").unwrap_err();
+        assert!(matches!(err, ActorError::NamespaceDenied(_)));
+        assert!(ctx.require_namespace_access("ns-b").is_err());
+    }
+
+    #[test]
+    fn grant_rejects_path_traversal() {
+        let ctx = ActorContext::new(ActorHandle::new("tenant/proc", "Process"), None, None);
+        assert!(ctx.grant_cross_namespace("tenant/../other").is_err());
+        assert!(ctx.grant_cross_namespace("").is_err());
+        assert!(ctx.grant_cross_namespace("/tenant/x").is_err());
+    }
 }
