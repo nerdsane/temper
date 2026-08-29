@@ -65,7 +65,9 @@ pub(super) fn reaction_dispatch_failure(
         DispatchError::Deferred { .. } => ReactionFailureKind::DispatchDeferred,
         DispatchError::AuthzDenied(_) => ReactionFailureKind::AuthorizationDenied,
         DispatchError::QuotaExceeded(_) => ReactionFailureKind::DispatchBudgetExhausted,
-        DispatchError::Conflict(_) => ReactionFailureKind::DispatchConflict,
+        DispatchError::Conflict(_) | DispatchError::CollectionWorkflowConflict(_) => {
+            ReactionFailureKind::DispatchConflict
+        }
         DispatchError::Ungoverned(_) => ReactionFailureKind::TargetUngoverned,
         DispatchError::ActorFailed(_)
         | DispatchError::WasmFailed(_)

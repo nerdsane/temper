@@ -21,9 +21,6 @@ impl TransitionTable {
     pub fn try_from_ioa_source(ioa_toml: &str) -> Result<Self, String> {
         let automaton = automaton::parse_automaton(ioa_toml)
             .map_err(|e| format!("failed to parse I/O Automaton TOML: {e}"))?;
-        if !automaton.collection_workflows.is_empty() {
-            return Err("CollectionWorkflowNotEnabled: public collection workflow activation is gated by ADR-0181 readiness checks".to_string());
-        }
         Ok(Self::from_automaton(&automaton))
     }
 
@@ -157,6 +154,7 @@ impl TransitionTable {
             initial_state: automaton.automaton.initial.clone(),
             schema_digest: None,
             state_timeouts: automaton.state_timeouts.clone(),
+            collection_workflows: automaton.collection_workflows.clone(),
             failure_routes,
             rules,
             keys: automaton

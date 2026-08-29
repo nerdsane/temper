@@ -1,20 +1,25 @@
 //! Durable reaction delivery identities and lifecycle records (ADR-0158).
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use temper_runtime::persistence::PersistenceError;
 use temper_runtime::persistence::schema_deployment::SchemaEventPin;
-use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
-use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 use super::types::ReactionRule;
-use crate::storage::BoxedEventStore;
 
+mod awaited;
 mod failure;
 mod identity;
 mod payload;
+mod persistence;
 mod state_timeout;
 pub(crate) use failure::{DurableFailureKind, delivery_failure_envelope};
 pub use identity::stable_delivery_id;
 pub use payload::{attach_intents, attach_receipt, extract_intents, extract_receipt};
+pub(crate) use persistence::delivery_record_append;
+pub use persistence::{
+    append_delivery_record, delivery_journal_id, find_delivery_record, initialize_delivery_record,
+    list_delivery_records, list_delivery_records_page, load_delivery_record,
+};
 pub(crate) use state_timeout::state_timeout_declaration_id;
 pub use state_timeout::{
     DeliveryKind, STATE_TIMEOUT_CLOCK_AUDIT_BUDGET, STATE_TIMEOUT_SERVICE,
@@ -34,6 +39,8 @@ pub const MAX_AUTOMATIC_ATTEMPTS: u32 = 5;
 pub const MAX_MANUAL_RETRIES: u32 = 3;
 /// Private synthetic entity type used for one journal per logical delivery.
 pub const REACTION_DELIVERY_ENTITY_TYPE: &str = "_ReactionDelivery";
+/// Maximum private callback evidence retained for one awaited integration.
+pub const MAX_AWAITED_CALLBACK_EVIDENCE_BYTES: usize = 128 * 1024;
 /// Bounded rule and authority snapshot supplied to the entity actor at commit.
 #[derive(Debug, Clone)]
 pub struct ReactionCommitContext {
@@ -73,6 +80,16 @@ pub struct ReactionReceipt {
     /// Collection workflow fence checked at the target commit boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection: Option<crate::trigger::collection_workflow::CollectionDeliveryContext>,
+    /// Awaited callback whose acceptance must be co-committed with the target event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) awaited_callback: Option<AwaitedCallbackReceiptV1>,
+}
+
+/// Exact awaited execution authorized to commit one callback target event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AwaitedCallbackReceiptV1 {
+    pub(crate) execution_id: String,
+    pub(crate) callback_action: String,
 }
 
 /// Immutable normalized reaction input committed with the source event.
@@ -157,6 +174,74 @@ pub enum ReactionDeliveryStatus {
     DeadLettered,
 }
 
+/// Immutable identity of the single awaited WASM integration bound to a
+/// collection-member delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AwaitedExecutionIdentityV1 {
+    pub(crate) execution_id: String,
+    pub(crate) integration_name: String,
+    pub(crate) module_name: String,
+    pub(crate) module_digest: String,
+    pub(crate) success_callback: String,
+    pub(crate) failure_callback: Option<String>,
+    pub(crate) schema_pin: Option<SchemaEventPin>,
+    pub(crate) deadline: DateTime<Utc>,
+}
+
+/// Durable boundary reached by one awaited collection-member integration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AwaitedExecutionPhase {
+    Executing,
+    ExecutionSucceeded,
+    ExecutionFailed,
+    CallbackAccepted,
+}
+
+/// Closed failure outcomes retained without relying on diagnostic strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AwaitedExecutionFailureClass {
+    ModuleFailure,
+    CallbackRejected,
+    CallbackTimeout,
+    CallbackStorageFailure,
+}
+
+/// Typed ownership failure evidence independent of execution completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AwaitedOwnerFailureClass {
+    RenewalLost,
+    StorageFailure,
+    DeadlineElapsed,
+}
+
+/// Last fenced owner failure retained for recovery and diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AwaitedOwnerFailureEvidenceV1 {
+    pub(crate) class: AwaitedOwnerFailureClass,
+    pub(crate) fencing_token: u64,
+    pub(crate) occurred_at: DateTime<Utc>,
+}
+
+/// Private replay evidence for an awaited integration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct AwaitedExecutionEvidenceV1 {
+    pub(crate) identity: AwaitedExecutionIdentityV1,
+    pub(crate) phase: AwaitedExecutionPhase,
+    pub(crate) fencing_token: u64,
+    pub(crate) started_at: DateTime<Utc>,
+    pub(crate) completed_at: Option<DateTime<Utc>>,
+    pub(crate) callback_action: Option<String>,
+    pub(crate) callback_params: Option<serde_json::Value>,
+    pub(crate) callback_digest: Option<String>,
+    pub(crate) callback_accepted_at: Option<DateTime<Utc>>,
+    pub(crate) callback_sequence: Option<u64>,
+    pub(crate) execution_failure: Option<AwaitedExecutionFailureClass>,
+    pub(crate) callback_failure: Option<AwaitedExecutionFailureClass>,
+}
+
 impl ReactionDeliveryStatus {
     /// Whether normal automatic delivery work has ended.
     pub(crate) const fn is_terminal(self) -> bool {
@@ -193,6 +278,12 @@ pub struct ReactionDeliveryRecord {
     pub transient_failure: bool,
     /// Sanitized last failure reason.
     pub last_error: Option<String>,
+    /// Exact private execution evidence for an awaited collection member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) awaited_execution: Option<AwaitedExecutionEvidenceV1>,
+    /// Typed failure from the most recent awaited execution owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) awaited_owner_failure: Option<AwaitedOwnerFailureEvidenceV1>,
     /// Canonical typed failure for the latest terminal unsuccessful outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<temper_failure::FailureEnvelopeV1>,
@@ -212,6 +303,8 @@ impl ReactionDeliveryRecord {
             next_attempt_at,
             transient_failure: false,
             last_error: None,
+            awaited_execution: None,
+            awaited_owner_failure: None,
             failure: None,
         }
     }
@@ -310,173 +403,6 @@ impl ReactionDeliveryRecord {
         }
         Ok(())
     }
-}
-
-/// Persistence ID of the private lifecycle journal for an intent.
-pub fn delivery_journal_id(intent: &PersistedReactionIntent) -> String {
-    format!(
-        "{}:{REACTION_DELIVERY_ENTITY_TYPE}:{}",
-        intent.tenant, intent.delivery_id
-    )
-}
-
-/// Append one fenced lifecycle snapshot to the delivery's private journal.
-pub async fn append_delivery_record(
-    store: &BoxedEventStore,
-    expected_sequence: u64,
-    record: &ReactionDeliveryRecord,
-) -> Result<u64, PersistenceError> {
-    let append = delivery_record_append(expected_sequence, record)?;
-    let results = store.append_batch(std::slice::from_ref(&append)).await?;
-    Ok(results[0].sequence_nr)
-}
-
-/// Build a delivery append for atomic composition with its owning workflow.
-pub(crate) fn delivery_record_append(
-    expected_sequence: u64,
-    record: &ReactionDeliveryRecord,
-) -> Result<temper_runtime::persistence::PersistenceAppend, PersistenceError> {
-    let payload = serde_json::to_value(record)
-        .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
-    let persistence_id = delivery_journal_id(&record.intent);
-    let envelope = PersistenceEnvelope {
-        sequence_nr: expected_sequence + 1,
-        event_type: format!("ReactionDelivery::{:?}", record.status),
-        payload,
-        metadata: EventMetadata {
-            event_id: sim_uuid(),
-            causation_id: sim_uuid(),
-            correlation_id: sim_uuid(),
-            timestamp: sim_now(),
-            actor_id: persistence_id.clone(),
-            kernel: None,
-        },
-    };
-    Ok(temper_runtime::persistence::PersistenceAppend {
-        persistence_id,
-        expected_sequence,
-        events: vec![envelope],
-        key_rows: Vec::new(),
-        vector_rows: Vec::new(),
-        reconcile_vectors: false,
-    })
-}
-
-/// Restore the latest lifecycle snapshot, inferring `Pending` from the atomic
-/// source intent when no lifecycle journal exists yet.
-pub async fn load_delivery_record(
-    store: &BoxedEventStore,
-    intent: PersistedReactionIntent,
-) -> Result<(ReactionDeliveryRecord, u64), PersistenceError> {
-    let persistence_id = delivery_journal_id(&intent);
-    let events = store.read_events(&persistence_id, 0).await?;
-    let Some(latest) = events.last() else {
-        return Ok((ReactionDeliveryRecord::pending(intent), 0));
-    };
-    let record: ReactionDeliveryRecord = serde_json::from_value(latest.payload.clone())
-        .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
-    if record.intent.delivery_id != intent.delivery_id || record.intent.tenant != intent.tenant {
-        return Err(PersistenceError::Serialization(
-            "delivery journal identity does not match source intent".to_string(),
-        ));
-    }
-    Ok((record, latest.sequence_nr))
-}
-
-/// Materialize the inferred Pending state so it is immediately queryable.
-pub async fn initialize_delivery_record(
-    store: &BoxedEventStore,
-    intent: PersistedReactionIntent,
-) -> Result<(), PersistenceError> {
-    let (record, sequence) = load_delivery_record(store, intent).await?;
-    if sequence != 0 {
-        return Ok(());
-    }
-    match append_delivery_record(store, 0, &record).await {
-        Ok(_) | Err(PersistenceError::ConcurrencyViolation { .. }) => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-/// List bounded delivery records inferred from committed source intents.
-pub async fn list_delivery_records(
-    store: &BoxedEventStore,
-    tenant: &str,
-    limit: usize,
-) -> Result<Vec<(ReactionDeliveryRecord, u64)>, PersistenceError> {
-    list_delivery_records_page(store, tenant, None, limit).await
-}
-
-/// Read one keyset page of current delivery lifecycle records.
-pub async fn list_delivery_records_page(
-    store: &BoxedEventStore,
-    tenant: &str,
-    after_delivery_id: Option<&str>,
-    limit: usize,
-) -> Result<Vec<(ReactionDeliveryRecord, u64)>, PersistenceError> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    let mut records = Vec::new();
-    let mut after = after_delivery_id.map(|delivery_id| {
-        (
-            REACTION_DELIVERY_ENTITY_TYPE.to_string(),
-            delivery_id.to_string(),
-        )
-    });
-    while records.len() < limit {
-        let page = store
-            .list_journal_ids_page(
-                tenant,
-                Some(REACTION_DELIVERY_ENTITY_TYPE),
-                after
-                    .as_ref()
-                    .map(|(entity_type, entity_id)| (entity_type.as_str(), entity_id.as_str())),
-                limit.saturating_sub(records.len()).max(1),
-            )
-            .await?;
-        if page.is_empty() {
-            break;
-        }
-        after = page.last().cloned();
-        for (entity_type, entity_id) in page {
-            if entity_type != REACTION_DELIVERY_ENTITY_TYPE {
-                continue;
-            }
-            let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
-            let events = store.read_latest_events(&persistence_id, 1).await?;
-            if let Some(latest) = events.last() {
-                let record: ReactionDeliveryRecord = serde_json::from_value(latest.payload.clone())
-                    .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
-                records.push((record, latest.sequence_nr));
-                if records.len() >= limit {
-                    break;
-                }
-            }
-        }
-    }
-    Ok(records)
-}
-
-/// Find one tenant-scoped delivery record by stable identity.
-pub async fn find_delivery_record(
-    store: &BoxedEventStore,
-    tenant: &str,
-    delivery_id: &str,
-) -> Result<Option<(ReactionDeliveryRecord, u64)>, PersistenceError> {
-    let persistence_id = format!("{tenant}:{REACTION_DELIVERY_ENTITY_TYPE}:{delivery_id}");
-    let events = store.read_latest_events(&persistence_id, 1).await?;
-    let Some(latest) = events.last() else {
-        return Ok(None);
-    };
-    let record: ReactionDeliveryRecord = serde_json::from_value(latest.payload.clone())
-        .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
-    if record.intent.tenant != tenant || record.intent.delivery_id != delivery_id {
-        return Err(PersistenceError::Serialization(
-            "delivery journal identity does not match request".to_string(),
-        ));
-    }
-    Ok(Some((record, latest.sequence_nr)))
 }
 
 #[cfg(test)]

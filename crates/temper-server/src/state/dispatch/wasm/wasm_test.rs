@@ -84,6 +84,28 @@ fn module_data_target_requires_exact_actor_and_host_schema_provenance() {
 }
 
 #[test]
+fn tenant_global_takeover_keeps_bound_digest_after_module_name_replacement() {
+    let tenant = TenantId::new("tenant-a");
+    let mut registry = crate::wasm_registry::WasmModuleRegistry::new();
+    registry.register(&tenant, "worker", "old-digest");
+
+    let bound_digest = registry
+        .get_hash(&tenant, "worker")
+        .expect("initial module should resolve")
+        .to_string();
+    registry.register(&tenant, "worker", "replacement-digest");
+
+    let recovered =
+        resolve_tenant_global_module(&registry, &tenant, "worker", Some(bound_digest.as_str()))
+            .expect("takeover should resolve the bound execution artifact");
+    let fresh = resolve_tenant_global_module(&registry, &tenant, "worker", None)
+        .expect("a fresh execution should resolve the replacement artifact");
+
+    assert_eq!(recovered.hash, "old-digest");
+    assert_eq!(fresh.hash, "replacement-digest");
+}
+
+#[test]
 fn internal_http_issuer_refuses_system_and_accepts_resolved_agents() {
     let state = crate::state::ServerState::from_registry(
         temper_runtime::ActorSystem::new("internal-capability-issuer-test"),

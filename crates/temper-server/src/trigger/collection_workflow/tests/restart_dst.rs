@@ -4,7 +4,7 @@ use temper_store_sim::{DeterministicRng, SimEventStore, SimFaultConfig};
 use super::*;
 
 const DST_SEEDS: std::ops::Range<u64> = 0..32;
-const GENERATED_DST_SEEDS: std::ops::Range<u64> = 0..128;
+const GENERATED_DST_SEEDS: std::ops::Range<u64> = 0..1_000;
 const RESTART_ATTEMPT_BUDGET: usize = 64;
 
 #[derive(Default)]

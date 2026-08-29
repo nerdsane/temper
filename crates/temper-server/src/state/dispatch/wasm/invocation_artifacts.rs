@@ -2,13 +2,14 @@ use super::failure_routing::{WasmFailure, failure_callback};
 use super::{WasmDispatchCtx, WasmDispatchMode, WasmEntityRef, record_wasm_error_on_current_span};
 use crate::entity_actor::EntityResponse;
 use crate::request_context::AgentContext;
-use crate::state::pending_decisions::PendingDecision;
-use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 use crate::state::wasm_invocation_log::WasmInvocationEntry;
 use temper_observe::wide_event;
-use temper_runtime::scheduler::{sim_now, sim_uuid};
-use temper_runtime::tenant::TenantId;
+use temper_runtime::scheduler::sim_now;
 use tracing::{Instrument, instrument};
+
+mod authorization;
+mod awaited;
+use awaited::{awaited_callback_failure_class, callback_agent_context};
 
 fn persisted_authorization_reason(raw_reason: &str, typed_routes: bool) -> &str {
     if typed_routes {
@@ -17,10 +18,12 @@ fn persisted_authorization_reason(raw_reason: &str, typed_routes: bool) -> &str 
         raw_reason
     }
 }
-
 impl crate::state::ServerState {
     /// Record a WASM invocation (persist log entry + emit observability events).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "callback receipt fields remain explicit"
+    )]
     pub(super) async fn record_invocation(
         &self,
         entity_ref: WasmEntityRef<'_>,
@@ -121,20 +124,30 @@ impl crate::state::ServerState {
         };
 
         if !integration.failure_routes.is_empty() {
-            let envelope = failure
-                .into_envelope(
-                    ctx.dispatch_idempotency_key
-                        .or(ctx.agent_ctx.idempotency_key.as_deref()),
-                    [
-                        ctx.entity_ref.tenant.as_str(),
-                        ctx.entity_ref.entity_type,
-                        ctx.entity_ref.entity_id,
-                        ctx.action,
-                        &integration.name,
-                    ],
-                    decision_id.as_deref(),
-                )
-                .map_err(|error| format!("InvalidFailureAdapterOutput: {error}"))?;
+            let envelope = match failure.into_envelope(
+                ctx.dispatch_idempotency_key
+                    .or(ctx.agent_ctx.idempotency_key.as_deref()),
+                [
+                    ctx.entity_ref.tenant.as_str(),
+                    ctx.entity_ref.entity_type,
+                    ctx.entity_ref.entity_id,
+                    ctx.action,
+                    &integration.name,
+                ],
+                decision_id.as_deref(),
+            ) {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    self.complete_awaited_module_failure(
+                        ctx.dispatch_idempotency_key,
+                        ctx.agent_ctx,
+                        None,
+                        None,
+                    )
+                    .await?;
+                    return Err(format!("InvalidFailureAdapterOutput: {error}"));
+                }
+            };
             self.record_typed_failure_observation(
                 ctx.entity_ref,
                 &integration.name,
@@ -161,8 +174,15 @@ impl crate::state::ServerState {
                 is_authz_denied.then_some(true),
             )
             .await;
-            let callback = callback_result?;
             let params = serde_json::json!({"failure": envelope});
+            let callback = self
+                .settle_awaited_typed_failure(
+                    ctx.dispatch_idempotency_key,
+                    ctx.agent_ctx,
+                    callback_result,
+                    params.clone(),
+                )
+                .await?;
             let callback_ctx = super::super::typed_failure::typed_failure_callback_context(
                 ctx.agent_ctx,
                 &envelope.operation.id,
@@ -174,7 +194,10 @@ impl crate::state::ServerState {
                 callback,
                 params,
                 &callback_ctx,
+                Some(ctx.agent_ctx),
                 ctx.mode,
+                &integration.name,
+                module_name,
                 true,
             )
             .await;
@@ -203,17 +226,36 @@ impl crate::state::ServerState {
                 params["decision_id"] = serde_json::json!(did);
                 params["authz_denied"] = serde_json::json!(true);
             }
-            return super::dispatch_wasm_callback_boxed(
+            self.complete_awaited_module_failure(
+                ctx.dispatch_idempotency_key,
+                ctx.agent_ctx,
+                Some(cb),
+                Some(params.clone()),
+            )
+            .await?;
+            let response = super::dispatch_wasm_callback_boxed(
                 self,
                 ctx.entity_ref,
                 cb,
                 params,
                 ctx.agent_ctx,
+                None,
                 ctx.mode,
+                &integration.name,
+                module_name,
                 false,
             )
-            .await;
+            .await?;
+            return Ok(response);
         }
+
+        self.complete_awaited_module_failure(
+            ctx.dispatch_idempotency_key,
+            ctx.agent_ctx,
+            None,
+            None,
+        )
+        .await?;
 
         // No declared recovery: propagate the failure instead of swallowing it
         // (ADR-0152). The invocation was already recorded above, so telemetry
@@ -223,15 +265,23 @@ impl crate::state::ServerState {
     }
 
     #[instrument(skip_all, fields(otel.name = "dispatch.dispatch_wasm_callback", callback_action))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "callback dispatch preserves separate authorities"
+    )]
     pub(super) async fn dispatch_wasm_callback(
         &self,
         entity_ref: WasmEntityRef<'_>,
         callback_action: &str,
         callback_params: serde_json::Value,
         agent_ctx: &AgentContext,
+        awaited_agent_ctx: Option<&AgentContext>,
         mode: WasmDispatchMode,
+        integration_name: &str,
+        module_name: &str,
         preserve_idempotency: bool,
     ) -> Result<Option<EntityResponse>, String> {
+        let awaited_agent_ctx = awaited_agent_ctx.unwrap_or(agent_ctx);
         match mode {
             WasmDispatchMode::Inline => {
                 // Preserve inline semantics through nested WASM callbacks.
@@ -239,20 +289,79 @@ impl crate::state::ServerState {
                 // its own WASM trigger; returning before that nested trigger
                 // commits lets concurrent requests observe stale detailed
                 // fields while counters advance.
-                let resp = super::dispatch_tenant_action_core_boxed(
+                let callback_ctx = if preserve_idempotency {
+                    agent_ctx.clone()
+                } else {
+                    callback_agent_context(
+                        agent_ctx,
+                        integration_name,
+                        module_name,
+                        callback_action,
+                    )
+                };
+                let reaction_context = self
+                    .awaited_callback_commit_context(
+                        entity_ref,
+                        callback_action,
+                        &callback_params,
+                        awaited_agent_ctx,
+                    )
+                    .await?;
+                let dispatch = super::dispatch_tenant_action_core_boxed(
                     self,
                     entity_ref.tenant,
                     entity_ref.entity_type,
                     entity_ref.entity_id,
                     callback_action,
                     callback_params,
-                    agent_ctx,
+                    &callback_ctx,
                     true,
-                    None,
+                    reaction_context,
                     None,
                 )
-                .await
-                .map_err(|e| e.to_string())?;
+                .await;
+                let awaited_owner =
+                    awaited_agent_ctx
+                        .idempotency_key
+                        .as_deref()
+                        .and_then(|delivery_id| {
+                            self.awaited_execution_owner(delivery_id, awaited_agent_ctx)
+                        });
+                let resp = match dispatch {
+                    Ok(response) => response,
+                    Err(error) => {
+                        if let Some(owner) = awaited_owner.as_ref()
+                            && let Err(evidence_error) = owner
+                                .record_callback_failure(
+                                    awaited_callback_failure_class(&error),
+                                    sim_now(),
+                                )
+                                .await
+                        {
+                            tracing::error!(
+                                callback = callback_action,
+                                error = %evidence_error,
+                                "failed to persist awaited callback failure evidence"
+                            );
+                        }
+                        return Err(error.to_string());
+                    }
+                };
+                if !resp.success
+                    && let Some(owner) = awaited_owner
+                    && let Err(evidence_error) = owner
+                        .record_callback_failure(
+                            crate::trigger::delivery::AwaitedExecutionFailureClass::CallbackRejected,
+                            sim_now(),
+                        )
+                        .await
+                {
+                    tracing::error!(
+                        callback = callback_action,
+                        error = %evidence_error,
+                        "failed to persist awaited callback rejection evidence"
+                    );
+                }
                 Ok(Some(resp))
             }
             WasmDispatchMode::Background => {
@@ -279,145 +388,7 @@ impl crate::state::ServerState {
             }
         }
     }
-
-    /// Record a WASM authorization denial: persist decision, create governance
-    /// entity, and emit trajectory entry.
-    pub(super) fn record_wasm_authz_denial(
-        &self,
-        entity_ref: WasmEntityRef<'_>,
-        trigger_action: &str,
-        integration_name: &str,
-        module_name: &str,
-        error_str: &str,
-        agent_ctx: &AgentContext,
-    ) -> Option<String> {
-        let pd = PendingDecision::from_denial(
-            entity_ref.tenant.as_str(),
-            "wasm-module",
-            "http_call",
-            "HttpEndpoint",
-            integration_name,
-            serde_json::json!({
-                "entity_type": entity_ref.entity_type,
-                "entity_id": entity_ref.entity_id,
-                "module": module_name,
-                "trigger_action": trigger_action,
-            }),
-            error_str,
-            Some(module_name.to_string()),
-        );
-        let decision_id = pd.id.clone();
-        let _ = self.pending_decision_tx.send(pd.clone());
-        // Tell the Observe UI a new decision exists so the Decisions tab refreshes live.
-        let _ = self
-            .observe_refresh_tx
-            .send(crate::state::ObserveRefreshHint::Decisions);
-        let state_c = self.clone();
-        tokio::spawn(async move {
-            // determinism-ok: background persist of pending decision
-            if let Err(e) = state_c.persist_pending_decision(&pd).await {
-                tracing::error!(error = %e, "failed to persist WASM authz decision");
-            }
-        });
-
-        let state_c = self.clone();
-        let gd_id = format!("GD-{}", sim_uuid());
-        let dispatch_ctx = AgentContext::for_service_inheriting("wasm-runtime", agent_ctx);
-        let gd_params = serde_json::json!({
-            "tenant": entity_ref.tenant.as_str(), "agent_id": "wasm-module",
-            "action_name": "http_call", "resource_type": "HttpEndpoint",
-            "resource_id": integration_name, "denial_reason": error_str,
-            "scope": "narrow", "pending_decision_id": decision_id,
-        });
-        #[rustfmt::skip]
-        tokio::spawn(async move { // determinism-ok: background entity creation
-            let tenant = TenantId::new("temper-system");
-            if let Err(e) = state_c.dispatch_tenant_action(
-                &tenant, "GovernanceDecision", &gd_id,
-                "CreateGovernanceDecision", gd_params, &dispatch_ctx,
-            ).await {
-                tracing::warn!(error = %e, "failed to create GovernanceDecision for WASM denial");
-            }
-        });
-
-        let traj = TrajectoryEntry {
-            timestamp: sim_now().to_rfc3339(),
-            tenant: entity_ref.tenant.to_string(),
-            entity_type: entity_ref.entity_type.to_string(),
-            entity_id: entity_ref.entity_id.to_string(),
-            action: trigger_action.to_string(),
-            success: false,
-            from_status: None,
-            to_status: None,
-            error: Some(error_str.to_string()),
-            // The denial belongs to the agent whose dispatch triggered the
-            // WASM call. Dropping that identity left every WASM denial
-            // unattributable in the trajectory stream.
-            agent_id: agent_ctx.agent_id.clone(),
-            session_id: agent_ctx.session_id.clone(),
-            authz_denied: Some(true),
-            denied_resource: Some(integration_name.to_string()),
-            denied_module: Some(module_name.to_string()),
-            source: Some(TrajectorySource::Authz),
-            spec_governed: None,
-            agent_type: agent_ctx.agent_type.clone(),
-            request_body: Some(serde_json::json!({
-                "integration": integration_name,
-                "module": module_name,
-                "trigger_action": trigger_action,
-            })),
-            intent: agent_ctx.intent.clone(),
-            matched_policy_ids: None,
-            capture_seq: None,
-        };
-        tracing::info!(
-            tenant = %traj.tenant,
-            entity_type = %traj.entity_type,
-            entity_id = %traj.entity_id,
-            action = %traj.action,
-            success = traj.success,
-            from_status = ?traj.from_status,
-            to_status = ?traj.to_status,
-            error = ?traj.error,
-            source = ?traj.source,
-            authz_denied = ?traj.authz_denied,
-            agent_id = traj.agent_id.as_deref().unwrap_or(""),
-            session_id = traj.session_id.as_deref().unwrap_or(""),
-            agent_type = traj.agent_type.as_deref().unwrap_or(""),
-            intent = traj.intent.as_deref().unwrap_or(""),
-            "trajectory.entry"
-        );
-        if !traj.success {
-            tracing::warn!(
-                tenant = %traj.tenant,
-                entity_type = %traj.entity_type,
-                entity_id = %traj.entity_id,
-                action = %traj.action,
-                error = ?traj.error,
-                authz_denied = ?traj.authz_denied,
-                source = ?traj.source,
-                "unmet_intent"
-            );
-        }
-        self.enqueue_trajectory_entry(traj);
-        Some(decision_id)
-    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::persisted_authorization_reason;
-
-    #[test]
-    fn typed_authorization_persistence_redacts_raw_diagnostics() {
-        let secret_bearing = "denied because token=secret";
-        assert_eq!(
-            persisted_authorization_reason(secret_bearing, true),
-            "AuthorizationDenied"
-        );
-        assert_eq!(
-            persisted_authorization_reason(secret_bearing, false),
-            secret_bearing
-        );
-    }
-}
+mod tests;

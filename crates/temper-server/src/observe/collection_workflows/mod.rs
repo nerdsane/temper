@@ -37,6 +37,14 @@ const MAX_MEMBER_LIMIT: usize = 64;
 const VIEW_ACTION: &str = "ViewCollectionWorkflow";
 const RESOURCE_TYPE: &str = "CollectionWorkflow";
 
+fn require_observe_enabled(state: &ServerState) -> Result<(), ObserveError> {
+    state
+        .collection_workflow_mode
+        .observe_enabled()
+        .then_some(())
+        .ok_or_else(|| ObserveError::new(StatusCode::NOT_FOUND, "collection_workflows_disabled"))
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct WorkflowListQuery {
     limit: Option<usize>,
@@ -222,6 +230,7 @@ pub(crate) async fn handle_list_workflows(
     authenticated_context: Option<Extension<AuthenticatedRequestContext>>,
     Query(query): Query<WorkflowListQuery>,
 ) -> Result<Json<WorkflowListResponse>, ObserveError> {
+    require_observe_enabled(&state)?;
     let authenticated = authenticated(authenticated_context.as_deref())?;
     let tenant = observe_tenant_scope(authenticated).as_str();
     let limit = valid_limit(query.limit, DEFAULT_WORKFLOW_LIMIT, MAX_WORKFLOW_LIMIT)?;
@@ -278,6 +287,7 @@ pub(crate) async fn handle_get_workflow(
     authenticated_context: Option<Extension<AuthenticatedRequestContext>>,
     Path(workflow_id): Path<String>,
 ) -> Result<Json<WorkflowDetailResponse>, ObserveError> {
+    require_observe_enabled(&state)?;
     let authenticated = authenticated(authenticated_context.as_deref())?;
     let tenant = observe_tenant_scope(authenticated).as_str();
     let (store, _) = state
@@ -304,6 +314,7 @@ pub(crate) async fn handle_list_members(
     Path(workflow_id): Path<String>,
     Query(query): Query<MemberListQuery>,
 ) -> Result<Json<MemberPageResponse>, ObserveError> {
+    require_observe_enabled(&state)?;
     let authenticated = authenticated(authenticated_context.as_deref())?;
     let tenant = observe_tenant_scope(authenticated).as_str();
     let limit = valid_limit(query.limit, DEFAULT_MEMBER_LIMIT, MAX_MEMBER_LIMIT)?;

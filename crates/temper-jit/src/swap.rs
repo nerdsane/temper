@@ -88,6 +88,7 @@ mod tests {
             initial_state: "A".into(),
             schema_digest: None,
             state_timeouts: vec![],
+            collection_workflows: vec![],
             failure_routes: vec![],
             keys: vec![],
             vectors: vec![],

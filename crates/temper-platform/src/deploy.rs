@@ -72,6 +72,43 @@ pub struct EntityDeployResult {
 /// Orchestrates the verify-and-deploy pipeline.
 pub struct DeployPipeline;
 
+fn admit_collection_sources(state: &PlatformState, input: &DeployInput) -> Result<(), String> {
+    let tenant = TenantId::new(&input.tenant_name);
+    let registry = state
+        .registry
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let existing = registry.get_tenant(&tenant);
+    let incoming = input
+        .entities
+        .iter()
+        .map(|entity| (entity.entity_type.as_str(), entity.ioa_source.as_str()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    for entity in &input.entities {
+        let existing_source = existing
+            .and_then(|config| config.entities.get(&entity.entity_type))
+            .map(|spec| spec.ioa_source.as_str());
+        state
+            .server
+            .collection_workflow_mode
+            .require_spec_source(existing_source, &entity.ioa_source)
+            .map_err(|error| format!("{}: {error}", entity.entity_type))?;
+    }
+    if let Some(existing) = existing {
+        for (entity_type, spec) in &existing.entities {
+            if !incoming.contains_key(entity_type.as_str()) {
+                state
+                    .server
+                    .collection_workflow_mode
+                    .require_spec_source(Some(&spec.ioa_source), "")
+                    .map_err(|error| format!("{entity_type}: {error}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 impl DeployPipeline {
     /// Run the full verify-and-deploy pipeline.
     ///
@@ -94,6 +131,35 @@ impl DeployPipeline {
 
         let mut entity_results = Vec::new();
         let mut all_passed = true;
+
+        if let Err(error) = admit_collection_sources(state, input) {
+            let summary = format!("Deployment rejected by collection workflow mode: {error}");
+            deploy_span.set_status(Status::Error {
+                description: summary.clone().into(),
+            });
+            deploy_span.set_attribute(KeyValue::new("temper.success", false));
+            deploy_span.end();
+            state.broadcast(PlatformEvent::DeployStatus {
+                tenant: input.tenant_name.clone(),
+                success: false,
+                summary: summary.clone(),
+            });
+            return DeployResult {
+                success: false,
+                tenant: input.tenant_name.clone(),
+                entity_results: input
+                    .entities
+                    .iter()
+                    .map(|entity| EntityDeployResult {
+                        entity_name: entity.entity_type.clone(),
+                        verified: false,
+                        ioa_source: entity.ioa_source.clone(),
+                        cascade: None,
+                    })
+                    .collect(),
+                summary,
+            };
+        }
 
         // Step 1-2: Parse and verify each entity spec
         for entity in &input.entities {
@@ -679,5 +745,51 @@ kind = "internal"
         let result = DeployPipeline::verify_and_deploy(&state, &input);
         assert!(!result.success);
         assert!(!result.entity_results[0].verified);
+    }
+
+    #[test]
+    fn deploy_pipeline_rejects_collection_authoring_while_not_enabled() {
+        for mode in [
+            temper_server::trigger::collection_workflow::CollectionWorkflowMode::Disabled,
+            temper_server::trigger::collection_workflow::CollectionWorkflowMode::Draining,
+        ] {
+            let mut state = PlatformState::new(None);
+            state.server.collection_workflow_mode = mode;
+            let mut input = sample_deploy_input();
+            input.entities[0]
+                .ioa_source
+                .push_str("\n[[collection_workflow]]\n");
+
+            let result = DeployPipeline::verify_and_deploy(&state, &input);
+
+            assert!(!result.success);
+            assert!(result.summary.contains(match mode {
+                temper_server::trigger::collection_workflow::CollectionWorkflowMode::Disabled => {
+                    "CollectionWorkflowDisabled"
+                }
+                temper_server::trigger::collection_workflow::CollectionWorkflowMode::Draining => {
+                    "CollectionWorkflowDraining"
+                }
+                temper_server::trigger::collection_workflow::CollectionWorkflowMode::Enabled => {
+                    unreachable!()
+                }
+            }));
+            assert!(
+                state
+                    .registry
+                    .read()
+                    .unwrap()
+                    .get_tenant(&TenantId::new("test-tenant"))
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn platform_server_defaults_collection_authoring_disabled() {
+        assert_eq!(
+            PlatformState::new(None).server.collection_workflow_mode,
+            temper_server::trigger::collection_workflow::CollectionWorkflowMode::Disabled
+        );
     }
 }

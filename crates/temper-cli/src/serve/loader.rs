@@ -127,6 +127,7 @@ pub(super) fn load_into_registry(
     registry: &mut SpecRegistry,
     specs_dir: &str,
     tenant: &str,
+    collection_workflow_mode: temper_server::trigger::collection_workflow::CollectionWorkflowMode,
 ) -> Result<LoadedTenantSpecs> {
     let specs_path = Path::new(specs_dir);
 
@@ -150,6 +151,15 @@ pub(super) fn load_into_registry(
 
     // Read IOA TOML specs
     let ioa_sources = read_ioa_sources(specs_path)?;
+    let tenant_id = TenantId::new(tenant);
+    for (entity_type, source) in &ioa_sources {
+        let existing_source = registry
+            .get_spec(&tenant_id, entity_type)
+            .map(|existing| existing.ioa_source.as_str());
+        collection_workflow_mode
+            .require_spec_source(existing_source, source)
+            .map_err(anyhow::Error::msg)?;
+    }
     let reactions = read_reactions(specs_path)?;
     let cross_invariants_toml = read_cross_invariants_toml(specs_path)?;
     let cedar_policy_text = build_tenant_cedar_policy(specs_path, ioa_sources.keys())?;
@@ -419,6 +429,7 @@ effect = "set phantom true"
             &mut registry,
             tmp.path().to_str().expect("utf8 path"),
             "lint-tenant",
+            temper_server::trigger::collection_workflow::CollectionWorkflowMode::Enabled,
         ) {
             Ok(_) => panic!("lint errors should abort loading"),
             Err(err) => err,

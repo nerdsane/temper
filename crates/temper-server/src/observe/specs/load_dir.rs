@@ -397,6 +397,20 @@ pub(super) async fn load_specs_from_directory(
         .await
         .map_err(|error| (StatusCode::CONFLICT, error))?;
 
+    {
+        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+        let tenant_id = temper_runtime::tenant::TenantId::new(&body.tenant);
+        for (entity_type, source) in &ioa_sources {
+            let existing_source = registry
+                .get_spec(&tenant_id, entity_type)
+                .map(|existing| existing.ioa_source.as_str());
+            state
+                .collection_workflow_mode
+                .require_spec_source(existing_source, source)
+                .map_err(|error| (StatusCode::CONFLICT, error))?;
+        }
+    }
+
     // Persist loaded specs first when Postgres is configured.
     let csdl_xml_for_db = csdl_xml.clone();
     for (entity_type, ioa_source) in &ioa_sources {

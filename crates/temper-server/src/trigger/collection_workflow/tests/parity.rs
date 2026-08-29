@@ -1,5 +1,106 @@
 use super::*;
 
+async fn prove_awaited_execution_semantics(tenant: &str, store: BoxedEventStore) {
+    use crate::trigger::delivery::{
+        AwaitedExecutionPhase, ReactionDeliveryRecord, append_delivery_record, extract_intents,
+        load_delivery_record,
+    };
+
+    let (start_intent, mut workflow) =
+        CollectionWorkflowRecordV1::start(start(tenant, "awaited", &["a"]))
+            .expect("valid awaited workflow start");
+    commit_activated_start(
+        &store,
+        source_append(tenant, "awaited", 0, "StartChecks"),
+        &start_intent,
+        &mut workflow,
+        &super::execution::actions(),
+        None,
+    )
+    .await
+    .expect("activate awaited workflow");
+    let events = store
+        .read_events(
+            &collection_workflow_journal_id(tenant, &workflow.workflow_id),
+            0,
+        )
+        .await
+        .expect("read awaited member intent");
+    let mut intent = extract_intents(&events[0].payload)
+        .expect("decode awaited member intent")
+        .remove(0);
+    super::execution::commit_target_receipt(&store, &mut intent, 0).await;
+
+    let now = temper_runtime::scheduler::sim_now();
+    let deadline = now + chrono::Duration::minutes(2);
+    intent.collection.as_mut().unwrap().execution_deadline = Some(deadline);
+    let mut delivery = ReactionDeliveryRecord::pending(intent.clone());
+    let fence = delivery
+        .claim(now, chrono::Duration::seconds(30))
+        .expect("claim awaited delivery");
+    delivery
+        .begin_dispatch(fence)
+        .expect("begin awaited dispatch");
+    let sequence = append_delivery_record(&store, 0, &delivery)
+        .await
+        .expect("persist awaited dispatch");
+    let owner = crate::trigger::dispatcher::AwaitedExecutionOwner::new(
+        store.clone(),
+        delivery,
+        sequence,
+        deadline,
+    );
+    owner
+        .bind(
+            "check",
+            "check.wasm",
+            "sha256:backend-parity",
+            "Succeeded",
+            Some("Failed"),
+            now,
+        )
+        .await
+        .expect("bind awaited execution");
+    owner
+        .renew(now + chrono::Duration::seconds(20))
+        .await
+        .expect("renew awaited execution");
+    let execution_id = owner
+        .snapshot()
+        .await
+        .0
+        .awaited_execution
+        .as_ref()
+        .unwrap()
+        .identity
+        .execution_id
+        .clone();
+    owner
+        .complete(
+            &execution_id,
+            true,
+            Some("Succeeded"),
+            Some(serde_json::json!({"backend": "parity"})),
+            None,
+            now + chrono::Duration::seconds(21),
+        )
+        .await
+        .expect("complete awaited execution");
+    drop(owner);
+
+    let (persisted, _) = load_delivery_record(&store, intent)
+        .await
+        .expect("reload awaited execution");
+    let evidence = persisted
+        .awaited_execution
+        .expect("awaited execution evidence survives backend restart");
+    assert_eq!(evidence.phase, AwaitedExecutionPhase::ExecutionSucceeded);
+    assert_eq!(
+        evidence.callback_params,
+        Some(serde_json::json!({"backend": "parity"}))
+    );
+}
+
 async fn prove_collection_ledger_semantics(tenant: &str, store: BoxedEventStore) {
     let (intent, mut record) =
         CollectionWorkflowRecordV1::start(start(tenant, "batch-1", &["a", "b", "c"]))
@@ -182,7 +283,9 @@ async fn prove_collection_ledger_semantics(tenant: &str, store: BoxedEventStore)
 #[tokio::test]
 async fn sim_matches_collection_ledger_semantics() {
     let store = temper_store_sim::SimEventStore::no_faults(41);
-    prove_collection_ledger_semantics("collection-sim-parity", BoxedEventStore::new(store)).await;
+    let store = BoxedEventStore::new(store);
+    prove_collection_ledger_semantics("collection-sim-parity", store.clone()).await;
+    prove_awaited_execution_semantics("collection-sim-awaited-parity", store).await;
 }
 
 #[tokio::test]
@@ -192,7 +295,9 @@ async fn turso_matches_collection_ledger_semantics() {
     let store = temper_store_turso::TursoEventStore::new(&url, None)
         .await
         .expect("create Turso store");
-    prove_collection_ledger_semantics("collection-turso-parity", BoxedEventStore::new(store)).await;
+    let store = BoxedEventStore::new(store);
+    prove_collection_ledger_semantics("collection-turso-parity", store.clone()).await;
+    prove_awaited_execution_semantics("collection-turso-awaited-parity", store).await;
 }
 
 #[tokio::test]
@@ -213,7 +318,9 @@ async fn postgres_matches_collection_ledger_semantics_when_available() {
         .expect("run Postgres migrations");
     let tenant = format!("collection-postgres-{}", uuid::Uuid::new_v4());
     let store = temper_store_postgres::PostgresEventStore::new(pool);
-    prove_collection_ledger_semantics(&tenant, BoxedEventStore::new(store)).await;
+    let store = BoxedEventStore::new(store);
+    prove_collection_ledger_semantics(&tenant, store.clone()).await;
+    prove_awaited_execution_semantics(&format!("{tenant}-awaited"), store).await;
 }
 
 #[tokio::test]

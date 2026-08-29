@@ -4,6 +4,7 @@ mod collection;
 mod helpers;
 mod persistence;
 mod recovery;
+mod settlement;
 mod state_timeout;
 #[cfg(test)]
 mod tests;
@@ -206,7 +207,12 @@ impl ReactionDispatcher {
             return Ok(Vec::new());
         }
 
-        if let Some(target_entity_id) = intent.target_entity_id.as_deref() {
+        let awaited_collection_member = intent.collection.as_ref().is_some_and(|context| {
+            context.role == crate::trigger::collection_workflow::CollectionDeliveryRole::Member
+        });
+        if !awaited_collection_member
+            && let Some(target_entity_id) = intent.target_entity_id.as_deref()
+        {
             let target_persistence_id = match intent.schema_pin.as_ref() {
                 Some(pin) => format!(
                     "{}:{}:{}",
@@ -317,8 +323,26 @@ impl ReactionDispatcher {
                 return Ok(Vec::new());
             }
         };
+        let claim_lease = if awaited_collection_member {
+            let deadline = intent
+                .collection
+                .as_ref()
+                .and_then(|context| context.execution_deadline)
+                .ok_or_else(|| "collection member execution deadline is missing".to_string())?;
+            let remaining = deadline - now;
+            if remaining <= chrono::Duration::zero() {
+                record.status = ReactionDeliveryStatus::Rejected;
+                record.last_error = Some("AwaitedExecutionDeadlineElapsed".to_string());
+                persist_terminal_delivery(state, &store, sequence, &record).await?;
+                record_delivery_terminal_metrics(&record);
+                return Ok(Vec::new());
+            }
+            remaining.min(chrono::Duration::seconds(30))
+        } else {
+            chrono::Duration::seconds(30)
+        };
         let fencing_token = record
-            .claim(now, chrono::Duration::seconds(30))
+            .claim(now, claim_lease)
             .map_err(|error| error.to_string())?;
         sequence = match append_delivery_record(&store, sequence, &record).await {
             Ok(sequence) => sequence,
@@ -342,116 +366,100 @@ impl ReactionDispatcher {
             .await
             .map_err(|error| error.to_string())?;
 
-        let invoking_ctx = AgentContext {
+        let mut invoking_ctx = AgentContext {
             security_ctx: Some(security_ctx),
             idempotency_key: Some(intent.delivery_id.clone()),
             schema_pin: intent.schema_pin.as_ref().map(|pin| pin.execution.clone()),
             ..AgentContext::default()
         };
+        if awaited_collection_member {
+            invoking_ctx.observation_metadata.insert(
+                crate::state::AWAITED_EXECUTION_FENCE_METADATA.to_string(),
+                fencing_token.to_string(),
+            );
+        }
         let drop_ok = rule.drop_ok;
-        let results = self
-            .dispatch_rules(
-                state,
-                &TenantId::new(&intent.tenant),
-                &intent.source_entity_type,
-                &intent.source_entity_id,
-                &intent.source_action,
-                &intent.source_to_state,
-                &intent.source_fields,
-                intent.depth,
-                &invoking_ctx,
-                vec![rule],
-                Some(BoundDelivery {
-                    delivery_id: intent.delivery_id.clone(),
-                    root_delivery_id: intent.root_delivery_id.clone(),
-                    fencing_token,
-                    target_entity_id: intent.target_entity_id.clone(),
-                    expected_target_sequence,
-                    state_timeout_state: intent
-                        .state_timeout
-                        .as_ref()
-                        .map(|clock| clock.state.clone()),
-                    collection: intent.collection.clone().map(|mut collection| {
-                        collection.attempts = u8::try_from(record.attempts).unwrap_or(u8::MAX);
-                        collection
-                    }),
-                    source_stream_descriptor: intent.source_stream_descriptor.clone(),
+        let awaited_owner = if awaited_collection_member {
+            let deadline = intent
+                .collection
+                .as_ref()
+                .and_then(|context| context.execution_deadline)
+                .ok_or_else(|| "collection member execution deadline is missing".to_string())?;
+            let owner = crate::trigger::dispatcher::AwaitedExecutionOwner::new(
+                store.clone(),
+                record.clone(),
+                sequence,
+                deadline,
+            );
+            state.register_awaited_execution_owner(
+                &intent.delivery_id,
+                fencing_token,
+                owner.clone(),
+            );
+            Some(owner)
+        } else {
+            None
+        };
+        let dispatch_tenant = TenantId::new(&intent.tenant);
+        let dispatch = self.dispatch_rules(
+            state,
+            &dispatch_tenant,
+            &intent.source_entity_type,
+            &intent.source_entity_id,
+            &intent.source_action,
+            &intent.source_to_state,
+            &intent.source_fields,
+            intent.depth,
+            &invoking_ctx,
+            vec![rule],
+            Some(BoundDelivery {
+                delivery_id: intent.delivery_id.clone(),
+                root_delivery_id: intent.root_delivery_id.clone(),
+                fencing_token,
+                target_entity_id: intent.target_entity_id.clone(),
+                expected_target_sequence,
+                state_timeout_state: intent
+                    .state_timeout
+                    .as_ref()
+                    .map(|clock| clock.state.clone()),
+                collection: intent.collection.clone().map(|mut collection| {
+                    collection.attempts = u8::try_from(record.attempts).unwrap_or(u8::MAX);
+                    collection
                 }),
+                source_stream_descriptor: intent.source_stream_descriptor.clone(),
+            }),
+        );
+        let results = if let Some(owner) = awaited_owner.as_ref() {
+            let result = crate::trigger::dispatcher::run_with_renewal(
+                owner,
+                &intent.delivery_id,
+                intent.kind,
+                dispatch,
+                temper_runtime::scheduler::sim_now,
             )
             .await;
+            state.remove_awaited_execution_owner(&intent.delivery_id, fencing_token);
+            let result = result?;
+            (record, sequence) =
+                crate::trigger::delivery::load_delivery_record(&store, intent.clone())
+                    .await
+                    .map_err(|error| error.to_string())?;
+            result
+        } else {
+            dispatch.await
+        };
 
-        record.lease_expires_at = None;
-        record.next_attempt_at = None;
-        if results.iter().any(|result| result.success) {
-            record.status = ReactionDeliveryStatus::Succeeded;
-            record.last_error = None;
-        } else if results.is_empty() {
-            record.status = ReactionDeliveryStatus::Skipped;
-            record.last_error = None;
-        } else {
-            let failed = results
-                .iter()
-                .find(|result| !result.success)
-                .expect("unsuccessful result set contains a failure");
-            let failure = failed
-                .failure
-                .unwrap_or(crate::trigger::types::ReactionFailureKind::LegacyDispatchFailure);
-            let error = failed
-                .error
-                .clone()
-                .unwrap_or_else(|| "reaction target rejected the action".to_string());
-            let migrated_timeout = intent.state_timeout.is_some()
-                && error.contains("migrated scoped schema write fence");
-            let collection_control_skip = collection_control_skip_reason(
-                intent.collection.as_ref().map(|context| context.role),
-                &error,
-            );
-            let transient = is_transient_delivery_failure(failure);
-            let dropped_allowed = drop_ok && is_expected_target_drop(&error);
-            record.transient_failure = transient;
-            record.last_error = Some(error);
-            record.status = if migrated_timeout || collection_control_skip.is_some() {
-                ReactionDeliveryStatus::Skipped
-            } else if transient && record.attempts < automatic_attempt_budget {
-                crate::runtime_metrics::record_reaction_delivery_event(
-                    intent.kind.metric_label(),
-                    "automatic_retry_scheduled",
-                );
-                record.next_attempt_at = Some(
-                    temper_runtime::scheduler::sim_now() + automatic_retry_backoff(record.attempts),
-                );
-                ReactionDeliveryStatus::Pending
-            } else if transient {
-                ReactionDeliveryStatus::DeadLettered
-            } else if dropped_allowed {
-                ReactionDeliveryStatus::DroppedAllowed
-            } else {
-                ReactionDeliveryStatus::Rejected
-            };
-            if let Some(reason) = collection_control_skip {
-                record.last_error = Some(reason.to_string());
-            }
-            if record.status.is_terminal()
-                && !matches!(
-                    record.status,
-                    ReactionDeliveryStatus::Skipped | ReactionDeliveryStatus::DroppedAllowed
-                )
-            {
-                assign_typed_failure_with_decision(
-                    &mut record,
-                    crate::trigger::delivery::DurableFailureKind::Reaction(failure),
-                    failed.decision_id.as_deref(),
-                )?;
-            }
-        }
-        if record.status.is_terminal() {
-            persist_terminal_delivery(state, &store, sequence, &record).await?;
-        } else {
-            append_delivery_record(&store, sequence, &record)
-                .await
-                .map_err(|error| error.to_string())?;
-        }
-        record_delivery_terminal_metrics(&record);
-        Ok(results)
+        settlement::settle_dispatch(
+            state,
+            &store,
+            record,
+            sequence,
+            &intent,
+            awaited_collection_member,
+            automatic_attempt_budget,
+            drop_ok,
+            results,
+        )
+        .await
     }
 }

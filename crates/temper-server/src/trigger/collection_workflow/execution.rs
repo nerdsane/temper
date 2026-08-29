@@ -7,10 +7,20 @@ use super::{
 use crate::storage::BoxedEventStore;
 use crate::trigger::delivery::{ReactionDeliveryRecord, ReactionDeliveryStatus};
 
+/// Failure class while constructing an atomic collection lifecycle fence.
+pub(crate) enum DeliveryFenceError {
+    /// Durable workflow state no longer authorizes this exact delivery owner.
+    FenceLost(String),
+    /// The workflow journal could not be read or encoded.
+    Storage(String),
+}
+
 mod metrics;
 mod outcome;
 mod receipt;
+mod terminal;
 mod timeout_binding;
+pub(crate) use terminal::commit_terminal_delivery;
 
 /// Bind execution to the pinned declaration and create the initial bounded
 /// member window for the workflow's first journal event.
@@ -31,6 +41,7 @@ pub(crate) async fn commit_activated_start(
     intent: &super::CollectionStartIntentV1,
     record: &mut super::CollectionWorkflowRecordV1,
     actions: &super::CollectionExecutionActions<'_>,
+    source_fence_append: Option<temper_runtime::persistence::PersistenceAppend>,
 ) -> Result<super::CollectionLedgerCommitOutcome, String> {
     let mut superseded_append = None;
     if let Some(active_workflow_id) = super::active_source_workflow_id(store, record)
@@ -64,13 +75,16 @@ pub(crate) async fn commit_activated_start(
     }
     timeout_binding::bind_timeout_from_source(record, &source_append, actions.timeout_action)?;
     let intents = activate_start(record, 0, actions)?;
+    let mut extra_appends = Vec::with_capacity(2);
+    extra_appends.extend(superseded_append);
+    extra_appends.extend(source_fence_append);
     let outcome = super::commit_collection_start_with_intents(
         store,
         source_append,
         intent,
         record,
         &intents,
-        superseded_append.as_slice(),
+        &extra_appends,
     )
     .await
     .map_err(|error| error.to_string())?;
@@ -86,6 +100,7 @@ pub(crate) async fn commit_controlled(
     intent: &super::CollectionControlIntentV1,
     expected_workflow_sequence: u64,
     record: &mut super::CollectionWorkflowRecordV1,
+    source_fence_append: Option<temper_runtime::persistence::PersistenceAppend>,
 ) -> Result<super::CollectionLedgerCommitOutcome, String> {
     let intents = recover_progress(record, expected_workflow_sequence)?;
     let mut delivery_appends = Vec::new();
@@ -112,6 +127,7 @@ pub(crate) async fn commit_controlled(
                 .map_err(|error| error.to_string())?,
         );
     }
+    delivery_appends.extend(source_fence_append);
     let outcome = super::commit_collection_control_with_intents(
         store,
         source_append,
@@ -217,14 +233,34 @@ fn validate_loaded_fence(
     Ok(())
 }
 
+/// Build a no-op workflow append that atomically fences a delivery lifecycle write.
+pub(crate) async fn delivery_fence_append(
+    store: &BoxedEventStore,
+    tenant: &str,
+    delivery_id: &str,
+    context: &CollectionDeliveryContext,
+    event_type: &str,
+) -> Result<temper_runtime::persistence::PersistenceAppend, DeliveryFenceError> {
+    let (record, sequence) = load_collection_record(store, tenant, &context.workflow_id)
+        .await
+        .map_err(|error| DeliveryFenceError::Storage(error.to_string()))?
+        .ok_or_else(|| {
+            DeliveryFenceError::FenceLost("collection workflow journal is missing".to_string())
+        })?;
+    validate_loaded_fence(&record, delivery_id, context).map_err(DeliveryFenceError::FenceLost)?;
+    super::workflow_append(&record, sequence, event_type)
+        .map_err(|error| DeliveryFenceError::Storage(error.to_string()))
+}
+
 /// Build the workflow side of the atomic target+fence commit. The returned
 /// append carries the exact sequence read here; a concurrent control append
 /// makes the whole target batch fail optimistic concurrency.
-pub(crate) async fn target_fence_append(
+pub(crate) async fn target_fence_appends(
     store: &BoxedEventStore,
     tenant: &str,
     receipt: &crate::trigger::delivery::ReactionReceipt,
-) -> Result<temper_runtime::persistence::PersistenceAppend, String> {
+    callback_sequence: u64,
+) -> Result<Vec<temper_runtime::persistence::PersistenceAppend>, String> {
     let context = receipt
         .collection
         .as_ref()
@@ -255,13 +291,15 @@ pub(crate) async fn target_fence_append(
                 delivery_id: receipt.delivery_id.clone(),
                 fencing_token: receipt.fencing_token,
             };
-            record.record_member_receipt(
-                member_id,
-                &receipt.delivery_id,
-                context.control_epoch,
-                context.attempts,
-                member_receipt,
-            )?;
+            if receipt.awaited_callback.is_none() {
+                record.record_member_receipt(
+                    member_id,
+                    &receipt.delivery_id,
+                    context.control_epoch,
+                    context.attempts,
+                    member_receipt,
+                )?;
+            }
         }
         CollectionDeliveryRole::Cancellation
         | CollectionDeliveryRole::Join
@@ -269,9 +307,48 @@ pub(crate) async fn target_fence_append(
         | CollectionDeliveryRole::CancellationDescendant
         | CollectionDeliveryRole::JoinDescendant => {}
     }
-    let append = super::workflow_append(&record, sequence, "CollectionWorkflow::TargetCommittedV1")
-        .map_err(|error| error.to_string())?;
-    Ok(append)
+    let workflow_append =
+        super::workflow_append(&record, sequence, "CollectionWorkflow::TargetCommittedV1")
+            .map_err(|error| error.to_string())?;
+    let mut appends = vec![workflow_append];
+    if let Some(callback) = receipt.awaited_callback.as_ref() {
+        let intent = super::find_collection_intent(store, &record, &receipt.delivery_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "awaited callback delivery intent is missing".to_string())?;
+        let (mut delivery, delivery_sequence) =
+            crate::trigger::delivery::load_delivery_record(store, intent)
+                .await
+                .map_err(|error| error.to_string())?;
+        delivery.accept_awaited_callback(
+            receipt.fencing_token,
+            &callback.execution_id,
+            &callback.callback_action,
+            callback_sequence,
+            temper_runtime::scheduler::sim_now(),
+        )?;
+        appends.push(
+            crate::trigger::delivery::delivery_record_append(delivery_sequence, &delivery)
+                .map_err(|error| error.to_string())?,
+        );
+    }
+    Ok(appends)
+}
+
+/// Build the single workflow fence append used by non-awaited target commits.
+pub(crate) async fn target_fence_append(
+    store: &BoxedEventStore,
+    tenant: &str,
+    receipt: &crate::trigger::delivery::ReactionReceipt,
+) -> Result<temper_runtime::persistence::PersistenceAppend, String> {
+    if receipt.awaited_callback.is_some() {
+        return Err("awaited callback requires an atomic target batch".to_string());
+    }
+    let mut appends = target_fence_appends(store, tenant, receipt, 0).await?;
+    if appends.len() != 1 {
+        return Err("non-awaited target produced an invalid fence batch".to_string());
+    }
+    Ok(appends.remove(0))
 }
 
 fn member<'a>(
@@ -286,152 +363,6 @@ fn member<'a>(
         .iter()
         .find(|member| member.member_id == member_id)
         .ok_or_else(|| "collection delivery member is outside the sealed roster".to_string())
-}
-
-/// Fold a terminal delivery into its workflow and commit both journals in one
-/// batch. Returns `Ok(false)` for ordinary non-collection deliveries.
-pub(crate) async fn commit_terminal_delivery(
-    store: &BoxedEventStore,
-    expected_delivery_sequence: u64,
-    delivery: &ReactionDeliveryRecord,
-) -> Result<bool, String> {
-    let Some(context) = delivery.intent.collection.as_ref() else {
-        return Ok(false);
-    };
-    if context.role.is_descendant() {
-        return Ok(false);
-    }
-    if !delivery.status.is_terminal() {
-        return Err("collection delivery outcome is not terminal".to_string());
-    }
-    let matching_receipt = receipt::has_matching_target_receipt(store, delivery).await?;
-    let (mut record, workflow_sequence) =
-        load_collection_record(store, &delivery.intent.tenant, &context.workflow_id)
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "collection workflow journal is missing".to_string())?;
-    let was_terminal = record.status.is_terminal();
-    let prior_member_status = context.member_id.as_deref().and_then(|member_id| {
-        record
-            .members
-            .iter()
-            .find(|member| member.member_id == member_id)
-            .map(|member| member.status)
-    });
-    if context.role == CollectionDeliveryRole::Member
-        && matching_receipt
-        && let Some(member_id) = context.member_id.as_deref()
-        && let Some(member) = record
-            .members
-            .iter()
-            .find(|member| member.member_id == member_id)
-        && member.delivery_id.as_deref() == Some(delivery.intent.delivery_id.as_str())
-        && matches!(
-            member.status,
-            CollectionMemberStatus::Cancelled | CollectionMemberStatus::TimedOut
-        )
-    {
-        crate::trigger::delivery::append_delivery_record(
-            store,
-            expected_delivery_sequence,
-            delivery,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        return Ok(true);
-    }
-    let join_is_superseded = matches!(
-        context.role,
-        CollectionDeliveryRole::Join | CollectionDeliveryRole::JoinDescendant
-    ) && super::active_source_workflow_id(store, &record)
-        .await
-        .map_err(|error| error.to_string())?
-        .as_deref()
-        != Some(record.workflow_id.as_str());
-    match context.role {
-        CollectionDeliveryRole::Member => {
-            let member_id = context
-                .member_id
-                .as_deref()
-                .ok_or_else(|| "collection member outcome has no member identity".to_string())?;
-            let attempts = u8::try_from(delivery.attempts)
-                .map_err(|_| "collection member attempt count overflowed".to_string())?;
-            if delivery.status == ReactionDeliveryStatus::Succeeded {
-                let receipt = super::CollectionMemberReceipt {
-                    delivery_id: delivery.intent.delivery_id.clone(),
-                    fencing_token: delivery.fencing_token,
-                };
-                record.record_member_receipt(
-                    member_id,
-                    &delivery.intent.delivery_id,
-                    context.control_epoch,
-                    attempts,
-                    receipt.clone(),
-                )?;
-                record.record_member_terminal(super::CollectionMemberTerminalEvidence {
-                    member_id: member_id.to_string(),
-                    control_epoch: context.control_epoch,
-                    status: CollectionMemberStatus::Succeeded,
-                    attempts,
-                    delivery_id: Some(delivery.intent.delivery_id.clone()),
-                    delivery_status: delivery.status,
-                    receipt: Some(receipt),
-                    failure_class: None,
-                })?;
-            } else {
-                record.record_member_terminal(super::CollectionMemberTerminalEvidence {
-                    member_id: member_id.to_string(),
-                    control_epoch: context.control_epoch,
-                    status: CollectionMemberStatus::Failed,
-                    attempts,
-                    delivery_id: Some(delivery.intent.delivery_id.clone()),
-                    delivery_status: delivery.status,
-                    receipt: None,
-                    failure_class: Some(outcome::failure_class(delivery.status)),
-                })?;
-            }
-        }
-        CollectionDeliveryRole::Cancellation => {
-            record.record_member_controlled_terminal(
-                context.member_id.as_deref().ok_or_else(|| {
-                    "collection cancellation outcome has no member identity".to_string()
-                })?,
-                &delivery.intent.delivery_id,
-                context.control_epoch,
-                delivery.status,
-                matching_receipt,
-            )?;
-        }
-        CollectionDeliveryRole::Join => {
-            if join_is_superseded {
-                record.supersede_join()?;
-            } else {
-                record.record_join_terminal(
-                    &delivery.intent.delivery_id,
-                    delivery.status == ReactionDeliveryStatus::Succeeded
-                        || (delivery.status == ReactionDeliveryStatus::Skipped && matching_receipt),
-                )?;
-            }
-        }
-        CollectionDeliveryRole::MemberDescendant
-        | CollectionDeliveryRole::CancellationDescendant
-        | CollectionDeliveryRole::JoinDescendant => {
-            return Err("collection descendant cannot own workflow aggregation".to_string());
-        }
-    }
-    let continuation = continuation_intents(&mut record, workflow_sequence, &context.actions)?;
-    super::commit_collection_delivery_outcome(
-        store,
-        expected_delivery_sequence,
-        delivery,
-        workflow_sequence,
-        &record,
-        &continuation,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-    metrics::record_terminal_commit(was_terminal, prior_member_status, context, &record);
-    Ok(true)
 }
 
 /// Atomically reopen a failed join and its governed delivery journal.

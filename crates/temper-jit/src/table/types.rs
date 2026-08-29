@@ -76,6 +76,9 @@ pub struct TransitionTable {
     /// reconstructing scheduling metadata after the source commit.
     #[serde(default)]
     pub state_timeouts: Vec<temper_spec::automaton::StateTimeout>,
+    /// Verified bounded collection-workflow declarations used by runtime dispatch.
+    #[serde(default)]
+    pub collection_workflows: Vec<temper_spec::automaton::CollectionWorkflow>,
     /// Validated typed trigger-failure category routes.
     #[serde(default)]
     pub failure_routes: Vec<temper_spec::automaton::ResolvedFailureRoute>,
@@ -199,6 +202,8 @@ impl<'de> Deserialize<'de> for TransitionTable {
             #[serde(default)]
             state_timeouts: Vec<temper_spec::automaton::StateTimeout>,
             #[serde(default)]
+            collection_workflows: Vec<temper_spec::automaton::CollectionWorkflow>,
+            #[serde(default)]
             failure_routes: Vec<temper_spec::automaton::ResolvedFailureRoute>,
             rules: Vec<TransitionRule>,
             #[serde(default)]
@@ -220,6 +225,7 @@ impl<'de> Deserialize<'de> for TransitionTable {
             initial_state: raw.initial_state,
             schema_digest: raw.schema_digest,
             state_timeouts: raw.state_timeouts,
+            collection_workflows: raw.collection_workflows,
             failure_routes: raw.failure_routes,
             rules: raw.rules,
             keys: raw.keys,
@@ -340,6 +346,7 @@ mod tests {
             initial_state: "Draft".to_string(),
             schema_digest: None,
             state_timeouts: vec![],
+            collection_workflows: vec![],
             failure_routes: vec![],
             keys: vec![],
             vectors: vec![],

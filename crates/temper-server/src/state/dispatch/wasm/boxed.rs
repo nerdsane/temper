@@ -77,13 +77,20 @@ pub(in crate::state::dispatch::wasm) fn handle_wasm_failure_boxed<'a>(
 }
 
 /// Heap-allocate an inline or background WASM callback dispatch.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "boxed callback preserves dispatch authority"
+)]
 pub(in crate::state::dispatch) fn dispatch_wasm_callback_boxed<'a>(
     state: &'a crate::state::ServerState,
     entity_ref: WasmEntityRef<'a>,
     callback_action: &'a str,
     callback_params: serde_json::Value,
     agent_context: &'a AgentContext,
+    awaited_agent_context: Option<&'a AgentContext>,
     mode: WasmDispatchMode,
+    integration_name: &'a str,
+    module_name: &'a str,
     preserve_idempotency: bool,
 ) -> BoxFuture<'a, Result<Option<EntityResponse>, String>> {
     state
@@ -92,7 +99,10 @@ pub(in crate::state::dispatch) fn dispatch_wasm_callback_boxed<'a>(
             callback_action,
             callback_params,
             agent_context,
+            awaited_agent_context,
             mode,
+            integration_name,
+            module_name,
             preserve_idempotency,
         )
         .boxed()

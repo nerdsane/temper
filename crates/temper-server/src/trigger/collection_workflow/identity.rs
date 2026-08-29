@@ -3,7 +3,6 @@
 use sha2::{Digest, Sha256};
 
 const WORKFLOW_DOMAIN: &[u8] = b"temper.collection-workflow.v1";
-const MEMBER_DOMAIN: &[u8] = b"temper.collection-workflow.member.v1";
 const CONTROL_DOMAIN: &[u8] = b"temper.collection-workflow.control.v1";
 
 fn component(digest: &mut Sha256, value: &[u8]) {
@@ -47,12 +46,7 @@ pub(crate) fn collection_member_id(
     member_index: u32,
     member_value: &str,
 ) -> String {
-    let mut digest = Sha256::new();
-    component(&mut digest, MEMBER_DOMAIN);
-    component(&mut digest, workflow_id.as_bytes());
-    digest.update(member_index.to_be_bytes());
-    component(&mut digest, member_value.as_bytes());
-    finish("collection-member-v1", digest)
+    temper_wasm_sdk::collection::collection_member_id_v1(workflow_id, member_index, member_value)
 }
 
 /// Return the child identity, which ADR-0181 defines as the member identity.

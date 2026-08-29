@@ -11,8 +11,9 @@ use crate::registry::SpecRegistry;
 use crate::storage::StorageStack;
 use crate::trigger::collection_workflow::{
     CollectionExecutionActions, CollectionMemberReceipt, CollectionRequestedOutcome,
-    CollectionWorkflowBudgets, CollectionWorkflowRecordV1, CollectionWorkflowStart, activate_start,
-    append_collection_record_idempotent, recover_progress, workflow_append,
+    CollectionWorkflowBudgets, CollectionWorkflowMode, CollectionWorkflowRecordV1,
+    CollectionWorkflowStart, activate_start, append_collection_record_idempotent, recover_progress,
+    workflow_append,
 };
 use crate::trigger::delivery::{
     ReactionDeliveryStatus, append_delivery_record, attach_intents, load_delivery_record,
@@ -46,6 +47,7 @@ async fn state() -> (ServerState, TursoEventStore, tempfile::TempDir) {
         .expect("durable Turso store");
     let mut state =
         ServerState::from_registry(ActorSystem::new("collection-observe"), SpecRegistry::new());
+    state.collection_workflow_mode = CollectionWorkflowMode::Enabled;
     state.set_storage_stack(StorageStack::from_turso(store.clone()));
     (state, store, temp)
 }
@@ -148,6 +150,26 @@ fn limits_are_rejected_instead_of_clamped() {
     assert_eq!(valid_limit(None, 50, 100).expect("default"), 50);
     assert!(valid_limit(Some(0), 50, 100).is_err());
     assert!(valid_limit(Some(101), 50, 100).is_err());
+}
+
+#[tokio::test]
+async fn disabled_mode_hides_collection_observe() {
+    let (mut state, _store, _temp) = state().await;
+    state.collection_workflow_mode =
+        crate::trigger::collection_workflow::CollectionWorkflowMode::Disabled;
+    let error = handle_list_workflows(
+        State(state),
+        Some(context("disabled-observe", "reader")),
+        Query(WorkflowListQuery {
+            limit: None,
+            cursor: None,
+            status: None,
+        }),
+    )
+    .await
+    .expect_err("disabled mode must hide collection Observe");
+    assert_eq!(error.status, StatusCode::NOT_FOUND);
+    assert_eq!(error.category, "collection_workflows_disabled");
 }
 
 #[tokio::test]
@@ -337,8 +359,9 @@ async fn denied_list_scan_stops_at_budget_and_returns_a_continuation() {
 
 #[tokio::test]
 async fn unavailable_storage_uses_a_stable_sanitized_category() {
-    let state =
+    let mut state =
         ServerState::from_registry(ActorSystem::new("collection-no-store"), SpecRegistry::new());
+    state.collection_workflow_mode = CollectionWorkflowMode::Enabled;
     permit_reader(&state, "tenant-a");
     let error = handle_list_workflows(
         State(state),
@@ -383,6 +406,7 @@ async fn cross_tenant_and_missing_ids_are_indistinguishable_after_restart() {
     // The route reads the event journal directly; an actor registry restart is
     // represented by a fresh state sharing the same durable storage stack.
     let mut restarted = restarted;
+    restarted.collection_workflow_mode = CollectionWorkflowMode::Enabled;
     restarted.set_storage_stack(StorageStack::from_turso(store));
     permit_reader(&restarted, "tenant-a");
     let detail = handle_get_workflow(

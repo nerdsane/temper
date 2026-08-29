@@ -119,6 +119,7 @@ pub(crate) fn admit_collection_window(
                     actions: actions.owned(),
                     max_attempts: record.budgets.max_attempts,
                     attempts: 0,
+                    execution_deadline: record.timeout_binding.as_ref().map(|clock| clock.deadline),
                 },
             },
         )?);
@@ -186,6 +187,7 @@ pub(crate) fn collection_cancellation_intents(
                 actions: actions.owned(),
                 max_attempts: record.budgets.max_attempts,
                 attempts: 0,
+                execution_deadline: record.timeout_binding.as_ref().map(|clock| clock.deadline),
             },
         })?);
     }
@@ -235,6 +237,7 @@ pub(crate) fn collection_join_intent(
                 actions: actions.owned(),
                 max_attempts: record.budgets.max_attempts,
                 attempts: 0,
+                execution_deadline: record.timeout_binding.as_ref().map(|clock| clock.deadline),
             },
         },
     )?))
@@ -290,7 +293,7 @@ fn intent(
         resolve_target: TargetResolver::Static {
             entity_id: target_entity_id.clone(),
         },
-        principal: None,
+        principal: Some("wasm-runtime".to_string()),
         drop_ok: false,
     };
     let (authority, schema_pin) = match kind {

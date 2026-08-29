@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn collection_workflow_public_activation_is_gated() {
+fn collection_workflow_public_activation_is_compiled() {
     let spec = r#"
 [automaton]
 name = "Batch"
@@ -82,6 +82,12 @@ on_failure = "Joined3"
 on_cancelled = "Joined4"
 on_timed_out = "Joined5"
 "#;
-    let error = TransitionTable::try_from_ioa_source(spec).expect_err("gate must remain shut");
-    assert!(error.contains("CollectionWorkflowNotEnabled"));
+    let table = TransitionTable::try_from_ioa_source(spec).expect("verified collection compiles");
+    assert_eq!(table.collection_workflows.len(), 1);
+    let workflow = &table.collection_workflows[0];
+    assert_eq!(workflow.name, "work");
+    assert_eq!(workflow.roster_field, "members");
+    assert_eq!(workflow.max_members, 8);
+    assert_eq!(workflow.max_concurrency, 2);
+    assert_eq!(workflow.max_attempts, 5);
 }

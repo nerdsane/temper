@@ -1,8 +1,8 @@
 //! Cross-entity collection workflow linting.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use super::super::{Automaton, TriggerKind};
+use super::super::{Automaton, Effect, TriggerKind};
 use super::BundleLintFinding;
 
 pub(super) fn lint_workflows(
@@ -101,6 +101,95 @@ pub(super) fn lint_workflows(
                     ),
                 ));
             }
+            if role == "member_action" {
+                lint_member_integration(entity_name, workflow, member, action, findings);
+            }
+        }
+    }
+}
+
+fn lint_member_integration(
+    source_entity: &str,
+    workflow: &super::super::CollectionWorkflow,
+    member: &Automaton,
+    action: &super::super::Action,
+    findings: &mut Vec<BundleLintFinding>,
+) {
+    let effects = action
+        .effect
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Trigger { name } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if effects.len() != 1 {
+        findings.push(BundleLintFinding::error(
+            source_entity,
+            "collection_member_integration_count",
+            format!(
+                "collection_workflow '{}' member action '{}.{}' must trigger exactly one integration",
+                workflow.name, workflow.member_entity, workflow.member_action
+            ),
+        ));
+        return;
+    }
+    let effect_name = effects[0];
+    let matching = member
+        .integrations
+        .iter()
+        .filter(|integration| integration.trigger == effect_name)
+        .collect::<Vec<_>>();
+    if matching.len() != 1 || matching[0].integration_type != "wasm" {
+        findings.push(BundleLintFinding::error(
+            source_entity,
+            "collection_member_integration_not_wasm",
+            format!(
+                "collection_workflow '{}' member action '{}.{}' effect '{}' must resolve uniquely to WASM",
+                workflow.name, workflow.member_entity, workflow.member_action, effect_name
+            ),
+        ));
+        return;
+    }
+    let integration = matching[0];
+    let Some(success) = integration.on_success.as_deref() else {
+        findings.push(BundleLintFinding::error(
+            source_entity,
+            "collection_member_success_callback_missing",
+            format!(
+                "collection_workflow '{}' member WASM integration '{}' requires static on_success",
+                workflow.name, integration.name
+            ),
+        ));
+        return;
+    };
+    let callbacks = std::iter::once(success)
+        .chain(integration.on_failure.as_deref())
+        .chain(
+            integration
+                .failure_routes
+                .iter()
+                .map(|route| route.callback_action.as_str()),
+        )
+        .collect::<BTreeSet<_>>();
+    for callback in callbacks {
+        let Some(callback_action) = member.actions.iter().find(|action| action.name == callback)
+        else {
+            continue;
+        };
+        if callback_action
+            .effect
+            .iter()
+            .any(|effect| matches!(effect, Effect::Trigger { .. }))
+        {
+            findings.push(BundleLintFinding::error(
+                source_entity,
+                "collection_member_callback_integration_forbidden",
+                format!(
+                    "collection_workflow '{}' callback '{}.{}' cannot trigger another integration",
+                    workflow.name, workflow.member_entity, callback
+                ),
+            ));
         }
     }
 }
@@ -173,6 +262,64 @@ pub(super) fn lint_role_uniqueness(
             }
         }
     }
+    for (source_entity, automaton) in automata {
+        for workflow in &automaton.collection_workflows {
+            let Some(member) = automata.get(&workflow.member_entity) else {
+                continue;
+            };
+            let Some(member_action) = member
+                .actions
+                .iter()
+                .find(|action| action.name == workflow.member_action)
+            else {
+                continue;
+            };
+            let effects = member_action
+                .effect
+                .iter()
+                .filter_map(|effect| match effect {
+                    Effect::Trigger { name } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if effects.len() != 1 {
+                continue;
+            }
+            let integrations = member
+                .integrations
+                .iter()
+                .filter(|integration| integration.trigger == effects[0])
+                .collect::<Vec<_>>();
+            if integrations.len() != 1 {
+                continue;
+            }
+            let integration = integrations[0];
+            let callbacks = integration
+                .on_success
+                .as_deref()
+                .into_iter()
+                .chain(integration.on_failure.as_deref())
+                .chain(
+                    integration
+                        .failure_routes
+                        .iter()
+                        .map(|route| route.callback_action.as_str()),
+                )
+                .collect::<BTreeSet<_>>();
+            for callback in callbacks {
+                if roles.contains_key(&(workflow.member_entity.clone(), callback.to_string())) {
+                    findings.push(BundleLintFinding::error(
+                        source_entity,
+                        "collection_member_callback_role_alias",
+                        format!(
+                            "collection_workflow '{}' callback '{}.{}' cannot also be a collection role action",
+                            workflow.name, workflow.member_entity, callback
+                        ),
+                    ));
+                }
+            }
+        }
+    }
     for (entity, automaton) in automata {
         for action in &automaton.actions {
             if !roles.contains_key(&(entity.clone(), action.name.clone())) {
@@ -208,3 +355,7 @@ pub(super) fn lint_role_uniqueness(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "collection/tests.rs"]
+mod tests;

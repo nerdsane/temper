@@ -221,6 +221,44 @@ impl crate::state::ServerState {
             self.reject_action_supplied_sub_writes(entity_type, action, &params)?;
         }
 
+        let (collection_start, collection_control) = {
+            let registry = self
+                .registry
+                .read()
+                .map_err(|_| DispatchError::Internal("registry lock poisoned".into()))?;
+            let table = match agent_ctx.schema_pin.as_ref() {
+                Some(pin) => registry.get_scoped_table_at_digest(
+                    tenant,
+                    &pin.scope,
+                    &pin.bundle_digest,
+                    entity_type,
+                ),
+                None => registry.get_table(tenant, entity_type),
+            }
+            .or_else(|| self.transition_tables.get(entity_type).cloned());
+            table.map_or((false, false), |table| {
+                let starts = table
+                    .collection_workflows
+                    .iter()
+                    .any(|workflow| workflow.start_action == action);
+                let controls = table.collection_workflows.iter().any(|workflow| {
+                    workflow.cancel_action == action || workflow.timeout_action == action
+                });
+                (starts, controls)
+            })
+        };
+        if collection_start {
+            self.collection_workflow_mode
+                .require_start_enabled()
+                .map_err(DispatchError::CollectionWorkflowConflict)?;
+        }
+        let collection_action = collection_start || collection_control;
+        if collection_action && self.event_journal().is_none() {
+            return Err(DispatchError::Internal(
+                "collection workflows require a configured event journal".to_string(),
+            ));
+        }
+
         let durable_timeouts_expected = if self.event_journal().is_some() {
             let registry = self
                 .registry
@@ -259,7 +297,7 @@ impl crate::state::ServerState {
             } else {
                 dispatcher.candidate_rules(tenant, entity_type, action)
             };
-            if rules.is_empty() && !durable_timeouts_expected {
+            if rules.is_empty() && !durable_timeouts_expected && !collection_action {
                 None
             } else {
                 let guard_source = match agent_ctx.schema_pin.as_ref() {
@@ -315,7 +353,8 @@ impl crate::state::ServerState {
         let durable_reactions_expected = reaction_context
             .as_ref()
             .is_some_and(|context| !context.rules.is_empty());
-        let durable_intents_expected = durable_reactions_expected || durable_timeouts_expected;
+        let durable_intents_expected =
+            durable_reactions_expected || durable_timeouts_expected || collection_action;
         if durable_reactions_expected && self.event_journal().is_none() {
             return Err(DispatchError::Internal(
                 "durable reactions require a configured event journal".to_string(),
@@ -367,6 +406,9 @@ impl crate::state::ServerState {
                 if !timeout_intents.is_empty() {
                     // A state timeout is future scheduler work, never part of
                     // the caller's synchronous reaction-tree wait budget.
+                    dispatcher.notify_recovery(tenant);
+                }
+                if collection_action {
                     dispatcher.notify_recovery(tenant);
                 }
                 if !reaction_intents.is_empty() && await_reactions {

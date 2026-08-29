@@ -35,6 +35,45 @@ fn active_workflow_journal_id(record: &CollectionWorkflowRecordV1) -> String {
     )
 }
 
+/// Load the active workflow for a declaration before a control transition commits.
+pub(crate) async fn load_active_source_workflow_id(
+    store: &BoxedEventStore,
+    tenant: &str,
+    source_entity_type: &str,
+    source_entity_id: &str,
+    declaration_name: &str,
+    schema_pin: Option<&temper_runtime::persistence::schema_deployment::SchemaEventPin>,
+) -> Result<Option<String>, PersistenceError> {
+    let source_entity_id = schema_pin.map_or_else(
+        || source_entity_id.to_string(),
+        |pin| {
+            temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                source_entity_id,
+                &pin.execution,
+            )
+        },
+    );
+    let persistence_id = format!(
+        "{tenant}:{ACTIVE_WORKFLOW_ENTITY_TYPE}:{source_entity_type}:{source_entity_id}:{declaration_name}"
+    );
+    let events = store.read_latest_events(&persistence_id, 1).await?;
+    events
+        .last()
+        .map(|event| {
+            event
+                .payload
+                .get(ACTIVE_COLLECTION_WORKFLOW_FIELD)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    PersistenceError::Serialization(
+                        "active collection workflow pointer is malformed".to_string(),
+                    )
+                })
+        })
+        .transpose()
+}
+
 pub(super) async fn load_active_workflow(
     store: &BoxedEventStore,
     record: &CollectionWorkflowRecordV1,

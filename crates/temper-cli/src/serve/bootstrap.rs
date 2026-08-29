@@ -182,6 +182,7 @@ pub(super) async fn build_registry(
     pg_pool: Option<&sqlx::PgPool>,
     storage_stack: Option<&StorageStack>,
     apps: &[(String, String)],
+    collection_workflow_mode: temper_server::trigger::collection_workflow::CollectionWorkflowMode,
 ) -> Result<(SpecRegistry, BTreeMap<String, String>)> {
     let mut registry = SpecRegistry::new();
     let mut tenant_policy_seed = BTreeMap::new();
@@ -218,7 +219,8 @@ pub(super) async fn build_registry(
     // Load app specs from disk, persisting to backend.
     for (tenant, specs_dir) in apps {
         println!("  Loading app: {tenant} from {specs_dir}");
-        let loaded = load_into_registry(&mut registry, specs_dir, tenant)?;
+        let loaded =
+            load_into_registry(&mut registry, specs_dir, tenant, collection_workflow_mode)?;
         if let Some(text) = loaded.cedar_policy_text.as_ref() {
             tenant_policy_seed.insert(tenant.clone(), text.clone());
         }

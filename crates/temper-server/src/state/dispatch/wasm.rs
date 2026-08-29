@@ -176,6 +176,22 @@ struct ResolvedWasmModule {
     scoped: bool,
 }
 
+fn resolve_tenant_global_module(
+    registry: &crate::wasm_registry::WasmModuleRegistry,
+    tenant: &TenantId,
+    module_name: &str,
+    pinned_digest: Option<&str>,
+) -> Option<ResolvedWasmModule> {
+    let hash = pinned_digest
+        .or_else(|| registry.get_hash(tenant, module_name))?
+        .to_string();
+    Some(ResolvedWasmModule {
+        data_binding: registry.data_manifest(tenant, module_name, &hash).cloned(),
+        hash,
+        scoped: false,
+    })
+}
+
 fn module_data_target(
     entity_state: &EntityState,
     agent_ctx: &AgentContext,
@@ -621,47 +637,172 @@ impl crate::state::ServerState {
         active_span.record("otel.name", format!("wasm:{module_name}").as_str());
         active_span.record("wasm.module", module_name.as_str());
 
-        let resolved_module = match &ctx.schema_target {
-            ModuleDataTarget::TenantGlobal => {
-                let wasm_reg = self.wasm_module_registry.read().unwrap(); // ci-ok: infallible lock
-                wasm_reg
-                    .get_hash(ctx.entity_ref.tenant, &module_name)
-                    .map(|hash| ResolvedWasmModule {
-                        hash: hash.to_string(),
-                        data_binding: wasm_reg
-                            .data_manifest(ctx.entity_ref.tenant, &module_name, hash)
-                            .cloned(),
-                        scoped: false,
-                    })
-            }
-            ModuleDataTarget::Scoped(pin) => {
-                let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
-                registry
-                    .get_scoped_module_at_digest(
+        let awaited_owner = ctx
+            .dispatch_idempotency_key
+            .and_then(|delivery_id| self.awaited_execution_owner(delivery_id, ctx.agent_ctx));
+        let awaited_evidence = if let Some(owner) = awaited_owner.as_ref() {
+            owner.snapshot().await.0.awaited_execution
+        } else {
+            None
+        };
+        let completed_evidence = awaited_evidence.as_ref().is_some_and(|evidence| {
+            evidence.phase != crate::trigger::delivery::AwaitedExecutionPhase::Executing
+        });
+        // Bound execution evidence is authoritative for both takeover and
+        // callback replay. A hot replacement under the same module name must
+        // never change the artifact selected by an existing logical execution.
+        let resolved_module = if completed_evidence {
+            Some(ResolvedWasmModule {
+                hash: awaited_evidence
+                    .as_ref()
+                    .expect("completed evidence is present")
+                    .identity
+                    .module_digest
+                    .clone(),
+                data_binding: None,
+                scoped: false,
+            })
+        } else if let Some(evidence) = awaited_evidence.as_ref() {
+            let pinned_hash = &evidence.identity.module_digest;
+            match &ctx.schema_target {
+                ModuleDataTarget::TenantGlobal => {
+                    let wasm_reg = self.wasm_module_registry.read().unwrap(); // ci-ok: infallible lock
+                    resolve_tenant_global_module(
+                        &wasm_reg,
                         ctx.entity_ref.tenant,
-                        &pin.scope,
-                        &pin.bundle_digest,
                         &module_name,
+                        Some(pinned_hash),
                     )
-                    .and_then(|descriptor| {
-                        descriptor
-                            .artifact_digest
-                            .strip_prefix("sha256:")
-                            .map(|hash| ResolvedWasmModule {
-                                hash: hash.to_string(),
+                }
+                ModuleDataTarget::Scoped(pin) => {
+                    let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
+                    registry
+                        .get_scoped_module_at_digest(
+                            ctx.entity_ref.tenant,
+                            &pin.scope,
+                            &pin.bundle_digest,
+                            &module_name,
+                        )
+                        .and_then(|descriptor| {
+                            (descriptor.artifact_digest.strip_prefix("sha256:")?
+                                == pinned_hash.as_str())
+                            .then(|| ResolvedWasmModule {
+                                hash: pinned_hash.clone(),
                                 data_binding: descriptor.data_binding.clone(),
                                 scoped: true,
                             })
-                    })
+                        })
+                }
+            }
+        } else {
+            match &ctx.schema_target {
+                ModuleDataTarget::TenantGlobal => {
+                    let wasm_reg = self.wasm_module_registry.read().unwrap(); // ci-ok: infallible lock
+                    resolve_tenant_global_module(
+                        &wasm_reg,
+                        ctx.entity_ref.tenant,
+                        &module_name,
+                        None,
+                    )
+                }
+                ModuleDataTarget::Scoped(pin) => {
+                    let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
+                    registry
+                        .get_scoped_module_at_digest(
+                            ctx.entity_ref.tenant,
+                            &pin.scope,
+                            &pin.bundle_digest,
+                            &module_name,
+                        )
+                        .and_then(|descriptor| {
+                            descriptor
+                                .artifact_digest
+                                .strip_prefix("sha256:")
+                                .map(|hash| ResolvedWasmModule {
+                                    hash: hash.to_string(),
+                                    data_binding: descriptor.data_binding.clone(),
+                                    scoped: true,
+                                })
+                        })
+                }
             }
         };
 
         let Some(resolved_module) = resolved_module else {
+            if let Some(owner) = awaited_owner.as_ref()
+                && awaited_evidence.is_none()
+            {
+                let success_callback = integration.on_success.as_deref().ok_or_else(|| {
+                    format!(
+                        "collection member integration '{}' has no static success callback",
+                        integration.name
+                    )
+                })?;
+                owner
+                    .bind(
+                        &integration.name,
+                        &module_name,
+                        "module-unavailable",
+                        success_callback,
+                        integration.on_failure.as_deref(),
+                        temper_runtime::scheduler::sim_now(),
+                    )
+                    .await?;
+            }
             return self
                 .handle_module_not_found(ctx, integration, &module_name)
                 .await;
         };
         let hash = resolved_module.hash.clone();
+        let awaited_replay = if let Some(owner) = awaited_owner.as_ref() {
+            let success_callback = integration.on_success.as_deref().ok_or_else(|| {
+                format!(
+                    "collection member integration '{}' has no static success callback",
+                    integration.name
+                )
+            })?;
+            Some(
+                owner
+                    .bind(
+                        &integration.name,
+                        &module_name,
+                        &hash,
+                        success_callback,
+                        integration.on_failure.as_deref(),
+                        temper_runtime::scheduler::sim_now(),
+                    )
+                    .await?,
+            )
+        } else {
+            None
+        };
+        if let Some(replay) = awaited_replay.as_ref()
+            && replay.phase != crate::trigger::delivery::AwaitedExecutionPhase::Executing
+        {
+            if replay.phase == crate::trigger::delivery::AwaitedExecutionPhase::CallbackAccepted {
+                return Ok(None);
+            }
+            let Some(callback_action) = replay.callback_action.as_deref() else {
+                return Err(replay
+                    .execution_failure
+                    .map(|failure| format!("{failure:?}"))
+                    .unwrap_or_else(|| "awaited WASM execution failed".to_string()));
+            };
+            let callback_response = self
+                .dispatch_wasm_callback(
+                    ctx.entity_ref,
+                    callback_action,
+                    replay.callback_params.clone().unwrap_or_default(),
+                    ctx.agent_ctx,
+                    None,
+                    ctx.mode,
+                    &integration.name,
+                    &module_name,
+                    false,
+                )
+                .await?;
+            return Ok(callback_response);
+        }
         let cache_result = instrument_wasm_dispatch_phase_result(
             active_parent_span.clone(),
             ctx,
@@ -1201,6 +1342,19 @@ impl crate::state::ServerState {
         // Existing action-triggered invocations don't use streams — pass empty registry.
         let streams = Arc::new(std::sync::RwLock::new(StreamRegistry::default()));
         let phase_parent_span = Span::current();
+        let awaited_owner = ctx
+            .dispatch_idempotency_key
+            .and_then(|delivery_id| self.awaited_execution_owner(delivery_id, ctx.agent_ctx));
+        let awaited_execution_id = if let Some(owner) = awaited_owner.as_ref() {
+            owner
+                .snapshot()
+                .await
+                .0
+                .awaited_execution
+                .map(|evidence| evidence.identity.execution_id)
+        } else {
+            None
+        };
         let invoke_result = instrument_wasm_dispatch_phase_result(
             phase_parent_span.clone(),
             ctx,
@@ -1403,6 +1557,20 @@ impl crate::state::ServerState {
                     )
                     .await
                     .map_err(|e| e.to_string())?;
+                if let (Some(owner), Some(execution_id)) =
+                    (awaited_owner.as_ref(), awaited_execution_id.as_deref())
+                {
+                    owner
+                        .complete(
+                            execution_id,
+                            true,
+                            integration.on_success.as_deref(),
+                            Some(callback_params.clone()),
+                            None,
+                            temper_runtime::scheduler::sim_now(),
+                        )
+                        .await?;
+                }
 
                 // Determine callback action: prefer static on_success from spec,
                 // fall back to dynamic callback_action from WASM result. Composite
@@ -1431,7 +1599,10 @@ impl crate::state::ServerState {
                             callback_action,
                             callback_params,
                             ctx.agent_ctx,
+                            None,
                             ctx.mode,
+                            &integration.name,
+                            module_name,
                             false,
                         ),
                     )

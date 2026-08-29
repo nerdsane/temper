@@ -1,10 +1,11 @@
-//! Reaction rule evaluation, authorization, dispatch, and telemetry.
-
+mod awaited;
 mod entry;
 mod failure;
 mod principal;
 mod stream_provenance;
 mod telemetry;
+#[cfg(test)]
+mod tests;
 
 use crate::request_context::AgentContext;
 use crate::trigger::{guard, params, resolver};
@@ -12,6 +13,7 @@ use temper_runtime::tenant::TenantId;
 
 use super::super::types::{MAX_REACTION_DEPTH, ReactionFailureKind, ReactionResult, ReactionRule};
 use super::{BoundDelivery, ReactionDispatcher, effective_trigger_security_context};
+use awaited::await_bound_delivery_integration;
 use failure::{
     reaction_authorization_decision_id, reaction_authorization_failure, reaction_dispatch_failure,
 };
@@ -349,6 +351,7 @@ impl ReactionDispatcher {
                             state_timeout_state: delivery.state_timeout_state.clone(),
                             schema_pin: None,
                             collection: delivery.collection.clone(),
+                            awaited_callback: None,
                         }),
                     }),
                     Err(error) => {
@@ -376,7 +379,7 @@ impl ReactionDispatcher {
                     &rule.then.action,
                     effective_params,
                     &dispatch_ctx,
-                    false,
+                    await_bound_delivery_integration(bound_delivery.as_ref()),
                     reaction_context,
                     None,
                     kernel_metadata,
