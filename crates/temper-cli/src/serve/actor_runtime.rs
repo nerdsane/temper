@@ -12,7 +12,6 @@ use temper_actor_runtime::{ActorSystem as PgActorSystem, SchedulerConfig, SpecDr
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::{EntitySpec, SpecRegistry};
 use temper_server::state::ServerState;
-use temper_spec::automaton::Effect;
 
 use crate::StorageBackend;
 
@@ -247,6 +246,11 @@ impl ActorBackedSelection {
     }
 }
 
+/// Reject spec features the Postgres actor runtime cannot wire up at serve
+/// time (legacy integrations and action triggers, which need integration
+/// actors this runtime does not provide). Effect-vocabulary support is NOT
+/// checked here — `SpecDrivenActor` construction is the single source of
+/// truth for which effects the runtime executes (ARN-179).
 fn validate_actor_runtime_compatible(
     tenant: &TenantId,
     entity_type: &str,
@@ -264,33 +268,6 @@ fn validate_actor_runtime_compatible(
                 "tenant {tenant} entity {entity_type} action {} declares action triggers, which are not yet supported by --actor-runtime postgres",
                 action.name
             );
-        }
-        for effect in &action.effect {
-            match effect {
-                Effect::Increment {
-                    amount: Some(_), ..
-                }
-                | Effect::Decrement {
-                    amount: Some(_), ..
-                }
-                | Effect::SetCounterFromParam { .. }
-                | Effect::ListAppend { .. }
-                | Effect::ListRemoveAt { .. }
-                | Effect::Trigger { .. }
-                | Effect::Schedule { .. }
-                | Effect::ScheduleAt { .. }
-                | Effect::Spawn { .. } => {
-                    bail!(
-                        "tenant {tenant} entity {entity_type} action {} uses effect {:?}, which is not yet supported by --actor-runtime postgres",
-                        action.name,
-                        effect
-                    );
-                }
-                Effect::Increment { amount: None, .. }
-                | Effect::Decrement { amount: None, .. }
-                | Effect::SetBool { .. }
-                | Effect::Emit { .. } => {}
-            }
         }
     }
     Ok(())
@@ -396,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_actor_effects() {
+    fn rejects_specs_with_legacy_integrations() {
         let registry = registry_with("alpha", "Process", PROCESS_IOA);
         let err = collect_actor_runtime_definitions(&registry, &["Process".into()]).unwrap_err();
 
