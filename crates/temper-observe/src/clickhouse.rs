@@ -4,6 +4,7 @@
 //! Write path is handled by OTEL SDK + OTLP export; this module is query-only.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use crate::error::ObserveError;
 use crate::store::{ObservabilityStore, ResultRow, ResultSet, SqlParam};
@@ -12,6 +13,28 @@ use crate::store::{ObservabilityStore, ResultRow, ResultSet, SqlParam};
 pub struct ClickHouseStore {
     base_url: String,
     client: reqwest::Client,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct BoundClickHouseQuery {
+    sql: String,
+    form_params: Vec<(String, String)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QueryRegion {
+    Code,
+    SingleQuoted,
+    DoubleQuoted,
+    BacktickQuoted,
+    UnicodeSingleQuoted,
+    UnicodeDoubleQuoted,
+    LineComment,
+    BlockComment(usize),
+    Heredoc {
+        delimiter_start: usize,
+        delimiter_len: usize,
+    },
 }
 
 impl ClickHouseStore {
@@ -29,81 +52,231 @@ impl ClickHouseStore {
     }
 
     fn query_url(&self) -> String {
-        format!("{}/?default_format=JSONEachRow", self.base_url)
+        // ClickHouse resolves `default_format` before it parses a multipart
+        // request body. Keep the SQL and parameter values in multipart fields,
+        // but select the response format in the URL where the HTTP handler can
+        // see it before query execution.
+        format!(
+            "{}/?default_format=JSONEachRow",
+            self.base_url.trim_end_matches('/')
+        )
     }
 
-    /// Substitute `$N` placeholders with rendered parameter values.
-    ///
-    /// Single pass so a substituted value can never be re-scanned, and
-    /// placeholders inside single-quoted string literals are left intact —
-    /// a naive global `replace` corrupts both (e.g. `WHERE name = '$1'`
-    /// would mangle the literal, and a value containing `$2` would be
-    /// rewritten by a later iteration).
-    fn interpolate_params(sql: &str, params: &[SqlParam]) -> String {
-        let render = |param: &SqlParam| -> String {
-            match param {
-                SqlParam::String(s) => format!("'{}'", s.replace('\'', "''")),
-                SqlParam::Int(i) => i.to_string(),
-                SqlParam::Float(f) => f.to_string(),
-                SqlParam::Bool(b) => if *b { "1" } else { "0" }.to_string(),
-                SqlParam::Null => "NULL".to_string(),
-            }
-        };
-
+    /// Translate store-wide `$N` placeholders to ClickHouse's typed query
+    /// parameters. Values are returned separately for multipart form encoding
+    /// and never become part of the SQL source text.
+    fn bind_params(sql: &str, params: &[SqlParam]) -> Result<BoundClickHouseQuery, ObserveError> {
         let mut out = String::with_capacity(sql.len());
+        let mut used = vec![false; params.len()];
         let bytes = sql.as_bytes();
         let mut i = 0;
-        let mut in_string = false;
+        let mut region = QueryRegion::Code;
+
         while i < bytes.len() {
-            // Placeholders, quotes, and escapes are all ASCII; any multibyte
-            // UTF-8 sequence starts with a byte >= 0x80 and is copied verbatim
-            // below, so indexing by byte never splits a character.
             let c = bytes[i];
-            if in_string {
-                if c == b'\'' {
-                    // `''` is an escaped quote inside a literal, not a terminator.
-                    if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                        out.push_str("''");
-                        i += 2;
+
+            match region {
+                QueryRegion::Code => {
+                    if c == b'$'
+                        && let Some(delimiter_len) = heredoc_delimiter_len(sql, i)
+                    {
+                        out.push_str(&sql[i..i + delimiter_len]);
+                        let delimiter_start = i;
+                        i += delimiter_len;
+                        region = QueryRegion::Heredoc {
+                            delimiter_start,
+                            delimiter_len,
+                        };
                         continue;
                     }
-                    in_string = false;
-                    out.push('\'');
-                    i += 1;
-                    continue;
+                    if is_clickhouse_word_char(c) {
+                        let mut end = i + 1;
+                        while end < bytes.len() && is_clickhouse_bareword_char(bytes[end]) {
+                            end += 1;
+                        }
+                        out.push_str(&sql[i..end]);
+                        i = end;
+                        continue;
+                    }
+                    let next = bytes.get(i + 1).copied();
+                    region = match (c, next) {
+                        (b'\'', _) => QueryRegion::SingleQuoted,
+                        (b'"', _) => QueryRegion::DoubleQuoted,
+                        (b'`', _) => QueryRegion::BacktickQuoted,
+                        (b'-', Some(b'-')) | (b'/', Some(b'/')) => QueryRegion::LineComment,
+                        (b'#', Some(b' ' | b'!')) => QueryRegion::LineComment,
+                        (b'/', Some(b'*')) => {
+                            out.push_str("/*");
+                            i += 2;
+                            region = QueryRegion::BlockComment(1);
+                            continue;
+                        }
+                        (0xE2, Some(0x80)) if bytes.get(i + 2) == Some(&0x98) => {
+                            push_char(sql, &mut out, &mut i);
+                            region = QueryRegion::UnicodeSingleQuoted;
+                            continue;
+                        }
+                        (0xE2, Some(0x80)) if bytes.get(i + 2) == Some(&0x9C) => {
+                            push_char(sql, &mut out, &mut i);
+                            region = QueryRegion::UnicodeDoubleQuoted;
+                            continue;
+                        }
+                        (b'$', Some(digit)) if digit.is_ascii_digit() => {
+                            let mut end = i + 1;
+                            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                                end += 1;
+                            }
+                            if bytes
+                                .get(end)
+                                .is_some_and(|byte| is_clickhouse_bareword_char(*byte))
+                            {
+                                while end < bytes.len() && is_clickhouse_bareword_char(bytes[end]) {
+                                    end += 1;
+                                }
+                                out.push_str(&sql[i..end]);
+                                i = end;
+                                continue;
+                            }
+                            let one_based = sql[i + 1..end].parse::<usize>().map_err(|_| {
+                                ObserveError::InvalidQuery(format!(
+                                    "invalid parameter placeholder {}",
+                                    &sql[i..end]
+                                ))
+                            })?;
+                            let index = one_based.checked_sub(1).ok_or_else(|| {
+                                ObserveError::InvalidQuery(
+                                    "parameter placeholders start at $1".to_string(),
+                                )
+                            })?;
+                            let param = params.get(index).ok_or_else(|| {
+                                ObserveError::InvalidQuery(format!(
+                                    "parameter ${one_based} was not provided"
+                                ))
+                            })?;
+                            used[index] = true;
+                            if let Some((parameter_type, _)) = clickhouse_param(param) {
+                                write!(out, "{{p{one_based}:{parameter_type}}}")
+                                    .expect("writing to a String cannot fail");
+                            } else {
+                                out.push_str("NULL");
+                            }
+                            i = end;
+                            continue;
+                        }
+                        _ => QueryRegion::Code,
+                    };
                 }
-                // Fall through to the multibyte-safe char copy below.
-            } else if c == b'\'' {
-                in_string = true;
-                out.push('\'');
-                i += 1;
-                continue;
-            } else if c == b'$' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
-                let mut j = i + 1;
-                while j < bytes.len() && bytes[j].is_ascii_digit() {
-                    j += 1;
+                QueryRegion::SingleQuoted
+                | QueryRegion::DoubleQuoted
+                | QueryRegion::BacktickQuoted => {
+                    let quote = match region {
+                        QueryRegion::SingleQuoted => b'\'',
+                        QueryRegion::DoubleQuoted => b'"',
+                        QueryRegion::BacktickQuoted => b'`',
+                        _ => unreachable!(),
+                    };
+                    if c == b'\\' {
+                        push_char(sql, &mut out, &mut i);
+                        if i < bytes.len() {
+                            push_char(sql, &mut out, &mut i);
+                        }
+                        continue;
+                    }
+                    if c == quote {
+                        if bytes.get(i + 1) == Some(&quote) {
+                            out.push(quote as char);
+                            out.push(quote as char);
+                            i += 2;
+                            continue;
+                        }
+                        region = QueryRegion::Code;
+                    }
                 }
-                let idx: usize = sql[i + 1..j].parse().unwrap_or(0);
-                match idx.checked_sub(1).and_then(|n| params.get(n)) {
-                    Some(param) => out.push_str(&render(param)),
-                    // Out-of-range placeholder: leave it verbatim so the
-                    // query fails loudly at ClickHouse rather than silently
-                    // binding the wrong value.
-                    None => out.push_str(&sql[i..j]),
+                QueryRegion::LineComment => {
+                    if c == b'\n' {
+                        region = QueryRegion::Code;
+                    }
                 }
-                i = j;
-                continue;
+                QueryRegion::BlockComment(depth) => {
+                    if c == b'/' && bytes.get(i + 1) == Some(&b'*') {
+                        out.push_str("/*");
+                        i += 2;
+                        region = QueryRegion::BlockComment(depth + 1);
+                        continue;
+                    }
+                    if c == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                        out.push_str("*/");
+                        i += 2;
+                        region = if depth == 1 {
+                            QueryRegion::Code
+                        } else {
+                            QueryRegion::BlockComment(depth - 1)
+                        };
+                        continue;
+                    }
+                }
+                QueryRegion::UnicodeSingleQuoted | QueryRegion::UnicodeDoubleQuoted => {
+                    let closing = if region == QueryRegion::UnicodeSingleQuoted {
+                        "’"
+                    } else {
+                        "”"
+                    };
+                    if sql[i..].starts_with(closing) {
+                        region = QueryRegion::Code;
+                    }
+                }
+                QueryRegion::Heredoc {
+                    delimiter_start,
+                    delimiter_len,
+                } => {
+                    let delimiter = &sql[delimiter_start..delimiter_start + delimiter_len];
+                    if sql[i..].starts_with(delimiter) {
+                        out.push_str(delimiter);
+                        i += delimiter_len;
+                        region = QueryRegion::Code;
+                        continue;
+                    }
+                }
             }
-            // ASCII byte or the leading byte of a multibyte char: copy the
-            // whole char so we never emit an invalid UTF-8 fragment.
-            let ch = sql[i..]
-                .chars()
-                .next()
-                .expect("byte index on char boundary");
-            out.push(ch);
-            i += ch.len_utf8();
+
+            push_char(sql, &mut out, &mut i);
         }
-        out
+
+        let form_params = used
+            .into_iter()
+            .zip(params)
+            .enumerate()
+            .filter_map(|(index, (is_used, param))| {
+                if !is_used {
+                    return None;
+                }
+                let (_, value) = clickhouse_param(param)?;
+                Some((format!("param_p{}", index + 1), value))
+            })
+            .collect();
+
+        Ok(BoundClickHouseQuery {
+            sql: out,
+            form_params,
+        })
+    }
+
+    fn build_request(
+        &self,
+        sql: &str,
+        params: &[SqlParam],
+    ) -> Result<reqwest::Request, ObserveError> {
+        let bound = Self::bind_params(sql, params)?;
+        let mut form = reqwest::multipart::Form::new().text("query", bound.sql);
+        for (name, value) in bound.form_params {
+            form = form.text(name, value);
+        }
+
+        self.client
+            .post(self.query_url())
+            .multipart(form)
+            .build()
+            .map_err(|e| ObserveError::ConnectionError(e.to_string()))
     }
 
     async fn execute_query(
@@ -111,12 +284,10 @@ impl ClickHouseStore {
         sql: &str,
         params: &[SqlParam],
     ) -> Result<ResultSet, ObserveError> {
-        let final_sql = Self::interpolate_params(sql, params);
+        let request = self.build_request(sql, params)?;
         let resp = self
             .client
-            .post(self.query_url())
-            .body(final_sql)
-            .send()
+            .execute(request)
             .await
             .map_err(|e| ObserveError::ConnectionError(e.to_string()))?;
 
@@ -152,6 +323,50 @@ impl ObservabilityStore for ClickHouseStore {
     ) -> Result<ResultSet, ObserveError> {
         self.execute_query(sql, params).await
     }
+}
+
+fn clickhouse_param(param: &SqlParam) -> Option<(&'static str, String)> {
+    match param {
+        SqlParam::String(value) => Some(("String", value.clone())),
+        SqlParam::Int(value) => Some(("Int64", value.to_string())),
+        SqlParam::Float(value) => Some(("Float64", value.to_string())),
+        SqlParam::Bool(value) => Some(("UInt8", u8::from(*value).to_string())),
+        SqlParam::Null => None,
+    }
+}
+
+fn heredoc_delimiter_len(source: &str, start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let tag_len = bytes[start + 1..].iter().position(|byte| *byte == b'$')?;
+    let delimiter_len = tag_len + 2;
+    let tag = &bytes[start + 1..start + 1 + tag_len];
+    if !tag
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    {
+        return None;
+    }
+    let delimiter = &source[start..start + delimiter_len];
+    source[start + delimiter_len..]
+        .contains(delimiter)
+        .then_some(delimiter_len)
+}
+
+fn is_clickhouse_bareword_char(byte: u8) -> bool {
+    is_clickhouse_word_char(byte) || byte == b'$'
+}
+
+fn is_clickhouse_word_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn push_char(source: &str, output: &mut String, index: &mut usize) {
+    let ch = source[*index..]
+        .chars()
+        .next()
+        .expect("index must be on a character boundary");
+    output.push(ch);
+    *index += ch.len_utf8();
 }
 
 /// Parse ClickHouse JSONEachRow response into a ResultSet.
@@ -190,82 +405,5 @@ fn parse_json_each_row(body: &str) -> Result<ResultSet, ObserveError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_store_construction() {
-        let store = ClickHouseStore::new("http://localhost:8123");
-        assert_eq!(store.base_url(), "http://localhost:8123");
-    }
-
-    #[test]
-    fn test_interpolate_params() {
-        let sql = "SELECT * FROM spans WHERE service = $1 AND duration_ns > $2";
-        let params = vec![SqlParam::String("api".into()), SqlParam::Int(1000)];
-        let result = ClickHouseStore::interpolate_params(sql, &params);
-        assert_eq!(
-            result,
-            "SELECT * FROM spans WHERE service = 'api' AND duration_ns > 1000"
-        );
-    }
-
-    #[test]
-    fn interpolate_preserves_placeholder_inside_string_literal() {
-        // The literal '$1' must survive untouched; only the bare $1 binds.
-        let sql = "SELECT * FROM spans WHERE label = '$1' AND service = $1";
-        let params = vec![SqlParam::String("api".into())];
-        let result = ClickHouseStore::interpolate_params(sql, &params);
-        assert_eq!(
-            result,
-            "SELECT * FROM spans WHERE label = '$1' AND service = 'api'"
-        );
-    }
-
-    #[test]
-    fn interpolate_does_not_rescan_substituted_value() {
-        // A value containing "$2" must not be rewritten by a later pass.
-        let sql = "SELECT $1, $2";
-        let params = vec![SqlParam::String("has $2 inside".into()), SqlParam::Int(7)];
-        let result = ClickHouseStore::interpolate_params(sql, &params);
-        assert_eq!(result, "SELECT 'has $2 inside', 7");
-    }
-
-    #[test]
-    fn interpolate_handles_two_digit_and_multibyte() {
-        let sql = "SELECT $10, name = $1, note = 'café ☕'";
-        let mut params: Vec<SqlParam> = (1..=10).map(SqlParam::Int).collect();
-        params[0] = SqlParam::String("first".into());
-        let result = ClickHouseStore::interpolate_params(sql, &params);
-        assert_eq!(result, "SELECT 10, name = 'first', note = 'café ☕'");
-    }
-
-    #[test]
-    fn interpolate_escapes_embedded_quotes() {
-        let sql = "WHERE name = $1";
-        let params = vec![SqlParam::String("O'Brien".into())];
-        let result = ClickHouseStore::interpolate_params(sql, &params);
-        assert_eq!(result, "WHERE name = 'O''Brien'");
-    }
-
-    #[test]
-    fn test_parse_empty() {
-        let rs = parse_json_each_row("").unwrap();
-        assert!(rs.is_empty());
-    }
-
-    #[test]
-    fn test_parse_single_row() {
-        let body = r#"{"service":"api","status":"ok"}"#;
-        let rs = parse_json_each_row(body).unwrap();
-        assert_eq!(rs.len(), 1);
-        assert_eq!(rs.get(0, "service"), Some(&serde_json::json!("api")));
-    }
-
-    #[test]
-    fn test_parse_multiple_rows() {
-        let body = "{\"a\":1}\n{\"a\":2}";
-        let rs = parse_json_each_row(body).unwrap();
-        assert_eq!(rs.len(), 2);
-    }
-}
+#[path = "clickhouse_tests.rs"]
+mod tests;
