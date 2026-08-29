@@ -302,6 +302,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space for full workspace builds
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h
       - uses: ./.github/actions/rust-setup
         with:
           cache-suffix: bench-build
