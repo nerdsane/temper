@@ -682,7 +682,18 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
     Ok(())
 }
 
-/// Validate all `[[vector]]` access-path declarations per ADR-0155.
+/// Maximum vector dimensionality a `[[vector]]` may declare (ADR-0159). Query
+/// work and allocation are `rows × dims`; with the row count already bounded
+/// (ADR-0155), this bounds the dimensionality so a spec cannot force
+/// multi-gigabyte per-query work. Set well above any real embedding model
+/// (which top out in the low thousands) so no legitimate spec is rejected.
+const MAX_VECTOR_DIMS: usize = 16_384;
+
+/// Maximum length of a `[[vector]]` identifier (`name` / `property` /
+/// `model_property`), bounding pathological declarations (ADR-0159).
+const MAX_VECTOR_IDENT_LEN: usize = 256;
+
+/// Validate all `[[vector]]` access-path declarations per ADR-0155 / ADR-0159.
 fn validate_vector_decls(automaton: &Automaton) -> Result<(), AutomatonParseError> {
     const METRICS: [&str; 3] = ["cosine", "dot", "l2"];
     let state_var_names: std::collections::BTreeSet<&str> =
@@ -712,6 +723,26 @@ fn validate_vector_decls(automaton: &Automaton) -> Result<(), AutomatonParseErro
                 "vector path '{}' must declare dims > 0",
                 vec_decl.name
             )));
+        }
+        if vec_decl.dims > MAX_VECTOR_DIMS {
+            return Err(AutomatonParseError::Validation(format!(
+                "vector path '{}' declares dims {} which exceeds the maximum of {MAX_VECTOR_DIMS}",
+                vec_decl.name, vec_decl.dims
+            )));
+        }
+        for (label, ident) in [
+            ("name", &vec_decl.name),
+            ("property", &vec_decl.property),
+            ("model_property", &vec_decl.model_property),
+            ("metric", &vec_decl.metric),
+        ] {
+            if ident.len() > MAX_VECTOR_IDENT_LEN {
+                return Err(AutomatonParseError::Validation(format!(
+                    "vector path '{}' {label} length {} exceeds the maximum of {MAX_VECTOR_IDENT_LEN}",
+                    vec_decl.name,
+                    ident.len()
+                )));
+            }
         }
         if !METRICS.contains(&vec_decl.metric.as_str()) {
             return Err(AutomatonParseError::Validation(format!(
