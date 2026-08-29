@@ -390,17 +390,32 @@ impl EntityActor {
             let reconcile_vectors = !table.vectors.is_empty();
             let mut key_rows = Vec::new();
             let mut vector_rows = Vec::new();
-            if let Some(field_map) = state.fields.as_object() {
-                for key in &table.keys {
-                    if let Some(hash) =
+            // ARN-238: a tombstoning write must RELEASE the entity's declared
+            // keys, not re-claim them from the still-populated fields —
+            // otherwise the dead entity holds the key values forever (keyed
+            // reads resolve to it, and new claimants are rejected as
+            // duplicates). The Delete arm persists before mutating status, so
+            // the event's to_status carries the tombstone signal. Release does
+            // not need the fields at all, so it is not gated on them.
+            let tombstoned = state.status == "Deleted" || event.to_status == "Deleted";
+            for key in &table.keys {
+                let key_hash = if tombstoned {
+                    None
+                } else {
+                    state.fields.as_object().and_then(|field_map| {
                         crate::key_index::canonical_key_hash(&key.name, &key.properties, field_map)
-                    {
-                        key_rows.push(temper_runtime::persistence::EntityKeyRow {
-                            key_name: key.name.clone(),
-                            key_hash: hash,
-                        });
-                    }
-                }
+                    })
+                };
+                // An empty hash is the RELEASE marker (see EntityKeyRow):
+                // the store drops the entity's row for this key_name and
+                // inserts nothing, so tombstoned or fully-nulled keys are
+                // purged in the same transaction as the journal append.
+                key_rows.push(temper_runtime::persistence::EntityKeyRow {
+                    key_name: key.name.clone(),
+                    key_hash: key_hash.unwrap_or_default(),
+                });
+            }
+            if let Some(field_map) = state.fields.as_object() {
                 // A soft-deleted (tombstone) entity is never indexed — it emits no
                 // vector rows, so the reconcile below PURGES any it had, even though
                 // its embedding field may still be present. Mirrors how the field-index
