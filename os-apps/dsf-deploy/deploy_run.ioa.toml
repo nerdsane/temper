@@ -1,0 +1,172 @@
+# DeployRun Entity — I/O Automaton Specification
+#
+# Shared Deep Sci-Fi deploy walk. Howl and TemperPaw both drive this.
+# Hands run on TensorLake sandbox dsf. Probe / deploy / verify HTTP is
+# the dsf_deploy WASM module.
+
+[automaton]
+name = "DeployRun"
+states = ["Idle", "Checking", "Ready", "Deploying", "Verifying", "Healthy", "Failed", "Cancelled"]
+initial = "Idle"
+
+# --- State Variables ---
+
+[[state]]
+name = "has_target"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "health_ok"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "deploy_recorded"
+type = "bool"
+initial = "false"
+
+# --- Actions ---
+
+[[action]]
+name = "Arm"
+kind = "input"
+from = ["Idle"]
+to = "Idle"
+effect = "set has_target true"
+params = ["Service", "Environment", "ComputerName"]
+hint = "Name the deploy target. Stays Idle until ProbeHealth."
+
+[[action]]
+name = "ProbeHealth"
+kind = "input"
+from = ["Idle", "Checking", "Failed"]
+to = "Checking"
+guard = "has_target"
+effect = [{ type = "trigger", name = "probe_health" }]
+hint = "Probe the armed target. Requires Arm first. Runs dsf_deploy."
+
+[[action.triggers]]
+name = "probe_health"
+kind = "wasm"
+module = "dsf_deploy"
+on_success = "MarkReady"
+on_failure = "MarkFailed"
+
+[action.triggers.config]
+health_url = "{secret:health_url}"
+sandbox_url = "{secret:sandbox_url}"
+
+[[action]]
+name = "MarkReady"
+kind = "input"
+from = ["Checking"]
+to = "Ready"
+effect = "set health_ok true"
+hint = "Health probe passed. Target is ready to deploy."
+
+[[action]]
+name = "StartDeploy"
+kind = "input"
+from = ["Ready"]
+to = "Deploying"
+effect = [{ type = "trigger", name = "start_deploy" }]
+hint = "Begin the deploy against the armed target. Runs dsf_deploy."
+
+[[action.triggers]]
+name = "start_deploy"
+kind = "wasm"
+module = "dsf_deploy"
+on_success = "RecordDeploy"
+on_failure = "MarkFailed"
+
+[action.triggers.config]
+deploy_url = "{secret:deploy_url}"
+sandbox_url = "{secret:sandbox_url}"
+
+[[action]]
+name = "RecordDeploy"
+kind = "input"
+from = ["Deploying"]
+to = "Deploying"
+effect = "set deploy_recorded true"
+params = ["DeployId"]
+hint = "Record the external deploy id. Stays Deploying until StartVerify."
+
+[[action]]
+name = "StartVerify"
+kind = "input"
+from = ["Deploying"]
+to = "Verifying"
+guard = "deploy_recorded"
+effect = [{ type = "trigger", name = "start_verify" }]
+hint = "Start post-deploy verification. Requires RecordDeploy. Runs dsf_deploy."
+
+[[action.triggers]]
+name = "start_verify"
+kind = "wasm"
+module = "dsf_deploy"
+on_success = "MarkHealthy"
+on_failure = "MarkFailed"
+
+[action.triggers.config]
+verify_url = "{secret:verify_url}"
+health_url = "{secret:health_url}"
+sandbox_url = "{secret:sandbox_url}"
+
+[[action]]
+name = "MarkHealthy"
+kind = "input"
+from = ["Verifying"]
+to = "Healthy"
+hint = "Verification passed. Terminal success."
+
+[[action]]
+name = "MarkFailed"
+kind = "input"
+from = ["Checking", "Deploying", "Verifying"]
+to = "Failed"
+hint = "Probe, deploy, or verify failed. ResumeOnComputer can retry."
+
+[[action]]
+name = "Cancel"
+kind = "input"
+from = ["Idle", "Checking", "Ready", "Deploying", "Verifying"]
+to = "Cancelled"
+hint = "Abandon the run. Terminal."
+
+[[action]]
+name = "ResumeOnComputer"
+kind = "input"
+from = ["Failed"]
+to = "Checking"
+effect = [{ type = "trigger", name = "resume_probe" }]
+hint = "Resume a failed run on the armed computer. Re-probes via dsf_deploy."
+
+[[action.triggers]]
+name = "resume_probe"
+kind = "wasm"
+module = "dsf_deploy"
+on_success = "MarkReady"
+on_failure = "MarkFailed"
+
+[action.triggers.config]
+health_url = "{secret:health_url}"
+sandbox_url = "{secret:sandbox_url}"
+
+# --- Safety Invariants ---
+
+[[invariant]]
+name = "CancelledIsFinal"
+when = ["Cancelled"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "HealthyIsFinal"
+when = ["Healthy"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "WorkRequiresTarget"
+when = ["Checking", "Ready", "Deploying", "Verifying", "Healthy"]
+assert = "has_target"
