@@ -71,3 +71,27 @@ green), and item 4 makes temper's deploy leg the temperpaw pin.
 harden a leg that should not exist. The real deploy path is the pin-bump PR into
 temperpaw. Given up: nothing (no environment consumed this workflow's output).
 **Where:** `.github/workflows/deploy-observe.yml` (removed).
+
+---
+
+**Decision:** #448 panel round-1 accuracy pass - fixed six real recipe inaccuracies
+against source, and rebutted the seventh (dst_genesis_install_rollback) with
+evidence rather than "fixing" a correct doc.
+**Came up because:** the panel spot-checked citations; for a feature map an
+inaccurate recipe is a first-class bug (agents drive these and get false failures).
+The research subagents had introduced semantic errors I passed through.
+**Options:** (a) apply all seven verbatim; (b) verify each against source, fix the
+real ones, and push back on any that are wrong.
+**Chose (b) over (a) because:** groundedness beats deference - blindly "fixing" a
+correct doc injects a NEW error. Verified: dst_genesis_install_rollback.rs exists on
+origin/main (git ls-tree) and the temper-server dst_* count is exactly 13, matching
+the table - so act-on 1 is a false finding, left as-is. Fixed the six real ones:
+SKILL mkdir -p .scratch; cedar decisions ?status=pending (DecisionStatus is
+serde lowercase); query-surface entity reads need the bearer while /tdata,/tdata/,
+/tdata/$metadata are public (edge.rs); integrations restated to observable (no
+universal retry/DLQ/callback promise); blobs $value is Blob-binary-only, overflow
+reads via the entity; README maps verify-remote. Re-audited every undriven file's
+routes against source - all real.
+**Where:** `.agents/skills/verify-temper/` (SKILL.md, features/{cedar-authz,
+query-surface,integrations-and-webhooks,blobs-and-temperfs,entity-lifecycle}.md,
+features/README.md).

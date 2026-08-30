@@ -23,7 +23,7 @@ curl -sS "http://localhost:3600/tdata/<Set>('t-1')" -H "Authorization: Bearer $K
 Params are delivered as the message payload (`SpecMessage::with_params`) and merged into the entity's fields; the transition table maps `(status, action)` and status moves via the `SetState` effect (or the durably stored `to_status`).
 
 ## What proves it
-The entity's `status` after the action matches the spec's transition, read back over OData. A 200 on dispatch is NOT proof: an action that is not valid from the current state still returns 200 while logging "action not valid from current state" and leaving status unchanged. For history, `GET /observe/entities/{type}/{id}/history`; to block until a target state, `GET /observe/entities/{type}/{id}/wait`.
+The entity's `status` after the action matches the spec's transition, read back over OData. A 200 on dispatch is NOT proof: an action that is not valid from the current state still returns 200 while logging "action not valid from current state" and leaving status unchanged. For history, `GET /observe/entities/{entity_type}/{entity_id}/history`; to block until a target state, `GET /observe/entities/{entity_type}/{entity_id}/wait`.
 
 ## Gotchas
 - You cannot create an entity directly into an arbitrary state - create mints it at the declared initial state only.

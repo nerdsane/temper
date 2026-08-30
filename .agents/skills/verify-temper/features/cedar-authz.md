@@ -16,7 +16,7 @@ curl -sS -X POST "http://localhost:3600/tdata/<Set>('<id>')/Temper.<Action>" \
 #   -> 403 {"error":{"code":"AuthorizationDenied","message":"... (decision: PD-…)"}}
 
 # 2. List pending decisions, 3. approve, 4. re-invoke -> 200
-curl -sS "http://localhost:3600/api/tenants/default/decisions?status=Pending" -H "Authorization: Bearer $TEMPER_API_KEY"
+curl -sS "http://localhost:3600/api/tenants/default/decisions?status=pending" -H "Authorization: Bearer $TEMPER_API_KEY"
 curl -sS -X POST "http://localhost:3600/api/tenants/default/decisions/PD-…/approve" \
   -H "Authorization: Bearer $TEMPER_API_KEY" -d '{"scope":{…},"decided_by":"human-terminal"}'
 ```
@@ -29,5 +29,5 @@ The denied dispatch returns 403 carrying a `PD-…` id; that id appears in the p
 
 ## Gotchas
 - `POST /api/audit` only records a trajectory entry; there is no `/api/audit` GET reader - audit history is read through the trajectory/observe endpoints.
-- Decision-list status casing is inconsistent in-tree (the CLI queries `?status=Pending`, some observe tests use `?status=pending`) - confirm what the running server accepts before hardcoding.
+- Decision status is stored lowercase (`DecisionStatus` is `#[serde(rename_all = "lowercase")]` in `state/pending_decisions.rs`), so the filter value is `?status=pending` - the CLI's `?status=Pending` will not match; use lowercase.
 - A silent 403 is itself a finding (stack rule): surface every denial to the human channel.

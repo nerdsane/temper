@@ -11,7 +11,7 @@ A transition can call an external service; an external service can call in over 
 
 ## Driving it
 
-**Outbound** - declare an integration on an action (`type="webhook"`, `url`, `trigger=<action>`, or an `ActionTrigger` of `kind="webhook"` with `url`+`method`), invoke the triggering action, watch the async POST. The platform engine (`crates/temper-platform/src/integration/`) adds exponential-backoff retry (default 3) and a dead-letter queue; the generic `HttpWebhookAdapter` maps a 2xx response body's `callback_params` back into a follow-up action. Delivery core is `temper_runtime::webhook::deliver_webhook` (10 s default timeout).
+**Outbound** - declare an integration on an action (`type="webhook"`, `url`, `trigger=<action>`, or an `ActionTrigger` of `kind="webhook"` with `url`+`method`), invoke the triggering action, and watch for the async POST at the endpoint. It is fire-and-forget post-commit: the transition completes regardless, and the observable effect is the outbound request plus a `tracing` success/failure line. Beyond that, behavior depends on the wiring, so verify only what your spec actually exercises: retry/backoff and a dead-letter queue exist in the platform integration engine (`crates/temper-platform/src/integration/`, delivery core `temper_runtime::webhook::deliver_webhook`), and a follow-up action is dispatched only when the path returns `callback_params` and the integration declares an `on_success`/adapter mapping. Do not assume retries/DLQ/callbacks for a plain webhook that declares none.
 
 **Inbound signed webhook** - declare `[[webhook]]` with `path`, `action`, `hmac_secret` (supports `{secret:key}`), `hmac_header`, then:
 ```bash
@@ -21,7 +21,7 @@ curl -sS -X POST "http://localhost:3600/webhooks/default/<path>?entity_id=<id>" 
 ```
 
 ## What proves it
-- Outbound: the external endpoint receives the JSON envelope (`tenant, entity_type, entity_id, trigger_action, trigger_params, entity_state`), the `tracing` success line fires, and any `callback_params` re-enter as the mapped action (read the entity back). Exhausted retries land a `DeadLetterEntry`.
+- Outbound: the external endpoint receives the JSON envelope (`tenant, entity_type, entity_id, trigger_action, trigger_params, entity_state`) and the `tracing` success line fires. If (and only if) the integration wires a callback, `callback_params` re-enter as the mapped action (read the entity back). Retry/DLQ apply only on the platform-engine path.
 - Inbound: a correctly signed request dispatches the configured action (entity moves); an unsigned/bad-sig request returns 401 without dispatching.
 
 ## Gotchas

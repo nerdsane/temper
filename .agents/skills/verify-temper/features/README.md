@@ -3,7 +3,7 @@
 Surface enumeration.
 
 Served route trees (`crates/temper-server/src`): `/tdata` (OData reads, bound actions, `$metadata`, `$hints`, `$events`), `/observe` (UI, entity history, replay-parity, specs, health), `/api` (authorize, decisions, policies, audit, specs load/validate), `/webhooks/{tenant}/{*path}` (inbound signed webhooks), `/_admin` (profiling), `/healthz`.
-CLI verbs (`temper-cli`): `serve`, `mcp`, `verify`, `verify-ioa`, `init`, `codegen`, `install`, `decide`, `migrate-turso-to-postgres`.
+CLI verbs (`temper-cli`): `serve`, `mcp`, `verify`, `verify-ioa`, `verify-remote`, `init`, `codegen`, `install`, `decide`, `migrate-turso-to-postgres`.
 Plus the DST suites (`crates/temper-server/tests/dst_*`, `crates/temper-platform/tests`).
 
 | Feature | File | Drive when you changed |
@@ -26,6 +26,7 @@ Plus the DST suites (`crates/temper-server/tests/dst_*`, `crates/temper-platform
 
 - `/_admin` profiling (cpu/wall) - ops-only; drive read-only.
 - `init` / `codegen` - scaffolding verbs; drive = run them in a temp dir and build the output.
+- `verify-remote` - runs the cascade against a specs dir + a running server URL (sim seeds, prop cases); drive = point it at a local `serve` instance. Covered by spec-cascade.md's cascade until it earns its own file.
 - `install` - app install flow; needs a target app checkout (temperpaw's genesis-install covers the app side).
 - `migrate-turso-to-postgres` - one-way ops migration; drive only against scratch data.
 - Composite cross-entity verification (ADR-0150) runs inside `temper verify` for multi-entity dirs; it is documented in spec-cascade.md rather than its own file.

@@ -13,6 +13,7 @@ cargo build -p temper-cli                                    # first build is lo
 # ISOLATE per instance: TURSO_URL unset defaults to the SHARED
 # ~/.local/share/temper/agents.db (another session's real state; two servers on
 # it corrupt each other). Always point at a per-worktree file.
+mkdir -p .scratch                                           # the turso file's dir must exist
 TEMPER_API_KEY=local-verify \
 TURSO_URL="file:$PWD/.scratch/temper.db" \
   cargo run -p temper-cli -- serve --port 3600 --storage turso   # capture the PID
