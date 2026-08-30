@@ -14,7 +14,7 @@ TURSO_URL="file:$PWD/.scratch/temper.db" \
 curl -sf http://localhost:3600/healthz
 curl -sf -H 'X-Tenant-Id: default' 'http://localhost:3600/tdata/$metadata' | head -c 400   # CSDL XML
 ```
-Public subset after SKILL Launch (`authz/edge.rs::is_public_kernel_request` plus platform `/healthz`): `GET /healthz`, `GET /tdata`, `GET /tdata/`, `GET /tdata/$metadata` only. Entity-set reads and dispatch are governed — they need the bearer **and** the tenant header. `GET /tdata/Plans` with `X-Tenant-Id` only → **401** (`TEMPER_API_KEY` is set). Set `KEY=$TEMPER_API_KEY`:
+Class-A skip after SKILL Launch: `authz/edge.rs::is_public_kernel_request` admits GET `/tdata`, `/tdata/`, `/tdata/$metadata`, `/temper-client.js`, `/static/temper-client.js`, `/genesis`, `/genesis/`, `/genesis/*`, and GET|POST `/webhooks/`. Platform `/healthz` is unauthenticated one layer up (`build_platform_router`); it is not in that fn. Entity-set reads and dispatch are governed — they need the bearer **and** the tenant header. `GET /tdata/Plans` with `X-Tenant-Id` only → **401** (`TEMPER_API_KEY` is set). Set `KEY=$TEMPER_API_KEY`:
 ```bash
 A=(-H "Authorization: Bearer $KEY" -H "X-Tenant-Id: default")
 curl -sS "http://localhost:3600/tdata/<Set>" "${A[@]}"

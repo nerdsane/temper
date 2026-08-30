@@ -7,9 +7,11 @@
 Callers read entity sets with the standard OData query options - filtering, projecting, expanding relations, paging.
 
 ## Driving it
-Entity-set reads are governed - they need the bearer AND the tenant header (only
-`GET /tdata`, `/tdata/`, and `/tdata/$metadata` are public, per
-`authz/edge.rs::is_public_kernel_request`). Set `KEY=$TEMPER_API_KEY`:
+Entity-set reads are governed - they need the bearer AND the tenant header.
+The public OData paths in `authz/edge.rs::is_public_kernel_request` are GET
+`/tdata`, `/tdata/`, and `/tdata/$metadata`; that fn also admits GET
+`/temper-client.js`, `/static/temper-client.js`, `/genesis`, `/genesis/`,
+`/genesis/*`, and GET|POST `/webhooks/`. Set `KEY=$TEMPER_API_KEY`:
 ```bash
 A=(-H "Authorization: Bearer $KEY" -H "X-Tenant-Id: default")
 curl "http://localhost:3600/tdata/<Set>?\$filter=status eq 'Draft'" "${A[@]}"
