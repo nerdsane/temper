@@ -70,3 +70,4 @@ scripts/generate-graph-json.js
 .desloppify/
 scorecard.png
 temper-e2e-test.db
+.scratch/

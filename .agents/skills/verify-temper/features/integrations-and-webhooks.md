@@ -22,7 +22,7 @@ curl -sS -X POST "http://localhost:3600/webhooks/default/<path>?entity_id=<id>" 
 
 ## What proves it
 - Outbound: the external endpoint receives the JSON envelope (`tenant, entity_type, entity_id, trigger_action, trigger_params, entity_state`) and the `tracing` success line fires. If (and only if) the integration wires a callback, `callback_params` re-enter as the mapped action (read the entity back). Retry/DLQ apply only on the platform-engine path.
-- Inbound: a correctly signed request dispatches the configured action (entity moves); an unsigned/bad-sig request returns 401 without dispatching.
+- Inbound: the flow is HMAC admission -> Cedar authorization -> dispatch (`receiver.rs:106` `admit_webhook`, then `:135` `authorize_with_context`, then `:159` `dispatch_tenant_action`). A correctly signed AND Cedar-permitted request dispatches the configured action (entity moves); an unsigned/bad-sig request returns 401 (never reaching Cedar); a signed-but-denied request returns 403 without dispatching. All three are the proof.
 
 ## Gotchas
 - Inbound HMAC is mandatory and fail-closed: missing secret/header/vault or an unresolved `{secret:...}` all return 401. The signature covers method + full path-and-query + body, not the body alone. Body hard cap 64 KB (413 over).

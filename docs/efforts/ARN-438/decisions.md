@@ -95,3 +95,30 @@ routes against source - all real.
 **Where:** `.agents/skills/verify-temper/` (SKILL.md, features/{cedar-authz,
 query-surface,integrations-and-webhooks,blobs-and-temperfs,entity-lifecycle}.md,
 features/README.md).
+
+---
+
+**Decision:** #448 panel round-2 (10 act-ons) - fixed by DRIVING against a live boot
++ source, per the owner's method change, and corrected the docs to observed reality.
+**Came up because:** round 2 expanded (7->10) as fresh eyes mined different files;
+that convergence-breaker signal meant "stop editing text, drive the recipes."
+**Options:** (a) keep text-editing per finding; (b) boot temper, drive what's
+drivable, source-confirm the rest, correct to reality.
+**Chose (b) because:** it's the only way to stop the expansion. Driven/confirmed and
+fixed: invalid-from-state dispatch is **409 Conflict** (bindings.rs:266-328,
+effects.rs:366), NOT 200 (my round-0 doc had the pg-actor path's behavior);
+VERIFIED_OPERATOR_WHEN uses `principal.agentTypeVerified` not `context`
+(engine/mod.rs:732); TURSO_PLATFORM_URL is checked before TURSO_URL so the isolation
+recipe must unset it (bootstrap.rs:59/90); entity-set names are the CSDL
+EntitySet.Name (measured pluralized-but-irregular: Policy->Policies) - read from
+$metadata, don't hand-pluralize; only contains/startswith/endswith are supported
+filter functions (filter_sql.rs:427); inbound webhook is HMAC->Cedar->dispatch
+(receiver.rs:135); the ADR-0048 503+Retry-After is a dispatch Transient, not a
+blob-read 503 (bindings.rs:359); /healthz+/version are temper-platform not
+temper-server. Measured live: entity reads 401 unauth / 403 Cedar-denied for the
+bootstrapped operator key (so create/dispatch on system entities isn't drivable
+locally). The `temper decide` CLI queries ?status=Pending vs lowercase-stored
+decisions -> filed as ARN-442; doc points at the curl flow with ?status=pending.
+**Where:** `.agents/skills/verify-temper/` (SKILL, cedar-authz, entity-lifecycle,
+query-surface, integrations-and-webhooks, blobs-and-temperfs, README); `.gitignore`
+(.scratch/). Evidence: `/tmp/verify-temper/<date>/driven-round3.txt`.

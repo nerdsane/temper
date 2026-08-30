@@ -12,7 +12,11 @@ cargo build -p temper-cli                                    # first build is lo
 
 # ISOLATE per instance: TURSO_URL unset defaults to the SHARED
 # ~/.local/share/temper/agents.db (another session's real state; two servers on
-# it corrupt each other). Always point at a per-worktree file.
+# it corrupt each other). Always point at a per-worktree file. AND unset
+# TURSO_PLATFORM_URL - bootstrap.rs checks it BEFORE TURSO_URL (serve/bootstrap.rs:59
+# vs :90), so if it is set in your env, TURSO_URL is ignored and you hit the shared/
+# cloud db instead.
+unset TURSO_PLATFORM_URL
 mkdir -p .scratch                                           # the turso file's dir must exist
 TEMPER_API_KEY=local-verify \
 TURSO_URL="file:$PWD/.scratch/temper.db" \
