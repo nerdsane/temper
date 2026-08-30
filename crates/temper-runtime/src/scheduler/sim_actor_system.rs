@@ -460,9 +460,15 @@ impl SimActorSystem {
             // Pick a random valid action
             let action_idx = self.rng.next_bound(valid.len());
             let action = valid[action_idx].clone();
+            let params = self
+                .actors
+                .get(&actor_id)
+                .map(|handler| handler.params_for_action(&action))
+                .unwrap_or_else(|| "{}".to_string());
 
             // Execute through the scheduler for fault injection
-            self.scheduler.send("sim-driver", &actor_id, &action, "{}");
+            self.scheduler
+                .send("sim-driver", &actor_id, &action, &params);
             self.total_messages += 1;
 
             self.tick_and_apply_ready();

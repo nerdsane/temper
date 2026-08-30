@@ -179,7 +179,7 @@
 
       <!-- Workspace Actions -->
       <Action Name="UpdateQuota" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace"/>
+        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace" Nullable="false"/>
         <Parameter Name="quota_limit" Type="Edm.Int64" Nullable="false"/>
         <ReturnType Type="Temper.FS.Workspace"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -188,7 +188,7 @@
       </Action>
 
       <Action Name="IncrementUsage" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace"/>
+        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace" Nullable="false"/>
         <Parameter Name="size_bytes" Type="Edm.Int64" Nullable="false"/>
         <ReturnType Type="Temper.FS.Workspace"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -197,7 +197,7 @@
       </Action>
 
       <Action Name="DecrementUsage" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace"/>
+        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace" Nullable="false"/>
         <Parameter Name="size_bytes" Type="Edm.Int64" Nullable="false"/>
         <ReturnType Type="Temper.FS.Workspace"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -206,7 +206,7 @@
       </Action>
 
       <Action Name="Freeze" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace"/>
+        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace" Nullable="false"/>
         <ReturnType Type="Temper.FS.Workspace"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Active</String></Collection>
@@ -215,7 +215,7 @@
       </Action>
 
       <Action Name="Thaw" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace"/>
+        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace" Nullable="false"/>
         <ReturnType Type="Temper.FS.Workspace"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Frozen</String></Collection>
@@ -224,7 +224,7 @@
       </Action>
 
       <Action Name="WorkspaceArchive" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace"/>
+        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace" Nullable="false"/>
         <ReturnType Type="Temper.FS.Workspace"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Active</String><String>Frozen</String></Collection>
@@ -234,7 +234,7 @@
 
       <!-- Directory Actions -->
       <Action Name="AddChild" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.FS.Directory"/>
+        <Parameter Name="bindingParameter" Type="Temper.FS.Directory" Nullable="false"/>
         <ReturnType Type="Temper.FS.Directory"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Active</String></Collection>
@@ -242,7 +242,7 @@
       </Action>
 
       <Action Name="RemoveChild" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.FS.Directory"/>
+        <Parameter Name="bindingParameter" Type="Temper.FS.Directory" Nullable="false"/>
         <ReturnType Type="Temper.FS.Directory"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Active</String></Collection>
@@ -250,7 +250,7 @@
       </Action>
 
       <Action Name="DirectoryRename" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.FS.Directory"/>
+        <Parameter Name="bindingParameter" Type="Temper.FS.Directory" Nullable="false"/>
         <Parameter Name="name" Type="Edm.String" Nullable="false"/>
         <Parameter Name="path" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.FS.Directory"/>
@@ -260,7 +260,7 @@
       </Action>
 
       <Action Name="DirectoryArchive" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.FS.Directory"/>
+        <Parameter Name="bindingParameter" Type="Temper.FS.Directory" Nullable="false"/>
         <ReturnType Type="Temper.FS.Directory"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Active</String></Collection>
@@ -270,13 +270,13 @@
 
       <!-- File Actions -->
       <Action Name="StreamUpdated" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.FS.File"/>
+        <Parameter Name="bindingParameter" Type="Temper.FS.File" Nullable="false"/>
         <Parameter Name="content_hash" Type="Edm.String" Nullable="false"/>
         <Parameter Name="size_bytes" Type="Edm.Int64" Nullable="false"/>
         <Parameter Name="mime_type" Type="Edm.String" Nullable="false"/>
         <Parameter Name="version_number" Type="Edm.Int32" Nullable="false"/>
-        <Parameter Name="previous_version_id" Type="Edm.Guid"/>
-        <Parameter Name="created_by" Type="Edm.String"/>
+        <Parameter Name="previous_version_id" Type="Edm.Guid" Nullable="false"/>
+        <Parameter Name="created_by" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.FS.File"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Created</String><String>Ready</String></Collection>
@@ -286,7 +286,7 @@
       </Action>
 
       <Action Name="Lock" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.FS.File"/>
+        <Parameter Name="bindingParameter" Type="Temper.FS.File" Nullable="false"/>
         <ReturnType Type="Temper.FS.File"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Ready</String></Collection>
@@ -295,7 +295,7 @@
       </Action>
 
       <Action Name="Unlock" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.FS.File"/>
+        <Parameter Name="bindingParameter" Type="Temper.FS.File" Nullable="false"/>
         <ReturnType Type="Temper.FS.File"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Locked</String></Collection>
@@ -304,7 +304,7 @@
       </Action>
 
       <Action Name="FileArchive" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.FS.File"/>
+        <Parameter Name="bindingParameter" Type="Temper.FS.File" Nullable="false"/>
         <ReturnType Type="Temper.FS.File"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Ready</String><String>Locked</String></Collection>
@@ -313,7 +313,7 @@
       </Action>
 
       <Action Name="RecordVersion" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.FS.File"/>
+        <Parameter Name="bindingParameter" Type="Temper.FS.File" Nullable="false"/>
         <Parameter Name="last_version_id" Type="Edm.Guid" Nullable="false"/>
         <ReturnType Type="Temper.FS.File"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -324,7 +324,7 @@
 
       <!-- FileVersion Actions -->
       <Action Name="Supersede" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.FS.FileVersion"/>
+        <Parameter Name="bindingParameter" Type="Temper.FS.FileVersion" Nullable="false"/>
         <ReturnType Type="Temper.FS.FileVersion"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Current</String></Collection>

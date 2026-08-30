@@ -25,12 +25,19 @@ fn handler_add_item_then_submit() {
     clock.advance();
     assert!(
         handler
-            .handle_message("AddItem", r#"{"ProductId":"laptop"}"#)
+            .handle_message("AddItem", r#"{"ProductId":"laptop","Quantity":1}"#)
             .is_ok()
     );
     assert_eq!(handler.current_item_count(), 1);
     clock.advance();
-    assert!(handler.handle_message("SubmitOrder", "{}").is_ok());
+    assert!(
+        handler
+            .handle_message(
+                "SubmitOrder",
+                r#"{"ShippingAddressId":"addr-1","PaymentMethod":"card"}"#,
+            )
+            .is_ok()
+    );
     assert_eq!(handler.current_status(), "Submitted");
     assert_eq!(handler.event_count(), 2);
 }
@@ -40,7 +47,14 @@ fn handler_cannot_submit_empty() {
     let (_guard, _clock, _id_gen) = install_deterministic_context(42);
     let mut handler = EntityActorHandler::new("Order", "o1", order_table());
     handler.init().unwrap();
-    assert!(handler.handle_message("SubmitOrder", "{}").is_err());
+    assert!(
+        handler
+            .handle_message(
+                "SubmitOrder",
+                r#"{"ShippingAddressId":"addr-1","PaymentMethod":"card"}"#,
+            )
+            .is_err()
+    );
     assert_eq!(handler.current_status(), "Draft");
 }
 
@@ -54,7 +68,9 @@ fn handler_valid_actions_follow_guards() {
     assert!(actions.contains(&"CancelOrder".to_string()));
     assert!(!actions.contains(&"SubmitOrder".to_string()));
     clock.advance();
-    handler.handle_message("AddItem", "{}").unwrap();
+    handler
+        .handle_message("AddItem", r#"{"ProductId":"laptop","Quantity":1}"#)
+        .unwrap();
     let actions = handler.valid_actions();
     assert!(actions.contains(&"SubmitOrder".to_string()));
     assert!(actions.contains(&"RemoveItem".to_string()));

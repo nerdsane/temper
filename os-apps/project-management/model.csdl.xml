@@ -221,7 +221,7 @@
 
       <!-- Issue Parent/Sub-Issue Actions -->
       <Action Name="SetParent" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <Parameter Name="ParentIssueId" Type="Edm.Guid" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -231,7 +231,7 @@
       </Action>
 
       <Action Name="RemoveParent" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Backlog</String><String>Triage</String><String>Todo</String><String>Planning</String><String>InProgress</String></Collection>
@@ -240,7 +240,7 @@
       </Action>
 
       <Action Name="AddSubIssue" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <Parameter Name="SubIssueId" Type="Edm.Guid" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -251,7 +251,7 @@
 
       <!-- Issue Actions -->
       <Action Name="SetDescription" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <Parameter Name="description" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -260,7 +260,7 @@
       </Action>
 
       <Action Name="SetPriority" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <Parameter Name="level" Type="Edm.Int32" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -269,7 +269,7 @@
       </Action>
 
       <Action Name="Assign" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <Parameter Name="AgentId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -279,7 +279,7 @@
       </Action>
 
       <Action Name="AssignPlanner" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <Parameter Name="AgentId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -289,7 +289,7 @@
       </Action>
 
       <Action Name="Unassign" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Backlog</String><String>Triage</String><String>Todo</String></Collection>
@@ -297,7 +297,7 @@
       </Action>
 
       <Action Name="MoveToTriage" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Backlog</String></Collection>
@@ -306,7 +306,7 @@
       </Action>
 
       <Action Name="MoveToTodo" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Triage</String></Collection>
@@ -315,7 +315,7 @@
       </Action>
 
       <Action Name="BeginPlanning" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Todo</String></Collection>
@@ -325,7 +325,7 @@
       </Action>
 
       <Action Name="WritePlan" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <Parameter Name="plan" Type="Edm.String" Nullable="false"/>
         <Parameter Name="acceptance_criteria" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
@@ -336,7 +336,7 @@
       </Action>
 
       <Action Name="RevisePlan" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <Parameter Name="feedback" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -345,7 +345,7 @@
       </Action>
 
       <Action Name="ApprovePlan" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Planning</String></Collection>
@@ -355,7 +355,7 @@
       </Action>
 
       <Action Name="RejectPlan" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <Parameter Name="reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -365,10 +365,10 @@
       </Action>
 
       <Action Name="StartWork" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
-        <Parameter Name="repo" Type="Edm.String"/>
-        <Parameter Name="branch_name" Type="Edm.String"/>
-        <Parameter Name="worktree_path" Type="Edm.String"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
+        <Parameter Name="repo" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="branch_name" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="worktree_path" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Planned</String></Collection>
@@ -379,7 +379,7 @@
       </Action>
 
       <Action Name="UpdateImplementation" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <Parameter Name="notes" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -388,8 +388,8 @@
       </Action>
 
       <Action Name="SubmitForReview" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
-        <Parameter Name="pr_url" Type="Edm.String"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
+        <Parameter Name="pr_url" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>InProgress</String></Collection>
@@ -398,7 +398,7 @@
       </Action>
 
       <Action Name="RequestChanges" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <Parameter Name="feedback" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -408,7 +408,7 @@
       </Action>
 
       <Action Name="ApproveReview" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>InReview</String></Collection>
@@ -417,7 +417,7 @@
       </Action>
 
       <Action Name="Reopen" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Done</String></Collection>
@@ -426,8 +426,8 @@
       </Action>
 
       <Action Name="Cancel" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
-        <Parameter Name="reason" Type="Edm.String"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
+        <Parameter Name="reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Backlog</String><String>Triage</String><String>Todo</String><String>Planning</String><String>Planned</String><String>InProgress</String></Collection>
@@ -436,7 +436,7 @@
       </Action>
 
       <Action Name="Archive" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Done</String><String>Cancelled</String></Collection>
@@ -445,7 +445,7 @@
       </Action>
 
       <Action Name="AddComment" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <Parameter Name="CommentId" Type="Edm.Guid" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -454,7 +454,7 @@
       </Action>
 
       <Action Name="AddLabel" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
         <Parameter Name="LabelId" Type="Edm.Guid" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Issue"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -464,7 +464,7 @@
 
       <!-- Project Actions -->
       <Action Name="ProjectSetDescription" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Project"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Project" Nullable="false"/>
         <Parameter Name="description" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Project"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -473,7 +473,7 @@
       </Action>
 
       <Action Name="ProjectActivate" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Project"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Project" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Project"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Planning</String></Collection>
@@ -482,7 +482,7 @@
       </Action>
 
       <Action Name="ProjectAddIssue" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Project"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Project" Nullable="false"/>
         <Parameter Name="IssueId" Type="Edm.Guid" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Project"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -491,7 +491,7 @@
       </Action>
 
       <Action Name="ProjectComplete" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Project"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Project" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Project"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Active</String></Collection>
@@ -500,7 +500,7 @@
       </Action>
 
       <Action Name="ProjectArchive" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Project"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Project" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Project"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Completed</String></Collection>
@@ -510,7 +510,7 @@
 
       <!-- Cycle Actions -->
       <Action Name="CycleStart" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Cycle"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Cycle" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Cycle"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Planning</String></Collection>
@@ -519,7 +519,7 @@
       </Action>
 
       <Action Name="CycleComplete" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Cycle"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Cycle" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Cycle"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Active</String></Collection>
@@ -529,7 +529,7 @@
 
       <!-- Comment Actions -->
       <Action Name="CommentEdit" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Comment"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Comment" Nullable="false"/>
         <Parameter Name="body" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Comment"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -539,7 +539,7 @@
       </Action>
 
       <Action Name="CommentDelete" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Comment"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Comment" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Comment"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Active</String><String>Edited</String></Collection>
@@ -549,7 +549,7 @@
 
       <!-- Label Actions -->
       <Action Name="LabelArchive" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Label"/>
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Label" Nullable="false"/>
         <ReturnType Type="Temper.ProjectManagement.Label"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Active</String></Collection>

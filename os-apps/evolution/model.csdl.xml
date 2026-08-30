@@ -30,56 +30,56 @@
       </EntityType>
 
       <Action Name="Start" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun"/>
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun" Nullable="false"/>
         <Parameter Name="SkillName" Type="Edm.String" Nullable="false"/>
         <Parameter Name="TargetEntityType" Type="Edm.String" Nullable="false"/>
-        <Parameter Name="AutonomyLevel" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="AutonomyLevel" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.Evolution.EvolutionRun"/>
       </Action>
 
       <Action Name="Approve" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun"/>
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun" Nullable="false"/>
         <Parameter Name="ApproverId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.Evolution.EvolutionRun"/>
       </Action>
 
       <Action Name="Reject" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun"/>
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun" Nullable="false"/>
         <Parameter Name="RejectionReason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.Evolution.EvolutionRun"/>
       </Action>
 
       <Action Name="Deploy" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun"/>
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun" Nullable="false"/>
         <Parameter Name="DeploymentId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.Evolution.EvolutionRun"/>
       </Action>
 
       <Action Name="Fail" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun"/>
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun" Nullable="false"/>
         <Parameter Name="FailureReason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.Evolution.EvolutionRun"/>
       </Action>
 
       <Action Name="CheckSentinel" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Evolution.SentinelMonitor"/>
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.SentinelMonitor" Nullable="false"/>
         <ReturnType Type="Temper.Evolution.SentinelMonitor"/>
       </Action>
 
       <Action Name="AlertsFound" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Evolution.SentinelMonitor"/>
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.SentinelMonitor" Nullable="false"/>
         <Parameter Name="AlertDetails" Type="Edm.String" Nullable="false"/>
         <Parameter Name="SuggestedTarget" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.Evolution.SentinelMonitor"/>
       </Action>
 
       <Action Name="NoAlerts" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Evolution.SentinelMonitor"/>
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.SentinelMonitor" Nullable="false"/>
         <ReturnType Type="Temper.Evolution.SentinelMonitor"/>
       </Action>
 
       <Action Name="CreateEvolutionRun" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Evolution.SentinelMonitor"/>
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.SentinelMonitor" Nullable="false"/>
         <Parameter Name="EvolutionRunId" Type="Edm.String" Nullable="false"/>
         <Parameter Name="SkillName" Type="Edm.String" Nullable="false"/>
         <Parameter Name="TargetEntityType" Type="Edm.String" Nullable="false"/>

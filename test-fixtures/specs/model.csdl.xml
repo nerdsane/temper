@@ -300,7 +300,7 @@
 
       <!-- Order Actions -->
       <Action Name="AddItem" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Example.Order"/>
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order" Nullable="false"/>
         <Parameter Name="ProductId" Type="Edm.Guid" Nullable="false"/>
         <Parameter Name="Quantity" Type="Edm.Int32" Nullable="false"/>
         <ReturnType Type="Temper.Example.Order"/>
@@ -312,7 +312,7 @@
       </Action>
 
       <Action Name="RemoveItem" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Example.Order"/>
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order" Nullable="false"/>
         <Parameter Name="ItemId" Type="Edm.Guid" Nullable="false"/>
         <ReturnType Type="Temper.Example.Order"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -321,7 +321,7 @@
       </Action>
 
       <Action Name="SubmitOrder" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Example.Order"/>
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order" Nullable="false"/>
         <Parameter Name="ShippingAddressId" Type="Edm.Guid" Nullable="false"/>
         <Parameter Name="PaymentMethod" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.Example.Order"/>
@@ -336,7 +336,7 @@
       </Action>
 
       <Action Name="ConfirmOrder" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Example.Order"/>
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order" Nullable="false"/>
         <ReturnType Type="Temper.Example.Order"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Submitted</String></Collection>
@@ -347,8 +347,8 @@
       </Action>
 
       <Action Name="CancelOrder" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Example.Order"/>
-        <Parameter Name="Reason" Type="Edm.String"/>
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.Example.Order"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection>
@@ -364,9 +364,9 @@
       </Action>
 
       <Action Name="InitiateReturn" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Example.Order"/>
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order" Nullable="false"/>
         <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
-        <Parameter Name="ItemIds" Type="Collection(Edm.Guid)"/>
+        <Parameter Name="ItemIds" Type="Collection(Edm.Guid)" Nullable="false"/>
         <ReturnType Type="Temper.Example.Order"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection>

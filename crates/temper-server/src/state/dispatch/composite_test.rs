@@ -273,7 +273,10 @@ initial = ""
 name = "Create"
 kind = "input"
 from = ["Durable"]
-params = ["RepositoryId", "CanonicalBytes"]
+params = [
+  "RepositoryId",
+  { name = "CanonicalBytes", type = "Edm.String", nullable = true },
+]
 "#;
 
 const REF_IOA: &str = r#"

@@ -1,5 +1,6 @@
 use super::*;
 use crate::automaton::{lint_csdl_reference_contracts, parse_automaton};
+use crate::csdl::parse_csdl;
 use std::collections::BTreeMap;
 
 #[test]
@@ -110,6 +111,115 @@ effect = "emit audit"
             .iter()
             .any(|finding| finding.code == "action_missing_to")
     );
+}
+
+#[test]
+fn lint_rejects_nullable_parameter_consumed_by_mutating_effect() {
+    let src = r#"
+[automaton]
+name = "Task"
+states = ["Draft"]
+initial = "Draft"
+
+[[state]]
+name = "count"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "Adjust"
+from = ["Draft"]
+params = [{ name = "delta", type = "Edm.Int64", nullable = true }]
+effect = [{ type = "increment", var = "count", amount = "delta" }]
+"#;
+    let automaton = parse_automaton(src).expect("parse");
+    let findings = lint_automaton(&automaton);
+
+    assert!(findings.iter().any(|finding| {
+        finding.code == "nullable_action_parameter_consumed"
+            && finding.message.contains("delta")
+            && finding.message.contains("counter effect")
+    }));
+}
+
+#[test]
+fn lint_allows_nullable_parameter_as_module_pass_through() {
+    let src = r#"
+[automaton]
+name = "Task"
+states = ["Draft"]
+initial = "Draft"
+
+[[action]]
+name = "Enrich"
+from = ["Draft"]
+params = [{ name = "optional_note", type = "Edm.String", nullable = true }]
+
+[[action.triggers]]
+name = "enrich_module"
+kind = "wasm"
+module = "enrich"
+"#;
+    let automaton = parse_automaton(src).expect("parse");
+    let findings = lint_automaton(&automaton);
+
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.code == "nullable_action_parameter_consumed")
+    );
+}
+
+#[test]
+fn lint_rejects_nullable_cross_entity_guard_identity() {
+    let src = r#"
+[automaton]
+name = "Task"
+states = ["Open"]
+initial = "Open"
+
+[[action]]
+name = "CheckOwner"
+from = ["Open"]
+params = [{ name = "owner_id", type = "Edm.Guid", nullable = true }]
+guard = [{ type = "cross_entity_state", entity_type = "Owner", entity_id_source = "owner_id", required_status = ["Active"] }]
+"#;
+    let automaton = parse_automaton(src).expect("parse");
+    let findings = lint_automaton(&automaton);
+
+    assert!(findings.iter().any(|finding| {
+        finding.code == "nullable_action_parameter_consumed"
+            && finding.message.contains("owner_id")
+            && finding.message.contains("guard")
+    }));
+}
+
+#[test]
+fn lint_rejects_nullable_reference_equality_parameter() {
+    let src = r#"
+[automaton]
+name = "Document"
+states = ["Open"]
+initial = "Open"
+
+[[state]]
+name = "workspace_id"
+type = "ref"
+entity_type = "Workspace"
+initial = ""
+
+[[action]]
+name = "Update"
+from = ["Open"]
+params = [{ name = "workspace_id", type = "ref", entity_type = "Workspace", nullable = true }]
+guard = [{ type = "reference_equals", reference = "workspace_id", param = "workspace_id" }]
+"#;
+    let findings = lint_automaton(&parse_automaton(src).expect("parse"));
+    assert!(findings.iter().any(|finding| {
+        finding.code == "nullable_action_parameter_consumed"
+            && finding.message.contains("workspace_id")
+            && finding.message.contains("guard")
+    }));
 }
 
 fn parse(src: &str) -> Automaton {
@@ -333,4 +443,91 @@ allow_indefinite_states = ["Active"]
     let findings = lint_csdl_reference_contracts(&csdl, &bundle);
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].code, "csdl_reference_contract_mismatch");
+}
+
+#[test]
+fn csdl_bundle_lint_requires_matching_parameter_nullability() {
+    let automaton = parse(
+        r#"
+[automaton]
+name = "Task"
+states = ["Open"]
+initial = "Open"
+
+[[action]]
+name = "Assign"
+kind = "input"
+from = ["Open"]
+params = [{ name = "agent_id", type = "Edm.String" }]
+"#,
+    );
+    let csdl = parse_csdl(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Test" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Task"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/></EntityType>
+      <Action Name="Assign" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Test.Task" Nullable="false"/>
+        <Parameter Name="AgentId" Type="Edm.String"/>
+      </Action>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#,
+    )
+    .expect("parse CSDL");
+    let findings =
+        lint_automata_csdl_bundle(&BTreeMap::from([("Task".to_string(), automaton)]), &csdl);
+
+    assert!(findings.iter().any(|finding| {
+        finding.code == "csdl_action_parameter_requiredness_mismatch"
+            && finding.message.contains("agent_id")
+    }));
+}
+
+#[test]
+fn csdl_bundle_lint_rejects_nullable_binding_and_alias_collision_stably() {
+    let automaton = parse(
+        r#"
+[automaton]
+name = "Task"
+states = ["Open"]
+initial = "Open"
+
+[[action]]
+name = "Assign"
+kind = "input"
+from = ["Open"]
+params = ["agent_id", "AgentId"]
+"#,
+    );
+    let csdl = parse_csdl(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Test" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <Action Name="Assign" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Test.Task"/>
+        <Parameter Name="AgentId" Type="Edm.String" Nullable="false"/>
+      </Action>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#,
+    )
+    .expect("parse CSDL");
+    let bundle = BTreeMap::from([("Task".to_string(), automaton)]);
+    let first = lint_automata_csdl_bundle(&bundle, &csdl);
+    let second = lint_automata_csdl_bundle(&bundle, &csdl);
+
+    assert_eq!(first, second);
+    assert!(
+        first
+            .iter()
+            .any(|finding| finding.code == "csdl_action_binding_nullable")
+    );
+    assert!(
+        first
+            .iter()
+            .any(|finding| finding.code == "csdl_action_parameter_alias_collision")
+    );
 }

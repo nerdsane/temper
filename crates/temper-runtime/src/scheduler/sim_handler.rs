@@ -114,6 +114,12 @@ pub trait SimActorHandler: Send {
     /// Actions enabled from the current status.
     fn valid_actions(&self) -> Vec<String>;
 
+    /// Deterministic valid input payload for random exploration of an action.
+    /// Parameterless handlers may keep the empty-object default.
+    fn params_for_action(&self, _action: &str) -> String {
+        "{}".to_string()
+    }
+
     /// All recorded events as JSON array.
     fn events_json(&self) -> serde_json::Value;
 

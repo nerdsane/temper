@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::automaton::{
-    Automaton, LintSeverity, lint_automata_bundle, lint_csdl_reference_contracts, parse_automaton,
+    Automaton, BundleLintFinding, LintSeverity, lint_automata_bundle, lint_automata_csdl_bundle,
+    lint_automaton, lint_csdl_reference_contracts, parse_automaton,
 };
 use crate::csdl::parse_csdl;
 
@@ -163,7 +164,21 @@ fn validate_bundle_contracts(
     crate::csdl::verify_stream_migration_automata_v1(&stream_capabilities, &automata)
         .map_err(|error| BundleError::new(BundleErrorCode::InvalidBundle, error))?;
 
-    let mut findings = lint_automata_bundle(&automata);
+    let mut findings = automata
+        .iter()
+        .flat_map(|(entity, automaton)| {
+            lint_automaton(automaton)
+                .into_iter()
+                .map(|finding| BundleLintFinding {
+                    entity: entity.clone(),
+                    severity: finding.severity,
+                    code: finding.code,
+                    message: finding.message,
+                })
+        })
+        .collect::<Vec<_>>();
+    findings.extend(lint_automata_bundle(&automata));
+    findings.extend(lint_automata_csdl_bundle(&automata, &csdl));
     findings.extend(lint_csdl_reference_contracts(&csdl, &automata));
     findings.sort_by(|left, right| {
         (&left.entity, &left.code, &left.message).cmp(&(&right.entity, &right.code, &right.message))

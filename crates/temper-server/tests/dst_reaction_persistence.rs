@@ -60,7 +60,7 @@ async fn source_event_atomically_contains_bound_reaction_intent() {
         .ask(
             EntityMsg::Action {
                 name: "AddItem".to_string(),
-                params: serde_json::json!({"ProductId": "product-7"}),
+                params: serde_json::json!({"ProductId": "product-7", "Quantity": 1}),
                 cross_entity_booleans: BTreeMap::new(),
                 idempotency_key: Some("source-action-414".to_string()),
                 expected_sequence: None,

@@ -65,7 +65,7 @@ async fn dispatch_action_with_preconditions(
         .ask(
             EntityMsg::Action {
                 name: "AddItem".into(),
-                params: serde_json::json!({}),
+                params: add_item_params(),
                 cross_entity_booleans: BTreeMap::new(),
                 idempotency_key: Some(idempotency_key.into()),
                 expected_sequence: Some(expected_sequence),
@@ -77,6 +77,10 @@ async fn dispatch_action_with_preconditions(
         )
         .await
         .expect("actor should respond")
+}
+
+fn add_item_params() -> serde_json::Value {
+    serde_json::json!({"ProductId": "product-1", "Quantity": 1})
 }
 
 /// Wait for the actor's `pre_start` to complete (which writes the bootstrap
@@ -139,7 +143,7 @@ async fn dst_retry_succeeds_after_one_violation() {
     wait_ready(&actor_ref).await;
     sim.inject_concurrency_violations(&persistence_id, 1);
 
-    let resp = dispatch_action(&actor_ref, "AddItem", serde_json::json!({})).await;
+    let resp = dispatch_action(&actor_ref, "AddItem", add_item_params()).await;
 
     assert!(
         resp.success,
@@ -222,7 +226,7 @@ async fn dst_retry_exhausts_under_sustained_violation() {
     // (the retry budget is the tight bound, not injection exhaustion).
     sim.inject_concurrency_violations(&persistence_id, 4);
 
-    let resp = dispatch_action(&actor_ref, "AddItem", serde_json::json!({})).await;
+    let resp = dispatch_action(&actor_ref, "AddItem", add_item_params()).await;
 
     assert!(
         !resp.success,
@@ -279,7 +283,7 @@ async fn dst_retry_succeeds_after_one_violation_many_seeds() {
         wait_ready(&actor_ref).await;
         sim.inject_concurrency_violations(&persistence_id, 1);
 
-        let resp = dispatch_action(&actor_ref, "AddItem", serde_json::json!({})).await;
+        let resp = dispatch_action(&actor_ref, "AddItem", add_item_params()).await;
 
         assert!(
             resp.success,

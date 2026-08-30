@@ -101,12 +101,21 @@ fn order_confirm_triggers_payment_authorize() {
 
     // Drive Order: AddItem → SubmitOrder → ConfirmOrder
     clock.advance();
-    sys.step("order-e1", "AddItem", r#"{"ProductId":"laptop"}"#)
-        .unwrap();
+    sys.step(
+        "order-e1",
+        "AddItem",
+        r#"{"ProductId":"product-1","Quantity":1}"#,
+    )
+    .unwrap();
     sys.assert_status("order-e1", "Draft");
 
     clock.advance();
-    sys.step("order-e1", "SubmitOrder", "{}").unwrap();
+    sys.step(
+        "order-e1",
+        "SubmitOrder",
+        r#"{"ShippingAddressId":"address-1","PaymentMethod":"card"}"#,
+    )
+    .unwrap();
     sys.assert_status("order-e1", "Submitted");
 
     clock.advance();
@@ -139,9 +148,19 @@ fn cascade_stops_without_infinite_loop() {
     sys.register_entity("payment-e2", "Payment", "e2", payment_table());
 
     clock.advance();
-    sys.step("order-e2", "AddItem", "{}").unwrap();
+    sys.step(
+        "order-e2",
+        "AddItem",
+        r#"{"ProductId":"product-1","Quantity":1}"#,
+    )
+    .unwrap();
     clock.advance();
-    sys.step("order-e2", "SubmitOrder", "{}").unwrap();
+    sys.step(
+        "order-e2",
+        "SubmitOrder",
+        r#"{"ShippingAddressId":"address-1","PaymentMethod":"card"}"#,
+    )
+    .unwrap();
     clock.advance();
     sys.step("order-e2", "ConfirmOrder", "{}").unwrap();
 
@@ -167,13 +186,22 @@ fn no_reaction_when_action_doesnt_match() {
 
     // AddItem should NOT trigger any reaction
     clock.advance();
-    sys.step("order-e3", "AddItem", r#"{"ProductId":"phone"}"#)
-        .unwrap();
+    sys.step(
+        "order-e3",
+        "AddItem",
+        r#"{"ProductId":"product-1","Quantity":1}"#,
+    )
+    .unwrap();
     assert!(sys.last_results().is_empty());
 
     // SubmitOrder should NOT trigger either (only ConfirmOrder does)
     clock.advance();
-    sys.step("order-e3", "SubmitOrder", "{}").unwrap();
+    sys.step(
+        "order-e3",
+        "SubmitOrder",
+        r#"{"ShippingAddressId":"address-1","PaymentMethod":"card"}"#,
+    )
+    .unwrap();
     assert!(sys.last_results().is_empty());
 }
 
@@ -218,9 +246,19 @@ fn field_based_target_resolution() {
     // The order's fields won't contain "payment_id" since it's not part of
     // the IOA spec — so target resolution will fail gracefully
     clock.advance();
-    sys.step("order-f1", "AddItem", "{}").unwrap();
+    sys.step(
+        "order-f1",
+        "AddItem",
+        r#"{"ProductId":"product-1","Quantity":1}"#,
+    )
+    .unwrap();
     clock.advance();
-    sys.step("order-f1", "SubmitOrder", "{}").unwrap();
+    sys.step(
+        "order-f1",
+        "SubmitOrder",
+        r#"{"ShippingAddressId":"address-1","PaymentMethod":"card"}"#,
+    )
+    .unwrap();
     clock.advance();
     sys.step("order-f1", "ConfirmOrder", "{}").unwrap();
 
@@ -328,9 +366,19 @@ fn multi_step_cascade_with_chained_reactions() {
     sys.register_entity("payment-c1", "Payment", "c1", payment_table());
 
     clock.advance();
-    sys.step("order-c1", "AddItem", "{}").unwrap();
+    sys.step(
+        "order-c1",
+        "AddItem",
+        r#"{"ProductId":"product-1","Quantity":1}"#,
+    )
+    .unwrap();
     clock.advance();
-    sys.step("order-c1", "SubmitOrder", "{}").unwrap();
+    sys.step(
+        "order-c1",
+        "SubmitOrder",
+        r#"{"ShippingAddressId":"address-1","PaymentMethod":"card"}"#,
+    )
+    .unwrap();
     clock.advance();
     sys.step("order-c1", "ConfirmOrder", "{}").unwrap();
 
@@ -388,9 +436,19 @@ fn cascade_with_params_from_fires_even_when_source_fields_missing() {
     sys.register_entity("payment-pf1", "Payment", "pf1", payment_table());
 
     clock.advance();
-    sys.step("order-pf1", "AddItem", "{}").unwrap();
+    sys.step(
+        "order-pf1",
+        "AddItem",
+        r#"{"ProductId":"product-1","Quantity":1}"#,
+    )
+    .unwrap();
     clock.advance();
-    sys.step("order-pf1", "SubmitOrder", "{}").unwrap();
+    sys.step(
+        "order-pf1",
+        "SubmitOrder",
+        r#"{"ShippingAddressId":"address-1","PaymentMethod":"card"}"#,
+    )
+    .unwrap();
     clock.advance();
     sys.step("order-pf1", "ConfirmOrder", "{}").unwrap();
 
@@ -558,9 +616,19 @@ fn guard_passing_rule_fires_guard_failing_rule_skipped() {
     sys.register_entity("payment-g1", "Payment", "g1", payment_table());
 
     clock.advance();
-    sys.step("order-g1", "AddItem", "{}").unwrap();
+    sys.step(
+        "order-g1",
+        "AddItem",
+        r#"{"ProductId":"product-1","Quantity":1}"#,
+    )
+    .unwrap();
     clock.advance();
-    sys.step("order-g1", "SubmitOrder", "{}").unwrap();
+    sys.step(
+        "order-g1",
+        "SubmitOrder",
+        r#"{"ShippingAddressId":"address-1","PaymentMethod":"card"}"#,
+    )
+    .unwrap();
     clock.advance();
     sys.step("order-g1", "ConfirmOrder", "{}").unwrap();
 
@@ -611,9 +679,19 @@ fn not_guard_skips_rule_when_inner_passes() {
     sys.register_entity("payment-n1", "Payment", "n1", payment_table());
 
     clock.advance();
-    sys.step("order-n1", "AddItem", "{}").unwrap();
+    sys.step(
+        "order-n1",
+        "AddItem",
+        r#"{"ProductId":"product-1","Quantity":1}"#,
+    )
+    .unwrap();
     clock.advance();
-    sys.step("order-n1", "SubmitOrder", "{}").unwrap();
+    sys.step(
+        "order-n1",
+        "SubmitOrder",
+        r#"{"ShippingAddressId":"address-1","PaymentMethod":"card"}"#,
+    )
+    .unwrap();
     clock.advance();
     sys.step("order-n1", "ConfirmOrder", "{}").unwrap();
 
@@ -639,9 +717,19 @@ fn cascade_does_not_cause_invariant_violations() {
     sys.register_entity("payment-v1", "Payment", "v1", payment_table());
 
     clock.advance();
-    sys.step("order-v1", "AddItem", "{}").unwrap();
+    sys.step(
+        "order-v1",
+        "AddItem",
+        r#"{"ProductId":"product-1","Quantity":1}"#,
+    )
+    .unwrap();
     clock.advance();
-    sys.step("order-v1", "SubmitOrder", "{}").unwrap();
+    sys.step(
+        "order-v1",
+        "SubmitOrder",
+        r#"{"ShippingAddressId":"address-1","PaymentMethod":"card"}"#,
+    )
+    .unwrap();
     clock.advance();
     sys.step("order-v1", "ConfirmOrder", "{}").unwrap();
 

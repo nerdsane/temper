@@ -34,7 +34,8 @@ pub use initial::{
     parse_bool_initial, parse_counter_initial_usize, parse_list_initial, parse_var_initial_json,
 };
 pub use lint::{
-    BundleLintFinding, LintFinding, LintSeverity, lint_automata_bundle, lint_automaton,
+    BundleLintFinding, LintFinding, LintSeverity, lint_automata_bundle, lint_automata_csdl_bundle,
+    lint_automaton,
 };
 pub use metadata::{LivenessViolation, SpecMetadata};
 pub use parser::{

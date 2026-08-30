@@ -166,7 +166,7 @@ pub(super) fn validation_entity(
     let entity = generated
         .manifest
         .entities
-        .into_iter()
+        .iter()
         .find(|entity| entity.entity_type == operation.command.entity_type)
         .ok_or_else(|| {
             validation_error(
@@ -184,7 +184,7 @@ pub(super) fn validation_entity(
             )
         },
     )?;
-    validate_manifest_entity_object(&entity, &fields, true)?;
+    validate_manifest_entity_object(entity, &fields, true)?;
     if let Some(action) = operation.command.initial_action.as_ref() {
         let params = serde_json::from_str(&action.canonical_parameters_json).map_err(|error| {
             validation_error(
@@ -193,9 +193,9 @@ pub(super) fn validation_entity(
                 error.to_string(),
             )
         })?;
-        validate_manifest_action_params(&entity, &action.action, &params)?;
+        validate_manifest_action_params(&csdl, entity, &action.action, &params)?;
     }
-    Ok(entity)
+    Ok(entity.clone())
 }
 
 pub(super) fn simple_failure(

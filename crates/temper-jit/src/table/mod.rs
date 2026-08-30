@@ -15,6 +15,6 @@ pub mod types;
 
 pub use guard::{EvalContext, Guard, GuardFailure, GuardFailureKind};
 pub use types::{
-    CompositeActionMetadata, CompositeCedarGate, Effect, StateVarMetadata, SubWriteSpec,
-    TransitionResult, TransitionRule, TransitionTable,
+    ActionInputError, ActionParamMetadata, CompositeActionMetadata, CompositeCedarGate, Effect,
+    StateVarMetadata, SubWriteSpec, TransitionResult, TransitionRule, TransitionTable,
 };

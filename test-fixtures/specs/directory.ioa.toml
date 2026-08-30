@@ -39,7 +39,12 @@ name = "Create"
 kind = "input"
 from = ["Active"]
 to = "Active"
-params = ["name", "path", "parent_id", "workspace_id"]
+params = [
+  "name",
+  "path",
+  { name = "parent_id", type = "Edm.Guid", nullable = true },
+  "workspace_id",
+]
 hint = "Create a new directory at the given path within a workspace."
 
 [[action]]

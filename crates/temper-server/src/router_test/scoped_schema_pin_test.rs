@@ -23,6 +23,134 @@ to = "Ready"
 "#;
 
 #[tokio::test]
+async fn task_scoped_action_validation_uses_the_exact_pinned_csdl() {
+    const IOA: &str = r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Ready"]
+initial = "Draft"
+
+[[action]]
+name = "AddItem"
+kind = "input"
+from = ["Draft"]
+to = "Ready"
+params = [{ name = "Flag", type = "bool" }]
+"#;
+    let mut state = test_state_with_ioa();
+    let tenant = TenantId::default();
+    let scope = SchemaScope {
+        kind: SchemaScopeKind::Task,
+        id: "requiredness-pin".into(),
+    };
+    let digest = format!("sha256:{}", "c".repeat(64));
+    let original_action = r#"      <Action Name="AddItem" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order" Nullable="false"/>
+        <Parameter Name="ProductId" Type="Edm.Guid" Nullable="false"/>
+        <Parameter Name="Quantity" Type="Edm.Int32" Nullable="false"/>
+        <ReturnType Type="Temper.Example.Order"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Draft</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Add a product to a draft order. Verify the order is in Draft status first. Use the Product entity to look up valid ProductIds."/>
+      </Action>"#;
+    let pinned_action = r#"      <Action Name="AddItem" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ScopedExample.Order" Nullable="false"/>
+        <Parameter Name="Flag" Type="Edm.Boolean" Nullable="false"/>
+      </Action>"#;
+    let scoped_csdl = include_str!("../../../../test-fixtures/specs/model.csdl.xml")
+        .replace(original_action, pinned_action)
+        .replace("Temper.Example", "Temper.ScopedExample");
+    assert!(scoped_csdl.contains("<Parameter Name=\"Flag\""));
+    let store = SimEventStore::no_faults(9_193);
+    persist_task_schema_bundle_with_csdl_in_scope(
+        &store,
+        IOA,
+        scoped_csdl.clone(),
+        &digest,
+        None,
+        "requiredness-pin",
+        &scope,
+    )
+    .await;
+    state.set_storage_stack(StorageStack::from_sim(store, None));
+    {
+        let mut registry = state.registry.write().expect("registry lock");
+        registry
+            .stage_scoped_bundle(
+                tenant.clone(),
+                scope.clone(),
+                digest.clone(),
+                parse_csdl(&scoped_csdl).expect("scoped requiredness CSDL"),
+                scoped_csdl,
+                &[("Order", IOA)],
+            )
+            .expect("stage requiredness bundle");
+        registry
+            .activate_scoped_bundle(&tenant, &scope, &digest, None)
+            .expect("activate requiredness bundle");
+    }
+    let app = authenticated_router(state.clone());
+    let scoped = |request: axum::http::request::Builder| {
+        request
+            .header("Content-Type", "application/json")
+            .header("X-Temper-Principal-Kind", "admin")
+            .header("x-temper-schema-scope-kind", "task")
+            .header("x-temper-schema-scope-id", scope.id.as_str())
+            .header("x-temper-schema-bundle-digest", digest.as_str())
+    };
+    let create = app
+        .clone()
+        .oneshot(
+            scoped(Request::post("/tdata/Orders"))
+                .body(Body::from(r#"{"Id":"pinned-validation"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    for (body, expected_code) in [
+        (r#"{"Flag":"not-a-boolean"}"#, "ActionParameterTypeMismatch"),
+        (r#"{}"#, "MissingActionParameter"),
+        (r#"{"Flag":null}"#, "MissingActionParameter"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                scoped(Request::post(
+                    "/tdata/Orders('pinned-validation')/Temper.ScopedExample.AddItem",
+                ))
+                .body(Body::from(body))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert_eq!(json["error"]["code"], expected_code);
+    }
+    let pin = SchemaExecutionPin {
+        scope,
+        bundle_digest: digest,
+    };
+    assert_eq!(
+        state
+            .get_scoped_entity_state(&tenant, "Order", "pinned-validation", pin)
+            .await
+            .expect("rejected actions leave the entity readable")
+            .state
+            .status,
+        "Draft"
+    );
+}
+
+#[tokio::test]
 async fn canonical_scoped_journal_id_is_reserved_from_global_actor_and_journal_use() {
     use temper_runtime::persistence::EventStore;
     use temper_runtime::persistence::schema_deployment::scoped_journal_entity_id;

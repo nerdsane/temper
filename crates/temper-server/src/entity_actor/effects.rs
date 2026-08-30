@@ -291,6 +291,20 @@ pub fn process_action_with_xref_and_field_mode(
     cross_entity_booleans: &std::collections::BTreeMap<String, bool>,
     field_sync_mode: FieldSyncMode,
 ) -> ProcessResult {
+    let canonical_params = table.canonicalize_action_params(action, params);
+    let params = &canonical_params;
+    if let Err(error) = table.validate_required_action_params(action, params) {
+        return ProcessResult {
+            success: false,
+            event: None,
+            custom_effects: vec![],
+            scheduled_actions: vec![],
+            spawn_requests: vec![],
+            overflow_blobs: vec![],
+            error: Some(error.to_string()),
+        };
+    }
+
     if state.events_since_snapshot >= MAX_EVENTS_SINCE_SNAPSHOT {
         return ProcessResult {
             success: false,
@@ -1883,6 +1897,65 @@ params = ["NewCommitSha"]
 "#;
 
         TransitionTable::from_ioa_source(spec)
+    }
+
+    #[test]
+    fn invalid_required_input_is_rejected_before_any_transition_work() {
+        let table = TransitionTable::from_ioa_source(
+            r#"
+[automaton]
+name = "Counter"
+states = ["Ready", "Changed"]
+initial = "Ready"
+
+[[state]]
+name = "count"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "Adjust"
+kind = "input"
+from = ["Ready"]
+to = "Changed"
+params = [{ name = "delta", type = "Edm.Int64" }]
+effect = [{ type = "increment", var = "count", amount = "delta" }]
+"#,
+        );
+
+        for invalid in [serde_json::json!({}), serde_json::json!({"delta": null})] {
+            let mut state = make_state("Counter", "counter-1");
+            state.status = "Ready".to_string();
+            let before = state.clone();
+            let result = process_action(&mut state, &table, "Adjust", &invalid);
+
+            assert!(!result.success);
+            assert!(
+                result
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("MissingActionParameter"))
+            );
+            assert_eq!(state.status, before.status);
+            assert_eq!(state.counters, before.counters);
+            assert_eq!(state.fields, before.fields);
+            assert_eq!(state.events.len(), before.events.len());
+            assert!(result.event.is_none());
+            assert!(result.custom_effects.is_empty());
+            assert!(result.scheduled_actions.is_empty());
+            assert!(result.spawn_requests.is_empty());
+        }
+
+        let mut state = make_state("Counter", "counter-1");
+        state.status = "Ready".to_string();
+        let result = process_action(
+            &mut state,
+            &table,
+            "Adjust",
+            &serde_json::json!({"Delta": 4}),
+        );
+        assert!(result.success, "alias input failed: {:?}", result.error);
+        assert_eq!(state.counters.get("count"), Some(&4));
     }
 
     fn active_ref_state(target: &str) -> EntityState {

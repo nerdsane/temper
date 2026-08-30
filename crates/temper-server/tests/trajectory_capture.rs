@@ -37,13 +37,27 @@ const INTENT: &str = "add a line item to the draft order";
 /// only way to assert on what was actually persisted.
 fn build_turso_state(system_name: &str, store: TursoEventStore) -> ServerState {
     let mut registry = SpecRegistry::new();
-    let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
-    registry.register_tenant(
-        "default",
-        csdl,
-        CSDL_XML.to_string(),
-        &[("Order", ORDER_IOA)],
+    let csdl_xml = CSDL_XML.replacen(
+        r#"<Parameter Name="Quantity" Type="Edm.Int32" Nullable="false"/>"#,
+        r#"<Parameter Name="Quantity" Type="Edm.Int32" Nullable="false"/>
+        <Parameter Name="Notes" Type="Edm.String"/>
+        <Parameter Name="api_token" Type="Edm.String"/>
+        <Parameter Name="payment" Type="Edm.Untyped"/>"#,
+        1,
     );
+    let order_ioa = ORDER_IOA.replacen(
+        r#"params = ["ProductId", "Quantity"]"#,
+        r#"params = [
+  "ProductId",
+  "Quantity",
+  { name = "Notes", type = "Edm.String", nullable = true },
+  { name = "api_token", type = "Edm.String", nullable = true },
+  { name = "payment", type = "Edm.Untyped", nullable = true },
+]"#,
+        1,
+    );
+    let csdl = parse_csdl(&csdl_xml).expect("CSDL parse");
+    registry.register_tenant("default", csdl, csdl_xml, &[("Order", &order_ioa)]);
 
     let state = ServerState::from_registry(ActorSystem::new(system_name), registry);
     {
@@ -174,7 +188,7 @@ async fn successful_governed_action_persists_request_body_session_and_intent() {
     let (status, body) = post_observed(
         &state,
         "/tdata/Orders('ord-jcs-1')/Temper.AddItem",
-        serde_json::json!({"ProductId": "prod-9", "Quantity": 3}),
+        serde_json::json!({"ProductId": "00000000-0000-0000-0000-000000000009", "Quantity": 3}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "AddItem failed: {body:?}");
@@ -200,7 +214,10 @@ async fn successful_governed_action_persists_request_body_session_and_intent() {
         .request_body
         .as_ref()
         .expect("successful actions must persist their request body");
-    assert_eq!(request_body["ProductId"], serde_json::json!("prod-9"));
+    assert_eq!(
+        request_body["ProductId"],
+        serde_json::json!("00000000-0000-0000-0000-000000000009")
+    );
     assert_eq!(request_body["Quantity"], serde_json::json!(3));
 
     let _ = std::fs::remove_file(db_path);
@@ -224,7 +241,7 @@ async fn failed_governed_action_still_persists_request_body_session_and_intent()
     let (status, _body) = post_observed(
         &state,
         "/tdata/Orders('ord-jcs-2')/Temper.SubmitOrder",
-        serde_json::json!({"ShippingAddressId": "addr-1", "PaymentMethod": "card"}),
+        serde_json::json!({"ShippingAddressId": "10000000-0000-0000-0000-000000000001", "PaymentMethod": "card"}),
     )
     .await;
     assert_eq!(
@@ -246,7 +263,7 @@ async fn failed_governed_action_still_persists_request_body_session_and_intent()
         .expect("failed actions keep persisting their request body");
     assert_eq!(
         request_body["ShippingAddressId"],
-        serde_json::json!("addr-1")
+        serde_json::json!("10000000-0000-0000-0000-000000000001")
     );
     assert!(entry.error.is_some(), "the failure reason is recorded");
 
@@ -282,7 +299,7 @@ async fn observe_prefixed_headers_are_honoured_as_session_and_intent() {
                 .header("X-Temper-Observe-Session-Id", "sess-observe-prefixed")
                 .header("X-Temper-Observe-Intent", "observe-prefixed intent")
                 .body(Body::from(
-                    serde_json::json!({"ProductId": "prod-3", "Quantity": 1}).to_string(),
+                    serde_json::json!({"ProductId": "00000000-0000-0000-0000-000000000003", "Quantity": 1}).to_string(),
                 ))
                 .unwrap(),
         ))
@@ -336,7 +353,7 @@ async fn cedar_denied_action_persists_intent_and_evaluated_attributes() {
     let (status, _body) = post_observed(
         &state,
         "/tdata/Orders('ord-jcs-4')/Temper.AddItem",
-        serde_json::json!({"ProductId": "prod-denied", "Quantity": 1}),
+        serde_json::json!({"ProductId": "00000000-0000-0000-0000-000000000004", "Quantity": 1}),
     )
     .await;
     assert_eq!(
@@ -385,7 +402,7 @@ async fn oversized_request_body_is_bounded_before_persistence() {
     let (status, body) = post_observed(
         &state,
         "/tdata/Orders('ord-jcs-5')/Temper.AddItem",
-        serde_json::json!({"ProductId": "prod-big", "Quantity": 1, "Notes": "x".repeat(50_000)}),
+        serde_json::json!({"ProductId": "00000000-0000-0000-0000-000000000005", "Quantity": 1, "Notes": "x".repeat(50_000)}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "AddItem failed: {body:?}");
@@ -439,7 +456,7 @@ async fn secret_named_parameters_are_redacted_before_persistence() {
         &state,
         "/tdata/Orders('ord-jcs-6')/Temper.AddItem",
         serde_json::json!({
-            "ProductId": "prod-secret",
+            "ProductId": "00000000-0000-0000-0000-000000000006",
             "Quantity": 1,
             "api_token": "sk-live-must-not-be-stored",
             "payment": {"card_number": "4111111111111111", "cvv": "123"}
@@ -465,7 +482,7 @@ async fn secret_named_parameters_are_redacted_before_persistence() {
     );
     assert_eq!(
         request_body["ProductId"],
-        serde_json::json!("prod-secret"),
+        serde_json::json!("00000000-0000-0000-0000-000000000006"),
         "ordinary arguments are still captured"
     );
 
@@ -491,7 +508,7 @@ async fn a_rejected_retry_records_the_state_it_was_attempted_from() {
     let (status, body) = post_observed(
         &state,
         "/tdata/Orders('ord-jcs-7')/Temper.AddItem",
-        serde_json::json!({"ProductId": "prod-1", "Quantity": 1}),
+        serde_json::json!({"ProductId": "00000000-0000-0000-0000-000000000007", "Quantity": 1}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "AddItem failed: {body:?}");
@@ -499,7 +516,7 @@ async fn a_rejected_retry_records_the_state_it_was_attempted_from() {
     let (status, body) = post_observed(
         &state,
         "/tdata/Orders('ord-jcs-7')/Temper.SubmitOrder",
-        serde_json::json!({"ShippingAddressId": "addr-1", "PaymentMethod": "card"}),
+        serde_json::json!({"ShippingAddressId": "10000000-0000-0000-0000-000000000001", "PaymentMethod": "card"}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "SubmitOrder failed: {body:?}");
@@ -509,7 +526,7 @@ async fn a_rejected_retry_records_the_state_it_was_attempted_from() {
     let (status, _body) = post_observed(
         &state,
         "/tdata/Orders('ord-jcs-7')/Temper.SubmitOrder",
-        serde_json::json!({"ShippingAddressId": "addr-1", "PaymentMethod": "card"}),
+        serde_json::json!({"ShippingAddressId": "10000000-0000-0000-0000-000000000001", "PaymentMethod": "card"}),
     )
     .await;
     assert_eq!(
@@ -554,7 +571,7 @@ async fn a_session_reads_back_in_capture_order() {
         let (status, body) = post_observed(
             &state,
             "/tdata/Orders('ord-jcs-8')/Temper.AddItem",
-            serde_json::json!({"ProductId": format!("prod-{quantity}"), "Quantity": quantity}),
+            serde_json::json!({"ProductId": format!("00000000-0000-0000-0000-{quantity:012}"), "Quantity": quantity}),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "AddItem failed: {body:?}");
@@ -562,7 +579,7 @@ async fn a_session_reads_back_in_capture_order() {
     let (status, body) = post_observed(
         &state,
         "/tdata/Orders('ord-jcs-8')/Temper.SubmitOrder",
-        serde_json::json!({"ShippingAddressId": "addr-1", "PaymentMethod": "card"}),
+        serde_json::json!({"ShippingAddressId": "10000000-0000-0000-0000-000000000001", "PaymentMethod": "card"}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "SubmitOrder failed: {body:?}");

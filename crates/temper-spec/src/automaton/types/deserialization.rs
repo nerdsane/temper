@@ -16,7 +16,7 @@ impl<'de> Deserialize<'de> for ActionParam {
             toml::Value::String(name) => Ok(Self::Named(name)),
             toml::Value::Table(mut fields) => {
                 for key in fields.keys() {
-                    if !matches!(key.as_str(), "name" | "type" | "entity_type") {
+                    if !matches!(key.as_str(), "name" | "type" | "entity_type" | "nullable") {
                         return Err(de::Error::custom(format!(
                             "unknown action parameter field `{key}`"
                         )));
@@ -30,10 +30,20 @@ impl<'de> Deserialize<'de> for ActionParam {
                     .unwrap_or_else(default_param_type);
                 let entity_type =
                     take_string_field(&mut fields, "entity_type").map_err(de::Error::custom)?;
+                let nullable = match fields.remove("nullable") {
+                    None => false,
+                    Some(toml::Value::Boolean(value)) => value,
+                    Some(_) => {
+                        return Err(de::Error::custom(
+                            "action parameter `nullable` must be a boolean",
+                        ));
+                    }
+                };
                 Ok(Self::Typed {
                     name,
                     param_type,
                     entity_type,
+                    nullable,
                 })
             }
             value => Err(de::Error::custom(format!(

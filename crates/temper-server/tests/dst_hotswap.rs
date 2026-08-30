@@ -93,7 +93,7 @@ async fn dst_hotswap_entity_sees_new_table() {
             "Order",
             &format!("o-{seed}"),
             "AddItem",
-            serde_json::json!({}),
+            serde_json::json!({"ProductId": "product-1", "Quantity": 1}),
         )
         .await
         .expect("AddItem");
@@ -104,7 +104,10 @@ async fn dst_hotswap_entity_sees_new_table() {
             "Order",
             &format!("o-{seed}"),
             "SubmitOrder",
-            serde_json::json!({}),
+            serde_json::json!({
+                "ShippingAddressId": "address-1",
+                "PaymentMethod": "card"
+            }),
         )
         .await
         .expect("SubmitOrder");

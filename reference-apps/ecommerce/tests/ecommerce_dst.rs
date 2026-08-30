@@ -18,6 +18,14 @@ use temper_server::entity_actor::sim_handler::EntityActorHandler;
 const ORDER_IOA: &str = include_str!("../specs/order.ioa.toml");
 const PAYMENT_IOA: &str = include_str!("../specs/payment.ioa.toml");
 const SHIPMENT_IOA: &str = include_str!("../specs/shipment.ioa.toml");
+const ADD_ITEM_PARAMS: &str = r#"{"ProductId":"product-1","Quantity":1}"#;
+const SUBMIT_ORDER_PARAMS: &str = r#"{"ShippingAddressId":"address-1","PaymentMethod":"card"}"#;
+const ORDER_SHIP_PARAMS: &str = r#"{"Carrier":"carrier","TrackingNumber":"track-1"}"#;
+const CANCEL_PARAMS: &str = r#"{"Reason":"customer-request"}"#;
+const RETURN_PARAMS: &str = r#"{"Reason":"damaged","ItemIds":["item-1"]}"#;
+const REFUND_PARAMS: &str = r#"{"Amount":10}"#;
+const SHIPMENT_SHIP_PARAMS: &str = r#"{"Carrier":"carrier","TrackingNumber":"track-1"}"#;
+const FAILURE_PARAMS: &str = r#"{"Reason":"delivery-failed"}"#;
 
 fn order_table() -> Arc<TransitionTable> {
     Arc::new(TransitionTable::from_ioa_source(ORDER_IOA))
@@ -61,11 +69,12 @@ fn scripted_order_add_item_then_submit() {
     sim.register_actor("ord-1", Box::new(handler));
 
     // Draft → AddItem (stays in Draft, increments item counter)
-    sim.step("ord-1", "AddItem", "{}").unwrap();
+    sim.step("ord-1", "AddItem", ADD_ITEM_PARAMS).unwrap();
     sim.assert_status("ord-1", "Draft");
 
     // Draft → SubmitOrder (now items > 0, guard passes)
-    sim.step("ord-1", "SubmitOrder", "{}").unwrap();
+    sim.step("ord-1", "SubmitOrder", SUBMIT_ORDER_PARAMS)
+        .unwrap();
     sim.assert_status("ord-1", "Submitted");
 
     sim.assert_event_count("ord-1", 2);
@@ -84,8 +93,9 @@ fn scripted_order_full_lifecycle() {
     sim.register_actor("ord-1", Box::new(handler));
 
     // Draft → AddItem → SubmitOrder → Confirmed → Processing → Shipped → Delivered
-    sim.step("ord-1", "AddItem", "{}").unwrap();
-    sim.step("ord-1", "SubmitOrder", "{}").unwrap();
+    sim.step("ord-1", "AddItem", ADD_ITEM_PARAMS).unwrap();
+    sim.step("ord-1", "SubmitOrder", SUBMIT_ORDER_PARAMS)
+        .unwrap();
     sim.assert_status("ord-1", "Submitted");
 
     sim.step("ord-1", "ConfirmOrder", "{}").unwrap();
@@ -94,7 +104,7 @@ fn scripted_order_full_lifecycle() {
     sim.step("ord-1", "ProcessOrder", "{}").unwrap();
     sim.assert_status("ord-1", "Processing");
 
-    sim.step("ord-1", "ShipOrder", "{}").unwrap();
+    sim.step("ord-1", "ShipOrder", ORDER_SHIP_PARAMS).unwrap();
     sim.assert_status("ord-1", "Shipped");
 
     sim.step("ord-1", "DeliverOrder", "{}").unwrap();
@@ -115,7 +125,7 @@ fn scripted_order_cancel_from_draft() {
         EntityActorHandler::new("Order", "ord-1", order_table()).with_ioa_invariants(ORDER_IOA);
     sim.register_actor("ord-1", Box::new(handler));
 
-    sim.step("ord-1", "CancelOrder", "{}").unwrap();
+    sim.step("ord-1", "CancelOrder", CANCEL_PARAMS).unwrap();
     sim.assert_status("ord-1", "Cancelled");
     assert!(!sim.has_violations());
 }
@@ -131,11 +141,12 @@ fn scripted_order_cancel_from_submitted() {
         EntityActorHandler::new("Order", "ord-1", order_table()).with_ioa_invariants(ORDER_IOA);
     sim.register_actor("ord-1", Box::new(handler));
 
-    sim.step("ord-1", "AddItem", "{}").unwrap();
-    sim.step("ord-1", "SubmitOrder", "{}").unwrap();
+    sim.step("ord-1", "AddItem", ADD_ITEM_PARAMS).unwrap();
+    sim.step("ord-1", "SubmitOrder", SUBMIT_ORDER_PARAMS)
+        .unwrap();
     sim.assert_status("ord-1", "Submitted");
 
-    sim.step("ord-1", "CancelOrder", "{}").unwrap();
+    sim.step("ord-1", "CancelOrder", CANCEL_PARAMS).unwrap();
     sim.assert_status("ord-1", "Cancelled");
     assert!(!sim.has_violations());
 }
@@ -152,7 +163,7 @@ fn scripted_order_cannot_submit_empty() {
     sim.register_actor("ord-1", Box::new(handler));
 
     // SubmitOrder from Draft without items should fail (guard: items > 0)
-    let result = sim.step("ord-1", "SubmitOrder", "{}");
+    let result = sim.step("ord-1", "SubmitOrder", SUBMIT_ORDER_PARAMS);
     assert!(result.is_err(), "SubmitOrder should fail with 0 items");
     sim.assert_status("ord-1", "Draft");
 }
@@ -169,16 +180,17 @@ fn scripted_order_return_flow() {
     sim.register_actor("ord-1", Box::new(handler));
 
     // Full lifecycle to Delivered
-    sim.step("ord-1", "AddItem", "{}").unwrap();
-    sim.step("ord-1", "SubmitOrder", "{}").unwrap();
+    sim.step("ord-1", "AddItem", ADD_ITEM_PARAMS).unwrap();
+    sim.step("ord-1", "SubmitOrder", SUBMIT_ORDER_PARAMS)
+        .unwrap();
     sim.step("ord-1", "ConfirmOrder", "{}").unwrap();
     sim.step("ord-1", "ProcessOrder", "{}").unwrap();
-    sim.step("ord-1", "ShipOrder", "{}").unwrap();
+    sim.step("ord-1", "ShipOrder", ORDER_SHIP_PARAMS).unwrap();
     sim.step("ord-1", "DeliverOrder", "{}").unwrap();
     sim.assert_status("ord-1", "Delivered");
 
     // Delivered → InitiateReturn → CompleteReturn → RefundOrder
-    sim.step("ord-1", "InitiateReturn", "{}").unwrap();
+    sim.step("ord-1", "InitiateReturn", RETURN_PARAMS).unwrap();
     sim.assert_status("ord-1", "ReturnRequested");
 
     sim.step("ord-1", "CompleteReturn", "{}").unwrap();
@@ -228,7 +240,7 @@ fn scripted_payment_failure() {
         .with_ioa_invariants(PAYMENT_IOA);
     sim.register_actor("pay-1", Box::new(handler));
 
-    sim.step("pay-1", "FailPayment", "{}").unwrap();
+    sim.step("pay-1", "FailPayment", FAILURE_PARAMS).unwrap();
     sim.assert_status("pay-1", "Failed");
 
     // Failed is terminal — no further transitions allowed
@@ -255,7 +267,7 @@ fn scripted_payment_refund() {
 
     sim.step("pay-1", "AuthorizePayment", "{}").unwrap();
     sim.step("pay-1", "CapturePayment", "{}").unwrap();
-    sim.step("pay-1", "RefundPayment", "{}").unwrap();
+    sim.step("pay-1", "RefundPayment", REFUND_PARAMS).unwrap();
     sim.assert_status("pay-1", "Refunded");
 
     // Refunded is terminal
@@ -285,7 +297,8 @@ fn scripted_shipment_full_delivery() {
 
     sim.assert_status("ship-1", "Created");
 
-    sim.step("ship-1", "ShipOrder", "{}").unwrap();
+    sim.step("ship-1", "ShipOrder", SHIPMENT_SHIP_PARAMS)
+        .unwrap();
     sim.assert_status("ship-1", "PickedUp");
 
     sim.step("ship-1", "MarkInTransit", "{}").unwrap();
@@ -312,14 +325,16 @@ fn scripted_shipment_failure_and_return() {
         .with_ioa_invariants(SHIPMENT_IOA);
     sim.register_actor("ship-1", Box::new(handler));
 
-    sim.step("ship-1", "ShipOrder", "{}").unwrap();
+    sim.step("ship-1", "ShipOrder", SHIPMENT_SHIP_PARAMS)
+        .unwrap();
     sim.step("ship-1", "MarkInTransit", "{}").unwrap();
     sim.assert_status("ship-1", "InTransit");
 
-    sim.step("ship-1", "FailDelivery", "{}").unwrap();
+    sim.step("ship-1", "FailDelivery", FAILURE_PARAMS).unwrap();
     sim.assert_status("ship-1", "Failed");
 
-    sim.step("ship-1", "ReturnShipment", "{}").unwrap();
+    sim.step("ship-1", "ReturnShipment", FAILURE_PARAMS)
+        .unwrap();
     sim.assert_status("ship-1", "Returned");
 
     // Returned is terminal
@@ -353,8 +368,9 @@ fn scripted_ecommerce_full_scenario() {
     sim.register_actor("ship-1", Box::new(shipment));
 
     // 1. Customer adds item and submits order
-    sim.step("ord-1", "AddItem", "{}").unwrap();
-    sim.step("ord-1", "SubmitOrder", "{}").unwrap();
+    sim.step("ord-1", "AddItem", ADD_ITEM_PARAMS).unwrap();
+    sim.step("ord-1", "SubmitOrder", SUBMIT_ORDER_PARAMS)
+        .unwrap();
     sim.assert_status("ord-1", "Submitted");
 
     // 2. Payment authorized and captured
@@ -368,14 +384,15 @@ fn scripted_ecommerce_full_scenario() {
     sim.assert_status("ord-1", "Processing");
 
     // 4. Shipment created and delivered
-    sim.step("ship-1", "ShipOrder", "{}").unwrap();
+    sim.step("ship-1", "ShipOrder", SHIPMENT_SHIP_PARAMS)
+        .unwrap();
     sim.step("ship-1", "MarkInTransit", "{}").unwrap();
     sim.step("ship-1", "MarkOutForDelivery", "{}").unwrap();
     sim.step("ship-1", "DeliverShipment", "{}").unwrap();
     sim.assert_status("ship-1", "Delivered");
 
     // 5. Order shipped and delivered
-    sim.step("ord-1", "ShipOrder", "{}").unwrap();
+    sim.step("ord-1", "ShipOrder", ORDER_SHIP_PARAMS).unwrap();
     sim.step("ord-1", "DeliverOrder", "{}").unwrap();
     sim.assert_status("ord-1", "Delivered");
 

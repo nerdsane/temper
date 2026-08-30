@@ -28,10 +28,18 @@ fn restart_reconstructs_state_and_sequence_from_the_journal() {
     });
     sim.register_actor("Order:one", Box::new(order_handler("one")));
 
-    sim.step("Order:one", "AddItem", r#"{"Quantity":1}"#)
-        .expect("add item");
-    sim.step("Order:one", "SubmitOrder", "{}")
-        .expect("submit order");
+    sim.step(
+        "Order:one",
+        "AddItem",
+        r#"{"ProductId":"product-1","Quantity":1}"#,
+    )
+    .expect("add item");
+    sim.step(
+        "Order:one",
+        "SubmitOrder",
+        r#"{"ShippingAddressId":"address-1","PaymentMethod":"card"}"#,
+    )
+    .expect("submit order");
     let events_before = sim.events_json("Order:one");
     assert_eq!(sim.event_sequence("Order:one"), 2);
 
@@ -79,7 +87,7 @@ fn actor_to_actor_messages_cross_the_heavy_fault_scheduler() {
                 "Order:source",
                 "Order:target",
                 "AddItem",
-                r#"{"Quantity":1}"#,
+                r#"{"ProductId":"product-1","Quantity":1}"#,
             );
         }
         sim.run_queued(256);
@@ -113,11 +121,15 @@ fn clock_skew_and_forward_jump_are_deterministic_and_scoped() {
         });
         sim.register_actor("Order:clock", Box::new(order_handler("clock")));
         sim.set_actor_clock_skew_ms("Order:clock", 5_000);
-        sim.step("Order:clock", "AddItem", r#"{"Quantity":1}"#)
-            .expect("skewed add");
+        sim.step(
+            "Order:clock",
+            "AddItem",
+            r#"{"ProductId":"product-1","Quantity":1}"#,
+        )
+        .expect("skewed add");
         sim.jump_clock_by(100);
         sim.set_actor_clock_skew_ms("Order:clock", -2_500);
-        sim.step("Order:clock", "RemoveItem", "{}")
+        sim.step("Order:clock", "RemoveItem", r#"{"ItemId":"item-1"}"#)
             .expect("post-jump remove");
         sim.events_json("Order:clock")
     }

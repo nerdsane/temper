@@ -189,6 +189,10 @@ pub enum ActionParam {
         /// Target entity type when `param_type = "ref"` (ADR-0156).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         entity_type: Option<String>,
+        /// Whether callers may omit the parameter or supply JSON `null`.
+        /// IOA action parameters are required unless this is explicitly true.
+        #[serde(default, skip_serializing_if = "is_false")]
+        nullable: bool,
     },
 }
 
@@ -196,13 +200,19 @@ fn default_param_type() -> String {
     "string".to_string()
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 impl ActionParam {
+    /// Return the logical parameter name.
     pub fn name(&self) -> &str {
         match self {
             Self::Named(n) => n,
             Self::Typed { name, .. } => name,
         }
     }
+    /// Return the declared parameter type, defaulting plain names to `string`.
     pub fn param_type(&self) -> &str {
         match self {
             Self::Named(_) => "string",
@@ -215,6 +225,14 @@ impl ActionParam {
         match self {
             Self::Named(_) => None,
             Self::Typed { entity_type, .. } => entity_type.as_deref(),
+        }
+    }
+
+    /// Return whether the parameter explicitly permits absence or JSON `null`.
+    pub fn nullable(&self) -> bool {
+        match self {
+            Self::Named(_) => false,
+            Self::Typed { nullable, .. } => *nullable,
         }
     }
 }

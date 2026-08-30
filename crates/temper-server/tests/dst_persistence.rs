@@ -45,6 +45,17 @@ fn order_table() -> Arc<RwLock<TransitionTable>> {
     Arc::new(RwLock::new(TransitionTable::from_ioa_source(ORDER_IOA)))
 }
 
+fn order_action_params(action: &str) -> serde_json::Value {
+    match action {
+        "AddItem" => serde_json::json!({"ProductId": "product-1", "Quantity": 1}),
+        "SubmitOrder" => serde_json::json!({
+            "ShippingAddressId": "address-1",
+            "PaymentMethod": "card"
+        }),
+        _ => serde_json::json!({}),
+    }
+}
+
 fn sim_store(seed: u64) -> BoxedEventStore {
     BoxedEventStore::new(SimEventStore::no_faults(seed))
 }
@@ -254,10 +265,15 @@ async fn dst_replay_fidelity() {
             .with_tenant("default");
             let actor_ref = system.spawn(actor, &entity_id);
 
-            let r = dispatch_action(&actor_ref, "AddItem", serde_json::json!({})).await;
+            let r = dispatch_action(&actor_ref, "AddItem", order_action_params("AddItem")).await;
             assert!(r.success, "seed {seed}: AddItem failed: {:?}", r.error);
 
-            let r = dispatch_action(&actor_ref, "SubmitOrder", serde_json::json!({})).await;
+            let r = dispatch_action(
+                &actor_ref,
+                "SubmitOrder",
+                order_action_params("SubmitOrder"),
+            )
+            .await;
             assert!(r.success, "seed {seed}: SubmitOrder failed: {:?}", r.error);
 
             let r = dispatch_action(&actor_ref, "ConfirmOrder", serde_json::json!({})).await;
@@ -322,7 +338,7 @@ async fn dst_sequence_monotonicity() {
 
         let actions = ["AddItem", "SubmitOrder", "ConfirmOrder", "ProcessOrder"];
         for action in &actions {
-            let r = dispatch_action(&actor_ref, action, serde_json::json!({})).await;
+            let r = dispatch_action(&actor_ref, action, order_action_params(action)).await;
             assert!(r.success, "seed {seed}: {action} failed: {:?}", r.error);
         }
 
@@ -368,8 +384,13 @@ async fn dst_crash_recovery() {
             .with_tenant("default");
             let actor_ref = system.spawn(actor, &entity_id);
 
-            dispatch_action(&actor_ref, "AddItem", serde_json::json!({})).await;
-            dispatch_action(&actor_ref, "SubmitOrder", serde_json::json!({})).await;
+            dispatch_action(&actor_ref, "AddItem", order_action_params("AddItem")).await;
+            dispatch_action(
+                &actor_ref,
+                "SubmitOrder",
+                order_action_params("SubmitOrder"),
+            )
+            .await;
 
             let state = get_state(&actor_ref).await;
             assert_eq!(state.state.status, "Submitted", "seed {seed}");
@@ -432,7 +453,7 @@ async fn dst_determinism_canary() {
             let actor_ref = system.spawn(actor, &entity_id);
 
             for action in &["AddItem", "SubmitOrder", "ConfirmOrder"] {
-                dispatch_action(&actor_ref, action, serde_json::json!({})).await;
+                dispatch_action(&actor_ref, action, order_action_params(action)).await;
             }
 
             let state = get_state(&actor_ref).await;
@@ -460,10 +481,15 @@ async fn dst_in_memory_entity_unaffected() {
     let actor = EntityActor::new("Order", "ord-inmem", table, serde_json::json!({}));
     let actor_ref = system.spawn(actor, "ord-inmem");
 
-    let r = dispatch_action(&actor_ref, "AddItem", serde_json::json!({})).await;
+    let r = dispatch_action(&actor_ref, "AddItem", order_action_params("AddItem")).await;
     assert!(r.success);
 
-    let r = dispatch_action(&actor_ref, "SubmitOrder", serde_json::json!({})).await;
+    let r = dispatch_action(
+        &actor_ref,
+        "SubmitOrder",
+        order_action_params("SubmitOrder"),
+    )
+    .await;
     assert!(r.success);
     assert_eq!(r.state.status, "Submitted");
 }

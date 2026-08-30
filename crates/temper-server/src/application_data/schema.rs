@@ -5,6 +5,10 @@ use temper_wasm_sdk::data::{
     ModuleDataErrorKind,
 };
 
+use crate::action_input_contract::{
+    ActionInputShapeError, NamedTypeShape, named_type_shape_from_csdl, validate_action_input_shape,
+    value_matches_schema_type,
+};
 use crate::entity_actor::EntityState;
 
 use super::{ApplicationDataInvocation, ModuleDataTarget, data_error, short_type};
@@ -22,119 +26,24 @@ fn property_accepts(property: &ManifestPropertyV1, value: &serde_json::Value) ->
     if value.is_null() {
         return property.nullable;
     }
-    if !property.enum_members.is_empty() {
-        return value
-            .as_str()
-            .is_some_and(|member| property.enum_members.iter().any(|known| known == member));
-    }
-    match property.type_name.as_str() {
-        "Edm.Boolean" => value.is_boolean(),
-        "Edm.Byte" => value
-            .as_u64()
-            .is_some_and(|number| number <= u8::MAX.into()),
-        "Edm.Int16" => value
-            .as_i64()
-            .is_some_and(|number| i16::try_from(number).is_ok()),
-        "Edm.Int32" => value
-            .as_i64()
-            .is_some_and(|number| i32::try_from(number).is_ok()),
-        "Edm.Int64" => value.as_i64().is_some(),
-        "Edm.Single" | "Edm.Double" => value.as_f64().is_some_and(f64::is_finite),
-        "Edm.Decimal" => value.as_str().is_some_and(decimal_lexical),
-        "Edm.Guid" => value
-            .as_str()
-            .is_some_and(|text| guid_lexical(text) && uuid::Uuid::parse_str(text).is_ok()),
-        "Edm.DateTimeOffset" => value
-            .as_str()
-            .is_some_and(|text| chrono::DateTime::parse_from_rfc3339(text).is_ok()),
-        "Edm.String" => value.is_string(),
-        "Edm.Binary" => value.as_str().is_some_and(binary_lexical),
-        // CSDL references and named scalar aliases cross this ABI as canonical strings.
-        _ => value.is_string(),
-    }
+    let named_type = if property.enum_members.is_empty() {
+        NamedTypeShape::EntityReference
+    } else {
+        NamedTypeShape::ManifestEnum(&property.enum_members)
+    };
+    value_matches_schema_type(value, &property.type_name, named_type)
 }
 
-fn decimal_lexical(value: &str) -> bool {
-    if matches!(value, "NaN" | "INF" | "-INF") {
-        return false;
+fn action_parameter_accepts(
+    csdl: &temper_spec::csdl::CsdlDocument,
+    parameter: &ManifestPropertyV1,
+    value: &serde_json::Value,
+) -> bool {
+    if value.is_null() {
+        return parameter.nullable;
     }
-    let unsigned = value.strip_prefix(['+', '-']).unwrap_or(value);
-    let exponent_index = unsigned.find(['e', 'E']);
-    let (mantissa, exponent) = exponent_index.map_or((unsigned, None), |index| {
-        (&unsigned[..index], Some(&unsigned[index + 1..]))
-    });
-    if exponent.is_some_and(|exponent| {
-        let digits = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
-        digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit())
-    }) || unsigned.matches(['e', 'E']).count() > 1
-    {
-        return false;
-    }
-    let mut parts = mantissa.split('.');
-    let whole = parts.next().unwrap_or_default();
-    let fraction = parts.next();
-    if parts.next().is_some()
-        || whole.is_empty()
-        || !whole.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return false;
-    }
-    fraction
-        .is_none_or(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
-}
-
-fn guid_lexical(value: &str) -> bool {
-    value.len() == 36
-        && value.bytes().enumerate().all(|(index, byte)| {
-            if matches!(index, 8 | 13 | 18 | 23) {
-                byte == b'-'
-            } else {
-                byte.is_ascii_hexdigit()
-            }
-        })
-}
-
-fn binary_lexical(value: &str) -> bool {
-    let unpadded = value.trim_end_matches('=');
-    let padding = value.len() - unpadded.len();
-    if padding > 2
-        || unpadded
-            .bytes()
-            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
-    {
-        return false;
-    }
-    match unpadded.len() % 4 {
-        0 => padding == 0,
-        2 => {
-            matches!(padding, 0 | 2)
-                && matches!(unpadded.as_bytes().last(), Some(b'A' | b'Q' | b'g' | b'w'))
-        }
-        3 => {
-            padding <= 1
-                && matches!(
-                    unpadded.as_bytes().last(),
-                    Some(
-                        b'A' | b'E'
-                            | b'I'
-                            | b'M'
-                            | b'Q'
-                            | b'U'
-                            | b'Y'
-                            | b'c'
-                            | b'g'
-                            | b'k'
-                            | b'o'
-                            | b's'
-                            | b'w'
-                            | b'0'
-                            | b'4'
-                            | b'8'
-                    )
-                )
-        }
-        _ => false,
-    }
+    let named_type = named_type_shape_from_csdl(csdl, &parameter.type_name);
+    value_matches_schema_type(value, &parameter.type_name, named_type)
 }
 
 impl ApplicationDataInvocation {
@@ -214,7 +123,18 @@ impl ApplicationDataInvocation {
                     "entity type is absent from the bound schema",
                 )
             })?;
-        validate_manifest_action_params(entity, action, params)
+        let registry = self.state.registry.read().unwrap(); // ci-ok: poisoned registry is fatal
+        let csdl = match &self.authority.target {
+            ModuleDataTarget::TenantGlobal => registry
+                .get_tenant(&self.authority.tenant)
+                .map(|config| &config.csdl)
+                .unwrap_or(&self.state.csdl),
+            ModuleDataTarget::Scoped(pin) => registry
+                .get_scoped_config_at_digest(&self.authority.tenant, &pin.scope, &pin.bundle_digest)
+                .map(|config| &config.csdl)
+                .expect("verified module schema pin must resolve its immutable CSDL"),
+        };
+        validate_manifest_action_params(csdl, entity, action, params)
     }
 
     pub(super) async fn run_governed_write_prechecks(
@@ -385,6 +305,7 @@ pub(crate) fn validate_manifest_entity_object(
 }
 
 pub(crate) fn validate_manifest_action_params(
+    csdl: &temper_spec::csdl::CsdlDocument,
     entity: &ManifestEntityV1,
     action: &str,
     params: &serde_json::Map<String, serde_json::Value>,
@@ -400,36 +321,35 @@ pub(crate) fn validate_manifest_action_params(
                 "action is absent from the bound schema",
             )
         })?;
-    for (name, value) in params {
-        let parameter = action
+    let values = validate_action_input_shape(
+        params,
+        action
             .parameters
             .iter()
-            .find(|parameter| parameter.canonical_name == *name)
-            .ok_or_else(|| {
-                data_error(
-                    ModuleDataErrorKind::SchemaMismatch,
-                    "UnknownActionParameter",
-                    "action parameter is absent from the bound schema",
-                )
-            })?;
-        if !property_accepts(parameter, value) {
+            .map(|parameter| (parameter.canonical_name.as_str(), parameter.nullable)),
+    )
+    .map_err(|error| match error {
+        ActionInputShapeError::Missing { .. } => data_error(
+            ModuleDataErrorKind::SchemaMismatch,
+            "MissingActionParameter",
+            "required action parameter is absent or null",
+        ),
+        ActionInputShapeError::Mismatch { .. } => data_error(
+            ModuleDataErrorKind::SchemaMismatch,
+            "ActionParameterTypeMismatch",
+            "action parameter name is absent or ambiguous in the bound schema",
+        ),
+    })?;
+    for parameter in &action.parameters {
+        if let Some(value) = values.get(parameter.canonical_name.as_str())
+            && !action_parameter_accepts(csdl, parameter, value)
+        {
             return Err(data_error(
                 ModuleDataErrorKind::SchemaMismatch,
                 "ActionParameterTypeMismatch",
                 "action parameter does not match the bound schema",
             ));
         }
-    }
-    if action
-        .parameters
-        .iter()
-        .any(|parameter| !parameter.nullable && !params.contains_key(&parameter.canonical_name))
-    {
-        return Err(data_error(
-            ModuleDataErrorKind::SchemaMismatch,
-            "MissingActionParameter",
-            "required action parameter is absent",
-        ));
     }
     Ok(())
 }
@@ -509,4 +429,150 @@ fn stored_property_value<'a>(
             .find(|(name, _)| temper_spec::to_snake_case(name) == normalized)
             .map(|(_, value)| value)
     })
+}
+
+#[cfg(test)]
+mod action_param_tests {
+    use super::*;
+    use temper_wasm_sdk::data::ManifestActionV1;
+
+    fn csdl() -> temper_spec::csdl::CsdlDocument {
+        temper_spec::parse_csdl(
+            r#"<?xml version="1.0"?><edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="Temper" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EntityType Name="Task"></EntityType><EntityType Name="User"></EntityType><EnumType Name="Phase"><Member Name="Open"/><Member Name="Closed"/></EnumType><ComplexType Name="Payload"><Property Name="Value" Type="Edm.String"/></ComplexType></Schema></edmx:DataServices></edmx:Edmx>"#,
+        )
+        .expect("test CSDL")
+    }
+
+    fn entity() -> ManifestEntityV1 {
+        ManifestEntityV1 {
+            entity_type: "Temper.Task".into(),
+            entity_set: "Tasks".into(),
+            generated_name: "Task".into(),
+            properties: Vec::new(),
+            actions: vec![ManifestActionV1 {
+                canonical_name: "Close".into(),
+                generated_name: "close".into(),
+                parameters: vec![
+                    ManifestPropertyV1 {
+                        canonical_name: "ReasonCode".into(),
+                        generated_name: "reason_code".into(),
+                        type_name: "Edm.String".into(),
+                        nullable: false,
+                        source: ManifestValueSourceV1::Input,
+                        default_value: None,
+                        enum_members: Vec::new(),
+                    },
+                    ManifestPropertyV1 {
+                        canonical_name: "Payload".into(),
+                        generated_name: "payload".into(),
+                        type_name: "Temper.Payload".into(),
+                        nullable: true,
+                        source: ManifestValueSourceV1::Input,
+                        default_value: None,
+                        enum_members: Vec::new(),
+                    },
+                    ManifestPropertyV1 {
+                        canonical_name: "Phase".into(),
+                        generated_name: "phase".into(),
+                        type_name: "Temper.Phase".into(),
+                        nullable: true,
+                        source: ManifestValueSourceV1::Input,
+                        default_value: None,
+                        enum_members: vec!["Open".into(), "Closed".into()],
+                    },
+                    ManifestPropertyV1 {
+                        canonical_name: "Owner".into(),
+                        generated_name: "owner".into(),
+                        type_name: "Temper.User".into(),
+                        nullable: true,
+                        source: ManifestValueSourceV1::Input,
+                        default_value: None,
+                        enum_members: Vec::new(),
+                    },
+                ],
+                result_type: None,
+                result_enum_members: Vec::new(),
+                composite: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn module_action_missing_and_null_required_values_share_the_stable_code() {
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({"ReasonCode": null}),
+        ] {
+            let entity = entity();
+            let error = validate_manifest_action_params(
+                &csdl(),
+                &entity,
+                "Close",
+                params.as_object().unwrap(),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind, ModuleDataErrorKind::SchemaMismatch);
+            assert_eq!(error.code, "MissingActionParameter");
+        }
+    }
+
+    #[test]
+    fn module_action_aliases_are_accepted_and_extras_use_type_mismatch() {
+        let entity = entity();
+        validate_manifest_action_params(
+            &csdl(),
+            &entity,
+            "Close",
+            serde_json::json!({"reason_code": "done"})
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        let error = validate_manifest_action_params(
+            &csdl(),
+            &entity,
+            "Close",
+            serde_json::json!({"ReasonCode": "done", "Other": true})
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "ActionParameterTypeMismatch");
+    }
+
+    #[test]
+    fn module_action_rejects_unknown_enum_and_wrong_reference_shape() {
+        let entity = entity();
+        for params in [
+            serde_json::json!({"ReasonCode": "done", "Phase": "Unknown"}),
+            serde_json::json!({"ReasonCode": "done", "Owner": {"Id": "user-1"}}),
+            serde_json::json!({"ReasonCode": "done", "Payload": "not-an-object"}),
+        ] {
+            let result = validate_manifest_action_params(
+                &csdl(),
+                &entity,
+                "Close",
+                params.as_object().unwrap(),
+            );
+            let error = match result {
+                Ok(()) => panic!("invalid params unexpectedly accepted: {params}"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code, "ActionParameterTypeMismatch");
+        }
+        validate_manifest_action_params(
+            &csdl(),
+            &entity,
+            "Close",
+            serde_json::json!({
+                "ReasonCode": "done",
+                "Phase": "Open",
+                "Owner": "user-1",
+                "Payload": {"Value": "ok"}
+            })
+            .as_object()
+            .unwrap(),
+        )
+        .unwrap();
+    }
 }

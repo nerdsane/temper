@@ -260,6 +260,18 @@ impl Actor for SpecDrivenActor {
             .map(|m| m.action.clone())
             .unwrap_or_else(|| message.message_type.clone());
 
+        let incoming_params = spec_msg
+            .as_ref()
+            .filter(|message| !message.params.is_empty())
+            .and_then(|message| serde_json::from_slice::<serde_json::Value>(&message.params).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let incoming_params = self
+            .table
+            .canonicalize_action_params(&action, &incoming_params);
+        self.table
+            .validate_required_action_params(&action, &incoming_params)
+            .map_err(|error| ActorError::HandlerFailed(error.to_string()))?;
+
         // Store incoming params in state.fields so integrations can read them.
         // Merge non-empty params into fields to preserve context from prior steps
         // (e.g. child Process keeps parent_pid while later messages add user_prompt/response).
@@ -279,11 +291,10 @@ impl Actor for SpecDrivenActor {
             }
         }
 
-        if let Some(fields) = spec_msg
-            .as_ref()
-            .filter(|m| !m.params.is_empty())
-            .and_then(|m| serde_json::from_slice::<serde_json::Value>(&m.params).ok())
-            .filter(|p| !p.as_object().is_some_and(|o| o.is_empty()))
+        if let Some(fields) = (!incoming_params
+            .as_object()
+            .is_some_and(|object| object.is_empty()))
+        .then_some(incoming_params)
         {
             match (actor_state.fields.as_object_mut(), fields.as_object()) {
                 (Some(existing), Some(new_fields)) => {

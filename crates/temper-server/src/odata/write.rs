@@ -14,6 +14,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use axum::Extension;
 
 use super::account_verification::enforce_commons_account_verified_for_write;
+use super::action_input::validate_bound_action_input;
 use super::app_uniqueness::enforce_commons_app_name_unique_for_write;
 use super::authz::{
     CREATE_ACTION, DELETE_ACTION, MutationResource, UPDATE_ACTION, apply_authenticated_context,
@@ -950,6 +951,17 @@ pub async fn handle_odata_post(
                 .await
                 {
                     return response;
+                }
+                if let Err(error) = validate_bound_action_input(
+                    &state,
+                    &tenant,
+                    agent_ctx.schema_pin.as_ref(),
+                    &entity_type,
+                    action_name,
+                    &body_json,
+                ) {
+                    return odata_error(StatusCode::BAD_REQUEST, error.code, &error.message)
+                        .into_response();
                 }
                 match actor_sys
                     .tell(

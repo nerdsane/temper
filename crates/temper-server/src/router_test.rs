@@ -225,6 +225,28 @@ async fn persist_task_schema_bundle_in_scope(
 ) {
     let scoped_csdl = include_str!("../../../test-fixtures/specs/model.csdl.xml")
         .replace("Temper.Example", "Temper.ScopedExample");
+    persist_task_schema_bundle_with_csdl_in_scope(
+        store,
+        order_ioa,
+        scoped_csdl,
+        digest,
+        predecessor,
+        operation_tag,
+        scope,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_task_schema_bundle_with_csdl_in_scope(
+    store: &impl SchemaDeploymentStore,
+    order_ioa: &str,
+    scoped_csdl: String,
+    digest: &str,
+    predecessor: Option<&str>,
+    operation_tag: &str,
+    scope: &SchemaScope,
+) {
     store
         .submit_schema_bundle(SubmitSchemaBundle {
             bundle: SchemaBundleRecord {
@@ -2521,6 +2543,52 @@ async fn test_post_bound_action() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "Cancelled");
+}
+
+#[tokio::test]
+async fn test_bound_action_schema_rejection_precedes_transition() {
+    let state = test_state_with_ioa();
+    let app = authenticated_router(state.clone());
+
+    for (entity_id, body, expected_code) in [
+        ("missing-reason", r#"{}"#, "MissingActionParameter"),
+        (
+            "null-reason",
+            r#"{"Reason":null}"#,
+            "MissingActionParameter",
+        ),
+        (
+            "wrong-reason",
+            r#"{"Reason":7}"#,
+            "ActionParameterTypeMismatch",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/tdata/Orders('{entity_id}')/Temper.Example.CancelOrder"
+                ))
+                .header("Content-Type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response_body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&response_body).unwrap();
+        assert_eq!(error["error"]["code"], expected_code);
+
+        let entity = state
+            .get_tenant_entity_state(&TenantId::default(), "Order", entity_id)
+            .await
+            .expect("authorization may load the actor, but rejection must leave it unchanged");
+        assert_eq!(entity.state.status, "Draft");
+        assert!(entity.state.events.is_empty());
+    }
 }
 
 #[tokio::test]

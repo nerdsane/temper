@@ -107,6 +107,9 @@ pub struct ActionParamDetail {
     /// must not assume a closed enum.
     #[serde(rename = "type")]
     pub param_type: String,
+    /// Whether callers may omit the parameter or provide JSON `null`.
+    #[serde(default)]
+    pub nullable: bool,
 }
 
 /// Detail of a single invariant.

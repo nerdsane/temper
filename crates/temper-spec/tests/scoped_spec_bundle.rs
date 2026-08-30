@@ -647,3 +647,57 @@ initial = ""
             .contains("csdl_reference_contract_mismatch")
     );
 }
+
+#[test]
+fn scoped_bundle_admission_runs_nullable_consumer_lint() {
+    let ioa = r#"
+[automaton]
+name = "Alpha"
+states = ["Draft"]
+initial = "Draft"
+
+[[state]]
+name = "count"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "Adjust"
+from = ["Draft"]
+params = [{ name = "delta", type = "Edm.Int64", nullable = true }]
+effect = [{ type = "increment", var = "count", amount = "delta" }]
+"#;
+    let error =
+        ScopedSpecBundle::compile(input(ORDERED_CSDL, vec![("Example.Alpha", ioa)])).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("nullable_action_parameter_consumed")
+    );
+}
+
+#[test]
+fn scoped_bundle_admission_runs_ioa_csdl_action_contract_lint() {
+    let ioa = r#"
+[automaton]
+name = "Alpha"
+states = ["Draft", "Ready"]
+initial = "Draft"
+
+[[action]]
+name = "Ready"
+from = ["Draft"]
+to = "Ready"
+params = [{ name = "Code", type = "Edm.String" }]
+"#;
+    let csdl = ORDERED_CSDL.replace(
+        "      <EntityContainer Name=\"Service\">",
+        "      <Action Name=\"Ready\" IsBound=\"true\"><Parameter Name=\"bindingParameter\" Type=\"Example.Alpha\" Nullable=\"false\"/><Parameter Name=\"Code\" Type=\"Edm.String\"/></Action>\n      <EntityContainer Name=\"Service\">",
+    );
+    let error = ScopedSpecBundle::compile(input(&csdl, vec![("Example.Alpha", ioa)])).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("csdl_action_parameter_requiredness_mismatch")
+    );
+}

@@ -415,7 +415,7 @@ async fn e2e_compile_first_two_tenants() {
             .header("Content-Type", "application/json")
             .header("Authorization", "Bearer alpha-operator-key")
             .header("X-Tenant-Id", "alpha")
-            .body(Body::from("{}"))
+            .body(Body::from(r#"{"Reason":"tenant-test"}"#))
             .unwrap(),
         )
         .await
@@ -604,7 +604,7 @@ async fn e2e_compile_first_system_and_user_coexist() {
             .header("Content-Type", "application/json")
             .header("Authorization", "Bearer alpha-operator-key")
             .header("X-Tenant-Id", "alpha")
-            .body(Body::from("{}"))
+            .body(Body::from(r#"{"Reason":"coexistence-test"}"#))
             .unwrap(),
         )
         .await

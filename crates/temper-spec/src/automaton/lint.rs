@@ -7,7 +7,16 @@ mod collection;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Automaton, Effect, FieldInvariant, Guard};
+use super::{Automaton, Effect, Guard};
+
+mod csdl_actions;
+mod field_invariants;
+mod nullable_params;
+mod sort;
+pub use csdl_actions::lint_automata_csdl_bundle;
+use field_invariants::lint_field_invariants;
+use nullable_params::lint_nullable_action_parameter_consumers;
+use sort::sort_bundle_findings;
 
 /// Severity of a lint finding.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -132,112 +141,13 @@ pub fn lint_automaton(automaton: &Automaton) -> Vec<LintFinding> {
                 ));
             }
         }
+
+        lint_nullable_action_parameter_consumers(action, &mut findings);
     }
 
     lint_field_invariants(automaton, &mut findings);
 
     findings
-}
-
-/// Validate parsed `[[field_invariant]]` entries.
-///
-/// The parser has already enforced structural well-formedness (no mixed
-/// operators, no unknown predicate keys). This pass adds semantic checks:
-///
-/// - Non-empty `name` (needed for error bodies).
-/// - Non-empty `when`/`require` trees — empty `any_of`/`all_of` are almost
-///   always a spec bug (trivially-false / trivially-true).
-/// - Referenced field names are non-empty identifiers. CSDL cross-checking
-///   against the actual entity properties happens in the cascade.
-fn lint_field_invariants(automaton: &Automaton, findings: &mut Vec<LintFinding>) {
-    let mut seen_names: BTreeSet<&str> = BTreeSet::new();
-    for inv in &automaton.field_invariants {
-        if inv.name.trim().is_empty() {
-            findings.push(LintFinding::error(
-                "field_invariant_missing_name",
-                "field_invariant has empty `name` — error responses would have no identifier",
-            ));
-        } else if !seen_names.insert(inv.name.as_str()) {
-            findings.push(LintFinding::error(
-                "field_invariant_duplicate_name",
-                format!("field_invariant '{}' is declared more than once", inv.name),
-            ));
-        }
-
-        if inv.when.has_empty_combinator() {
-            findings.push(LintFinding::error(
-                "field_invariant_empty_combinator",
-                format!(
-                    "field_invariant '{}' `when` tree contains an empty `any_of`/`all_of` — rule is always inert or always fires",
-                    inv.name
-                ),
-            ));
-        }
-        if inv.require.has_empty_combinator() {
-            findings.push(LintFinding::error(
-                "field_invariant_empty_combinator",
-                format!(
-                    "field_invariant '{}' `require` tree contains an empty `any_of`/`all_of` — rule is trivially true or trivially false",
-                    inv.name
-                ),
-            ));
-        }
-
-        for referenced in inv.referenced_fields() {
-            if !is_valid_field_identifier(&referenced) {
-                findings.push(LintFinding::error(
-                    "field_invariant_bad_field_name",
-                    format!(
-                        "field_invariant '{}' references field '{}' which is not a valid identifier",
-                        inv.name, referenced
-                    ),
-                ));
-            }
-        }
-
-        check_unsatisfiable_same_field_equals(inv, findings);
-    }
-}
-
-/// Detect the simplest class of trivially-unsatisfiable invariants:
-/// both `when` and `require` are `{ field = X, equals = V }` on the
-/// same field but with different `V`. A Local→Cloud check like this would
-/// never pass, so the violation would fire on every matching write.
-fn check_unsatisfiable_same_field_equals(inv: &FieldInvariant, findings: &mut Vec<LintFinding>) {
-    use super::FieldPredicate;
-    if let (
-        FieldPredicate::Equals {
-            field: lf,
-            equals: lv,
-        },
-        FieldPredicate::Equals {
-            field: rf,
-            equals: rv,
-        },
-    ) = (&inv.when, &inv.require)
-        && lf == rf
-        && lv != rv
-    {
-        findings.push(LintFinding::warning(
-            "field_invariant_trivially_unsatisfiable",
-            format!(
-                "field_invariant '{}' requires field '{}' to equal both '{}' and '{}'",
-                inv.name, lf, lv, rv
-            ),
-        ));
-    }
-}
-
-fn is_valid_field_identifier(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-    let mut chars = s.chars();
-    let first = chars.next().unwrap(); // ci-ok: non-empty checked above
-    if !(first.is_ascii_alphabetic() || first == '_') {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Run semantic lint checks across a bundle of automata.
@@ -467,24 +377,6 @@ fn available_spawn_params(
         }
     }
     available_params
-}
-
-fn sort_bundle_findings(findings: &mut [BundleLintFinding]) {
-    findings.sort_by(|a, b| {
-        let key_a = (
-            &a.entity,
-            matches!(a.severity, LintSeverity::Warning),
-            &a.code,
-            &a.message,
-        );
-        let key_b = (
-            &b.entity,
-            matches!(b.severity, LintSeverity::Warning),
-            &b.code,
-            &b.message,
-        );
-        key_a.cmp(&key_b)
-    });
 }
 
 fn is_supported_state_var_type(var_type: &str) -> bool {

@@ -57,7 +57,7 @@
       </EntityType>
 
       <Action Name="TryRead" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters" Nullable="false"/>
         <Parameter Name="actor" Type="Edm.Int32" Nullable="false"/>
         <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -66,7 +66,7 @@
       </Action>
 
       <Action Name="TryWrite" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters" Nullable="false"/>
         <Parameter Name="actor" Type="Edm.Int32" Nullable="false"/>
         <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -75,7 +75,7 @@
       </Action>
 
       <Action Name="ReadOrWrite" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters" Nullable="false"/>
         <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Idle</String><String>Reading</String><String>Writing</String></Collection>
@@ -83,7 +83,7 @@
       </Action>
 
       <Action Name="Stop" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters" Nullable="false"/>
         <Parameter Name="actor" Type="Edm.Int32" Nullable="false"/>
         <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -92,56 +92,98 @@
       </Action>
 
       <Action Name="ValidateProposal" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
-        <Parameter Name="proposed_readers" Type="Collection(Edm.Int32)"/>
-        <Parameter Name="proposed_writers" Type="Collection(Edm.Int32)"/>
-        <Parameter Name="proposed_waiting" Type="Collection(Temper.ReadersWriters.WaitRequest)"/>
-        <Parameter Name="last_step" Type="Edm.String"/>
-        <Parameter Name="actor" Type="Edm.Int32"/>
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters" Nullable="false"/>
+        <Parameter Name="proposed_readers" Type="Collection(Edm.Int32)" Nullable="false"/>
+        <Parameter Name="proposed_writers" Type="Collection(Edm.Int32)" Nullable="false"/>
+        <Parameter Name="proposed_waiting" Type="Collection(Temper.ReadersWriters.WaitRequest)" Nullable="false"/>
+        <Parameter Name="last_step" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="actor" Type="Edm.Int32" Nullable="false"/>
         <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
       </Action>
 
       <Action Name="Enqueued" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters" Nullable="false"/>
+        <Parameter Name="readers" Type="Collection(Edm.Int32)" Nullable="false"/>
+        <Parameter Name="writers" Type="Collection(Edm.Int32)" Nullable="false"/>
+        <Parameter Name="waiting" Type="Collection(Temper.ReadersWriters.WaitRequest)" Nullable="false"/>
+        <Parameter Name="last_step" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="actor" Type="Edm.Int32" Nullable="false"/>
         <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
       </Action>
       <Action Name="Unchanged" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters" Nullable="false"/>
+        <Parameter Name="readers" Type="Collection(Edm.Int32)" Nullable="false"/>
+        <Parameter Name="writers" Type="Collection(Edm.Int32)" Nullable="false"/>
+        <Parameter Name="waiting" Type="Collection(Temper.ReadersWriters.WaitRequest)" Nullable="false"/>
+        <Parameter Name="last_step" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="actor" Type="Edm.Int32" Nullable="false"/>
         <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
       </Action>
       <Action Name="ReaderStartedFromIdle" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters" Nullable="false"/>
+        <Parameter Name="readers" Type="Collection(Edm.Int32)" Nullable="false"/>
+        <Parameter Name="writers" Type="Collection(Edm.Int32)" Nullable="false"/>
+        <Parameter Name="waiting" Type="Collection(Temper.ReadersWriters.WaitRequest)" Nullable="false"/>
+        <Parameter Name="last_step" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="actor" Type="Edm.Int32" Nullable="false"/>
         <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
       </Action>
       <Action Name="ReaderStartedFromReading" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters" Nullable="false"/>
+        <Parameter Name="readers" Type="Collection(Edm.Int32)" Nullable="false"/>
+        <Parameter Name="writers" Type="Collection(Edm.Int32)" Nullable="false"/>
+        <Parameter Name="waiting" Type="Collection(Temper.ReadersWriters.WaitRequest)" Nullable="false"/>
+        <Parameter Name="last_step" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="actor" Type="Edm.Int32" Nullable="false"/>
         <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
       </Action>
       <Action Name="WriterStarted" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters" Nullable="false"/>
+        <Parameter Name="readers" Type="Collection(Edm.Int32)" Nullable="false"/>
+        <Parameter Name="writers" Type="Collection(Edm.Int32)" Nullable="false"/>
+        <Parameter Name="waiting" Type="Collection(Temper.ReadersWriters.WaitRequest)" Nullable="false"/>
+        <Parameter Name="last_step" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="actor" Type="Edm.Int32" Nullable="false"/>
         <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
       </Action>
       <Action Name="ReaderStoppedMoreRemain" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters" Nullable="false"/>
+        <Parameter Name="readers" Type="Collection(Edm.Int32)" Nullable="false"/>
+        <Parameter Name="writers" Type="Collection(Edm.Int32)" Nullable="false"/>
+        <Parameter Name="waiting" Type="Collection(Temper.ReadersWriters.WaitRequest)" Nullable="false"/>
+        <Parameter Name="last_step" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="actor" Type="Edm.Int32" Nullable="false"/>
         <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
       </Action>
       <Action Name="ReaderStoppedLast" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters" Nullable="false"/>
+        <Parameter Name="readers" Type="Collection(Edm.Int32)" Nullable="false"/>
+        <Parameter Name="writers" Type="Collection(Edm.Int32)" Nullable="false"/>
+        <Parameter Name="waiting" Type="Collection(Temper.ReadersWriters.WaitRequest)" Nullable="false"/>
+        <Parameter Name="last_step" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="actor" Type="Edm.Int32" Nullable="false"/>
         <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
       </Action>
       <Action Name="WriterStopped" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters" Nullable="false"/>
+        <Parameter Name="readers" Type="Collection(Edm.Int32)" Nullable="false"/>
+        <Parameter Name="writers" Type="Collection(Edm.Int32)" Nullable="false"/>
+        <Parameter Name="waiting" Type="Collection(Temper.ReadersWriters.WaitRequest)" Nullable="false"/>
+        <Parameter Name="last_step" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="actor" Type="Edm.Int32" Nullable="false"/>
         <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
       </Action>
       <Action Name="Rejected" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
-        <Parameter Name="error" Type="Edm.String"/>
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters" Nullable="false"/>
+        <Parameter Name="error" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="last_step" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="actor" Type="Edm.Int32" Nullable="false"/>
         <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
       </Action>
       <Action Name="StepFailed" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters"/>
-        <Parameter Name="error" Type="Edm.String"/>
-        <Parameter Name="integration" Type="Edm.String"/>
+        <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters" Nullable="false"/>
+        <Parameter Name="error" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="integration" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
       </Action>
 

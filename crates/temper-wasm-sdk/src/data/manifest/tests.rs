@@ -169,3 +169,67 @@ fn property_metadata_without_source_fails_closed() {
     }));
     assert!(property.is_err());
 }
+
+fn manifest_with_action_parameter(nullable: bool) -> ModuleSdkManifest {
+    let parameter = ManifestPropertyV1 {
+        canonical_name: "ReasonCode".into(),
+        generated_name: "reason_code".into(),
+        type_name: "Edm.String".into(),
+        nullable,
+        source: ManifestValueSourceV1::Input,
+        default_value: None,
+        enum_members: Vec::new(),
+    };
+    let entity = ManifestEntityV1 {
+        entity_type: "Temper.Task".into(),
+        entity_set: "Tasks".into(),
+        generated_name: "Task".into(),
+        properties: Vec::new(),
+        actions: vec![ManifestActionV1 {
+            canonical_name: "Close".into(),
+            generated_name: "close".into(),
+            parameters: vec![parameter],
+            result_type: None,
+            result_enum_members: Vec::new(),
+            composite: false,
+        }],
+    };
+    ModuleSdkManifest::new(
+        "worker",
+        ModuleSdkMetadataDigests {
+            closure: "closure".into(),
+            dependency_lock: "closure".into(),
+            schema: "schema".into(),
+        },
+        "artifact",
+        ModuleDataGrant::default(),
+        vec![entity],
+        BTreeSet::new(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn required_to_nullable_action_parameter_is_a_compatible_widening() {
+    let prior = manifest_with_action_parameter(false);
+    let candidate = manifest_with_action_parameter(true);
+    assert_eq!(
+        prior
+            .compatible_action_nullability_widenings(&candidate)
+            .unwrap(),
+        BTreeSet::from(["action:Temper.Task:Close".to_string()])
+    );
+}
+
+#[test]
+fn nullable_to_required_action_parameter_names_the_breaking_narrowing() {
+    let prior = manifest_with_action_parameter(true);
+    let candidate = manifest_with_action_parameter(false);
+    let error = prior
+        .compatible_action_nullability_widenings(&candidate)
+        .unwrap_err();
+    assert!(error.contains("entity='Temper.Task'"));
+    assert!(error.contains("action='Close'"));
+    assert!(error.contains("parameter='ReasonCode'"));
+    assert!(error.contains("old_nullable=true new_nullable=false"));
+}

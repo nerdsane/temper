@@ -226,12 +226,14 @@ pub(super) fn verify_module_data_binding(
         return Ok(regenerated.clone());
     }
 
+    let prior_hashes = supplied.used_symbol_hashes()?;
+    let candidate_hashes = regenerated.used_symbol_hashes()?;
+    let compatible_nullability_changes =
+        supplied.compatible_action_nullability_widenings(regenerated)?;
     let proof = supplied
         .compatibility_proof
         .as_ref()
         .ok_or_else(|| "module data binding differs without an artifact-bound proof".to_string())?;
-    let prior_hashes = supplied.used_symbol_hashes()?;
-    let candidate_hashes = regenerated.used_symbol_hashes()?;
     if proof.prior_closure_digest != supplied.closure_digest
         || proof.candidate_closure_digest != regenerated.closure_digest
         || proof.prior_grant_digest != supplied.grant_digest
@@ -241,10 +243,10 @@ pub(super) fn verify_module_data_binding(
     {
         return Err("module data compatibility proof failed host recomputation".into());
     }
-    if prior_hashes
-        .iter()
-        .any(|(symbol, hash)| candidate_hashes.get(symbol) != Some(hash))
-    {
+    if prior_hashes.iter().any(|(symbol, hash)| {
+        candidate_hashes.get(symbol) != Some(hash)
+            && !compatible_nullability_changes.contains(symbol)
+    }) {
         return Err("module data compatibility proof changes a used symbol".into());
     }
     if !grant_is_equal_or_narrower(&regenerated.grant, &supplied.grant)
@@ -300,7 +302,11 @@ fn budgets_are_equal_or_narrower(candidate: &ModuleDataBudgets, prior: &ModuleDa
 mod tests {
     use super::*;
     use temper_spec::csdl::parse_csdl;
-    use temper_wasm_sdk::data::{DataOperationKind, EntityDataGrant};
+    use temper_wasm_sdk::data::{
+        DataOperationKind, EntityDataGrant, ManifestActionV1, ManifestEntityV1, ManifestPropertyV1,
+        ManifestValueSourceV1, ModuleSdkCompatibilityProof, ModuleSdkMetadataDigests,
+        bind_module_sdk_artifact,
+    };
 
     const CSDL: &str = r#"<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="Temper.App" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EntityType Name="Task"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/><Property Name="State" Type="Edm.String" Nullable="false" DefaultValue="Open"/></EntityType><EntityContainer Name="Container"><EntitySet Name="Tasks" EntityType="Temper.App.Task"/></EntityContainer></Schema></edmx:DataServices></edmx:Edmx>"#;
     const IOA: &str = r#"[automaton]
@@ -325,6 +331,105 @@ initial = "Open"
             }],
             ..ModuleDataGrant::default()
         }
+    }
+
+    fn action_grant() -> ModuleDataGrant {
+        ModuleDataGrant {
+            operations: [DataOperationKind::ActionInvoke].into_iter().collect(),
+            entities: vec![EntityDataGrant {
+                entity_type: "Temper.App.Task".into(),
+                actions: ["Close".to_string()].into_iter().collect(),
+                ..EntityDataGrant::default()
+            }],
+            ..ModuleDataGrant::default()
+        }
+    }
+
+    fn action_manifest(nullable: bool, closure: &str) -> ModuleSdkManifest {
+        ModuleSdkManifest::new(
+            "worker",
+            ModuleSdkMetadataDigests {
+                closure: closure.into(),
+                dependency_lock: closure.into(),
+                schema: format!("schema-{nullable}"),
+            },
+            "artifact",
+            action_grant(),
+            vec![ManifestEntityV1 {
+                entity_type: "Temper.App.Task".into(),
+                entity_set: "Tasks".into(),
+                generated_name: "Task".into(),
+                properties: Vec::new(),
+                actions: vec![ManifestActionV1 {
+                    canonical_name: "Close".into(),
+                    generated_name: "close".into(),
+                    parameters: vec![ManifestPropertyV1 {
+                        canonical_name: "Reason".into(),
+                        generated_name: "reason".into(),
+                        type_name: "Edm.String".into(),
+                        nullable,
+                        source: ManifestValueSourceV1::Input,
+                        default_value: None,
+                        enum_members: Vec::new(),
+                    }],
+                    result_type: None,
+                    result_enum_members: Vec::new(),
+                    composite: false,
+                }],
+            }],
+            ["Close".to_string()].into_iter().collect(),
+        )
+        .unwrap()
+    }
+
+    fn bound_wasm(manifest: &ModuleSdkManifest) -> Vec<u8> {
+        bind_module_sdk_artifact(
+            b"\0asm\x01\0\0\0",
+            &ArtifactModuleSdkBinding::from_manifest(manifest).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn global_binding_gate_names_nullable_to_required_narrowing_without_a_proof() {
+        let prior = action_manifest(true, "prior");
+        let candidate = action_manifest(false, "candidate");
+        let error = verify_module_data_binding(
+            &bound_wasm(&prior),
+            "worker",
+            &action_grant(),
+            &prior,
+            &candidate,
+        )
+        .unwrap_err();
+        assert!(error.contains("entity='Temper.App.Task'"));
+        assert!(error.contains("action='Close'"));
+        assert!(error.contains("parameter='Reason'"));
+        assert!(error.contains("old_nullable=true new_nullable=false"));
+    }
+
+    #[test]
+    fn global_binding_gate_accepts_required_to_nullable_with_valid_proof() {
+        let mut prior = action_manifest(false, "prior");
+        let candidate = action_manifest(true, "candidate");
+        prior.compatibility_proof = Some(ModuleSdkCompatibilityProof {
+            prior_closure_digest: prior.closure_digest.clone(),
+            candidate_closure_digest: candidate.closure_digest.clone(),
+            prior_used_symbol_hashes: prior.used_symbol_hashes().unwrap(),
+            candidate_used_symbol_hashes: candidate.used_symbol_hashes().unwrap(),
+            prior_grant_digest: prior.grant_digest.clone(),
+            candidate_grant_digest: candidate.grant_digest.clone(),
+        });
+        assert!(
+            verify_module_data_binding(
+                &bound_wasm(&prior),
+                "worker",
+                &action_grant(),
+                &prior,
+                &candidate,
+            )
+            .is_ok()
+        );
     }
 
     #[test]

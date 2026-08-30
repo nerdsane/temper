@@ -420,6 +420,27 @@ impl SimActorHandler for EntityActorHandler {
             .collect()
     }
 
+    fn params_for_action(&self, action: &str) -> String {
+        let params = self
+            .table
+            .action_params
+            .get(action)
+            .map(|metadata| {
+                metadata
+                    .iter()
+                    .filter(|(_, parameter)| !parameter.nullable)
+                    .map(|(name, parameter)| {
+                        (
+                            name.clone(),
+                            deterministic_param_value(&parameter.param_type),
+                        )
+                    })
+                    .collect::<serde_json::Map<_, _>>()
+            })
+            .unwrap_or_default();
+        serde_json::Value::Object(params).to_string()
+    }
+
     fn events_json(&self) -> serde_json::Value {
         serde_json::to_value(&self.state.events).unwrap_or(serde_json::Value::Array(vec![]))
     }
@@ -476,6 +497,19 @@ fn to_pascal_case(name: &str) -> String {
         }
     }
     result
+}
+
+fn deterministic_param_value(param_type: &str) -> serde_json::Value {
+    match param_type.to_ascii_lowercase().as_str() {
+        "bool" | "boolean" | "edm.boolean" => serde_json::Value::Bool(true),
+        "int" | "integer" | "i32" | "i64" | "edm.byte" | "edm.sbyte" | "edm.int16"
+        | "edm.int32" | "edm.int64" | "float" | "double" | "decimal" | "edm.decimal"
+        | "edm.double" | "edm.single" => serde_json::json!(1),
+        name if name.starts_with("list") || name.starts_with("collection") => {
+            serde_json::json!(["value"])
+        }
+        _ => serde_json::Value::String("value".to_string()),
+    }
 }
 
 #[cfg(test)]

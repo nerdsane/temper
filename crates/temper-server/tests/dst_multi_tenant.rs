@@ -65,7 +65,7 @@ async fn dst_tenant_a_dispatches_order() {
                 "Order",
                 &format!("o-{seed}"),
                 "AddItem",
-                serde_json::json!({}),
+                common::order_action_params("AddItem"),
                 &agent,
             )
             .await;
@@ -142,7 +142,7 @@ async fn dst_tenant_b_cannot_dispatch_order() {
             "Order",
             "o-1",
             "AddItem",
-            serde_json::json!({}),
+            common::order_action_params("AddItem"),
             &agent,
         )
         .await;
@@ -174,7 +174,7 @@ async fn dst_tenant_isolation_under_load() {
                 "Order",
                 &format!("o-{seed}"),
                 "AddItem",
-                serde_json::json!({}),
+                common::order_action_params("AddItem"),
                 &agent,
             )
             .await
@@ -186,7 +186,7 @@ async fn dst_tenant_isolation_under_load() {
                 "Order",
                 &format!("o-{seed}"),
                 "SubmitOrder",
-                serde_json::json!({}),
+                common::order_action_params("SubmitOrder"),
                 &agent,
             )
             .await
