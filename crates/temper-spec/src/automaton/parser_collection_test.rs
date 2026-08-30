@@ -111,5 +111,5 @@ fn collection_workflow_rejects_duplicate_reserved_parameters() {
         1,
     );
     let error = parse_automaton(&duplicate).expect_err("duplicate reserved parameter must fail");
-    assert!(error.to_string().contains("invalid reserved parameters"));
+    assert!(error.to_string().contains("declared twice"));
 }

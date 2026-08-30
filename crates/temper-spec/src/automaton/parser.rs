@@ -3,13 +3,16 @@
 //! Also provides conversion to the existing TemperModel and TransitionTable
 //! formats, so the verification cascade and runtime work unchanged.
 //!
-//! The hand-rolled TOML parser lives in [`super::toml_parser`] to keep this
-//! module focused on the public API and validation logic.
+//! The schema-backed TOML parser (ADR-0171) lives in [`super::toml_parser`] so
+//! this module can remain focused on the public API and validation logic.
 
 use super::ResolvedFailureRoute;
 use super::toml_parser;
 use super::types::*;
 use crate::tlaplus::{Invariant as TlaInvariant, StateMachine, Transition};
+
+mod formatting;
+use formatting::{format_effects, format_guards};
 
 /// Errors from parsing an automaton specification.
 #[derive(Debug, thiserror::Error)]
@@ -317,7 +320,42 @@ fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), Auto
             }
         }
     }
-    automaton.integrations.extend(synthesized);
+    for candidate in synthesized {
+        let matching: Vec<usize> = automaton
+            .integrations
+            .iter()
+            .enumerate()
+            .filter_map(|(index, integration)| {
+                (integration.name == candidate.name || integration.trigger == candidate.trigger)
+                    .then_some(index)
+            })
+            .collect();
+        match matching.as_slice() {
+            [] => automaton.integrations.push(candidate),
+            [index] => {
+                let existing = &automaton.integrations[*index];
+                let mut comparable_existing = existing.clone();
+                let mut comparable_candidate = candidate.clone();
+                comparable_existing.failure_routes.clear();
+                comparable_candidate.failure_routes.clear();
+                if comparable_existing != comparable_candidate {
+                    return Err(AutomatonParseError::Validation(format!(
+                        "integration name or trigger conflicts with the canonical action-trigger record '{}'",
+                        candidate.trigger
+                    )));
+                }
+                // `failure_routes` is derived and omitted from canonical TOML.
+                // Restore it from the inline trigger on every parse.
+                automaton.integrations[*index].failure_routes = candidate.failure_routes;
+            }
+            _ => {
+                return Err(AutomatonParseError::Validation(format!(
+                    "integration name or trigger conflicts with the canonical action-trigger record '{}'",
+                    candidate.trigger
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -482,107 +520,128 @@ pub fn to_state_machine(automaton: &Automaton) -> StateMachine {
     }
 }
 
-fn format_guards(guards: &[Guard]) -> String {
-    guards
-        .iter()
-        .map(|g| match g {
-            Guard::StateIn { values } => {
-                format!(
-                    "status \\in {{{}}}",
-                    values
-                        .iter()
-                        .map(|s| format!("\"{s}\""))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            }
-            Guard::MinCount { var, min } => format!("{var} >= {min}"),
-            Guard::MaxCount { var, max } => format!("{var} < {max}"),
-            Guard::IsTrue { var } => format!("{var} = TRUE"),
-            Guard::IsFalse { var } => format!("{var} = FALSE"),
-            Guard::ListContains { var, value } => format!("{value} \\in {var}"),
-            Guard::ListLengthMin { var, min } => format!("Len({var}) >= {min}"),
-            Guard::CrossEntityState {
-                entity_type,
-                entity_id_source,
-                required_status,
-                forbidden_status,
-                ..
-            } => {
-                let set = |statuses: &[String]| {
-                    statuses
-                        .iter()
-                        .map(|s| format!("\"{s}\""))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
-                let mut conjuncts = Vec::new();
-                if !required_status.is_empty() {
-                    conjuncts.push(format!(
-                        "{entity_type}[{entity_id_source}].status \\in {{{}}}",
-                        set(required_status)
-                    ));
-                }
-                if !forbidden_status.is_empty() {
-                    conjuncts.push(format!(
-                        "{entity_type}[{entity_id_source}].status \\notin {{{}}}",
-                        set(forbidden_status)
-                    ));
-                }
-                if conjuncts.is_empty() {
-                    "TRUE".to_string()
-                } else {
-                    conjuncts.join(" /\\ ")
-                }
-            }
-            Guard::ReferenceEquals { reference, param } => {
-                format!("{reference} = {param}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" /\\ ")
-}
-
-fn format_effects(effects: &[Effect]) -> String {
-    effects
-        .iter()
-        .map(|e| match e {
-            Effect::Increment { var, amount } => match amount {
-                Some(amount) => format!("{var}' = {var} + {amount}"),
-                None => format!("{var}' = {var} + 1"),
-            },
-            Effect::Decrement { var, amount } => match amount {
-                Some(amount) => format!("{var}' = {var} - {amount}"),
-                None => format!("{var}' = {var} - 1"),
-            },
-            Effect::SetCounterFromParam { var, param } => format!("{var}' = {param}"),
-            Effect::SetBool { var, value } => {
-                format!("{var}' = {}", if *value { "TRUE" } else { "FALSE" })
-            }
-            Effect::Emit { event } => format!("Emit(\"{event}\")"),
-            Effect::Trigger { name } => format!("Trigger(\"{name}\")"),
-            Effect::Schedule {
-                action,
-                delay_seconds,
-            } => format!("Schedule(\"{action}\", {delay_seconds})"),
-            Effect::ListAppend { var } => format!("ListAppend({var})"),
-            Effect::ListRemoveAt { var } => format!("ListRemoveAt({var})"),
-            Effect::ScheduleAt { action, field } => {
-                format!("ScheduleAt(\"{action}\", {field})")
-            }
-            Effect::Spawn {
-                entity_type,
-                entity_id_source,
-                ..
-            } => {
-                format!("Spawn({entity_type}, {entity_id_source})")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" /\\ ")
+fn validate_unique_names<'a, I>(kind: &str, names: I) -> Result<(), AutomatonParseError>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut seen = std::collections::BTreeSet::new();
+    for name in names {
+        if name.trim().is_empty() {
+            return Err(AutomatonParseError::Validation(format!(
+                "{kind} name must not be empty"
+            )));
+        }
+        if !seen.insert(name) {
+            return Err(AutomatonParseError::Validation(format!(
+                "{kind} '{name}' declared twice"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
+    if automaton.automaton.name.trim().is_empty() {
+        return Err(AutomatonParseError::Validation(
+            "automaton name must not be empty".to_string(),
+        ));
+    }
+    if automaton.automaton.states.is_empty() {
+        return Err(AutomatonParseError::Validation(
+            "automaton must declare at least one state".to_string(),
+        ));
+    }
+
+    validate_unique_names(
+        "automaton state",
+        automaton.automaton.states.iter().map(String::as_str),
+    )?;
+    validate_unique_names(
+        "state variable",
+        automaton.state.iter().map(|state| state.name.as_str()),
+    )?;
+    validate_unique_names(
+        "action",
+        automaton.actions.iter().map(|action| action.name.as_str()),
+    )?;
+    validate_unique_names(
+        "invariant",
+        automaton
+            .invariants
+            .iter()
+            .map(|invariant| invariant.name.as_str()),
+    )?;
+    validate_unique_names(
+        "liveness property",
+        automaton
+            .liveness
+            .iter()
+            .map(|property| property.name.as_str()),
+    )?;
+    validate_unique_names(
+        "integration",
+        automaton
+            .integrations
+            .iter()
+            .map(|integration| integration.name.as_str()),
+    )?;
+    validate_unique_names(
+        "webhook",
+        automaton
+            .webhooks
+            .iter()
+            .map(|webhook| webhook.name.as_str()),
+    )?;
+    validate_unique_names(
+        "context entity",
+        automaton
+            .context_entities
+            .iter()
+            .map(|context| context.name.as_str()),
+    )?;
+    validate_unique_names(
+        "field invariant",
+        automaton
+            .field_invariants
+            .iter()
+            .map(|invariant| invariant.name.as_str()),
+    )?;
+    validate_unique_names("key", automaton.keys.iter().map(|key| key.name.as_str()))?;
+    validate_unique_names(
+        "vector path",
+        automaton.vectors.iter().map(|vector| vector.name.as_str()),
+    )?;
+    validate_unique_names(
+        "collection workflow",
+        automaton
+            .collection_workflows
+            .iter()
+            .map(|workflow| workflow.name.as_str()),
+    )?;
+
+    for action in &automaton.actions {
+        validate_unique_names(
+            &format!("parameter on action '{}'", action.name),
+            action.params.iter().map(ActionParam::name),
+        )?;
+    }
+    for invariant in &automaton.invariants {
+        if invariant.assert.trim().is_empty() {
+            return Err(AutomatonParseError::Validation(format!(
+                "invariant '{}' must declare a non-empty assertion",
+                invariant.name
+            )));
+        }
+    }
+    for property in &automaton.liveness {
+        if property.reaches.is_empty() && property.has_actions != Some(true) {
+            return Err(AutomatonParseError::Validation(format!(
+                "liveness property '{}' must declare non-empty reaches or has_actions = true",
+                property.name
+            )));
+        }
+    }
+
     // 1. Initial state must be in the states list.
     if !automaton
         .automaton

@@ -23,6 +23,29 @@ use std::path::PathBuf;
 use temper_runtime::scheduler::install_deterministic_context;
 
 const TENANT: &str = "gepa-test";
+
+const REASSIGN_ACTION: &str = r#"
+
+# --- Reassign (added by GEPA evolution run evo-reassign-fix) ---
+
+[[action]]
+name = "Reassign"
+kind = "input"
+from = ["Backlog", "Triage", "Todo", "Planning", "Planned", "InProgress", "InReview"]
+guard = "is_true assignee_set"
+params = ["NewAssigneeId"]
+hint = "Reassign the issue to a different implementer."
+"#;
+
+fn issue_spec_before_reassign_evolution() -> String {
+    let current = include_str!("../../../os-apps/project-management/specs/issue.ioa.toml");
+    let prior = current.replace(REASSIGN_ACTION, "");
+    assert_ne!(
+        prior, current,
+        "fixture must contain the evolved Reassign action"
+    );
+    prior
+}
 const GEPA_E2E_TEST_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 const _: () = {
@@ -907,18 +930,7 @@ async fn e2e_gepa_hotdeploy_and_verify() {
 
     // Now create a mutated Issue spec that adds Reassign.
     // We take the original and add a Reassign action.
-    let mutated_issue_spec =
-        include_str!("../../../os-apps/project-management/specs/issue.ioa.toml").to_string()
-            + r#"
-
-[[action]]
-name = "Reassign"
-kind = "input"
-from = ["Backlog", "Triage", "Todo", "InProgress", "InReview", "Planning", "Planned"]
-guard = "is_true assignee_set"
-params = ["NewAssigneeId"]
-hint = "Reassign the issue to a different implementer."
-"#;
+    let mutated_issue_spec = issue_spec_before_reassign_evolution() + REASSIGN_ACTION;
 
     // Verify the mutated spec parses (L0 check).
     let parsed = temper_spec::automaton::parse_automaton(&mutated_issue_spec);
@@ -1170,18 +1182,7 @@ async fn e2e_gepa_full_loop() {
     assert_eq!(entity.state.status, "Deploying");
 
     // --- Step 6: Hot-deploy the mutated spec ---
-    let mutated_issue_spec =
-        include_str!("../../../os-apps/project-management/specs/issue.ioa.toml").to_string()
-            + r#"
-
-[[action]]
-name = "Reassign"
-kind = "input"
-from = ["Backlog", "Triage", "Todo", "InProgress", "InReview", "Planning", "Planned"]
-guard = "is_true assignee_set"
-params = ["NewAssigneeId"]
-hint = "Reassign the issue to a different implementer."
-"#;
+    let mutated_issue_spec = issue_spec_before_reassign_evolution() + REASSIGN_ACTION;
 
     {
         let mut registry = harness.platform_state.registry.write().unwrap(); // ci-ok: infallible lock

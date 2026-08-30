@@ -78,6 +78,28 @@ action = "Reconcile"
 }
 
 #[test]
+fn canonical_toml_preserves_typed_failure_callback_parameters() {
+    let source = format!(
+        "{PREFIX}[[action.triggers.failure_routes]]\ncategory = \"transient\"\naction = \"ScheduleRetry\"\n{CALLBACKS}"
+    );
+    parse_automaton(&source).expect("source-form typed failure route");
+
+    let value = toml::from_str::<toml::Value>(&source).expect("source TOML");
+    let canonical = toml::to_string(&value).expect("canonical TOML");
+    assert!(canonical.contains("[[action.params]]"));
+
+    let automaton = parse_automaton(&canonical).expect("canonical typed failure route");
+    let callback = automaton
+        .actions
+        .iter()
+        .find(|action| action.name == "ScheduleRetry")
+        .expect("callback action identity");
+    assert_eq!(callback.params.len(), 1);
+    assert_eq!(callback.params[0].name(), "failure");
+    assert_eq!(callback.params[0].param_type(), "failure_v1");
+}
+
+#[test]
 fn duplicate_category_fails_closed() {
     let error = parse(
         r#"

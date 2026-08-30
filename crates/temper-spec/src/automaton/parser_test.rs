@@ -11,6 +11,8 @@ mod failure_routes;
 mod features;
 #[path = "parser_integrations_test.rs"]
 mod integrations;
+#[path = "parser_strictness_test.rs"]
+mod strictness;
 #[path = "parser_triggers_test.rs"]
 mod triggers;
 
