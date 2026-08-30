@@ -65,6 +65,11 @@ pub struct TransitionTable {
     /// Composite-action metadata keyed by action name (ADR-0040).
     #[serde(default)]
     pub composite_actions: BTreeMap<String, CompositeActionMetadata>,
+    /// Declared input contract keyed by action name. Older serialized tables
+    /// default to an empty map; newly compiled IOA parameters are required
+    /// unless their metadata explicitly permits null.
+    #[serde(default)]
+    pub action_params: BTreeMap<String, Vec<ActionParamMetadata>>,
     /// Pre-built index: action name → indices into `rules`.
     ///
     /// Eliminates the O(N) linear scan + Vec allocation in [`evaluate_ctx()`].
@@ -73,6 +78,18 @@ pub struct TransitionTable {
     /// [`evaluate_ctx()`]: TransitionTable::evaluate_ctx
     #[serde(skip)]
     pub(crate) rule_index: BTreeMap<String, Vec<usize>>,
+}
+
+/// Compiled schema metadata for one action input.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionParamMetadata {
+    /// Logical parameter name as declared by the IOA action.
+    pub name: String,
+    /// IOA/CSDL type name used for adapter validation and diagnostics.
+    pub param_type: String,
+    /// Whether omission or JSON `null` is accepted.
+    #[serde(default)]
+    pub nullable: bool,
 }
 
 /// Platform-primitive metadata for a single state variable.
@@ -160,6 +177,8 @@ impl<'de> Deserialize<'de> for TransitionTable {
             #[serde(default)]
             composite_actions: BTreeMap<String, CompositeActionMetadata>,
             #[serde(default)]
+            action_params: BTreeMap<String, Vec<ActionParamMetadata>>,
+            #[serde(default)]
             keys: Vec<DeclaredKey>,
             #[serde(default)]
             vectors: Vec<DeclaredVector>,
@@ -175,6 +194,7 @@ impl<'de> Deserialize<'de> for TransitionTable {
             vectors: raw.vectors,
             state_var_metadata: raw.state_var_metadata,
             composite_actions: raw.composite_actions,
+            action_params: raw.action_params,
             rule_index: BTreeMap::new(),
         };
         table.rebuild_index();
@@ -259,6 +279,72 @@ pub struct TransitionResult {
 }
 
 impl TransitionTable {
+    /// Add canonical IOA parameter keys for any accepted naming aliases.
+    ///
+    /// Existing keys are preserved because some internal create paths carry
+    /// both CSDL and storage aliases. Semantic consumers can always read the
+    /// exact IOA name after this normalization step.
+    pub fn canonicalize_action_params(
+        &self,
+        action: &str,
+        params: &serde_json::Value,
+    ) -> serde_json::Value {
+        let Some(metadata) = self.action_params.get(action) else {
+            return params.clone();
+        };
+        let Some(source) = params.as_object() else {
+            return params.clone();
+        };
+        let mut canonical = source.clone();
+        for param in metadata {
+            if canonical.contains_key(&param.name) {
+                continue;
+            }
+            let normalized_name = temper_spec::naming::to_snake_case(&param.name);
+            if let Some((_, value)) = source
+                .iter()
+                .find(|(name, _)| temper_spec::naming::to_snake_case(name) == normalized_name)
+            {
+                canonical.insert(param.name.clone(), value.clone());
+            }
+        }
+        serde_json::Value::Object(canonical)
+    }
+
+    /// Validate required action inputs before guards or effects run.
+    ///
+    /// This actor-local defense checks presence and nullability. Adapters use
+    /// pinned CSDL for the richer client-facing type validation.
+    pub fn validate_required_action_params(
+        &self,
+        action: &str,
+        params: &serde_json::Value,
+    ) -> Result<(), ActionInputError> {
+        let Some(metadata) = self.action_params.get(action) else {
+            return Ok(());
+        };
+        let object = params.as_object();
+        for param in metadata {
+            if param.nullable {
+                continue;
+            }
+            let normalized_name = temper_spec::naming::to_snake_case(&param.name);
+            let has_value = object.is_some_and(|object| {
+                object.iter().any(|(name, value)| {
+                    temper_spec::naming::to_snake_case(name) == normalized_name && !value.is_null()
+                })
+            });
+            if !has_value {
+                return Err(ActionInputError {
+                    code: "MissingActionParameter",
+                    action: action.to_string(),
+                    parameter: param.name.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Rebuild the rule index from the current rules vec.
     ///
     /// Called automatically during construction. Must be called explicitly
@@ -273,6 +359,29 @@ impl TransitionTable {
         }
     }
 }
+
+/// Stable actor-local action input validation failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionInputError {
+    /// Stable detail code shared with adapter diagnostics.
+    pub code: &'static str,
+    /// Action whose input contract was violated.
+    pub action: String,
+    /// Missing or null required parameter.
+    pub parameter: String,
+}
+
+impl std::fmt::Display for ActionInputError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}: action '{}' requires non-null parameter '{}'",
+            self.code, self.action, self.parameter
+        )
+    }
+}
+
+impl std::error::Error for ActionInputError {}
 
 #[cfg(test)]
 mod tests {
@@ -313,6 +422,7 @@ mod tests {
             ],
             state_var_metadata: BTreeMap::new(),
             composite_actions: BTreeMap::new(),
+            action_params: BTreeMap::new(),
             rule_index: BTreeMap::new(),
         };
         table.rebuild_index();
@@ -320,5 +430,81 @@ mod tests {
         assert_eq!(table.rule_index.len(), 2);
         assert_eq!(table.rule_index["Submit"], vec![0, 1]);
         assert_eq!(table.rule_index["Cancel"], vec![2]);
+    }
+
+    #[test]
+    fn compiled_action_contract_rejects_missing_and_null() {
+        let table = TransitionTable::from_ioa_source(
+            r#"
+[automaton]
+name = "Task"
+states = ["Open"]
+initial = "Open"
+
+[[action]]
+name = "Assign"
+kind = "input"
+from = ["Open"]
+params = [
+  { name = "agent_id", type = "Edm.String" },
+  { name = "note", type = "Edm.String", nullable = true },
+]
+"#,
+        );
+
+        for input in [serde_json::json!({}), serde_json::json!({"AgentId": null})] {
+            let error = table
+                .validate_required_action_params("Assign", &input)
+                .unwrap_err();
+            assert_eq!(error.code, "MissingActionParameter");
+        }
+        for input in [
+            serde_json::json!({"AgentId": "a"}),
+            serde_json::json!({"AgentId": 3}),
+            serde_json::json!({"AgentId": "a", "agent_id": "a"}),
+            serde_json::json!({"agent_id": "a", "note": null}),
+            serde_json::json!({"agent_id": "a", "note": "ok"}),
+        ] {
+            table
+                .validate_required_action_params("Assign", &input)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn action_parameter_aliases_gain_the_exact_ioa_key() {
+        let table = TransitionTable::from_ioa_source(
+            r#"
+[automaton]
+name = "Counter"
+states = ["Ready"]
+initial = "Ready"
+
+[[action]]
+name = "Adjust"
+from = ["Ready"]
+params = [{ name = "delta_value", type = "Edm.Int64" }]
+"#,
+        );
+        let normalized =
+            table.canonicalize_action_params("Adjust", &serde_json::json!({"DeltaValue": 4}));
+        assert_eq!(normalized["delta_value"], 4);
+        assert_eq!(normalized["DeltaValue"], 4);
+    }
+
+    #[test]
+    fn older_serialized_table_without_action_metadata_remains_readable() {
+        let json = r#"{
+          "entity_name":"Task",
+          "states":["Open"],
+          "initial_state":"Open",
+          "rules":[],
+          "keys":[],
+          "vectors":[],
+          "state_var_metadata":{},
+          "composite_actions":{}
+        }"#;
+        let table: TransitionTable = serde_json::from_str(json).expect("old table fixture");
+        assert!(table.action_params.is_empty());
     }
 }

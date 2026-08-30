@@ -438,791 +438,791 @@
       </EntityType>
 
       <Action Name="ActivateAdaptationGoal" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.AdaptationGoal"/>
-        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="GoalStatement" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="CreatedByBrainRunId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="HumanNotes" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.AdaptationGoal" Nullable="false"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="GoalStatement" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="CreatedByBrainRunId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="HumanNotes" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.AdaptationGoal"/>
       </Action>
 
       <Action Name="ArchiveAdaptationGoal" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.AdaptationGoal"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.AdaptationGoal" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.AdaptationGoal"/>
       </Action>
 
       <Action Name="ActivateAutonomyPolicy" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.AutonomyPolicy"/>
-        <Parameter Name="OrganismId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="PolicyJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="CreatedBy" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.AutonomyPolicy" Nullable="false"/>
+        <Parameter Name="OrganismId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="PolicyJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="CreatedBy" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.AutonomyPolicy"/>
       </Action>
 
       <Action Name="UpdateAutonomyPolicy" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.AutonomyPolicy"/>
-        <Parameter Name="PolicyJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="UpdatedBy" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.AutonomyPolicy" Nullable="false"/>
+        <Parameter Name="PolicyJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="UpdatedBy" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.AutonomyPolicy"/>
       </Action>
 
       <Action Name="RetireAutonomyPolicy" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.AutonomyPolicy"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.AutonomyPolicy" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.AutonomyPolicy"/>
       </Action>
 
       <Action Name="StartBrainRun" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.BrainRun"/>
-        <Parameter Name="Role" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="WorkItemId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="AgentKind" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Model" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ParentSessionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="CorrelationJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.BrainRun" Nullable="false"/>
+        <Parameter Name="Role" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="WorkItemId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="AgentKind" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Model" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ParentSessionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="CorrelationJson" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.BrainRun"/>
       </Action>
 
       <Action Name="SucceedBrainRun" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.BrainRun"/>
-        <Parameter Name="OutputJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.BrainRun" Nullable="false"/>
+        <Parameter Name="OutputJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.BrainRun"/>
       </Action>
 
       <Action Name="FailBrainRun" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.BrainRun"/>
-        <Parameter Name="FailureReason" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.BrainRun" Nullable="false"/>
+        <Parameter Name="FailureReason" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.BrainRun"/>
       </Action>
 
       <Action Name="CancelBrainRun" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.BrainRun"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.BrainRun" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.BrainRun"/>
       </Action>
 
       <Action Name="ProposeDirection" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Direction"/>
-        <Parameter Name="OrganismId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="PressureIdsJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="PressureClass" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Title" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ProvenanceJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="AutonomyLane" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ProposedAdaptationGoal" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ProposedViabilityConstraintsJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="BrainRunId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Direction" Nullable="false"/>
+        <Parameter Name="OrganismId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="PressureIdsJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="PressureClass" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Title" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ProvenanceJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="AutonomyLane" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ProposedAdaptationGoal" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ProposedViabilityConstraintsJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="BrainRunId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Direction"/>
       </Action>
 
       <Action Name="SelectDirection" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Direction"/>
-        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="SelectedBy" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="SelectionNotes" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Direction" Nullable="false"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="SelectedBy" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="SelectionNotes" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Direction"/>
       </Action>
 
       <Action Name="DismissDirection" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Direction"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Direction" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Direction"/>
       </Action>
 
       <Action Name="ArchiveDirection" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Direction"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Direction" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Direction"/>
       </Action>
 
       <Action Name="ActivateEliminationRule" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EliminationRule"/>
-        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="RuleStatement" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="MetricIdsJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ThresholdJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="CreatedByBrainRunId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EliminationRule" Nullable="false"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="RuleStatement" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="MetricIdsJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ThresholdJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="CreatedByBrainRunId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.EliminationRule"/>
       </Action>
 
       <Action Name="ArchiveEliminationRule" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EliminationRule"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EliminationRule" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.EliminationRule"/>
       </Action>
 
       <Action Name="BeginEpisodeNegotiation" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode"/>
-        <Parameter Name="DirectionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="OrganismId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ParentVersionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="AutonomyLane" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode" Nullable="false"/>
+        <Parameter Name="DirectionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="OrganismId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ParentVersionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="AutonomyLane" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Episode"/>
       </Action>
 
       <Action Name="RecordEpisodeContract" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode"/>
-        <Parameter Name="AdaptationGoalId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="SelectionPressureId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ViabilityConstraintIdsJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvaluationStageIdsJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EliminationRuleIdsJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ScoringRuleIdsJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode" Nullable="false"/>
+        <Parameter Name="AdaptationGoalId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="SelectionPressureId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ViabilityConstraintIdsJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvaluationStageIdsJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EliminationRuleIdsJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ScoringRuleIdsJson" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Episode"/>
       </Action>
 
       <Action Name="StartEpisode" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode"/>
-        <Parameter Name="StartedBy" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode" Nullable="false"/>
+        <Parameter Name="StartedBy" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Episode"/>
       </Action>
 
       <Action Name="AddGeneration" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode"/>
-        <Parameter Name="GenerationId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode" Nullable="false"/>
+        <Parameter Name="GenerationId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Episode"/>
       </Action>
 
       <Action Name="PauseEpisode" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Episode"/>
       </Action>
 
       <Action Name="ResumeEpisode" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Episode"/>
       </Action>
 
       <Action Name="BeginEpisodeSelection" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode"/>
-        <Parameter Name="GenerationId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode" Nullable="false"/>
+        <Parameter Name="GenerationId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Episode"/>
       </Action>
 
       <Action Name="RecordEpisodeWinner" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode"/>
-        <Parameter Name="WinningVariantId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="SelectorBrainRunId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="SelectionExplanation" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode" Nullable="false"/>
+        <Parameter Name="WinningVariantId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="SelectorBrainRunId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="SelectionExplanation" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Episode"/>
       </Action>
 
       <Action Name="CompleteEpisode" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode"/>
-        <Parameter Name="PromotionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="OrganismVersionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode" Nullable="false"/>
+        <Parameter Name="PromotionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="OrganismVersionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Episode"/>
       </Action>
 
       <Action Name="StopEpisode" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Episode"/>
       </Action>
 
       <Action Name="FailEpisode" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode"/>
-        <Parameter Name="FailureReason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Episode" Nullable="false"/>
+        <Parameter Name="FailureReason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Episode"/>
       </Action>
 
       <Action Name="SubmitEpisodeStartRequest" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EpisodeStartRequest"/>
-        <Parameter Name="DirectionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="OrganismId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ParentVersionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="AutonomyLane" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="RequestedBy" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="AdaptationGoal" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="HumanNotes" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ViabilityConstraintsJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="MetricsJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvaluationStagesJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EliminationRulesJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ScoringRulesJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="SelectionStatement" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ContractJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="StartedBy" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EpisodeStartRequest" Nullable="false"/>
+        <Parameter Name="DirectionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="OrganismId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ParentVersionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="AutonomyLane" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="RequestedBy" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="AdaptationGoal" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="HumanNotes" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ViabilityConstraintsJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="MetricsJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvaluationStagesJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EliminationRulesJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ScoringRulesJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="SelectionStatement" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ContractJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="StartedBy" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.EpisodeStartRequest"/>
       </Action>
 
       <Action Name="MarkEpisodeStartRequestStarted" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EpisodeStartRequest"/>
-        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EpisodeStartRequest" Nullable="false"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.EpisodeStartRequest"/>
       </Action>
 
       <Action Name="FailEpisodeStartRequest" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EpisodeStartRequest"/>
-        <Parameter Name="FailureReason" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EpisodeStartRequest" Nullable="false"/>
+        <Parameter Name="FailureReason" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.EpisodeStartRequest"/>
       </Action>
 
       <Action Name="CancelEpisodeStartRequest" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EpisodeStartRequest"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EpisodeStartRequest" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.EpisodeStartRequest"/>
       </Action>
 
       <Action Name="ActivateEvaluationStage" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EvaluationStage"/>
-        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="StageName" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="StageKind" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="SequenceIndex" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="RequiredEvidenceJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ExecutorKind" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EvaluationStage" Nullable="false"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="StageName" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="StageKind" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="SequenceIndex" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="RequiredEvidenceJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ExecutorKind" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.EvaluationStage"/>
       </Action>
 
       <Action Name="ArchiveEvaluationStage" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EvaluationStage"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EvaluationStage" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.EvaluationStage"/>
       </Action>
 
       <Action Name="RecordEvidenceArtifact" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EvidenceArtifact"/>
-        <Parameter Name="ArtifactKind" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Uri" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="CorrelationJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Digest" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EvidenceArtifact" Nullable="false"/>
+        <Parameter Name="ArtifactKind" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Uri" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="CorrelationJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Digest" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.EvidenceArtifact"/>
       </Action>
 
       <Action Name="LinkEvidenceArtifact" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EvidenceArtifact"/>
-        <Parameter Name="TargetEntityType" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="TargetEntityId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EvidenceArtifact" Nullable="false"/>
+        <Parameter Name="TargetEntityType" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="TargetEntityId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.EvidenceArtifact"/>
       </Action>
 
       <Action Name="ArchiveEvidenceArtifact" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EvidenceArtifact"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.EvidenceArtifact" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.EvidenceArtifact"/>
       </Action>
 
       <Action Name="StartGeneration" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Generation"/>
-        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ParentVersionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="GenerationIndex" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="VariantTargetCount" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Generation" Nullable="false"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ParentVersionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="GenerationIndex" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="VariantTargetCount" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Generation"/>
       </Action>
 
       <Action Name="RecordGeneratedVariant" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Generation"/>
-        <Parameter Name="VariantId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="BrainRunId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Generation" Nullable="false"/>
+        <Parameter Name="VariantId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="BrainRunId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Generation"/>
       </Action>
 
       <Action Name="RecordGenerationSurvivor" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Generation"/>
-        <Parameter Name="VariantId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Generation" Nullable="false"/>
+        <Parameter Name="VariantId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Generation"/>
       </Action>
 
       <Action Name="BeginGenerationSelection" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Generation"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Generation" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Generation"/>
       </Action>
 
       <Action Name="CompleteGeneration" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Generation"/>
-        <Parameter Name="WinnerVariantId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Generation" Nullable="false"/>
+        <Parameter Name="WinnerVariantId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Generation"/>
       </Action>
 
       <Action Name="FailGeneration" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Generation"/>
-        <Parameter Name="FailureReason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Generation" Nullable="false"/>
+        <Parameter Name="FailureReason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Generation"/>
       </Action>
 
       <Action Name="RecordLineageEdge" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.LineageEdge"/>
-        <Parameter Name="OrganismId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ParentVersionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ChildVersionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="PromotionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="MutationSummary" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.LineageEdge" Nullable="false"/>
+        <Parameter Name="OrganismId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ParentVersionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ChildVersionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="PromotionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="MutationSummary" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.LineageEdge"/>
       </Action>
 
       <Action Name="ArchiveLineageEdge" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.LineageEdge"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.LineageEdge" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.LineageEdge"/>
       </Action>
 
       <Action Name="RecordMeasurement" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Measurement"/>
-        <Parameter Name="MetricDefinitionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="StageResultId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="TrialId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="VariantId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Value" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Unit" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Measurement" Nullable="false"/>
+        <Parameter Name="MetricDefinitionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="StageResultId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="TrialId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="VariantId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Value" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Unit" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Measurement"/>
       </Action>
 
       <Action Name="ArchiveMeasurement" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Measurement"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Measurement" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Measurement"/>
       </Action>
 
       <Action Name="ActivateMetricDefinition" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.MetricDefinition"/>
-        <Parameter Name="MetricName" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="MetricKind" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Unit" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="HigherIsBetter" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Description" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.MetricDefinition" Nullable="false"/>
+        <Parameter Name="MetricName" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="MetricKind" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Unit" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="HigherIsBetter" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Description" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.MetricDefinition"/>
       </Action>
 
       <Action Name="ArchiveMetricDefinition" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.MetricDefinition"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.MetricDefinition" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.MetricDefinition"/>
       </Action>
 
       <Action Name="RecordMutation" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Mutation"/>
-        <Parameter Name="VariantId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ChangedFilesJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="DiffRef" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="BrainRunId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Mutation" Nullable="false"/>
+        <Parameter Name="VariantId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ChangedFilesJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="DiffRef" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="BrainRunId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Mutation"/>
       </Action>
 
       <Action Name="ArchiveMutation" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Mutation"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Mutation" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Mutation"/>
       </Action>
 
       <Action Name="ActivateOrganism" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Organism"/>
-        <Parameter Name="Name" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="AppRef" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ParentVersionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="BaselineEvaluationJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Organism" Nullable="false"/>
+        <Parameter Name="Name" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="AppRef" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ParentVersionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="BaselineEvaluationJson" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Organism"/>
       </Action>
 
       <Action Name="RecordOrganismVersion" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Organism"/>
-        <Parameter Name="OrganismVersionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="PromotionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="AppRef" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Organism" Nullable="false"/>
+        <Parameter Name="OrganismVersionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="PromotionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="AppRef" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Organism"/>
       </Action>
 
       <Action Name="SyncOrganismParentRef" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Organism"/>
-        <Parameter Name="OrganismVersionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="PromotionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="AppRef" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Organism" Nullable="false"/>
+        <Parameter Name="OrganismVersionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="PromotionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="AppRef" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Organism"/>
       </Action>
 
       <Action Name="ArchiveOrganism" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Organism"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Organism" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Organism"/>
       </Action>
 
       <Action Name="MarkOrganismVersionParent" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.OrganismVersion"/>
-        <Parameter Name="OrganismId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="AppRef" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="CommitRef" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="PromotionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.OrganismVersion" Nullable="false"/>
+        <Parameter Name="OrganismId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="AppRef" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="CommitRef" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="PromotionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.OrganismVersion"/>
       </Action>
 
       <Action Name="SupersedeOrganismVersion" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.OrganismVersion"/>
-        <Parameter Name="NewParentVersionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="PromotionId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.OrganismVersion" Nullable="false"/>
+        <Parameter Name="NewParentVersionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="PromotionId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.OrganismVersion"/>
       </Action>
 
       <Action Name="RollbackOrganismVersion" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.OrganismVersion"/>
-        <Parameter Name="RollbackPromotionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.OrganismVersion" Nullable="false"/>
+        <Parameter Name="RollbackPromotionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.OrganismVersion"/>
       </Action>
 
       <Action Name="InferPressure" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Pressure"/>
-        <Parameter Name="OrganismId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="PressureClass" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="SignalIdsJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="BrainRunId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Pressure" Nullable="false"/>
+        <Parameter Name="OrganismId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="PressureClass" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="SignalIdsJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="BrainRunId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Pressure"/>
       </Action>
 
       <Action Name="FramePressureAsDirection" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Pressure"/>
-        <Parameter Name="DirectionId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Pressure" Nullable="false"/>
+        <Parameter Name="DirectionId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Pressure"/>
       </Action>
 
       <Action Name="DismissPressure" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Pressure"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Pressure" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Pressure"/>
       </Action>
 
       <Action Name="ArchivePressure" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Pressure"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Pressure" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Pressure"/>
       </Action>
 
       <Action Name="PromoteWinner" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Promotion"/>
-        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="WinningVariantId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ParentVersionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="NewOrganismVersionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="SelectionExplanation" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="AppRef" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Promotion" Nullable="false"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="WinningVariantId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ParentVersionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="NewOrganismVersionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="SelectionExplanation" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="AppRef" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Promotion"/>
       </Action>
 
       <Action Name="RecordPromotionMaterialization" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Promotion"/>
-        <Parameter Name="CanonicalAppRef" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ProductionTenant" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="RuntimeRef" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Promotion" Nullable="false"/>
+        <Parameter Name="CanonicalAppRef" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ProductionTenant" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="RuntimeRef" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Promotion"/>
       </Action>
 
       <Action Name="RecordPromotionMaterializationFailure" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Promotion"/>
-        <Parameter Name="FailureReason" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Promotion" Nullable="false"/>
+        <Parameter Name="FailureReason" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Promotion"/>
       </Action>
 
       <Action Name="RollbackPromotion" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Promotion"/>
-        <Parameter Name="RollbackVersionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Promotion" Nullable="false"/>
+        <Parameter Name="RollbackVersionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Promotion"/>
       </Action>
 
       <Action Name="FailPromotion" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Promotion"/>
-        <Parameter Name="FailureReason" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Promotion" Nullable="false"/>
+        <Parameter Name="FailureReason" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Promotion"/>
       </Action>
 
       <Action Name="ActivateScoringRule" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.ScoringRule"/>
-        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="RuleStatement" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="MetricIdsJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Weight" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="CreatedByBrainRunId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.ScoringRule" Nullable="false"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="RuleStatement" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="MetricIdsJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Weight" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="CreatedByBrainRunId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.ScoringRule"/>
       </Action>
 
       <Action Name="ArchiveScoringRule" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.ScoringRule"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.ScoringRule" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.ScoringRule"/>
       </Action>
 
       <Action Name="ActivateSelectionPressure" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.SelectionPressure"/>
-        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="SelectionStatement" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="MetricIdsJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EliminationRuleIdsJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ScoringRuleIdsJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="CreatedByBrainRunId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.SelectionPressure" Nullable="false"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="SelectionStatement" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="MetricIdsJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EliminationRuleIdsJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ScoringRuleIdsJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="CreatedByBrainRunId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.SelectionPressure"/>
       </Action>
 
       <Action Name="ArchiveSelectionPressure" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.SelectionPressure"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.SelectionPressure" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.SelectionPressure"/>
       </Action>
 
       <Action Name="RecordSignal" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Signal"/>
-        <Parameter Name="Source" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="SignalKind" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="OrganismId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="CorrelationJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Signal" Nullable="false"/>
+        <Parameter Name="Source" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="SignalKind" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="OrganismId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="CorrelationJson" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Signal"/>
       </Action>
 
       <Action Name="LinkSignalToPressure" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Signal"/>
-        <Parameter Name="PressureId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Signal" Nullable="false"/>
+        <Parameter Name="PressureId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Signal"/>
       </Action>
 
       <Action Name="FailSignalObservation" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Signal"/>
-        <Parameter Name="error" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="error_message" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="integration" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Signal" Nullable="false"/>
+        <Parameter Name="error" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="error_message" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="integration" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Signal"/>
       </Action>
 
       <Action Name="IgnoreSignal" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Signal"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Signal" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Signal"/>
       </Action>
 
       <Action Name="ArchiveSignal" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Signal"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Signal" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Signal"/>
       </Action>
 
       <Action Name="StartStageResult" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.StageResult"/>
-        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="GenerationId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="VariantId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvaluationStageId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="WorkItemId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.StageResult" Nullable="false"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="GenerationId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="VariantId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvaluationStageId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="WorkItemId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.StageResult"/>
       </Action>
 
       <Action Name="PassStageResult" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.StageResult"/>
-        <Parameter Name="MetricsJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.StageResult" Nullable="false"/>
+        <Parameter Name="MetricsJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.StageResult"/>
       </Action>
 
       <Action Name="FailStageResult" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.StageResult"/>
-        <Parameter Name="MetricsJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="FailureReason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.StageResult" Nullable="false"/>
+        <Parameter Name="MetricsJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="FailureReason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.StageResult"/>
       </Action>
 
       <Action Name="EliminateStageResult" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.StageResult"/>
-        <Parameter Name="EliminationRuleId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.StageResult" Nullable="false"/>
+        <Parameter Name="EliminationRuleId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.StageResult"/>
       </Action>
 
       <Action Name="StartTrial" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Trial"/>
-        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="VariantId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="SimulatedUserId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Goal" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="WorkItemId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Trial" Nullable="false"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="VariantId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="SimulatedUserId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Goal" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="WorkItemId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Trial"/>
       </Action>
 
       <Action Name="SucceedTrial" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Trial"/>
-        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="MeasurementsJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Trial" Nullable="false"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="MeasurementsJson" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Trial"/>
       </Action>
 
       <Action Name="FailTrial" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Trial"/>
-        <Parameter Name="FailureReason" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="MeasurementsJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Trial" Nullable="false"/>
+        <Parameter Name="FailureReason" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="MeasurementsJson" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Trial"/>
       </Action>
 
       <Action Name="ArchiveTrial" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Trial"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Trial" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Trial"/>
       </Action>
 
       <Action Name="RecordVariantMutation" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Variant"/>
-        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="GenerationId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="MutationId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="AppRef" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="BranchRef" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="BrainRunId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Variant" Nullable="false"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="GenerationId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="MutationId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="AppRef" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="BranchRef" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="BrainRunId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Variant"/>
       </Action>
 
       <Action Name="StartVariantBuild" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Variant"/>
-        <Parameter Name="WorkItemId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Variant" Nullable="false"/>
+        <Parameter Name="WorkItemId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Variant"/>
       </Action>
 
       <Action Name="MarkVariantActive" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Variant"/>
-        <Parameter Name="RuntimeRef" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Variant" Nullable="false"/>
+        <Parameter Name="RuntimeRef" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Variant"/>
       </Action>
 
       <Action Name="RecordVariantStageResult" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Variant"/>
-        <Parameter Name="StageResultId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Variant" Nullable="false"/>
+        <Parameter Name="StageResultId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Variant"/>
       </Action>
 
       <Action Name="EliminateVariant" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Variant"/>
-        <Parameter Name="EliminationRuleId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="StageResultId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Variant" Nullable="false"/>
+        <Parameter Name="EliminationRuleId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="StageResultId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Variant"/>
       </Action>
 
       <Action Name="SelectVariant" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Variant"/>
-        <Parameter Name="SelectionPressureId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="SelectorBrainRunId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Variant" Nullable="false"/>
+        <Parameter Name="SelectionPressureId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="SelectorBrainRunId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Variant"/>
       </Action>
 
       <Action Name="PromoteVariant" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Variant"/>
-        <Parameter Name="PromotionId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="OrganismVersionId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Variant" Nullable="false"/>
+        <Parameter Name="PromotionId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="OrganismVersionId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Variant"/>
       </Action>
 
       <Action Name="FailVariant" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Variant"/>
-        <Parameter Name="FailureReason" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.Variant" Nullable="false"/>
+        <Parameter Name="FailureReason" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.Variant"/>
       </Action>
 
       <Action Name="ActivateViabilityConstraint" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.ViabilityConstraint"/>
-        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ConstraintStatement" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ConstraintKind" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="CreatedByBrainRunId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.ViabilityConstraint" Nullable="false"/>
+        <Parameter Name="EpisodeId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ConstraintStatement" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ConstraintKind" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="CreatedByBrainRunId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.ViabilityConstraint"/>
       </Action>
 
       <Action Name="PinViabilityConstraint" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.ViabilityConstraint"/>
-        <Parameter Name="PinnedBy" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.ViabilityConstraint" Nullable="false"/>
+        <Parameter Name="PinnedBy" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.ViabilityConstraint"/>
       </Action>
 
       <Action Name="ArchiveViabilityConstraint" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.ViabilityConstraint"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.ViabilityConstraint" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.ViabilityConstraint"/>
       </Action>
 
       <Action Name="QueueWorkItem" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.WorkItem"/>
-        <Parameter Name="Role" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="TargetEntityType" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="TargetEntityId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="PromptRef" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ContextRef" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="OutputSchemaRef" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="CorrelationJson" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.WorkItem" Nullable="false"/>
+        <Parameter Name="Role" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="TargetEntityType" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="TargetEntityId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="PromptRef" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ContextRef" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="OutputSchemaRef" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="CorrelationJson" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.WorkItem"/>
       </Action>
 
       <Action Name="ClaimWorkItem" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.WorkItem"/>
-        <Parameter Name="WorkerId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="ClaimedBy" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.WorkItem" Nullable="false"/>
+        <Parameter Name="WorkerId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="ClaimedBy" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.WorkItem"/>
       </Action>
 
       <Action Name="StartWorkItem" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.WorkItem"/>
-        <Parameter Name="BrainRunId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.WorkItem" Nullable="false"/>
+        <Parameter Name="BrainRunId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.WorkItem"/>
       </Action>
 
       <Action Name="SucceedWorkItem" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.WorkItem"/>
-        <Parameter Name="ResultJson" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="Summary" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.WorkItem" Nullable="false"/>
+        <Parameter Name="ResultJson" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Summary" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.WorkItem"/>
       </Action>
 
       <Action Name="FailWorkItem" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.WorkItem"/>
-        <Parameter Name="FailureReason" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.WorkItem" Nullable="false"/>
+        <Parameter Name="FailureReason" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="EvidenceArtifactId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.WorkItem"/>
       </Action>
 
       <Action Name="CancelWorkItem" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.WorkItem"/>
-        <Parameter Name="Reason" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.DirectedEvolution.WorkItem" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.DirectedEvolution.WorkItem"/>
       </Action>
 

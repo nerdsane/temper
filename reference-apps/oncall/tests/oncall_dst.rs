@@ -19,6 +19,12 @@ const PAGE_IOA: &str = include_str!("../specs/page.ioa.toml");
 const ESCALATION_POLICY_IOA: &str = include_str!("../specs/escalation_policy.ioa.toml");
 const REMEDIATION_IOA: &str = include_str!("../specs/remediation.ioa.toml");
 const POSTMORTEM_IOA: &str = include_str!("../specs/postmortem.ioa.toml");
+const AGENT_PARAMS: &str = r#"{"AgentId":"agent-1"}"#;
+const APPROVER_PARAMS: &str = r#"{"ApproverId":"approver-1"}"#;
+const REJECTION_PARAMS: &str = r#"{"Reason":"not-approved"}"#;
+const FAILURE_PARAMS: &str = r#"{"ErrorMessage":"execution-failed"}"#;
+const ROOT_CAUSE_PARAMS: &str = r#"{"RootCauseDescription":"dependency-failure"}"#;
+const REVISION_PARAMS: &str = r#"{"Feedback":"add supporting evidence"}"#;
 
 fn page_table() -> Arc<TransitionTable> {
     Arc::new(TransitionTable::from_ioa_source(PAGE_IOA))
@@ -67,7 +73,7 @@ fn page_assign_then_investigate() {
         EntityActorHandler::new("Page", "page-1", page_table()).with_ioa_invariants(PAGE_IOA);
     sim.register_actor("page-1", Box::new(handler));
 
-    sim.step("page-1", "AssignAgent", "{}").unwrap();
+    sim.step("page-1", "AssignAgent", AGENT_PARAMS).unwrap();
     sim.assert_status("page-1", "Triggered");
 
     sim.step("page-1", "StartInvestigation", "{}").unwrap();
@@ -90,7 +96,7 @@ fn page_full_lifecycle() {
     sim.register_actor("page-1", Box::new(handler));
 
     // Triggered → AssignAgent → StartInvestigation → StartRemediation → Resolve
-    sim.step("page-1", "AssignAgent", "{}").unwrap();
+    sim.step("page-1", "AssignAgent", AGENT_PARAMS).unwrap();
     sim.step("page-1", "StartInvestigation", "{}").unwrap();
     sim.assert_status("page-1", "Investigating");
 
@@ -117,12 +123,12 @@ fn page_escalation_flow() {
     sim.register_actor("page-1", Box::new(handler));
 
     // Assign → Investigate → Escalate (tier 1) → Reassign → Escalate (tier 2)
-    sim.step("page-1", "AssignAgent", "{}").unwrap();
+    sim.step("page-1", "AssignAgent", AGENT_PARAMS).unwrap();
     sim.step("page-1", "StartInvestigation", "{}").unwrap();
     sim.step("page-1", "Escalate", "{}").unwrap();
     sim.assert_status("page-1", "Escalated");
 
-    sim.step("page-1", "ReassignAgent", "{}").unwrap();
+    sim.step("page-1", "ReassignAgent", AGENT_PARAMS).unwrap();
     sim.assert_status("page-1", "Investigating");
 
     sim.step("page-1", "Escalate", "{}").unwrap();
@@ -147,7 +153,7 @@ fn page_auto_resolve() {
     sim.assert_status("page-1", "Resolved");
 
     // Resolved is terminal
-    let result = sim.step("page-1", "AssignAgent", "{}");
+    let result = sim.step("page-1", "AssignAgent", AGENT_PARAMS);
     assert!(
         result.is_err(),
         "AssignAgent should fail from Resolved state"
@@ -189,7 +195,7 @@ fn page_escalation_increments_tier() {
         EntityActorHandler::new("Page", "page-1", page_table()).with_ioa_invariants(PAGE_IOA);
     sim.register_actor("page-1", Box::new(handler));
 
-    sim.step("page-1", "AssignAgent", "{}").unwrap();
+    sim.step("page-1", "AssignAgent", AGENT_PARAMS).unwrap();
     sim.step("page-1", "StartInvestigation", "{}").unwrap();
 
     // Each escalation increments the tier counter
@@ -200,7 +206,7 @@ fn page_escalation_increments_tier() {
     assert!(!sim.has_violations());
 
     // Reassign and escalate again
-    sim.step("page-1", "ReassignAgent", "{}").unwrap();
+    sim.step("page-1", "ReassignAgent", AGENT_PARAMS).unwrap();
     sim.step("page-1", "Timeout", "{}").unwrap();
     sim.assert_status("page-1", "Escalated");
 
@@ -225,7 +231,7 @@ fn remediation_approve_execute_succeed() {
 
     sim.assert_status("rem-1", "Proposed");
 
-    sim.step("rem-1", "Approve", "{}").unwrap();
+    sim.step("rem-1", "Approve", APPROVER_PARAMS).unwrap();
     sim.assert_status("rem-1", "Approved");
 
     sim.step("rem-1", "Execute", "{}").unwrap();
@@ -253,11 +259,11 @@ fn remediation_reject_is_final() {
         .with_ioa_invariants(REMEDIATION_IOA);
     sim.register_actor("rem-1", Box::new(handler));
 
-    sim.step("rem-1", "Reject", "{}").unwrap();
+    sim.step("rem-1", "Reject", REJECTION_PARAMS).unwrap();
     sim.assert_status("rem-1", "Rejected");
 
     // Rejected is terminal
-    let result = sim.step("rem-1", "Approve", "{}");
+    let result = sim.step("rem-1", "Approve", APPROVER_PARAMS);
     assert!(result.is_err(), "Approve should fail from Rejected state");
 
     assert!(!sim.has_violations());
@@ -277,7 +283,7 @@ fn remediation_retry_after_failure() {
 
     sim.step("rem-1", "AutoApprove", "{}").unwrap();
     sim.step("rem-1", "Execute", "{}").unwrap();
-    sim.step("rem-1", "Fail", "{}").unwrap();
+    sim.step("rem-1", "Fail", FAILURE_PARAMS).unwrap();
     sim.assert_status("rem-1", "Failed");
 
     // Retry → back to Approved
@@ -349,16 +355,17 @@ fn postmortem_revision_cycle() {
         .with_ioa_invariants(POSTMORTEM_IOA);
     sim.register_actor("pm-1", Box::new(handler));
 
-    sim.step("pm-1", "AddRootCause", "{}").unwrap();
+    sim.step("pm-1", "AddRootCause", ROOT_CAUSE_PARAMS).unwrap();
     sim.step("pm-1", "SubmitForReview", "{}").unwrap();
     sim.assert_status("pm-1", "InReview");
 
     // Request revision → back to Draft (but has_root_cause reset by RequestRevision)
-    sim.step("pm-1", "RequestRevision", "{}").unwrap();
+    sim.step("pm-1", "RequestRevision", REVISION_PARAMS)
+        .unwrap();
     sim.assert_status("pm-1", "Draft");
 
     // Need to add root cause again before re-submitting
-    sim.step("pm-1", "AddRootCause", "{}").unwrap();
+    sim.step("pm-1", "AddRootCause", ROOT_CAUSE_PARAMS).unwrap();
     sim.step("pm-1", "SubmitForReview", "{}").unwrap();
     sim.assert_status("pm-1", "InReview");
 
@@ -377,7 +384,7 @@ fn postmortem_full_lifecycle() {
         .with_ioa_invariants(POSTMORTEM_IOA);
     sim.register_actor("pm-1", Box::new(handler));
 
-    sim.step("pm-1", "AddRootCause", "{}").unwrap();
+    sim.step("pm-1", "AddRootCause", ROOT_CAUSE_PARAMS).unwrap();
     sim.step("pm-1", "SubmitForReview", "{}").unwrap();
     sim.step("pm-1", "ApprovePostmortem", "{}").unwrap();
     sim.assert_status("pm-1", "Approved");
@@ -386,7 +393,7 @@ fn postmortem_full_lifecycle() {
     sim.assert_status("pm-1", "Published");
 
     // Published is terminal
-    let result = sim.step("pm-1", "AddRootCause", "{}");
+    let result = sim.step("pm-1", "AddRootCause", ROOT_CAUSE_PARAMS);
     assert!(
         result.is_err(),
         "AddRootCause should fail from Published state"

@@ -41,28 +41,28 @@
       </EntityType>
 
       <Action Name="Configure" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel" Nullable="false"/>
         <Parameter Name="channel_type" Type="Edm.String" Nullable="false"/>
         <Parameter Name="channel_id" Type="Edm.String" Nullable="false"/>
-        <Parameter Name="guild_id" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="default_agent_config" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="webhook_secret" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="webhook_url" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="guild_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="default_agent_config" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="webhook_secret" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="webhook_url" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.Claw.Channel"/>
       </Action>
 
       <Action Name="Connect" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel" Nullable="false"/>
         <ReturnType Type="Temper.Claw.Channel"/>
       </Action>
 
       <Action Name="Ready" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel" Nullable="false"/>
         <ReturnType Type="Temper.Claw.Channel"/>
       </Action>
 
       <Action Name="ReceiveMessage" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel" Nullable="false"/>
         <Parameter Name="message_id" Type="Edm.String" Nullable="false"/>
         <Parameter Name="author_id" Type="Edm.String" Nullable="false"/>
         <Parameter Name="thread_id" Type="Edm.String" Nullable="false"/>
@@ -71,7 +71,7 @@
       </Action>
 
       <Action Name="SendReply" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel" Nullable="false"/>
         <Parameter Name="thread_id" Type="Edm.String" Nullable="false"/>
         <Parameter Name="content" Type="Edm.String" Nullable="false"/>
         <Parameter Name="agent_entity_id" Type="Edm.String" Nullable="false"/>
@@ -79,7 +79,7 @@
       </Action>
 
       <Action Name="ReplyDelivered" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel" Nullable="false"/>
         <Parameter Name="thread_id" Type="Edm.String" Nullable="false"/>
         <Parameter Name="content" Type="Edm.String" Nullable="false"/>
         <Parameter Name="agent_entity_id" Type="Edm.String" Nullable="false"/>
@@ -87,85 +87,85 @@
       </Action>
 
       <Action Name="Disconnect" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel" Nullable="false"/>
         <ReturnType Type="Temper.Claw.Channel"/>
       </Action>
 
       <Action Name="Reconnect" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel" Nullable="false"/>
         <ReturnType Type="Temper.Claw.Channel"/>
       </Action>
 
       <Action Name="Archive" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel" Nullable="false"/>
         <ReturnType Type="Temper.Claw.Channel"/>
       </Action>
 
       <Action Name="ConnectFailed" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel" Nullable="false"/>
         <Parameter Name="error_message" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.Claw.Channel"/>
       </Action>
 
       <Action Name="RouteFailed" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel" Nullable="false"/>
         <Parameter Name="error_message" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.Claw.Channel"/>
       </Action>
 
       <Action Name="ReplyFailed" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel"/>
+        <Parameter Name="bindingParameter" Type="Temper.Claw.Channel" Nullable="false"/>
         <Parameter Name="error_message" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.Claw.Channel"/>
       </Action>
 
       <Action Name="Register" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Claw.AgentRoute"/>
+        <Parameter Name="bindingParameter" Type="Temper.Claw.AgentRoute" Nullable="false"/>
         <Parameter Name="binding_tier" Type="Edm.String" Nullable="false"/>
-        <Parameter Name="channel_id" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="guild_id" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="match_pattern" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="agent_config" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="soul_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="channel_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="guild_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="match_pattern" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="agent_config" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="soul_id" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.Claw.AgentRoute"/>
       </Action>
 
       <Action Name="Update" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Claw.AgentRoute"/>
-        <Parameter Name="agent_config" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="match_pattern" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="soul_id" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.Claw.AgentRoute" Nullable="false"/>
+        <Parameter Name="agent_config" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="match_pattern" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="soul_id" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.Claw.AgentRoute"/>
       </Action>
 
       <Action Name="Disable" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Claw.AgentRoute"/>
+        <Parameter Name="bindingParameter" Type="Temper.Claw.AgentRoute" Nullable="false"/>
         <ReturnType Type="Temper.Claw.AgentRoute"/>
       </Action>
 
       <Action Name="Enable" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Claw.AgentRoute"/>
+        <Parameter Name="bindingParameter" Type="Temper.Claw.AgentRoute" Nullable="false"/>
         <ReturnType Type="Temper.Claw.AgentRoute"/>
       </Action>
 
       <Action Name="Create" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Claw.ChannelSession"/>
+        <Parameter Name="bindingParameter" Type="Temper.Claw.ChannelSession" Nullable="false"/>
         <Parameter Name="channel_id" Type="Edm.String" Nullable="false"/>
         <Parameter Name="thread_id" Type="Edm.String" Nullable="false"/>
         <Parameter Name="author_id" Type="Edm.String" Nullable="false"/>
         <Parameter Name="agent_entity_id" Type="Edm.String" Nullable="false"/>
-        <Parameter Name="last_message_at" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="last_message_at" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.Claw.ChannelSession"/>
       </Action>
 
       <Action Name="Resume" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Claw.ChannelSession"/>
-        <Parameter Name="last_message_at" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.Claw.ChannelSession" Nullable="false"/>
+        <Parameter Name="last_message_at" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.Claw.ChannelSession"/>
       </Action>
 
       <Action Name="Expire" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.Claw.ChannelSession"/>
+        <Parameter Name="bindingParameter" Type="Temper.Claw.ChannelSession" Nullable="false"/>
         <ReturnType Type="Temper.Claw.ChannelSession"/>
       </Action>
 

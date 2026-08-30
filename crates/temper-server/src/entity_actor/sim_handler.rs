@@ -242,6 +242,20 @@ impl SimActorHandler for EntityActorHandler {
             .collect()
     }
 
+    fn params_for_action(&self, action: &str) -> String {
+        let Some(metadata) = self.table.action_params.get(action) else {
+            return "{}".to_string();
+        };
+        let mut params = serde_json::Map::new();
+        for param in metadata.iter().filter(|param| !param.nullable) {
+            params.insert(
+                param.name.clone(),
+                deterministic_param_value(&param.param_type),
+            );
+        }
+        serde_json::Value::Object(params).to_string()
+    }
+
     fn events_json(&self) -> serde_json::Value {
         serde_json::to_value(&self.state.events).unwrap_or(serde_json::Value::Array(vec![]))
     }
@@ -256,6 +270,22 @@ impl SimActorHandler for EntityActorHandler {
 
     fn pending_callbacks(&self) -> Vec<String> {
         self.last_custom_effects.clone()
+    }
+}
+
+fn deterministic_param_value(param_type: &str) -> serde_json::Value {
+    if param_type.starts_with("Collection(") {
+        return serde_json::json!([]);
+    }
+    match param_type {
+        "bool" | "boolean" | "Edm.Boolean" => serde_json::json!(true),
+        "int" | "integer" | "Edm.Byte" | "Edm.SByte" | "Edm.Int16" | "Edm.Int32" | "Edm.Int64" => {
+            serde_json::json!(1)
+        }
+        "float" | "number" | "Edm.Decimal" | "Edm.Double" | "Edm.Single" => {
+            serde_json::json!(1.0)
+        }
+        _ => serde_json::json!("sim-value"),
     }
 }
 
@@ -288,7 +318,7 @@ mod tests {
 
         // AddItem
         clock.advance();
-        let result = handler.handle_message("AddItem", r#"{"ProductId":"laptop"}"#);
+        let result = handler.handle_message("AddItem", r#"{"ProductId":"laptop","Quantity":1}"#);
         assert!(result.is_ok());
         assert_eq!(handler.current_status(), "Draft");
         assert_eq!(handler.current_item_count(), 1);
@@ -296,7 +326,10 @@ mod tests {
 
         // SubmitOrder
         clock.advance();
-        let result = handler.handle_message("SubmitOrder", "{}");
+        let result = handler.handle_message(
+            "SubmitOrder",
+            r#"{"ShippingAddressId":"addr-1","PaymentMethod":"card"}"#,
+        );
         assert!(result.is_ok());
         assert_eq!(handler.current_status(), "Submitted");
         assert_eq!(handler.event_count(), 2);
@@ -308,7 +341,10 @@ mod tests {
         let mut handler = EntityActorHandler::new("Order", "o1", order_table());
         handler.init().unwrap();
 
-        let result = handler.handle_message("SubmitOrder", "{}");
+        let result = handler.handle_message(
+            "SubmitOrder",
+            r#"{"ShippingAddressId":"addr-1","PaymentMethod":"card"}"#,
+        );
         assert!(result.is_err());
         assert_eq!(handler.current_status(), "Draft");
     }
@@ -339,7 +375,9 @@ mod tests {
         handler.init().unwrap();
 
         clock.advance();
-        handler.handle_message("AddItem", "{}").unwrap();
+        handler
+            .handle_message("AddItem", r#"{"ProductId":"laptop","Quantity":1}"#)
+            .unwrap();
 
         let actions = handler.valid_actions();
         assert!(actions.contains(&"AddItem".to_string()));

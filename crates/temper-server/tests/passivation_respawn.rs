@@ -23,7 +23,7 @@ async fn passivated_actor_respawns_with_correct_state() {
         "Order",
         &entity_id,
         "AddItem",
-        serde_json::json!({}),
+        common::order_action_params("AddItem"),
     )
     .await
     .expect("AddItem should succeed");
@@ -35,7 +35,7 @@ async fn passivated_actor_respawns_with_correct_state() {
         "Order",
         &entity_id,
         "SubmitOrder",
-        serde_json::json!({}),
+        common::order_action_params("SubmitOrder"),
     )
     .await
     .expect("SubmitOrder should succeed");

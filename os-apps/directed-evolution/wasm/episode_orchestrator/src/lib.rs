@@ -41,8 +41,8 @@ temper_side_effect_module! {
             json!({
                 "EpisodeId": episode_id,
                 "ParentVersionId": parent_version_id,
-                "GenerationIndex": generation_index,
-                "VariantTargetCount": variant_target_count,
+                "GenerationIndex": generation_index.to_string(),
+                "VariantTargetCount": variant_target_count.to_string(),
             }),
         )?;
         post_directed_action(

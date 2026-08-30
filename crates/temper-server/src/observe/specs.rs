@@ -129,6 +129,7 @@ pub(crate) async fn handle_get_spec_detail(
                             .map(|p| ActionParamDetail {
                                 name: p.name().to_string(),
                                 param_type: p.param_type().to_string(),
+                                nullable: p.nullable(),
                             })
                             .collect(),
                         hint: a.hint.clone().unwrap_or_default(),

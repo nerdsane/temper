@@ -97,6 +97,7 @@ mod tests {
             }],
             state_var_metadata: Default::default(),
             composite_actions: Default::default(),
+            action_params: Default::default(),
             rule_index: Default::default(),
         };
         table.rebuild_index();

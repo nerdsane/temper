@@ -354,8 +354,8 @@ fn queue_followup_generation_if_allowed(
         json!({
             "EpisodeId": input.episode_id,
             "ParentVersionId": parent_version_id,
-            "GenerationIndex": next_generation_index,
-            "VariantTargetCount": variant_target_count,
+            "GenerationIndex": next_generation_index.to_string(),
+            "VariantTargetCount": variant_target_count.to_string(),
         }),
     )?;
     post_directed_action(

@@ -31,7 +31,7 @@ params = [
 
 Canonical IOA preserves explicit nullability metadata. Older transition-table fixtures that do not contain nullability deserialize as required. Temper does not reinterpret arbitrary CSDL: omitted CSDL `Nullable` continues to mean nullable according to OData semantics.
 
-For every callable IOA action, bundle verification requires the matching bound CSDL action to have a non-nullable binding parameter of the correct entity type and the same normalized non-binding parameter names, types, and nullability. Alias collisions are verification errors. Unrelated CSDL actions remain permitted.
+For every callable IOA action, bundle verification requires the matching bound CSDL action to have a non-nullable binding parameter of the correct entity type and the same normalized non-binding parameter names and nullability. Alias collisions are verification errors. Unrelated CSDL actions remain permitted. IOA parameter types remain descriptive metadata in this decision; CSDL stays authoritative for OData wire-type validation.
 
 Stable verification detail codes are `csdl_action_parameter_requiredness_mismatch`, `csdl_action_binding_nullable`, and `nullable_action_parameter_consumed`.
 
@@ -57,17 +57,17 @@ HTTP failures use status 400 with `MissingActionParameter` for absent or null re
 
 Generated Rust SDKs map required parameters to `T` and explicitly nullable parameters to `Option<T>`. `None` crosses the existing data ABI as JSON `null`; the wire format does not change.
 
-The existing structured action manifests classify nullable-to-required as a breaking narrowing and reject reuse of the old artifact. Required-to-nullable remains compatible for an existing required-value client only with the existing compatibility proof. Diagnostics name the fully qualified entity, action, parameter, and old/new nullability. No parallel schema-diff mechanism is introduced.
+This repository does not yet contain the structured action-manifest and typed module-data compatibility substrate described by the downstream rollout. Nullability compatibility classification must land with that substrate: nullable-to-required is a breaking narrowing, while required-to-nullable is compatible for an existing required-value client only with a valid compatibility proof. Diagnostics must name the fully qualified entity, action, parameter, and old/new nullability. This change does not introduce a parallel schema-diff mechanism; artifact reuse remains blocked until the owning substrate enforces this classification.
 
 ## Rollout Plan
 
-1. Land parser, canonical model, verifier, JIT metadata, runtime validation, SDK generation, compatibility classification, and regression coverage in one Temper change.
+1. Land parser, canonical model, verifier, JIT metadata, runtime validation, generated SDK mapping, and regression coverage in one Temper change. Add compatibility classification in the repository that owns the structured action manifests before allowing artifact reuse.
 2. Regenerate the existing `arc-agi-temper` draft PR #37, remove obsolete `Some(...)` wrappers for required inputs, rebuild WASM artifacts, and exercise HTTP, typed-client, persistence, restart, and upgrade paths.
 3. Deploy downstream and verify rejected and accepted calls plus their Datadog traces before declaring the rollout complete.
 
 ## Readiness Gates
 
-- All parser, bundle, semantic-lint, SDK, compatibility, adapter, actor, and end-to-end tests pass.
+- All parser, bundle, semantic-lint, SDK, adapter, actor, and end-to-end tests pass; structured-manifest compatibility tests become a downstream readiness gate when that substrate is available.
 - Required-value rejection proves no state, event, trigger, effect, or lifecycle mutation.
 - Repository formatting, clippy, dependency, determinism, pre-push, DST-review, and code-review gates pass.
 - Downstream PR #37 is regenerated, deployed, and live-verified.

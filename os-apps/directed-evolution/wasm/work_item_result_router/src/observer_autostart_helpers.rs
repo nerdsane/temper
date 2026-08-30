@@ -175,7 +175,7 @@ fn activate_repair_evaluation_stages(
                 "EpisodeId": episode_id,
                 "StageName": stage.name,
                 "StageKind": stage.kind,
-                "SequenceIndex": index + 1,
+                "SequenceIndex": (index + 1).to_string(),
                 "RequiredEvidenceJson": json!(stage.required_evidence).to_string(),
                 "ExecutorKind": stage.executor,
             }),

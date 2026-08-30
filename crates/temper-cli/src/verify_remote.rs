@@ -7,7 +7,10 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
-use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton};
+use temper_spec::automaton::{
+    LintSeverity, lint_automata_bundle, lint_automata_csdl_bundle, lint_automaton,
+};
+use temper_spec::csdl::{CsdlDocument, parse_csdl};
 
 use crate::util::to_pascal_case;
 
@@ -35,7 +38,12 @@ pub async fn run(
         anyhow::bail!("No .ioa.toml files found in {}", specs_path.display());
     }
 
-    lint_ioa_sources(&ioa_sources)?;
+    let csdl_path = specs_path.join("model.csdl.xml");
+    let csdl_xml = fs::read_to_string(&csdl_path)
+        .with_context(|| format!("Failed to read {}", csdl_path.display()))?;
+    let csdl = parse_csdl(&csdl_xml)
+        .with_context(|| format!("Failed to parse CSDL from {}", csdl_path.display()))?;
+    lint_ioa_sources(&ioa_sources, &csdl)?;
 
     let endpoint = format!("{}/api/specs/validate-ioa", base_url.trim_end_matches('/'));
     let client = reqwest::Client::new();
@@ -79,7 +87,7 @@ pub async fn run(
     Ok(())
 }
 
-fn lint_ioa_sources(ioa_sources: &HashMap<String, String>) -> Result<()> {
+fn lint_ioa_sources(ioa_sources: &HashMap<String, String>, csdl: &CsdlDocument) -> Result<()> {
     let mut parsed_automata = BTreeMap::new();
     let mut lint_error_count = 0usize;
     let mut lint_error_lines = Vec::new();
@@ -132,6 +140,26 @@ fn lint_ioa_sources(ioa_sources: &HashMap<String, String>) -> Result<()> {
                     finding.entity, finding.code, finding.message
                 ));
             }
+        }
+    }
+
+    for finding in lint_automata_csdl_bundle(&parsed_automata, csdl) {
+        match finding.severity {
+            LintSeverity::Error => {
+                lint_error_count += 1;
+                lint_error_lines.push(format!(
+                    "{}: {} - {}",
+                    finding.entity, finding.code, finding.message
+                ));
+                write_stdout_line(format!(
+                    "\n  [lint:error] {}: {} - {}",
+                    finding.entity, finding.code, finding.message
+                ));
+            }
+            LintSeverity::Warning => write_stdout_line(format!(
+                "\n  [lint:warn] {}: {} - {}",
+                finding.entity, finding.code, finding.message
+            )),
         }
     }
 

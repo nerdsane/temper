@@ -483,7 +483,7 @@ async fn dst_add_item_then_submit() {
         .ask(
             EntityMsg::Action {
                 name: "AddItem".into(),
-                params: serde_json::json!({"ProductId": "prod-1"}),
+                params: serde_json::json!({"ProductId": "prod-1", "Quantity": 1}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_authorization_precondition: None,
@@ -501,7 +501,7 @@ async fn dst_add_item_then_submit() {
         .ask(
             EntityMsg::Action {
                 name: "SubmitOrder".into(),
-                params: serde_json::json!({"ShippingAddressId": "addr-1"}),
+                params: serde_json::json!({"ShippingAddressId": "addr-1", "PaymentMethod": "card"}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_authorization_precondition: None,
@@ -583,7 +583,7 @@ async fn dst_cannot_submit_without_items() {
         .ask(
             EntityMsg::Action {
                 name: "SubmitOrder".into(),
-                params: serde_json::json!({}),
+                params: serde_json::json!({"ShippingAddressId": "addr-1", "PaymentMethod": "card"}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_authorization_precondition: None,
@@ -605,11 +605,20 @@ async fn dst_full_order_lifecycle() {
 
     // Draft -> AddItem -> SubmitOrder -> ConfirmOrder -> ProcessOrder -> ShipOrder -> DeliverOrder
     let actions = [
-        ("AddItem", serde_json::json!({})),
-        ("SubmitOrder", serde_json::json!({})),
+        (
+            "AddItem",
+            serde_json::json!({"ProductId": "prod-1", "Quantity": 1}),
+        ),
+        (
+            "SubmitOrder",
+            serde_json::json!({"ShippingAddressId": "addr-1", "PaymentMethod": "card"}),
+        ),
         ("ConfirmOrder", serde_json::json!({})),
         ("ProcessOrder", serde_json::json!({})),
-        ("ShipOrder", serde_json::json!({})),
+        (
+            "ShipOrder",
+            serde_json::json!({"Carrier": "carrier", "TrackingNumber": "track-1"}),
+        ),
         ("DeliverOrder", serde_json::json!({})),
     ];
 
@@ -684,18 +693,27 @@ async fn dst_cannot_cancel_shipped_order() {
     let actor_ref = system.spawn(actor, "order-6");
 
     // Drive to Shipped
-    for action in &[
-        "AddItem",
-        "SubmitOrder",
-        "ConfirmOrder",
-        "ProcessOrder",
-        "ShipOrder",
+    for (action, params) in [
+        (
+            "AddItem",
+            serde_json::json!({"ProductId": "prod-1", "Quantity": 1}),
+        ),
+        (
+            "SubmitOrder",
+            serde_json::json!({"ShippingAddressId": "addr-1", "PaymentMethod": "card"}),
+        ),
+        ("ConfirmOrder", serde_json::json!({})),
+        ("ProcessOrder", serde_json::json!({})),
+        (
+            "ShipOrder",
+            serde_json::json!({"Carrier": "carrier", "TrackingNumber": "track-1"}),
+        ),
     ] {
         let _: EntityResponse = actor_ref
             .ask(
                 EntityMsg::Action {
                     name: action.to_string(),
-                    params: serde_json::json!({}),
+                    params,
                     cross_entity_booleans: std::collections::BTreeMap::new(),
                     idempotency_key: None,
                     expected_authorization_precondition: None,
@@ -711,7 +729,7 @@ async fn dst_cannot_cancel_shipped_order() {
         .ask(
             EntityMsg::Action {
                 name: "CancelOrder".into(),
-                params: serde_json::json!({}),
+                params: serde_json::json!({"Reason": "too-late"}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_authorization_precondition: None,
@@ -744,7 +762,7 @@ async fn dst_multiple_actors_independent() {
         .ask(
             EntityMsg::Action {
                 name: "CancelOrder".into(),
-                params: serde_json::json!({}),
+                params: serde_json::json!({"Reason": "cancel-a"}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_authorization_precondition: None,
@@ -759,7 +777,7 @@ async fn dst_multiple_actors_independent() {
         .ask(
             EntityMsg::Action {
                 name: "AddItem".into(),
-                params: serde_json::json!({}),
+                params: serde_json::json!({"ProductId": "prod-1", "Quantity": 1}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_authorization_precondition: None,

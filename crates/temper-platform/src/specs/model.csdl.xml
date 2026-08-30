@@ -14,13 +14,13 @@
         <Property Name="Verified" Type="Edm.Boolean" />
       </EntityType>
       <Action Name="UpdateSpecs" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Project" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Project"  Nullable="false"/>
       </Action>
       <Action Name="Verify" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Project" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Project"  Nullable="false"/>
       </Action>
       <Action Name="Archive" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Project" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Project"  Nullable="false"/>
       </Action>
 
       <EntityType Name="Tenant">
@@ -33,13 +33,13 @@
         <Property Name="ProjectId" Type="Edm.String" />
       </EntityType>
       <Action Name="Deploy" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Tenant" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Tenant"  Nullable="false"/>
       </Action>
       <Action Name="Suspend" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Tenant" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Tenant"  Nullable="false"/>
       </Action>
       <Action Name="Reactivate" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Tenant" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Tenant"  Nullable="false"/>
       </Action>
 
       <EntityType Name="CatalogEntry">
@@ -54,13 +54,13 @@
         <Property Name="ProjectId" Type="Edm.String" />
       </EntityType>
       <Action Name="Publish" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.CatalogEntry" />
+        <Parameter Name="bindingParameter" Type="Temper.System.CatalogEntry"  Nullable="false"/>
       </Action>
       <Action Name="Deprecate" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.CatalogEntry" />
+        <Parameter Name="bindingParameter" Type="Temper.System.CatalogEntry"  Nullable="false"/>
       </Action>
       <Action Name="Fork" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.CatalogEntry" />
+        <Parameter Name="bindingParameter" Type="Temper.System.CatalogEntry"  Nullable="false"/>
       </Action>
 
       <EntityType Name="Collaborator">
@@ -74,13 +74,13 @@
         <Property Name="Role" Type="Edm.String" />
       </EntityType>
       <Action Name="Accept" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Collaborator" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Collaborator"  Nullable="false"/>
       </Action>
       <Action Name="Remove" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Collaborator" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Collaborator"  Nullable="false"/>
       </Action>
       <Action Name="ChangeRole" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Collaborator" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Collaborator"  Nullable="false"/>
       </Action>
 
       <EntityType Name="Version">
@@ -93,10 +93,10 @@
         <Property Name="VersionNumber" Type="Edm.Int32" />
       </EntityType>
       <Action Name="MarkDeployed" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Version" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Version"  Nullable="false"/>
       </Action>
       <Action Name="Supersede" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Version" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Version"  Nullable="false"/>
       </Action>
 
       <EntityType Name="Observation">
@@ -112,13 +112,13 @@
         <Property Name="Tenant" Type="Edm.String" />
       </EntityType>
       <Action Name="ReviewObservation" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Observation" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Observation"  Nullable="false"/>
       </Action>
       <Action Name="ResolveObservation" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Observation" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Observation"  Nullable="false"/>
       </Action>
       <Action Name="SupersedeObservation" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Observation" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Observation"  Nullable="false"/>
       </Action>
 
       <EntityType Name="Problem">
@@ -133,13 +133,13 @@
         <Property Name="Invariants" Type="Edm.String" />
       </EntityType>
       <Action Name="MarkProblemReviewed" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Problem" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Problem"  Nullable="false"/>
       </Action>
       <Action Name="ResolveProblem" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Problem" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Problem"  Nullable="false"/>
       </Action>
       <Action Name="SupersedeProblem" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Problem" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Problem"  Nullable="false"/>
       </Action>
 
       <EntityType Name="Analysis">
@@ -154,13 +154,13 @@
         <Property Name="Recommendation" Type="Edm.String" />
       </EntityType>
       <Action Name="MarkAnalysisReviewed" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Analysis" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Analysis"  Nullable="false"/>
       </Action>
       <Action Name="AcceptAnalysis" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Analysis" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Analysis"  Nullable="false"/>
       </Action>
       <Action Name="RejectAnalysis" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Analysis" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Analysis"  Nullable="false"/>
       </Action>
 
       <EntityType Name="EvolutionDecision">
@@ -175,13 +175,13 @@
         <Property Name="VerificationSummary" Type="Edm.String" />
       </EntityType>
       <Action Name="ApproveEvolutionDecision" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.EvolutionDecision" />
+        <Parameter Name="bindingParameter" Type="Temper.System.EvolutionDecision"  Nullable="false"/>
       </Action>
       <Action Name="RejectEvolutionDecision" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.EvolutionDecision" />
+        <Parameter Name="bindingParameter" Type="Temper.System.EvolutionDecision"  Nullable="false"/>
       </Action>
       <Action Name="DeferEvolutionDecision" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.EvolutionDecision" />
+        <Parameter Name="bindingParameter" Type="Temper.System.EvolutionDecision"  Nullable="false"/>
       </Action>
 
       <EntityType Name="Insight">
@@ -197,13 +197,13 @@
         <Property Name="PriorityScore" Type="Edm.String" />
       </EntityType>
       <Action Name="AcknowledgeInsight" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Insight" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Insight"  Nullable="false"/>
       </Action>
       <Action Name="MarkInsightActioned" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Insight" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Insight"  Nullable="false"/>
       </Action>
       <Action Name="DismissInsight" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Insight" />
+        <Parameter Name="bindingParameter" Type="Temper.System.Insight"  Nullable="false"/>
       </Action>
 
       <EntityType Name="FeatureRequest">
@@ -218,16 +218,16 @@
         <Property Name="DeveloperNotes" Type="Edm.String" />
       </EntityType>
       <Action Name="AcknowledgeFeatureRequest" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest" />
+        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest"  Nullable="false"/>
       </Action>
       <Action Name="PlanFeatureRequest" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest" />
+        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest"  Nullable="false"/>
       </Action>
       <Action Name="WontFixFeatureRequest" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest" />
+        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest"  Nullable="false"/>
       </Action>
       <Action Name="ResolveFeatureRequest" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest" />
+        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest"  Nullable="false"/>
       </Action>
 
       <EntityType Name="GovernanceDecision">
@@ -254,21 +254,21 @@
         <Property Name="CallbackOnDeny" Type="Edm.String" Nullable="true"/>
       </EntityType>
       <Action Name="ApproveGovernanceDecision" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision" />
+        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision"  Nullable="false"/>
       </Action>
       <Action Name="DenyGovernanceDecision" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision" />
+        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision"  Nullable="false"/>
       </Action>
       <Action Name="ExpireGovernanceDecision" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision" />
+        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision"  Nullable="false"/>
       </Action>
       <Action Name="RegisterCallback" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision"/>
-        <Parameter Name="CallbackTenant" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="CallbackEntitySet" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="CallbackEntityId" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="CallbackOnApprove" Type="Edm.String" Nullable="true"/>
-        <Parameter Name="CallbackOnDeny" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision" Nullable="false"/>
+        <Parameter Name="CallbackTenant" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="CallbackEntitySet" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="CallbackEntityId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="CallbackOnApprove" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="CallbackOnDeny" Type="Edm.String" Nullable="false"/>
       </Action>
 
       <EntityType Name="HttpEndpoint">
@@ -291,13 +291,13 @@
         <Property Name="ActionBridgeResponse" Type="Edm.String" />
       </EntityType>
       <Action Name="PauseHttpEndpoint" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.HttpEndpoint" />
+        <Parameter Name="bindingParameter" Type="Temper.System.HttpEndpoint"  Nullable="false"/>
       </Action>
       <Action Name="ResumeHttpEndpoint" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.HttpEndpoint" />
+        <Parameter Name="bindingParameter" Type="Temper.System.HttpEndpoint"  Nullable="false"/>
       </Action>
       <Action Name="DeleteHttpEndpoint" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.HttpEndpoint" />
+        <Parameter Name="bindingParameter" Type="Temper.System.HttpEndpoint"  Nullable="false"/>
       </Action>
 
       <EntityContainer Name="Container">

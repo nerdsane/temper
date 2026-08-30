@@ -233,7 +233,7 @@ async fn same_entity_type_different_tenants() {
             "Order",
             "o1",
             "CancelOrder",
-            serde_json::json!({}),
+            serde_json::json!({"Reason": "test cancellation"}),
             &AgentContext::default(),
         )
         .await
