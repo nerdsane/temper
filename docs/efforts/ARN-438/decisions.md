@@ -122,3 +122,22 @@ decisions -> filed as ARN-442; doc points at the curl flow with ?status=pending.
 **Where:** `.agents/skills/verify-temper/` (SKILL, cedar-authz, entity-lifecycle,
 query-surface, integrations-and-webhooks, blobs-and-temperfs, README); `.gitignore`
 (.scratch/). Evidence: `/tmp/verify-temper/<date>/driven-round3.txt`.
+
+---
+
+**Decision:** #448 HOLD-1/HOLD-2 after Rei held `e14370a` — isolate the
+serve-and-odata drive recipe, and drop the false `/version` claim.
+**Came up because:** agents hit `features/serve-and-odata.md` first (feature-map
+row 1) and it still shipped `cargo run -p temper-cli -- serve --port 3600` with
+no isolate, while SKILL.md on the same head unsets `TURSO_PLATFORM_URL` and uses
+`TURSO_URL=file:$PWD/.scratch/temper.db` — that is the ARN-435 shared-db crash.
+Separately, README claimed unauthenticated `/healthz` and `/version` on
+`build_platform_router`; only `/healthz` is registered (`router.rs:28`).
+**Options:** (a) point serve-and-odata at SKILL; (b) copy SKILL's isolate recipe
+into the driving block. For `/version`: (c) add the route; (d) drop the claim.
+**Chose (b)+(d) because:** a pointer still lets an agent copy the local bash
+block and crash; the drive recipe has to be safe on its own. `/version` has no
+caller and no test — adding a product route to make a doc true is the wrong
+direction; `/healthz` on the platform router stays (Rei already verified that).
+**Where:** `.agents/skills/verify-temper/features/serve-and-odata.md`;
+`features/README.md`.
