@@ -27,11 +27,12 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use serde::{Deserialize, Serialize, de};
+use serde::{Deserialize, Serialize, de, ser::SerializeMap};
 use serde_json::Value as Json;
 
 /// A single cross-field validation rule on one entity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FieldInvariant {
     /// Invariant name (used in error bodies and logs).
     pub name: String,
@@ -52,39 +53,47 @@ pub struct FieldInvariant {
 /// on `Equals` are stored as `serde_json::Value` so bools, strings, numbers,
 /// and enum member names all flow through the same code path as the OData
 /// write payload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldPredicate {
     /// Field is missing or `null`.
-    Absent {
-        field: String,
-        #[serde(serialize_with = "serialize_true")]
-        absent: (),
-    },
+    Absent { field: String, absent: () },
     /// Field exists and equals the given literal.
     Equals { field: String, equals: Json },
     /// Convenience leaf — absent, null, empty string, or empty array.
-    Empty {
-        field: String,
-        #[serde(serialize_with = "serialize_true")]
-        empty: (),
-    },
+    Empty { field: String, empty: () },
     /// Logical OR — short-circuits on first child pass.
-    AnyOf {
-        #[serde(rename = "any_of")]
-        any_of: Vec<FieldPredicate>,
-    },
+    AnyOf { any_of: Vec<FieldPredicate> },
     /// Logical AND — short-circuits on first child fail.
-    AllOf {
-        #[serde(rename = "all_of")]
-        all_of: Vec<FieldPredicate>,
-    },
+    AllOf { all_of: Vec<FieldPredicate> },
     /// Logical NOT.
     Not { not: Box<FieldPredicate> },
 }
 
-fn serialize_true<S: serde::Serializer>(_: &(), s: S) -> Result<S::Ok, S::Error> {
-    s.serialize_bool(true)
+impl Serialize for FieldPredicate {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        match self {
+            Self::Absent { field, .. } => {
+                map.serialize_entry("field", field)?;
+                map.serialize_entry("absent", &true)?;
+            }
+            Self::Equals { field, equals } => {
+                map.serialize_entry("field", field)?;
+                map.serialize_entry("equals", equals)?;
+            }
+            Self::Empty { field, .. } => {
+                map.serialize_entry("field", field)?;
+                map.serialize_entry("empty", &true)?;
+            }
+            Self::AnyOf { any_of } => map.serialize_entry("any_of", any_of)?,
+            Self::AllOf { all_of } => map.serialize_entry("all_of", all_of)?,
+            Self::Not { not } => map.serialize_entry("not", not)?,
+        }
+        map.end()
+    }
 }
 
 // Custom deserializer: we need precise error messages and strict rejection of

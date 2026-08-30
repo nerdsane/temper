@@ -89,6 +89,35 @@ on_timeout = "Fail"
 params = { error_message = "start never arrived" }
 "#;
 
+const TYPED_FAILURE_ROUTE_IOA: &str = r#"
+[automaton]
+name = "Alpha"
+states = ["Created", "Running", "RetryScheduled"]
+initial = "Created"
+
+[[action]]
+name = "Start"
+kind = "input"
+from = ["Created"]
+to = "Running"
+
+[[action.triggers]]
+name = "run_worker"
+kind = "wasm"
+module = "worker"
+
+[[action.triggers.failure_routes]]
+category = "transient"
+action = "RecordTransientFailureV1"
+
+[[action]]
+name = "RecordTransientFailureV1"
+kind = "input"
+from = ["Running"]
+to = "RetryScheduled"
+params = [{ name = "failure", type = "failure_v1" }]
+"#;
+
 const ORDERED_CSDL: &str = r#"<?xml version="1.0"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
   <edmx:DataServices>
@@ -247,6 +276,47 @@ fn canonical_source_preserves_actions_after_nested_trigger_config() {
         2,
         "Fail effects should survive canonicalization"
     );
+}
+
+#[test]
+fn canonical_bundle_preserves_typed_failure_callback_parameters() {
+    let compiled = ScopedSpecBundle::compile(input(
+        ORDERED_CSDL,
+        vec![("Example.Alpha", TYPED_FAILURE_ROUTE_IOA)],
+    ))
+    .expect("typed failure callback bundle should compile");
+
+    let canonical = &compiled.ioa_specs()[0].canonical_source;
+    assert!(canonical.contains("[[action.params]]"));
+    let automaton = parse_automaton(canonical).expect("canonical IOA should reparse");
+    let callback = automaton
+        .actions
+        .iter()
+        .find(|action| action.name == "RecordTransientFailureV1")
+        .expect("callback action should retain its identity");
+    assert_eq!(callback.params.len(), 1);
+    assert_eq!(callback.params[0].name(), "failure");
+    assert_eq!(callback.params[0].param_type(), "failure_v1");
+
+    let recompiled = ScopedSpecBundle::compile(ScopedSpecBundleInput {
+        scope_id: compiled.scope_id().into(),
+        predecessor_digest: compiled.predecessor_digest().map(str::to_string),
+        csdl_xml: compiled.canonical_csdl().into(),
+        ioa_sources: compiled
+            .ioa_specs()
+            .iter()
+            .map(|spec| IoaSourceInput {
+                entity_type: spec.entity_type.clone(),
+                source: spec.canonical_source.clone(),
+            })
+            .collect(),
+        cedar_policies: compiled.cedar_policies().to_vec(),
+        wasm_modules: compiled.wasm_modules().to_vec(),
+        migration: compiled.migration().cloned(),
+        budgets: compiled.budgets().clone(),
+    })
+    .expect("canonical typed failure callback bundle should recompile");
+    assert_eq!(compiled, recompiled);
 }
 
 #[test]

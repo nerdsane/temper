@@ -175,7 +175,45 @@ to = "Done"
     )
 }
 
+fn typed_failure_ioa(name: &str) -> String {
+    format!(
+        r#"[automaton]
+name = "{name}"
+states = ["Open", "Running", "RetryScheduled"]
+initial = "Open"
+
+[[action]]
+name = "Start"
+kind = "input"
+from = ["Open"]
+to = "Running"
+
+[[action.triggers]]
+name = "run_worker"
+kind = "wasm"
+module = "worker"
+
+[[action.triggers.failure_routes]]
+category = "transient"
+action = "RecordTransientFailureV1"
+
+[[action]]
+name = "RecordTransientFailureV1"
+kind = "input"
+from = ["Running"]
+to = "RetryScheduled"
+params = [{{ name = "failure", type = "failure_v1" }}]
+"#
+    )
+}
+
 fn bound_dependency_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    bound_dependency_fixture_with_root_ioa(ioa("Task"))
+}
+
+fn bound_dependency_fixture_with_root_ioa(
+    root_ioa: String,
+) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let temp = tempfile::tempdir().unwrap();
     let apps = temp.path().join("apps");
     let root = apps.join("root");
@@ -208,7 +246,7 @@ type = "Paw.FS.File"
     )
     .unwrap();
     std::fs::write(root.join("specs/model.csdl.xml"), ROOT_CSDL).unwrap();
-    std::fs::write(root.join("specs/task.ioa.toml"), ioa("Task")).unwrap();
+    std::fs::write(root.join("specs/task.ioa.toml"), root_ioa).unwrap();
     std::fs::write(
         dependency.join("app.toml"),
         "name = \"dependency\"\nversion = \"2.0.0\"\n",
@@ -302,6 +340,18 @@ async fn local_catalog_install_uses_the_generated_module_sdk_closure() {
     let platform = bundle_test_platform(temp.path().join("data")).await;
 
     crate::os_apps::install_os_app(&platform, "local-typed-module", "root")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn locked_install_preserves_typed_failure_callback_closure() {
+    let (temp, root, _dependency) =
+        bound_dependency_fixture_with_root_ioa(typed_failure_ioa("Task"));
+    let locked = locked_workspace_bundle(&root, "typed-failure-route");
+    let platform = bundle_test_platform(temp.path().join("data")).await;
+
+    install_local_bundle(&platform, locked.request)
         .await
         .unwrap();
 }
