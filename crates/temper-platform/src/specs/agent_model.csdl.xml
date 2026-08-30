@@ -48,6 +48,32 @@
         <Property Name="default_budget_cents" Type="Edm.String"/>
       </EntityType>
 
+      <Action Name="Define" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentType" Nullable="false"/>
+        <Parameter Name="name" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="system_prompt" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="tool_set" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="model" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="max_turns" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="adapter_config" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="default_budget_cents" Type="Edm.String" Nullable="false"/>
+      </Action>
+      <Action Name="Update" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentType" Nullable="false"/>
+        <Parameter Name="system_prompt" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="tool_set" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="model" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="max_turns" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="adapter_config" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="default_budget_cents" Type="Edm.String" Nullable="false"/>
+      </Action>
+      <Action Name="Deprecate" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentType" Nullable="false"/>
+      </Action>
+      <Action Name="Reactivate" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AgentType" Nullable="false"/>
+      </Action>
+
       <EntityType Name="Agent">
         <Key><PropertyRef Name="id"/></Key>
         <Property Name="id" Type="Edm.String" Nullable="false"/>
@@ -142,7 +168,7 @@
       </EntityType>
 
       <Action Name="Issue" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.AgentCredential"/>
+        <Parameter Name="bindingParameter" Type="Temper.AgentCredential" Nullable="false"/>
         <Parameter Name="agent_type_id" Type="Edm.String" Nullable="false"/>
         <Parameter Name="agent_instance_id" Type="Edm.String" Nullable="false"/>
         <Parameter Name="key_hash" Type="Edm.String" Nullable="false"/>
@@ -154,7 +180,7 @@
       </Action>
 
       <Action Name="Rotate" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.AgentCredential"/>
+        <Parameter Name="bindingParameter" Type="Temper.AgentCredential" Nullable="false"/>
         <Parameter Name="key_hash" Type="Edm.String" Nullable="false"/>
         <Parameter Name="key_prefix" Type="Edm.String" Nullable="false"/>
         <Parameter Name="description" Type="Edm.String" Nullable="true"/>
@@ -162,7 +188,7 @@
       </Action>
 
       <Action Name="Revoke" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.AgentCredential"/>
+        <Parameter Name="bindingParameter" Type="Temper.AgentCredential" Nullable="false"/>
         <ReturnType Type="Temper.AgentCredential"/>
       </Action>
 

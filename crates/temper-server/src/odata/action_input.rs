@@ -39,7 +39,12 @@ pub(super) fn validate_bound_action_input(
     };
     let action_name = action_name.rsplit('.').next().unwrap_or(action_name);
     let Some(action) = find_bound_action(&csdl, entity_type, action_name) else {
-        return Ok(());
+        return Err(ActionInputViolation {
+            code: "UnknownBoundAction",
+            message: format!(
+                "action '{entity_type}.{action_name}' has no matching bound CSDL action"
+            ),
+        });
     };
     validate_action_body(&csdl, entity_type, action, body)
 }
@@ -173,6 +178,7 @@ mod tests {
         let action = find_bound_action(&csdl, "Task", &name).unwrap();
         for body in [
             serde_json::json!({"AgentId": "a"}),
+            serde_json::json!({"AgentId": ""}),
             serde_json::json!({"AgentId": "a", "Note": null}),
             serde_json::json!({"agent_id": "a", "note": "hello"}),
         ] {
@@ -214,6 +220,66 @@ mod tests {
         ] {
             let error = validate_action_body(&csdl, "Task", action, &body).unwrap_err();
             assert_eq!(error.code, "ActionParameterTypeMismatch");
+        }
+    }
+
+    #[test]
+    fn unmatched_bound_action_fails_closed() {
+        let (csdl, _) = action();
+        let xml = r#"<?xml version="1.0"?><edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="T" xmlns="http://docs.oasis-open.org/odata/ns/edm"><Action Name="Assign" IsBound="true"><Parameter Name="bindingParameter" Type="T.Task" Nullable="false"/><Parameter Name="AgentId" Type="Edm.String" Nullable="false"/></Action></Schema></edmx:DataServices></edmx:Edmx>"#;
+        let state = crate::state::ServerState::new(
+            temper_runtime::ActorSystem::new("unmatched-action"),
+            csdl,
+            xml.to_string(),
+        );
+        let error = validate_bound_action_input(
+            &state,
+            &temper_runtime::tenant::TenantId::default(),
+            None,
+            "Order",
+            "NotAnAction",
+            &serde_json::json!({}),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "UnknownBoundAction");
+    }
+
+    #[test]
+    fn directory_create_does_not_skip_schema() {
+        let xml = include_str!("../../../../os-apps/temper-fs/specs/model.csdl.xml");
+        let csdl = parse_csdl(xml).expect("FS CSDL");
+        let state = crate::state::ServerState::new(
+            temper_runtime::ActorSystem::new("directory-create"),
+            csdl,
+            xml.to_string(),
+        );
+        let tenant = temper_runtime::tenant::TenantId::default();
+        for (body, expected) in [
+            (serde_json::json!({}), "MissingActionParameter"),
+            (
+                serde_json::json!({"name": 7, "path": "/", "workspace_id": "ws"}),
+                "ActionParameterTypeMismatch",
+            ),
+            (
+                serde_json::json!({
+                    "name": "docs",
+                    "path": "/docs",
+                    "workspace_id": "ws",
+                    "extra": true
+                }),
+                "ActionParameterTypeMismatch",
+            ),
+        ] {
+            let error = validate_bound_action_input(
+                &state,
+                &tenant,
+                None,
+                "Directory",
+                "Temper.FS.Create",
+                &body,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, expected, "body={body}");
         }
     }
 

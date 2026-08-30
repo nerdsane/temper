@@ -55,6 +55,122 @@
         <Property Name="reason" Type="Edm.String"/>
       </EntityType>
 
+
+
+      <!-- Callable IOA action twins (ADR-0193) -->
+      <Action Name="Begin" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DeployWorkflow" Nullable="false"/>
+        <ReturnType Type="Temper.DeployWorkflow"/>
+      </Action>
+
+      <Action Name="StartDeploy" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DeployWorkflow" Nullable="false"/>
+        <Parameter Name="environment" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="version" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.DeployWorkflow"/>
+      </Action>
+
+      <Action Name="Verify" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DeployWorkflow" Nullable="false"/>
+        <ReturnType Type="Temper.DeployWorkflow"/>
+      </Action>
+
+      <Action Name="GoLive" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DeployWorkflow" Nullable="false"/>
+        <Parameter Name="deploy_url" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.DeployWorkflow"/>
+      </Action>
+
+      <Action Name="Rollback" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DeployWorkflow" Nullable="false"/>
+        <Parameter Name="reason" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.DeployWorkflow"/>
+      </Action>
+
+      <Action Name="StartPlanning" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.LeadPlan" Nullable="false"/>
+        <ReturnType Type="Temper.LeadPlan"/>
+      </Action>
+
+      <Action Name="StartTesting" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.LeadPlan" Nullable="false"/>
+        <ReturnType Type="Temper.LeadPlan"/>
+      </Action>
+
+      <Action Name="StartReview" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.LeadPlan" Nullable="false"/>
+        <Parameter Name="test_results" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.LeadPlan"/>
+      </Action>
+
+      <Action Name="StartDeploy" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.LeadPlan" Nullable="false"/>
+        <Parameter Name="review_approval" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.LeadPlan"/>
+      </Action>
+
+      <Action Name="Complete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.LeadPlan" Nullable="false"/>
+        <Parameter Name="deploy_url" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.LeadPlan"/>
+      </Action>
+
+      <Action Name="Fail" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.LeadPlan" Nullable="false"/>
+        <Parameter Name="reason" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.LeadPlan"/>
+      </Action>
+
+      <Action Name="Begin" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReviewWorkflow" Nullable="false"/>
+        <ReturnType Type="Temper.ReviewWorkflow"/>
+      </Action>
+
+      <Action Name="Approve" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReviewWorkflow" Nullable="false"/>
+        <Parameter Name="reviewer" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="comments" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.ReviewWorkflow"/>
+      </Action>
+
+      <Action Name="RequestChanges" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReviewWorkflow" Nullable="false"/>
+        <Parameter Name="reviewer" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="change_requests" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.ReviewWorkflow"/>
+      </Action>
+
+      <Action Name="Reject" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReviewWorkflow" Nullable="false"/>
+        <Parameter Name="reviewer" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="reason" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.ReviewWorkflow"/>
+      </Action>
+
+      <Action Name="ReSubmit" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ReviewWorkflow" Nullable="false"/>
+        <ReturnType Type="Temper.ReviewWorkflow"/>
+      </Action>
+
+      <Action Name="Begin" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.TestWorkflow" Nullable="false"/>
+        <ReturnType Type="Temper.TestWorkflow"/>
+      </Action>
+
+      <Action Name="RecordPass" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.TestWorkflow" Nullable="false"/>
+        <Parameter Name="test_count" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="coverage" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.TestWorkflow"/>
+      </Action>
+
+      <Action Name="RecordFail" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.TestWorkflow" Nullable="false"/>
+        <Parameter Name="failures" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="error_log" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.TestWorkflow"/>
+      </Action>
+
       <EntityContainer Name="Service">
         <EntitySet Name="LeadPlans" EntityType="Temper.LeadPlan">
           <NavigationPropertyBinding Path="TestWorkflow" Target="TestWorkflows"/>

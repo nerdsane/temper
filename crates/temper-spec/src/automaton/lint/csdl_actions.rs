@@ -42,6 +42,17 @@ pub fn lint_automata_csdl_bundle(
                         .is_some_and(|binding| type_tail(&binding.type_name) == entity_name)
                 })
                 .collect();
+            if matching.is_empty() && csdl_has_entity_type(csdl, entity_name) {
+                findings.push(BundleLintFinding::error(
+                    entity_name,
+                    "csdl_action_missing",
+                    format!(
+                        "callable IOA action '{}.{}' has no matching bound CSDL action",
+                        entity_name, ioa_action.name
+                    ),
+                ));
+                continue;
+            }
             for csdl_action in matching.iter().copied() {
                 lint_csdl_action_contract(entity_name, ioa_action, csdl_action, &mut findings);
             }
@@ -170,6 +181,15 @@ fn insert_normalized_param(
         return;
     }
     params.insert(normalized, (name.to_string(), nullable));
+}
+
+fn csdl_has_entity_type(csdl: &CsdlDocument, entity_name: &str) -> bool {
+    csdl.schemas.iter().any(|schema| {
+        schema
+            .entity_types
+            .iter()
+            .any(|entity| entity.name == entity_name)
+    })
 }
 
 fn type_tail(type_name: &str) -> &str {

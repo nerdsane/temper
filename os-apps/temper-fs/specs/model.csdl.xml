@@ -334,6 +334,79 @@
 
       <!-- ============ Entity Container ============ -->
 
+
+
+      <!-- Callable IOA action twins (ADR-0193) -->
+      <Action Name="Create" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.Directory" Nullable="false"/>
+        <Parameter Name="name" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="path" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="parent_id" Type="Edm.Guid"/>
+        <Parameter Name="workspace_id" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.FS.Directory"/>
+      </Action>
+
+      <Action Name="Rename" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.Directory" Nullable="false"/>
+        <Parameter Name="name" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="path" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.FS.Directory"/>
+      </Action>
+
+      <Action Name="Archive" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.Directory" Nullable="false"/>
+        <ReturnType Type="Temper.FS.Directory"/>
+      </Action>
+
+      <Action Name="Create" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.File" Nullable="false"/>
+        <Parameter Name="name" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="path" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="directory_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="workspace_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="mime_type" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.FS.File"/>
+      </Action>
+
+      <Action Name="Archive" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.File" Nullable="false"/>
+        <ReturnType Type="Temper.FS.File"/>
+      </Action>
+
+      <Action Name="Create" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.FileVersion" Nullable="false"/>
+        <Parameter Name="file_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="version_number" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="content_hash" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="mime_type" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="size_bytes" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="previous_version_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="created_by" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.FS.FileVersion"/>
+      </Action>
+
+      <Action Name="Create" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace" Nullable="false"/>
+        <Parameter Name="name" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="quota_limit" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.FS.Workspace"/>
+      </Action>
+
+      <Action Name="IncrementFileCount" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace" Nullable="false"/>
+        <ReturnType Type="Temper.FS.Workspace"/>
+      </Action>
+
+      <Action Name="DecrementFileCount" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace" Nullable="false"/>
+        <ReturnType Type="Temper.FS.Workspace"/>
+      </Action>
+
+      <Action Name="Archive" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.Workspace" Nullable="false"/>
+        <ReturnType Type="Temper.FS.Workspace"/>
+      </Action>
+
       <EntityContainer Name="TemperFSService">
         <EntitySet Name="Workspaces" EntityType="Temper.FS.Workspace">
           <NavigationPropertyBinding Path="Directories" Target="Directories"/>

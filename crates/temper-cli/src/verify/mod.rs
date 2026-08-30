@@ -497,6 +497,15 @@ params = ["title", "description", "plan_id"]
         <Property Name="Id" Type="Edm.Guid" Nullable="false" />
         <Property Name="status" Type="Edm.String" />
       </EntityType>
+      <Action Name="Touch" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Fs.File" Nullable="false" />
+      </Action>
+      <Action Name="IncrementUsage" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Fs.Workspace" Nullable="false" />
+      </Action>
+      <Action Name="Freeze" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Fs.Workspace" Nullable="false" />
+      </Action>
       <EntityContainer Name="Service">
         <EntitySet Name="Files" EntityType="Temper.Fs.File" />
         <EntitySet Name="Workspaces" EntityType="Temper.Fs.Workspace" />

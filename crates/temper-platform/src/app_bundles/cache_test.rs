@@ -134,6 +134,16 @@ const ROOT_CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
         <Property Name="id" Type="Edm.String" Nullable="false"/>
         <Property Name="state" Type="Edm.String" Nullable="false"/>
       </EntityType>
+      <Action Name="Complete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Example.Root.Task" Nullable="false"/>
+      </Action>
+      <Action Name="Start" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Example.Root.Task" Nullable="false"/>
+      </Action>
+      <Action Name="RecordTransientFailureV1" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Example.Root.Task" Nullable="false"/>
+        <Parameter Name="failure" Type="failure_v1" Nullable="false"/>
+      </Action>
       <EntityContainer Name="Default">
         <EntitySet Name="Tasks" EntityType="Example.Root.Task"/>
       </EntityContainer>
@@ -151,6 +161,9 @@ const DEPENDENCY_CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
         <Property Name="id" Type="Edm.String" Nullable="false"/>
         <Property Name="state" Type="Edm.String" Nullable="false"/>
       </EntityType>
+      <Action Name="Complete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Paw.FS.File" Nullable="false"/>
+      </Action>
       <EntityContainer Name="Default">
         <EntitySet Name="Files" EntityType="Paw.FS.File"/>
       </EntityContainer>

@@ -146,10 +146,23 @@ async fn generated_client_survives_submission_activation_and_cold_restart() {
     state.data_dir = temp.path().join("data");
 
     let sources = ioa_sources();
+    let budgets = ScopedBundleBudgets::default();
+    let canonical = ScopedSpecBundle::compile(ScopedSpecBundleInput {
+        scope_id: "generated-client-canonicalization".into(),
+        predecessor_digest: None,
+        csdl_xml: CSDL.into(),
+        ioa_sources: sources.clone(),
+        cedar_policies: Vec::new(),
+        wasm_modules: Vec::new(),
+        migration: None,
+        budgets: budgets.clone(),
+    })
+    .expect("fixture closure should canonicalize");
     let closure = scoped_module_data_closure_digest(CSDL, sources.clone())
         .expect("fixture closure should canonicalize");
     let generated = temper_codegen::generate_module_sdk(
-        &temper_spec::parse_csdl(CSDL).expect("fixture CSDL should parse"),
+        &temper_spec::parse_csdl(canonical.canonical_csdl())
+            .expect("canonical fixture CSDL should parse"),
         &sources,
         MODULE_NAME,
         &closure,
@@ -174,7 +187,6 @@ async fn generated_client_survives_submission_activation_and_cold_restart() {
         .expect("scoped artifact should persist before submission");
 
     let scope_id = "generated-client-e2e";
-    let budgets = ScopedBundleBudgets::default();
     let binding_digest = packaged
         .manifest
         .binding_digest()

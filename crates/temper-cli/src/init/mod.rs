@@ -15,6 +15,9 @@ const CSDL_TEMPLATE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
         <Property Name="Name" Type="Edm.String" Nullable="false"/>
         <Property Name="Status" Type="Edm.String" Nullable="false"/>
       </EntityType>
+      <Action Name="Complete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="{{namespace}}.Item" Nullable="false"/>
+      </Action>
       <EntityContainer Name="Service">
         <EntitySet Name="Items" EntityType="{{namespace}}.Item"/>
       </EntityContainer>

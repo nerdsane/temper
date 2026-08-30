@@ -936,6 +936,57 @@
 
       <!-- ============ Entity Container ============ -->
 
+
+
+      <!-- Callable IOA action twins (ADR-0193) -->
+      <Action Name="Start" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.CrucibleScheduler" Nullable="false"/>
+        <Parameter Name="heartbeat_interval_seconds" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Crucible.CrucibleScheduler"/>
+      </Action>
+
+      <Action Name="ScheduledCheck" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.CrucibleScheduler" Nullable="false"/>
+        <ReturnType Type="Temper.Crucible.CrucibleScheduler"/>
+      </Action>
+
+      <Action Name="CheckComplete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.CrucibleScheduler" Nullable="false"/>
+        <Parameter Name="schedules_triggered" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Crucible.CrucibleScheduler"/>
+      </Action>
+
+      <Action Name="CheckFailed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.CrucibleScheduler" Nullable="false"/>
+        <Parameter Name="error" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Crucible.CrucibleScheduler"/>
+      </Action>
+
+      <Action Name="ScheduleFailed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.CrucibleScheduler" Nullable="false"/>
+        <Parameter Name="error" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Crucible.CrucibleScheduler"/>
+      </Action>
+
+      <Action Name="Trigger" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.SessionSchedule" Nullable="false"/>
+        <ReturnType Type="Temper.Crucible.SessionSchedule"/>
+      </Action>
+
+      <Action Name="TriggerComplete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.SessionSchedule" Nullable="false"/>
+        <Parameter Name="last_result" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Crucible.SessionSchedule"/>
+      </Action>
+
+      <Action Name="TriggerFailed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Crucible.SessionSchedule" Nullable="false"/>
+        <Parameter Name="error" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="error_message" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="integration" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Crucible.SessionSchedule"/>
+      </Action>
+
       <EntityContainer Name="CrucibleService">
         <EntitySet Name="Environments" EntityType="Temper.Crucible.Environment">
           <NavigationPropertyBinding Path="AllowedHosts" Target="EnvironmentAllowedHosts"/>

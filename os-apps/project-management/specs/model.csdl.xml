@@ -559,6 +559,15 @@
 
       <!-- ============ Entity Container ============ -->
 
+
+
+      <!-- Callable IOA action twins (ADR-0193) -->
+      <Action Name="Reassign" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Issue" Nullable="false"/>
+        <Parameter Name="NewAssigneeId" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Issue"/>
+      </Action>
+
       <EntityContainer Name="ProjectManagementService">
         <EntitySet Name="Issues" EntityType="Temper.ProjectManagement.Issue">
           <NavigationPropertyBinding Path="ParentIssue" Target="Issues"/>

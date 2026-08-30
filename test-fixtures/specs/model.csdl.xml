@@ -311,6 +311,14 @@
                     String="Add a product to a draft order. Verify the order is in Draft status first. Use the Product entity to look up valid ProductIds."/>
       </Action>
 
+      <Action Name="Configure" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order" Nullable="false"/>
+      </Action>
+
+      <Action Name="Simulate" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order" Nullable="false"/>
+      </Action>
+
       <Action Name="RemoveItem" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Example.Order" Nullable="false"/>
         <Parameter Name="ItemId" Type="Edm.Guid" Nullable="false"/>
@@ -478,6 +486,67 @@
       </Function>
 
       <!-- ============ Entity Container ============ -->
+
+
+
+      <!-- Callable IOA action twins (ADR-0193) -->
+      <Action Name="Create" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Directory" Nullable="false"/>
+        <Parameter Name="name" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="path" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="parent_id" Type="Edm.Guid"/>
+        <Parameter Name="workspace_id" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Example.Directory"/>
+      </Action>
+
+      <Action Name="AddChild" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Directory" Nullable="false"/>
+        <ReturnType Type="Temper.Example.Directory"/>
+      </Action>
+
+      <Action Name="RemoveChild" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Directory" Nullable="false"/>
+        <ReturnType Type="Temper.Example.Directory"/>
+      </Action>
+
+      <Action Name="Rename" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Directory" Nullable="false"/>
+        <Parameter Name="name" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="path" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Example.Directory"/>
+      </Action>
+
+      <Action Name="Archive" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Directory" Nullable="false"/>
+        <ReturnType Type="Temper.Example.Directory"/>
+      </Action>
+
+      <Action Name="ProcessOrder" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order" Nullable="false"/>
+        <ReturnType Type="Temper.Example.Order"/>
+      </Action>
+
+      <Action Name="ShipOrder" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order" Nullable="false"/>
+        <Parameter Name="Carrier" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="TrackingNumber" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Example.Order"/>
+      </Action>
+
+      <Action Name="DeliverOrder" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order" Nullable="false"/>
+        <ReturnType Type="Temper.Example.Order"/>
+      </Action>
+
+      <Action Name="CompleteReturn" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order" Nullable="false"/>
+        <ReturnType Type="Temper.Example.Order"/>
+      </Action>
+
+      <Action Name="RefundOrder" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Example.Order" Nullable="false"/>
+        <ReturnType Type="Temper.Example.Order"/>
+      </Action>
 
       <EntityContainer Name="ExampleService">
         <EntitySet Name="Customers" EntityType="Temper.Example.Customer">

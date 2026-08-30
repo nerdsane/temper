@@ -131,6 +131,11 @@ const ORDERED_CSDL: &str = r#"<?xml version="1.0"?>
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
       </EntityType>
+      <Action Name="Ready" IsBound="true"><Parameter Name="bindingParameter" Type="Example.Alpha" Nullable="false"/></Action>
+      <Action Name="Start" IsBound="true"><Parameter Name="bindingParameter" Type="Example.Alpha" Nullable="false"/></Action>
+      <Action Name="Fail" IsBound="true"><Parameter Name="bindingParameter" Type="Example.Alpha" Nullable="false"/><Parameter Name="error_message" Type="Edm.String" Nullable="false"/></Action>
+      <Action Name="RecordTransientFailureV1" IsBound="true"><Parameter Name="bindingParameter" Type="Example.Alpha" Nullable="false"/><Parameter Name="failure" Type="failure_v1" Nullable="false"/></Action>
+      <Action Name="Adjust" IsBound="true"><Parameter Name="bindingParameter" Type="Example.Alpha" Nullable="false"/><Parameter Name="delta" Type="Edm.Int64"/></Action>
       <EntityContainer Name="Service">
         <EntitySet Name="Alphas" EntityType="Example.Alpha"/>
         <EntitySet Name="Betas" EntityType="Example.Beta"/>
@@ -156,6 +161,11 @@ const REORDERED_CSDL: &str = r#"
     <Property Type="Edm.Guid" Nullable="false" Name="Id" />
     <Key><PropertyRef Name="Id" /></Key>
    </EntityType>
+   <Action Name="Ready" IsBound="true"><Parameter Name="bindingParameter" Type="Example.Alpha" Nullable="false"/></Action>
+   <Action Name="Start" IsBound="true"><Parameter Name="bindingParameter" Type="Example.Alpha" Nullable="false"/></Action>
+   <Action Name="Fail" IsBound="true"><Parameter Name="bindingParameter" Type="Example.Alpha" Nullable="false"/><Parameter Name="error_message" Type="Edm.String" Nullable="false"/></Action>
+   <Action Name="RecordTransientFailureV1" IsBound="true"><Parameter Name="bindingParameter" Type="Example.Alpha" Nullable="false"/><Parameter Name="failure" Type="failure_v1" Nullable="false"/></Action>
+   <Action Name="Adjust" IsBound="true"><Parameter Name="bindingParameter" Type="Example.Alpha" Nullable="false"/><Parameter Name="delta" Type="Edm.Int64"/></Action>
   </Schema>
  </edmx:DataServices>
 </edmx:Edmx>
@@ -196,12 +206,16 @@ fn canonical_bundle_identity_ignores_formatting_and_input_order() {
     ))
     .expect("reordered bundle should compile");
 
+    assert_eq!(
+        first.canonical_csdl(),
+        second.canonical_csdl(),
+        "canonical CSDL must ignore source ordering"
+    );
     assert_eq!(first.digest(), second.digest());
-    assert_eq!(first.canonical_csdl(), second.canonical_csdl());
     assert_eq!(first.ioa_specs(), second.ioa_specs());
     assert_eq!(
         first.digest(),
-        "sha256:1b6d8593187902e64156ff79c09b5738bbaae2f6170558a24b63d7106864fadb"
+        "sha256:0c2453c7521f327e84be1e21a9afdc8cce3836bf38aeceb166cd876f780d9fca"
     );
 }
 
@@ -691,8 +705,8 @@ to = "Ready"
 params = [{ name = "Code", type = "Edm.String" }]
 "#;
     let csdl = ORDERED_CSDL.replace(
-        "      <EntityContainer Name=\"Service\">",
-        "      <Action Name=\"Ready\" IsBound=\"true\"><Parameter Name=\"bindingParameter\" Type=\"Example.Alpha\" Nullable=\"false\"/><Parameter Name=\"Code\" Type=\"Edm.String\"/></Action>\n      <EntityContainer Name=\"Service\">",
+        "      <Action Name=\"Ready\" IsBound=\"true\"><Parameter Name=\"bindingParameter\" Type=\"Example.Alpha\" Nullable=\"false\"/></Action>",
+        "      <Action Name=\"Ready\" IsBound=\"true\"><Parameter Name=\"bindingParameter\" Type=\"Example.Alpha\" Nullable=\"false\"/><Parameter Name=\"Code\" Type=\"Edm.String\"/></Action>",
     );
     let error = ScopedSpecBundle::compile(input(&csdl, vec![("Example.Alpha", ioa)])).unwrap_err();
     assert!(

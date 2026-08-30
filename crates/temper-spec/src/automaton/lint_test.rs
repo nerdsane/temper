@@ -531,3 +531,89 @@ params = ["agent_id", "AgentId"]
             .any(|finding| finding.code == "csdl_action_parameter_alias_collision")
     );
 }
+
+#[test]
+fn csdl_bundle_lint_requires_matching_bound_action() {
+    let automaton = parse(
+        r#"
+[automaton]
+name = "Directory"
+states = ["Active"]
+initial = "Active"
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Active"]
+params = ["name", "path", "workspace_id"]
+"#,
+    );
+    let csdl = parse_csdl(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.FS" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Directory"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/></EntityType>
+      <Action Name="AddChild" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.FS.Directory" Nullable="false"/>
+      </Action>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#,
+    )
+    .expect("parse CSDL");
+    let findings = lint_automata_csdl_bundle(
+        &BTreeMap::from([("Directory".to_string(), automaton)]),
+        &csdl,
+    );
+
+    assert!(findings.iter().any(|finding| {
+        finding.code == "csdl_action_missing"
+            && finding.entity == "Directory"
+            && finding.message.contains("Create")
+    }));
+}
+
+#[test]
+fn csdl_bundle_lint_requires_exact_action_name() {
+    let automaton = parse(
+        r#"
+[automaton]
+name = "Task"
+states = ["Open"]
+initial = "Open"
+
+[[action]]
+name = "Assign"
+kind = "input"
+from = ["Open"]
+params = [{ name = "agent_id", type = "Edm.String" }]
+"#,
+    );
+    let csdl = parse_csdl(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Test" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Task"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/></EntityType>
+      <Action Name="assign" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Test.Task" Nullable="false"/>
+        <Parameter Name="AgentId" Type="Edm.String" Nullable="false"/>
+      </Action>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#,
+    )
+    .expect("parse CSDL");
+    let findings =
+        lint_automata_csdl_bundle(&BTreeMap::from([("Task".to_string(), automaton)]), &csdl);
+
+    assert!(findings.iter().any(|finding| {
+        finding.code == "csdl_action_missing" && finding.message.contains("Assign")
+    }));
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.code == "csdl_action_parameter_requiredness_mismatch")
+    );
+}

@@ -559,6 +559,138 @@
 
       <!-- ============ Entity Container ============ -->
 
+
+
+      <!-- Callable IOA action twins (ADR-0193) -->
+      <Action Name="Create" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Comment" Nullable="false"/>
+        <Parameter Name="issue_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="body" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="author_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="agent_type" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="session_id" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Comment"/>
+      </Action>
+
+      <Action Name="Edit" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Comment" Nullable="false"/>
+        <Parameter Name="body" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Comment"/>
+      </Action>
+
+      <Action Name="Delete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Comment" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Comment"/>
+      </Action>
+
+      <Action Name="React" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Comment" Nullable="false"/>
+        <Parameter Name="emoji" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="reactor_id" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Comment"/>
+      </Action>
+
+      <Action Name="SetProject" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Cycle" Nullable="false"/>
+        <Parameter Name="project_id" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Cycle"/>
+      </Action>
+
+      <Action Name="AddIssueToCycle" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Cycle" Nullable="false"/>
+        <Parameter Name="IssueId" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Cycle"/>
+      </Action>
+
+      <Action Name="Start" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Cycle" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Cycle"/>
+      </Action>
+
+      <Action Name="MarkIssueComplete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Cycle" Nullable="false"/>
+        <Parameter Name="IssueId" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Cycle"/>
+      </Action>
+
+      <Action Name="Complete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Cycle" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Cycle"/>
+      </Action>
+
+      <Action Name="RemoveIssueFromCycle" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Cycle" Nullable="false"/>
+        <Parameter Name="IssueId" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Cycle"/>
+      </Action>
+
+      <Action Name="Create" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Label" Nullable="false"/>
+        <Parameter Name="name" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="color" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="description" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Label"/>
+      </Action>
+
+      <Action Name="IncrementUsage" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Label" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Label"/>
+      </Action>
+
+      <Action Name="Archive" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Label" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Label"/>
+      </Action>
+
+      <Action Name="SetDescription" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Project" Nullable="false"/>
+        <Parameter Name="description" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Project"/>
+      </Action>
+
+      <Action Name="Activate" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Project" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Project"/>
+      </Action>
+
+      <Action Name="AddIssue" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Project" Nullable="false"/>
+        <Parameter Name="IssueId" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Project"/>
+      </Action>
+
+      <Action Name="AddCycle" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Project" Nullable="false"/>
+        <Parameter Name="CycleId" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Project"/>
+      </Action>
+
+      <Action Name="AddMember" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Project" Nullable="false"/>
+        <Parameter Name="AgentId" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Project"/>
+      </Action>
+
+      <Action Name="Pause" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Project" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Project"/>
+      </Action>
+
+      <Action Name="Resume" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Project" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Project"/>
+      </Action>
+
+      <Action Name="Complete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Project" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Project"/>
+      </Action>
+
+      <Action Name="Archive" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ProjectManagement.Project" Nullable="false"/>
+        <ReturnType Type="Temper.ProjectManagement.Project"/>
+      </Action>
+
       <EntityContainer Name="ProjectManagementService">
         <EntitySet Name="Issues" EntityType="Temper.ProjectManagement.Issue">
           <NavigationPropertyBinding Path="ParentIssue" Target="Issues"/>

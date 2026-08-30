@@ -79,6 +79,8 @@ const ACTIVE_STREAM_CSDL: &str = r#"<?xml version="1.0"?>
 <Annotation Term="Temper.Vocab.Stream.MigrationStorageContractVersion" Int="1"/>
 <Annotation Term="Temper.Vocab.Stream.MigrationStorageKeyPrefix" String="temper-fs/"/>
 </EntityType>
+<Action Name="StreamUpdated" IsBound="true"><Parameter Name="bindingParameter" Type="Example.File" Nullable="false"/><Parameter Name="content_hash" Type="Edm.String" Nullable="false"/><Parameter Name="size_bytes" Type="Edm.String" Nullable="false"/><Parameter Name="mime_type" Type="Edm.String" Nullable="false"/></Action>
+<Action Name="Touch" IsBound="true"><Parameter Name="bindingParameter" Type="Example.File" Nullable="false"/></Action>
 <EntityContainer Name="Default"><EntitySet Name="Files" EntityType="Example.File"/></EntityContainer>
 </Schema></edmx:DataServices></edmx:Edmx>"#;
 

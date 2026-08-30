@@ -13,6 +13,16 @@
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
         <Property Name="Status" Type="Edm.String" Nullable="false" DefaultValue="Idle"/>
       </EntityType>
+      <Action Name="Run" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Scoped.Worker" Nullable="false"/>
+      </Action>
+      <Action Name="Completed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Scoped.Worker" Nullable="false"/>
+      </Action>
+      <Action Name="RunFailed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Scoped.Worker" Nullable="false"/>
+        <Parameter Name="failure" Type="failure_v1" Nullable="false"/>
+      </Action>
       <EntityContainer Name="Container">
         <EntitySet Name="Customers" EntityType="Temper.Scoped.Customer"/>
         <EntitySet Name="Workers" EntityType="Temper.Scoped.Worker"/>

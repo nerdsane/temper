@@ -35,6 +35,12 @@
       <Action Name="Deploy" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.System.Tenant"  Nullable="false"/>
       </Action>
+      <Action Name="BeginDeployment" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Tenant" Nullable="false" />
+      </Action>
+      <Action Name="CompleteDeployment" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Tenant" Nullable="false" />
+      </Action>
       <Action Name="Suspend" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.System.Tenant"  Nullable="false"/>
       </Action>
@@ -298,6 +304,255 @@
       </Action>
       <Action Name="DeleteHttpEndpoint" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.System.HttpEndpoint"  Nullable="false"/>
+      </Action>
+
+
+
+      <!-- Callable IOA action twins (ADR-0193) -->
+      <Action Name="CreateAnalysis" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Analysis" Nullable="false"/>
+        <Parameter Name="problem_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="root_cause" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="options" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="recommendation" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.System.Analysis"/>
+      </Action>
+
+      <Action Name="MarkReviewed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Analysis" Nullable="false"/>
+        <ReturnType Type="Temper.System.Analysis"/>
+      </Action>
+
+      <Action Name="Accept" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Analysis" Nullable="false"/>
+        <ReturnType Type="Temper.System.Analysis"/>
+      </Action>
+
+      <Action Name="Reject" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Analysis" Nullable="false"/>
+        <ReturnType Type="Temper.System.Analysis"/>
+      </Action>
+
+      <Action Name="CreateEntry" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.CatalogEntry" Nullable="false"/>
+        <ReturnType Type="Temper.System.CatalogEntry"/>
+      </Action>
+
+      <Action Name="Invite" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Collaborator" Nullable="false"/>
+        <ReturnType Type="Temper.System.Collaborator"/>
+      </Action>
+
+      <Action Name="CreateDecision" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.EvolutionDecision" Nullable="false"/>
+        <Parameter Name="analysis_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="decided_by" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="rationale" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="verification_summary" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.System.EvolutionDecision"/>
+      </Action>
+
+      <Action Name="Approve" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.EvolutionDecision" Nullable="false"/>
+        <ReturnType Type="Temper.System.EvolutionDecision"/>
+      </Action>
+
+      <Action Name="Reject" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.EvolutionDecision" Nullable="false"/>
+        <ReturnType Type="Temper.System.EvolutionDecision"/>
+      </Action>
+
+      <Action Name="Defer" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.EvolutionDecision" Nullable="false"/>
+        <ReturnType Type="Temper.System.EvolutionDecision"/>
+      </Action>
+
+      <Action Name="CreateFeatureRequest" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest" Nullable="false"/>
+        <Parameter Name="category" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="description" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="frequency" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="developer_notes" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.System.FeatureRequest"/>
+      </Action>
+
+      <Action Name="Acknowledge" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest" Nullable="false"/>
+        <ReturnType Type="Temper.System.FeatureRequest"/>
+      </Action>
+
+      <Action Name="Plan" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest" Nullable="false"/>
+        <ReturnType Type="Temper.System.FeatureRequest"/>
+      </Action>
+
+      <Action Name="WontFix" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest" Nullable="false"/>
+        <ReturnType Type="Temper.System.FeatureRequest"/>
+      </Action>
+
+      <Action Name="Resolve" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest" Nullable="false"/>
+        <ReturnType Type="Temper.System.FeatureRequest"/>
+      </Action>
+
+      <Action Name="CreateGovernanceDecision" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision" Nullable="false"/>
+        <Parameter Name="tenant" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="agent_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="action_name" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="resource_type" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="resource_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="denial_reason" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="scope" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="pending_decision_id" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.System.GovernanceDecision"/>
+      </Action>
+
+      <Action Name="Approve" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision" Nullable="false"/>
+        <Parameter Name="decided_by" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="scope" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="generated_policy" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.System.GovernanceDecision"/>
+      </Action>
+
+      <Action Name="Deny" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision" Nullable="false"/>
+        <Parameter Name="decided_by" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="denial_reason" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.System.GovernanceDecision"/>
+      </Action>
+
+      <Action Name="Expire" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision" Nullable="false"/>
+        <ReturnType Type="Temper.System.GovernanceDecision"/>
+      </Action>
+
+      <Action Name="Create" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.HttpEndpoint" Nullable="false"/>
+        <Parameter Name="path_prefix" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="methods" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="integration_module" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="requires_auth" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="timeout_secs" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="max_fuel" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="max_memory" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="max_response_bytes" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="action_bridge_entity_type" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="action_bridge_entity_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="action_bridge_action" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="action_bridge_response" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.System.HttpEndpoint"/>
+      </Action>
+
+      <Action Name="Pause" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.HttpEndpoint" Nullable="false"/>
+        <ReturnType Type="Temper.System.HttpEndpoint"/>
+      </Action>
+
+      <Action Name="Resume" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.HttpEndpoint" Nullable="false"/>
+        <ReturnType Type="Temper.System.HttpEndpoint"/>
+      </Action>
+
+      <Action Name="Delete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.HttpEndpoint" Nullable="false"/>
+        <ReturnType Type="Temper.System.HttpEndpoint"/>
+      </Action>
+
+      <Action Name="CreateInsight" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Insight" Nullable="false"/>
+        <Parameter Name="observation_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="category" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="signal" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="recommendation" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="priority_score" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.System.Insight"/>
+      </Action>
+
+      <Action Name="Acknowledge" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Insight" Nullable="false"/>
+        <ReturnType Type="Temper.System.Insight"/>
+      </Action>
+
+      <Action Name="MarkActioned" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Insight" Nullable="false"/>
+        <ReturnType Type="Temper.System.Insight"/>
+      </Action>
+
+      <Action Name="Dismiss" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Insight" Nullable="false"/>
+        <ReturnType Type="Temper.System.Insight"/>
+      </Action>
+
+      <Action Name="CreateObservation" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Observation" Nullable="false"/>
+        <Parameter Name="source" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="classification" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="evidence_query" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="context" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="tenant" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.System.Observation"/>
+      </Action>
+
+      <Action Name="Review" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Observation" Nullable="false"/>
+        <ReturnType Type="Temper.System.Observation"/>
+      </Action>
+
+      <Action Name="Resolve" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Observation" Nullable="false"/>
+        <ReturnType Type="Temper.System.Observation"/>
+      </Action>
+
+      <Action Name="Supersede" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Observation" Nullable="false"/>
+        <ReturnType Type="Temper.System.Observation"/>
+      </Action>
+
+      <Action Name="CreateProblem" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Problem" Nullable="false"/>
+        <Parameter Name="observation_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="problem_statement" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="severity" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="invariants" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.System.Problem"/>
+      </Action>
+
+      <Action Name="MarkReviewed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Problem" Nullable="false"/>
+        <ReturnType Type="Temper.System.Problem"/>
+      </Action>
+
+      <Action Name="Resolve" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Problem" Nullable="false"/>
+        <ReturnType Type="Temper.System.Problem"/>
+      </Action>
+
+      <Action Name="Supersede" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Problem" Nullable="false"/>
+        <ReturnType Type="Temper.System.Problem"/>
+      </Action>
+
+      <Action Name="CreateProject" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Project" Nullable="false"/>
+        <ReturnType Type="Temper.System.Project"/>
+      </Action>
+
+      <Action Name="CreateTenant" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Tenant" Nullable="false"/>
+        <ReturnType Type="Temper.System.Tenant"/>
+      </Action>
+
+      <Action Name="Archive" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Tenant" Nullable="false"/>
+        <ReturnType Type="Temper.System.Tenant"/>
+      </Action>
+
+      <Action Name="CreateVersion" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.System.Version" Nullable="false"/>
+        <ReturnType Type="Temper.System.Version"/>
       </Action>
 
       <EntityContainer Name="Container">

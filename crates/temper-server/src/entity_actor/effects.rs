@@ -1958,6 +1958,44 @@ effect = [{ type = "increment", var = "count", amount = "delta" }]
         assert_eq!(state.counters.get("count"), Some(&4));
     }
 
+    #[test]
+    fn older_serialized_table_does_not_skip_requiredness_at_dispatch() {
+        let json = r#"{
+          "entity_name":"Order",
+          "states":["Draft","Cancelled"],
+          "initial_state":"Draft",
+          "rules":[{
+            "name":"CancelOrder",
+            "from_states":["Draft"],
+            "to_state":"Cancelled",
+            "guard":"Always",
+            "effects":[{"SetState":"Cancelled"},{"EmitEvent":"CancelOrder"}]
+          }],
+          "keys":[],
+          "vectors":[],
+          "state_var_metadata":{},
+          "composite_actions":{}
+        }"#;
+        let table: TransitionTable = serde_json::from_str(json).expect("old table fixture");
+        assert!(table.action_params.is_empty());
+
+        let mut state = make_state("Order", "order-old");
+        state.status = "Draft".to_string();
+        let before = state.clone();
+        let result = process_action(&mut state, &table, "CancelOrder", &serde_json::json!({}));
+
+        assert!(!result.success);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("MissingActionParameter"))
+        );
+        assert_eq!(state.status, before.status);
+        assert_eq!(state.events.len(), before.events.len());
+        assert!(result.event.is_none());
+    }
+
     fn active_ref_state(target: &str) -> EntityState {
         let mut state = make_state("Ref", "rf-repo-refs-heads-main");
         state.status = "Active".to_string();

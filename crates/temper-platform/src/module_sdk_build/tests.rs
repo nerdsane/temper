@@ -16,6 +16,9 @@ const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
         <Property Name="id" Type="Edm.String" Nullable="false"/>
         <Property Name="state" Type="Edm.String" Nullable="false" DefaultValue="Open"/>
       </EntityType>
+      <Action Name="Complete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Example.Task" Nullable="false"/>
+      </Action>
       <EntityContainer Name="Default">
         <EntitySet Name="Tasks" EntityType="Example.Task"/>
       </EntityContainer>

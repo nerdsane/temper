@@ -97,7 +97,6 @@ impl TransitionTable {
         let action_params = automaton
             .actions
             .iter()
-            .filter(|action| !action.params.is_empty())
             .map(|action| {
                 let params = action
                     .params
