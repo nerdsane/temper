@@ -12,28 +12,10 @@ use super::ResolvedFailureRoute;
 use super::field_invariant::FieldInvariant;
 
 mod deserialization;
+mod names;
+mod trigger_guard;
 
-/// Return whether a field name is owned by the runtime rather than an action.
-///
-/// Entity identity, lifecycle status, spec-governance metadata, and declared
-/// context statuses are derived from server-proven state. Specs and callers
-/// must not create a second mutable representation of these values.
-pub fn is_server_derived_field_name(name: &str) -> bool {
-    matches!(
-        name,
-        "Id" | "id"
-            | "Status"
-            | "status"
-            | "has_spec"
-            | "HasSpec"
-            | "_temper_state_timeout_declaration_v1"
-    ) || is_server_derived_context_status_name(name)
-}
-
-/// Return whether a field is in the server-derived context-status namespace.
-pub fn is_server_derived_context_status_name(name: &str) -> bool {
-    name.starts_with("ctx_") && name.ends_with("_status")
-}
+pub use names::{is_server_derived_context_status_name, is_server_derived_field_name};
 
 /// A complete I/O Automaton specification for a single entity type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -866,28 +848,6 @@ pub enum TriggerGuard {
         /// Inner guard.
         guard: Box<TriggerGuard>,
     },
-}
-
-impl TriggerGuard {
-    /// Compute the maximum composite nesting depth of this guard.
-    ///
-    /// Leaf variants are depth 1. `AllOf` / `AnyOf` / `Not` add one level.
-    /// Used at parse time to reject guards deeper than
-    /// `MAX_TRIGGER_GUARD_DEPTH`.
-    pub fn depth(&self) -> u32 {
-        match self {
-            TriggerGuard::FieldEquals { .. }
-            | TriggerGuard::FieldIn { .. }
-            | TriggerGuard::BoolTrue { .. }
-            | TriggerGuard::BoolFalse { .. }
-            | TriggerGuard::StateIn { .. }
-            | TriggerGuard::CrossEntityStateIn { .. } => 1,
-            TriggerGuard::AllOf { guards } | TriggerGuard::AnyOf { guards } => {
-                1 + guards.iter().map(Self::depth).max().unwrap_or(0)
-            }
-            TriggerGuard::Not { guard } => 1 + guard.depth(),
-        }
-    }
 }
 
 /// An outgoing trigger declared inline on an `Action` (ADR-0046).
