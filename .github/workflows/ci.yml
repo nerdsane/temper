@@ -299,7 +299,7 @@ jobs:
     name: Bench Build
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
-    timeout-minutes: 45
+    timeout-minutes: 50
     env:
       CARGO_BUILD_JOBS: 2
     steps:
