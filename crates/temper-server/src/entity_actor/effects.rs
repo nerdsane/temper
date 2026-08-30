@@ -1882,8 +1882,8 @@ effect = [{ type = "increment", var = "count", amount = "delta" }]
     }
 
     #[test]
-    fn older_serialized_table_does_not_skip_requiredness_at_dispatch() {
-        let json = r#"{
+    fn older_serialized_table_parameterless_succeeds_required_still_fails_closed() {
+        let parameterless = r#"{
           "entity_name":"Order",
           "states":["Draft","Cancelled"],
           "initial_state":"Draft",
@@ -1899,14 +1899,50 @@ effect = [{ type = "increment", var = "count", amount = "delta" }]
           "state_var_metadata":{},
           "composite_actions":{}
         }"#;
-        let table: TransitionTable = serde_json::from_str(json).expect("old table fixture");
-        assert!(table.action_params.is_empty());
+        let parameterless: TransitionTable =
+            serde_json::from_str(parameterless).expect("parameterless old table");
+        assert!(parameterless.action_params.is_empty());
 
         let mut state = make_state("Order", "order-old");
         state.status = "Draft".to_string();
-        let before = state.clone();
-        let result = process_action(&mut state, &table, "CancelOrder", &serde_json::json!({}));
+        let result = process_action(
+            &mut state,
+            &parameterless,
+            "CancelOrder",
+            &serde_json::json!({}),
+        );
+        assert!(
+            result.success,
+            "parameterless old-table call must still succeed: {:?}",
+            result.error
+        );
+        assert_eq!(state.status, "Cancelled");
 
+        let required = r#"{
+          "entity_name":"Task",
+          "states":["Open"],
+          "initial_state":"Open",
+          "rules":[{
+            "name":"Assign",
+            "from_states":["Open"],
+            "to_state":"Open",
+            "guard":"Always",
+            "effects":[{"EmitEvent":"Assign"}]
+          }],
+          "keys":[],
+          "vectors":[],
+          "state_var_metadata":{},
+          "composite_actions":{},
+          "action_params":{
+            "Assign":[{"name":"agent_id","param_type":"Edm.String"}]
+          }
+        }"#;
+        let required: TransitionTable =
+            serde_json::from_str(required).expect("required-param old table");
+        let mut state = make_state("Task", "task-old");
+        state.status = "Open".to_string();
+        let before = state.clone();
+        let result = process_action(&mut state, &required, "Assign", &serde_json::json!({}));
         assert!(!result.success);
         assert!(
             result

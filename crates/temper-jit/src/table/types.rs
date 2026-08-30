@@ -321,16 +321,11 @@ impl TransitionTable {
         params: &serde_json::Value,
     ) -> Result<(), ActionInputError> {
         let Some(metadata) = self.action_params.get(action) else {
-            // Older serialized tables deserialize with an empty map. They stay
-            // readable, but a known live action without compiled requiredness
-            // metadata must not skip actor-local validation.
-            if self.rule_index.contains_key(action) {
-                return Err(ActionInputError {
-                    code: "MissingActionParameter",
-                    action: action.to_string(),
-                    parameter: action.to_string(),
-                });
-            }
+            // Older serialized tables omit `action_params` (empty map after
+            // deserialize). Newly compiled parameterless actions insert
+            // `action_params[name] = []` and pass below. A missing key must
+            // not brick a live parameterless rule. Requiredness is enforced
+            // only when compiled metadata is present.
             return Ok(());
         };
         let object = params.as_object();
@@ -523,9 +518,61 @@ params = [{ name = "delta_value", type = "Edm.Int64" }]
         }"#;
         let table: TransitionTable = serde_json::from_str(json).expect("old table fixture");
         assert!(table.action_params.is_empty());
-        let error = table
+        table
             .validate_required_action_params("CancelOrder", &serde_json::json!({}))
-            .unwrap_err();
+            .expect("parameterless old-table call must still succeed");
+    }
+
+    #[test]
+    fn older_serialized_table_parameterless_succeeds_required_still_fails_closed() {
+        let parameterless = r#"{
+          "entity_name":"Order",
+          "states":["Draft","Cancelled"],
+          "initial_state":"Draft",
+          "rules":[{
+            "name":"CancelOrder",
+            "from_states":["Draft"],
+            "to_state":"Cancelled",
+            "guard":"Always",
+            "effects":[{"SetState":"Cancelled"}]
+          }],
+          "keys":[],
+          "vectors":[],
+          "state_var_metadata":{},
+          "composite_actions":{}
+        }"#;
+        let parameterless: TransitionTable =
+            serde_json::from_str(parameterless).expect("parameterless old table");
+        assert!(parameterless.action_params.is_empty());
+        parameterless
+            .validate_required_action_params("CancelOrder", &serde_json::json!({}))
+            .expect("parameterless old-table call must still succeed");
+
+        let required = r#"{
+          "entity_name":"Task",
+          "states":["Open"],
+          "initial_state":"Open",
+          "rules":[{
+            "name":"Assign",
+            "from_states":["Open"],
+            "to_state":"Open",
+            "guard":"Always",
+            "effects":[]
+          }],
+          "keys":[],
+          "vectors":[],
+          "state_var_metadata":{},
+          "composite_actions":{},
+          "action_params":{
+            "Assign":[{"name":"agent_id","param_type":"Edm.String"}]
+          }
+        }"#;
+        let required: TransitionTable =
+            serde_json::from_str(required).expect("required-param old table");
+        let error = required
+            .validate_required_action_params("Assign", &serde_json::json!({}))
+            .expect_err("required-param old-table {} must stay MissingActionParameter");
         assert_eq!(error.code, "MissingActionParameter");
+        assert_eq!(error.parameter, "agent_id");
     }
 }

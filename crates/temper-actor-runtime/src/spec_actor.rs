@@ -268,9 +268,21 @@ impl Actor for SpecDrivenActor {
         let incoming_params = self
             .table
             .canonicalize_action_params(&action, &incoming_params);
-        self.table
+        if let Err(error) = self
+            .table
             .validate_required_action_params(&action, &incoming_params)
-            .map_err(|error| ActorError::HandlerFailed(error.to_string()))?;
+        {
+            // Permanent client input (`{}`, JSON null, or non-JSON → `{}`).
+            // HandlerFailed rolls back activate() before cursor advance, so
+            // the same row is retried forever. Consume / dead-letter instead.
+            tracing::warn!(
+                actor = %self.name,
+                action = %action,
+                error = %error,
+                "permanent action input error; consuming message"
+            );
+            return Ok(());
+        }
 
         // Store incoming params in state.fields so integrations can read them.
         // Merge non-empty params into fields to preserve context from prior steps
@@ -434,6 +446,8 @@ impl SpecDrivenActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeZone, Utc};
+    use prost::Message as _;
 
     const SIMPLE_SPEC: &str = r#"
 [automaton]
@@ -459,6 +473,41 @@ kind = "input"
 from = ["Running"]
 to = "Idle"
 "#;
+
+    const REQUIRED_PARAM_SPEC: &str = r#"
+[automaton]
+name = "Task"
+states = ["Open"]
+initial = "Open"
+
+[[action]]
+name = "Assign"
+kind = "input"
+from = ["Open"]
+params = [{ name = "agent_id", type = "Edm.String" }]
+"#;
+
+    fn spec_mailbox_message(id: i64, action: &str, params: serde_json::Value) -> Message {
+        let payload = SpecMessage::with_params(action, params).encode_to_vec();
+        Message {
+            id,
+            from: None,
+            to: ActorHandle::new("test", "Task"),
+            message_type: "SpecMessage".to_string(),
+            payload,
+            correlation_id: None,
+            created_at: Utc.timestamp_opt(0, 0).single().expect("epoch"),
+        }
+    }
+
+    /// Mirrors `PgActorActivator::activate`: `handle` Err returns before
+    /// cursor advance, so the same row is the next `READ_NEXT_MESSAGE`.
+    fn next_poll_id(mailbox: &[Message], last_msg_id: i64) -> Option<i64> {
+        mailbox
+            .iter()
+            .find(|message| message.id > last_msg_id)
+            .map(|message| message.id)
+    }
 
     #[test]
     fn test_spec_driven_actor_initial_state() {
@@ -488,5 +537,43 @@ to = "Idle"
         let maps = build_routing_maps(&rules);
         assert_eq!(maps["Agent"]["PrepareContext"].0, "ContextManager");
         assert_eq!(maps["Agent"]["PrepareContext"].1, "PrepareContext");
+    }
+
+    #[tokio::test]
+    async fn permanent_missing_action_parameter_does_not_remain_next_poll() {
+        let actor = SpecDrivenActor::from_ioa(REQUIRED_PARAM_SPEC, HashMap::new()).unwrap();
+        let ctx = ActorContext::new(ActorHandle::new("test", "Task"), None, None);
+        let mut state = actor.initial_state();
+        let mailbox = [
+            spec_mailbox_message(1, "Assign", serde_json::json!({})),
+            spec_mailbox_message(2, "Assign", serde_json::json!({"agent_id": "a"})),
+        ];
+
+        let mut last_msg_id = 0i64;
+        let first_id = next_poll_id(&mailbox, last_msg_id).expect("queued poison row");
+        assert_eq!(first_id, 1);
+
+        let result = actor.handle(&ctx, &mut state, &mailbox[0]).await;
+        assert!(
+            result.is_ok(),
+            "permanent MissingActionParameter must be consumed, not HandlerFailed: {result:?}"
+        );
+        last_msg_id = first_id;
+
+        let next_id = next_poll_id(&mailbox, last_msg_id);
+        assert_eq!(
+            next_id,
+            Some(2),
+            "poison row must not remain the next poll after a permanent input error"
+        );
+
+        let after: SpecActorState = serde_json::from_slice(&state).unwrap();
+        assert_eq!(after.status, "Open");
+        assert!(
+            after
+                .fields
+                .as_object()
+                .is_none_or(|fields| fields.is_empty())
+        );
     }
 }
