@@ -165,3 +165,20 @@ governed /tdata (load-bearing for stage 3); HMAC signs the FULL request target i
 server-derived stripped, write.rs).
 **Where:** `.agents/skills/verify-temper/` (dst-proof, cedar-authz, spec-hot-swap,
 entity-lifecycle, event-sourcing-readback, wasm-integration, integrations-and-webhooks).
+
+---
+
+**Decision:** Integrate commit 9453ba0f (serve-and-odata isolation + dropping the
+false /version-on-platform-router claim) into #448 by rebasing onto it, keeping it.
+**Came up because:** it landed on `claude/arn-438-verify-temper` mid-round-3. It is
+authored under the shared `rita-aga` identity by a CONCURRENT session (HOLD-1/HOLD-2
+message, another checkout of this worktree) - NOT the team lead, who confirmed they
+never pushed to this branch. Attribution corrected here so the log does not credit
+the wrong actor.
+**Options:** (a) force-push over it; (b) rebase onto it and keep it.
+**Chose (b) because:** its content is correct and verified - the serve isolation
+recipe matches SKILL.md (unset TURSO_PLATFORM_URL), and dropping the /version claim
+matches the live 404 probe (/version does not exist until the parked /version PR
+adds it). Force-pushing would silently discard a valid concurrent fix. Only
+decisions.md needed a both-entries merge.
+**Where:** `features/serve-and-odata.md` (from 9453ba0f); this entry.
