@@ -86,6 +86,78 @@
         <ReturnType Type="Temper.Evolution.SentinelMonitor"/>
       </Action>
 
+      
+
+      <!-- Callable IOA action twins (ADR-0174) -->
+      <Action Name="SelectCandidate" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun" Nullable="false"/>
+        <Parameter Name="CandidateId" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="SpecSource" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="TrajectoryActions" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Trajectories" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Evolution.EvolutionRun"/>
+      </Action>
+
+      <Action Name="RecordEvaluation" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun" Nullable="false"/>
+        <Parameter Name="ReplayResultJson" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Evolution.EvolutionRun"/>
+      </Action>
+
+      <Action Name="RecordDataset" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun" Nullable="false"/>
+        <Parameter Name="DatasetJson" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Evolution.EvolutionRun"/>
+      </Action>
+
+      <Action Name="RecordMutation" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun" Nullable="false"/>
+        <Parameter Name="MutatedSpecSource" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="MutationSummary" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Evolution.EvolutionRun"/>
+      </Action>
+
+      <Action Name="RecordVerificationPass" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun" Nullable="false"/>
+        <Parameter Name="VerificationReport" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Evolution.EvolutionRun"/>
+      </Action>
+
+      <Action Name="RecordVerificationFailure" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun" Nullable="false"/>
+        <Parameter Name="VerificationErrors" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Evolution.EvolutionRun"/>
+      </Action>
+
+      <Action Name="ExhaustRetries" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun" Nullable="false"/>
+        <Parameter Name="FailureReason" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Evolution.EvolutionRun"/>
+      </Action>
+
+      <Action Name="RecordScore" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun" Nullable="false"/>
+        <Parameter Name="ScoresJson" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Evolution.EvolutionRun"/>
+      </Action>
+
+      <Action Name="RecordFrontier" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun" Nullable="false"/>
+        <Parameter Name="FrontierUpdateJson" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Evolution.EvolutionRun"/>
+      </Action>
+
+      <Action Name="RecordFrontierAutoApprove" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun" Nullable="false"/>
+        <Parameter Name="FrontierUpdateJson" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.Evolution.EvolutionRun"/>
+      </Action>
+
+      <Action Name="ContinueEvolution" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Evolution.EvolutionRun" Nullable="false"/>
+        <ReturnType Type="Temper.Evolution.EvolutionRun"/>
+      </Action>
+
       <EntityContainer Name="Service">
         <EntitySet Name="EvolutionRuns" EntityType="Temper.Evolution.EvolutionRun"/>
         <EntitySet Name="SentinelMonitors" EntityType="Temper.Evolution.SentinelMonitor"/>

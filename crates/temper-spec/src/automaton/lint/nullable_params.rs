@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::automaton::{Action, Effect, Guard};
+use crate::automaton::{Action, Effect, Guard, TriggerGuard};
 
 use super::LintFinding;
 
@@ -50,9 +50,19 @@ pub(super) fn lint_nullable_action_parameter_consumers(
                     consumers.insert("list effect".to_string());
                 }
                 Effect::Spawn {
-                    entity_id_source, ..
-                } if entity_id_source == name => {
-                    consumers.insert("spawn identity".to_string());
+                    entity_id_source,
+                    copy_fields,
+                    ..
+                } => {
+                    if entity_id_source == name {
+                        consumers.insert("spawn identity".to_string());
+                    }
+                    if copy_fields
+                        .as_ref()
+                        .is_some_and(|fields| fields.iter().any(|field| field == name))
+                    {
+                        consumers.insert("spawn copy_fields".to_string());
+                    }
                 }
                 _ => {}
             }
@@ -61,6 +71,13 @@ pub(super) fn lint_nullable_action_parameter_consumers(
         for trigger in &action.triggers {
             if trigger.params_from.values().any(|source| source == name) {
                 consumers.insert("required trigger mapping".to_string());
+            }
+            if trigger
+                .guard
+                .as_ref()
+                .is_some_and(|guard| trigger_guard_consumes(guard, name))
+            {
+                consumers.insert("guard".to_string());
             }
             let template_consumed = trigger
                 .config
@@ -83,6 +100,23 @@ pub(super) fn lint_nullable_action_parameter_consumers(
                 ),
             ));
         }
+    }
+}
+
+fn trigger_guard_consumes(guard: &TriggerGuard, parameter: &str) -> bool {
+    match guard {
+        TriggerGuard::CrossEntityStateIn {
+            entity_id_source, ..
+        } => entity_id_source == parameter,
+        TriggerGuard::FieldEquals { field, .. }
+        | TriggerGuard::FieldIn { field, .. }
+        | TriggerGuard::BoolTrue { field }
+        | TriggerGuard::BoolFalse { field } => field == parameter,
+        TriggerGuard::StateIn { .. } => false,
+        TriggerGuard::AllOf { guards } | TriggerGuard::AnyOf { guards } => guards
+            .iter()
+            .any(|child| trigger_guard_consumes(child, parameter)),
+        TriggerGuard::Not { guard } => trigger_guard_consumes(guard, parameter),
     }
 }
 

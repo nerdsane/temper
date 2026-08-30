@@ -321,6 +321,16 @@ impl TransitionTable {
         params: &serde_json::Value,
     ) -> Result<(), ActionInputError> {
         let Some(metadata) = self.action_params.get(action) else {
+            // Older serialized tables deserialize with an empty map. They stay
+            // readable, but a known live action without compiled requiredness
+            // metadata must not skip actor-local validation.
+            if self.rule_index.contains_key(action) {
+                return Err(ActionInputError {
+                    code: "MissingActionParameter",
+                    action: action.to_string(),
+                    parameter: action.to_string(),
+                });
+            }
             return Ok(());
         };
         let object = params.as_object();
@@ -461,6 +471,7 @@ params = [
         for input in [
             serde_json::json!({"AgentId": "a"}),
             serde_json::json!({"AgentId": 3}),
+            serde_json::json!({"AgentId": ""}),
             serde_json::json!({"AgentId": "a", "agent_id": "a"}),
             serde_json::json!({"agent_id": "a", "note": null}),
             serde_json::json!({"agent_id": "a", "note": "ok"}),
@@ -495,10 +506,16 @@ params = [{ name = "delta_value", type = "Edm.Int64" }]
     #[test]
     fn older_serialized_table_without_action_metadata_remains_readable() {
         let json = r#"{
-          "entity_name":"Task",
-          "states":["Open"],
-          "initial_state":"Open",
-          "rules":[],
+          "entity_name":"Order",
+          "states":["Draft","Cancelled"],
+          "initial_state":"Draft",
+          "rules":[{
+            "name":"CancelOrder",
+            "from_states":["Draft"],
+            "to_state":"Cancelled",
+            "guard":"Always",
+            "effects":[{"SetState":"Cancelled"}]
+          }],
           "keys":[],
           "vectors":[],
           "state_var_metadata":{},
@@ -506,5 +523,9 @@ params = [{ name = "delta_value", type = "Edm.Int64" }]
         }"#;
         let table: TransitionTable = serde_json::from_str(json).expect("old table fixture");
         assert!(table.action_params.is_empty());
+        let error = table
+            .validate_required_action_params("CancelOrder", &serde_json::json!({}))
+            .unwrap_err();
+        assert_eq!(error.code, "MissingActionParameter");
     }
 }
