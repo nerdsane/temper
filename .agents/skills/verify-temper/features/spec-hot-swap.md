@@ -11,12 +11,12 @@ Push over the management API (there is no CLI verb for it):
 ```bash
 # replace mode (directory is truth; entity types absent from the dir are dropped)
 curl -sS -X POST "http://localhost:3600/api/specs/load-dir" \
-  -H "Authorization: Bearer $KEY" -d '{"tenant":"default","specs_dir":"/abs/dir","merge":false}'
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"tenant":"default","specs_dir":"/abs/dir","merge":false}'
 # merge mode (agent submit_specs; preserves untouched types + relation graph)
 curl -sS -X POST "http://localhost:3600/api/specs/load-inline" \
-  -H "Authorization: Bearer $KEY" -d '{"tenant":"default","specs":{"Order.ioa.toml":"..."}}'
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"tenant":"default","specs":{"model.csdl.xml":"<CSDL>","Order.ioa.toml":"..."}}'
 ```
-For an existing entity type, `SwapController::swap` writes the new `TransitionTable` into the same `RwLock` the live actors hold and bumps an atomic version - actors pick it up with no restart. New entity types get a fresh spec instead. `load-dir` verifies inline and streams NDJSON per entity; MCP `submit_specs` hits `load-inline`. Offline check first with `cargo run -p temper-cli -- verify --specs-dir <dir>`. The dedicated seeded suite is `cargo test -p temper-server --test dst_hotswap`.
+The `load-inline` `specs` map MUST include `model.csdl.xml` alongside the `*.ioa.toml` files: load-inline stages the map to a temp dir and calls load-dir, which reads `model.csdl.xml` as required (`observe/specs/load_dir.rs:230`) and fails without it. For an existing entity type, `SwapController::swap` writes the new `TransitionTable` into the same `RwLock` the live actors hold and bumps an atomic version - actors pick it up with no restart. New entity types get a fresh spec instead. `load-dir` verifies inline and streams NDJSON per entity; MCP `submit_specs` hits `load-inline`. Offline check first with `cargo run -p temper-cli -- verify --specs-dir <dir>`. The dedicated seeded suite is `cargo test -p temper-server --test dst_hotswap`.
 
 ## What proves it
 The swap logs `hot-swapped transition table for existing entity` with `old_version`/`new_version`, and a new action/state defined only in the new spec becomes usable on a pre-existing entity id (same actor, no restart) once verification passes. `GET /observe/specs/{entity}` reflects the new spec. Verification is reset to Pending on register, so dispatch is gated until it completes.

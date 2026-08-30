@@ -8,14 +8,16 @@ An agent creates an entity, moves it through its state machine by dispatching go
 
 ## Driving it
 ```bash
-# create - the body may set id (else the server mints one); status, if given, MUST equal
-# the spec's initial state. Server-derived fields are stripped.
+# create - the body may set id (else the server mints one) AND ordinary initial
+# fields (they are retained); only server-derived fields are stripped, and status,
+# if given, MUST equal the spec's initial state (odata/write.rs).
 curl -sS -X POST "http://localhost:3600/tdata/<Set>" \
-  -H "Authorization: Bearer $KEY" -H "X-Tenant-Id: default" -d '{"id":"t-1"}'
+  -H "Authorization: Bearer $KEY" -H "X-Tenant-Id: default" -H "Content-Type: application/json" \
+  -d '{"id":"t-1","some_initial_field":"v"}'
 
 # move the state - state variables are set via ACTION PARAMS in the POST body, not create fields
 curl -sS -X POST "http://localhost:3600/tdata/<Set>('t-1')/Temper.<Action>" \
-  -H "Authorization: Bearer $KEY" -H "X-Tenant-Id: default" -d '{"amount":5}'
+  -H "Authorization: Bearer $KEY" -H "X-Tenant-Id: default" -H "Content-Type: application/json" -d '{"amount":5}'
 
 # read back - the transition is only proven here
 curl -sS "http://localhost:3600/tdata/<Set>('t-1')" -H "Authorization: Bearer $KEY" -H "X-Tenant-Id: default"

@@ -31,7 +31,12 @@ An engineer changing sim-visible kernel code proves the change holds across seed
 cargo test -p temper-server --test dst_lifecycle          # one suite (fast to iterate)
 cargo test -p temper-server --test dst_platform_random    # randomized; TEMPER_DST_RANDOM_MODE=full|smoke
 cargo test -p temper-platform --test system_entity_dst
-cargo test -p temper-server dst_                           # all dst_* in temper-server
+# ALL suites: each dst_* is its own --test binary, so select by binary, not a name
+# filter (`cargo test -p temper-server dst_` filters test-FUNCTION names, which is
+# not the same set). Loop the binaries, or run every integration test target:
+for t in $(ls crates/temper-server/tests/dst_*.rs | xargs -n1 basename | sed 's/\.rs$//'); do
+  cargo test -p temper-server --test "$t"; done
+cargo test -p temper-server --tests                       # or: every integration test binary
 ```
 
 ## What proves it

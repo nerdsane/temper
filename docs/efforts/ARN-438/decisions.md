@@ -141,3 +141,27 @@ caller and no test — adding a product route to make a doc true is the wrong
 direction; `/healthz` on the platform router stays (Rei already verified that).
 **Where:** `.agents/skills/verify-temper/features/serve-and-odata.md`;
 `features/README.md`.
+
+---
+
+**Decision:** #448 round 3 (breaker triggered, 9 codex act-ons) - fixed the 9 against
+source and froze; owner re-armed the breaker for ONE bounded verification round.
+**Came up because:** 7->10->9 across rounds is the convergence breaker - a 13-file
+map has an unbounded textual-accuracy tail (each round mines different files). Owner
+decision: fix these concrete 9, then a bounded verify-the-9-only round; new findings
+below Important pre-adjudicated to validate-through-use.
+**Options:** (a) keep panelling; (b) fix the 9, freeze, bounded verify, RESOLVE any
+dispute, merge - no further rounds.
+**Chose (b) because:** the owner's call; the map self-corrects at first real use.
+Fixed (source-verified): dst_ must select by --test BINARY not a fn-name filter;
+Content-Type headers on the POST examples (cedar-authz, spec-hot-swap, entity-lifecycle);
+load-inline `specs` map MUST include model.csdl.xml (load_dir.rs:230); turso index
+maintenance is NOT atomic co-commit - key-index unmaintained-on-write, vector-index
+write-behind (event_store.rs:140-176), postgres co-commits; the table is
+`wasm_invocation_logs` (schema.rs:122); **WASM "never dispatches" is a paw-patrol
+CONTRACT, not a host impossibility** - the host has http_call and can reach the
+governed /tdata (load-bearing for stage 3); HMAC signs the FULL request target incl
+/webhooks/<tenant> (receiver.rs:90); create retains ordinary initial fields (only
+server-derived stripped, write.rs).
+**Where:** `.agents/skills/verify-temper/` (dst-proof, cedar-authz, spec-hot-swap,
+entity-lifecycle, event-sourcing-readback, wasm-integration, integrations-and-webhooks).

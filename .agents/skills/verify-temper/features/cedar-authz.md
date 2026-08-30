@@ -12,13 +12,13 @@ Evaluation is schema-less (`Request::new(principal, action, resource, context, N
 ```bash
 # 1. A denied OData dispatch returns 403 with the pending-decision id embedded
 curl -sS -X POST "http://localhost:3600/tdata/<Set>('<id>')/Temper.<Action>" \
-  -H "Authorization: Bearer $AGENT_TOKEN" -H "X-Tenant-Id: default" -d '{}'
+  -H "Authorization: Bearer $AGENT_TOKEN" -H "X-Tenant-Id: default" -H "Content-Type: application/json" -d '{}'
 #   -> 403 {"error":{"code":"AuthorizationDenied","message":"... (decision: PD-…)"}}
 
 # 2. List pending decisions, 3. approve, 4. re-invoke -> 200
 curl -sS "http://localhost:3600/api/tenants/default/decisions?status=pending" -H "Authorization: Bearer $TEMPER_API_KEY"
 curl -sS -X POST "http://localhost:3600/api/tenants/default/decisions/PD-…/approve" \
-  -H "Authorization: Bearer $TEMPER_API_KEY" -d '{"scope":{…},"decided_by":"human-terminal"}'
+  -H "Authorization: Bearer $TEMPER_API_KEY" -H "Content-Type: application/json" -d '{"scope":{…},"decided_by":"human-terminal"}'
 ```
 Drive the approve loop with the curl flow above (lowercase `?status=pending`). NOT with `temper decide` today: it polls `?status=Pending` (`decide/mod.rs:122`) while decisions store lowercase (`DecisionStatus` is `serde(rename_all="lowercase")`), so its list comes back empty and it never surfaces the pending decision - a real CLI bug (filed as ARN-442), not a driver error.
 
