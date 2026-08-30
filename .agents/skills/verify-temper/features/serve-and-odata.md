@@ -14,7 +14,13 @@ TURSO_URL="file:$PWD/.scratch/temper.db" \
 curl -sf http://localhost:3600/healthz
 curl -sf -H 'X-Tenant-Id: default' 'http://localhost:3600/tdata/$metadata' | head -c 400   # CSDL XML
 ```
-Read an entity set named in the metadata; dispatch an action via `POST /tdata/<Set>('<id>')/Temper.<Action>` with `X-Tenant-Id`.
+Public subset after SKILL Launch (`authz/edge.rs::is_public_kernel_request` plus platform `/healthz`): `GET /healthz`, `GET /tdata`, `GET /tdata/`, `GET /tdata/$metadata` only. Entity-set reads and dispatch are governed — they need the bearer **and** the tenant header. `GET /tdata/Plans` with `X-Tenant-Id` only → **401** (`TEMPER_API_KEY` is set). Set `KEY=$TEMPER_API_KEY`:
+```bash
+A=(-H "Authorization: Bearer $KEY" -H "X-Tenant-Id: default")
+curl -sS "http://localhost:3600/tdata/<Set>" "${A[@]}"
+curl -sS -X POST "http://localhost:3600/tdata/<Set>('<id>')/Temper.<Action>" \
+  "${A[@]}" -H "Content-Type: application/json" -d '{}'
+```
 
 ## What proves it
 Health 200 with a live process; metadata is CSDL XML listing the bootstrapped entity types; an entity read returns `@odata.context`. A dispatch is proven by reading the entity back and seeing the state move - a 200 on dispatch alone is not a transition.

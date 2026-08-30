@@ -8,9 +8,10 @@ An agent creates an entity, moves it through its state machine by dispatching go
 
 ## Driving it
 ```bash
-# create - the body may set id (else the server mints one) AND ordinary initial
-# fields (they are retained); only server-derived fields are stripped, and status,
-# if given, MUST equal the spec's initial state (odata/write.rs).
+# create → 201 Created (odata/write.rs StatusCode::CREATED on every success path).
+# The body may set id (else the server mints one) AND ordinary initial fields
+# (they are retained); only server-derived fields are stripped, and status,
+# if given, MUST equal the spec's initial state.
 curl -sS -X POST "http://localhost:3600/tdata/<Set>" \
   -H "Authorization: Bearer $KEY" -H "X-Tenant-Id: default" -H "Content-Type: application/json" \
   -d '{"id":"t-1","some_initial_field":"v"}'
@@ -25,7 +26,7 @@ curl -sS "http://localhost:3600/tdata/<Set>('t-1')" -H "Authorization: Bearer $K
 Params are delivered as the message payload (`SpecMessage::with_params`) and merged into the entity's fields; the transition table maps `(status, action)` and status moves via the `SetState` effect (or the durably stored `to_status`).
 
 ## What proves it
-The entity's `status` after the action matches the spec's transition, read back over OData. The dispatch status codes (source: `odata/bindings.rs:266-346`): a successful transition is **200**; an action **not valid from the current state is 409 Conflict** with the error `Action '<A>' not valid from state '<S>'` (`entity_actor/effects.rs:366`), and the status does not change; a dispatch on an unregistered type is **404** (`EntityTypeNotGoverned`); a Cedar denial is **403**. So read the entity back regardless - the 200 vs 409 tells you whether the machine moved. For history, `GET /observe/entities/{entity_type}/{entity_id}/history`; to block until a target state, `GET /observe/entities/{entity_type}/{entity_id}/wait`.
+The entity's `status` after the action matches the spec's transition, read back over OData. Create is **201 Created** (`odata/write.rs`). Dispatch codes (`odata/bindings.rs:266-346`): a successful transition is **200**; every `success=false` from `entity_actor/effects.rs` maps to **409 Conflict** `ActionFailed` — not only the from-state miss. `effects.rs` emits three agent-facing strings on that path: known action / wrong state / no guard failure → `Action '<A>' not valid from state '<S>'` (`:366`); known action / guard failed → `render_guard_failure` (`Action '<A>' blocked from state '<S>': guard …`, `:234`); unknown action (including a `Temper.<Action>` that is not on the type) → `Unknown action: …` (`:378`). Drivers that match only the from-state string will mis-classify a 409 `Unknown action: …` as "not an invalid-from-state". Replay: known action from the wrong state → 409 + from-state string; unknown `Temper.<Action>` on a real entity → 409 + `Unknown action: …`. A dispatch on an unregistered type is **404** (`EntityTypeNotGoverned`); a Cedar denial is **403**. Read the entity back regardless - the 200 vs 409 tells you whether the machine moved. For history, `GET /observe/entities/{entity_type}/{entity_id}/history`; to block until a target state, `GET /observe/entities/{entity_type}/{entity_id}/wait`.
 
 ## Gotchas
 - You cannot create an entity directly into an arbitrary state - create mints it at the declared initial state only.

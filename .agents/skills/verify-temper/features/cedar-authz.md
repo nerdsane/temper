@@ -29,5 +29,5 @@ The denied dispatch returns 403 carrying a `PD-…` id; that id appears in the p
 
 ## Gotchas
 - `POST /api/audit` only records a trajectory entry; there is no `/api/audit` GET reader - audit history is read through the trajectory/observe endpoints.
-- Decision status is stored lowercase (`DecisionStatus` is `#[serde(rename_all = "lowercase")]` in `state/pending_decisions.rs`), so the filter value is `?status=pending` - the CLI's `?status=Pending` will not match; use lowercase.
+- Decision status is stored lowercase: the SQL column is `pending_decisions.status TEXT NOT NULL DEFAULT 'pending'` (turso `schema.rs:156`, postgres `schema.rs:234`), and `DecisionStatus` is `#[serde(rename_all = "lowercase")]` in `state/pending_decisions.rs`. The filter value is `?status=pending` - the CLI's `?status=Pending` will not match the column or the serde form; use lowercase (ARN-442).
 - A silent 403 is itself a finding (stack rule): surface every denial to the human channel.

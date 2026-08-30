@@ -26,7 +26,7 @@ Plus the DST suites (`crates/temper-server/tests/dst_*`, `crates/temper-platform
 
 - `/_admin` profiling (cpu/wall) - ops-only; drive read-only.
 - `init` / `codegen` - scaffolding verbs; drive = run them in a temp dir and build the output.
-- `verify-remote` - runs the cascade against a specs dir + a running server URL (sim seeds, prop cases); drive = point it at a local `serve` instance. Covered by spec-cascade.md's cascade until it earns its own file.
+- `verify-remote` - **broken against a local SKILL Launch serve.** The CLI POSTs `/api/specs/validate-ioa` with `X-Temper-Principal-Kind: admin` and no bearer (`crates/temper-cli/src/verify_remote.rs`). That header is stripped (`authz/edge.rs`); the route is not public → **401**. Even with a bearer, Cedar `run_verification` is not on the operator seed (only `manage_policies` on PolicySet) → **403**. Do not drive it. Offline `temper verify` / `verify-ioa` in spec-cascade.md is the working cascade.
 - `install` - app install flow; needs a target app checkout (temperpaw's genesis-install covers the app side).
 - `migrate-turso-to-postgres` - one-way ops migration; drive only against scratch data.
 - Composite cross-entity verification (ADR-0150) runs inside `temper verify` for multi-entity dirs; it is documented in spec-cascade.md rather than its own file.
