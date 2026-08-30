@@ -25,7 +25,9 @@ use crate::tenant_access::tenant_access_check;
 /// first registered tenant in the SpecRegistry.
 pub fn build_platform_router(state: PlatformState) -> Router {
     let tenant_api = crate::tenant_api::tenant_api_router();
-    let health = Router::new().route("/healthz", routing::get(|| async { StatusCode::OK }));
+    let health = Router::new()
+        .route("/healthz", routing::get(|| async { StatusCode::OK }))
+        .route("/version", routing::get(version_info));
 
     // Platform observe routes — merged at /observe/* to avoid the /api double-nest
     // collision between temper-server's /api routes and the platform's /api routes.
@@ -60,6 +62,19 @@ pub fn build_platform_router(state: PlatformState) -> Router {
         .layer(middleware::from_fn(
             temper_server::authz::strip_inbound_identity_headers,
         ))
+}
+
+/// Unauthenticated deploy-identity probe: the commit the running binary was built
+/// from. Read at runtime from `RAILWAY_GIT_COMMIT_SHA` (Railway injects it into
+/// GitHub-connected builds), else the build-time `GIT_COMMIT_SHA`, else "unknown".
+/// Commit only - the release verifier compares it against the release-branch HEAD.
+async fn version_info() -> axum::Json<serde_json::Value> {
+    let commit = std::env::var("RAILWAY_GIT_COMMIT_SHA")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| option_env!("GIT_COMMIT_SHA").map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
+    axum::Json(serde_json::json!({ "commit": commit }))
 }
 
 #[cfg(test)]
@@ -163,6 +178,25 @@ permit(
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_version_route_is_public_and_reports_a_commit() {
+        // Unauthenticated (no credential) - proves it is in the public allowlist.
+        let app = build_platform_router(test_state());
+        let response = app
+            .oneshot(Request::get("/version").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            json.get("commit").and_then(|c| c.as_str()).is_some(),
+            "version route must report a string `commit` field, got {json}"
+        );
     }
 
     #[tokio::test]
