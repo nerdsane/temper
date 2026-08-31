@@ -17,6 +17,14 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   RUST_TOOLCHAIN: nightly-2026-02-08
+  # ARN-439: CI-only compile speedups. These are env overrides scoped to CI runners; the
+  # developer-local profiles in Cargo.toml are untouched. Swatinem/rust-cache also sets
+  # CARGO_INCREMENTAL=0, but we set it here too so it holds for every cargo invocation.
+  # line-tables-only debuginfo keeps backtraces (RUST_BACKTRACE=1 above) while cutting the
+  # debuginfo that dominates codegen + link time on the compile-heavy jobs.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   # ─────────────────────────────────────────────────────
@@ -83,18 +91,14 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy, rustfmt
 
+      - name: Set up mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
       - name: cargo fmt --check
         run: cargo fmt --check
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-check-
 
       - name: cargo check --workspace
         run: cargo check --workspace
@@ -110,6 +114,12 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
     timeout-minutes: 45
+    env:
+      # ARN-439: CI only compiles benches (--no-run), never runs them, so the release-inherited
+      # lto=true + codegen-units=1 are pure compile-time waste here. Override them off for the
+      # bench profile on this job only.
+      CARGO_PROFILE_BENCH_LTO: "off"
+      CARGO_PROFILE_BENCH_CODEGEN_UNITS: "16"
     steps:
       - uses: actions/checkout@v4
 
@@ -121,15 +131,11 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-bench-
+      - name: Set up mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
 
       - name: cargo bench --workspace --no-run
         run: cargo bench --workspace --no-run
@@ -148,15 +154,11 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-integrity-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-integrity-
+      - name: Set up mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
 
       - name: No TODO/FIXME/HACK in production code
         run: |
@@ -244,14 +246,16 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - name: Set up mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-test-
+          tool: cargo-nextest
 
       - name: Install wasm target for GEPA test modules
         run: rustup target add wasm32-unknown-unknown
@@ -262,14 +266,17 @@ jobs:
             (cd "wasm-modules/$module" && cargo build --target wasm32-unknown-unknown --release)
           done
 
-      - name: cargo test --workspace -- --skip dst_
-        run: cargo test --workspace -- --skip dst_
+      - name: cargo nextest run --workspace (skip dst_)
+        run: cargo nextest run --workspace -E 'not test(dst_)'
 
       # spec_validate_endpoint declares required-features = ["observe"]. The
       # workspace run above usually still covers it via feature unification
       # (temper-cli/temper-mcp enable temper-server's observe feature), but
       # that coverage is incidental — it evaporates if those edges change.
       # Run the observe-gated tests explicitly so coverage is guaranteed.
+      # These stay on `cargo test` on purpose (ARN-439 decision D4): they are
+      # narrow name-filtered runs whose whole job is to *guarantee* coverage, and
+      # cargo test's positional-substring filter is the exact semantics relied on.
       - name: cargo test observe-gated tests
         run: |
           cargo test -p temper-server --features observe --test spec_validate_endpoint
@@ -279,25 +286,57 @@ jobs:
           # run them explicitly so coverage never depends on feature unification.
           cargo test -p temper-server --features observe --lib api::repl::
 
+      # nextest does NOT run (or compile) doctests, so the workspace nextest run
+      # above drops doctest coverage — e.g. the no_run example in temper-sdk that
+      # compile-checks the public client API. Run doctests explicitly to restore
+      # exactly what nextest omits (compile-only for no_run; fast).
+      - name: cargo test --doc --workspace
+        run: cargo test --doc --workspace
+
   # ─────────────────────────────────────────────────────
   # Gate 3b: DST/platform coverage (matrixed)
+  #
+  # ARN-439: platform-random full mode is the main-branch tail. Off-PR it is sharded
+  # by SEED across 4 jobs (TEMPER_DST_SHARD_INDEX/COUNT) — not nextest --partition —
+  # because each of its 5 test functions loops its seeds internally, so only
+  # seed-level splitting balances the work. The union of the 4 shards is the full
+  # seed set, so coverage is unchanged. On PRs platform-random runs as ONE smoke
+  # cell (no shards): sharding a ~3-min smoke suite would just be 4x runner spin-up.
+  # The matrix is built dynamically per event by dst-matrix-setup. All cells share
+  # one rust-cache (shared-key: dst) since they compile the same test dep graph.
   # ─────────────────────────────────────────────────────
+  dst-matrix-setup:
+    name: DST matrix setup
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - id: gen
+        # core/boot/consistency always run. platform-random: one smoke cell on PRs,
+        # four full-mode seed shards on push/schedule/dispatch.
+        run: |
+          SUITES='[
+            {"suite":"core","command":"cargo nextest run -p temper-server --test dst_concurrency_retry --test dst_hotswap --test dst_lifecycle --test dst_multi_tenant --test dst_persistence"},
+            {"suite":"platform-boot","command":"cargo nextest run -p temper-server --test dst_platform_boot"},
+            {"suite":"platform-consistency","command":"cargo nextest run -p temper-server --test dst_platform_cedar --test dst_platform_index --test dst_platform_rollback"}
+          ]'
+          RANDOM_CMD="cargo nextest run -p temper-server --test dst_platform_random"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANDOM_CELLS=$(jq -cn --arg cmd "$RANDOM_CMD" '[{suite:"platform-random",command:$cmd}]')
+          else
+            RANDOM_CELLS=$(jq -cn --arg cmd "$RANDOM_CMD" '[range(0;4) | {suite:"platform-random",shard_index:(.|tostring),shard_count:"4",command:$cmd}]')
+          fi
+          MATRIX=$(jq -cn --argjson s "$SUITES" --argjson r "$RANDOM_CELLS" '{include: ($s + $r)}')
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
   dst-platform-tests:
-    name: DST/Platform Tests (${{ matrix.suite }})
+    name: DST/Platform Tests (${{ matrix.suite }}${{ matrix.shard_count && format(' {0}/{1}', matrix.shard_index, matrix.shard_count) || '' }})
+    needs: dst-matrix-setup
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - suite: core
-            command: cargo test -p temper-server --test dst_concurrency_retry --test dst_hotswap --test dst_lifecycle --test dst_multi_tenant --test dst_persistence
-          - suite: platform-boot
-            command: cargo test -p temper-server --test dst_platform_boot
-          - suite: platform-consistency
-            command: cargo test -p temper-server --test dst_platform_cedar --test dst_platform_index --test dst_platform_rollback
-          - suite: platform-random
-            command: cargo test -p temper-server --test dst_platform_random
+      matrix: ${{ fromJSON(needs.dst-matrix-setup.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -309,19 +348,24 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-dst-${{ matrix.suite }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-dst-${{ matrix.suite }}-
+      - name: Set up mold linker
+        uses: rui314/setup-mold@v1
 
-      - name: cargo test DST/platform suite
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: dst
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: cargo nextest DST/platform suite
         env:
           TEMPER_DST_RANDOM_MODE: ${{ matrix.suite == 'platform-random' && github.event_name == 'pull_request' && 'smoke' || 'full' }}
+          TEMPER_DST_SHARD_INDEX: ${{ matrix.shard_index }}
+          TEMPER_DST_SHARD_COUNT: ${{ matrix.shard_count }}
         run: ${{ matrix.command }}
 
   # ─────────────────────────────────────────────────────
@@ -342,15 +386,11 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-verify-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-verify-
+      - name: Set up mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
 
       - name: Build temper-cli
         run: cargo build -p temper-cli
@@ -393,15 +433,11 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-instrumentation-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-instrumentation-
+      - name: Set up mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
 
       - name: Run check_instrumentation
         run: cargo run -q -p temper-server --bin check_instrumentation

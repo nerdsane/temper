@@ -53,6 +53,61 @@ impl RandomMode {
     }
 }
 
+/// Read a shard env var: `None` if unset or empty, `Some(Ok(n))` if a valid integer,
+/// `Some(Err(msg))` if set to something that is not a valid integer.
+///
+/// An empty string counts as unset because GitHub Actions passes an absent matrix value
+/// (`${{ matrix.shard_index }}` on a cell that omits it) as `""`, not by dropping the env.
+fn shard_env(name: &str) -> Option<Result<u64, String>> {
+    // determinism-ok: CI shard selection happens before deterministic seeds are installed.
+    match std::env::var(name) {
+        Ok(value) if value.trim().is_empty() => None,
+        Ok(value) => Some(
+            value
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| format!("{name} must be a non-negative integer, got {value:?}")),
+        ),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => Some(Err(format!("{name} is not valid UTF-8"))),
+    }
+}
+
+/// CI seed sharding: split the `0..total` seed range across parallel CI shards.
+///
+/// Shard `i` of `n` runs the seeds where `seed % n == i`. The union of every shard is the
+/// full `0..total` range, so coverage is identical to an unsharded run — sharding only
+/// divides the wall-clock, never the coverage. With neither env var set (local runs) it
+/// yields every seed. Each seed is self-contained, so which shard runs it does not change
+/// the outcome.
+///
+/// Misconfiguration FAILS LOUDLY rather than silently dropping a partition: a bad or
+/// missing `TEMPER_DST_SHARD_INDEX` while `TEMPER_DST_SHARD_COUNT` > 1 would otherwise
+/// default the index to 0 and run shard 0 twice while some partition's seeds never run —
+/// a silent coverage loss, which the no-silent-failure rule forbids.
+fn shard_seeds(total: u64) -> impl Iterator<Item = u64> {
+    let count = match shard_env("TEMPER_DST_SHARD_COUNT") {
+        None => 1,
+        Some(Ok(n)) if n >= 1 => n,
+        Some(Ok(n)) => panic!("TEMPER_DST_SHARD_COUNT must be >= 1, got {n}"),
+        Some(Err(message)) => panic!("{message}"),
+    };
+    let index = match shard_env("TEMPER_DST_SHARD_INDEX") {
+        Some(Ok(i)) => i,
+        Some(Err(message)) => panic!("{message}"),
+        None if count == 1 => 0,
+        None => panic!(
+            "TEMPER_DST_SHARD_COUNT={count} requires TEMPER_DST_SHARD_INDEX to be set \
+             (refusing to silently run shard 0 and drop the other partitions)"
+        ),
+    };
+    assert!(
+        index < count,
+        "TEMPER_DST_SHARD_INDEX ({index}) must be < TEMPER_DST_SHARD_COUNT ({count})"
+    );
+    (0..total).filter(move |seed| seed % count == index)
+}
+
 /// Run a full workload: generate `num_ops` operations and execute them.
 ///
 /// When `check_invariants_inline` is true, `CheckInvariants` ops actually
@@ -153,7 +208,7 @@ async fn dst_random_workload_no_faults() {
     let seeds = mode.seeds(100, 10);
     let ops = mode.ops(50, 20);
 
-    for seed in 0..seeds {
+    for seed in shard_seeds(seeds) {
         let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
         let mut harness = SimPlatformHarness::no_faults(seed);
 
@@ -179,7 +234,7 @@ async fn dst_random_workload_event_faults() {
     let seeds = mode.seeds(50, 5);
     let ops = mode.ops(30, 15);
 
-    for seed in 0..seeds {
+    for seed in shard_seeds(seeds) {
         let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
         let mut harness = SimPlatformHarness::new(
             seed,
@@ -213,7 +268,7 @@ async fn dst_random_workload_platform_faults() {
     let seeds = mode.seeds(50, 5);
     let ops = mode.ops(30, 15);
 
-    for seed in 0..seeds {
+    for seed in shard_seeds(seeds) {
         let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
         let mut harness = SimPlatformHarness::new(
             seed,
@@ -247,7 +302,7 @@ async fn dst_random_workload_combined_faults() {
     let seeds = mode.seeds(50, 5);
     let ops = mode.ops(30, 15);
 
-    for seed in 0..seeds {
+    for seed in shard_seeds(seeds) {
         let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
         let mut harness = SimPlatformHarness::new(
             seed,
@@ -283,7 +338,7 @@ async fn dst_random_workload_determinism() {
     let seeds = mode.seeds(10, 3);
     let ops = mode.ops(50, 20);
 
-    for seed in 0..seeds {
+    for seed in shard_seeds(seeds) {
         let mut results = Vec::new();
 
         for _run in 0..2 {
