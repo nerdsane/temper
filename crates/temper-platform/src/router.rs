@@ -25,7 +25,9 @@ use crate::tenant_access::tenant_access_check;
 /// first registered tenant in the SpecRegistry.
 pub fn build_platform_router(state: PlatformState) -> Router {
     let tenant_api = crate::tenant_api::tenant_api_router();
-    let health = Router::new().route("/healthz", routing::get(|| async { StatusCode::OK }));
+    let health = Router::new()
+        .route("/healthz", routing::get(|| async { StatusCode::OK }))
+        .route("/version", routing::get(version_info));
 
     // Platform observe routes — merged at /observe/* to avoid the /api double-nest
     // collision between temper-server's /api routes and the platform's /api routes.
@@ -60,6 +62,30 @@ pub fn build_platform_router(state: PlatformState) -> Router {
         .layer(middleware::from_fn(
             temper_server::authz::strip_inbound_identity_headers,
         ))
+}
+
+/// Unauthenticated deploy-identity probe: the commit the running binary was built
+/// from. Read at runtime from `RAILWAY_GIT_COMMIT_SHA` (Railway injects it into
+/// GitHub-connected builds), else the build-time `GIT_COMMIT_SHA`, else "unknown".
+/// Commit only - the release verifier compares it against the release-branch HEAD.
+///
+/// `/version` is a reserved built-in (like `/healthz`): it is matched here before
+/// the kernel's HttpEndpoint fallback, so it takes precedence over any tenant
+/// HttpEndpoint at `/version` - the path is listed in the HttpEndpoint reserved
+/// namespaces (`temper-server/src/http_endpoint.rs`) so a tenant cannot register it.
+async fn version_info() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({ "commit": version_commit(|k| std::env::var(k).ok()) }))
+}
+
+/// Resolve the build commit from an injected env lookup: runtime
+/// `RAILWAY_GIT_COMMIT_SHA` (non-empty), else the build-time `GIT_COMMIT_SHA`, else
+/// "unknown". The lookup is a parameter so tests supply a fake environment instead of
+/// mutating process-global env, which races the other parallel test threads.
+fn version_commit(get: impl Fn(&str) -> Option<String>) -> String {
+    get("RAILWAY_GIT_COMMIT_SHA")
+        .filter(|s| !s.is_empty())
+        .or_else(|| option_env!("GIT_COMMIT_SHA").map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 #[cfg(test)]
@@ -163,6 +189,48 @@ permit(
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_version_commit_echoes_env_not_a_constant() {
+        // Pin the source without touching process-global env: with
+        // RAILWAY_GIT_COMMIT_SHA present, the resolver must echo that exact value -
+        // an always-"unknown" (or hardcoded) implementation fails the first assert.
+        let want = "deadbeefcafef00d1234567890abcdef12345678";
+        let echoed = version_commit(|k| (k == "RAILWAY_GIT_COMMIT_SHA").then(|| want.to_string()));
+        assert_eq!(
+            echoed, want,
+            "version must echo RAILWAY_GIT_COMMIT_SHA, not a constant"
+        );
+
+        // Empty runtime value falls through (Railway can inject ""), and an absent
+        // env must not fabricate the runtime commit.
+        let empty = version_commit(|k| (k == "RAILWAY_GIT_COMMIT_SHA").then(String::new));
+        assert_ne!(empty, want, "empty RAILWAY_GIT_COMMIT_SHA must not echo");
+        let absent = version_commit(|_| None);
+        assert_ne!(
+            absent, want,
+            "absent env must not fabricate the runtime commit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_version_route_is_public_and_reports_a_commit() {
+        // Unauthenticated (no credential) - proves it is in the public allowlist.
+        let app = build_platform_router(test_state());
+        let response = app
+            .oneshot(Request::get("/version").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            json.get("commit").and_then(|c| c.as_str()).is_some(),
+            "version route must report a string `commit` field, got {json}"
+        );
     }
 
     #[tokio::test]

@@ -198,7 +198,9 @@ fn is_public_request(req: &Request) -> bool {
     temper_server::authz::is_public_kernel_request(req.method(), req.uri().path())
         || matches!(
             (req.method(), req.uri().path()),
-            (&Method::GET, "/healthz") | (&Method::POST, "/api/identity/resolve")
+            (&Method::GET, "/healthz")
+                | (&Method::GET, "/version")
+                | (&Method::POST, "/api/identity/resolve")
         )
 }
 

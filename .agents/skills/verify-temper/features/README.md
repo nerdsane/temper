@@ -2,7 +2,7 @@
 
 Surface enumeration.
 
-Served route trees (`crates/temper-server/src`): `/tdata` (OData reads, bound actions, `$metadata`, `$hints`, `$events`), `/observe` (UI, entity history, replay-parity, specs, health), `/api` (authorize, decisions, policies, audit, specs load/validate), `/webhooks/{tenant}/{*path}` (inbound signed webhooks), `/_admin` (profiling). The unauthenticated `/healthz` liveness route is registered one layer up in `crates/temper-platform/src/router.rs` (`build_platform_router`); there is no `/version` route.
+Served route trees (`crates/temper-server/src`): `/tdata` (OData reads, bound actions, `$metadata`, `$hints`, `$events`), `/observe` (UI, entity history, replay-parity, specs, health), `/api` (authorize, decisions, policies, audit, specs load/validate), `/webhooks/{tenant}/{*path}` (inbound signed webhooks), `/_admin` (profiling). The unauthenticated `/healthz` (liveness) and `/version` (deploy-identity, returns `{commit}`) routes are registered one layer up in `crates/temper-platform/src/router.rs` (`build_platform_router`), not in temper-server; both are reserved built-ins that take precedence over any tenant HttpEndpoint at those paths.
 CLI verbs (`temper-cli`): `serve`, `mcp`, `verify`, `verify-ioa`, `verify-remote`, `init`, `codegen`, `install`, `decide`, `migrate-turso-to-postgres`.
 Plus the DST suites (`crates/temper-server/tests/dst_*`, `crates/temper-platform/tests`).
 

@@ -182,3 +182,21 @@ matches the live 404 probe (/version does not exist until the parked /version PR
 adds it). Force-pushing would silently discard a valid concurrent fix. Only
 decisions.md needed a both-entries merge.
 **Where:** `features/serve-and-odata.md` (from 9453ba0f); this entry.
+
+---
+
+**Decision:** Add a minimal unauthenticated `GET /version` route to temper-server
+returning `{commit}` only, sourced from `RAILWAY_GIT_COMMIT_SHA` (runtime) then a
+build-time `GIT_COMMIT_SHA` (`option_env!`) then "unknown" (ARN-438 item 5, step 2).
+**Came up because:** the aya temper-server release-gating driver must verify the live
+deploy reports the expected commit, but the kernel had NO sha-reporting route (probed
+prod: /version, /readyz, /observe/version, /paw/version all 404; /observe/health carries no sha).
+**Options:** (a) a full GHCR image pipeline so the existing driver's image-identity
+check works; (b) the smallest kernel addition - a /version route reading the commit
+from env; (c) no route, verify liveness only.
+**Chose (b) over (a)/(c) because:** (a) is machinery for a secondary standalone kernel
+whose primary deploy leg is already the temperpaw pin (owner rejected it); (c) cannot
+confirm the deployed code identity. (b) is a few lines, unauth like /healthz, commit-only.
+Degrades to "unknown" where the env is absent, verified empirically on first deploy.
+**Where:** `crates/temper-platform/src/router.rs` (`version_info` + route),
+`crates/temper-platform/src/bearer_auth.rs` (public allowlist).

@@ -14,8 +14,14 @@
 //!   * Longest-prefix match wins; ties on length are rejected at
 //!     `Create` time by a cross-field invariant.
 //!   * Built-in namespaces (`/tdata`, `/webhooks`, `/_admin`,
-//!     `/observe`, `/api`, `/_internal`) are reserved; the spec's
-//!     invariants block them at write time.
+//!     `/observe`, `/api`, `/_internal`, and the platform-router
+//!     built-ins `/healthz` and `/version`) are reserved; the spec's
+//!     invariants block them at write time. The `/healthz` and
+//!     `/version` routes live one layer up in the platform router
+//!     (`temper-platform/src/router.rs`) and win by axum precedence over
+//!     this fallback, so a tenant HttpEndpoint there would be shadowed -
+//!     hence reserved. (Enforcement is the Phase-2 runtime check; the
+//!     spec notes dispatch is stubbed 501 until then.)
 //!   * Methods are matched case-insensitively against the row's
 //!     comma-separated Methods column.
 //!   * `Paused` / `Deleted` endpoints never match.

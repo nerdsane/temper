@@ -45,3 +45,13 @@ turso`), confirm `/healthz` + `/tdata/$metadata`, run the cascade
 (`temper verify`) and at least one `dst_*` suite, and capture the output as
 evidence that the skill's commands are real. The remaining CI checks (fmt/clippy,
 the SDLC gates) run on the PR.
+
+## Item 5 (identity leg): the /version route
+
+This effort's temper slice also carries item 5's kernel piece: an unauthenticated
+`GET /version` route on the platform router returning `{commit}` (from
+`RAILWAY_GIT_COMMIT_SHA`, else a build-time value, else "unknown"), the deploy
+identity the aya release-gating driver verifies. Shipped as its own small PR
+(temper #452) after this one merged; the driver source mode and the deploy-aya
+workflow are the other item-5 pieces (stack + temperpaw). See the decision log
+entry "Add a minimal unauthenticated GET /version route".

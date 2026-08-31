@@ -9,8 +9,10 @@
 # Phase 2: wire end-to-end on top of ADR-0057 http_call_streaming.
 #
 # Field-level shape invariants (path_prefix starts with '/', methods
-# non-empty, timeout_secs in [1, 600], reserved-namespace check) are
-# enforced in the action handler at runtime. IOA field_invariant
+# non-empty, timeout_secs in [1, 600], reserved-namespace check - the
+# reserved set includes the platform-router built-ins /healthz and
+# /version alongside /tdata, /webhooks, /_admin, /observe, /api,
+# /_internal) are enforced in the action handler at runtime. IOA field_invariant
 # grammar today supports only absent/equals/empty combinators — a
 # follow-up ADR will extend it with `matches` + `gte`/`lte` so these
 # invariants can move into the spec and become DST-verifiable.
