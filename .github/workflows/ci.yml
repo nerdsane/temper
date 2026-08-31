@@ -286,46 +286,57 @@ jobs:
           # run them explicitly so coverage never depends on feature unification.
           cargo test -p temper-server --features observe --lib api::repl::
 
+      # nextest does NOT run (or compile) doctests, so the workspace nextest run
+      # above drops doctest coverage — e.g. the no_run example in temper-sdk that
+      # compile-checks the public client API. Run doctests explicitly to restore
+      # exactly what nextest omits (compile-only for no_run; fast).
+      - name: cargo test --doc --workspace
+        run: cargo test --doc --workspace
+
   # ─────────────────────────────────────────────────────
   # Gate 3b: DST/platform coverage (matrixed)
   #
-  # ARN-439: platform-random full mode is the main-branch tail. It is sharded by
-  # SEED across 4 jobs (TEMPER_DST_SHARD_INDEX/COUNT) — not nextest --partition —
+  # ARN-439: platform-random full mode is the main-branch tail. Off-PR it is sharded
+  # by SEED across 4 jobs (TEMPER_DST_SHARD_INDEX/COUNT) — not nextest --partition —
   # because each of its 5 test functions loops its seeds internally, so only
   # seed-level splitting balances the work. The union of the 4 shards is the full
-  # seed set, so coverage is unchanged. All matrix cells share one rust-cache
-  # (shared-key: dst) since they compile the same temper-server test dep graph.
+  # seed set, so coverage is unchanged. On PRs platform-random runs as ONE smoke
+  # cell (no shards): sharding a ~3-min smoke suite would just be 4x runner spin-up.
+  # The matrix is built dynamically per event by dst-matrix-setup. All cells share
+  # one rust-cache (shared-key: dst) since they compile the same test dep graph.
   # ─────────────────────────────────────────────────────
+  dst-matrix-setup:
+    name: DST matrix setup
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - id: gen
+        # core/boot/consistency always run. platform-random: one smoke cell on PRs,
+        # four full-mode seed shards on push/schedule/dispatch.
+        run: |
+          SUITES='[
+            {"suite":"core","command":"cargo nextest run -p temper-server --test dst_concurrency_retry --test dst_hotswap --test dst_lifecycle --test dst_multi_tenant --test dst_persistence"},
+            {"suite":"platform-boot","command":"cargo nextest run -p temper-server --test dst_platform_boot"},
+            {"suite":"platform-consistency","command":"cargo nextest run -p temper-server --test dst_platform_cedar --test dst_platform_index --test dst_platform_rollback"}
+          ]'
+          RANDOM_CMD="cargo nextest run -p temper-server --test dst_platform_random"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANDOM_CELLS=$(jq -cn --arg cmd "$RANDOM_CMD" '[{suite:"platform-random",command:$cmd}]')
+          else
+            RANDOM_CELLS=$(jq -cn --arg cmd "$RANDOM_CMD" '[range(0;4) | {suite:"platform-random",shard_index:(.|tostring),shard_count:"4",command:$cmd}]')
+          fi
+          MATRIX=$(jq -cn --argjson s "$SUITES" --argjson r "$RANDOM_CELLS" '{include: ($s + $r)}')
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
   dst-platform-tests:
     name: DST/Platform Tests (${{ matrix.suite }}${{ matrix.shard_count && format(' {0}/{1}', matrix.shard_index, matrix.shard_count) || '' }})
+    needs: dst-matrix-setup
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - suite: core
-            command: cargo nextest run -p temper-server --test dst_concurrency_retry --test dst_hotswap --test dst_lifecycle --test dst_multi_tenant --test dst_persistence
-          - suite: platform-boot
-            command: cargo nextest run -p temper-server --test dst_platform_boot
-          - suite: platform-consistency
-            command: cargo nextest run -p temper-server --test dst_platform_cedar --test dst_platform_index --test dst_platform_rollback
-          - suite: platform-random
-            shard_index: "0"
-            shard_count: "4"
-            command: cargo nextest run -p temper-server --test dst_platform_random
-          - suite: platform-random
-            shard_index: "1"
-            shard_count: "4"
-            command: cargo nextest run -p temper-server --test dst_platform_random
-          - suite: platform-random
-            shard_index: "2"
-            shard_count: "4"
-            command: cargo nextest run -p temper-server --test dst_platform_random
-          - suite: platform-random
-            shard_index: "3"
-            shard_count: "4"
-            command: cargo nextest run -p temper-server --test dst_platform_random
+      matrix: ${{ fromJSON(needs.dst-matrix-setup.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
 

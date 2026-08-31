@@ -75,3 +75,57 @@ Appended at the moment each call is made. Self-contained for a reader with zero 
   is untestable without a live run. Flagged to team-lead/Rita as a known minor consequence; a badge
   rework, if wanted, is a separate one-line follow-up.
 - **Where:** `.github/workflows/badges.yml` (unchanged); consequence noted here.
+
+---
+
+## Review-panel round 1 (2026-08-31): 1 act-on + 2 considers, all taken
+
+### D6 — Restore doctest coverage with an explicit `cargo test --doc --workspace` step
+- **Decision:** Add `cargo test --doc --workspace` to the Tests job.
+- **Came up because:** both panel reviewers converged: nextest does not run OR compile doctests,
+  so the workspace nextest run silently narrowed CI verification. My earlier "no runnable
+  doctests exist" claim was WRONG — I scanned `///` (item docs) and missed `//!` (module docs);
+  `crates/temper-sdk/src/lib.rs` has a `no_run` module doctest that compile-checks the public
+  client API, plus other `//!` fences. `cargo test --doc` compiles `no_run` and compiles+runs
+  plain examples; nextest skips all of them.
+- **Options:** (a) add `cargo test --doc --workspace`; (b) leave nextest-only.
+- **Chose (a) over (b) because:** (b) removes a compile-check that currently works, which the
+  no-lost-capability rule forbids. (a) restores exactly what nextest omits; for `no_run` it is
+  compile-only (fast). Gained: coverage parity. Gave up: a small amount of Tests-job time.
+- **Where:** `.github/workflows/ci.yml` Tests job.
+
+### D7 — Fail loudly on shard misconfiguration instead of defaulting the index to 0
+- **Decision:** `shard_seeds` panics on a missing/invalid `TEMPER_DST_SHARD_INDEX` when
+  `TEMPER_DST_SHARD_COUNT` > 1, on a non-integer count/index, and on index >= count.
+- **Came up because:** panel consider — the first version defaulted an empty/nonnumeric index to
+  0, so a CI misconfiguration would silently run shard 0 twice and DROP another partition's seeds
+  (silent coverage loss).
+- **Options:** (a) keep the lenient default-to-0; (b) fail loudly on any inconsistency.
+- **Chose (b) over (a) because:** silent coverage loss violates the no-silent-failure /
+  no-silent-caps rule; a dropped partition is exactly the kind of gap that must abort, not pass
+  quietly. Empty strings still count as "unset" (GitHub passes an absent matrix value as `""`),
+  so the local/PR-smoke unsharded path is unaffected. Verified in isolation: panics on missing
+  index, non-integer index, and index>=count; union of 4 shards still equals the full seed set.
+- **Where:** `crates/temper-server/tests/dst_platform_random.rs` `shard_env` + `shard_seeds`.
+
+### D8 — Gate the 4-way sharding to full mode; PRs run one smoke platform-random cell
+- **Decision:** Build the DST matrix dynamically (`dst-matrix-setup` job): on PRs, platform-random
+  is a single smoke cell (no shards); off-PR (push/schedule/dispatch), it is the 4 full-mode seed
+  shards.
+- **Came up because:** panel consider — sharding a ~3-minute PR smoke suite into 4 cells is 4x
+  runner spin-up for no wall-clock gain (PRs are gated by the Tests job, not this suite).
+- **Options:** (a) static 4-shard matrix always (shards run in smoke too); (b) dynamic matrix
+  gated by event; (c) `if`-skip 3 of 4 cells on PRs (still spins up the runners).
+- **Chose (b) over (a)/(c) because:** (a) wastes 4x runner minutes on PRs; (c) still pays the
+  checkout+toolchain spin-up before the no-op. (b) sizes the matrix correctly per event with one
+  tiny (~5s) setup job — a standard dynamic-matrix pattern, not exotic machinery. Full-mode
+  coverage and the main-tail win are unchanged. Gave up: one extra fast job in the graph.
+- **Where:** `.github/workflows/ci.yml` `dst-matrix-setup` + `dst-platform-tests` (fromJSON matrix).
+
+### D9 — badges.yml still left untouched (panel deferred to my judgment)
+- **Decision:** Keep D5 — no change to `badges.yml`.
+- **Came up because:** the panel raised the badge-fallback consider but left it to my judgment.
+- **Options:** (a) rework the badge log-parsing; (b) keep the graceful fallback.
+- **Chose (b) over (a) because:** the fallback never errors and reworking gh-log field math for a
+  vanity metric remains scope creep (see D5); the panel agreed it is graceful.
+- **Where:** `.github/workflows/badges.yml` (unchanged).

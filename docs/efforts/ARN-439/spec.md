@@ -26,8 +26,9 @@ CI-scoped via workflow/job env).
 
 3. **cargo-nextest** — install via `taiki-e/install-action@v2` (`tool: cargo-nextest`); run the
    workspace test suite and the DST matrix under `cargo nextest run`. `--skip dst_` becomes the
-   filterset `-E 'not test(dst_)'`. (No runnable doctests exist in the tree — all doc fences are
-   `text`/`toml`/`sql`/`ignore` — so nextest, which does not run doctests, loses zero coverage.)
+   filterset `-E 'not test(dst_)'`. nextest does not run or compile doctests, and the tree DOES
+   have compilable doctests (e.g. the `no_run` module example in `temper-sdk`), so the Tests job
+   also runs `cargo test --doc --workspace` to keep doctest coverage (review round 1, D6).
 
 4. **Bench Build** — job-level env `CARGO_PROFILE_BENCH_LTO=off`,
    `CARGO_PROFILE_BENCH_CODEGEN_UNITS=16`. CI only compiles benches (`--no-run`), never runs
@@ -36,9 +37,11 @@ CI-scoped via workflow/job env).
 5. **Shard `dst_platform_random` full mode ×4** — the main tail. Implemented as **seed-level
    sharding** (not nextest `--partition`): the 5 test functions loop seeds internally, so
    test-case partitioning cannot balance them. The test reads `TEMPER_DST_SHARD_INDEX` /
-   `TEMPER_DST_SHARD_COUNT` and each shard runs `seed % count == index`. The matrix expands
-   `platform-random` into 4 shard entries. Union of shards = every seed → full coverage.
-   Smoke mode on PRs is unchanged (still `TEMPER_DST_RANDOM_MODE=smoke`).
+   `TEMPER_DST_SHARD_COUNT` and each shard runs `seed % count == index`; misconfiguration fails
+   loudly (round 1, D7) rather than silently dropping a partition. The matrix is built dynamically
+   (round 1, D8): off-PR `platform-random` is 4 seed shards (full mode); on PRs it is ONE smoke
+   cell (no shards — sharding a 3-minute smoke suite is pure runner overhead). Union of shards =
+   every seed → full coverage.
 
 6. **mold linker** — `rui314/setup-mold@v1` (`make-default: true`) on every Linux job that
    compiles, so all linking uses mold with no RUSTFLAGS change.
