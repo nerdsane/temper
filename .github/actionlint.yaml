@@ -3,4 +3,4 @@
 # does not flag them as unknown.
 self-hosted-runner:
   labels:
-    - blacksmith-4vcpu-ubuntu-2404
+    - blacksmith-4vcpu-ubuntu-2204
