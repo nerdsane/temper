@@ -1,6 +1,0 @@
-# ARN-439 step 2: Blacksmith provides these self-hosted-style runner labels once
-# the Blacksmith GitHub App is installed on the repo. Declare them so actionlint
-# does not flag them as unknown.
-self-hosted-runner:
-  labels:
-    - blacksmith-4vcpu-ubuntu-2204
