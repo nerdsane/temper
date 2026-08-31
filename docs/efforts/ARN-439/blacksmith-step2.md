@@ -1,81 +1,56 @@
-# ARN-439 — Step 2: Blacksmith runner (prepared, NOT applied)
+# ARN-439 — Step 2: Blacksmith runner (implemented in this PR)
 
-Step 1 (this PR) exhausts the free fixes. Step 2 moves the compile-heavy jobs onto Blacksmith
-runners for bare-metal speed and a colocated 4x cache. It is **not applied** — it lands only
-after Rita's go and a warm-vs-cold benchmark on a trial, because temper is public and every paid
-minute is net-new spend.
+Step 1 (merged, PR #447) exhausted the free fixes. Rita approved moving the compile-heavy jobs
+onto Blacksmith runners for bare-metal CPU and a colocated cache, plus a sticky disk that
+persists `target/` across runs — the one thing rust-cache cannot do (it prunes the workspace's
+own artifacts), which is why the `Tests` job was warm≈cold in step 1.
 
-Blacksmith is a drop-in runner: you change the `runs-on` label and keep the rest of the workflow.
-Because step 1 uses `Swatinem/rust-cache` (not a Blacksmith-specific cache action), the cache layer
-needs **no change** — on a Blacksmith runner the same rust-cache transparently reads/writes
-Blacksmith's colocated cache, which is faster and not bound by GitHub's 10 GB cap. So the step-2
-diff is almost entirely a label swap.
+Blacksmith is a drop-in runner: change the `runs-on` label, keep the rest of the workflow.
 
-## What Rita must set up first (one-time)
+## What this PR changes
 
-1. Sign up at https://blacksmith.sh and install the **Blacksmith GitHub App** on the `nerdsane`
-   org (or just the `temper` repo). No secrets, no self-hosted infra — the App provisions runners
-   on demand.
-2. Apply to the **open-source program** (temper is public, so it likely qualifies for free or
-   heavily discounted minutes). Until that clears, the free tier (3,000 min/mo + a colocated
-   Actions cache well above 10 GB) already covers a lot.
-3. Nothing else. No AWS account, no runner maintenance.
+Only the three compile-heavy jobs move; the light jobs stay on free GitHub runners (public
+repo → $0, and they are not the bottleneck):
 
-## The diff (apply only after her go)
+| Job | Runner | target/ | ~/.cargo |
+|---|---|---|---|
+| Tests | `blacksmith-4vcpu-ubuntu-2404` | sticky disk `…-tests-target` | rust-cache (`cache-targets: false`) |
+| Bench Build | `blacksmith-4vcpu-ubuntu-2404` | sticky disk `…-bench-target` | rust-cache (`cache-targets: false`) |
+| dst-platform-tests | `blacksmith-4vcpu-ubuntu-2404` | sticky disk `…-dst-target-<suite>-<shard>` (per cell) | rust-cache (`shared-key: dst`, `cache-targets: false`) |
+| check, integrity, verify-specs, instrumentation, dst-matrix-setup, verification-contract | `ubuntu-latest` (free) | rust-cache | rust-cache |
 
-Swap `runs-on: ubuntu-latest` → `runs-on: blacksmith-4vcpu-ubuntu-2404` on the three
-compile-heavy jobs. Leave the light jobs (verification-contract, integrity, instrumentation) on
-free GitHub runners — they are not the bottleneck and burn no meaningful minutes.
+mold, cargo-nextest, the CI profile env, seed-sharding and the dynamic matrix all carry over
+unchanged — Blacksmith runs the same steps, faster.
 
-```diff
-   test:
-     name: Tests
--    runs-on: ubuntu-latest
-+    runs-on: blacksmith-4vcpu-ubuntu-2404
-```
-```diff
-   dst-platform-tests:
-     name: DST/Platform Tests (...)
--    runs-on: ubuntu-latest
-+    runs-on: blacksmith-4vcpu-ubuntu-2404
-```
-```diff
-   bench-build:
-     name: Bench Build
--    runs-on: ubuntu-latest
-+    runs-on: blacksmith-4vcpu-ubuntu-2404
-```
+## Why sticky disk for target/ AND rust-cache for ~/.cargo
 
-`check` (Compile & Lint) is the next candidate if PR wall-clock is still gated by it after the
-above — swap it too and re-measure.
+`Swatinem/rust-cache` prunes `target/` to dependency artifacts and drops the workspace's own
+compiled crates, so a large workspace recompiles itself every run — this is exactly why step 1's
+`Tests` warm run (17.3m) barely beat its cold run (16.3m). A Blacksmith **sticky disk** mounted at
+`./target` is a persistent NVMe volume that keeps the *whole* target directory warm across runs,
+so the workspace's own test binaries survive. `cache-targets: false` tells rust-cache to stop
+managing `target/` (the sticky disk owns it) and cache only `~/.cargo` deps — no double-management,
+no conflict. Deps still dedupe across the dst cells via `shared-key: dst`.
 
-## Optional: sticky disk for `target/` (only if rust-cache colocated isn't enough)
+Sticky disks are exclusive per key, and the dst matrix cells run concurrently, so each cell gets a
+distinct target key (`…-dst-target-<suite>-<shard_index>`); sharing one key would serialize them.
 
-If the colocated rust-cache restore is still a visible cost on the heaviest jobs, mount `target/`
-(and `~/.cargo`) as a Blacksmith **sticky disk** — a persistent volume hot-loaded into the runner,
-better than any cache action when the artifact set is very large. This replaces the rust-cache
-step *on Blacksmith jobs only*:
+## The gate (must clear before merge)
 
-```yaml
-      - name: Mount cargo sticky disks
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: ${{ github.repository }}-cargo-registry
-          path: ~/.cargo
-      - name: Mount target sticky disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: ${{ github.repository }}-${{ github.job }}-target
-          path: ./target
-```
+The `blacksmith-*` runner labels resolve only once the **Blacksmith GitHub App is installed on
+nerdsane/temper**. That is a browser step for Rita:
+1. https://blacksmith.sh → sign in with GitHub as `nerdsane`.
+2. Install the Blacksmith app on the `temper` repo.
+3. (Optional, for free minutes) apply to the open-source program — temper is public.
 
-Sticky disks require a Blacksmith runner (they no-op / fail on GitHub runners), so this is strictly
-a post-swap option. Keep one key per job (per-job `target/` differs); the dst matrix can share one
-key the way step 1 shares `shared-key: dst`.
+Until then, any `runs-on: blacksmith-*` job sits queued with no runner. **Do not merge** until a
+Blacksmith-labelled job actually picks up — verified with a `workflow_dispatch` smoke run on this
+branch (a queued-forever job means the app is not installed yet).
 
-## Benchmark before committing to paid
+## Measurement plan
 
-On the trial, run the workflow twice on a Blacksmith runner (cold then warm) and compare the
-`Tests` and `platform-random` wall-clocks against step 1's warm numbers. Adopt Blacksmith only if
-the delta justifies the spend; otherwise step 1's $0 result stands. Namespace (native `cache: rust`
-volumes, ~$30-50/mo) is the managed fallback if Blacksmith's OSS terms don't land.
+Once a Blacksmith run executes: capture the first run (cold sticky disk) and a second run (warm
+sticky disk) per job, compare against step 1's post-merge free-fix baseline, and extend the
+ARN-439 table with a third column. Compute realistic $/month from actual billed Blacksmith minutes
+(3,000 free min/mo offset; the OSS program may zero it). Adopt only if the delta justifies the
+spend; otherwise step 1's $0 result stands and this PR is dropped.

@@ -111,7 +111,8 @@ jobs:
   # ─────────────────────────────────────────────────────
   bench-build:
     name: Bench Build
-    runs-on: ubuntu-latest
+    # ARN-439 step 2: heavy job on a Blacksmith runner (4 vCPU, colocated cache).
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: github.event_name != 'pull_request'
     timeout-minutes: 45
     env:
@@ -134,8 +135,17 @@ jobs:
       - name: Set up mold linker
         uses: rui314/setup-mold@v1
 
-      - name: Cache Rust build
+      - name: Sticky-disk target (persist bench build artifacts across runs)
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-bench-target
+          path: ./target
+
+      - name: Cache cargo deps
         uses: Swatinem/rust-cache@v2
+        with:
+          # target/ is a Blacksmith sticky disk on this job; rust-cache handles ~/.cargo only.
+          cache-targets: "false"
 
       - name: cargo bench --workspace --no-run
         run: cargo bench --workspace --no-run
@@ -231,7 +241,9 @@ jobs:
   # ─────────────────────────────────────────────────────
   test:
     name: Tests
-    runs-on: ubuntu-latest
+    # ARN-439 step 2: the PR critical path — Blacksmith runner + sticky target/ so the
+    # workspace's own build artifacts (which rust-cache prunes) persist warm across runs.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -249,8 +261,17 @@ jobs:
       - name: Set up mold linker
         uses: rui314/setup-mold@v1
 
-      - name: Cache Rust build
+      - name: Sticky-disk target (persist workspace build artifacts across runs)
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-tests-target
+          path: ./target
+
+      - name: Cache cargo deps
         uses: Swatinem/rust-cache@v2
+        with:
+          # target/ is a Blacksmith sticky disk on this job; rust-cache handles ~/.cargo only.
+          cache-targets: "false"
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -332,7 +353,8 @@ jobs:
   dst-platform-tests:
     name: DST/Platform Tests (${{ matrix.suite }}${{ matrix.shard_count && format(' {0}/{1}', matrix.shard_index, matrix.shard_count) || '' }})
     needs: dst-matrix-setup
-    runs-on: ubuntu-latest
+    # ARN-439 step 2: the main tail — Blacksmith runner + per-cell sticky target/.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -351,10 +373,18 @@ jobs:
       - name: Set up mold linker
         uses: rui314/setup-mold@v1
 
-      - name: Cache Rust build
+      - name: Sticky-disk target (per matrix cell; cells run concurrently so keys must differ)
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-dst-target-${{ matrix.suite }}-${{ matrix.shard_index }}
+          path: ./target
+
+      - name: Cache cargo deps
         uses: Swatinem/rust-cache@v2
         with:
+          # deps are shared across all dst cells; target/ is a per-cell sticky disk.
           shared-key: dst
+          cache-targets: "false"
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
