@@ -1,0 +1,82 @@
+# Deploy the aya temper-server on a push to the `release` branch, with verify +
+# automatic rollback (ARN-438 item 5). temper's PRIMARY deploy leg is the temperpaw
+# pin; this is the SECONDARY standalone kernel (aya's brain). Named deploy-aya to
+# avoid the cargo-dist `release.yml` (tag-triggered GitHub releases).
+#
+# The aya temper-server is a Railway GitHub source build: pushing `release` triggers
+# Railway's build directly. This workflow does NOT deploy - it runs the shared driver
+# in source mode to capture the last-good deployment, verify the new one reports this
+# commit on /version, and roll back (redeploy last-good) on failure.
+#
+# Required repo secrets/vars (owner-set): STACK_TOKEN (clone the driver from stack),
+# RAILWAY_TOKEN (account/team API token), RAILWAY_PROJECT_ID, RAILWAY_ENVIRONMENT_ID,
+# RAILWAY_SERVICE_ID, AYA_TEMPER_BASE_URL. temper's /version is unauth - no
+# TEMPER_API_KEY needed for identity.
+name: deploy-aya
+on:
+  push:
+    branches: [release]
+permissions:
+  contents: read
+concurrency:
+  group: deploy-temper-aya-production
+  cancel-in-progress: false   # let an in-flight deploy+verify finish before the next
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # A hung verify must not block every later release (cancel-in-progress is false).
+    timeout-minutes: 30
+    environment: production
+    env:
+      # Authenticates the head-guard ls-remote so it stays robust if temper ever
+      # goes private (today's public repo works credential-less; this does not
+      # regress that). contents:read is enough for ls-remote.
+      GH_TOKEN: ${{ github.token }}
+      STACK_TOKEN: ${{ secrets.STACK_TOKEN }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID || vars.RAILWAY_PROJECT_ID }}
+      RAILWAY_ENVIRONMENT_ID: ${{ secrets.RAILWAY_ENVIRONMENT_ID || vars.RAILWAY_ENVIRONMENT_ID }}
+      RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID || vars.RAILWAY_SERVICE_ID }}
+      BASE_URL: ${{ secrets.AYA_TEMPER_BASE_URL || vars.AYA_TEMPER_BASE_URL }}
+      # Source-build driver contract for temper's unauth /version -> {commit}.
+      DEPLOY_MODE: source
+      VERSION_PATH: /version
+      VERSION_FIELD: commit
+      READY_PATH: /healthz
+      EXPECTED_SHA: ${{ github.sha }}
+    steps:
+      - name: Head guard - only deploy the current release tip
+        id: head_guard
+        run: |
+          set -euo pipefail
+          # A re-run replays the original push's sha; if `release` has since moved,
+          # deploying this stale commit would regress prod. Deploy only when this
+          # commit is still the release HEAD (a newer push handles newer commits).
+          # `exit 0` here would end only THIS step, leaving the deploy steps to run
+          # on the stale sha - so a stale run signals `stale=true` and every
+          # subsequent step is gated off it, making a superseded push a visible no-op.
+          head=$(git ls-remote "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" release | cut -f1)
+          if [ -n "$head" ] && [ "$head" != "${GITHUB_SHA}" ]; then
+            echo "::warning::release HEAD is $head, not this run's ${GITHUB_SHA} - a newer push supersedes; skipping."
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release commit: ${GITHUB_SHA}"
+          fi
+      - name: Guard secrets
+        if: steps.head_guard.outputs.stale != 'true'
+        run: |
+          set -euo pipefail
+          for v in STACK_TOKEN RAILWAY_TOKEN RAILWAY_PROJECT_ID RAILWAY_ENVIRONMENT_ID RAILWAY_SERVICE_ID BASE_URL; do
+            if [ -z "${!v:-}" ]; then echo "::error::$v is required (repo secret or variable)"; exit 65; fi
+          done
+      - name: Fetch the deploy driver from stack
+        if: steps.head_guard.outputs.stale != 'true'
+        run: |
+          set -euo pipefail
+          git clone --depth 1 "https://x-access-token:${STACK_TOKEN}@github.com/arni-labs/stack" /tmp/stack \
+            || { echo "::error::cannot reach arni-labs/stack"; exit 1; }
+      - name: Deploy-verify-rollback (source mode)
+        if: steps.head_guard.outputs.stale != 'true'
+        run: |
+          set -euo pipefail
+          bash /tmp/stack/deploy/railway-deploy-verify-rollback.sh
