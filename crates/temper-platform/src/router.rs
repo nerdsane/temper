@@ -74,12 +74,18 @@ pub fn build_platform_router(state: PlatformState) -> Router {
 /// HttpEndpoint at `/version` - the path is listed in the HttpEndpoint reserved
 /// namespaces (`temper-server/src/http_endpoint.rs`) so a tenant cannot register it.
 async fn version_info() -> axum::Json<serde_json::Value> {
-    let commit = std::env::var("RAILWAY_GIT_COMMIT_SHA")
-        .ok()
+    axum::Json(serde_json::json!({ "commit": version_commit(|k| std::env::var(k).ok()) }))
+}
+
+/// Resolve the build commit from an injected env lookup: runtime
+/// `RAILWAY_GIT_COMMIT_SHA` (non-empty), else the build-time `GIT_COMMIT_SHA`, else
+/// "unknown". The lookup is a parameter so tests supply a fake environment instead of
+/// mutating process-global env, which races the other parallel test threads.
+fn version_commit(get: impl Fn(&str) -> Option<String>) -> String {
+    get("RAILWAY_GIT_COMMIT_SHA")
         .filter(|s| !s.is_empty())
         .or_else(|| option_env!("GIT_COMMIT_SHA").map(str::to_string))
-        .unwrap_or_else(|| "unknown".to_string());
-    axum::Json(serde_json::json!({ "commit": commit }))
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 #[cfg(test)]
@@ -185,28 +191,27 @@ permit(
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    #[tokio::test]
-    async fn test_version_route_reports_the_env_commit_not_a_constant() {
-        // Pin the source: with RAILWAY_GIT_COMMIT_SHA set, /version must echo that
-        // exact value - an always-"unknown" (or hardcoded) implementation fails here.
+    #[test]
+    fn test_version_commit_echoes_env_not_a_constant() {
+        // Pin the source without touching process-global env: with
+        // RAILWAY_GIT_COMMIT_SHA present, the resolver must echo that exact value -
+        // an always-"unknown" (or hardcoded) implementation fails the first assert.
         let want = "deadbeefcafef00d1234567890abcdef12345678";
-        unsafe { std::env::set_var("RAILWAY_GIT_COMMIT_SHA", want) };
-        let app = build_platform_router(test_state());
-        let response = app
-            .oneshot(Request::get("/version").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let echoed = version_commit(|k| (k == "RAILWAY_GIT_COMMIT_SHA").then(|| want.to_string()));
         assert_eq!(
-            json.get("commit").and_then(|c| c.as_str()),
-            Some(want),
+            echoed, want,
             "version must echo RAILWAY_GIT_COMMIT_SHA, not a constant"
         );
-        unsafe { std::env::remove_var("RAILWAY_GIT_COMMIT_SHA") };
+
+        // Empty runtime value falls through (Railway can inject ""), and an absent
+        // env must not fabricate the runtime commit.
+        let empty = version_commit(|k| (k == "RAILWAY_GIT_COMMIT_SHA").then(String::new));
+        assert_ne!(empty, want, "empty RAILWAY_GIT_COMMIT_SHA must not echo");
+        let absent = version_commit(|_| None);
+        assert_ne!(
+            absent, want,
+            "absent env must not fabricate the runtime commit"
+        );
     }
 
     #[tokio::test]
