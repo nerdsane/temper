@@ -1,0 +1,8 @@
+name: bs-smoke
+on:
+  workflow_dispatch:
+jobs:
+  smoke-2204:
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    steps:
+      - run: echo "picked up on blacksmith-4vcpu-ubuntu-2204 host=$(uname -a)"
