@@ -68,6 +68,11 @@ pub fn build_platform_router(state: PlatformState) -> Router {
 /// from. Read at runtime from `RAILWAY_GIT_COMMIT_SHA` (Railway injects it into
 /// GitHub-connected builds), else the build-time `GIT_COMMIT_SHA`, else "unknown".
 /// Commit only - the release verifier compares it against the release-branch HEAD.
+///
+/// `/version` is a reserved built-in (like `/healthz`): it is matched here before
+/// the kernel's HttpEndpoint fallback, so it takes precedence over any tenant
+/// HttpEndpoint at `/version` - the path is listed in the HttpEndpoint reserved
+/// namespaces (`temper-server/src/http_endpoint.rs`) so a tenant cannot register it.
 async fn version_info() -> axum::Json<serde_json::Value> {
     let commit = std::env::var("RAILWAY_GIT_COMMIT_SHA")
         .ok()
@@ -178,6 +183,30 @@ permit(
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_version_route_reports_the_env_commit_not_a_constant() {
+        // Pin the source: with RAILWAY_GIT_COMMIT_SHA set, /version must echo that
+        // exact value - an always-"unknown" (or hardcoded) implementation fails here.
+        let want = "deadbeefcafef00d1234567890abcdef12345678";
+        unsafe { std::env::set_var("RAILWAY_GIT_COMMIT_SHA", want) };
+        let app = build_platform_router(test_state());
+        let response = app
+            .oneshot(Request::get("/version").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json.get("commit").and_then(|c| c.as_str()),
+            Some(want),
+            "version must echo RAILWAY_GIT_COMMIT_SHA, not a constant"
+        );
+        unsafe { std::env::remove_var("RAILWAY_GIT_COMMIT_SHA") };
     }
 
     #[tokio::test]
