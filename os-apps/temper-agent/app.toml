@@ -2,3 +2,42 @@ name = "temper-agent"
 description = "Governed agent loop with souls, skills, memories, tool hooks, heartbeat monitoring, and cron scheduling"
 version = "0.1.0"
 dependencies = ["temper-fs"]
+
+[[wasm_modules]]
+name = "llm_caller"
+
+[[wasm_modules]]
+name = "tool_runner"
+
+[[wasm_modules]]
+name = "sandbox_provisioner"
+
+[[wasm_modules]]
+name = "sandbox_destroyer"
+
+[[wasm_modules]]
+name = "context_compactor"
+
+[[wasm_modules]]
+name = "steering_checker"
+
+[[wasm_modules]]
+name = "coding_agent_runner"
+
+[[wasm_modules]]
+name = "heartbeat_scan"
+
+[[wasm_modules]]
+name = "heartbeat_scheduler"
+
+[[wasm_modules]]
+name = "cron_trigger"
+
+[[wasm_modules]]
+name = "cron_scheduler_check"
+
+[[wasm_modules]]
+name = "cron_scheduler_heartbeat"
+
+[[wasm_modules]]
+name = "workspace_restorer"

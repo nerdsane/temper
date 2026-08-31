@@ -19,7 +19,7 @@
 
 [automaton]
 name = "TemperAgent"
-states = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Completed", "Failed", "Cancelled"]
+states = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Recovering", "Completed", "Failed", "Cancelled", "Deleting", "DeletionFailed", "Deleted"]
 initial = "Created"
 
 # --- State Variables: Core ---
@@ -27,7 +27,7 @@ initial = "Created"
 [[state]]
 name = "model"
 type = "string"
-initial = "claude-sonnet-4-20250514"
+initial = "claude-sonnet-4-5-20250929"
 
 [[state]]
 name = "provider"
@@ -238,13 +238,50 @@ name = "heartbeat_timeout_seconds"
 type = "string"
 initial = "300"
 
+# --- State Variables: Agent Runtime PoC (Milestone 1) ---
+
+[[state]]
+name = "sandbox_provider"
+type = "string"
+initial = "local"
+
+[[state]]
+name = "repo_url"
+type = "string"
+initial = ""
+
+[[state]]
+name = "repo_ref"
+type = "string"
+initial = ""
+
+[[state]]
+name = "workspace_checkpoint"
+type = "string"
+initial = ""
+
+[[state]]
+name = "last_tool_batch_id"
+type = "string"
+initial = ""
+
+[[state]]
+name = "run_budget"
+type = "string"
+initial = ""
+
+[[state]]
+name = "artifact_ref"
+type = "string"
+initial = ""
+
 # --- Actions: Core Agent Loop ---
 
 [[action]]
 name = "Configure"
 kind = "input"
 from = ["Created"]
-params = ["system_prompt", "user_message", "model", "provider", "max_turns", "tools_enabled", "workdir", "sandbox_url", "temper_api_url", "soul_id", "parent_agent_id", "agent_depth", "max_follow_ups", "hook_policy", "reserve_tokens", "keep_recent_tokens", "compaction_model", "heartbeat_timeout_seconds"]
+params = ["system_prompt", "user_message", "model", "provider", "max_turns", "tools_enabled", "workdir", "sandbox_url", "sandbox_provider", "sandbox_image", "repo_url", "repo_ref", "temper_api_url", "soul_id", "parent_agent_id", "agent_depth", "max_follow_ups", "hook_policy", "reserve_tokens", "keep_recent_tokens", "compaction_model", "heartbeat_timeout_seconds"]
 hint = "Configure agent with system prompt, user message, model, tools, soul, and optional overrides."
 
 [[action]]
@@ -252,7 +289,7 @@ name = "Provision"
 kind = "input"
 from = ["Created"]
 to = "Provisioning"
-hint = "Start sandbox provisioning. Triggers provision_sandbox WASM integration."
+hint = "Start durable sandbox allocation before fallible bootstrap work."
 effect = [{ type = "trigger", name = "provision_sandbox" }]
 
 # ADR-0046: inline trigger — migrated from [[integration]] below.
@@ -268,15 +305,47 @@ on_failure = "Fail"
 temper_api_url = "{secret:temper_api_url}"
 sandbox_url = "{secret:sandbox_url}"
 e2b_api_key = "{secret:e2b_api_key}"
+tensorlake_api_key = "{secret:tensorlake_api_key}"
+tensorlake_api_url = "{secret:tensorlake_api_url}"
+github_token = "{secret:github_token}"
+# 120s default (WasmResourceLimits::max_duration) was too tight once the
+# module started polling for sandbox readiness (up to 60s) on top of TemperFS
+# bootstrap and the repo clone itself; 300s matches the headroom already used
+# by other network-bound triggers in this spec (e.g. llm_caller).
+timeout_secs = "300"
 
+
+# Persist the external provider resource before TemperFS bootstrap or a private
+# clone can fail. A failed bootstrap therefore retains a teardown target.
+[[action]]
+name = "SandboxAllocated"
+kind = "input"
+from = ["Provisioning"]
+params = ["sandbox_url", "sandbox_id", "sandbox_provider"]
+hint = "Persist a newly allocated sandbox and its actual provider before fallible bootstrap work."
+effect = [{ type = "trigger", name = "bootstrap_sandbox" }]
+
+[[action.triggers]]
+name = "bootstrap_sandbox"
+kind = "wasm"
+module = "sandbox_provisioner"
+on_failure = "Fail"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+e2b_api_key = "{secret:e2b_api_key}"
+tensorlake_api_key = "{secret:tensorlake_api_key}"
+tensorlake_api_url = "{secret:tensorlake_api_url}"
+github_token = "{secret:github_token}"
+timeout_secs = "300"
 
 [[action]]
 name = "SandboxReady"
 kind = "input"
 from = ["Provisioning"]
 to = "Thinking"
-params = ["sandbox_url", "sandbox_id", "workspace_id", "conversation_file_id", "file_manifest_id", "session_file_id", "session_leaf_id"]
-hint = "Callback from sandbox provisioner. Sets sandbox connection, TemperFS workspace/file/manifest/session, and starts think loop."
+params = ["sandbox_url", "sandbox_id", "workspace_id", "conversation_file_id", "file_manifest_id", "session_file_id", "session_leaf_id", "workdir"]
+hint = "Callback from sandbox bootstrapper. Sets sandbox connection, TemperFS workspace/file/manifest/session, and starts think loop."
 effect = [{ type = "trigger", name = "call_llm" }]
 
 # ADR-0046: inline trigger — migrated from [[integration]] below.
@@ -327,6 +396,7 @@ on_failure = "Fail"
 
 [action.triggers.config]
 temper_api_url = "{secret:temper_api_url}"
+tensorlake_api_key = "{secret:tensorlake_api_key}"
 max_sync_file_bytes = "61440"
 sync_exclude = "__pycache__,node_modules,.git"
 logfire_read_token = "{secret:logfire_read_token}"
@@ -338,7 +408,7 @@ name = "HandleToolResults"
 kind = "input"
 from = ["Executing"]
 to = "Thinking"
-params = ["pending_tool_calls", "conversation", "session_leaf_id"]
+params = ["pending_tool_calls", "conversation", "session_leaf_id", "last_tool_batch_id", "workspace_checkpoint"]
 guard = "turn_count < 100"
 hint = "Tool results received. Increment turn, transition to Thinking, and call LLM again. Static safety ceiling at 100 turns; dynamic max_turns enforced by llm_caller at runtime."
 effect = [
@@ -486,7 +556,7 @@ hint = "Agent timed out — no heartbeat within timeout period."
 [[action]]
 name = "Fail"
 kind = "input"
-from = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering"]
+from = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Recovering"]
 to = "Failed"
 params = ["error_message"]
 hint = "Mark agent run as failed."
@@ -494,9 +564,45 @@ hint = "Mark agent run as failed."
 [[action]]
 name = "Cancel"
 kind = "input"
-from = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering"]
+from = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Recovering"]
 to = "Cancelled"
-hint = "Cancel agent execution."
+hint = "Cancel agent execution. Triggers sandbox teardown via destroy_sandbox WASM."
+effect = [{ type = "trigger", name = "destroy_sandbox" }]
+
+# Terminal-run deletion is teardown-gated: the run remains visible while its
+# provider sandbox is removed, then becomes logically Deleted only after the
+# sandbox_destroyer callback confirms success. This preserves an auditable,
+# retryable record if provider cleanup fails.
+[[action]]
+name = "RequestDeletion"
+kind = "input"
+from = ["Completed", "Failed", "Cancelled"]
+to = "Deleting"
+hint = "Begin teardown-gated deletion of a terminal agent run."
+effect = [{ type = "trigger", name = "delete_sandbox" }]
+
+[[action]]
+name = "RetryDeletion"
+kind = "input"
+from = ["DeletionFailed", "Deleting"]
+to = "Deleting"
+hint = "Retry provider sandbox teardown after a deletion failure or an interrupted callback."
+effect = [{ type = "trigger", name = "delete_sandbox" }]
+
+[[action]]
+name = "DeletionTeardownSucceeded"
+kind = "input"
+from = ["Deleting"]
+to = "Deleted"
+hint = "Sandbox teardown completed; hide the run from normal reads."
+
+[[action]]
+name = "DeletionTeardownFailed"
+kind = "input"
+from = ["Deleting"]
+to = "DeletionFailed"
+params = ["error_message"]
+hint = "Sandbox teardown failed; retain a visible record so deletion can be retried."
 
 [[action]]
 name = "Resume"
@@ -506,6 +612,33 @@ to = "Provisioning"
 params = ["sandbox_url", "sandbox_id", "workspace_id", "conversation_file_id", "file_manifest_id", "session_file_id", "session_leaf_id"]
 hint = "Resume agent from saved state. Transitions to Provisioning for workspace restore."
 effect = [{ type = "trigger", name = "restore_workspace" }]
+
+# --- Actions: Sandbox-Loss Recovery (Milestone 3) ---
+
+[[action]]
+name = "SandboxLost"
+kind = "input"
+from = ["Executing"]
+to = "Recovering"
+params = ["error_message"]
+hint = "Sandbox was lost or became unreachable. Transition to Recovering for restore."
+
+[[action]]
+name = "SandboxRestored"
+kind = "input"
+from = ["Recovering"]
+to = "Thinking"
+params = ["sandbox_url", "sandbox_id", "workspace_id", "conversation_file_id", "file_manifest_id", "session_file_id", "session_leaf_id", "workspace_checkpoint"]
+hint = "Sandbox restored from checkpoint. Resume thinking loop."
+effect = [{ type = "trigger", name = "call_llm" }]
+
+[[action]]
+name = "RestoreFailed"
+kind = "input"
+from = ["Recovering"]
+to = "Failed"
+params = ["error_message"]
+hint = "Sandbox restore failed. Mark run as failed."
 
 # --- Invariants ---
 
@@ -521,6 +654,37 @@ on_failure = "Fail"
 [action.triggers.config]
 temper_api_url = "{secret:temper_api_url}"
 
+# ADR-0046: inline trigger — Cancel action sandbox teardown. Cancellation
+# remains best-effort, so an infrastructure failure is recorded but does not
+# drive an invalid callback from the already-Cancelled state.
+[[action.triggers]]
+name = "destroy_sandbox"
+kind = "wasm"
+module = "sandbox_destroyer"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+e2b_api_key = "{secret:e2b_api_key}"
+e2b_api_url = "{secret:e2b_api_url}"
+tensorlake_api_key = "{secret:tensorlake_api_key}"
+tensorlake_api_url = "{secret:tensorlake_api_url}"
+
+# Terminal deletion is strict rather than best-effort. If the module cannot
+# run (including authorization, timeout, or provider-call failures), the
+# platform drives DeletionTeardownFailed so the record remains retryable.
+[[action.triggers]]
+name = "delete_sandbox"
+kind = "wasm"
+module = "sandbox_destroyer"
+on_failure = "DeletionTeardownFailed"
+
+[action.triggers.config]
+temper_api_url = "{secret:temper_api_url}"
+e2b_api_key = "{secret:e2b_api_key}"
+e2b_api_url = "{secret:e2b_api_url}"
+tensorlake_api_key = "{secret:tensorlake_api_key}"
+tensorlake_api_url = "{secret:tensorlake_api_url}"
+
 
 [[invariant]]
 name = "CompletedHasResult"
@@ -528,23 +692,13 @@ when = ["Completed"]
 assert = "has_result"
 
 [[invariant]]
-name = "CompletedIsFinal"
-when = ["Completed"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "FailedIsFinal"
-when = ["Failed"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "CancelledIsFinal"
-when = ["Cancelled"]
+name = "DeletedIsFinal"
+when = ["Deleted"]
 assert = "no_further_transitions"
 
 [[invariant]]
 name = "TurnCountNonNegative"
-when = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Completed", "Failed", "Cancelled"]
+when = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Recovering", "Completed", "Failed", "Cancelled", "Deleting", "DeletionFailed", "Deleted"]
 assert = "turn_count >= 0"
 
 # --- Integrations ---
