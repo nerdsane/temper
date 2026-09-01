@@ -190,8 +190,8 @@ async fn directed_evolution_failed_variant_generation_queues_followup_then_close
             .state
             .fields
             .get("GenerationIndex")
-            .and_then(|value| value.as_u64()),
-        Some(2)
+            .and_then(|value| value.as_str()),
+        Some("2")
     );
     let followup_work_items = directed_evolution_wait_for_ids_with_field(
         &state,

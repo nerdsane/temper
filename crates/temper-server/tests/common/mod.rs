@@ -17,6 +17,27 @@ use temper_store_sim::SimEventStore;
 pub const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
 pub const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
 
+/// Valid deterministic inputs for actions in the shared Order fixture.
+pub fn order_action_params(action: &str) -> serde_json::Value {
+    match action {
+        "AddItem" => serde_json::json!({"ProductId": "product-1", "Quantity": 1}),
+        "SubmitOrder" => serde_json::json!({
+            "ShippingAddressId": "address-1",
+            "PaymentMethod": "card"
+        }),
+        "ShipOrder" => serde_json::json!({
+            "Carrier": "carrier-1",
+            "TrackingNumber": "tracking-1"
+        }),
+        "CancelOrder" => serde_json::json!({"Reason": "test cancellation"}),
+        "InitiateReturn" => serde_json::json!({
+            "Reason": "test return",
+            "ItemIds": []
+        }),
+        _ => serde_json::json!({}),
+    }
+}
+
 // ── State builders ──────────────────────────────────────────────────────
 
 /// Build a `ServerState` with a single tenant (default), Order spec, and

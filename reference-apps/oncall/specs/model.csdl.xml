@@ -200,7 +200,7 @@
 
       <!-- Page Actions -->
       <Action Name="AssignAgent" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Page"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Page" Nullable="false"/>
         <Parameter Name="AgentId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Page"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -211,7 +211,7 @@
       </Action>
 
       <Action Name="StartInvestigation" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Page"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Page" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Page"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Triggered</String></Collection>
@@ -222,7 +222,7 @@
       </Action>
 
       <Action Name="Escalate" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Page"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Page" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Page"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Investigating</String></Collection>
@@ -233,7 +233,7 @@
       </Action>
 
       <Action Name="ReassignAgent" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Page"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Page" Nullable="false"/>
         <Parameter Name="AgentId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Page"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -245,7 +245,7 @@
       </Action>
 
       <Action Name="StartRemediation" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Page"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Page" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Page"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Investigating</String></Collection>
@@ -254,7 +254,7 @@
       </Action>
 
       <Action Name="Resolve" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Page"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Page" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Page"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Remediated</String></Collection>
@@ -263,7 +263,7 @@
       </Action>
 
       <Action Name="AutoResolve" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Page"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Page" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Page"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Triggered</String></Collection>
@@ -274,7 +274,7 @@
       </Action>
 
       <Action Name="Timeout" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Page"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Page" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Page"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Investigating</String></Collection>
@@ -284,7 +284,7 @@
 
       <!-- EscalationPolicy Actions -->
       <Action Name="Activate" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.EscalationPolicy"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.EscalationPolicy" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.EscalationPolicy"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Idle</String></Collection>
@@ -293,7 +293,7 @@
       </Action>
 
       <Action Name="StepUp" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.EscalationPolicy"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.EscalationPolicy" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.EscalationPolicy"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Active</String></Collection>
@@ -303,7 +303,7 @@
       </Action>
 
       <Action Name="Snooze" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.EscalationPolicy"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.EscalationPolicy" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.EscalationPolicy"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Active</String></Collection>
@@ -311,7 +311,7 @@
       </Action>
 
       <Action Name="Unsnooze" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.EscalationPolicy"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.EscalationPolicy" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.EscalationPolicy"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Active</String></Collection>
@@ -319,7 +319,7 @@
       </Action>
 
       <Action Name="Exhaust" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.EscalationPolicy"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.EscalationPolicy" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.EscalationPolicy"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Active</String></Collection>
@@ -328,7 +328,7 @@
       </Action>
 
       <Action Name="Reset" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.EscalationPolicy"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.EscalationPolicy" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.EscalationPolicy"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Exhausted</String></Collection>
@@ -338,7 +338,7 @@
 
       <!-- Remediation Actions -->
       <Action Name="Approve" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation" Nullable="false"/>
         <Parameter Name="ApproverId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Remediation"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -348,8 +348,8 @@
       </Action>
 
       <Action Name="Reject" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation"/>
-        <Parameter Name="Reason" Type="Edm.String"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation" Nullable="false"/>
+        <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Remediation"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Proposed</String></Collection>
@@ -358,7 +358,7 @@
       </Action>
 
       <Action Name="AutoApprove" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Remediation"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Proposed</String></Collection>
@@ -369,7 +369,7 @@
       </Action>
 
       <Action Name="Execute" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Remediation"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Approved</String></Collection>
@@ -378,7 +378,7 @@
       </Action>
 
       <Action Name="Succeed" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Remediation"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Executing</String></Collection>
@@ -387,8 +387,8 @@
       </Action>
 
       <Action Name="Fail" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation"/>
-        <Parameter Name="ErrorMessage" Type="Edm.String"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation" Nullable="false"/>
+        <Parameter Name="ErrorMessage" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Remediation"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Executing</String></Collection>
@@ -397,7 +397,7 @@
       </Action>
 
       <Action Name="Retry" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Remediation"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Failed</String></Collection>
@@ -407,7 +407,7 @@
 
       <!-- Postmortem Actions -->
       <Action Name="AddRootCause" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Postmortem"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Postmortem" Nullable="false"/>
         <Parameter Name="RootCauseDescription" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Postmortem"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -418,7 +418,7 @@
       </Action>
 
       <Action Name="SubmitForReview" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Postmortem"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Postmortem" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Postmortem"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Draft</String></Collection>
@@ -427,7 +427,7 @@
       </Action>
 
       <Action Name="RequestRevision" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Postmortem"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Postmortem" Nullable="false"/>
         <Parameter Name="Feedback" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Postmortem"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
@@ -437,7 +437,7 @@
       </Action>
 
       <Action Name="ApprovePostmortem" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Postmortem"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Postmortem" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Postmortem"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>InReview</String></Collection>
@@ -446,7 +446,7 @@
       </Action>
 
       <Action Name="Publish" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.OnCall.Postmortem"/>
+        <Parameter Name="bindingParameter" Type="Temper.OnCall.Postmortem" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Postmortem"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection><String>Approved</String></Collection>

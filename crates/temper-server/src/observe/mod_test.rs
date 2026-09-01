@@ -1012,15 +1012,17 @@ fn action_param_detail_serializes_typed_params_under_type_key() {
     let detail = ActionParamDetail {
         name: "sleep_seconds".to_string(),
         param_type: "uint64".to_string(),
+        nullable: true,
     };
     let json = serde_json::to_value(&detail).unwrap();
     assert_eq!(
         json,
-        serde_json::json!({"name": "sleep_seconds", "type": "uint64"})
+        serde_json::json!({"name": "sleep_seconds", "type": "uint64", "nullable": true})
     );
     let back: ActionParamDetail = serde_json::from_value(json).unwrap();
     assert_eq!(back.name, "sleep_seconds");
     assert_eq!(back.param_type, "uint64");
+    assert!(back.nullable);
 }
 
 #[tokio::test]
@@ -1409,7 +1411,7 @@ async fn test_entity_history_returns_events() {
             "Order",
             "order-hist-1",
             "AddItem",
-            serde_json::json!({"ProductId": "p1"}),
+            serde_json::json!({"ProductId": "p1", "Quantity": 1}),
             &AgentContext::default(),
         )
         .await;
@@ -1421,7 +1423,7 @@ async fn test_entity_history_returns_events() {
             "Order",
             "order-hist-1",
             "SubmitOrder",
-            serde_json::json!({}),
+            serde_json::json!({"ShippingAddressId": "addr-1", "PaymentMethod": "card"}),
             &AgentContext::default(),
         )
         .await;
@@ -1484,7 +1486,7 @@ async fn test_entity_wait_returns_terminal_state() {
             "Order",
             "order-wait-1",
             "AddItem",
-            serde_json::json!({}),
+            serde_json::json!({"ProductId": "p1", "Quantity": 1}),
             &AgentContext::default(),
         )
         .await;
@@ -1499,7 +1501,7 @@ async fn test_entity_wait_returns_terminal_state() {
                 "Order",
                 "order-wait-1",
                 "SubmitOrder",
-                serde_json::json!({}),
+                serde_json::json!({"ShippingAddressId": "addr-1", "PaymentMethod": "card"}),
                 &AgentContext::default(),
             )
             .await
@@ -1581,7 +1583,7 @@ async fn test_entity_wait_wakes_from_state_change_event_before_poll_interval() {
             "Order",
             "order-wait-event-1",
             "AddItem",
-            serde_json::json!({}),
+            serde_json::json!({"ProductId": "p1", "Quantity": 1}),
             &AgentContext::default(),
         )
         .await;
@@ -1596,7 +1598,7 @@ async fn test_entity_wait_wakes_from_state_change_event_before_poll_interval() {
                 "Order",
                 "order-wait-event-1",
                 "SubmitOrder",
-                serde_json::json!({}),
+                serde_json::json!({"ShippingAddressId": "addr-1", "PaymentMethod": "card"}),
                 &AgentContext::default(),
             )
             .await
@@ -1633,7 +1635,7 @@ async fn test_entity_wait_times_out_with_current_state() {
             "Order",
             "order-wait-timeout",
             "AddItem",
-            serde_json::json!({}),
+            serde_json::json!({"ProductId": "p1", "Quantity": 1}),
             &AgentContext::default(),
         )
         .await;
@@ -1687,7 +1689,7 @@ async fn test_health_counts_entities_and_transitions() {
             "Order",
             "health-test-1",
             "AddItem",
-            serde_json::json!({}),
+            serde_json::json!({"ProductId": "p1", "Quantity": 1}),
             &AgentContext::default(),
         )
         .await;
@@ -1726,7 +1728,7 @@ async fn test_metrics_returns_prometheus_format() {
             "Order",
             "metrics-1",
             "AddItem",
-            serde_json::json!({}),
+            serde_json::json!({"ProductId": "p1", "Quantity": 1}),
             &AgentContext::default(),
         )
         .await;
@@ -1737,7 +1739,7 @@ async fn test_metrics_returns_prometheus_format() {
             "Order",
             "metrics-2",
             "SubmitOrder",
-            serde_json::json!({}),
+            serde_json::json!({"ShippingAddressId": "addr-1", "PaymentMethod": "card"}),
             &AgentContext::default(),
         )
         .await;
@@ -1794,7 +1796,7 @@ async fn test_trajectories_records_success_and_failure() {
             "Order",
             "traj-1",
             "AddItem",
-            serde_json::json!({"ProductId": "p1"}),
+            serde_json::json!({"ProductId": "p1", "Quantity": 1}),
             &AgentContext::default(),
         )
         .await;
@@ -1807,7 +1809,7 @@ async fn test_trajectories_records_success_and_failure() {
             "Order",
             "traj-2",
             "SubmitOrder",
-            serde_json::json!({}),
+            serde_json::json!({"ShippingAddressId": "addr-1", "PaymentMethod": "card"}),
             &AgentContext::default(),
         )
         .await;
@@ -1845,7 +1847,7 @@ async fn test_trajectories_filters_by_entity_type() {
             "Order",
             "traj-f1",
             "AddItem",
-            serde_json::json!({"ProductId": "p1"}),
+            serde_json::json!({"ProductId": "p1", "Quantity": 1}),
             &AgentContext::default(),
         )
         .await;
@@ -2011,7 +2013,7 @@ async fn test_sentinel_check_detects_error_spike() {
                 "Order",
                 &format!("sentinel-pass-{i}"),
                 "AddItem",
-                serde_json::json!({"ProductId": "p1"}),
+                serde_json::json!({"ProductId": "p1", "Quantity": 1}),
                 &AgentContext::default(),
             )
             .await;

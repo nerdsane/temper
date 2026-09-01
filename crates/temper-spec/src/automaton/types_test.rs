@@ -39,6 +39,39 @@ from = ["A"]
 }
 
 #[test]
+fn action_parameters_are_required_unless_explicitly_nullable() {
+    let toml_src = r#"
+[automaton]
+name = "T"
+states = ["A"]
+initial = "A"
+
+[[action]]
+name = "DoIt"
+from = ["A"]
+params = [
+    "plain",
+    { name = "typed", type = "Edm.Int64" },
+    { name = "optional", type = "Edm.String", nullable = true },
+]
+"#;
+    let automaton: Automaton = toml::from_str(toml_src).unwrap();
+    let params = &automaton.actions[0].params;
+
+    assert_eq!(params[0].name(), "plain");
+    assert_eq!(params[0].param_type(), "string");
+    assert!(!params[0].nullable());
+    assert_eq!(params[1].param_type(), "Edm.Int64");
+    assert!(!params[1].nullable());
+    assert!(params[2].nullable());
+
+    let encoded = toml::to_string(&automaton).expect("serialize automaton");
+    let reparsed: Automaton = toml::from_str(&encoded).expect("round trip automaton");
+    assert!(!reparsed.actions[0].params[1].nullable());
+    assert!(reparsed.actions[0].params[2].nullable());
+}
+
+#[test]
 fn parse_guard_variants() {
     let toml_src = r#"
 [automaton]

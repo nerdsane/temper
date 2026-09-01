@@ -11,6 +11,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use temper_authz::SecurityContext;
 
 use super::account_verification::enforce_commons_account_verified_for_action;
+use super::action_input::validate_bound_action_input;
 use super::common::run_write_prechecks;
 use super::rate_limit::{enforce_commons_write_rate_limit, owner_id_from_action};
 use super::response::annotate_entity;
@@ -167,6 +168,15 @@ pub(super) async fn dispatch_bound_action(
             &reason_with_id,
         )
         .into_response();
+    }
+
+    if let Err(error) = validate_bound_action_input(state, tenant, entity_type, action, &body_json)
+    {
+        http_span.set_status(Status::error(error.code));
+        http_span.set_attribute(OtelKeyValue::new("http.status_code", 400i64));
+        let end_time: std::time::SystemTime = sim_now().into();
+        http_span.end_with_timestamp(end_time);
+        return odata_error(StatusCode::BAD_REQUEST, error.code, &error.message).into_response();
     }
 
     if let Err(resp) = enforce_commons_account_verified_for_action(

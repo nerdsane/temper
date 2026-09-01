@@ -8,8 +8,8 @@ use temper_spec::automaton::{self, Automaton, ResolvedEffect, ResolvedGuard, tra
 
 use super::guard::Guard;
 use super::types::{
-    CompositeActionMetadata, CompositeCedarGate, Effect, SubWriteSpec, TransitionRule,
-    TransitionTable,
+    ActionParamMetadata, CompositeActionMetadata, CompositeCedarGate, Effect, SubWriteSpec,
+    TransitionRule, TransitionTable,
 };
 
 impl TransitionTable {
@@ -116,6 +116,24 @@ impl TransitionTable {
             );
         }
 
+        let action_params = automaton
+            .actions
+            .iter()
+            .filter(|action| action.kind != "output")
+            .map(|action| {
+                let params = action
+                    .params
+                    .iter()
+                    .map(|param| ActionParamMetadata {
+                        name: param.name().to_string(),
+                        param_type: param.param_type().to_string(),
+                        nullable: param.nullable(),
+                    })
+                    .collect();
+                (action.name.clone(), params)
+            })
+            .collect();
+
         TransitionTable {
             entity_name: automaton.automaton.name.clone(),
             states: automaton.automaton.states.clone(),
@@ -142,6 +160,7 @@ impl TransitionTable {
                 .collect(),
             state_var_metadata,
             composite_actions,
+            action_params,
             rule_index,
         }
     }

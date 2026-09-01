@@ -37,13 +37,27 @@ const INTENT: &str = "add a line item to the draft order";
 /// only way to assert on what was actually persisted.
 fn build_turso_state(system_name: &str, store: TursoEventStore) -> ServerState {
     let mut registry = SpecRegistry::new();
-    let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
-    registry.register_tenant(
-        "default",
-        csdl,
-        CSDL_XML.to_string(),
-        &[("Order", ORDER_IOA)],
+    let csdl_xml = CSDL_XML.replacen(
+        r#"<Parameter Name="Quantity" Type="Edm.Int32" Nullable="false"/>"#,
+        r#"<Parameter Name="Quantity" Type="Edm.Int32" Nullable="false"/>
+        <Parameter Name="Notes" Type="Edm.String"/>
+        <Parameter Name="api_token" Type="Edm.String"/>
+        <Parameter Name="payment" Type="Edm.Untyped"/>"#,
+        1,
     );
+    let order_ioa = ORDER_IOA.replacen(
+        r#"params = ["ProductId", "Quantity"]"#,
+        r#"params = [
+  "ProductId",
+  "Quantity",
+  { name = "Notes", type = "Edm.String", nullable = true },
+  { name = "api_token", type = "Edm.String", nullable = true },
+  { name = "payment", type = "Edm.Untyped", nullable = true },
+]"#,
+        1,
+    );
+    let csdl = parse_csdl(&csdl_xml).expect("CSDL parse");
+    registry.register_tenant("default", csdl, csdl_xml, &[("Order", &order_ioa)]);
 
     let state = ServerState::from_registry(ActorSystem::new(system_name), registry);
     {

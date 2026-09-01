@@ -38,7 +38,7 @@ async fn dst_full_lifecycle_through_dispatch() {
                 "Order",
                 &eid,
                 action,
-                serde_json::json!({}),
+                common::order_action_params(action),
             )
             .await
             .unwrap_or_else(|e| panic!("seed {seed}: {action} failed: {e}"));
@@ -78,7 +78,7 @@ async fn dst_lifecycle_crash_and_recovery() {
                     "Order",
                     &eid,
                     action,
-                    serde_json::json!({}),
+                    common::order_action_params(action),
                 )
                 .await
                 .unwrap_or_else(|e| panic!("seed {seed}: {action} failed: {e}"));
@@ -130,7 +130,7 @@ async fn dst_lifecycle_event_count() {
             "Order",
             "o-count",
             action,
-            serde_json::json!({}),
+            common::order_action_params(action),
         )
         .await
         .unwrap();

@@ -23,7 +23,7 @@
       </EntityType>
 
       <Action Name="PauseTracking" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.Location"/>
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.Location" Nullable="false"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection>
             <String>Active</String>
@@ -33,7 +33,7 @@
       </Action>
 
       <Action Name="ResumeTracking" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.Location"/>
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.Location" Nullable="false"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection>
             <String>Paused</String>
@@ -43,7 +43,7 @@
       </Action>
 
       <Action Name="RemoveLocation" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.Location"/>
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.Location" Nullable="false"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection>
             <String>Active</String>
@@ -75,7 +75,7 @@
       </EntityType>
 
       <Action Name="AcknowledgeAlert" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherAlert"/>
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherAlert" Nullable="false"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection>
             <String>Pending</String>
@@ -85,7 +85,7 @@
       </Action>
 
       <Action Name="ResolveAlert" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherAlert"/>
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherAlert" Nullable="false"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection>
             <String>Pending</String>
@@ -96,7 +96,7 @@
       </Action>
 
       <Action Name="ExpireAlert" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherAlert"/>
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherAlert" Nullable="false"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection>
             <String>Pending</String>
@@ -131,7 +131,7 @@
       </EntityType>
 
       <Action Name="FetchWeatherData" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherReport"/>
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherReport" Nullable="false"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection>
             <String>Collecting</String>
@@ -141,12 +141,12 @@
       </Action>
 
       <Action Name="FetchSucceeded" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherReport"/>
-        <Parameter Name="Temperature" Type="Edm.String"/>
-        <Parameter Name="Humidity" Type="Edm.String"/>
-        <Parameter Name="WindSpeed" Type="Edm.String"/>
-        <Parameter Name="Precipitation" Type="Edm.String"/>
-        <Parameter Name="Conditions" Type="Edm.String"/>
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherReport" Nullable="false"/>
+        <Parameter Name="Temperature" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Humidity" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="WindSpeed" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Precipitation" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Conditions" Type="Edm.String" Nullable="false"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection>
             <String>Fetching</String>
@@ -156,7 +156,7 @@
       </Action>
 
       <Action Name="FetchFailed" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherReport"/>
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherReport" Nullable="false"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection>
             <String>Fetching</String>
@@ -166,7 +166,7 @@
       </Action>
 
       <Action Name="ArchiveReport" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherReport"/>
+        <Parameter Name="bindingParameter" Type="Temper.WeatherTracker.WeatherReport" Nullable="false"/>
         <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
           <Collection>
             <String>Ready</String>

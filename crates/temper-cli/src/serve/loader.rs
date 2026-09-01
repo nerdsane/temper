@@ -10,7 +10,9 @@ use crate::util::to_pascal_case;
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::SpecRegistry;
 use temper_server::trigger::registry::parse_reactions;
-use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton, parse_automaton};
+use temper_spec::automaton::{
+    LintSeverity, lint_automata_bundle, lint_automata_csdl_bundle, lint_automaton, parse_automaton,
+};
 use temper_spec::cross_invariant::{
     CrossInvariantLintSeverity, lint_cross_invariants, parse_cross_invariants,
 };
@@ -70,6 +72,15 @@ pub(super) fn lint_tenant_specs(
     }
 
     for finding in lint_automata_bundle(&parsed_automata) {
+        findings.push(TenantLintFinding {
+            entity: finding.entity,
+            code: finding.code,
+            severity: finding.severity,
+            message: finding.message,
+        });
+    }
+
+    for finding in lint_automata_csdl_bundle(&parsed_automata, csdl) {
         findings.push(TenantLintFinding {
             entity: finding.entity,
             code: finding.code,

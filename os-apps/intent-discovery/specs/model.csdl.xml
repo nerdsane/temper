@@ -24,15 +24,15 @@
       </EntityType>
 
       <Action Name="Trigger" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.IntentDiscovery.IntentDiscovery"/>
+        <Parameter Name="bindingParameter" Type="Temper.IntentDiscovery.IntentDiscovery" Nullable="false"/>
         <Parameter Name="reason" Type="Edm.String" Nullable="false"/>
         <Parameter Name="source" Type="Edm.String" Nullable="false"/>
-        <Parameter Name="trigger_context_json" Type="Edm.String" Nullable="true"/>
+        <Parameter Name="trigger_context_json" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.IntentDiscovery.IntentDiscovery"/>
       </Action>
 
       <Action Name="GatheringComplete" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.IntentDiscovery.IntentDiscovery"/>
+        <Parameter Name="bindingParameter" Type="Temper.IntentDiscovery.IntentDiscovery" Nullable="false"/>
         <Parameter Name="signal_summary_json" Type="Edm.String" Nullable="false"/>
         <Parameter Name="signal_sources_json" Type="Edm.String" Nullable="false"/>
         <Parameter Name="signal_count" Type="Edm.Int64" Nullable="false"/>
@@ -40,7 +40,7 @@
       </Action>
 
       <Action Name="AnalysisComplete" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.IntentDiscovery.IntentDiscovery"/>
+        <Parameter Name="bindingParameter" Type="Temper.IntentDiscovery.IntentDiscovery" Nullable="false"/>
         <Parameter Name="analyst_agent_id" Type="Edm.String" Nullable="false"/>
         <Parameter Name="analysis_json" Type="Edm.String" Nullable="false"/>
         <Parameter Name="finding_count" Type="Edm.Int64" Nullable="false"/>
@@ -48,7 +48,7 @@
       </Action>
 
       <Action Name="ProposalComplete" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.IntentDiscovery.IntentDiscovery"/>
+        <Parameter Name="bindingParameter" Type="Temper.IntentDiscovery.IntentDiscovery" Nullable="false"/>
         <Parameter Name="records_created_count" Type="Edm.Int64" Nullable="false"/>
         <Parameter Name="issues_created_count" Type="Edm.Int64" Nullable="false"/>
         <Parameter Name="record_ids_json" Type="Edm.String" Nullable="false"/>
@@ -58,7 +58,7 @@
       </Action>
 
       <Action Name="Fail" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.IntentDiscovery.IntentDiscovery"/>
+        <Parameter Name="bindingParameter" Type="Temper.IntentDiscovery.IntentDiscovery" Nullable="false"/>
         <Parameter Name="error_message" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.IntentDiscovery.IntentDiscovery"/>
       </Action>
