@@ -5,8 +5,6 @@ on:
     branches: [main, staging]
   push:
     branches: [main, staging]
-  schedule:
-    - cron: "17 8 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -27,46 +25,6 @@ env:
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
-  # ─────────────────────────────────────────────────────
-  # Gate 0: Verification contract (seconds)
-  # ─────────────────────────────────────────────────────
-  verification-contract:
-    name: Verification Contract (verification.v1)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install git hook wrappers
-        run: bash scripts/setup-hooks.sh
-
-      - name: Generate verification.v1 report
-        env:
-          VERIFICATION_AGENT_PROVIDER: github-actions
-          VERIFICATION_AGENT_MODEL: ci
-        run: |
-          bash scripts/verification-v1-report.sh \
-            --session "${{ github.run_id }}" \
-            --out verification.v1.json \
-            --pretty
-
-      - name: Validate verification.v1 contract
-        run: bash scripts/verification-v1-validate.sh verification.v1.json
-
-      - name: Enforce verification policy
-        run: |
-          jq -e '
-            .summary.blocking_failures == 0 and
-            .summary.checks_failed == 0
-          ' verification.v1.json >/dev/null
-          jq '{summary: .summary}' verification.v1.json
-
-      - name: Upload verification artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: verification-v1
-          path: verification.v1.json
-
   # ─────────────────────────────────────────────────────
   # Gate 1: Fast checks (seconds)
   # ─────────────────────────────────────────────────────
@@ -105,40 +63,6 @@ jobs:
 
       - name: cargo clippy --workspace --all-targets
         run: cargo clippy --workspace --all-targets -- -D warnings
-
-  # ─────────────────────────────────────────────────────
-  # Gate 1b: Bench compile (non-PR events only)
-  # ─────────────────────────────────────────────────────
-  bench-build:
-    name: Bench Build
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    timeout-minutes: 45
-    env:
-      # ARN-439: CI only compiles benches (--no-run), never runs them, so the release-inherited
-      # lto=true + codegen-units=1 are pure compile-time waste here. Override them off for the
-      # bench profile on this job only.
-      CARGO_PROFILE_BENCH_LTO: "off"
-      CARGO_PROFILE_BENCH_CODEGEN_UNITS: "16"
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libz3-dev
-
-      - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-
-      - name: Set up mold linker
-        uses: rui314/setup-mold@v1
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-
-      - name: cargo bench --workspace --no-run
-        run: cargo bench --workspace --no-run
 
   # ─────────────────────────────────────────────────────
   # Gate 2: Integrity checks (seconds)
@@ -201,14 +125,6 @@ jobs:
 
       - name: Storage dispatch boundary ratchet
         run: bash scripts/check-storage-dispatch-boundary.sh
-
-      # DST pattern scan DISABLED (2026-02-17)
-      # Reason: Grep-based pattern matching is too brittle and caused 5+ consecutive
-      # CI failures from false positives. The DST reviewer agent (.claude/agents/dst-reviewer.md)
-      # performs semantic analysis which is strictly superior to regex scanning.
-      # The pattern scan will be re-evaluated once the DST architecture refactor
-      # (shared effect application) is complete.
-      # See: .progress/012_20260217_dst_architecture_fix.md
 
       - name: Dependency isolation
         run: |

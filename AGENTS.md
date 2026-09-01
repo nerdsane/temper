@@ -66,7 +66,7 @@ Suites: `platform_e2e_dst`, `system_entity_dst` (crates/temper-platform/tests/).
 cargo test --workspace                                  # full suite
 cargo test -p temper-platform --test platform_e2e_dst   # E2E shared-registry proof
 cargo run -p temper-cli -- serve --port 3000            # HTTP server, OData API, Observe UI
-scripts/setup-hooks.sh                                  # install git hooks (pre-commit integrity, pre-push 4-gate)
+scripts/setup-hooks.sh                                  # install git hooks (pre-commit integrity)
 ```
 
 ## Enforcement hooks

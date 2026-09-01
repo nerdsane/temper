@@ -33,7 +33,6 @@ Scores are normalized to `[0.0, 1.0]`.
 | `config.hook.stop.stop_verify` | `.claude/settings.json` + `stop-verify.sh` | `config` | Yes | `mechanical` | limited | 0.75 | 0.30 | 0.55 | Good fallback, commit-marker path currently unwired. |
 | `config.hook.posttool.trace_capture` | `.claude/settings.json` + `trace-capture.sh` | `config` | No | `mechanical` | useful | 0.55 | 0.40 | 0.80 | Portable trace artifact, limited tamper coverage. |
 | `install.git_hook.pre_commit` | `.git/hooks/pre-commit` wrapper | `git` | Yes | `mechanical` | useful | 0.82 | 0.50 | 0.80 | Catches non-Claude commit paths. |
-| `install.git_hook.pre_push` | `.git/hooks/pre-push` wrapper | `git` | Yes | `mechanical` | useful | 0.80 | 0.48 | 0.80 | Catches non-Claude push paths. |
 | `install.git_hook.post_commit` | `.git/hooks/post-commit` wrapper | `git` | Yes | `mechanical` | useful | 0.74 | 0.42 | 0.82 | Wires stop-gate commit lifecycle markers. |
 | `evidence.trace.integrity` | `trace-*.jsonl` + `verify-trace.sh` | `trace` | No | `mechanical` | useful | 0.65 | 0.55 | 0.85 | Hash chain on selected fields. |
 | `evidence.marker.review.dst` | `dst-reviewed(.toml)` marker | `review` | Conditional | `attestation` | limited | 0.55 | 0.20 | 0.75 | Presence-only unless freshness checked. |
@@ -42,7 +41,6 @@ Scores are normalized to `[0.0, 1.0]`.
 | `evidence.push_post_verify` | `push-pending-*` vs `test-verified-*` markers | `push` | Yes | `mechanical` | useful | 0.68 | 0.30 | 0.75 | Effective when marker lifecycle is intact. |
 | `wiring.exit_gate.commit_markers` | `stop-verify.sh` plus post-commit marker writers | `wiring` | Yes | `mechanical` | useful | 0.72 | 0.35 | 0.82 | `commit-pending`/`sim-changed` are written by git post-commit hook. |
 | `wiring.marker.session_binding` | `pre-commit-review-gate.sh` / `stop-verify.sh` | `wiring` | No | `inferred` | limited | 0.35 | 0.10 | 0.85 | Marker existence checked; session/change binding not enforced. |
-| `wiring.pre_push_determinism_blocking` | `pre-push.sh` + `scripts/check-determinism.sh` | `wiring` | Intended Yes | `mechanical` | limited | 0.30 | 0.10 | 0.80 | Determinism scan currently advisory in practice. |
 
 ## Universal Consumption Contract
 

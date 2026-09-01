@@ -1,0 +1,38 @@
+name: Bench Build
+
+# Compile-only check that the benches still build (cargo bench --no-run). Benches
+# change rarely and are never run in CI, so this runs weekly + on demand instead of
+# on every main push (ARN-453; it cost ~16 min per push).
+on:
+  schedule:
+    - cron: "17 8 * * 0"   # Sundays 08:17 UTC
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: nightly-2026-02-08
+  CARGO_INCREMENTAL: "0"
+  # CI only compiles benches, never runs them: release-inherited lto=true +
+  # codegen-units=1 are pure compile-time waste here.
+  CARGO_PROFILE_BENCH_LTO: "off"
+  CARGO_PROFILE_BENCH_CODEGEN_UNITS: "16"
+
+jobs:
+  bench-build:
+    name: Bench Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Set up mold linker
+        uses: rui314/setup-mold@v1
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+      - name: cargo bench --workspace --no-run
+        run: cargo bench --workspace --no-run

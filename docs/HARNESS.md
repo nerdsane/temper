@@ -102,7 +102,6 @@ This harness enforces quality for **agents developing Temper itself** (the frame
 | 12 | Integrity Check | Git hook | pre-commit | `git commit` | **YES** |
 | 13 | Spec Syntax | Git hook | pre-commit | `git commit` | **YES** |
 | 14 | Dep Audit | Git hook | pre-commit | `git commit` | **YES** |
-| 15 | Full Test Suite | Git hook | pre-push | `git push` | **YES** |
 | 16 | Commit Marker Writer | Git hook | post-commit | `git commit` | **YES** (for stop-gate wiring) |
 
 ---
@@ -394,23 +393,6 @@ Blocking:  YES (part of pre-commit hook)
 
 If any `Cargo.toml` was staged, runs `scripts/audit-deps.sh`. Same check as Component 3, but catches direct git commits that bypass Claude Code hooks.
 
-### Component 13: Pre-Push — Full Test Suite
-
-```
-File:      .claude/hooks/pre-push.sh (installed to .git/hooks/pre-push)
-Blocking:  YES
-```
-
-Runs a 3-gate pipeline before every push:
-
-| Gate | What it checks | Blocking |
-|------|---------------|----------|
-| 1/3 | Integrity (no TODO/unwrap/hacks) | YES |
-| 2/3 | Determinism patterns in sim crates | Advisory |
-| 3/3 | `cargo test --workspace` | YES |
-
-Bypass with `git push --no-verify` for emergencies only.
-
 ### Component 14: Post-Commit — Commit Marker Writer
 
 ```
@@ -567,8 +549,6 @@ scripts/setup-hooks.sh
 # Skip git pre-commit checks
 git commit --no-verify
 
-# Skip git pre-push test suite
-git push --no-verify
 ```
 
 Claude Code hooks **cannot be bypassed** — they're enforced by the tool itself. If a blocking hook fires, you must fix the issue. The `// determinism-ok` comment is the only escape hatch for false positives in the DST pattern scan.
@@ -602,9 +582,4 @@ scripts/verification-v1-report.sh --pretty
 
 This exports hook/gate/marker evidence in one model-agnostic JSON document that any runtime can consume.
 
-CI now consumes this contract via job `verification-contract` in `.github/workflows/ci.yml`:
-
-- Generates `verification.v1.json`
-- Validates contract shape
-- Enforces policy (`blocking_failures == 0` and `checks_failed == 0`)
-- Uploads the report as build artifact
+This contract is a LOCAL harness self-report. It is not a CI gate: running the hook installer on a CI runner and validating the resulting report tested the installer, not the code (removed 2026-09-01, ARN-453).

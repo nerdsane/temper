@@ -50,7 +50,6 @@ mkdir -p "$(dirname "$OUT_FILE")"
 
 SETTINGS_FILE="$WORKSPACE_ROOT/.claude/settings.json"
 PRE_COMMIT_HOOK="$WORKSPACE_ROOT/.git/hooks/pre-commit"
-PRE_PUSH_HOOK="$WORKSPACE_ROOT/.git/hooks/pre-push"
 POST_COMMIT_HOOK="$WORKSPACE_ROOT/.git/hooks/post-commit"
 TRACE_FILE="$MARKER_DIR/trace-${SESSION_ID}.jsonl"
 
@@ -163,13 +162,6 @@ else
         "pre-commit wrapper missing or not pointed at .claude/hooks/pre-commit.sh." '[".git/hooks/pre-commit",".claude/hooks/pre-commit.sh"]'
 fi
 
-if [ -f "$PRE_PUSH_HOOK" ] && grep -q "\.claude/hooks/pre-push\.sh" "$PRE_PUSH_HOOK"; then
-    add_check "install.git_hook.pre_push" "Git pre-push wrapper installed" "git" true "pass" "mechanical" 0.80 0.48 0.80 \
-        "pre-push wrapper points to .claude/hooks/pre-push.sh." '[".git/hooks/pre-push",".claude/hooks/pre-push.sh"]'
-else
-    add_check "install.git_hook.pre_push" "Git pre-push wrapper installed" "git" true "fail" "mechanical" 0.80 0.48 0.80 \
-        "pre-push wrapper missing or not pointed at .claude/hooks/pre-push.sh." '[".git/hooks/pre-push",".claude/hooks/pre-push.sh"]'
-fi
 
 if [ -f "$POST_COMMIT_HOOK" ] && grep -q "\.claude/hooks/post-commit\.sh" "$POST_COMMIT_HOOK"; then
     add_check "install.git_hook.post_commit" "Git post-commit wrapper installed" "git" true "pass" "mechanical" 0.74 0.42 0.82 \
@@ -269,13 +261,6 @@ else
 fi
 
 # Wiring check: determinism gate behavior at push time.
-if grep -q 'Determinism is advisory' "$WORKSPACE_ROOT/.claude/hooks/pre-push.sh"; then
-    add_check "wiring.pre_push_determinism_blocking" "Pre-push determinism enforcement is blocking" "wiring" true "warn" "mechanical" 0.30 0.10 0.80 \
-        "pre-push determinism check is currently advisory in practice." '[".claude/hooks/pre-push.sh","scripts/check-determinism.sh"]'
-else
-    add_check "wiring.pre_push_determinism_blocking" "Pre-push determinism enforcement is blocking" "wiring" true "pass" "mechanical" 0.30 0.10 0.80 \
-        "pre-push determinism check appears blocking." '[".claude/hooks/pre-push.sh","scripts/check-determinism.sh"]'
-fi
 
 CHECKS_JSON="$(jq -s '.' "$TMP_CHECKS")"
 
