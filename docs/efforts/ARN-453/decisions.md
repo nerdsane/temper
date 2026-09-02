@@ -41,3 +41,21 @@
 **Options:** (a) tell people to re-run setup-hooks.sh; (b) installer removes it; (c) also self-heal from the tracked pre-commit hook, which every such checkout already runs.
 **Chose (c) over (a)/(b) because:** it needs no human step; the commit that precedes the push removes the wrapper.
 **Where:** scripts/setup-hooks.sh, .claude/hooks/pre-commit.sh.
+
+**Decision:** The Tests job's exclusion is scoped to temper-server (`not (package(temper-server) and binary(/^dst_/))`) instead of making the core matrix cell workspace-wide.
+**Came up because:** round 2 (codex) - the matrix only runs temper-server, so a dst_ binary in another crate would have been excluded by the Tests job and run nowhere.
+**Options:** (a) core cell `--workspace` (compiles every crate's tests in that cell too); (b) scope the Tests-job exclusion to the package the matrix covers.
+**Chose (b) over (a) because:** complete coverage in both directions at no extra compile; other crates' dst_ binaries run in the Tests job like any other test.
+**Where:** .github/workflows/ci.yml Tests step.
+
+**Decision:** Matrix exclusions are anchored regexes (`/^dst_platform_boot$/`), and the generator's `-E` expressions are JSON-escaped double quotes inside the single-quoted SUITES string.
+**Came up because:** round 2 - fable found the single-quote nesting was a bash syntax error (CI's matrix setup failed on 1afb3a99; I had pushed a `run:` block without executing it), and the bare `binary(dst_platform_boot)` exclusion was a substring match.
+**Options:** none for the syntax error; for the match, bare vs anchored.
+**Chose anchored because:** a future `dst_platform_boot_replay` binary would otherwise be silently dropped from platform-consistency.
+**Where:** ci.yml dst-matrix-setup. The generator step is now executed locally before push, and a `workflows-lint` CI job (actionlint) makes the class of error un-mergeable.
+
+**Decision:** Add an actionlint job to CI.
+**Came up because:** the quoting bug above; actionlint catches it (verified against the broken head), and I had run it only before the matrix edit.
+**Options:** (a) rely on running actionlint by hand; (b) a seconds-long CI job.
+**Chose (b) over (a) because:** a rule I already had and skipped once is not a control; the job is.
+**Where:** .github/workflows/ci.yml job workflows-lint.

@@ -26,6 +26,22 @@ env:
 
 jobs:
   # ─────────────────────────────────────────────────────
+  # Gate 0: Workflow files are code (ARN-453: a bad quote in the DST matrix
+  # generator shipped once). actionlint + shellcheck on every run: block.
+  # ─────────────────────────────────────────────────────
+  workflows-lint:
+    name: Workflows Lint (actionlint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.7
+          # style/info-level shellcheck codes are pre-existing noise; errors block
+          ./actionlint -color -ignore 'SC2086' -ignore 'SC2012' -ignore 'SC2044' -ignore 'SC2129'
+
+  # ─────────────────────────────────────────────────────
   # Gate 1: Fast checks (seconds)
   # ─────────────────────────────────────────────────────
   check:
@@ -182,12 +198,13 @@ jobs:
             (cd "wasm-modules/$module" && cargo build --target wasm32-unknown-unknown --release)
           done
 
-      # The dst_* integration binaries run in the DST matrix below; everything
-      # else, including lib unit tests that happen to have dst_ in their name,
-      # runs here. (ARN-453: the old name filter `not test(dst_)` also dropped
-      # those lib tests, and nothing else ran them.)
-      - name: cargo nextest run --workspace (dst_ binaries run in the matrix)
-        run: cargo nextest run --workspace -E 'not binary(/^dst_/)'
+      # temper-server's dst_* integration binaries run in the DST matrix below;
+      # everything else runs here: other crates' dst_* binaries (the matrix only
+      # covers temper-server) and lib unit tests that happen to have dst_ in
+      # their name. (ARN-453: the old name filter `not test(dst_)` dropped those
+      # lib tests, and nothing else ran them.)
+      - name: cargo nextest run --workspace (temper-server dst_ binaries run in the matrix)
+        run: cargo nextest run --workspace -E 'not (package(temper-server) and binary(/^dst_/))'
 
       # spec_validate_endpoint declares required-features = ["observe"]. The
       # workspace run above usually still covers it via feature unification
@@ -239,9 +256,9 @@ jobs:
         # never be silently left out (ARN-453: three binaries were).
         run: |
           SUITES='[
-            {"suite":"core","command":"cargo nextest run -p temper-server -E 'binary(/^dst_/) and not binary(/^dst_platform_/)'"},
+            {"suite":"core","command":"cargo nextest run -p temper-server -E \"binary(/^dst_/) and not binary(/^dst_platform_/)\""},
             {"suite":"platform-boot","command":"cargo nextest run -p temper-server --test dst_platform_boot"},
-            {"suite":"platform-consistency","command":"cargo nextest run -p temper-server -E 'binary(/^dst_platform_/) and not binary(dst_platform_boot) and not binary(dst_platform_random)'"}
+            {"suite":"platform-consistency","command":"cargo nextest run -p temper-server -E \"binary(/^dst_platform_/) and not binary(/^dst_platform_boot$/) and not binary(/^dst_platform_random$/)\""}
           ]'
           RANDOM_CMD="cargo nextest run -p temper-server --test dst_platform_random"
           if [ "${{ github.event_name }}" = "pull_request" ]; then
