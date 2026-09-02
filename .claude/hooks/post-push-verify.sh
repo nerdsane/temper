@@ -3,7 +3,7 @@
 # BLOCKING: No (advisory)
 #
 # After git push, records that a push happened for this session.
-# Tests run in CI on every push (there is no pre-push hook), so we don't re-run them here.
+# Tests run in CI (pull requests and main/staging pushes); there is no pre-push hook, so nothing re-runs them here.
 set -euo pipefail
 
 PAYLOAD="$(cat)"
