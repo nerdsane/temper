@@ -8,9 +8,11 @@ on:
     - cron: "17 8 * * 0"   # Sundays 08:17 UTC
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: nightly-2026-02-08
   CARGO_INCREMENTAL: "0"
   # CI only compiles benches, never runs them: release-inherited lto=true +
   # codegen-units=1 are pure compile-time waste here.
@@ -26,10 +28,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libz3-dev
-      - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: rustup toolchain install && rustup show active-toolchain
       - name: Set up mold linker
         uses: rui314/setup-mold@v1
       - name: Cache Rust build

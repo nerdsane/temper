@@ -6,7 +6,9 @@
 set -euo pipefail
 
 WORKSPACE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HOOKS_DIR="$(git rev-parse --git-path hooks)"   # worktree-safe: .git is a file in linked worktrees
+# Resolve against the repo this script lives in, not the caller's cwd; git-path is
+# worktree-safe (.git is a file in linked worktrees).
+HOOKS_DIR="$(git -C "$WORKSPACE_ROOT" rev-parse --path-format=absolute --git-path hooks)"
 SOURCE_DIR="$WORKSPACE_ROOT/.claude/hooks"
 
 echo "=== Installing Git Hooks ==="

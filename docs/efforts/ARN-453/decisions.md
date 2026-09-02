@@ -59,3 +59,33 @@
 **Options:** (a) rely on running actionlint by hand; (b) a seconds-long CI job.
 **Chose (b) over (a) because:** a rule I already had and skipped once is not a control; the job is.
 **Where:** .github/workflows/ci.yml job workflows-lint.
+
+**Decision:** The installer resolves the hooks directory against the repository the script lives in (`git -C "$WORKSPACE_ROOT"`), not the caller's cwd.
+**Came up because:** round 3 (codex, fable) - my round-2 worktree fix used the cwd's repository, so running the installer by absolute path from another repo would have written temper's hooks there. Reproduced, then driven from a foreign cwd after the fix (foreign repo untouched, temper hooks installed).
+**Options:** (a) `cd "$WORKSPACE_ROOT"` at the top; (b) `git -C`.
+**Chose (b) because:** one expression, no cwd side effect for the rest of the script.
+**Where:** scripts/setup-hooks.sh.
+
+**Decision:** Remove the `evidence.push_post_verify` self-report check and describe the post-push hook as what it is: a `push-completed` trace marker, no tests.
+**Came up because:** round 3 (codex) - the report looked for `push-pending`/`test-verified` markers that nothing writes; HARNESS.md said the post-push hook runs `cargo test`. Both were fiction; the check could only ever "skip".
+**Options:** (a) make the hook write the markers the report wants (re-adding push-time tests locally); (b) delete the check and correct the docs.
+**Chose (b) over (a) because:** CI verifies pushed code; a local test run at push time is the thing this effort removed.
+**Where:** scripts/verification-v1-report.sh, docs/internal/verification.v1.mapping.md, docs/HARNESS.md (overview diagram, hook row, Component 6, marker flow, lifecycle diagram).
+
+**Decision:** The actionlint installer script is fetched from the v1.7.7 tag, not main; the lint and bench jobs declare `contents: read`; bench.yml installs the toolchain from rust-toolchain.toml instead of a second hard-coded pin.
+**Came up because:** round 3 (fable) - an unpinned script piped to bash in a job with the default token; duplicated nightly pin.
+**Options:** none worth recording for the pin; for the toolchain, (a) duplicate the env var, (b) let rustup read the file.
+**Chose (b) because:** the file is already the source of truth for developers.
+**Where:** .github/workflows/ci.yml workflows-lint, .github/workflows/bench.yml.
+
+**Decision:** Branch protection is out of scope for this PR and surfaced to the owner instead.
+**Came up because:** round 3 (fable) asked whether required contexts were updated. Checked: nerdsane/temper main has NO branch protection and no rulesets (GitHub API 404 / empty), so no context is required and none blocks a merge today.
+**Options:** (a) add a ruleset from this session; (b) report it.
+**Chose (b) because:** repository settings are the owner's call and were never part of this effort's intent; the gates are enforced by process, not by GitHub, until she decides.
+**Where:** PR #454 completion report.
+
+**Decision:** ADR-0079 amended in place rather than superseded.
+**Came up because:** round 3 (codex) - the ADR still required the nightly and bench-on-every-non-PR-event.
+**Options:** (a) a new ADR; (b) an amendment section.
+**Chose (b) because:** the rest of ADR-0079 (PR smoke mode, seed shards, concurrency) still stands.
+**Where:** docs/adrs/0079-ci-pr-smoke-and-dst-matrix.md.

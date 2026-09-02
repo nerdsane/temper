@@ -210,33 +210,6 @@ else
         "alignment-reviewed marker missing." '["/tmp/temper-harness/*/alignment-reviewed","/tmp/temper-harness/*/alignment-reviewed.toml"]'
 fi
 
-# Push verification marker consistency.
-shopt -s nullglob
-PENDING_MARKERS=("$MARKER_DIR"/push-pending-*)
-shopt -u nullglob
-
-if [ "${#PENDING_MARKERS[@]}" -eq 0 ]; then
-    add_check "evidence.push_post_verify" "Post-push verification marker consistency" "push" true "skip" "mechanical" 0.68 0.30 0.75 \
-        "No push-pending markers found." "$(jq -nc --arg d "$MARKER_DIR" '[$d]')"
-else
-    ALL_VERIFIED=true
-    for PENDING in "${PENDING_MARKERS[@]}"; do
-        MARKER_SESSION="$(basename "$PENDING" | sed 's/^push-pending-//')"
-        if [ ! -f "$MARKER_DIR/test-verified-${MARKER_SESSION}" ] && [ ! -f "$MARKER_DIR/test-verified-${MARKER_SESSION}.toml" ]; then
-            ALL_VERIFIED=false
-            break
-        fi
-    done
-
-    if [ "$ALL_VERIFIED" = true ]; then
-        add_check "evidence.push_post_verify" "Post-push verification marker consistency" "push" true "pass" "mechanical" 0.68 0.30 0.75 \
-            "Every push-pending marker has matching test-verified evidence." "$(jq -nc --arg d "$MARKER_DIR" '[$d]')"
-    else
-        add_check "evidence.push_post_verify" "Post-push verification marker consistency" "push" true "fail" "mechanical" 0.68 0.30 0.75 \
-            "Found push-pending marker(s) without matching test-verified marker." "$(jq -nc --arg d "$MARKER_DIR" '[$d]')"
-    fi
-fi
-
 # Wiring check: stop-gate commit markers are checked but currently unwritten.
 # Only count concrete write operations (redirection/touch/write-marker), not generic mentions.
 COMMIT_MARKER_WRITERS="$(find_commit_marker_writers \

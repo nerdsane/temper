@@ -71,7 +71,7 @@ scripts/setup-hooks.sh                                  # install git hooks (pre
 
 ## Enforcement hooks
 
-`.claude/settings.json` wires blocking hooks: L0-L3 spec verification on every `.ioa.toml` edit, a 25-pattern determinism guard on `.rs` edits in sim-visible crates, and a pre-commit gate requiring DST-review and code-review markers (`.agents/agents/dst-reviewer.md`, `code-reviewer.md` write them on PASS). Tests are not run by local hooks; CI runs the full suite, the DST matrix and the readability ratchet on every push.
+`.claude/settings.json` wires blocking hooks: L0-L3 spec verification on every `.ioa.toml` edit, a 25-pattern determinism guard on `.rs` edits in sim-visible crates, and a pre-commit gate requiring DST-review and code-review markers (`.agents/agents/dst-reviewer.md`, `code-reviewer.md` write them on PASS). Tests are not run by local hooks; CI runs the full suite, the DST matrix and the readability ratchet on every pull request and on pushes to main/staging (ci.yml `on:`). A branch push with no PR starts nothing.
 
 ## Deploying spec changes
 

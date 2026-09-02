@@ -33,11 +33,14 @@ jobs:
     name: Workflows Lint (actionlint)
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - name: actionlint
         run: |
-          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.7
+          # installer script and binary both pinned to the same release tag
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
           # style/info-level shellcheck codes are pre-existing noise; errors block
           ./actionlint -color -ignore 'SC2086' -ignore 'SC2012' -ignore 'SC2044' -ignore 'SC2129'
 
