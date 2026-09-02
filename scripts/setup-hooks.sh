@@ -30,6 +30,13 @@ HOOK_EOF
 chmod +x "$HOOKS_DIR/pre-commit"
 echo "Installed: pre-commit (integrity check, spec syntax, dep audit)"
 
+# Remove the pre-push wrapper the old installer wrote (its target,
+# .claude/hooks/pre-push.sh, was deleted in ARN-453; a stale wrapper fails every push).
+if [ -f "$HOOKS_DIR/pre-push" ] && grep -q "temper harness" "$HOOKS_DIR/pre-push" 2>/dev/null; then
+    rm -f "$HOOKS_DIR/pre-push"
+    echo "Removed: stale pre-push wrapper (its gates run in CI now)"
+fi
+
 # Install post-commit hook
 if [ -f "$HOOKS_DIR/post-commit" ] && ! grep -q "temper harness" "$HOOKS_DIR/post-commit" 2>/dev/null; then
     echo "WARNING: Existing post-commit hook found. Backing up to post-commit.backup"

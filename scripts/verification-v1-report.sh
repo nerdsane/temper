@@ -260,8 +260,6 @@ else
         "Marker session/change binding appears configured." '[".claude/hooks/pre-commit-review-gate.sh","scripts/write-marker.sh"]'
 fi
 
-# Wiring check: determinism gate behavior at push time.
-
 CHECKS_JSON="$(jq -s '.' "$TMP_CHECKS")"
 
 CHECKS_TOTAL="$(echo "$CHECKS_JSON" | jq 'length')"

@@ -15,9 +15,6 @@ name: sdlc
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened, labeled]
-concurrency:
-  group: sdlc-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -190,6 +187,12 @@ jobs:
             else await github.rest.issues.createComment({...context.repo, issue_number: context.issue.number, body});
 
   review:
+    # only review had a concurrency group before the merge into one file; proof
+    # (Vercel deploy) and the cheap gates never did, and an `edited` event must not
+    # cancel a proof render mid-flight.
+    concurrency:
+      group: sdlc-review-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     permissions:
       contents: write        # routing enables auto-merge
       pull-requests: write

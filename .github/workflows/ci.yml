@@ -182,8 +182,12 @@ jobs:
             (cd "wasm-modules/$module" && cargo build --target wasm32-unknown-unknown --release)
           done
 
-      - name: cargo nextest run --workspace (skip dst_)
-        run: cargo nextest run --workspace -E 'not test(dst_)'
+      # The dst_* integration binaries run in the DST matrix below; everything
+      # else, including lib unit tests that happen to have dst_ in their name,
+      # runs here. (ARN-453: the old name filter `not test(dst_)` also dropped
+      # those lib tests, and nothing else ran them.)
+      - name: cargo nextest run --workspace (dst_ binaries run in the matrix)
+        run: cargo nextest run --workspace -E 'not binary(/^dst_/)'
 
       # spec_validate_endpoint declares required-features = ["observe"]. The
       # workspace run above usually still covers it via feature unification
@@ -230,11 +234,14 @@ jobs:
       - id: gen
         # core/boot/consistency always run. platform-random: one smoke cell on PRs,
         # four full-mode seed shards on push/schedule/dispatch.
+        # Cells are defined by EXCLUSION, not by listing binaries: every dst_* binary
+        # lands in core unless a platform cell claims it, so a new dst_ test can
+        # never be silently left out (ARN-453: three binaries were).
         run: |
           SUITES='[
-            {"suite":"core","command":"cargo nextest run -p temper-server --test dst_concurrency_retry --test dst_hotswap --test dst_lifecycle --test dst_multi_tenant --test dst_persistence"},
+            {"suite":"core","command":"cargo nextest run -p temper-server -E 'binary(/^dst_/) and not binary(/^dst_platform_/)'"},
             {"suite":"platform-boot","command":"cargo nextest run -p temper-server --test dst_platform_boot"},
-            {"suite":"platform-consistency","command":"cargo nextest run -p temper-server --test dst_platform_cedar --test dst_platform_index --test dst_platform_rollback"}
+            {"suite":"platform-consistency","command":"cargo nextest run -p temper-server -E 'binary(/^dst_platform_/) and not binary(dst_platform_boot) and not binary(dst_platform_random)'"}
           ]'
           RANDOM_CMD="cargo nextest run -p temper-server --test dst_platform_random"
           if [ "${{ github.event_name }}" = "pull_request" ]; then
