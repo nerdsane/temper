@@ -16,8 +16,8 @@ use crate::state::ServerState;
 
 mod support;
 use support::{
-    add_rule_policy_id, build_prospective_enabled_text,
-    build_prospective_enabled_text_with_override, policy_row_to_json, reload_tenant_from_store,
+    build_prospective_enabled_text, build_prospective_enabled_text_with_override, persist_new_rule,
+    policy_row_to_json, reload_tenant_from_store,
 };
 
 // ---------------------------------------------------------------------------
@@ -134,60 +134,13 @@ pub(crate) async fn handle_add_policy_rule(
         }
     };
 
-    if let Some(store) = state.policy_store()
-        && let Ok(rows) = store.load_policies_for_tenant(&tenant).await
-        && let Some(existing) = rows
-            .iter()
-            .find(|row| row.enabled && row.cedar_text.trim() == rule.trim())
-    {
-        return (
-            StatusCode::OK,
-            axum::Json(serde_json::json!({
-                "tenant": tenant,
-                "policy_id": existing.policy_id,
-                "status": "rule_added",
-            })),
-        )
-            .into_response();
-    }
-
-    let policy_id = add_rule_policy_id(&rule);
-    debug_assert_ne!(policy_id, "primary");
-    debug_assert!(!policy_id.is_empty());
-
-    let prospective =
-        build_prospective_enabled_text(&state, &tenant, Some((&policy_id, &rule))).await;
-    if let Err(resp) = super::validate_and_reload_policies(&state, &tenant, &prospective) {
-        return resp;
-    }
-
-    persist_and_activate_policy(
+    persist_new_rule(
         &state,
         &tenant,
-        &policy_id,
         &rule,
         &auth.security_context().principal.id,
     )
-    .await;
-
-    {
-        let mut policies = state.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-        policies.insert(tenant.clone(), prospective);
-    }
-
-    let _ = state
-        .observe_refresh_tx
-        .send(crate::state::ObserveRefreshHint::Policies);
-
-    (
-        StatusCode::OK,
-        axum::Json(serde_json::json!({
-            "tenant": tenant,
-            "policy_id": policy_id,
-            "status": "rule_added",
-        })),
-    )
-        .into_response()
+    .await
 }
 
 // ---------------------------------------------------------------------------

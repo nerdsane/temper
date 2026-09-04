@@ -1,6 +1,8 @@
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use sha2::{Digest, Sha256};
 
-use crate::authz::load_and_activate_tenant_policies;
+use crate::authz::{load_and_activate_tenant_policies, persist_and_activate_policy};
 use crate::state::ServerState;
 use crate::storage::PolicyStoreRow;
 
@@ -11,6 +13,57 @@ use crate::storage::PolicyStoreRow;
 pub(super) fn add_rule_policy_id(cedar_text: &str) -> String {
     let digest = Sha256::digest(cedar_text.as_bytes());
     format!("rule:{digest:x}")
+}
+
+pub(super) async fn existing_enabled_rule_id(
+    state: &ServerState,
+    tenant: &str,
+    rule: &str,
+) -> Option<String> {
+    let store = state.policy_store()?;
+    let rows = store.load_policies_for_tenant(tenant).await.ok()?;
+    rows.into_iter()
+        .find(|row| row.enabled && row.cedar_text.trim() == rule.trim())
+        .map(|row| row.policy_id)
+}
+
+pub(super) fn rule_added_json(tenant: &str, policy_id: &str) -> axum::response::Response {
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "tenant": tenant,
+            "policy_id": policy_id,
+            "status": "rule_added",
+        })),
+    )
+        .into_response()
+}
+
+pub(super) async fn persist_new_rule(
+    state: &ServerState,
+    tenant: &str,
+    rule: &str,
+    created_by: &str,
+) -> axum::response::Response {
+    if let Some(existing_id) = existing_enabled_rule_id(state, tenant, rule).await {
+        return rule_added_json(tenant, &existing_id);
+    }
+    let policy_id = add_rule_policy_id(rule);
+    debug_assert_ne!(policy_id, "primary");
+    debug_assert!(!policy_id.is_empty());
+    let prospective = build_prospective_enabled_text(state, tenant, Some((&policy_id, rule))).await;
+    if let Err(resp) = crate::api::validate_and_reload_policies(state, tenant, &prospective) {
+        return resp;
+    }
+    persist_and_activate_policy(state, tenant, &policy_id, rule, created_by).await;
+    {
+        let mut policies = state.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+        policies.insert(tenant.to_string(), prospective);
+    }
+    let _ = state
+        .observe_refresh_tx
+        .send(crate::state::ObserveRefreshHint::Policies);
+    rule_added_json(tenant, &policy_id)
 }
 
 pub(super) fn policy_row_to_json(row: &PolicyStoreRow) -> serde_json::Value {

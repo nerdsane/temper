@@ -103,9 +103,7 @@ pub async fn recover_cedar_policies(state: &PlatformState, ps: &dyn PlatformStor
         let mut seen_texts = BTreeSet::new();
         let mut entry_count = 0usize;
 
-        // `primary` is the durable aggregate policy row for newer installs. If
-        // it exists, prefer it over the legacy blob to avoid loading the same
-        // multi-megabyte generated policy twice.
+        // Prefer granular `primary` over the legacy blob when both exist.
         if !has_primary_granular
             && let Some(legacy_text) = legacy_entries.get(&tenant)
             && push_unique_cedar_text(&mut policy_text, &mut seen_texts, legacy_text)
@@ -158,13 +156,6 @@ pub async fn recover_cedar_policies(state: &PlatformState, ps: &dyn PlatformStor
     }
 }
 
-fn append_cedar_policy_text(target: &mut String, cedar_text: &str) {
-    if !target.is_empty() {
-        target.push('\n');
-    }
-    target.push_str(cedar_text);
-}
-
 fn push_unique_cedar_text(
     target: &mut String,
     seen: &mut BTreeSet<String>,
@@ -174,7 +165,10 @@ fn push_unique_cedar_text(
     if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
         return false;
     }
-    append_cedar_policy_text(target, cedar_text);
+    if !target.is_empty() {
+        target.push('\n');
+    }
+    target.push_str(cedar_text);
     true
 }
 
