@@ -16,7 +16,7 @@ use crate::state::ServerState;
 
 mod support;
 use support::{
-    build_prospective_enabled_text, build_prospective_enabled_text_with_override,
+    build_prospective_enabled_text, build_prospective_enabled_text_with_override, persist_new_rule,
     policy_row_to_json, reload_tenant_from_store,
 };
 
@@ -123,8 +123,8 @@ pub(crate) async fn handle_add_policy_rule(
     };
 
     let rule = match body_json.get("rule").and_then(|v| v.as_str()) {
-        Some(v) => v.to_string(),
-        None => {
+        Some(v) if !v.trim().is_empty() => v.to_string(),
+        _ => {
             tracing::warn!("missing 'rule' field in add policy rule request");
             return (
                 StatusCode::BAD_REQUEST,
@@ -134,43 +134,13 @@ pub(crate) async fn handle_add_policy_rule(
         }
     };
 
-    let new_tenant_text = {
-        let policies = state.tenant_policies.read().unwrap(); // ci-ok: infallible lock
-        let existing = policies.get(&tenant).cloned().unwrap_or_default();
-        if existing.is_empty() {
-            rule.clone()
-        } else {
-            format!("{existing}\n{rule}")
-        }
-    };
-
-    if let Err(resp) = super::validate_and_reload_policies(&state, &tenant, &new_tenant_text) {
-        return resp;
-    }
-
-    {
-        let mut policies = state.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-        policies.insert(tenant.clone(), new_tenant_text.clone());
-    }
-
-    persist_and_activate_policy(
+    persist_new_rule(
         &state,
         &tenant,
-        "primary",
-        &new_tenant_text,
+        &rule,
         &auth.security_context().principal.id,
     )
-    .await;
-
-    let _ = state
-        .observe_refresh_tx
-        .send(crate::state::ObserveRefreshHint::Policies);
-
-    (
-        StatusCode::OK,
-        axum::Json(serde_json::json!({"tenant": tenant, "status": "rule_added"})),
-    )
-        .into_response()
+    .await
 }
 
 // ---------------------------------------------------------------------------

@@ -45,6 +45,8 @@ pub(super) async fn persist_bundle_policy_rows(
             continue;
         }
         let policy_id = os_app_policy_row_id(app_name, &source.relative_path);
+        // `save_policy` skips an insert when an enabled row already has
+        // this cedar_text (ARN-286/399). Reinstall must not grow duplicates.
         policy_store
             .save_policy(tenant, &policy_id, cedar_text, &created_by)
             .await

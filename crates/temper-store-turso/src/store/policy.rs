@@ -40,8 +40,13 @@ impl TursoEventStore {
     ///
     /// Computes a SHA-256 hash of `cedar_text` and compares it against any
     /// existing row for `(tenant, policy_id)`.  If the hash matches, no write
-    /// is issued and the method returns `Ok(false)`.  On a content change (or
-    /// first insert) the row is upserted and `Ok(true)` is returned.
+    /// is issued and the method returns `Ok(false)`.
+    ///
+    /// A new `policy_id` is also skipped when an **enabled** row for the same
+    /// tenant already stores identical `cedar_text`. Genesis reinstalls and
+    /// load-inline append paths were creating a new row for the same permit
+    /// under a different id (ARN-286/399). Disabled rows do not block insert.
+    /// Updating an existing `policy_id` to new text still writes.
     ///
     /// Callers can use the boolean return value to decide whether to log a
     /// trajectory entry for the change.
@@ -78,6 +83,18 @@ impl TursoEventStore {
                 tenant,
                 policy_id,
                 "Cedar policy unchanged (hash match), skipping write"
+            );
+            return Ok(false);
+        }
+
+        if existing_hash.is_none()
+            && enabled_duplicate_hash_exists(&conn, tenant, &policy_hash).await?
+        {
+            tracing::debug!(
+                tenant,
+                policy_id,
+                hash = %policy_hash,
+                "Cedar policy text already enabled under another policy_id, skipping insert"
             );
             return Ok(false);
         }
@@ -396,4 +413,26 @@ pub(super) fn compute_policy_hash(cedar_text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(cedar_text.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+async fn enabled_duplicate_hash_exists(
+    conn: &super::instrumentation::InstrumentedConnection,
+    tenant: &str,
+    policy_hash: &str,
+) -> Result<bool, PersistenceError> {
+    assert!(!tenant.is_empty(), "tenant is required for policy lookup");
+    assert!(
+        !policy_hash.is_empty(),
+        "policy hash is required for duplicate lookup"
+    );
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM policies \
+             WHERE tenant = ?1 AND enabled = 1 AND policy_hash = ?2 \
+             LIMIT 1",
+            params![tenant, policy_hash],
+        )
+        .await
+        .map_err(storage_error)?;
+    Ok(rows.next().await.map_err(storage_error)?.is_some())
 }

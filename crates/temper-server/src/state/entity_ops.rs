@@ -19,6 +19,11 @@ use crate::registry::{VerificationDetail, VerificationStatus};
 use crate::runtime_metrics;
 use crate::storage::DataOnlyCreateRecord;
 
+/// Idle actors snapshotted and stopped in one `passivate_idle_actors` tick.
+/// Remainder stay registered for the next tick so snapshot writes cannot
+/// occupy the request pool for the whole idle set (ARN-462).
+pub const PASSIVATE_IDLE_ACTORS_PER_TICK: usize = 32;
+
 fn actor_idle_timeout_secs() -> i64 {
     static ACTOR_IDLE_TIMEOUT: OnceLock<i64> = OnceLock::new();
     *ACTOR_IDLE_TIMEOUT.get_or_init(|| {
@@ -1782,7 +1787,7 @@ impl ServerState {
         let timeout_secs = actor_idle_timeout_secs();
         let cutoff = sim_now() - chrono::Duration::seconds(timeout_secs);
 
-        let candidates: Vec<(String, ActorRef<EntityMsg>)> = {
+        let mut candidates: Vec<(String, ActorRef<EntityMsg>, chrono::DateTime<chrono::Utc>)> = {
             let Ok(registry) = self.actor_registry.read() else {
                 return;
             };
@@ -1794,7 +1799,7 @@ impl ServerState {
                 .filter_map(|(key, actor_ref)| {
                     let last_seen = last_accessed.get(key)?;
                     if *last_seen <= cutoff {
-                        Some((key.clone(), actor_ref.clone()))
+                        Some((key.clone(), actor_ref.clone(), *last_seen))
                     } else {
                         None
                     }
@@ -1806,10 +1811,17 @@ impl ServerState {
             return;
         }
 
+        // Oldest idle first so a bounded tick still sheds the actors that have
+        // been occupying the registry the longest.
+        candidates.sort_by_key(|(_, _, last_seen)| *last_seen);
+        candidates.truncate(PASSIVATE_IDLE_ACTORS_PER_TICK);
+        debug_assert!(candidates.len() <= PASSIVATE_IDLE_ACTORS_PER_TICK);
+        debug_assert!(!candidates.is_empty());
+
         let mut passivated = 0usize;
         let policy = self.dispatch_retry_policy();
         let journal = self.event_journal();
-        for (actor_key, actor_ref) in candidates {
+        for (actor_key, actor_ref, _) in candidates {
             // ADR-0048: retry transient failures so passivation is not skipped
             // by a single AskTimeout under load.
             let snapshot_outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
@@ -1877,6 +1889,7 @@ impl ServerState {
             }
         }
 
+        debug_assert!(passivated <= PASSIVATE_IDLE_ACTORS_PER_TICK);
         if passivated > 0 {
             runtime_metrics::record_server_state_metrics(self);
             tracing::info!(count = passivated, timeout_secs, "passivated idle actors");

@@ -1,8 +1,48 @@
+use std::collections::BTreeMap;
+
 use axum::http::StatusCode;
+use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton};
 use temper_spec::cross_invariant::{CrossInvariantLintFinding, CrossInvariantLintSeverity};
 
+use crate::registry::{EntityVerificationResult, SpecRegistry, VerificationStatus};
+
 pub(super) use temper_spec::naming::to_pascal_case;
+
+/// Specs in this submission that are byte-identical to an already-passed
+/// registry entry. The load-inline/load-dir cascade must not re-run for these:
+/// that is the 60s+ CPU class when an agent re-submits an unchanged app.
+pub(super) fn unchanged_passed_verification(
+    registry: &SpecRegistry,
+    tenant: &str,
+    ioa_sources: &BTreeMap<String, String>,
+) -> BTreeMap<String, EntityVerificationResult> {
+    assert!(!tenant.is_empty(), "tenant is required for hash gating");
+    let tenant_id = TenantId::new(tenant);
+    let mut cached = BTreeMap::new();
+    for (entity_type, source) in ioa_sources {
+        let Some(existing) = registry.get_spec(&tenant_id, entity_type) else {
+            continue;
+        };
+        if temper_store_turso::spec_content_hash(&existing.ioa_source)
+            != temper_store_turso::spec_content_hash(source)
+        {
+            continue;
+        }
+        let Some(status) = registry.get_verification_status(&tenant_id, entity_type) else {
+            continue;
+        };
+        match status {
+            VerificationStatus::Completed(result) | VerificationStatus::Restored(result)
+                if result.all_passed =>
+            {
+                cached.insert(entity_type.clone(), result.clone());
+            }
+            _ => {}
+        }
+    }
+    cached
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct EntityLintFinding {
@@ -159,4 +199,64 @@ pub(super) fn build_ndjson_response(
                 format!("Failed to build NDJSON response: {e}"),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
+    use temper_spec::csdl::parse_csdl;
+
+    const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
+    const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
+
+    fn passed_result() -> EntityVerificationResult {
+        EntityVerificationResult {
+            all_passed: true,
+            levels: vec![EntityLevelSummary {
+                level: "L0_symbolic".to_string(),
+                passed: true,
+                summary: "cached".to_string(),
+                details: None,
+            }],
+            verified_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn unchanged_passed_verification_skips_only_identical_passed_specs() {
+        let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
+        let mut registry = SpecRegistry::new();
+        registry.register_tenant("t", csdl, CSDL_XML.to_string(), &[("Order", ORDER_IOA)]);
+        let tenant = TenantId::new("t");
+        registry.set_verification_status(
+            &tenant,
+            "Order",
+            VerificationStatus::Completed(passed_result()),
+        );
+
+        let same = BTreeMap::from([("Order".to_string(), ORDER_IOA.to_string())]);
+        let cached = unchanged_passed_verification(&registry, "t", &same);
+        assert_eq!(cached.len(), 1);
+        assert!(cached["Order"].all_passed);
+
+        let changed = BTreeMap::from([("Order".to_string(), format!("{ORDER_IOA}\n# touch\n"))]);
+        assert!(unchanged_passed_verification(&registry, "t", &changed).is_empty());
+    }
+
+    #[test]
+    fn unchanged_passed_verification_ignores_pending_and_failed() {
+        let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
+        let mut registry = SpecRegistry::new();
+        registry.register_tenant("t", csdl, CSDL_XML.to_string(), &[("Order", ORDER_IOA)]);
+        let tenant = TenantId::new("t");
+        registry.set_verification_status(&tenant, "Order", VerificationStatus::Pending);
+        let same = BTreeMap::from([("Order".to_string(), ORDER_IOA.to_string())]);
+        assert!(unchanged_passed_verification(&registry, "t", &same).is_empty());
+
+        let mut failed = passed_result();
+        failed.all_passed = false;
+        registry.set_verification_status(&tenant, "Order", VerificationStatus::Completed(failed));
+        assert!(unchanged_passed_verification(&registry, "t", &same).is_empty());
+    }
 }

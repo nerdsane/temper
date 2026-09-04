@@ -8,11 +8,14 @@ use temper_runtime::scheduler::sim_now;
 use crate::registry::VerificationStatus;
 use crate::state::ServerState;
 
+use super::verification_cached::{cached_verification_line, restore_unchanged_verification};
+
 pub(super) fn build_verification_stream_response(
     state: ServerState,
     tenant: String,
     entity_names: Vec<String>,
     ioa_sources: BTreeMap<String, String>,
+    cached_verification: BTreeMap<String, crate::registry::EntityVerificationResult>,
     lint_warning_lines: Vec<serde_json::Value>,
     cross_lint_warning_lines: Vec<serde_json::Value>,
 ) -> axum::response::Response {
@@ -53,6 +56,15 @@ pub(super) fn build_verification_stream_response(
             std::collections::BTreeMap::new();
 
         for entity_name in &entity_names {
+            if let Some(cached) = cached_verification.get(entity_name) {
+                restore_unchanged_verification(&state_for_task, &tenant, entity_name, cached);
+                let _ = tx
+                    .send(Ok(cached_verification_line(entity_name, cached)))
+                    .await;
+                entity_results.insert(entity_name.clone(), cached.all_passed);
+                continue;
+            }
+
             // Emit design-time events for UI (spec_loaded + verify_started)
             let loaded_event = crate::state::DesignTimeEvent {
                 kind: "spec_loaded".to_string(),

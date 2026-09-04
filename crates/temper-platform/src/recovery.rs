@@ -100,23 +100,23 @@ pub async fn recover_cedar_policies(state: &PlatformState, ps: &dyn PlatformStor
         let entries = granular_entries.remove(&tenant).unwrap_or_default();
         let has_primary_granular = entries.iter().any(|(policy_id, _)| policy_id == "primary");
         let mut policy_text = String::new();
+        let mut seen_texts = BTreeSet::new();
         let mut entry_count = 0usize;
 
-        // `primary` is the durable aggregate policy row for newer installs. If
-        // it exists, prefer it over the legacy blob to avoid loading the same
-        // multi-megabyte generated policy twice.
-        if !has_primary_granular {
-            if let Some(legacy_text) = legacy_entries.get(&tenant) {
-                append_cedar_policy_text(&mut policy_text, legacy_text);
-                entry_count += 1;
-            }
+        // Prefer granular `primary` over the legacy blob when both exist.
+        if !has_primary_granular
+            && let Some(legacy_text) = legacy_entries.get(&tenant)
+            && push_unique_cedar_text(&mut policy_text, &mut seen_texts, legacy_text)
+        {
+            entry_count += 1;
         } else if legacy_entries.contains_key(&tenant) {
             skipped_legacy_count += 1;
         }
 
         for (_, cedar_text) in entries {
-            append_cedar_policy_text(&mut policy_text, &cedar_text);
-            entry_count += 1;
+            if push_unique_cedar_text(&mut policy_text, &mut seen_texts, &cedar_text) {
+                entry_count += 1;
+            }
         }
 
         if policy_text.trim().is_empty() {
@@ -156,11 +156,20 @@ pub async fn recover_cedar_policies(state: &PlatformState, ps: &dyn PlatformStor
     }
 }
 
-fn append_cedar_policy_text(target: &mut String, cedar_text: &str) {
+fn push_unique_cedar_text(
+    target: &mut String,
+    seen: &mut BTreeSet<String>,
+    cedar_text: &str,
+) -> bool {
+    let trimmed = cedar_text.trim();
+    if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+        return false;
+    }
     if !target.is_empty() {
         target.push('\n');
     }
     target.push_str(cedar_text);
+    true
 }
 
 /// Restore previously installed OS apps from the platform store.
@@ -464,5 +473,23 @@ permit(
             !tenant_text.contains("legacy_only"),
             "legacy blob should be skipped when durable primary policy row exists"
         );
+    }
+
+    #[test]
+    fn push_unique_cedar_text_skips_identical_enabled_copies() {
+        let mut target = String::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let policy = "permit(principal, action == Action::\"read\", resource);";
+        assert!(super::push_unique_cedar_text(
+            &mut target,
+            &mut seen,
+            policy
+        ));
+        assert!(!super::push_unique_cedar_text(
+            &mut target,
+            &mut seen,
+            &format!("  {policy}  ")
+        ));
+        assert_eq!(target.matches("permit").count(), 1);
     }
 }

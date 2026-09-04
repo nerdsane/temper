@@ -1160,6 +1160,60 @@ async fn empty_equality_list_on_large_type_is_authoritative_absent_without_scan(
     let _ = std::fs::remove_file(db_path);
 }
 
+/// ARN-462: the production DesignLanguages shape — type cardinality is *inside*
+/// `scan_candidate_budget` (1275 < 10k), native page is empty, equality filter
+/// matches nothing. Reconcile must not hydrate every id and then return 0.
+#[tokio::test]
+async fn empty_equality_filter_on_in_budget_type_does_not_hydrate_every_id() {
+    let db_path = std::env::temp_dir().join(format!("temper-arn462-in-budget-{}.db", sim_uuid()));
+    let _ = std::fs::remove_file(&db_path);
+    let db_url = format!("file:{}", db_path.display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let tenant = TenantId::default();
+    const TYPE_COUNT: usize = 20;
+    let state = build_large_projected_type(&store, &tenant, "arn462-in-budget", TYPE_COUNT).await;
+
+    let security_ctx = SecurityContext::system();
+    let query_options = session_filter_options("session-absent");
+    // max_entities=100 → scan_candidate_budget=1000, so 20 is "in budget" and
+    // today's planner hydrates all 20.
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
+        state: &state,
+        tenant: &tenant,
+        security_ctx: &security_ctx,
+        entity_type: "Order",
+        entity_set_name: "Orders",
+        query_options: &query_options,
+        budget: QueryPlaneReadBudget {
+            default_page_size: 20,
+            max_entities: 100,
+        },
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => panic!("in-budget empty exact-match must return empty, not 413"),
+    };
+    assert!(
+        result.entities.is_empty(),
+        "no Order has SessionId session-absent"
+    );
+    assert!(
+        result.telemetry.materialized_count < TYPE_COUNT,
+        "empty exact-match must not hydrate every id of an in-budget type (materialized {}, type {})",
+        result.telemetry.materialized_count,
+        TYPE_COUNT
+    );
+    assert_eq!(
+        result.telemetry.materialized_count, 0,
+        "fully-projected type with an empty native page has an empty coverage gap"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
 /// ARN-68 + ARN-89 at scale: a journal-durable entity whose projected row is MISSING
 /// (never projected here; a crash-lost projection in prod) must be FOUND by an equality list
 /// even when the type exceeds the scan budget — the gap reconcile materializes only the

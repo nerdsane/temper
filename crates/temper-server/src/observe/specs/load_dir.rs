@@ -15,7 +15,7 @@ use tracing::instrument;
 
 use super::super::specs_helpers::{
     build_ndjson_response, cross_lint_ndjson_line, lint_loaded_specs, lint_ndjson_line,
-    to_pascal_case,
+    to_pascal_case, unchanged_passed_verification,
 };
 use super::types::LoadDirRequest;
 use super::verification_stream::build_verification_stream_response;
@@ -407,6 +407,12 @@ pub(super) async fn load_specs_from_directory(
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
+    // Snapshot before register: merge/replace resets verification to Pending.
+    let cached_verification = {
+        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
+        unchanged_passed_verification(&registry, &body.tenant, &ioa_sources)
+    };
+
     {
         let mut registry = state.registry.write().unwrap(); // ci-ok: infallible lock
         registry
@@ -471,6 +477,7 @@ pub(super) async fn load_specs_from_directory(
         body.tenant,
         entity_names,
         ioa_sources,
+        cached_verification,
         lint_warning_lines,
         cross_lint_warning_lines,
     ))
