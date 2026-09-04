@@ -17,10 +17,11 @@ use crate::state::{ServerState, TrajectoryEntry, TrajectorySource};
 
 /// Persist a Cedar policy entry and log a trajectory entry on change.
 ///
-/// Uses SHA-256 hash comparison to skip redundant writes.  When the content
-/// changes, a [`TrajectoryEntry`] is logged with `action = "policy_saved"` and
-/// `source = "Platform"` so the Evolution Engine can correlate policy changes
-/// with subsequent authorization outcomes.
+/// Uses SHA-256 hash comparison to skip redundant writes, including a new
+/// `policy_id` whose `cedar_text` already exists on an enabled row for the
+/// tenant.  When the content changes, a [`TrajectoryEntry`] is logged with
+/// `action = "policy_saved"` and `source = "Platform"` so the Evolution Engine
+/// can correlate policy changes with subsequent authorization outcomes.
 ///
 /// **Cedar engine reload is the caller's responsibility.**  Callers must invoke
 /// `validate_and_reload_policies` (or equivalent) before calling this function.

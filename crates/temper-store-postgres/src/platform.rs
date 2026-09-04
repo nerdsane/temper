@@ -1237,6 +1237,22 @@ impl PostgresEventStore {
             return Ok(false);
         }
 
+        if existing_hash.is_none() {
+            let duplicate: Option<i32> = crate::dbm::postgres_query_scalar!(
+                "SELECT 1 FROM policies \
+                 WHERE tenant = $1 AND enabled = true AND policy_hash = $2 \
+                 LIMIT 1",
+            )
+            .bind(tenant)
+            .bind(&policy_hash)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(storage_error)?;
+            if duplicate.is_some() {
+                return Ok(false);
+            }
+        }
+
         crate::dbm::postgres_query!(
             "INSERT INTO policies \
              (tenant, policy_id, cedar_text, policy_hash, created_at, created_by, enabled) \

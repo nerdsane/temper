@@ -2,14 +2,18 @@ use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
 use serde_json::json;
-use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::parse_csdl;
 
 use super::super::types::LoadInlineRequest;
 use crate::state::ServerState;
 
+/// Build an ADR reminder from the *submitted* specs only.
+///
+/// This used to list every File and `GetState` each one. On a tenant with many
+/// Files that wakes passivated actors and can dominate load-inline CPU
+/// (production: 87s / 64s busy). Presence of ADRs is not checked here.
 pub(super) async fn build_adr_warning_context(
-    state: &ServerState,
+    _state: &ServerState,
     body: &LoadInlineRequest,
     tenant: &str,
 ) -> Option<serde_json::Value> {
@@ -19,17 +23,12 @@ pub(super) async fn build_adr_warning_context(
         return None;
     }
 
-    let hits = find_existing_adr_paths(state, tenant, &candidate_paths).await;
-    if !hits.is_empty() {
-        return None;
-    }
-
     tracing::warn!(
         tenant,
         app_name = body.app_name.as_deref().unwrap_or(""),
         namespaces = ?namespaces,
         candidate_paths = ?candidate_paths,
-        "Spec submitted with no ADRs — design decisions should be recorded under /apps/<app>/adrs/"
+        "Spec submitted with no File scan for ADRs — record decisions under /apps/<app>/adrs/"
     );
 
     Some(json!({
@@ -241,55 +240,6 @@ fn normalize_app_slug(value: &str) -> String {
     }
 
     slug.trim_matches('-').to_string()
-}
-
-async fn find_existing_adr_paths(
-    state: &ServerState,
-    tenant: &str,
-    candidate_paths: &[String],
-) -> Vec<String> {
-    let tenant_id = TenantId::new(tenant);
-    let has_files = {
-        let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
-        registry.get_spec(&tenant_id, "File").is_some()
-    };
-    if !has_files {
-        return Vec::new();
-    }
-
-    let mut hits = Vec::new();
-    for file_id in state.list_entity_ids(&tenant_id, "File") {
-        let Ok(resp) = state
-            .get_tenant_entity_state(&tenant_id, "File", &file_id)
-            .await
-        else {
-            continue;
-        };
-        if resp.state.status == "Archived" {
-            continue;
-        }
-        let path = resp
-            .state
-            .fields
-            .get("Path")
-            .and_then(|value| value.as_str())
-            .or_else(|| {
-                resp.state
-                    .fields
-                    .get("path")
-                    .and_then(|value| value.as_str())
-            });
-        let Some(path) = path else { continue };
-        if candidate_paths
-            .iter()
-            .any(|prefix| path.starts_with(prefix))
-        {
-            hits.push(path.to_string());
-        }
-    }
-    hits.sort();
-    hits.dedup();
-    hits
 }
 
 #[cfg(test)]

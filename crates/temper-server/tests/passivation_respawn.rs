@@ -86,3 +86,85 @@ async fn passivated_actor_respawns_with_correct_state() {
     assert_eq!(recovered.state.item_count, 1);
     assert!(recovered.state.total_event_count >= 3); // Created + AddItem + SubmitOrder
 }
+
+/// ARN-462: one passivation tick must not snapshot-and-stop every idle actor.
+/// Production traces did 430 / 735 sequential GetState + snapshot writes on the
+/// request pool. Remainder stay idle for the next tick. Actors that are
+/// processed still get a snapshot (ADR-0048).
+#[tokio::test]
+async fn passivate_tick_does_not_snapshot_every_idle_actor() {
+    let seed = 7;
+    let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+    let sim_store = SimEventStore::no_faults(seed);
+    let state = common::build_default_state_with_store(sim_store.clone(), "passivation-budget");
+
+    let tenant = TenantId::default();
+    const IDLE_COUNT: usize = 48;
+    let mut actor_keys = Vec::with_capacity(IDLE_COUNT);
+    for index in 0..IDLE_COUNT {
+        let entity_id = format!("o-idle-{index:02}");
+        let created = common::dispatch(
+            &state,
+            &tenant,
+            "Order",
+            &entity_id,
+            "AddItem",
+            serde_json::json!({}),
+        )
+        .await
+        .expect("AddItem should succeed");
+        assert!(created.success);
+        actor_keys.push(format!("{tenant}:Order:{entity_id}"));
+    }
+
+    {
+        let mut last_accessed = state.last_accessed.write().unwrap();
+        for key in &actor_keys {
+            last_accessed.insert(key.clone(), sim_now() - chrono::Duration::seconds(600));
+        }
+    }
+
+    state.passivate_idle_actors().await;
+
+    let remaining = {
+        let registry = state.actor_registry.read().unwrap();
+        actor_keys
+            .iter()
+            .filter(|key| registry.contains_key(*key))
+            .count()
+    };
+    let passivated = IDLE_COUNT - remaining;
+    assert!(
+        passivated > 0,
+        "at least one idle actor should be passivated this tick"
+    );
+    assert!(
+        remaining > 0,
+        "one tick must not drain every idle actor (passivated {passivated} of {IDLE_COUNT})"
+    );
+    assert!(
+        passivated <= temper_server::state::PASSIVATE_IDLE_ACTORS_PER_TICK,
+        "passivated {passivated} exceeds PASSIVATE_IDLE_ACTORS_PER_TICK"
+    );
+
+    let mut snapshotted = 0usize;
+    for key in &actor_keys {
+        if remaining_registry_has(&state, key) {
+            continue;
+        }
+        let snapshot = sim_store
+            .load_snapshot(key)
+            .await
+            .expect("snapshot lookup should succeed");
+        assert!(
+            snapshot.is_some(),
+            "passivated actor {key} must still receive a snapshot (ADR-0048)"
+        );
+        snapshotted += 1;
+    }
+    assert_eq!(snapshotted, passivated);
+}
+
+fn remaining_registry_has(state: &temper_server::ServerState, actor_key: &str) -> bool {
+    state.actor_registry.read().unwrap().contains_key(actor_key)
+}

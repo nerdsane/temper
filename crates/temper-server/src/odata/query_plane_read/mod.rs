@@ -268,30 +268,21 @@ pub(in crate::odata) async fn read_entity_set_page(
     let needs_full_proof = request.query_options.filter.is_some()
         || request.query_options.orderby.is_some()
         || request.query_options.count == Some(true);
-    if needs_full_proof
-        && !should_check_source_cursor_catalog_coverage(all_entity_ids.len(), request.budget)
-    {
-        // ARN-68 (the SessionEntries-list flavor): the reconcile scan is over budget,
-        // which used to be an unconditional 413 — so EVERY empty equality-conjunction
-        // list on a high-cardinality type failed (e.g. a session bootstrap listing
-        // `SessionId eq '<new>'` against 95k entries). The full scan is only needed for
-        // entities the native page cannot see: the ones with NO `entity_field_index`
-        // row for a filtered field (a just-committed entity whose async projection has
-        // not landed, a crash-lost projection, or a pre-projection-era entity). That
-        // gap is enumerable per field and normally tiny, so reconcile the GAP instead
-        // of the type: union a RE-RUN native page (probe-then-page ordering makes the
-        // union complete — anything covered at probe time is visible to the later
-        // page, anything uncovered is in the gap, so a projection landing between the
-        // first page and the probe is not dropped) with the materialized gap, in one
-        // source-cursor pass. A committed-but-unprojected match is FOUND
-        // (read-after-write repaired, not rejected); a genuine miss returns bounded
-        // empty. If the union exceeds the scan budget, or the backend has no
-        // field-index coverage probe, keep the honest rejection. Entities whose field
-        // row exists with a STALE value stay invisible — the same trust every
-        // non-empty native page already gets at any type size (the small-type ARN-89
-        // reconcile is stronger; this gate trades that for boundedness).
-        // Reconcile-affordable types never reach this gate, so their ARN-89 repair
-        // semantics are unchanged.
+    let over_scan_budget = needs_full_proof
+        && !should_check_source_cursor_catalog_coverage(all_entity_ids.len(), request.budget);
+    // ARN-462: an empty exact-match page must use the gap ∪ native-page union
+    // even when the type is *under* `scan_candidate_budget`. The over-budget
+    // gate used to be the only caller, so an in-budget type (DesignLanguages
+    // 1275 < 10k) hydrated every id and returned 0.
+    if reconciling_exact_match_lag || over_scan_budget {
+        // ARN-68 (the SessionEntries-list flavor): the full scan is only needed
+        // for entities the native page cannot see — no `entity_field_index` row
+        // for a filtered field. Reconcile that gap, not the type. A
+        // committed-but-unprojected match is FOUND; a genuine miss returns
+        // bounded empty. If the union exceeds the scan budget, or the backend
+        // has no field-index coverage probe, keep the honest over-budget
+        // rejection. In-budget probe failure still falls through (no second
+        // invented probe).
         if reconciling_exact_match_lag
             && let Some(pairs) = request
                 .query_options
@@ -390,17 +381,19 @@ pub(in crate::odata) async fn read_entity_set_page(
                 }
             }
         }
-        return Err(budget_rejection(
-            &request,
-            QueryPlaneReadStrategy::ReadSourceCursor,
-            false,
-            request.state.query_plane_store().is_some(),
-            QueryPlaneCoverageReport::default(),
-            ScanCounters {
-                candidate_count: all_entity_ids.len(),
-                ..ScanCounters::empty()
-            },
-        ));
+        if over_scan_budget {
+            return Err(budget_rejection(
+                &request,
+                QueryPlaneReadStrategy::ReadSourceCursor,
+                false,
+                request.state.query_plane_store().is_some(),
+                QueryPlaneCoverageReport::default(),
+                ScanCounters {
+                    candidate_count: all_entity_ids.len(),
+                    ..ScanCounters::empty()
+                },
+            ));
+        }
     }
     let (coverage, missing_ids) = catalog_coverage_report(&request, &all_entity_ids).await;
 

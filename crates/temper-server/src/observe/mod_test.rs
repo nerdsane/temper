@@ -4,18 +4,18 @@ use axum::http::{Request, StatusCode};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use temper_runtime::ActorSystem;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
+use temper_runtime::ActorSystem;
 use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Record};
 use tracing::{Id, Subscriber};
-use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::Layer;
 
 use crate::registry::SpecRegistry;
 use crate::request_context::AgentContext;
@@ -1144,6 +1144,70 @@ async fn test_load_inline_cannot_bundle_policy_authority() {
             .is_err(),
         "bundled policy text must never become active"
     );
+}
+
+#[tokio::test]
+async fn test_load_inline_skips_cascade_for_unchanged_passed_specs() {
+    let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
+    let mut registry = crate::registry::SpecRegistry::new();
+    registry.register_tenant(
+        "skip-verify",
+        csdl,
+        CSDL_XML.to_string(),
+        &[("Order", ORDER_IOA)],
+    );
+    registry.set_verification_status(
+        &TenantId::new("skip-verify"),
+        "Order",
+        crate::registry::VerificationStatus::Completed(crate::registry::EntityVerificationResult {
+            all_passed: true,
+            levels: vec![crate::registry::EntityLevelSummary {
+                level: "L0_symbolic".to_string(),
+                passed: true,
+                summary: "pre-verified".to_string(),
+                details: None,
+            }],
+            verified_at: "2026-01-01T00:00:00Z".to_string(),
+        }),
+    );
+    let state = ServerState::from_registry(ActorSystem::new("test-observe-skip"), registry);
+    install_admin_submit_specs_policy(&state, "skip-verify");
+    let app = build_app_with_state(state);
+
+    let response = app
+        .oneshot(with_tenant_security_context(
+            Request::post("/api/specs/load-inline")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "tenant": "skip-verify",
+                        "specs": {
+                            "model.csdl.xml": CSDL_XML,
+                            "order.ioa.toml": ORDER_IOA
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+            "skip-verify",
+            admin_security_context(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    let cached = text.lines().find_map(|line| {
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        (value["type"] == "verification_result" && value["cached"] == true).then_some(value)
+    });
+    let cached = cached.expect("unchanged passed spec must skip the cascade");
+    assert_eq!(cached["entity"], "Order");
+    assert_eq!(cached["reason"], "unchanged_verified");
+    assert_eq!(cached["all_passed"], true);
 }
 
 #[tokio::test]

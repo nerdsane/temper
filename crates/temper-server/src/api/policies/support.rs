@@ -1,6 +1,17 @@
+use sha2::{Digest, Sha256};
+
 use crate::authz::load_and_activate_tenant_policies;
 use crate::state::ServerState;
 use crate::storage::PolicyStoreRow;
+
+/// Stable id for a rule added via POST `/policies/rules`.
+///
+/// Hashing the Cedar text makes a second add of the same rule land on the
+/// same row instead of growing `primary` (ARN-462 / ARN-286).
+pub(super) fn add_rule_policy_id(cedar_text: &str) -> String {
+    let digest = Sha256::digest(cedar_text.as_bytes());
+    format!("rule:{digest:x}")
+}
 
 pub(super) fn policy_row_to_json(row: &PolicyStoreRow) -> serde_json::Value {
     serde_json::json!({

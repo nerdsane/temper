@@ -16,8 +16,8 @@ use crate::state::ServerState;
 
 mod support;
 use support::{
-    build_prospective_enabled_text, build_prospective_enabled_text_with_override,
-    policy_row_to_json, reload_tenant_from_store,
+    add_rule_policy_id, build_prospective_enabled_text,
+    build_prospective_enabled_text_with_override, policy_row_to_json, reload_tenant_from_store,
 };
 
 // ---------------------------------------------------------------------------
@@ -123,8 +123,8 @@ pub(crate) async fn handle_add_policy_rule(
     };
 
     let rule = match body_json.get("rule").and_then(|v| v.as_str()) {
-        Some(v) => v.to_string(),
-        None => {
+        Some(v) if !v.trim().is_empty() => v.to_string(),
+        _ => {
             tracing::warn!("missing 'rule' field in add policy rule request");
             return (
                 StatusCode::BAD_REQUEST,
@@ -134,33 +134,46 @@ pub(crate) async fn handle_add_policy_rule(
         }
     };
 
-    let new_tenant_text = {
-        let policies = state.tenant_policies.read().unwrap(); // ci-ok: infallible lock
-        let existing = policies.get(&tenant).cloned().unwrap_or_default();
-        if existing.is_empty() {
-            rule.clone()
-        } else {
-            format!("{existing}\n{rule}")
-        }
-    };
-
-    if let Err(resp) = super::validate_and_reload_policies(&state, &tenant, &new_tenant_text) {
-        return resp;
+    if let Some(store) = state.policy_store()
+        && let Ok(rows) = store.load_policies_for_tenant(&tenant).await
+        && let Some(existing) = rows
+            .iter()
+            .find(|row| row.enabled && row.cedar_text.trim() == rule.trim())
+    {
+        return (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "tenant": tenant,
+                "policy_id": existing.policy_id,
+                "status": "rule_added",
+            })),
+        )
+            .into_response();
     }
 
-    {
-        let mut policies = state.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-        policies.insert(tenant.clone(), new_tenant_text.clone());
+    let policy_id = add_rule_policy_id(&rule);
+    debug_assert_ne!(policy_id, "primary");
+    debug_assert!(!policy_id.is_empty());
+
+    let prospective =
+        build_prospective_enabled_text(&state, &tenant, Some((&policy_id, &rule))).await;
+    if let Err(resp) = super::validate_and_reload_policies(&state, &tenant, &prospective) {
+        return resp;
     }
 
     persist_and_activate_policy(
         &state,
         &tenant,
-        "primary",
-        &new_tenant_text,
+        &policy_id,
+        &rule,
         &auth.security_context().principal.id,
     )
     .await;
+
+    {
+        let mut policies = state.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+        policies.insert(tenant.clone(), prospective);
+    }
 
     let _ = state
         .observe_refresh_tx
@@ -168,7 +181,11 @@ pub(crate) async fn handle_add_policy_rule(
 
     (
         StatusCode::OK,
-        axum::Json(serde_json::json!({"tenant": tenant, "status": "rule_added"})),
+        axum::Json(serde_json::json!({
+            "tenant": tenant,
+            "policy_id": policy_id,
+            "status": "rule_added",
+        })),
     )
         .into_response()
 }
