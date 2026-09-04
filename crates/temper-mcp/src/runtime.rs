@@ -10,10 +10,16 @@ use temper_ots::{
     OTSMessageContent, OTSMetadata, OutcomeType, TrajectoryBuilder,
 };
 use temper_runtime::scheduler::sim_now;
-use tokio::io::{self, AsyncWriteExt, BufReader};
+use tokio::io::{self, AsyncBufRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::sync::mpsc;
 
 use super::McpConfig;
-use super::protocol::dispatch_json_line;
+use super::code_analysis::{extract_temper_call_metadata, extract_trajectory_actions_from_code};
+use super::protocol::{dispatch_json_value, json_rpc_error};
+use crate::elicit::{
+    ClientRequester, DeniedDecision, PendingClientRequests, denial_from_dispatch_value,
+    elicit_flag_enabled, is_client_response,
+};
 use crate::trajectory_bounds::{
     MAX_STDIO_LINE_BYTES, MAX_TRAJECTORY_TOTAL_BYTES, MAX_TRAJECTORY_TURNS, StdioFrame,
     TRAJECTORY_TURN_ENVELOPE_BYTES, bounded_trajectory_actions, bump_seen, floor_char_boundary,
@@ -58,6 +64,11 @@ pub(crate) struct RuntimeContext {
     pub(crate) agent_type: Option<String>,
     pub(crate) session_id: Option<String>,
     pub(crate) api_key: Option<String>,
+    /// Separate credential used ONLY to resolve elicitation approvals. When the
+    /// agent's `api_key` is a scoped agent credential, the approval must be
+    /// posted as a DIFFERENT principal (the human operator), or ARN-389's
+    /// self-approval guard rejects it. Falls back to `api_key` when unset.
+    pub(crate) approver_key: Option<String>,
     pub(crate) identity_tenant: String,
     sandbox: temper_sandbox::runner::PersistentSandbox,
     /// OTS trajectory builder for capturing agent execution traces.
@@ -74,6 +85,14 @@ pub(crate) struct RuntimeContext {
     /// Whether the turn/byte cap has already been reported for this trajectory,
     /// so hitting the cap warns once rather than on every subsequent turn.
     capped_warned: bool,
+    /// Whether the MCP client declared the `elicitation` capability at
+    /// initialize. Without it, denials pass through untouched (ADR-0173).
+    pub(crate) client_supports_elicitation: bool,
+    /// Config gate for elicitation approvals (`TEMPER_MCP_ELICIT_APPROVALS`).
+    pub(crate) elicit_approvals_enabled: bool,
+    /// Handle for server→client requests; present only when running inside
+    /// the stdio loop (unit tests dispatching directly have none).
+    pub(crate) requester: Option<ClientRequester>,
 }
 
 impl RuntimeContext {
@@ -96,6 +115,9 @@ impl RuntimeContext {
                 .api_key
                 .clone()
                 .or_else(|| std::env::var("TEMPER_API_KEY").ok()), // determinism-ok: startup config
+            approver_key: std::env::var("TEMPER_MCP_APPROVER_KEY")
+                .ok()
+                .filter(|v| !v.trim().is_empty()), // determinism-ok: startup config
             identity_tenant: std::env::var("TEMPER_TENANT")
                 .ok()
                 .filter(|v| !v.trim().is_empty())
@@ -106,7 +128,23 @@ impl RuntimeContext {
             turns_recorded: 0,
             trajectory_bytes: 0,
             capped_warned: false,
+            client_supports_elicitation: false,
+            elicit_approvals_enabled: elicit_flag_enabled(
+                std::env::var("TEMPER_MCP_ELICIT_APPROVALS").ok().as_deref(),
+            ), // determinism-ok: startup config
+            requester: None,
         })
+    }
+
+    /// Whether a Cedar denial can be put to the human via elicitation:
+    /// the feature is enabled, the client declared the capability, the stdio
+    /// loop provided a requester, and an operator credential is configured to
+    /// resolve the decision with.
+    pub(crate) fn elicitation_available(&self) -> bool {
+        self.elicit_approvals_enabled
+            && self.client_supports_elicitation
+            && self.requester.is_some()
+            && self.api_key.is_some()
     }
 
     /// Apply MCP `clientInfo` from the `initialize` handshake.
@@ -461,14 +499,23 @@ impl RuntimeContext {
         }
     }
 
-    pub(crate) async fn run_execute(&mut self, code: &str) -> Result<String> {
+    /// Execute code in the sandbox. Returns the result together with any
+    /// Cedar denials observed on `temper.*` calls, so the caller can offer
+    /// them to the human via elicitation (ADR-0173).
+    pub(crate) async fn run_execute(
+        &mut self,
+        code: &str,
+    ) -> (Result<String>, Vec<DeniedDecision>) {
         let http = self.http.clone();
         let base_url = self.base_url.clone();
         let agent_id = self.agent_id.clone();
         let session_id = self.session_id.clone();
         let api_key = self.api_key.clone();
+        let denials: std::sync::Arc<std::sync::Mutex<Vec<DeniedDecision>>> = Default::default();
+        let denial_sink = denials.clone();
 
-        self.sandbox
+        let result = self
+            .sandbox
             .execute(
                 code,
                 |function_name: String,
@@ -479,6 +526,7 @@ impl RuntimeContext {
                     let agent_id = agent_id.clone();
                     let session_id = session_id.clone();
                     let api_key = api_key.clone();
+                    let denial_sink = denial_sink.clone();
                     async move {
                         if !kwargs.is_empty() {
                             return Err(format!(
@@ -517,17 +565,30 @@ impl RuntimeContext {
                             // are legitimate developer ops (ARN-166).
                             allow_host_ops: true,
                         };
-                        temper_sandbox::dispatch::dispatch_temper_method(
+                        let result = temper_sandbox::dispatch::dispatch_temper_method(
                             &ctx,
                             &function_name,
                             remaining,
                             &kwargs,
                         )
-                        .await
+                        .await;
+                        // A structured Cedar denial passing through here is
+                        // the interception point for elicitation approvals
+                        // (ADR-0173): record it, never mutate the value the
+                        // sandbox code sees.
+                        if let Ok(ref value) = result
+                            && let Some(denial) = denial_from_dispatch_value(&tenant, value)
+                        {
+                            denial_sink.lock().expect("denial sink lock").push(denial);
+                        }
+                        result
                     }
                 },
             )
-            .await
+            .await;
+
+        let denials = std::mem::take(&mut *denials.lock().expect("denial sink lock"));
+        (result, denials)
     }
 }
 
@@ -536,390 +597,78 @@ struct TrajectoryUploadError {
     retryable: bool,
 }
 
-fn extract_trajectory_actions_from_code(code: &str) -> Vec<Value> {
-    let mut actions = Vec::new();
-    let mut cursor = 0usize;
-    let needle = "temper.action";
-
-    while let Some(found) = code[cursor..].find(needle) {
-        let method_start = cursor + found + needle.len();
-        let mut open = method_start;
-        while open < code.len()
-            && code
-                .as_bytes()
-                .get(open)
-                .is_some_and(|b| b.is_ascii_whitespace())
-        {
-            open += 1;
-        }
-        if code.as_bytes().get(open) != Some(&b'(') {
-            cursor = method_start;
-            continue;
-        }
-
-        let Some(close) = find_matching_paren(code, open) else {
-            break;
-        };
-
-        let args = split_top_level_args(&code[open + 1..close]);
-        let (action_idx, params_idx) =
-            if args.len() >= 5 && parse_python_string_literal(args[3]).is_some() {
-                (3usize, 4usize)
-            } else {
-                (2usize, 3usize)
-            };
-
-        if args.len() > action_idx
-            && let Some(action_name) = parse_python_string_literal(args[action_idx])
-        {
-            let params = args
-                .get(params_idx)
-                .and_then(|raw| parse_python_json_value(raw))
-                .unwrap_or_else(|| serde_json::json!({}));
-            actions.push(serde_json::json!({
-                "action": action_name,
-                "params": params,
-            }));
-        }
-
-        cursor = close + 1;
-    }
-
-    actions
-}
-
-#[derive(Debug, Clone, Default)]
-struct TemperCallMetadata {
-    /// Tenant referenced by the call, when the call uses the tenant-first
-    /// signature. Used only as a cross-tenant observability signal — never to
-    /// route trajectory storage (ARN-222).
-    tenant: Option<String>,
-}
-
-fn extract_temper_call_metadata(code: &str) -> Vec<TemperCallMetadata> {
-    let mut out = Vec::new();
-    out.extend(extract_temper_action_metadata(code));
-    out.extend(extract_temper_create_metadata(code));
-    out
-}
-
-fn extract_temper_action_metadata(code: &str) -> Vec<TemperCallMetadata> {
-    extract_call_metadata(code, "temper.action", |args| {
-        // New signature: temper.action(tenant, entity_type, id, action, params).
-        // Only the tenant is retained; the legacy signature carries no tenant.
-        let tenant = (args.len() >= 5)
-            .then(|| parse_python_string_literal(args[0]))
-            .flatten();
-        TemperCallMetadata { tenant }
-    })
-}
-
-fn extract_temper_create_metadata(code: &str) -> Vec<TemperCallMetadata> {
-    extract_call_metadata(code, "temper.create", |args| {
-        // New signature: temper.create(tenant, entity_type, fields). Only the
-        // tenant is retained; the legacy signature carries no tenant.
-        let tenant = (args.len() >= 3)
-            .then(|| parse_python_string_literal(args[0]))
-            .flatten();
-        TemperCallMetadata { tenant }
-    })
-}
-
-fn extract_call_metadata<F>(code: &str, needle: &str, mapper: F) -> Vec<TemperCallMetadata>
-where
-    F: Fn(Vec<&str>) -> TemperCallMetadata,
-{
-    let mut out = Vec::new();
-    let mut cursor = 0usize;
-
-    while let Some(found) = code[cursor..].find(needle) {
-        let method_start = cursor + found + needle.len();
-        let mut open = method_start;
-        while open < code.len()
-            && code
-                .as_bytes()
-                .get(open)
-                .is_some_and(|b| b.is_ascii_whitespace())
-        {
-            open += 1;
-        }
-        if code.as_bytes().get(open) != Some(&b'(') {
-            cursor = method_start;
-            continue;
-        }
-
-        let Some(close) = find_matching_paren(code, open) else {
-            break;
-        };
-        let args = split_top_level_args(&code[open + 1..close]);
-        out.push(mapper(args));
-        cursor = close + 1;
-    }
-
-    out
-}
-
-fn find_matching_paren(input: &str, open_idx: usize) -> Option<usize> {
-    let mut depth = 0i32;
-    let mut in_quote: Option<char> = None;
-    let mut escaped = false;
-
-    for (offset, ch) in input[open_idx..].char_indices() {
-        let idx = open_idx + offset;
-        if let Some(quote) = in_quote {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == quote {
-                in_quote = None;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' | '"' => in_quote = Some(ch),
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(idx);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    None
-}
-
-fn split_top_level_args(input: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0usize;
-    let mut depth_paren = 0i32;
-    let mut depth_brace = 0i32;
-    let mut depth_bracket = 0i32;
-    let mut in_quote: Option<char> = None;
-    let mut escaped = false;
-
-    for (idx, ch) in input.char_indices() {
-        if let Some(quote) = in_quote {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == quote {
-                in_quote = None;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' | '"' => in_quote = Some(ch),
-            '(' => depth_paren += 1,
-            ')' => depth_paren -= 1,
-            '{' => depth_brace += 1,
-            '}' => depth_brace -= 1,
-            '[' => depth_bracket += 1,
-            ']' => depth_bracket -= 1,
-            ',' if depth_paren == 0 && depth_brace == 0 && depth_bracket == 0 => {
-                parts.push(input[start..idx].trim());
-                start = idx + 1;
-            }
-            _ => {}
-        }
-    }
-
-    if start <= input.len() {
-        let tail = input[start..].trim();
-        if !tail.is_empty() {
-            parts.push(tail);
-        }
-    }
-    parts
-}
-
-fn parse_python_string_literal(raw: &str) -> Option<String> {
-    let s = raw.trim();
-    if s.len() < 2 {
-        return None;
-    }
-    let quote = s.chars().next()?;
-    if (quote != '\'' && quote != '"') || !s.ends_with(quote) {
-        return None;
-    }
-
-    let mut out = String::new();
-    let mut escaped = false;
-    for ch in s[1..s.len() - 1].chars() {
-        if escaped {
-            let mapped = match ch {
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                '\\' => '\\',
-                '\'' => '\'',
-                '"' => '"',
-                other => other,
-            };
-            out.push(mapped);
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        out.push(ch);
-    }
-    if escaped {
-        out.push('\\');
-    }
-    Some(out)
-}
-
-fn parse_python_json_value(raw: &str) -> Option<Value> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Some(serde_json::json!({}));
-    }
-    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
-        return Some(v);
-    }
-    let normalized = normalize_pythonish_json(trimmed);
-    serde_json::from_str::<Value>(&normalized).ok()
-}
-
-fn normalize_pythonish_json(input: &str) -> String {
-    let mut quoted = String::with_capacity(input.len());
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut escaped = false;
-
-    for ch in input.chars() {
-        if in_single {
-            if escaped {
-                quoted.push(ch);
-                escaped = false;
-                continue;
-            }
-            match ch {
-                '\\' => escaped = true,
-                '\'' => {
-                    in_single = false;
-                    quoted.push('"');
-                }
-                '"' => quoted.push_str("\\\""),
-                _ => quoted.push(ch),
-            }
-            continue;
-        }
-
-        if in_double {
-            quoted.push(ch);
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_double = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' => {
-                in_single = true;
-                quoted.push('"');
-            }
-            '"' => {
-                in_double = true;
-                quoted.push('"');
-            }
-            _ => quoted.push(ch),
-        }
-    }
-
-    let mut out = String::with_capacity(quoted.len());
-    let mut token = String::new();
-    let mut in_string = false;
-    let mut esc = false;
-
-    let flush_token = |token: &mut String, out: &mut String| {
-        if token.is_empty() {
-            return;
-        }
-        match token.as_str() {
-            "True" => out.push_str("true"),
-            "False" => out.push_str("false"),
-            "None" => out.push_str("null"),
-            _ => out.push_str(token),
-        }
-        token.clear();
-    };
-
-    for ch in quoted.chars() {
-        if in_string {
-            out.push(ch);
-            if esc {
-                esc = false;
-            } else if ch == '\\' {
-                esc = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        if ch == '"' {
-            flush_token(&mut token, &mut out);
-            in_string = true;
-            out.push(ch);
-            continue;
-        }
-
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            token.push(ch);
-            continue;
-        }
-
-        flush_token(&mut token, &mut out);
-        out.push(ch);
-    }
-    flush_token(&mut token, &mut out);
-
-    out
-}
-
 /// Run the MCP server on stdio with JSON-RPC over newline-delimited JSON.
+pub async fn run_stdio_server(config: McpConfig) -> Result<()> {
+    let ctx = RuntimeContext::from_config(&config)?;
+    run_loop(ctx, BufReader::new(io::stdin()), io::stdout()).await
+}
+
+/// Run the MCP server loop over an arbitrary transport.
+///
+/// The transport is split into a reader task and a writer task connected by
+/// channels so the server can send correlated requests to the client (MCP
+/// elicitation) while a `tools/call` is still being handled: the reader
+/// routes JSON-RPC *responses* to the pending server→client request map and
+/// queues client *requests* for the sequential dispatch loop. That queue also
+/// guarantees at most one elicitation is in flight per session.
 ///
 /// Frames are read through [`read_stdio_frame`], which bounds each frame to
-/// `MAX_STDIO_LINE_BYTES`; oversized frames are dropped and invalid UTF-8 frames
-/// are skipped rather than aborting the session.
-pub async fn run_stdio_server(config: McpConfig) -> Result<()> {
-    let mut ctx = RuntimeContext::from_config(&config)?;
-    let mut stdin = BufReader::new(io::stdin());
-    let mut stdout = io::stdout();
+/// `MAX_STDIO_LINE_BYTES`; oversized frames are dropped and invalid UTF-8
+/// frames are skipped rather than aborting the session.
+pub(crate) async fn run_loop<R, W>(mut ctx: RuntimeContext, reader: R, writer: W) -> Result<()>
+where
+    R: AsyncBufRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let (out_tx, out_rx) = mpsc::unbounded_channel::<Value>();
+    let writer_task = tokio::spawn(write_outbound(out_rx, writer));
 
+    let pending = PendingClientRequests::default();
+    ctx.requester = Some(ClientRequester::new(out_tx.clone(), pending.clone()));
+
+    let (in_tx, mut in_rx) = mpsc::unbounded_channel::<Value>();
+    let reader_task = tokio::spawn(read_inbound(reader, in_tx, pending, out_tx.clone()));
+
+    while let Some(message) = in_rx.recv().await {
+        if let Some(response) = dispatch_json_value(&mut ctx, message).await
+            && out_tx.send(response).is_err()
+        {
+            break;
+        }
+    }
+
+    // Finalize and upload OTS trajectory on session close.
+    ctx.finalize_trajectory().await;
+
+    // Drop every outbound sender (the requester holds one) so the writer
+    // drains remaining output and exits, then stop the reader.
+    ctx.requester = None;
+    drop(out_tx);
+    let _ = writer_task.await;
+    reader_task.abort();
+
+    Ok(())
+}
+
+/// Read frames from the client, routing responses to pending server→client
+/// requests and forwarding requests/notifications to the dispatch loop.
+async fn read_inbound<R: AsyncBufRead + Unpin>(
+    mut reader: R,
+    inbound: mpsc::UnboundedSender<Value>,
+    pending: PendingClientRequests,
+    outbound: mpsc::UnboundedSender<Value>,
+) {
     loop {
-        let buf = match read_stdio_frame(&mut stdin).await? {
-            StdioFrame::Eof => break,
-            StdioFrame::TooLarge => {
+        let buf = match read_stdio_frame(&mut reader).await {
+            Ok(StdioFrame::Eof) | Err(_) => break,
+            Ok(StdioFrame::TooLarge) => {
                 tracing::warn!(
                     limit = MAX_STDIO_LINE_BYTES,
                     "mcp.stdio.frame_too_large: dropped oversized frame"
                 );
                 continue;
             }
-            StdioFrame::Line(buf) => buf,
+            Ok(StdioFrame::Line(buf)) => buf,
         };
         let line = match std::str::from_utf8(&buf) {
             Ok(text) => text.trim(),
@@ -932,18 +681,55 @@ pub async fn run_stdio_server(config: McpConfig) -> Result<()> {
             continue;
         }
 
-        if let Some(response) = dispatch_json_line(&mut ctx, line).await {
-            let encoded = serde_json::to_string(&response)?;
-            stdout.write_all(encoded.as_bytes()).await?;
-            stdout.write_all(b"\n").await?;
-            stdout.flush().await?;
+        let message: Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = outbound.send(json_rpc_error(
+                    None,
+                    -32700,
+                    format!("parse error: {error}"),
+                ));
+                continue;
+            }
+        };
+
+        if is_client_response(&message) {
+            if !pending.resolve(message) {
+                tracing::warn!("mcp.stdio.unmatched_response: dropped");
+            }
+            continue;
+        }
+        if inbound.send(message).is_err() {
+            break;
         }
     }
 
-    // Finalize and upload OTS trajectory on session close.
-    ctx.finalize_trajectory().await;
+    // The client stream ended: fail any in-flight server→client request so
+    // a pending elicitation returns immediately (decision left pending)
+    // instead of waiting out its timeout.
+    pending.fail_all();
+}
 
-    Ok(())
+/// Serialize outbound JSON-RPC messages as newline-delimited frames.
+async fn write_outbound<W: AsyncWrite + Unpin>(
+    mut rx: mpsc::UnboundedReceiver<Value>,
+    mut writer: W,
+) {
+    while let Some(message) = rx.recv().await {
+        let encoded = match serde_json::to_string(&message) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                tracing::warn!(%error, "mcp.stdio.encode_failed: dropped message");
+                continue;
+            }
+        };
+        if writer.write_all(encoded.as_bytes()).await.is_err()
+            || writer.write_all(b"\n").await.is_err()
+            || writer.flush().await.is_err()
+        {
+            break;
+        }
+    }
 }
 
 #[cfg(test)]

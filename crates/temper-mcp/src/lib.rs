@@ -1,5 +1,7 @@
 //! stdio MCP server exposing Temper Code Mode tools.
 
+mod code_analysis;
+mod elicit;
 mod protocol;
 mod runtime;
 mod trajectory_bounds;
@@ -11,7 +13,13 @@ pub use runtime::run_stdio_server;
 use protocol::dispatch_json_value;
 use runtime::RuntimeContext;
 
+/// Baseline protocol revision, kept for clients that negotiate it.
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+/// Latest protocol revision this server implements (adds elicitation).
+const MCP_LATEST_PROTOCOL_VERSION: &str = "2025-06-18";
+/// Protocol revisions this server accepts; a client requesting one of these
+/// gets it echoed back, anything else gets the latest (MCP lifecycle spec).
+const SUPPORTED_PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const MCP_SERVER_NAME: &str = "temper-mcp";
 
 /// Runtime config for the stdio MCP server.
@@ -44,3 +52,7 @@ pub struct McpConfig {
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "elicit_loop_tests.rs"]
+mod elicit_loop_tests;
