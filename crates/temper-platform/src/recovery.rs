@@ -106,12 +106,11 @@ pub async fn recover_cedar_policies(state: &PlatformState, ps: &dyn PlatformStor
         // `primary` is the durable aggregate policy row for newer installs. If
         // it exists, prefer it over the legacy blob to avoid loading the same
         // multi-megabyte generated policy twice.
-        if !has_primary_granular {
-            if let Some(legacy_text) = legacy_entries.get(&tenant) {
-                if push_unique_cedar_text(&mut policy_text, &mut seen_texts, legacy_text) {
-                    entry_count += 1;
-                }
-            }
+        if !has_primary_granular
+            && let Some(legacy_text) = legacy_entries.get(&tenant)
+            && push_unique_cedar_text(&mut policy_text, &mut seen_texts, legacy_text)
+        {
+            entry_count += 1;
         } else if legacy_entries.contains_key(&tenant) {
             skipped_legacy_count += 1;
         }
