@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use axum::http::StatusCode;
 use temper_runtime::tenant::TenantId;
-use temper_spec::automaton::{lint_automata_bundle, lint_automaton, LintSeverity};
+use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton};
 use temper_spec::cross_invariant::{CrossInvariantLintFinding, CrossInvariantLintSeverity};
 
 use crate::registry::{EntityVerificationResult, SpecRegistry, VerificationStatus};

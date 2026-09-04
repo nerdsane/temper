@@ -7,7 +7,7 @@
 
 use libsql::params;
 use sha2::{Digest, Sha256};
-use temper_runtime::persistence::{storage_error, PersistenceError};
+use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
 use super::{PolicyDenialPatternRow, TursoEventStore};
