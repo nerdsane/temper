@@ -1,6 +1,6 @@
 # ADR-0150: Always-On Composite Cross-Entity Verification
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-06-22
 - Deciders: Temper core maintainers
 - Related:
