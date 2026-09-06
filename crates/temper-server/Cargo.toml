@@ -79,6 +79,10 @@ tempfile = "3"
 pprof = { version = "0.14", features = ["prost-codec"] }
 
 [dev-dependencies]
+deadpool-postgres = { workspace = true }
+tokio-postgres = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
 tokio-test = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

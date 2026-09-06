@@ -938,6 +938,13 @@ pub async fn handle_odata_patch(
             if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
                 return *resp;
             }
+            // Generic writes are unsupported for strict PG-backed types. Their
+            // instances do not exist in the native actor index checked below.
+            if state.is_pg_actor_backed(&tenant, &entity_type)
+                && let Some(response) = strict_generic_write_response(&state, &tenant, &entity_type)
+            {
+                return response;
+            }
             if let Err(resp) =
                 ensure_entity_exists_or_404(&state, &tenant, &entity_type, &set_name, &key_str)
             {
@@ -1135,6 +1142,13 @@ pub async fn handle_odata_put(
             if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
                 return *resp;
             }
+            // Generic writes are unsupported for strict PG-backed types. Their
+            // instances do not exist in the native actor index checked below.
+            if state.is_pg_actor_backed(&tenant, &entity_type)
+                && let Some(response) = strict_generic_write_response(&state, &tenant, &entity_type)
+            {
+                return response;
+            }
             if let Err(resp) =
                 ensure_entity_exists_or_404(&state, &tenant, &entity_type, &set_name, &key_str)
             {
@@ -1331,6 +1345,13 @@ pub async fn handle_odata_delete(
 
             if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
                 return *resp;
+            }
+            // Generic writes are unsupported for strict PG-backed types. Their
+            // instances do not exist in the native actor index checked below.
+            if state.is_pg_actor_backed(&tenant, &entity_type)
+                && let Some(response) = strict_generic_write_response(&state, &tenant, &entity_type)
+            {
+                return response;
             }
             if let Err(resp) =
                 ensure_entity_exists_or_404(&state, &tenant, &entity_type, &set_name, &key_str)
