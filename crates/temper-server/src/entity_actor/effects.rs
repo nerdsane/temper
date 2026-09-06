@@ -291,6 +291,24 @@ pub fn process_action_with_xref_and_field_mode(
         };
     }
 
+    if let Err(error) = table.validate_action_params(
+        action,
+        params,
+        &state.fields,
+        &state.counters,
+        &state.booleans,
+    ) {
+        return ProcessResult {
+            success: false,
+            event: None,
+            custom_effects: vec![],
+            scheduled_actions: vec![],
+            spawn_requests: vec![],
+            overflow_blobs: vec![],
+            error: Some(error),
+        };
+    }
+
     let ctx = build_eval_context_with_xref(state, cross_entity_booleans);
     let result = table.evaluate_ctx(&state.status, &ctx, action);
 

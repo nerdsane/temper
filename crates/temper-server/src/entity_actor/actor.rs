@@ -1692,6 +1692,25 @@ impl Actor for EntityActor {
             EntityMsg::Delete {
                 expected_authorization_precondition,
             } => {
+                if self
+                    .table
+                    .read()
+                    .expect("table lock poisoned")
+                    .strict_action_params
+                {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(
+                            "Strict entities require a declared action for deletion".to_owned(),
+                        ),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
                 if let Some(expected) = expected_authorization_precondition
                     && super::effects::entity_authorization_precondition(state) != expected
                 {

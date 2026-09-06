@@ -131,6 +131,9 @@ pub struct AutomatonMeta {
     /// `# justification:` comment explaining why the state is indefinite.
     #[serde(default)]
     pub allow_indefinite_states: Vec<String>,
+    /// Restrict writes to declared action parameters and guarded actions.
+    #[serde(default)]
+    pub strict_action_params: bool,
 }
 
 /// A state variable declaration.
@@ -224,6 +227,9 @@ pub struct Action {
     /// Parameters this action accepts.
     #[serde(default)]
     pub params: Vec<ActionParam>,
+    /// Atomic checks of incoming parameters against the pre-transition state.
+    #[serde(default)]
+    pub constraints: Vec<ActionConstraint>,
     /// Agent hint for this action.
     pub hint: Option<String>,
     /// Whether a Composite action records an audit/idempotency event on the parent stream.
@@ -243,6 +249,42 @@ pub struct Action {
     /// Declared sub-write contract for Composite actions (ADR-0040).
     #[serde(default, rename = "sub_writes")]
     pub sub_writes: Vec<SubWriteSpec>,
+}
+
+/// A parameter constraint evaluated before any action effect or field write.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ActionConstraint {
+    /// Require the parameter to equal the stored field.
+    ParamEqualsField { param: String, field: String },
+    /// Require the parameter to differ from the stored field.
+    ParamNotEqualsField { param: String, field: String },
+    /// Require an integer parameter to exceed the stored integer field.
+    ParamGreaterThanField { param: String, field: String },
+    /// Require a nonempty string parameter.
+    ParamNonempty { param: String },
+}
+
+impl ActionConstraint {
+    /// Parameter checked by this constraint.
+    pub fn param(&self) -> &str {
+        match self {
+            Self::ParamEqualsField { param, .. }
+            | Self::ParamNotEqualsField { param, .. }
+            | Self::ParamGreaterThanField { param, .. }
+            | Self::ParamNonempty { param } => param,
+        }
+    }
+
+    /// Pre-state field used by a comparison constraint.
+    pub fn field(&self) -> Option<&str> {
+        match self {
+            Self::ParamEqualsField { field, .. }
+            | Self::ParamNotEqualsField { field, .. }
+            | Self::ParamGreaterThanField { field, .. } => Some(field),
+            Self::ParamNonempty { .. } => None,
+        }
+    }
 }
 
 fn default_internal() -> String {

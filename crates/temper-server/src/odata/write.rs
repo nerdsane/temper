@@ -430,6 +430,12 @@ pub async fn handle_odata_post(
                     Ok(prepared) => prepared,
                     Err(response) => return *response,
                 };
+            if let Err(error) =
+                state.validate_initial_entity_fields(&tenant, &entity_type, &initial_fields)
+            {
+                return odata_error(StatusCode::BAD_REQUEST, "StrictActionContract", &error)
+                    .into_response();
+            }
             if let Err(resp) = authorize_collection_create(
                 &state,
                 &tenant,

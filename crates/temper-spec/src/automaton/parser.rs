@@ -561,6 +561,31 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
         }
     }
 
+    for action in &automaton.actions {
+        for constraint in &action.constraints {
+            if !action
+                .params
+                .iter()
+                .any(|param| param.name() == constraint.param())
+            {
+                return Err(AutomatonParseError::Validation(format!(
+                    "action '{}' constrains undeclared parameter '{}'",
+                    action.name,
+                    constraint.param()
+                )));
+            }
+            if let Some(field) = constraint.field()
+                && !automaton.state.iter().any(|state| state.name == field)
+                && !super::types::is_server_derived_field_name(field)
+            {
+                return Err(AutomatonParseError::Validation(format!(
+                    "action '{}' constraint references undeclared field '{field}'",
+                    action.name
+                )));
+            }
+        }
+    }
+
     // 3. All `from` and `to` states in actions must be declared states.
     for action in &automaton.actions {
         for from in &action.from {

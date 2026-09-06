@@ -4,6 +4,7 @@
 //! parser rather than the full `toml` crate for the core parsing. Webhook
 //! sections are delegated to `toml::from_str` in a second pass.
 
+mod constraints;
 mod effects;
 mod guards;
 mod inline;
@@ -50,6 +51,7 @@ struct ParseState {
     meta_states: Vec<String>,
     meta_initial: String,
     meta_allow_indefinite_states: Vec<String>,
+    meta_strict_action_params: Option<String>,
     state_vars: Vec<StateVar>,
     actions: Vec<Action>,
     invariants: Vec<Invariant>,
@@ -92,7 +94,7 @@ impl ParseState {
                 self.current_section = Section::ActionTrigger;
                 true
             }
-            "[[action.cedar_gate]]" | "[[action.sub_writes]]" => {
+            "[[action.constraints]]" | "[[action.cedar_gate]]" | "[[action.sub_writes]]" => {
                 self.flush_items();
                 self.current_section = Section::CompositeActionMetadata;
                 true
@@ -136,8 +138,12 @@ impl ParseState {
         // actions by name. The hand-rolled parser skips these blocks.
         let mut triggers_by_action = extract_action_triggers(input)?;
         let mut composite_by_action = extract_action_composite_metadata(input)?;
+        let mut constraints_by_action = constraints::extract(input)?;
         let mut actions = self.actions;
         for action in &mut actions {
+            action.constraints = constraints_by_action
+                .remove(&action.name)
+                .unwrap_or_default();
             if let Some(trigs) = triggers_by_action.remove(&action.name) {
                 action.triggers.extend(trigs);
             }
@@ -153,6 +159,16 @@ impl ParseState {
                 states: self.meta_states,
                 initial: self.meta_initial,
                 allow_indefinite_states: self.meta_allow_indefinite_states,
+                strict_action_params: self
+                    .meta_strict_action_params
+                    .map(|value| value.parse::<bool>())
+                    .transpose()
+                    .map_err(|_| {
+                        AutomatonParseError::Validation(
+                            "strict_action_params must be true or false".into(),
+                        )
+                    })?
+                    .unwrap_or(false),
             },
             state: self.state_vars,
             actions,
@@ -171,6 +187,7 @@ impl ParseState {
 
     fn apply_automaton_field(&mut self, key: &str, value: &str) {
         match key {
+            "strict_action_params" => self.meta_strict_action_params = Some(value.to_string()),
             "name" => self.meta_name = value.to_string(),
             "initial" => self.meta_initial = value.to_string(),
             "states" => self.meta_states = parse_string_array(value),
@@ -348,6 +365,7 @@ impl ParseState {
             guard: Vec::new(),
             effect: Vec::new(),
             params: Vec::new(),
+            constraints: Vec::new(),
             hint: None,
             record_parent_event: true,
             triggers: Vec::new(),

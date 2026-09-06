@@ -115,7 +115,7 @@ impl SimReactionSystem {
         let to_state = self.inner.status(actor_id);
 
         // Build fields from the result for target resolution
-        let fields = result.clone();
+        let fields = result.get("fields").unwrap_or(&result).clone();
 
         // Dispatch reactions recursively
         self.dispatch_cascade(&entity_type, &entity_id, action, &to_state, &fields, 0);
@@ -248,7 +248,7 @@ impl SimReactionSystem {
                         &target_entity_id,
                         &target_action,
                         &target_status,
-                        &result_fields,
+                        result_fields.get("fields").unwrap_or(&result_fields),
                         depth + 1,
                     );
                 }
