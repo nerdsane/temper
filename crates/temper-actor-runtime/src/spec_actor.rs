@@ -53,6 +53,27 @@ impl SpecMessage {
     }
 }
 
+/// Internal reaction delivery. Source fields are projected at the receiving
+/// actor, where its declared action inputs are available. External requests
+/// cannot use this envelope without an actor sender.
+#[derive(Clone, PartialEq, prost::Message)]
+pub(crate) struct RoutedSpecMessage {
+    // Keep the SpecMessage wire layout: concrete integration actors decode it.
+    #[prost(string, tag = "1")]
+    pub action: String,
+    #[prost(bytes, tag = "2")]
+    pub params: Vec<u8>,
+}
+
+impl From<SpecMessage> for RoutedSpecMessage {
+    fn from(message: SpecMessage) -> Self {
+        Self {
+            action: message.action,
+            params: message.params,
+        }
+    }
+}
+
 // ─── Actor state ─────────────────────────────────────────────────────────────
 
 /// Serializable state for spec-driven actors.
@@ -256,6 +277,12 @@ impl Actor for SpecDrivenActor {
         };
 
         // Decode strict inputs at the boundary, before touching actor state.
+        let routed = message.message_type == "RoutedSpecMessage";
+        if routed && message.from.is_none() {
+            return Err(ActorError::Rejected(
+                "routed action requires an actor sender".into(),
+            ));
+        }
         let spec_msg = if message.message_type.ends_with("SpecMessage") {
             match message.decode::<SpecMessage>() {
                 Ok(message) => Some(message),
@@ -282,7 +309,7 @@ impl Actor for SpecDrivenActor {
                     .strict_action_params
                     .then_some(message.payload.as_slice())
             });
-        let params = match params_bytes.filter(|bytes| !bytes.is_empty()) {
+        let mut params = match params_bytes.filter(|bytes| !bytes.is_empty()) {
             Some(bytes) => match serde_json::from_slice::<serde_json::Value>(bytes) {
                 Ok(value) => value,
                 Err(error) if self.table.strict_action_params => {
@@ -294,6 +321,17 @@ impl Actor for SpecDrivenActor {
             },
             None => serde_json::json!({}),
         };
+        if routed && self.table.strict_action_params {
+            let contract = self.table.action_contracts.get(action).ok_or_else(|| {
+                ActorError::Rejected(format!(
+                    "Action '{action}' has no declared parameter contract"
+                ))
+            })?;
+            let fields = params.as_object_mut().ok_or_else(|| {
+                ActorError::Rejected("routed source fields must be a JSON object".into())
+            })?;
+            fields.retain(|name, _| contract.params.contains(name));
+        }
         self.table
             .validate_action_params(
                 action,
@@ -408,7 +446,10 @@ impl SpecDrivenActor {
                         ActorHandle::new(ctx.self_handle().namespace.clone(), target_type.clone());
                     ctx.tell(
                         &target,
-                        SpecMessage::with_params(target_action.clone(), state.fields.clone()),
+                        RoutedSpecMessage::from(SpecMessage::with_params(
+                            target_action.clone(),
+                            state.fields.clone(),
+                        )),
                     )
                     .await;
                 } else {
@@ -427,7 +468,10 @@ impl SpecDrivenActor {
                         ActorHandle::new(ctx.self_handle().namespace.clone(), target_type.clone());
                     ctx.tell(
                         &target,
-                        SpecMessage::with_params(target_action.clone(), state.fields.clone()),
+                        RoutedSpecMessage::from(SpecMessage::with_params(
+                            target_action.clone(),
+                            state.fields.clone(),
+                        )),
                     )
                     .await;
                 } else {

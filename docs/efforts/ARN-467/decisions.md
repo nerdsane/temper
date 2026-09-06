@@ -86,3 +86,41 @@
 **Chose the shared merge because:** The actor retains its declared defaults while creation still supplies identity and any permitted initial values. The real HTTP test now reads the default before enqueueing or executing an action.
 
 **Where:** crates/temper-actor-runtime/src/system.rs and crates/temper-server/tests/strict_postgres_actions.rs.
+
+
+## D8: Authorize PostgreSQL mutations before consulting the input contract
+
+**Decision:** Load the PostgreSQL resource for Cedar authorization, then validate action inputs or refuse unsupported generic writes.
+
+**Came up because:** The second review reproduced a stored-value oracle: a denied caller received 400 for an incorrect compare-and-set guess and 403 for the correct guess. The PostgreSQL generic-write refusal also skipped Cedar.
+
+**Options:** Keep type and constraint checks before authorization; duplicate permission logic; share the PostgreSQL resource authorization boundary before either response.
+
+**Chose shared authorization because:** Unauthorized callers receive the same policy refusal regardless of their guesses, and all mutation attempts reach Cedar. Authorized callers retain the specific contract errors without enqueueing invalid work.
+
+**Where:** crates/temper-server/src/odata/write.rs; crates/temper-server/tests/strict_postgres_actions.rs.
+
+## D9: Remove direct PostgreSQL field updates
+
+**Decision:** Initialize Process fields during idempotent creation and remove the otherwise unused direct field-update API.
+
+**Came up because:** The second review found that update_actor_fields bypasses the specification. Its only caller was Process collection creation, after spawning the registered actors.
+
+**Options:** Add another contract check to an unrestricted mutation API; preserve the API for one creation caller; create Process with its fields before spawning its peers and delete the update API.
+
+**Chose creation followed by deletion because:** Fresh actors receive their fields and declared defaults without granting a way to rewrite existing actors. Repeated creation preserves existing state through the existing insert-on-conflict behavior.
+
+**Where:** crates/temper-actor-runtime/src/system.rs; crates/temper-server/src/odata/write.rs; crates/temper-server/tests/strict_postgres_actions.rs.
+
+
+## D10: Separate routed source fields from ordinary action inputs
+
+**Decision:** Deliver PostgreSQL emit and trigger reactions in an internal envelope, then project source fields onto the strict target action's declared parameters before checking its constraints.
+
+**Came up because:** The real PostgreSQL cascade test showed that sending every source field as ordinary input makes strict targets reject valid reactions for unrelated source metadata.
+
+**Options:** Exempt every actor-origin message from validation; add the target registry to each sender; identify reaction deliveries explicitly and construct the declared input at the receiver.
+
+**Chose explicit reaction deliveries because:** The target owns its input contract, while ordinary caller and actor messages retain the exact allowlist. Routed requests still satisfy constraints against unmodified target state. An external envelope without an actor sender is rejected, and unknown target actions fail before mutation.
+
+**Where:** crates/temper-actor-runtime/src/spec_actor.rs; crates/temper-actor-runtime/src/pg_strict_tests.rs.

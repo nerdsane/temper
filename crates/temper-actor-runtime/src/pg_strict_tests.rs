@@ -230,3 +230,120 @@ async fn rejection_discards_handler_mutations_and_tells_but_transient_failure_re
         assert_eq!(read(&pool, &handle).await.0, b"changed bytes");
     }
 }
+
+#[tokio::test]
+async fn routed_emit_and_trigger_project_only_declared_inputs_then_enforce_constraints() {
+    let (pool, _container) = pool().await;
+    for effect in [
+        r#"{type = "emit", event = "Forward"}"#,
+        r#"{type = "trigger", name = "Forward"}"#,
+    ] {
+        let source_spec = format!(
+            r#"
+[automaton]
+name = "Source"
+states = ["Ready"]
+initial = "Ready"
+strict_action_params = true
+[[state]]
+name = "source_only"
+type = "string"
+initial = "not a sink parameter"
+[[action]]
+name = "Forward"
+kind = "input"
+from = ["Ready"]
+params = ["desired", "expected_desired"]
+effect = [{effect}]
+"#
+        );
+        let source = SpecDrivenActor::from_ioa(
+            &source_spec,
+            HashMap::from([("Forward".into(), ("Sink".into(), "Replace".into()))]),
+        )
+        .unwrap();
+        let sink =
+            SpecDrivenActor::from_ioa(&SPEC.replace("Strict", "Sink"), HashMap::new()).unwrap();
+        let system = crate::ActorSystem::new(pool.clone(), crate::SchedulerConfig::default());
+        system.register(Arc::new(source)).await.unwrap();
+        system.register(Arc::new(sink)).await.unwrap();
+        let namespace = format!("strict-route-{}", Uuid::new_v4());
+        let source = system.spawn(&namespace, "Source").await.unwrap();
+        let sink = system.spawn(&namespace, "Sink").await.unwrap();
+        system
+            .tell(
+                None,
+                &source,
+                SpecMessage::with_params(
+                    "Forward",
+                    serde_json::json!({"desired":"second", "expected_desired":"first"}),
+                ),
+            )
+            .await
+            .unwrap();
+        system.activate_now(&source).await.unwrap();
+        system
+            .activate_now(&sink)
+            .await
+            .expect("declared routed fields must reach the strict target");
+        let accepted = read(&pool, &sink).await.0;
+        let state: SpecActorState = serde_json::from_slice(&accepted).unwrap();
+        assert_eq!(state.fields["desired"], "second");
+        assert!(state.fields.get("source_only").is_none());
+        system
+            .tell(
+                None,
+                &source,
+                SpecMessage::with_params(
+                    "Forward",
+                    serde_json::json!({"desired":"third", "expected_desired":"stale"}),
+                ),
+            )
+            .await
+            .unwrap();
+        system.activate_now(&source).await.unwrap();
+        assert!(matches!(
+            system.activate_now(&sink).await,
+            Err(ActivationError::ActorError(ActorError::Rejected(_)))
+        ));
+        assert_eq!(read(&pool, &sink).await.0, accepted);
+        // Public callers cannot opt into internal projection by naming the envelope.
+        system
+            .tell(
+                None,
+                &sink,
+                crate::spec_actor::RoutedSpecMessage::from(SpecMessage::with_params(
+                    "Replace",
+                    serde_json::json!({
+                        "desired":"forged", "expected_desired":"second", "source_only":true
+                    }),
+                )),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            system.activate_now(&sink).await,
+            Err(ActivationError::ActorError(ActorError::Rejected(_)))
+        ));
+        assert_eq!(read(&pool, &sink).await.0, accepted);
+        // An ordinary actor-origin request also keeps the exact public allowlist.
+        system
+            .tell(
+                Some(&source),
+                &sink,
+                SpecMessage::with_params(
+                    "Replace",
+                    serde_json::json!({
+                        "desired":"forged", "expected_desired":"second", "source_only":true
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            system.activate_now(&sink).await,
+            Err(ActivationError::ActorError(ActorError::Rejected(_)))
+        ));
+        assert_eq!(read(&pool, &sink).await.0, accepted);
+    }
+}

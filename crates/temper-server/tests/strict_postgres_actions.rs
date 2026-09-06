@@ -31,7 +31,11 @@ name = "SubmitOrder"
 kind = "input"
 from = ["Draft"]
 to = "Submitted"
-params = ["Notes"]
+params = ["Notes", "expected_notes"]
+[[action.constraints]]
+kind = "param_equals_field"
+param = "expected_notes"
+field = "Notes"
 "#;
 
 async fn pool() -> (Pool, Option<ContainerAsync<Postgres>>) {
@@ -143,7 +147,7 @@ async fn strict_postgres_http_preserves_the_contract_and_acknowledges_only_enque
         .reload_tenant_policies("default", "permit(principal, action, resource);")
         .unwrap();
     // Authentication is a local fixture; router, policy, storage and actor execution are real.
-    let router = build_router(state).layer(axum::middleware::from_fn(test_identity));
+    let router = build_router(state.clone()).layer(axum::middleware::from_fn(test_identity));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -180,6 +184,44 @@ async fn strict_postgres_http_preserves_the_contract_and_acknowledges_only_enque
     let initial = actor_state(&pool, &handle).await;
     let initial_json: Value = serde_json::from_slice(&initial).unwrap();
     assert_eq!(initial_json["fields"]["Notes"], "draft note");
+    state
+        .authz
+        .reload_tenant_policies("default", "forbid(principal, action, resource);")
+        .unwrap();
+    for guess in ["wrong guess", "draft note"] {
+        let response = client
+            .post(&action_url)
+            .json(&json!({"Notes":"requested", "expected_notes": guess}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a refused caller must not distinguish stored field guesses"
+        );
+        assert_eq!(message_count(&pool, &handle.namespace).await, 0);
+        assert_eq!(actor_state(&pool, &handle).await, initial);
+    }
+    for method in [
+        reqwest::Method::PATCH,
+        reqwest::Method::PUT,
+        reqwest::Method::DELETE,
+    ] {
+        let response = client
+            .request(method, &entity_url)
+            .json(&json!({"Notes":"forged"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(message_count(&pool, &handle.namespace).await, 0);
+        assert_eq!(actor_state(&pool, &handle).await, initial);
+    }
+    state
+        .authz
+        .reload_tenant_policies("default", "permit(principal, action, resource);")
+        .unwrap();
     for body in ["{", "null", "[]", r#"{"Notes":"allowed","forged":true}"#] {
         let response = client
             .post(&action_url)
@@ -212,7 +254,7 @@ async fn strict_postgres_http_preserves_the_contract_and_acknowledges_only_enque
     }
     let response = client
         .post(&action_url)
-        .json(&json!({"Notes":"requested"}))
+        .json(&json!({"Notes":"requested", "expected_notes":"draft note"}))
         .send()
         .await
         .unwrap();
@@ -254,4 +296,92 @@ async fn strict_postgres_http_preserves_the_contract_and_acknowledges_only_enque
         &[&handle.namespace]).await.unwrap().get(0);
     assert_eq!(cursor, message_id);
     server.abort();
+}
+
+#[tokio::test]
+async fn repeated_process_creation_preserves_existing_fields_and_defaults() {
+    for strict in [false, true] {
+        let spec = SPEC
+            .replace(r#"name = "Order""#, r#"name = "Process""#)
+            .replace(
+                "strict_action_params = true",
+                &format!("strict_action_params = {strict}"),
+            );
+        let csdl = CSDL
+            .replace("Orders", "Processes")
+            .replace("Order", "Process");
+        let (pool, _container) = pool().await;
+        let actors = Arc::new(ActorSystem::new(pool.clone(), SchedulerConfig::default()));
+        actors
+            .register(Arc::new(
+                SpecDrivenActor::from_ioa(&spec, HashMap::new()).unwrap(),
+            ))
+            .await
+            .unwrap();
+        let mut registry = SpecRegistry::new();
+        registry.register_tenant(
+            "default",
+            temper_spec::csdl::parse_csdl(&csdl).unwrap(),
+            csdl,
+            &[("Process", spec.as_str())],
+        );
+        registry.set_verification_status(
+            &TenantId::default(),
+            "Process",
+            VerificationStatus::Completed(EntityVerificationResult {
+                all_passed: true,
+                levels: vec![],
+                verified_at: "2026-09-06T00:00:00Z".into(),
+            }),
+        );
+        let mut state = ServerState::from_pg_registry(actors.clone(), registry);
+        state.actor_backed_types.insert("Process".into());
+        state
+            .authz
+            .reload_tenant_policies("default", "permit(principal, action, resource);")
+            .unwrap();
+        // Authentication is a local fixture; router, policy, storage and actor execution are real.
+        let router = build_router(state.clone()).layer(axum::middleware::from_fn(test_identity));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = Client::new();
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let url = format!("{base}/tdata/Processes");
+        let fields = if strict {
+            json!({"id": id})
+        } else {
+            json!({"id": id, "Notes":"draft note"})
+        };
+        let response = client.post(&url).json(&fields).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let handle = ActorHandle::new(format!("default/{id}"), "Process");
+        let initial: Value = serde_json::from_slice(&actor_state(&pool, &handle).await).unwrap();
+        assert_eq!(initial["fields"]["Notes"], "draft note");
+        actors
+            .tell(
+                None,
+                &handle,
+                temper_actor_runtime::SpecMessage::with_params(
+                    "SubmitOrder",
+                    json!({"Notes":"kept", "expected_notes":"draft note"}),
+                ),
+            )
+            .await
+            .unwrap();
+        actors.activate_now(&handle).await.unwrap();
+        let before = actor_state(&pool, &handle).await;
+        let fields = if strict {
+            json!({"id": id})
+        } else {
+            json!({"id": id, "Notes":"forged"})
+        };
+        let response = client.post(&url).json(&fields).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(actor_state(&pool, &handle).await, before);
+        server.abort();
+    }
 }

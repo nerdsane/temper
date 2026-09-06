@@ -282,3 +282,14 @@ to = "Idle"
         assert_eq!(maps["Agent"]["PrepareContext"].1, "PrepareContext");
     }
 }
+
+#[test]
+fn routed_messages_preserve_the_wire_contract_used_by_concrete_integration_actors() {
+    let ordinary = SpecMessage::with_params("Execute", json!({"input":"test"}));
+    let routed = RoutedSpecMessage::from(ordinary.clone());
+    assert_eq!(routed.encode_to_vec(), ordinary.encode_to_vec());
+    assert_eq!(
+        SpecMessage::decode(routed.encode_to_vec().as_slice()).unwrap(),
+        ordinary
+    );
+}

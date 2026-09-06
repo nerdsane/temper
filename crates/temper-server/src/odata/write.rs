@@ -285,6 +285,82 @@ fn ensure_entity_exists_or_404(
     }
 }
 
+async fn authorize_pg_mutation(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_id: &str,
+    action: &str,
+    security_ctx: &temper_authz::SecurityContext,
+    agent_ctx: &AgentContext,
+) -> Result<temper_actor_runtime::spec_actor::SpecActorState, ODataWriteError> {
+    let actor_sys = state
+        .pg_actor_system
+        .as_ref()
+        .expect("PG path requires actor system");
+    let namespace = format!("{tenant}/{entity_id}");
+    let state_bytes = match actor_sys.load_state(&namespace, entity_type).await {
+        Ok(Some(state_bytes)) => state_bytes,
+        Ok(None) => {
+            return Err(Box::new(
+                odata_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFound",
+                    &format!("Entity '{entity_type}' with key '{entity_id}' not found"),
+                )
+                .into_response(),
+            ));
+        }
+        Err(error) => {
+            return Err(Box::new(
+                odata_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "ActorReadError",
+                    &error.to_string(),
+                )
+                .into_response(),
+            ));
+        }
+    };
+    let actor_state: temper_actor_runtime::spec_actor::SpecActorState =
+        match serde_json::from_slice(&state_bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                return Err(Box::new(
+                    odata_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "ActorReadError",
+                        "Stored actor state is invalid",
+                    )
+                    .into_response(),
+                ));
+            }
+        };
+    let authz_body = serde_json::json!({
+        "entity_id": entity_id,
+        "status": actor_state.status,
+        "fields": actor_state.fields,
+    });
+    let attrs = resource_attrs_from_body(state, tenant, entity_type, entity_id, &authz_body);
+    if let Err(response) = authorize_mutation(
+        state,
+        tenant,
+        security_ctx,
+        agent_ctx,
+        action,
+        MutationResource {
+            entity_type,
+            entity_id,
+            attrs: &attrs,
+        },
+    )
+    .await
+    {
+        return Err(Box::new(response));
+    }
+    Ok(actor_state)
+}
+
 async fn authorize_existing_mutation(
     state: &ServerState,
     tenant: &TenantId,
@@ -609,25 +685,18 @@ pub async fn handle_odata_post(
                 && let Some(actor_sys) = &state.pg_actor_system
             {
                 let namespace = format!("{tenant}/{entity_id}");
-                let spawn_result = if entity_type == "Process" {
-                    actor_sys.spawn_all_registered(&namespace).await
-                } else {
-                    actor_sys
-                        .spawn_with_fields(&namespace, &entity_type, initial_fields.clone())
-                        .await
-                        .map(|_| ())
+                let spawn_result = actor_sys
+                    .spawn_with_fields(&namespace, &entity_type, initial_fields.clone())
+                    .await;
+                let spawn_result = match spawn_result {
+                    Ok(_) if entity_type == "Process" => {
+                        actor_sys.spawn_all_registered(&namespace).await
+                    }
+                    Ok(_) => Ok(()),
+                    Err(error) => Err(error),
                 };
                 match spawn_result {
                     Ok(_) => {
-                        if entity_type == "Process" {
-                            let handle = temper_actor_runtime::ActorHandle::new(
-                                namespace.clone(),
-                                entity_type.clone(),
-                            );
-                            let _ = actor_sys
-                                .update_actor_fields(&handle, initial_fields.clone(), false)
-                                .await;
-                        }
                         return ODataResponse {
                             status: StatusCode::CREATED,
                             body: serde_json::json!({
@@ -751,37 +820,20 @@ pub async fn handle_odata_post(
                 let handle =
                     temper_actor_runtime::ActorHandle::new(namespace.clone(), entity_type.clone());
                 let action_name = action.rsplit('.').next().unwrap_or(&action);
-                let state_bytes = match actor_sys.load_state(&namespace, &entity_type).await {
-                    Ok(Some(state_bytes)) => state_bytes,
-                    Ok(None) => {
-                        return odata_error(
-                            StatusCode::NOT_FOUND,
-                            "ResourceNotFound",
-                            &format!("Entity '{set_name}' with key '{key_str}' not found"),
-                        )
-                        .into_response();
-                    }
-                    Err(error) => {
-                        return odata_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "ActorReadError",
-                            &error.to_string(),
-                        )
-                        .into_response();
-                    }
+                let actor_state = match authorize_pg_mutation(
+                    &state,
+                    &tenant,
+                    &entity_type,
+                    &key_str,
+                    &action,
+                    &security_ctx,
+                    &agent_ctx,
+                )
+                .await
+                {
+                    Ok(state) => state,
+                    Err(response) => return *response,
                 };
-                let actor_state: temper_actor_runtime::spec_actor::SpecActorState =
-                    match serde_json::from_slice(&state_bytes) {
-                        Ok(value) => value,
-                        Err(_) => {
-                            return odata_error(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "ActorReadError",
-                                "Stored actor state is invalid",
-                            )
-                            .into_response();
-                        }
-                    };
                 let strict = {
                     let registry = state.registry.read().expect("registry lock poisoned");
                     if let Some(table) = registry.get_table(&tenant, &entity_type) {
@@ -804,29 +856,6 @@ pub async fn handle_odata_post(
                         false
                     }
                 };
-                let authz_body = serde_json::json!({
-                    "entity_id": key_str,
-                    "status": actor_state.status,
-                    "fields": actor_state.fields,
-                });
-                let attrs =
-                    resource_attrs_from_body(&state, &tenant, &entity_type, &key_str, &authz_body);
-                if let Err(response) = authorize_mutation(
-                    &state,
-                    &tenant,
-                    &security_ctx,
-                    &agent_ctx,
-                    &action,
-                    MutationResource {
-                        entity_type: &entity_type,
-                        entity_id: &key_str,
-                        attrs: &attrs,
-                    },
-                )
-                .await
-                {
-                    return response;
-                }
                 match actor_sys
                     .tell(
                         None,
@@ -938,11 +967,24 @@ pub async fn handle_odata_patch(
             if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
                 return *resp;
             }
-            // Generic writes are unsupported for strict PG-backed types. Their
-            // instances do not exist in the native actor index checked below.
+            // PG instances are authorized from their persisted state, before
+            // refusing verbs that the strict type does not support.
             if state.is_pg_actor_backed(&tenant, &entity_type)
                 && let Some(response) = strict_generic_write_response(&state, &tenant, &entity_type)
             {
+                if let Err(error) = authorize_pg_mutation(
+                    &state,
+                    &tenant,
+                    &entity_type,
+                    &key_str,
+                    UPDATE_ACTION,
+                    &security_ctx,
+                    &agent_ctx,
+                )
+                .await
+                {
+                    return *error;
+                }
                 return response;
             }
             if let Err(resp) =
@@ -1142,11 +1184,24 @@ pub async fn handle_odata_put(
             if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
                 return *resp;
             }
-            // Generic writes are unsupported for strict PG-backed types. Their
-            // instances do not exist in the native actor index checked below.
+            // PG instances are authorized from their persisted state, before
+            // refusing verbs that the strict type does not support.
             if state.is_pg_actor_backed(&tenant, &entity_type)
                 && let Some(response) = strict_generic_write_response(&state, &tenant, &entity_type)
             {
+                if let Err(error) = authorize_pg_mutation(
+                    &state,
+                    &tenant,
+                    &entity_type,
+                    &key_str,
+                    UPDATE_ACTION,
+                    &security_ctx,
+                    &agent_ctx,
+                )
+                .await
+                {
+                    return *error;
+                }
                 return response;
             }
             if let Err(resp) =
@@ -1346,11 +1401,24 @@ pub async fn handle_odata_delete(
             if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
                 return *resp;
             }
-            // Generic writes are unsupported for strict PG-backed types. Their
-            // instances do not exist in the native actor index checked below.
+            // PG instances are authorized from their persisted state, before
+            // refusing verbs that the strict type does not support.
             if state.is_pg_actor_backed(&tenant, &entity_type)
                 && let Some(response) = strict_generic_write_response(&state, &tenant, &entity_type)
             {
+                if let Err(error) = authorize_pg_mutation(
+                    &state,
+                    &tenant,
+                    &entity_type,
+                    &key_str,
+                    DELETE_ACTION,
+                    &security_ctx,
+                    &agent_ctx,
+                )
+                .await
+                {
+                    return *error;
+                }
                 return response;
             }
             if let Err(resp) =
