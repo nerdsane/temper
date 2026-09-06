@@ -317,7 +317,37 @@ impl PgActorActivator {
             Some(self.pool.clone()),
         );
 
-        handler.handle(&ctx, &mut state, &message).await?;
+        match handler.handle(&ctx, &mut state, &message).await {
+            Ok(()) => {}
+            Err(error @ ActorError::Rejected(_)) => {
+                // Deterministic refusals must not poison FIFO. Advance only the
+                // cursor; never persist modified handler bytes or buffered tells.
+                let changed = tx
+                    .execute(
+                        "UPDATE odp_temper.actor_instances SET last_msg_id = $1, \
+                     version = version + 1, updated_at = NOW() \
+                     WHERE namespace = $2 AND actor_type = $3 AND version = $4",
+                        &[
+                            &new_last_msg_id,
+                            &actor_handle.namespace,
+                            &actor_handle.actor_type,
+                            &version,
+                        ],
+                    )
+                    .await
+                    .map_err(|error| {
+                        ActivationError::Storage(format!("reject message: {error}"))
+                    })?;
+                if changed == 0 {
+                    return Err(ActivationError::ConcurrencyViolation { expected: version });
+                }
+                tx.commit().await.map_err(|error| {
+                    ActivationError::Storage(format!("commit rejection: {error}"))
+                })?;
+                return Err(error.into());
+            }
+            Err(error) => return Err(error.into()),
+        }
 
         // 5. Persist state + advance cursor.
         let rows_affected = tx
@@ -374,3 +404,7 @@ impl PgActorActivator {
         Ok(ActivationResult { activated: true })
     }
 }
+
+#[cfg(test)]
+#[path = "pg_strict_tests.rs"]
+mod strict_tests;

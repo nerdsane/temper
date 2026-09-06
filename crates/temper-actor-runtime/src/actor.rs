@@ -86,6 +86,10 @@ pub(crate) struct BufferedTell {
 /// Errors from actor operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ActorError {
+    /// A deterministic refusal: consume the message without persisting state or tells.
+    #[error("request rejected: {0}")]
+    Rejected(String),
+
     #[error("handler failed: {0}")]
     HandlerFailed(String),
 

@@ -1,0 +1,232 @@
+//! Real Postgres proofs for rejection consumption and retryable rollback.
+use super::*;
+use crate::spec_actor::{SpecActorState, SpecDrivenActor, SpecMessage};
+use prost::Message as _;
+use std::collections::HashMap;
+
+static SCHEMA_READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+async fn pool() -> (
+    Pool,
+    Option<testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>>,
+) {
+    if let Ok(url) = std::env::var("TEMPER_ACTOR_TEST_DATABASE_URL") {
+        let parsed: tokio_postgres::Config = url.parse().unwrap();
+        assert!(
+            parsed.get_hosts().iter().all(|host| matches!(host,
+            tokio_postgres::config::Host::Tcp(name) if name == "127.0.0.1" || name == "localhost"))
+        );
+        assert!(
+            parsed
+                .get_dbname()
+                .is_some_and(|name| name.starts_with("temper_test_"))
+        );
+        let mut config = deadpool_postgres::Config::new();
+        config.url = Some(url);
+        let pool = config
+            .create_pool(
+                Some(deadpool_postgres::Runtime::Tokio1),
+                tokio_postgres::NoTls,
+            )
+            .unwrap();
+        SCHEMA_READY
+            .get_or_init(|| async {
+                schema::create_tables(&pool.get().await.unwrap())
+                    .await
+                    .unwrap();
+            })
+            .await;
+        (pool, None)
+    } else {
+        let (pool, container) = crate::test_utils::setup_test_pg().await;
+        (pool, Some(container))
+    }
+}
+
+async fn read(pool: &Pool, handle: &ActorHandle) -> (Vec<u8>, i64, i64) {
+    let row = pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(schema::LOAD_ACTOR, &[&handle.namespace, &handle.actor_type])
+        .await
+        .unwrap();
+    (row.get("state"), row.get("last_msg_id"), row.get("version"))
+}
+
+async fn setup(pool: &Pool, handler: &dyn Actor) -> ActorHandle {
+    let handle = ActorHandle::new(format!("strict-{}", Uuid::new_v4()), handler.actor_type());
+    pool.get()
+        .await
+        .unwrap()
+        .execute(
+            schema::CREATE_ACTOR,
+            &[
+                &handle.namespace,
+                &handle.actor_type,
+                &handler.initial_state(),
+            ],
+        )
+        .await
+        .unwrap();
+    handle
+}
+
+const SPEC: &str = r#"
+[automaton]
+name = "Strict"
+states = ["Ready"]
+initial = "Ready"
+strict_action_params = true
+[[state]]
+name = "desired"
+type = "string"
+initial = "first"
+[[action]]
+name = "Replace"
+kind = "input"
+from = ["Ready"]
+params = ["desired", "expected_desired"]
+[[action.constraints]]
+kind = "param_equals_field"
+param = "expected_desired"
+field = "desired"
+"#;
+
+#[tokio::test]
+async fn rejected_input_is_consumed_and_the_next_valid_message_runs() {
+    let (pool, _container) = pool().await;
+    let actor = SpecDrivenActor::from_ioa(SPEC, HashMap::new()).unwrap();
+    let handle = setup(&pool, &actor).await;
+    let mailbox = Arc::new(PgMailbox::new(pool.clone(), PgMailboxConfig::default()));
+    let activator = PgActorActivator::new(pool.clone(), mailbox.clone());
+    let initial = read(&pool, &handle).await.0;
+    let mut rejected_ids = Vec::new();
+    for (kind, payload) in [
+        ("SpecMessage", vec![0xff]),
+        (
+            "Replace",
+            br#"{"desired":"bad","expected_desired":"stale"}"#.to_vec(),
+        ),
+        (
+            "Replace",
+            br#"{"desired":"bad","expected_desired":"first","extra":true}"#.to_vec(),
+        ),
+    ] {
+        let id = mailbox.tell(None, &handle, kind, payload).await.unwrap();
+        rejected_ids.push(id);
+    }
+    let id = mailbox
+        .tell(
+            None,
+            &handle,
+            "SpecMessage",
+            SpecMessage::with_params(
+                "Replace",
+                serde_json::json!({"desired": "second", "expected_desired": "first"}),
+            )
+            .encode_to_vec(),
+        )
+        .await
+        .unwrap();
+    // The valid request is already queued behind all three rejected requests.
+    for id in rejected_ids {
+        assert!(matches!(
+            activator.activate(&handle, &actor).await,
+            Err(ActivationError::ActorError(ActorError::Rejected(_)))
+        ));
+        let (bytes, cursor, _) = read(&pool, &handle).await;
+        assert_eq!(bytes, initial);
+        assert_eq!(cursor, id);
+    }
+    assert!(activator.activate(&handle, &actor).await.unwrap().activated);
+    let (bytes, cursor, _) = read(&pool, &handle).await;
+    assert_eq!(cursor, id);
+    let state: SpecActorState = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(state.fields["desired"], "second");
+    assert!(!activator.activate(&handle, &actor).await.unwrap().activated);
+}
+
+struct MutatingFailure {
+    rejected: bool,
+    recovered: bool,
+}
+
+#[async_trait::async_trait]
+impl Actor for MutatingFailure {
+    fn actor_type(&self) -> &str {
+        "MutatingFailure"
+    }
+    fn initial_state(&self) -> Vec<u8> {
+        b"original bytes".to_vec()
+    }
+    async fn handle(
+        &self,
+        ctx: &ActorContext,
+        state: &mut Vec<u8>,
+        _: &Message,
+    ) -> Result<(), ActorError> {
+        *state = b"changed bytes".to_vec();
+        ctx.tell(
+            &ActorHandle::new(ctx.self_handle().namespace.clone(), "Audit"),
+            SpecMessage::new("Record"),
+        )
+        .await;
+        if self.recovered {
+            return Ok(());
+        }
+        if self.rejected {
+            Err(ActorError::Rejected("invalid input".into()))
+        } else {
+            Err(ActorError::HandlerFailed(
+                "transient provider outage".into(),
+            ))
+        }
+    }
+}
+
+#[tokio::test]
+async fn rejection_discards_handler_mutations_and_tells_but_transient_failure_retries() {
+    let (pool, _container) = pool().await;
+    let mailbox = Arc::new(PgMailbox::new(pool.clone(), PgMailboxConfig::default()));
+    let activator = PgActorActivator::new(pool.clone(), mailbox.clone());
+    for rejected in [true, false] {
+        let actor = MutatingFailure {
+            rejected,
+            recovered: false,
+        };
+        let handle = setup(&pool, &actor).await;
+        let before = read(&pool, &handle).await;
+        let id = mailbox
+            .tell(None, &handle, "Request", vec![])
+            .await
+            .unwrap();
+        assert!(activator.activate(&handle, &actor).await.is_err());
+        let (bytes, cursor, version) = read(&pool, &handle).await;
+        assert_eq!(bytes, before.0);
+        assert_eq!(cursor, if rejected { id } else { before.1 });
+        assert_eq!(version, before.2 + i64::from(rejected));
+        let tell_count: i64 = pool.get().await.unwrap().query_one(
+            "SELECT count(*) FROM odp_temper.actor_messages WHERE namespace = $1 AND to_actor = 'Audit'",
+            &[&handle.namespace]).await.unwrap().get(0);
+        assert_eq!(tell_count, 0);
+        let recovered = MutatingFailure {
+            rejected: false,
+            recovered: true,
+        };
+        if rejected {
+            mailbox
+                .tell(None, &handle, "Request", vec![])
+                .await
+                .unwrap();
+        }
+        assert!(
+            activator
+                .activate(&handle, &recovered)
+                .await
+                .unwrap()
+                .activated
+        );
+        assert_eq!(read(&pool, &handle).await.0, b"changed bytes");
+    }
+}

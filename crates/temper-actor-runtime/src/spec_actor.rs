@@ -193,6 +193,15 @@ impl SpecDrivenActor {
             }
         }
 
+        table.initialize_strict_fields(
+            &mut init_state.fields,
+            &mut init_state.counters,
+            &mut init_state.booleans,
+        );
+        if table.strict_action_params {
+            init_state.lists = table.initial_values.lists.clone();
+        }
+
         // Input actions are the message types this actor accepts.
         // NOTE: Box::leak is intentional — actors are singletons, never dropped.
         let subscriptions_static: Vec<&'static str> = automaton
@@ -246,64 +255,82 @@ impl Actor for SpecDrivenActor {
                 .map_err(|e| ActorError::HandlerFailed(format!("state deser: {e}")))?
         };
 
-        // 2. Resolve action name + params.
-        // If the message carries a SpecMessage, extract the action from its payload.
-        // This handles both direct SpecMessage sends and raw action-name messages.
+        // Decode strict inputs at the boundary, before touching actor state.
         let spec_msg = if message.message_type.ends_with("SpecMessage") {
-            message.decode::<SpecMessage>().ok()
+            match message.decode::<SpecMessage>() {
+                Ok(message) => Some(message),
+                Err(error) if self.table.strict_action_params => {
+                    return Err(ActorError::Rejected(format!(
+                        "invalid SpecMessage: {error}"
+                    )));
+                }
+                Err(_) => None,
+            }
         } else {
             None
         };
         let action = spec_msg
             .as_ref()
-            .filter(|m| !m.action.is_empty())
-            .map(|m| m.action.clone())
-            .unwrap_or_else(|| message.message_type.clone());
-
-        // Store incoming params in state.fields so integrations can read them.
-        // Merge non-empty params into fields to preserve context from prior steps
-        // (e.g. child Process keeps parent_pid while later messages add user_prompt/response).
-        // For a new user turn, clear transient scratchpad fields from prior turns.
-        if self.name == "Process"
-            && matches!(action.as_str(), "StartProcess" | "SendInput")
-            && let Some(obj) = actor_state.fields.as_object_mut()
-        {
-            for key in [
-                "tool_calls",
-                "tool_results",
-                "child_result",
-                "response",
-                "error",
-            ] {
-                obj.remove(key);
-            }
-        }
-
-        if let Some(fields) = spec_msg
+            .filter(|message| !message.action.is_empty())
+            .map(|message| message.action.as_str())
+            .unwrap_or(&message.message_type);
+        let params_bytes = spec_msg
             .as_ref()
-            .filter(|m| !m.params.is_empty())
-            .and_then(|m| serde_json::from_slice::<serde_json::Value>(&m.params).ok())
-            .filter(|p| !p.as_object().is_some_and(|o| o.is_empty()))
-        {
-            match (actor_state.fields.as_object_mut(), fields.as_object()) {
-                (Some(existing), Some(new_fields)) => {
-                    for (k, v) in new_fields {
-                        existing.insert(k.clone(), v.clone());
-                    }
+            .map(|message| message.params.as_slice())
+            .or_else(|| {
+                self.table
+                    .strict_action_params
+                    .then_some(message.payload.as_slice())
+            });
+        let params = match params_bytes.filter(|bytes| !bytes.is_empty()) {
+            Some(bytes) => match serde_json::from_slice::<serde_json::Value>(bytes) {
+                Ok(value) => value,
+                Err(error) if self.table.strict_action_params => {
+                    return Err(ActorError::Rejected(format!(
+                        "invalid action JSON: {error}"
+                    )));
                 }
-                _ => actor_state.fields = fields,
-            }
-        }
-
+                Err(_) => serde_json::json!({}),
+            },
+            None => serde_json::json!({}),
+        };
+        self.table
+            .validate_action_params(
+                action,
+                &params,
+                &actor_state.fields,
+                &actor_state.counters,
+                &actor_state.booleans,
+            )
+            .map_err(ActorError::Rejected)?;
         let eval_ctx = actor_state.to_eval_context();
-
-        // 2. Evaluate transition table.
         let result = self
             .table
-            .evaluate_ctx(&actor_state.status, &eval_ctx, &action);
+            .evaluate_ctx(&actor_state.status, &eval_ctx, action);
 
         match result {
             Some(r) if r.success => {
+                // A rejected user turn must retain both prior context and scratch data.
+                if self.name == "Process"
+                    && matches!(action, "StartProcess" | "SendInput")
+                    && let Some(fields) = actor_state.fields.as_object_mut()
+                {
+                    for key in [
+                        "tool_calls",
+                        "tool_results",
+                        "child_result",
+                        "response",
+                        "error",
+                    ] {
+                        fields.remove(key);
+                    }
+                }
+                if !params.as_object().is_some_and(|object| object.is_empty()) {
+                    match (actor_state.fields.as_object_mut(), params.as_object()) {
+                        (Some(existing), Some(incoming)) => existing.extend(incoming.clone()),
+                        _ => actor_state.fields = params,
+                    }
+                }
                 let from_status = actor_state.status.clone();
 
                 // 3. Apply effects — may include SetState.
@@ -323,20 +350,18 @@ impl Actor for SpecDrivenActor {
                     "transition"
                 );
             }
-            Some(_) => {
-                tracing::warn!(
-                    actor = %self.name,
-                    action = %action,
-                    status = %actor_state.status,
+            denied => {
+                let reason = if denied.is_some() {
                     "action not valid from current state"
-                );
-            }
-            None => {
-                tracing::warn!(
-                    actor = %self.name,
-                    action = %action,
+                } else {
                     "unknown action"
-                );
+                };
+                tracing::warn!(actor = %self.name, action = %action, status = %actor_state.status, reason);
+                return if self.table.strict_action_params {
+                    Err(ActorError::Rejected(reason.into()))
+                } else {
+                    Ok(())
+                };
             }
         }
 
@@ -421,61 +446,5 @@ impl SpecDrivenActor {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const SIMPLE_SPEC: &str = r#"
-[automaton]
-name = "TestActor"
-states = ["Idle", "Running"]
-initial = "Idle"
-
-[[state]]
-name = "rounds"
-type = "counter"
-initial = "0"
-
-[[action]]
-name = "Start"
-kind = "input"
-from = ["Idle"]
-to = "Running"
-effect = [{ type = "increment", var = "rounds" }]
-
-[[action]]
-name = "Stop"
-kind = "input"
-from = ["Running"]
-to = "Idle"
-"#;
-
-    #[test]
-    fn test_spec_driven_actor_initial_state() {
-        let actor = SpecDrivenActor::from_ioa(SIMPLE_SPEC, HashMap::new()).unwrap();
-        let state_bytes = actor.initial_state();
-        let state: SpecActorState = serde_json::from_slice(&state_bytes).unwrap();
-        assert_eq!(state.status, "Idle");
-        assert_eq!(state.counters.get("rounds"), Some(&0usize));
-    }
-
-    #[test]
-    fn test_routing_map_builder() {
-        let rules = vec![ReactionRule {
-            name: "a".into(),
-            when: temper_runtime::reaction::ReactionTrigger {
-                entity_type: "Agent".into(),
-                action: Some("PrepareContext".into()),
-                to_state: None,
-            },
-            then: temper_runtime::reaction::ReactionTarget {
-                entity_type: "ContextManager".into(),
-                action: "PrepareContext".into(),
-            },
-            resolve_target: temper_runtime::reaction::TargetResolver::SameId,
-        }];
-
-        let maps = build_routing_maps(&rules);
-        assert_eq!(maps["Agent"]["PrepareContext"].0, "ContextManager");
-        assert_eq!(maps["Agent"]["PrepareContext"].1, "PrepareContext");
-    }
-}
+#[path = "spec_actor_strict_tests.rs"]
+mod strict_tests;
