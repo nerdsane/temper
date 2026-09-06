@@ -15,9 +15,9 @@
 //! - `action`: the action/emit name (e.g., "PrepareContext")
 //! - `params`: JSON-encoded params (empty for actions with no params)
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
-use temper_jit::table::{EvalContext, TransitionTable};
+use temper_jit::table::TransitionTable;
 use temper_runtime::reaction::ReactionRule;
 use temper_spec::automaton::Automaton;
 
@@ -76,38 +76,9 @@ impl From<SpecMessage> for RoutedSpecMessage {
 
 // ─── Actor state ─────────────────────────────────────────────────────────────
 
-/// Serializable state for spec-driven actors.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-pub struct SpecActorState {
-    pub status: String,
-    #[serde(default)]
-    pub counters: BTreeMap<String, usize>,
-    #[serde(default)]
-    pub booleans: BTreeMap<String, bool>,
-    #[serde(default)]
-    pub lists: BTreeMap<String, Vec<String>>,
-    /// Arbitrary extra data — used to thread params through the reaction chain.
-    /// SpecDrivenActor stores the last incoming message params here so integrations
-    /// can read them from the trigger message.
-    #[serde(default)]
-    pub fields: serde_json::Value,
-}
-
-impl SpecActorState {
-    fn to_eval_context(&self) -> EvalContext {
-        let mut ctx = EvalContext::default();
-        for (k, v) in &self.counters {
-            ctx.counters.insert(k.clone(), *v);
-        }
-        for (k, v) in &self.booleans {
-            ctx.booleans.insert(k.clone(), *v);
-        }
-        for (k, v) in &self.lists {
-            ctx.lists.insert(k.clone(), v.clone());
-        }
-        ctx
-    }
-}
+#[path = "spec_actor_state.rs"]
+mod state;
+pub use state::SpecActorState;
 
 // ─── Routing map builder ─────────────────────────────────────────────────────
 
@@ -170,6 +141,8 @@ pub struct SpecDrivenActor {
     routing: HashMap<String, (String, String)>,
     /// Leaked static refs for subscriptions() return.
     subscriptions_static: Vec<&'static str>,
+    /// Application-owned fields cleared only by an accepted configured action.
+    input_field_resets: HashMap<String, Vec<String>>,
 }
 
 impl SpecDrivenActor {
@@ -214,12 +187,17 @@ impl SpecDrivenActor {
             }
         }
 
-        table.initialize_strict_fields(
+        table.initialize_declared_fields(
             &mut init_state.fields,
             &mut init_state.counters,
             &mut init_state.booleans,
         );
-        if table.strict_action_params {
+        if table.strict_action_params
+            || table
+                .action_contracts
+                .values()
+                .any(|contract| !contract.constraints.is_empty())
+        {
             init_state.lists = table.initial_values.lists.clone();
         }
 
@@ -238,7 +216,14 @@ impl SpecDrivenActor {
             init_state,
             routing,
             subscriptions_static,
+            input_field_resets: HashMap::new(),
         }
+    }
+
+    /// Configure application fields cleared after an action is accepted.
+    pub fn with_input_field_resets(mut self, resets: HashMap<String, Vec<String>>) -> Self {
+        self.input_field_resets = resets;
+        self
     }
 
     /// Which message types this actor accepts.
@@ -262,13 +247,37 @@ impl Actor for SpecDrivenActor {
         serde_json::to_vec(&self.init_state).unwrap_or_default()
     }
 
+    fn initial_state_for(&self, handle: &ActorHandle) -> Vec<u8> {
+        let mut state = self.init_state.clone();
+        if state.fields.is_null() {
+            state.fields = serde_json::json!({});
+        }
+        if let Some(fields) = state.fields.as_object_mut() {
+            fields.insert("Id".into(), serde_json::json!(handle.namespace));
+            fields.insert("id".into(), serde_json::json!(handle.namespace));
+        }
+        serde_json::to_vec(&state).unwrap_or_default()
+    }
+
     async fn handle(
         &self,
         ctx: &ActorContext,
         state: &mut Vec<u8>,
         message: &Message,
     ) -> Result<(), ActorError> {
-        // 1. Deserialize state.
+        // Supported creation persists initial bytes before the actor accepts messages.
+        if state.is_empty()
+            && (self.table.strict_action_params
+                || self
+                    .table
+                    .action_contracts
+                    .values()
+                    .any(|contract| !contract.constraints.is_empty()))
+        {
+            return Err(ActorError::Rejected(
+                "contracted actor has no persisted initial state".into(),
+            ));
+        }
         let mut actor_state: SpecActorState = if state.is_empty() {
             self.init_state.clone()
         } else {
@@ -301,18 +310,20 @@ impl Actor for SpecDrivenActor {
             .filter(|message| !message.action.is_empty())
             .map(|message| message.action.as_str())
             .unwrap_or(&message.message_type);
+        let validates_input = self.table.strict_action_params
+            || self
+                .table
+                .action_contracts
+                .get(action)
+                .is_some_and(|contract| !contract.constraints.is_empty());
         let params_bytes = spec_msg
             .as_ref()
             .map(|message| message.params.as_slice())
-            .or_else(|| {
-                self.table
-                    .strict_action_params
-                    .then_some(message.payload.as_slice())
-            });
+            .or_else(|| validates_input.then_some(message.payload.as_slice()));
         let mut params = match params_bytes.filter(|bytes| !bytes.is_empty()) {
             Some(bytes) => match serde_json::from_slice::<serde_json::Value>(bytes) {
                 Ok(value) => value,
-                Err(error) if self.table.strict_action_params => {
+                Err(error) if validates_input => {
                     return Err(ActorError::Rejected(format!(
                         "invalid action JSON: {error}"
                     )));
@@ -322,6 +333,9 @@ impl Actor for SpecDrivenActor {
             None => serde_json::json!({}),
         };
         if routed && self.table.strict_action_params {
+            if params.is_null() {
+                params = serde_json::json!({});
+            }
             let contract = self.table.action_contracts.get(action).ok_or_else(|| {
                 ActorError::Rejected(format!(
                     "Action '{action}' has no declared parameter contract"
@@ -348,18 +362,10 @@ impl Actor for SpecDrivenActor {
 
         match result {
             Some(r) if r.success => {
-                // A rejected user turn must retain both prior context and scratch data.
-                if self.name == "Process"
-                    && matches!(action, "StartProcess" | "SendInput")
+                if let Some(reset_fields) = self.input_field_resets.get(action)
                     && let Some(fields) = actor_state.fields.as_object_mut()
                 {
-                    for key in [
-                        "tool_calls",
-                        "tool_results",
-                        "child_result",
-                        "response",
-                        "error",
-                    ] {
+                    for key in reset_fields {
                         fields.remove(key);
                     }
                 }

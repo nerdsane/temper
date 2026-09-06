@@ -14,9 +14,8 @@ use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
 use crate::entity_actor::EntityState;
-use crate::entity_actor::effects::{
-    FieldSyncMode, build_eval_context_with_xref, process_action_with_xref_and_field_mode,
-};
+use crate::entity_actor::action_input::process_action_with_blob_prestate;
+use crate::entity_actor::effects::{FieldSyncMode, build_eval_context_with_xref};
 use crate::request_context::AgentContext;
 use crate::state::account_verification::CommonsAccountVerificationError;
 use crate::state::app_uniqueness::CommonsAppUniquenessError;
@@ -327,14 +326,19 @@ impl crate::state::ServerState {
                 stream,
             )?;
 
-            let result = process_action_with_xref_and_field_mode(
+            let result = process_action_with_blob_prestate(
                 &mut stream.state,
                 &table,
                 &write.action,
                 &write.params,
                 &cross_entity_booleans,
                 field_sync_mode,
-            );
+                crate::blobs::BlobReadSource::Staged {
+                    store: blob_store.as_ref(),
+                    blobs: &overflow_blobs,
+                },
+            )
+            .await;
             if !result.success {
                 return Err(DispatchError::Conflict(result.error.unwrap_or_else(|| {
                     format!(
@@ -613,18 +617,26 @@ impl crate::state::ServerState {
             .composite_known_absent_create_targets(tenant, &prepared)
             .await?;
 
+        let parent = AtomicCompositeParent {
+            tenant,
+            entity_type,
+            entity_id,
+            action,
+            idempotency: parent_idempotency,
+            record_event: metadata.record_parent_event,
+        };
         let mut virtual_targets = BTreeMap::new();
+        let mut pending_overflow_blobs = Vec::new();
         for write in &mut prepared {
             let key = (write.entity_type.clone(), write.entity_id.clone());
             let known_absent_create = known_absent_create_targets.contains(&key);
             let (before, after) = self
                 .preflight_composite_sub_write_transition(
-                    tenant,
-                    entity_type,
-                    action,
+                    &parent,
                     write,
                     known_absent_create,
                     virtual_targets.remove(&key),
+                    &mut pending_overflow_blobs,
                     sub_security_ctx,
                 )
                 .await?;
@@ -717,19 +729,18 @@ impl crate::state::ServerState {
         Ok(absent)
     }
 
-    // The target and context arguments stay explicit: this is the one ordered
-    // authorization/transition boundary for an entire composite batch.
-    #[allow(clippy::too_many_arguments)]
     async fn preflight_composite_sub_write_transition(
         &self,
-        tenant: &TenantId,
-        parent_entity_type: &str,
-        parent_action: &str,
+        parent: &AtomicCompositeParent<'_>,
         write: &PreparedCompositeSubWrite,
         known_absent_create: bool,
         previous: Option<PreflightCompositeTarget>,
+        pending_overflow_blobs: &mut Vec<crate::blobs::OverflowBlobWrite>,
         security_ctx: &SecurityContext,
     ) -> Result<(PreflightCompositeTarget, PreflightCompositeTarget), DispatchError> {
+        let tenant = parent.tenant;
+        let parent_entity_type = parent.entity_type;
+        let parent_action = parent.action;
         let table = self.transition_table_for_dispatch(tenant, &write.entity_type)?;
         let before = if let Some(previous) = previous {
             previous
@@ -838,14 +849,19 @@ impl crate::state::ServerState {
             .event_journal()
             .map(|(_, backend)| self.composite_batch_field_sync_mode(tenant, backend))
             .unwrap_or(FieldSyncMode::InlineTruncate);
-        let result = process_action_with_xref_and_field_mode(
+        let result = process_action_with_blob_prestate(
             &mut stream.state,
             &table,
             &write.action,
             &write.params,
             &cross_entity_booleans,
             field_sync_mode,
-        );
+            crate::blobs::BlobReadSource::Staged {
+                store: self.blob_store_for_tenant(tenant).ok().as_ref(),
+                blobs: pending_overflow_blobs,
+            },
+        )
+        .await;
         if !result.success {
             return Err(DispatchError::Conflict(format!(
                 "composite {parent_entity_type}.{parent_action} sub-write {} would fail: {}",
@@ -859,6 +875,7 @@ impl crate::state::ServerState {
         event.idempotency_key = Some(write.idempotency_key.clone());
         stream.state.sequence_nr += 1;
         stream.state.push_event_bounded(event);
+        pending_overflow_blobs.extend(result.overflow_blobs);
         Ok((
             before,
             PreflightCompositeTarget {

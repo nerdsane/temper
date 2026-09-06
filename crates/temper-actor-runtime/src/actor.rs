@@ -317,6 +317,11 @@ pub trait Actor: Send + Sync + 'static {
         vec![]
     }
 
+    /// Initial state for a new instance with its persisted identity available.
+    fn initial_state_for(&self, _handle: &ActorHandle) -> Vec<u8> {
+        self.initial_state()
+    }
+
     /// Handle a single message.
     ///
     /// Use `ctx.tell()` for fire-and-forget (buffered, transactional).

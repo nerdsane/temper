@@ -1,5 +1,17 @@
 # Decisions and tradeoffs
 
+## D16: Compare actual stored values and return an unavailable actor error
+
+**Decision:** Constraints compare persisted pre-action values; fresh contracted actors materialize defaults at creation. Greater-than inputs remain nonnegative integers, and a missing PostgreSQL actor system returns HTTP 503.
+
+**Came up because:** Regressions showed missing recovered fields being replaced by declaration defaults during comparison, negative greater-than inputs passing against signed state, and a generic write panicking when the configured actor backend was absent.
+
+**Options:** Retain validator defaults and assume actor availability; enforce the readable pre-state contract and return the specific unavailable boundary error.
+
+**Chose the explicit boundaries because:** Recovery does not fabricate state, numeric validation matches the declared contract, and unavailable infrastructure does not panic the request handler. Existing unconstrained initialization remains unchanged.
+
+**Where:** crates/temper-jit/src/table/action_contract.rs; crates/temper-server/src/odata/write.rs; crates/temper-server/tests/strict_generic_writes.rs. The new regressions failed before these fixes and pass afterward.
+
 ## D13: Reject contracts the validator cannot execute
 
 **Decision:** Reject repeated action names in contracted IOAs, malformed strict integer defaults, and comparison targets without values in the shared validator.
@@ -160,3 +172,45 @@
 **Chose ordered preflight because:** Invalid later inputs leave all target journals and overflow storage untouched, while valid dependent writes retain atomic behavior. Strict sub-write parameters remain explicit inputs; generated identity stays in the resource address and initial state. Data-only creation reuses the same initializer.
 
 **Where:** crates/temper-server/src/state/dispatch/composite.rs and composite/helpers.rs; entity_actor/actor.rs; state/entity_ops.rs and native regression tests.
+
+
+## D14: Materialize contract defaults and identity at creation
+
+**Decision:** Initialize declared values for fresh strict or constrained actors, and persist standalone PostgreSQL actor identity when the actor is spawned.
+
+**Came up because:** Constraint fallback compared missing stored values with declarations while guards and effects used absent state, and generic PostgreSQL spawn did not persist the Id that constraints accepted as a target.
+
+**Options:** Infer values during validation, synthesize identity on first message, or initialize the actual state at creation and compare only stored values afterward.
+
+**Chose creation-time initialization because:** Constraints, guards, and effects read the same persisted state. Recovered missing values fail rather than silently receiving new defaults. Standalone actor Id is its complete namespace. HTTP creation supplies its canonical Id explicitly and overrides that default. Existing actors retain their state when spawn is repeated, and unconstrained legacy initialization stays unchanged.
+
+**Where:** crates/temper-jit/src/table/action_contract.rs (coordinated root change), crates/temper-actor-runtime/src/actor.rs, system.rs, spec_actor.rs, and native actor initialization.
+
+## D15: Configure Process scratch resets in its component
+
+**Decision:** Configure fields cleared on accepted Process inputs at the existing agent component registration, using a generic reset-fields setting on the spec actor.
+
+**Came up because:** The generic PostgreSQL handler hardcoded the Process entity name, two action names, and application scratch keys. A different Process spec therefore lost data it never declared as transient.
+
+**Options:** Keep the hardcoded behavior, add field deletion to the specification language, wrap the actor and duplicate its validation, or supply an explicit per-action reset configuration.
+
+**Chose explicit configuration because:** The generic handler clears configured fields only after validation succeeds and before it merges parameters and emits integration context. Refused inputs retain state and emit nothing. The existing Process component supplies its own names and keys. Its pre-existing placement in temper-agents remains unchanged and is flagged for repository ownership review.
+
+**Where:** crates/temper-actor-runtime/src/spec_actor.rs, crates/temper-agents/src/lib.rs, and adapter regression tests.
+
+
+## D17: Resolve comparison values without changing stored fields
+
+**Decision:** Read compared overflow values through the existing bounded, length- and hash-verified blob reader into separate comparison state, and refuse writes that would truncate a declared comparison target.
+
+**Came up because:** An actual native actor writing a 512 KiB value stored a blob reference or a truncation placeholder. Later equality compared that representation with the original value and refused a valid request. A missing blob could also make an inequality appear true without establishing its value.
+
+**Options:** Compare caller-provided descriptors or content hashes, retain all large values inline, hydrate the actor state in place, or resolve only the compared fields before the pure interpreter runs.
+
+**Chose separate verified comparison values because:** Equality and inequality use the same logical stored value without rewriting the actor fields, fetching unrelated blobs, or increasing persistent state limits. Missing, corrupt, or over-budget blobs refuse both comparisons. Native execution, concurrency retries, and composite preflight and staging share this boundary. InlineTruncate refuses an oversized write before effects instead of accepting irreversible data loss on a field needed by a constraint. Previously truncated historic values cannot be recovered from their placeholder.
+
+**Where:** crates/temper-server/src/entity_actor/action_input.rs, effects.rs, actor.rs, blobs/hydration.rs, and state/dispatch/composite.rs. Real local Turso and filesystem-object tests cover equality, inequality, actor restart, missing bytes and forged bytes; the inline-store test proves refusal leaves the full state unchanged.
+
+The same persisted-prestate rule rejects empty stored bytes for strict or constrained PostgreSQL actors. Supported creation writes serialized initial state before accepting messages; an empty recovered byte vector is not that creation event. A focused regression distinguishes empty bytes from valid serialized initial state and preserves the unconstrained legacy behavior. A strict child without a declared initializer also refuses before creation, with an observable parent refusal, so generated parent links are not silently discarded.
+
+Sequential composite comparison also reads bytes generated by earlier sub-writes before falling back to stored objects. These bytes already belong to the pending batch and pass the same length and hash verification. Preflight retains them in its existing ordered batch, and neither preflight nor validation writes an object. The new IOA-backed regression first failed on a matching pending value, then proves both successful ordered execution and zero journal/object writes after a stale comparison.

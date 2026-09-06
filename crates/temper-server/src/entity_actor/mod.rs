@@ -4,6 +4,7 @@
 //! Each entity actor holds its current state and a TransitionTable, and
 //! processes action messages by evaluating transitions through the table.
 
+pub(crate) mod action_input;
 mod actor;
 pub mod effects;
 mod field_updates;

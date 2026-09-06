@@ -294,10 +294,16 @@ async fn authorize_pg_mutation(
     security_ctx: &temper_authz::SecurityContext,
     agent_ctx: &AgentContext,
 ) -> Result<temper_actor_runtime::spec_actor::SpecActorState, ODataWriteError> {
-    let actor_sys = state
-        .pg_actor_system
-        .as_ref()
-        .expect("PG path requires actor system");
+    let actor_sys = state.pg_actor_system.as_ref().ok_or_else(|| {
+        Box::new(
+            odata_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ActorSystemUnavailable",
+                "The actor system for this resource is unavailable",
+            )
+            .into_response(),
+        )
+    })?;
     let namespace = format!("{tenant}/{entity_id}");
     let state_bytes = match actor_sys.load_state(&namespace, entity_type).await {
         Ok(Some(state_bytes)) => state_bytes,

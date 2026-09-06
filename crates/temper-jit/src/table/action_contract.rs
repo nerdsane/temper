@@ -6,6 +6,110 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use temper_spec::automaton::ActionConstraint;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn constraints_do_not_recreate_missing_persisted_fields_from_defaults() {
+        let table = TransitionTable::from_ioa_source(
+            r#"
+[automaton]
+name = "PersistedSequence"
+states = ["Active"]
+initial = "Active"
+strict_action_params = true
+[[state]]
+name = "sequence"
+type = "counter"
+initial = "7"
+[[action]]
+name = "Advance"
+kind = "input"
+from = ["Active"]
+params = ["expected"]
+[[action.constraints]]
+kind = "param_equals_field"
+param = "expected"
+field = "sequence"
+"#,
+        );
+        let params = json!({"expected":7});
+        let mut fields = json!({});
+        let mut counters = BTreeMap::new();
+        let mut booleans = BTreeMap::new();
+        assert!(
+            table
+                .validate_action_params("Advance", &params, &fields, &counters, &booleans)
+                .is_err()
+        );
+        table.initialize_declared_fields(&mut fields, &mut counters, &mut booleans);
+        assert!(
+            table
+                .validate_action_params("Advance", &params, &fields, &counters, &booleans)
+                .is_ok()
+        );
+        counters.insert("sequence".into(), 8);
+        assert!(
+            table
+                .validate_action_params("Advance", &params, &fields, &counters, &booleans)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn greater_than_requires_a_nonnegative_parameter_even_for_signed_state() {
+        let table = TransitionTable::from_ioa_source(
+            r#"
+[automaton]
+name = "SignedSequence"
+states = ["Active"]
+initial = "Active"
+strict_action_params = true
+[[state]]
+name = "sequence"
+type = "integer"
+initial = "-3"
+[[action]]
+name = "Advance"
+kind = "input"
+from = ["Active"]
+params = ["expected"]
+[[action.constraints]]
+kind = "param_greater_than_field"
+param = "expected"
+field = "sequence"
+"#,
+        );
+        let fields = json!({"sequence":-3});
+        let counters = BTreeMap::new();
+        let booleans = BTreeMap::new();
+        assert!(
+            table
+                .validate_action_params(
+                    "Advance",
+                    &json!({"expected":-2}),
+                    &fields,
+                    &counters,
+                    &booleans
+                )
+                .is_err()
+        );
+        assert!(
+            table
+                .validate_action_params(
+                    "Advance",
+                    &json!({"expected":0}),
+                    &fields,
+                    &counters,
+                    &booleans
+                )
+                .is_ok()
+        );
+    }
+}
+
 /// Allowed parameters and atomic pre-state checks for one action.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ActionContract {
@@ -62,15 +166,6 @@ impl InitialValues {
         }
         values
     }
-
-    fn field(&self, name: &str) -> Option<Value> {
-        self.counters
-            .get(name)
-            .map(|value| Value::from(*value as u64))
-            .or_else(|| self.booleans.get(name).map(|value| Value::from(*value)))
-            .or_else(|| self.fields.get(name).cloned())
-            .or_else(|| self.lists.get(name).map(|list| serde_json::json!(list)))
-    }
 }
 
 fn integer(value: &Value) -> Option<i128> {
@@ -97,14 +192,20 @@ fn matches_field(param: &Value, field: &Value, counter: bool) -> Option<bool> {
 }
 
 impl TransitionTable {
-    /// Initialize a fresh strict actor using the same declarations as constraints.
-    pub fn initialize_strict_fields(
+    /// Materialize declarations once when creating a fresh contracted actor.
+    /// Recovery must retain persisted state, including missing fields.
+    pub fn initialize_declared_fields(
         &self,
         fields: &mut Value,
         counters: &mut BTreeMap<String, usize>,
         booleans: &mut BTreeMap<String, bool>,
     ) {
-        if !self.strict_action_params {
+        if !self.strict_action_params
+            && self
+                .action_contracts
+                .values()
+                .all(|contract| contract.constraints.is_empty())
+        {
             return;
         }
         counters.extend(self.initial_values.counters.clone());
@@ -182,7 +283,6 @@ impl TransitionTable {
                     .map(|value| Value::from(*value as u64))
                     .or_else(|| booleans.get(name).map(|value| Value::from(*value)))
                     .or_else(|| fields.get(name).cloned())
-                    .or_else(|| self.initial_values.field(name))
             });
             let counter = constraint.field().is_some_and(|name| {
                 self.initial_values.counters.contains_key(name) || counters.contains_key(name)
@@ -198,7 +298,7 @@ impl TransitionTable {
                     .as_ref()
                     .is_some_and(|field| matches_field(param, field, counter) == Some(false)),
                 ActionConstraint::ParamGreaterThanField { .. } => {
-                    (!counter || param.as_u64().is_some())
+                    param.as_u64().is_some()
                         && matches!((integer(param), field.as_ref().and_then(integer)), (Some(a), Some(b)) if a > b)
                 }
             };

@@ -70,7 +70,7 @@ impl ActorSystem {
             let handlers = self.handlers.read().unwrap();
             handlers
                 .get(actor_type)
-                .map(|h| h.initial_state())
+                .map(|h| h.initial_state_for(&handle))
                 .unwrap_or_default()
         };
 
@@ -106,7 +106,7 @@ impl ActorSystem {
             let handlers = self.handlers.read().unwrap();
             let raw = handlers
                 .get(actor_type)
-                .map(|h| h.initial_state())
+                .map(|h| h.initial_state_for(&handle))
                 .unwrap_or_default();
             if fields.is_null() || fields.as_object().is_some_and(|o| o.is_empty()) {
                 raw
@@ -215,6 +215,7 @@ impl ActorSystem {
     pub async fn spawn_all_registered(&self, namespace: &str) -> Result<(), ActorError> {
         let actor_types: Vec<String> = { self.handlers.read().unwrap().keys().cloned().collect() };
         for actor_type in &actor_types {
+            let handle = ActorHandle::new(namespace, actor_type);
             // ON CONFLICT DO NOTHING — idempotent.
             let client = self
                 .pool
@@ -225,7 +226,7 @@ impl ActorSystem {
                 let handlers = self.handlers.read().unwrap();
                 handlers
                     .get(actor_type.as_str())
-                    .map(|h| h.initial_state())
+                    .map(|h| h.initial_state_for(&handle))
                     .unwrap_or_default()
             };
             client

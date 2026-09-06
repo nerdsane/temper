@@ -1808,6 +1808,14 @@ async fn composite_integration_result_rejects_undeclared_sub_write() {
 
 #[cfg(feature = "sim")]
 fn strict_composite_state(store: SimEventStore) -> ServerState {
+    strict_composite_state_with_name_constraint(store, false)
+}
+
+#[cfg(feature = "sim")]
+fn strict_composite_state_with_name_constraint(
+    store: SimEventStore,
+    compare_name: bool,
+) -> ServerState {
     let parent = r#"
 [automaton]
 name="Parent"
@@ -1869,6 +1877,14 @@ kind="param_equals_field"
 param="expected_revision"
 field="revision"
 "#;
+    let child = if compare_name {
+        child.replace(
+            "params=[\"Name\",\"expected_revision\"]",
+            "params=[\"Name\",\"expected_revision\",\"expected_name\"]",
+        ) + "\n[[action.constraints]]\nkind=\"param_equals_field\"\nparam=\"expected_name\"\nfield=\"Name\"\n"
+    } else {
+        child.to_string()
+    };
     let state = ServerState::with_storage_stack(
         ActorSystem::new("strict-composite"),
         parse_csdl(COMPOSITE_CSDL).unwrap(),
@@ -2079,5 +2095,47 @@ async fn strict_composite_uses_virtual_authorization_and_rejects_before_overflow
             0,
             "no overflow object may be written before later authorization and constraints pass"
         );
+    }
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn strict_composite_compares_uncommitted_overflow_from_earlier_subwrite() {
+    for matches in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SimEventStore::no_faults(467);
+        let mut state = strict_composite_state_with_name_constraint(store.clone(), true);
+        state.data_dir = dir.path().to_path_buf();
+        let tenant = TenantId::default();
+        let large = "x".repeat(512 * 1024);
+        let payload = json!({"sub_writes":[
+            {"entity_type":"Child","entity_id":"child","action":"Create","params":{"Name":large,"expected_revision":3}},
+            {"entity_type":"Child","entity_id":"child","action":"Update","params":{"Name":"final","expected_revision":4,"expected_name":if matches {large.as_str()} else {"stale"}}}
+        ]});
+        let result = state
+            .apply_composite_integration_result(
+                &tenant,
+                "Parent",
+                "parent",
+                "CreateChild",
+                &payload,
+                &AgentContext::for_service("strict-composite"),
+            )
+            .await;
+        if matches {
+            result.expect("later sub-write must compare the earlier pending blob value");
+            let child = state
+                .get_tenant_entity_state(&tenant, "Child", "child")
+                .await
+                .unwrap()
+                .state;
+            assert_eq!(child.fields["Name"], "final");
+            assert_eq!(child.counters["revision"], 5);
+        } else {
+            assert!(matches!(result, Err(DispatchError::Conflict(_))));
+            assert!(store.dump_journal("default:Parent:parent").is_empty());
+            assert!(store.dump_journal("default:Child:child").is_empty());
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        }
     }
 }

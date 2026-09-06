@@ -50,6 +50,24 @@ fn state() -> ServerState {
         .unwrap();
     state
 }
+
+#[tokio::test]
+async fn generic_pg_write_reports_unavailable_actor_system_without_panicking() {
+    let mut state = state();
+    state.actor_backed_types.insert("Order".into());
+    for method in ["PATCH", "PUT", "DELETE"] {
+        assert_eq!(
+            request(
+                &state,
+                method,
+                "/tdata/Orders('valid')",
+                json!({"Notes":"change"})
+            )
+            .await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+}
 async fn request(
     state: &ServerState,
     method: &str,

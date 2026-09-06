@@ -290,6 +290,18 @@ impl crate::state::ServerState {
                     let strict_child = child_table
                         .as_ref()
                         .is_some_and(|table| table.strict_action_params);
+                    if strict_child && initial_action.is_none() {
+                        state.record_generated_callback_refusal(
+                            super::WasmEntityRef {
+                                tenant: &t,
+                                entity_type: &parent_t,
+                                entity_id: &parent_i,
+                            },
+                            "spawn",
+                            "Strict child requires a declared initializer for its generated fields",
+                        );
+                        return;
+                    }
                     let initializer = if let Some(action) = initial_action {
                         let mut params = parent_params.as_object().cloned().unwrap_or_default();
                         params.extend(parent_fields.clone());

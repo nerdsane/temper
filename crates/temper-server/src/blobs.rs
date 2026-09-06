@@ -20,7 +20,8 @@ pub use descriptor::{
     is_valid_field_overflow_key,
 };
 pub(crate) use hydration::{
-    BlobHydrationBudget, hydrate_blob_refs_for_tenant, hydrate_blob_refs_for_tenant_with_budget,
+    BlobHydrationBudget, BlobReadSource, hydrate_blob_refs_for_tenant,
+    hydrate_blob_refs_for_tenant_with_budget, hydrate_comparison_fields,
 };
 #[cfg(test)]
 pub(crate) use hydration::{hydrate_blob_refs_in_value, hydrate_blob_refs_in_value_with_ceiling};

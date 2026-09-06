@@ -105,7 +105,12 @@ fn strict_initial_values_use_the_shared_typed_declarations() {
 
 #[tokio::test]
 async fn strict_adapter_preserves_state_and_effects_on_rejection_across_seeded_sequences() {
-    let actor = actor(STRICT);
+    let actor = actor(STRICT).with_input_field_resets(
+        ["StartProcess", "SendInput"]
+            .into_iter()
+            .map(|action| (action.into(), vec!["response".into()]))
+            .collect(),
+    );
     for seed in 1..=64 {
         let mut rng = DeterministicRng::new(seed);
         let mut state = actor.initial_state();
@@ -152,7 +157,14 @@ async fn strict_adapter_preserves_state_and_effects_on_rejection_across_seeded_s
                 rounds += 1;
                 busy = !busy;
                 desired = next;
-                assert_eq!(ctx.pending_tells.lock().await.len(), 1);
+                let tells = ctx.pending_tells.lock().await;
+                assert_eq!(tells.len(), 1);
+                let emitted = SpecMessage::decode(tells[0].payload.as_slice()).unwrap();
+                let emitted_fields: serde_json::Value =
+                    serde_json::from_slice(&emitted.params).unwrap();
+                assert!(emitted_fields.get("response").is_none());
+                assert_eq!(emitted_fields["desired"], desired);
+                drop(tells);
                 let after: SpecActorState = serde_json::from_slice(&state).unwrap();
                 assert_eq!(after.fields["desired"], desired);
                 assert_eq!(after.status, if busy { "Busy" } else { "Idle" });
@@ -292,4 +304,146 @@ fn routed_messages_preserve_the_wire_contract_used_by_concrete_integration_actor
         SpecMessage::decode(routed.encode_to_vec().as_slice()).unwrap(),
         ordinary
     );
+}
+
+#[tokio::test]
+async fn round_three_raw_non_strict_constrained_input_keeps_its_parameters() {
+    let source = STRICT.replace(
+        "strict_action_params = true",
+        "strict_action_params = false",
+    );
+    let actor = actor(&source);
+    let mut state = actor.initial_state();
+    actor
+        .handle(
+            &context(),
+            &mut state,
+            &message(
+                "StartProcess",
+                json!({
+                    "desired":"release-b", "expected_desired":"release-a", "user_prompt":"next"
+                }),
+                true,
+            ),
+        )
+        .await
+        .expect("valid constrained JSON input must execute");
+    let after: SpecActorState = serde_json::from_slice(&state).unwrap();
+    assert_eq!(after.fields["desired"], "release-b");
+    assert_eq!(after.status, "Busy");
+}
+
+#[tokio::test]
+async fn round_three_routed_null_source_means_no_generated_fields() {
+    let actor = actor(STRICT);
+    let mut state = actor.initial_state();
+    let mut incoming = message("Noop", serde_json::Value::Null, false);
+    incoming.message_type = "RoutedSpecMessage".into();
+    incoming.from = Some(ActorHandle::new("strict-test", "Source"));
+    actor
+        .handle(&context(), &mut state, &incoming)
+        .await
+        .expect("legacy null source must reach a parameterless strict action");
+    let before = state.clone();
+    incoming.payload =
+        SpecMessage::with_params("StartProcess", serde_json::Value::Null).encode_to_vec();
+    assert!(
+        actor
+            .handle(&context(), &mut state, &incoming)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        state, before,
+        "null projection cannot invent a required input"
+    );
+}
+
+#[tokio::test]
+async fn round_three_unconfigured_process_preserves_declared_application_fields() {
+    let actor = actor(STRICT);
+    let mut decoded: SpecActorState = serde_json::from_slice(&actor.initial_state()).unwrap();
+    decoded.fields["response"] = json!("persistent application response");
+    let mut state = serde_json::to_vec(&decoded).unwrap();
+    let ctx = context();
+    actor
+        .handle(
+            &ctx,
+            &mut state,
+            &message(
+                "StartProcess",
+                json!({
+                    "desired":"release-b", "expected_desired":"release-a", "user_prompt":"next"
+                }),
+                false,
+            ),
+        )
+        .await
+        .unwrap();
+    let after: SpecActorState = serde_json::from_slice(&state).unwrap();
+    assert_eq!(after.fields["response"], "persistent application response");
+    let tells = ctx.pending_tells.lock().await;
+    let emitted = SpecMessage::decode(tells[0].payload.as_slice()).unwrap();
+    let fields: serde_json::Value = serde_json::from_slice(&emitted.params).unwrap();
+    assert_eq!(fields["response"], "persistent application response");
+}
+
+#[test]
+fn round_three_non_strict_constrained_fresh_state_materializes_all_declared_defaults() {
+    let source = STRICT.replace(
+        "strict_action_params = true",
+        "strict_action_params = false",
+    );
+    let state: SpecActorState = serde_json::from_slice(&actor(&source).initial_state()).unwrap();
+    assert_eq!(state.fields["desired"], "release-a");
+    assert!(state.booleans["enabled"]);
+    assert_eq!(state.lists["members"], ["first"]);
+}
+
+#[tokio::test]
+async fn contracted_empty_persisted_bytes_are_not_fresh_creation() {
+    for source in [
+        STRICT.to_string(),
+        STRICT.replace(
+            "strict_action_params = true",
+            "strict_action_params = false",
+        ),
+    ] {
+        let actor = actor(&source);
+        let mut empty = vec![];
+        let ctx = context();
+        let incoming = message("Noop", json!({}), false);
+        assert!(matches!(
+            actor.handle(&ctx, &mut empty, &incoming).await,
+            Err(ActorError::Rejected(_))
+        ));
+        assert!(empty.is_empty());
+        assert!(ctx.pending_tells.lock().await.is_empty());
+        let mut initialized = actor.initial_state_for(&ActorHandle::new("valid", "Process"));
+        actor
+            .handle(&context(), &mut initialized, &incoming)
+            .await
+            .expect("supported creation persisted valid initial bytes");
+    }
+    let legacy = SpecDrivenActor::from_ioa(
+        r#"
+[automaton]
+name = "Legacy"
+states = ["Idle"]
+initial = "Idle"
+[[action]]
+name = "Noop"
+kind = "input"
+from = ["Idle"]
+"#,
+        HashMap::new(),
+    )
+    .unwrap();
+    let mut empty = vec![];
+    legacy
+        .handle(&context(), &mut empty, &message("Noop", json!({}), false))
+        .await
+        .unwrap();
+    let recovered: SpecActorState = serde_json::from_slice(&empty).unwrap();
+    assert_eq!(recovered.status, "Idle");
 }

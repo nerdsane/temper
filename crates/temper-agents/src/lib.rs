@@ -70,10 +70,29 @@ pub async fn register_agent_actors(
 
     // Process (renamed from Agent) — the orchestrator state machine.
     system
-        .register(Arc::new(SpecDrivenActor::from_ioa(
-            PROCESS_SPEC,
-            build_actor_routing("Process", &rules),
-        )?))
+        .register(Arc::new(
+            SpecDrivenActor::from_ioa(PROCESS_SPEC, build_actor_routing("Process", &rules))?
+                .with_input_field_resets(
+                    ["StartProcess", "SendInput"]
+                        .into_iter()
+                        .map(|action| {
+                            (
+                                action.to_string(),
+                                [
+                                    "tool_calls",
+                                    "tool_results",
+                                    "child_result",
+                                    "response",
+                                    "error",
+                                ]
+                                .into_iter()
+                                .map(str::to_string)
+                                .collect(),
+                            )
+                        })
+                        .collect(),
+                ),
+        ))
         .await?;
     // AgentDefinition — config template, spawns Process instances.
     system

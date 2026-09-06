@@ -347,3 +347,63 @@ effect = [{effect}]
         assert_eq!(read(&pool, &sink).await.0, accepted);
     }
 }
+
+#[tokio::test]
+async fn round_three_fresh_identity_is_persisted_before_any_action() {
+    let (pool, _container) = pool().await;
+    let spec = SPEC.replace("field = \"desired\"", "field = \"Id\"");
+    let system = crate::ActorSystem::new(pool.clone(), crate::SchedulerConfig::default());
+    system
+        .register(Arc::new(
+            SpecDrivenActor::from_ioa(&spec, HashMap::new()).unwrap(),
+        ))
+        .await
+        .unwrap();
+    for variant in 0..3 {
+        let namespace = format!("identity-{variant}-{}", Uuid::new_v4());
+        let expected = if variant == 2 {
+            "explicit-http-id"
+        } else {
+            namespace.as_str()
+        };
+        let handle = match variant {
+            0 => system.spawn(&namespace, "Strict").await.unwrap(),
+            1 => {
+                system.spawn_all_registered(&namespace).await.unwrap();
+                ActorHandle::new(&namespace, "Strict")
+            }
+            _ => system
+                .spawn_with_fields(
+                    &namespace,
+                    "Strict",
+                    serde_json::json!({"Id":expected,"id":expected}),
+                )
+                .await
+                .unwrap(),
+        };
+        let before = read(&pool, &handle).await;
+        let state: SpecActorState = serde_json::from_slice(&before.0).unwrap();
+        assert_eq!(state.fields["Id"], expected);
+        assert_eq!(state.fields["id"], expected);
+        assert_eq!(before.1, 0);
+        system
+            .tell(
+                None,
+                &handle,
+                SpecMessage::with_params(
+                    "Replace",
+                    serde_json::json!({"desired":"changed","expected_desired":expected}),
+                ),
+            )
+            .await
+            .unwrap();
+        system.activate_now(&handle).await.unwrap();
+        let state: SpecActorState = serde_json::from_slice(&read(&pool, &handle).await.0).unwrap();
+        assert_eq!(state.fields["desired"], "changed");
+        system.spawn(&namespace, "Strict").await.unwrap();
+        let retained: SpecActorState =
+            serde_json::from_slice(&read(&pool, &handle).await.0).unwrap();
+        assert_eq!(retained.fields["Id"], expected);
+        assert_eq!(retained.fields["desired"], "changed");
+    }
+}

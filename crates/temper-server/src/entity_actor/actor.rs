@@ -36,9 +36,9 @@ pub(super) use tokio::time::sleep as sleep_persistence_retry; // determinism-ok:
 
 use crate::storage::{BackendLabel, BoxedEventStore};
 
+use super::action_input::process_action_with_blob_prestate;
 use super::effects::{
-    FieldSyncMode, build_eval_context_with_xref, process_action_with_xref_and_field_mode,
-    prune_transient_action_fields_from_state,
+    FieldSyncMode, build_eval_context_with_xref, prune_transient_action_fields_from_state,
 };
 use super::snapshot_queue::{SnapshotEnqueueOutcome, SnapshotWriteQueue};
 use super::types::{
@@ -151,7 +151,7 @@ impl EntityActor {
         let mut fields = initial_fields.clone();
         let mut counters = BTreeMap::new();
         let mut booleans = BTreeMap::new();
-        table.initialize_strict_fields(&mut fields, &mut counters, &mut booleans);
+        table.initialize_declared_fields(&mut fields, &mut counters, &mut booleans);
         super::effects::canonicalize_entity_fields(&mut fields, entity_id, &table.initial_state);
 
         EntityState {
@@ -161,7 +161,12 @@ impl EntityActor {
             item_count: 0,
             counters,
             booleans,
-            lists: if table.strict_action_params {
+            lists: if table.strict_action_params
+                || table
+                    .action_contracts
+                    .values()
+                    .any(|contract| !contract.constraints.is_empty())
+            {
                 table.initial_values.lists.clone()
             } else {
                 BTreeMap::new()
@@ -1210,14 +1215,19 @@ impl Actor for EntityActor {
                 // retry can replace them with values re-evaluated against the
                 // caught-up state. The downstream telemetry and reply use
                 // whichever pair last succeeded in persist.
-                let mut result = process_action_with_xref_and_field_mode(
+                let mut result = process_action_with_blob_prestate(
                     state,
                     &table,
                     &name,
                     &params,
                     &cross_entity_booleans,
                     field_sync_mode,
-                );
+                    crate::blobs::BlobReadSource::Staged {
+                        store: self.blob_store.as_ref(),
+                        blobs: &[],
+                    },
+                )
+                .await;
 
                 if result.success {
                     // process_action returned a successful transition with event.
@@ -1350,14 +1360,19 @@ impl Actor for EntityActor {
                                     // terminal state during the race) — if so,
                                     // surface that error rather than silently
                                     // dropping the caller.
-                                    let retry_result = process_action_with_xref_and_field_mode(
+                                    let retry_result = process_action_with_blob_prestate(
                                         state,
                                         &table,
                                         &name,
                                         &params,
                                         &cross_entity_booleans,
                                         field_sync_mode,
-                                    );
+                                        crate::blobs::BlobReadSource::Staged {
+                                            store: self.blob_store.as_ref(),
+                                            blobs: &[],
+                                        },
+                                    )
+                                    .await;
 
                                     if !retry_result.success {
                                         retry_final = Some((
@@ -1803,3 +1818,7 @@ mod tests;
 #[cfg(test)]
 #[path = "authoritative_replay_test.rs"]
 mod authoritative_replay_tests;
+
+#[cfg(test)]
+#[path = "contract_state_test.rs"]
+mod contract_state_tests;
