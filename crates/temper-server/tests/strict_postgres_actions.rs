@@ -22,6 +22,10 @@ name = "Order"
 states = ["Draft", "Submitted"]
 initial = "Draft"
 strict_action_params = true
+[[state]]
+name = "Notes"
+type = "string"
+initial = "draft note"
 [[action]]
 name = "SubmitOrder"
 kind = "input"
@@ -174,6 +178,8 @@ async fn strict_postgres_http_preserves_the_contract_and_acknowledges_only_enque
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
     let initial = actor_state(&pool, &handle).await;
+    let initial_json: Value = serde_json::from_slice(&initial).unwrap();
+    assert_eq!(initial_json["fields"]["Notes"], "draft note");
     for body in ["{", "null", "[]", r#"{"Notes":"allowed","forged":true}"#] {
         let response = client
             .post(&action_url)

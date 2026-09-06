@@ -113,7 +113,10 @@ impl ActorSystem {
             } else {
                 let mut state: crate::spec_actor::SpecActorState =
                     serde_json::from_slice(&raw).unwrap_or_default();
-                state.fields = fields;
+                match (state.fields.as_object_mut(), fields.as_object()) {
+                    (Some(existing), Some(incoming)) => existing.extend(incoming.clone()),
+                    _ => state.fields = fields,
+                }
                 serde_json::to_vec(&state).unwrap_or(raw)
             }
         };
