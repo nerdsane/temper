@@ -91,7 +91,12 @@ fn message(action: &str, params: serde_json::Value, raw: bool) -> Message {
 }
 
 fn context() -> ActorContext {
-    ActorContext::new(ActorHandle::new("strict-test", "Process"), None, None)
+    ActorContext::new(
+        ActorHandle::new("strict-test", "Process"),
+        None,
+        None,
+        Default::default(),
+    )
 }
 
 #[test]

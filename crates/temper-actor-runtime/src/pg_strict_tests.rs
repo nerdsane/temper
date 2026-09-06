@@ -99,7 +99,7 @@ async fn rejected_input_is_consumed_and_the_next_valid_message_runs() {
     let actor = SpecDrivenActor::from_ioa(SPEC, HashMap::new()).unwrap();
     let handle = setup(&pool, &actor).await;
     let mailbox = Arc::new(PgMailbox::new(pool.clone(), PgMailboxConfig::default()));
-    let activator = PgActorActivator::new(pool.clone(), mailbox.clone());
+    let activator = PgActorActivator::new(pool.clone(), mailbox.clone(), Default::default());
     let initial = read(&pool, &handle).await.0;
     let mut rejected_ids = Vec::new();
     for (kind, payload) in [
@@ -189,7 +189,7 @@ impl Actor for MutatingFailure {
 async fn rejection_discards_handler_mutations_and_tells_but_transient_failure_retries() {
     let (pool, _container) = pool().await;
     let mailbox = Arc::new(PgMailbox::new(pool.clone(), PgMailboxConfig::default()));
-    let activator = PgActorActivator::new(pool.clone(), mailbox.clone());
+    let activator = PgActorActivator::new(pool.clone(), mailbox.clone(), Default::default());
     for rejected in [true, false] {
         let actor = MutatingFailure {
             rejected,
@@ -412,7 +412,7 @@ async fn round_three_fresh_identity_is_persisted_before_any_action() {
 async fn activation_preserves_recovered_bytes_and_initializes_only_absent_actors() {
     let (pool, _container) = pool().await;
     let mailbox = Arc::new(PgMailbox::new(pool.clone(), PgMailboxConfig::default()));
-    let activator = PgActorActivator::new(pool.clone(), mailbox.clone());
+    let activator = PgActorActivator::new(pool.clone(), mailbox.clone(), Default::default());
     for recovered_empty in [true, false] {
         let spec = if recovered_empty {
             SPEC.to_owned()

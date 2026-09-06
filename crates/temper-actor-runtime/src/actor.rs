@@ -1,5 +1,7 @@
 //! Core actor types: ActorHandle, Message, Actor trait, ActorContext.
 
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::Mutex;
 
@@ -115,6 +117,8 @@ pub struct ActorContext {
     pub(crate) mailbox: Option<std::sync::Arc<dyn crate::mailbox::Mailbox>>,
     /// Pool for spawn/lookup operations.
     pub(crate) pool: Option<deadpool_postgres::Pool>,
+    /// The actor system's shared registered implementations.
+    handlers: Arc<RwLock<HashMap<String, Arc<dyn Actor>>>>,
 }
 
 impl ActorContext {
@@ -123,12 +127,14 @@ impl ActorContext {
         self_handle: ActorHandle,
         mailbox: Option<std::sync::Arc<dyn crate::mailbox::Mailbox>>,
         pool: Option<deadpool_postgres::Pool>,
+        handlers: Arc<RwLock<HashMap<String, Arc<dyn Actor>>>>,
     ) -> Self {
         Self {
             self_handle,
             pending_tells: Mutex::new(Vec::new()),
             mailbox,
             pool,
+            handlers,
         }
     }
 
@@ -240,27 +246,35 @@ impl ActorContext {
             .map_err(|e| ActorError::MailboxError(e.to_string()))
     }
 
-    /// Spawn a new actor instance in the same session.
-    /// The actor's initial state comes from the handler's initial_state()
-    /// method when the activator first processes it — not from the caller.
+    /// Spawn a sibling and persist its registered handler's initial state immediately.
+    /// An existing instance retains its stored state.
+    ///
+    /// # Errors
+    /// Returns `NotFound` for an unregistered actor type, or `Internal` for storage failure.
     pub async fn spawn(&self, actor_type: &str) -> Result<ActorHandle, ActorError> {
         let pool = self
             .pool
             .as_ref()
             .ok_or_else(|| ActorError::Internal("no pool in context".into()))?;
+        let handle = ActorHandle::new(self.self_handle.namespace.clone(), actor_type);
+        let initial_state = self
+            .handlers
+            .read()
+            .unwrap()
+            .get(actor_type)
+            .ok_or_else(|| ActorError::NotFound(actor_type.to_owned()))?
+            .initial_state_for(&handle);
         let client = pool
             .get()
             .await
             .map_err(|e| ActorError::Internal(format!("pool: {e}")))?;
 
-        let handle = ActorHandle::new(self.self_handle.namespace.clone(), actor_type);
-
-        // Insert actor instance with empty state (ignore conflict if already exists).
+        // Ignore an existing instance without replacing recovered bytes.
         client
             .execute(
                 "INSERT INTO odp_temper.actor_instances (namespace, actor_type, state) \
                  VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-                &[&handle.namespace, &handle.actor_type, &Vec::<u8>::new()],
+                &[&handle.namespace, &handle.actor_type, &initial_state],
             )
             .await
             .map_err(|e| ActorError::Internal(format!("spawn: {e}")))?;

@@ -1,6 +1,7 @@
 //! Postgres-backed implementations of Mailbox and ActorActivator.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -197,11 +198,21 @@ pub enum ActivationError {
 pub struct PgActorActivator {
     pool: Pool,
     mailbox: Arc<dyn Mailbox>,
+    handlers: Arc<RwLock<HashMap<String, Arc<dyn Actor>>>>,
 }
 
 impl PgActorActivator {
-    pub fn new(pool: Pool, mailbox: Arc<dyn Mailbox>) -> Self {
-        Self { pool, mailbox }
+    /// Build an activator using the actor system's existing handler registry.
+    pub fn new(
+        pool: Pool,
+        mailbox: Arc<dyn Mailbox>,
+        handlers: Arc<RwLock<HashMap<String, Arc<dyn Actor>>>>,
+    ) -> Self {
+        Self {
+            pool,
+            mailbox,
+            handlers,
+        }
     }
 
     /// Activate an actor instance.
@@ -310,6 +321,7 @@ impl PgActorActivator {
             actor_handle.clone(),
             Some(self.mailbox.clone()),
             Some(self.pool.clone()),
+            self.handlers.clone(),
         );
 
         match handler.handle(&ctx, &mut state, &message).await {
