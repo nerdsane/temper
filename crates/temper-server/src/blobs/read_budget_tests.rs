@@ -1,7 +1,8 @@
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 
-use super::hydration::{BlobReadSource, hydrate_blob_refs_with_source};
+use super::BlobReadSource;
+use super::hydration::hydrate_blob_refs_with_source;
 use super::{
     BlobHydrationBudget, FIELD_OVERFLOW_REF_KEY, blob_ref_value, field_overflow_descriptor,
 };

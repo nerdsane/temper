@@ -275,7 +275,7 @@ to = "Idle"
 
     #[test]
     fn test_routing_map_builder() {
-        let rules = vec![ReactionRule {
+        let rules = vec![temper_runtime::reaction::ReactionRule {
             name: "a".into(),
             when: temper_runtime::reaction::ReactionTrigger {
                 entity_type: "Agent".into(),

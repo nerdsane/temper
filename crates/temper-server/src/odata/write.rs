@@ -694,13 +694,6 @@ pub async fn handle_odata_post(
                 let spawn_result = actor_sys
                     .spawn_with_fields(&namespace, &entity_type, initial_fields.clone())
                     .await;
-                let spawn_result = match spawn_result {
-                    Ok(_) if entity_type == "Process" => {
-                        actor_sys.spawn_all_registered(&namespace).await
-                    }
-                    Ok(_) => Ok(()),
-                    Err(error) => Err(error),
-                };
                 match spawn_result {
                     Ok(_) => {
                         return ODataResponse {

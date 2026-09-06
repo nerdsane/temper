@@ -6,7 +6,36 @@ use testcontainers::ContainerAsync;
 use testcontainers_modules::postgres::Postgres;
 
 /// Start a fresh isolated Postgres container per test. Drop ContainerAsync to stop it.
-pub async fn setup_test_pg() -> (Pool, ContainerAsync<Postgres>) {
+pub async fn setup_test_pg() -> (Pool, Option<ContainerAsync<Postgres>>) {
+    if let Ok(url) = std::env::var("TEMPER_ACTOR_TEST_DATABASE_URL") {
+        let parsed: tokio_postgres::Config = url.parse().expect("valid local test URL");
+        assert!(
+            parsed.get_hosts().iter().all(|host| matches!(host,
+            tokio_postgres::config::Host::Tcp(name) if name == "127.0.0.1" || name == "localhost"))
+        );
+        assert!(
+            parsed
+                .get_dbname()
+                .is_some_and(|name| name.starts_with("temper_test_"))
+        );
+        let mut cfg = PgConfig::new();
+        cfg.url = Some(url);
+        let pool = cfg
+            .create_pool(
+                Some(deadpool_postgres::Runtime::Tokio1),
+                tokio_postgres::NoTls,
+            )
+            .expect("create local test pool");
+        static SCHEMA: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+        SCHEMA
+            .get_or_init(|| async {
+                crate::schema::create_tables(&pool.get().await.unwrap())
+                    .await
+                    .unwrap();
+            })
+            .await;
+        return (pool, None);
+    }
     use testcontainers::runners::AsyncRunner;
 
     let container = Postgres::default()
@@ -36,7 +65,7 @@ pub async fn setup_test_pg() -> (Pool, ContainerAsync<Postgres>) {
         .await
         .expect("apply schema");
 
-    (pool, container)
+    (pool, Some(container))
 }
 
 /// Start a shared Postgres container (one per test binary, container leaked intentionally).

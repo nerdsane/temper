@@ -6,6 +6,7 @@
 
 pub(crate) mod action_input;
 mod actor;
+pub(crate) mod bootstrap;
 pub mod effects;
 mod field_updates;
 mod replay_validation;

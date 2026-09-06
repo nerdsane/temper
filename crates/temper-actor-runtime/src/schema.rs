@@ -89,14 +89,13 @@ pub const DELETE_MESSAGE: &str = "\
 
 /// Find actors with pending messages (candidates for activation).
 pub const FIND_PENDING_ACTORS: &str = "\
-    SELECT ai.namespace, ai.actor_type \
-    FROM odp_temper.actor_instances ai \
-    WHERE EXISTS ( \
-        SELECT 1 FROM odp_temper.actor_messages am \
-        WHERE am.namespace = ai.namespace \
-          AND am.to_actor = ai.actor_type \
-          AND am.id > ai.last_msg_id \
-    ) \
+    SELECT am.namespace, am.to_actor AS actor_type \
+    FROM odp_temper.actor_messages am \
+    JOIN odp_temper.actor_types registered ON registered.actor_type = am.to_actor \
+    LEFT JOIN odp_temper.actor_instances ai \
+        ON ai.namespace = am.namespace AND ai.actor_type = am.to_actor \
+    WHERE am.id > COALESCE(ai.last_msg_id, 0) \
+    GROUP BY am.namespace, am.to_actor \
     ORDER BY random() \
     LIMIT $1";
 

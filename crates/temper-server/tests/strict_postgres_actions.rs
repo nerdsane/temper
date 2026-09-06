@@ -385,3 +385,78 @@ async fn repeated_process_creation_preserves_existing_fields_and_defaults() {
         server.abort();
     }
 }
+
+#[tokio::test]
+async fn custom_strict_process_creation_does_not_spawn_unrelated_registered_actors() {
+    let (pool, _container) = pool().await;
+    let actors = Arc::new(ActorSystem::new(pool.clone(), SchedulerConfig::default()));
+    let process_spec = SPEC.replace("Order", "Process");
+    for source in [&process_spec, &SPEC.replace("Order", "Unrelated")] {
+        actors
+            .register(Arc::new(
+                SpecDrivenActor::from_ioa(source, HashMap::new()).unwrap(),
+            ))
+            .await
+            .unwrap();
+    }
+    let csdl = CSDL
+        .replace("Orders", "Processes")
+        .replace("Order", "Process");
+    let mut registry = SpecRegistry::new();
+    registry.register_tenant(
+        "default",
+        temper_spec::csdl::parse_csdl(&csdl).unwrap(),
+        csdl.clone(),
+        &[("Process", process_spec.as_str())],
+    );
+    registry.set_verification_status(
+        &TenantId::default(),
+        "Process",
+        VerificationStatus::Completed(EntityVerificationResult {
+            all_passed: true,
+            levels: vec![],
+            verified_at: "2026-09-06T00:00:00Z".into(),
+        }),
+    );
+    let mut state = ServerState::from_pg_registry(actors.clone(), registry);
+    state.actor_backed_types.insert("Process".into());
+    state
+        .authz
+        .reload_tenant_policies("default", "permit(principal, action, resource);")
+        .unwrap();
+    let router = build_router(state).layer(axum::middleware::from_fn(test_identity));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let id = uuid::Uuid::new_v4().to_string();
+    let response = Client::new()
+        .post(format!("{base}/tdata/Processes"))
+        .json(&json!({"id":id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "{}",
+        response.text().await.unwrap()
+    );
+    assert!(
+        actors
+            .load_state(&format!("default/{id}"), "Process")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        actors
+            .load_state(&format!("default/{id}"), "Unrelated")
+            .await
+            .unwrap()
+            .is_none(),
+        "a product name must not create an unrelated registered actor"
+    );
+    server.abort();
+}

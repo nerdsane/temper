@@ -1889,10 +1889,7 @@ field="revision"
         ActorSystem::new("strict-composite"),
         parse_csdl(COMPOSITE_CSDL).unwrap(),
         COMPOSITE_CSDL.into(),
-        BTreeMap::from([
-            ("Parent".into(), parent.into()),
-            ("Child".into(), child.into()),
-        ]),
+        BTreeMap::from([("Parent".into(), parent.into()), ("Child".into(), child)]),
         StorageStack::from_sim(store, None),
     )
     .unwrap();
@@ -1907,7 +1904,7 @@ field="revision"
 #[tokio::test]
 async fn strict_composite_preflight_uses_defaults_and_sequential_target_state() {
     let store = SimEventStore::no_faults(101);
-    let state = strict_composite_state(store);
+    let state = strict_composite_state(store.clone());
     let tenant = TenantId::default();
     state.apply_composite_integration_result(&tenant,"Parent","parent","CreateChild",&json!({"sub_writes":[
         {"entity_type":"Child","entity_id":"child","action":"Create","params":{"Name":"first","expected_revision":3}},
@@ -1924,6 +1921,70 @@ async fn strict_composite_preflight_uses_defaults_and_sequential_target_state() 
     assert_eq!(child.lists["members"], vec!["first"]);
     assert_eq!(child.fields["Name"], "second");
     assert_eq!(child.fields["Id"], "child");
+    let journal = store.dump_journal("default:Child:child");
+    assert_eq!(
+        journal[0].payload["initial_values"]["counters"]["revision"],
+        3
+    );
+    assert_eq!(
+        journal[0].payload["initial_values"]["booleans"]["enabled"],
+        true
+    );
+    assert_eq!(
+        journal[0].payload["initial_values"]["lists"]["members"],
+        json!(["first"])
+    );
+
+    // Both recovery paths must retain creation facts after declaration defaults change.
+    let mut changed_table = state
+        .transition_table_for_dispatch(&tenant, "Child")
+        .unwrap()
+        .as_ref()
+        .clone();
+    changed_table
+        .initial_values
+        .counters
+        .insert("revision".into(), 90);
+    changed_table
+        .initial_values
+        .booleans
+        .insert("enabled".into(), false);
+    changed_table
+        .initial_values
+        .lists
+        .insert("members".into(), vec!["new default".into()]);
+    let store = crate::storage::BoxedEventStore::new(store);
+    let full = crate::entity_actor::recover_authoritative_entity_state_from_store(
+        "default",
+        "Child",
+        "child",
+        &changed_table,
+        &store,
+        BackendLabel::Sim,
+        &json!({}),
+        None,
+    )
+    .await
+    .unwrap();
+    let snapshot = crate::entity_actor::recover_entity_state_from_store(
+        "default",
+        "Child",
+        "child",
+        &changed_table,
+        &store,
+        BackendLabel::Sim,
+        &json!({}),
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+    for recovered in [full, snapshot] {
+        assert_eq!(recovered.counters, child.counters);
+        assert_eq!(recovered.booleans, child.booleans);
+        assert_eq!(recovered.lists, child.lists);
+        assert_eq!(recovered.fields, child.fields);
+    }
 }
 
 #[cfg(feature = "sim")]

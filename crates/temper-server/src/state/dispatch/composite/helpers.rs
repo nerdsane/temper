@@ -329,8 +329,9 @@ pub(super) fn composite_event_envelope(
 pub(super) fn composite_envelope(
     persistence_id: &str,
     event: &crate::entity_actor::EntityEvent,
+    initial: &EntityState,
 ) -> Result<PersistenceEnvelope, DispatchError> {
-    let payload = serde_json::to_value(event).map_err(|e| {
+    let payload = crate::entity_actor::bootstrap::event_payload(event, initial).map_err(|e| {
         DispatchError::Internal(format!("failed to serialize composite event: {e}"))
     })?;
     Ok(PersistenceEnvelope {

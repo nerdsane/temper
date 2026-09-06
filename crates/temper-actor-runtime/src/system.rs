@@ -104,9 +104,12 @@ impl ActorSystem {
         // Build initial state with fields pre-populated.
         let initial_state = {
             let handlers = self.handlers.read().unwrap();
-            let raw = handlers
-                .get(actor_type)
-                .map(|h| h.initial_state_for(&handle))
+            let handler = handlers.get(actor_type);
+            if let Some(handler) = handler {
+                handler.validate_initial_fields(&fields)?;
+            }
+            let raw = handler
+                .map(|handler| handler.initial_state_for(&handle))
                 .unwrap_or_default();
             if fields.is_null() || fields.as_object().is_some_and(|o| o.is_empty()) {
                 raw

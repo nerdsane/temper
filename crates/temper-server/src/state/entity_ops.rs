@@ -781,7 +781,12 @@ impl ServerState {
         entity_id: &str,
         initial_fields: serde_json::Value,
     ) -> Result<ActorRef<EntityMsg>, String> {
-        self.validate_initial_entity_fields(tenant, entity_type, &initial_fields)?;
+        if !initial_fields
+            .as_object()
+            .is_some_and(|fields| fields.is_empty())
+        {
+            self.validate_initial_entity_fields(tenant, entity_type, &initial_fields)?;
+        }
         let key = format!("{tenant}:{entity_type}:{entity_id}");
 
         // Fast-path: check actor registry under read lock.
@@ -815,6 +820,13 @@ impl ServerState {
         // ADR-0048 sub-decision 5: every actor gets the shared idempotency
         // cache so it can dedupe duplicate asks produced by retry storms.
         let tenant_blob_store = self.blob_store_for_tenant(tenant).ok();
+        let legacy_blob_store: Option<Arc<dyn crate::storage::BlobStore>> =
+            if tenant == &TenantId::default() {
+                self.platform_metadata_store()
+                    .map(|store| store as Arc<dyn crate::storage::BlobStore>)
+            } else {
+                None
+            };
         let snapshot_queue = self
             .snapshot_write_queue
             .lock()
@@ -837,7 +849,8 @@ impl ServerState {
                 .with_tenant(tenant.as_str())
                 .with_idempotency_cache(self.idempotency_cache.clone())
                 .with_blob_store(tenant_blob_store),
-        };
+        }
+        .with_legacy_blob_store(legacy_blob_store);
 
         // Slow-path: atomically re-check and spawn under write lock.
         // This prevents duplicate actors when concurrent requests race to create

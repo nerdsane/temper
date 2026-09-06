@@ -2,7 +2,7 @@ use super::*;
 use std::time::Duration;
 use temper_runtime::ActorSystem;
 
-const OVERFLOW_CONTRACT: &str = r#"
+pub(in crate::entity_actor) const OVERFLOW_CONTRACT: &str = r#"
 [automaton]
 name = "Document"
 states = ["Ready"]
@@ -366,5 +366,87 @@ async fn round_three_seeded_blob_faults_preserve_refused_state() {
                     .unwrap();
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn round_four_native_comparisons_read_default_tenant_legacy_database_blobs() {
+    use temper_runtime::tenant::TenantId;
+    let dir = tempfile::tempdir().unwrap();
+    let journal = temper_store_turso::TursoEventStore::new(
+        dir.path().join("legacy.db").to_str().unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
+    let csdl_source = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
+    let ioa = OVERFLOW_CONTRACT.replace("Document", "Order");
+    let mut registry = crate::registry::SpecRegistry::new();
+    registry.register_tenant(
+        "default",
+        temper_spec::csdl::parse_csdl(csdl_source).unwrap(),
+        csdl_source.to_owned(),
+        &[("Order", ioa.as_str())],
+    );
+    let mut state =
+        crate::state::ServerState::from_registry(ActorSystem::new("legacy-comparison"), registry);
+    state.data_dir = dir.path().to_path_buf();
+    state.set_storage_stack(crate::storage::StorageStack::from_turso(journal.clone()));
+    let tenant = TenantId::default();
+    let context = crate::request_context::AgentContext::for_service("legacy-comparison");
+    let large = "L".repeat(512 * 1024);
+    let written = state
+        .dispatch_tenant_action(
+            &tenant,
+            "Order",
+            "legacy",
+            "Write",
+            serde_json::json!({"Name":large}),
+            &context,
+        )
+        .await
+        .unwrap();
+    assert!(written.success);
+    let descriptor = written.state.fields["Name"].clone();
+    let key = crate::blobs::field_overflow_descriptor(&descriptor)
+        .unwrap()
+        .key
+        .to_owned();
+    let bytes = serde_json::to_vec(&serde_json::json!(large)).unwrap();
+    journal.put_blob(&key, &bytes).await.unwrap();
+    std::fs::remove_file(dir.path().join("blobs").join(&key)).unwrap();
+    assert!(matches!(
+        state
+            .get_blob_with_legacy_fallback_bounded(&tenant, &key, bytes.len())
+            .await
+            .unwrap(),
+        crate::blob_store::BlobReadBounded::Found(_)
+    ));
+    assert!(matches!(
+        state
+            .get_blob_with_legacy_fallback_bounded(&TenantId::new("other"), &key, bytes.len())
+            .await
+            .unwrap(),
+        crate::blob_store::BlobReadBounded::Missing
+    ));
+    for (action, expected, accepts) in [
+        ("Same", large.as_str(), true),
+        ("Different", large.as_str(), false),
+        ("Same", "stale", false),
+        ("Different", "stale", true),
+    ] {
+        let response = state
+            .dispatch_tenant_action(
+                &tenant,
+                "Order",
+                "legacy",
+                action,
+                serde_json::json!({"expected":expected}),
+                &context,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.success, accepts, "{action}: {:?}", response.error);
+        assert_eq!(response.state.fields["Name"], descriptor);
     }
 }

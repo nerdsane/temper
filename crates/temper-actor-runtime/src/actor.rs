@@ -322,6 +322,11 @@ pub trait Actor: Send + Sync + 'static {
         self.initial_state()
     }
 
+    /// Validate explicit creation fields before serializing or persisting initial state.
+    fn validate_initial_fields(&self, _fields: &serde_json::Value) -> Result<(), ActorError> {
+        Ok(())
+    }
+
     /// Handle a single message.
     ///
     /// Use `ctx.tell()` for fire-and-forget (buffered, transactional).

@@ -39,7 +39,7 @@ async fn pool() -> (
         (pool, None)
     } else {
         let (pool, container) = crate::test_utils::setup_test_pg().await;
-        (pool, Some(container))
+        (pool, container)
     }
 }
 
@@ -471,3 +471,6 @@ async fn activation_preserves_recovered_bytes_and_initializes_only_absent_actors
         }
     }
 }
+
+#[path = "pg_creation_tests.rs"]
+mod creation_tests;

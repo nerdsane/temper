@@ -7,7 +7,9 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use temper_runtime::tenant::TenantId;
 
+use super::read_source::{BlobReadSource, read_blob_ref_bytes};
 use super::{field_overflow_descriptor, field_overflow_sha256};
+#[cfg(test)]
 use crate::blob_store::BlobStore;
 use crate::blob_store::{BlobReadBounded, hex_lower};
 use crate::state::ServerState;
@@ -221,51 +223,6 @@ fn collect_blob_ref_pointers(value: &Value, pointer: &str, out: &mut Vec<String>
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
-    }
-}
-
-/// Available sources for bounded field-overflow reads.
-pub(crate) enum BlobReadSource<'a> {
-    #[cfg(test)]
-    Store(&'a BlobStore),
-    Staged {
-        store: Option<&'a BlobStore>,
-        blobs: &'a [super::OverflowBlobWrite],
-    },
-    Tenant {
-        state: &'a ServerState,
-        tenant: &'a TenantId,
-    },
-}
-
-async fn read_blob_ref_bytes(
-    source: &BlobReadSource<'_>,
-    key: &str,
-    max_bytes: usize,
-) -> Result<BlobReadBounded, String> {
-    match source {
-        #[cfg(test)]
-        BlobReadSource::Store(store) => store.get_bounded(key, max_bytes).await,
-        BlobReadSource::Staged { store, blobs } => {
-            if let Some(blob) = blobs.iter().find(|blob| blob.key == key) {
-                return if blob.body.len() <= max_bytes {
-                    Ok(BlobReadBounded::Found(blob.body.clone()))
-                } else {
-                    Ok(BlobReadBounded::TooLarge {
-                        actual_bytes: Some(blob.body.len() as u64),
-                    })
-                };
-            }
-            match store {
-                Some(store) => store.get_bounded(key, max_bytes).await,
-                None => Err("Comparison field blob storage is unavailable".to_string()),
-            }
-        }
-        BlobReadSource::Tenant { state, tenant } => {
-            state
-                .get_blob_with_legacy_fallback_bounded(tenant, key, max_bytes)
-                .await
-        }
     }
 }
 

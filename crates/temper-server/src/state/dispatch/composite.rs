@@ -231,6 +231,11 @@ impl crate::state::ServerState {
 
         let field_sync_mode = self.composite_batch_field_sync_mode(tenant, backend);
         let blob_store = self.blob_store_for_tenant(tenant).ok();
+        let legacy_blob_store = if tenant == &TenantId::default() {
+            self.platform_metadata_store()
+        } else {
+            None
+        };
         let mut overflow_blobs = Vec::new();
         let mut streams: BTreeMap<String, AtomicCompositeStream> = BTreeMap::new();
         let parent_persistence_id = format!("{tenant}:{parent_entity_type}:{parent_entity_id}");
@@ -335,6 +340,9 @@ impl crate::state::ServerState {
                 field_sync_mode,
                 crate::blobs::BlobReadSource::Staged {
                     store: blob_store.as_ref(),
+                    legacy: legacy_blob_store
+                        .as_deref()
+                        .map(|store| store as &dyn crate::storage::BlobStore),
                     blobs: &overflow_blobs,
                 },
             )
@@ -361,7 +369,7 @@ impl crate::state::ServerState {
             event.idempotency_key = Some(write.idempotency_key.clone());
             stream
                 .events
-                .push(composite_envelope(&persistence_id, &event)?);
+                .push(composite_envelope(&persistence_id, &event, &stream.state)?);
             stream.state.sequence_nr = stream.state.sequence_nr.saturating_add(1);
             stream.state.push_event_bounded(event);
         }
@@ -504,7 +512,7 @@ impl crate::state::ServerState {
                 params: serde_json::json!({}),
                 idempotency_key: None,
             };
-            events.push(composite_envelope(&persistence_id, &bootstrap)?);
+            events.push(composite_envelope(&persistence_id, &bootstrap, &state)?);
             state.sequence_nr = state.sequence_nr.saturating_add(1);
             state.push_event_bounded(bootstrap);
         }
@@ -849,6 +857,11 @@ impl crate::state::ServerState {
             .event_journal()
             .map(|(_, backend)| self.composite_batch_field_sync_mode(tenant, backend))
             .unwrap_or(FieldSyncMode::InlineTruncate);
+        let legacy_blob_store = if tenant == &TenantId::default() {
+            self.platform_metadata_store()
+        } else {
+            None
+        };
         let result = process_action_with_blob_prestate(
             &mut stream.state,
             &table,
@@ -858,6 +871,9 @@ impl crate::state::ServerState {
             field_sync_mode,
             crate::blobs::BlobReadSource::Staged {
                 store: self.blob_store_for_tenant(tenant).ok().as_ref(),
+                legacy: legacy_blob_store
+                    .as_deref()
+                    .map(|store| store as &dyn crate::storage::BlobStore),
                 blobs: pending_overflow_blobs,
             },
         )

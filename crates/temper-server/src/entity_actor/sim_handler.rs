@@ -6,13 +6,14 @@
 //! `EntityActor::handle()`: same `evaluate()` call, same effect application,
 //! same event recording. No async, no persistence, no telemetry.
 
+use futures_util::FutureExt;
 use std::sync::Arc;
 
 use temper_jit::table::{EvalContext, TransitionTable};
 use temper_runtime::scheduler::{CompareOp, SimActorHandler, SpecAssert, SpecInvariant};
 use temper_spec::automaton::StateVar;
 
-use super::effects::ScheduledAction;
+use super::effects::{FieldSyncMode, ScheduledAction};
 use super::types::EntityState;
 
 /// Simulation handler wrapping a real TransitionTable.
@@ -28,6 +29,8 @@ pub struct EntityActorHandler {
     last_custom_effects: Vec<String>,
     /// Scheduled actions from the last successful action (timer requests).
     last_scheduled_actions: Vec<ScheduledAction>,
+    field_sync_mode: FieldSyncMode,
+    overflow_blobs: Vec<crate::blobs::OverflowBlobWrite>,
 }
 
 impl EntityActorHandler {
@@ -52,7 +55,15 @@ impl EntityActorHandler {
             invariants: Vec::new(),
             last_custom_effects: Vec::new(),
             last_scheduled_actions: Vec::new(),
+            field_sync_mode: FieldSyncMode::InlineTruncate,
+            overflow_blobs: Vec::new(),
         }
+    }
+
+    /// Select the production storage representation exercised by this simulation.
+    pub fn with_field_sync_mode(mut self, mode: FieldSyncMode) -> Self {
+        self.field_sync_mode = mode;
+        self
     }
 
     /// Build an [`EvalContext`] from the current entity state.
@@ -155,6 +166,31 @@ fn is_declared_bool(state: &StateVar) -> bool {
     state.var_type == "bool"
 }
 
+fn retain_current_blobs(
+    fields: &serde_json::Value,
+    blobs: &mut Vec<crate::blobs::OverflowBlobWrite>,
+) {
+    fn collect(value: &serde_json::Value, keys: &mut std::collections::BTreeSet<String>) {
+        if let Some(descriptor) = crate::blobs::field_overflow_descriptor(value) {
+            keys.insert(descriptor.key.to_owned());
+        } else {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    fields.values().for_each(|value| collect(value, keys))
+                }
+                serde_json::Value::Array(values) => {
+                    values.iter().for_each(|value| collect(value, keys))
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut keys = std::collections::BTreeSet::new();
+    collect(fields, &mut keys);
+    // Removing a key after retention deduplicates content-addressed writes.
+    blobs.retain(|blob| keys.remove(&blob.key));
+}
+
 impl SimActorHandler for EntityActorHandler {
     fn init(&mut self) -> Result<serde_json::Value, String> {
         self.state = super::actor::EntityActor::build_initial_state(
@@ -164,6 +200,9 @@ impl SimActorHandler for EntityActorHandler {
             &serde_json::json!({}),
         );
 
+        self.overflow_blobs.clear();
+        self.last_custom_effects.clear();
+        self.last_scheduled_actions.clear();
         Ok(serde_json::to_value(&self.state).unwrap_or_default())
     }
 
@@ -171,12 +210,27 @@ impl SimActorHandler for EntityActorHandler {
         let params_value: serde_json::Value = serde_json::from_str(params)
             .map_err(|_| "Action parameters must contain valid JSON".to_owned())?;
 
-        // Unified process_action — THE SAME CODE as production.
-        // FoundationDB DST principle: one function for all paths.
-        let result =
-            super::effects::process_action(&mut self.state, &self.table, action, &params_value);
+        // The memory-only source must complete synchronously. Any accidental I/O
+        // in this path is a simulator invariant failure, not a second interpreter.
+        let result = super::action_input::process_action_with_blob_prestate(
+            &mut self.state,
+            &self.table,
+            action,
+            &params_value,
+            &std::collections::BTreeMap::new(),
+            self.field_sync_mode,
+            crate::blobs::BlobReadSource::Staged {
+                store: None,
+                legacy: None,
+                blobs: &self.overflow_blobs,
+            },
+        )
+        .now_or_never()
+        .expect("simulation blob reads must be memory-only");
 
         if result.success {
+            self.overflow_blobs.extend(result.overflow_blobs);
+            retain_current_blobs(&self.state.fields, &mut self.overflow_blobs);
             // Capture custom effects for integration callback scheduling
             self.last_custom_effects = result.custom_effects;
             self.last_scheduled_actions = result.scheduled_actions;
@@ -238,131 +292,5 @@ impl SimActorHandler for EntityActorHandler {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use temper_runtime::scheduler::install_deterministic_context;
-
-    const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
-
-    fn order_table() -> Arc<TransitionTable> {
-        Arc::new(TransitionTable::from_ioa_source(ORDER_IOA))
-    }
-
-    #[test]
-    fn handler_starts_in_draft() {
-        let (_guard, _clock, _id_gen) = install_deterministic_context(42);
-        let mut handler = EntityActorHandler::new("Order", "o1", order_table());
-        handler.init().unwrap();
-        assert_eq!(handler.current_status(), "Draft");
-        assert_eq!(handler.current_item_count(), 0);
-        assert_eq!(handler.event_count(), 0);
-    }
-
-    #[test]
-    fn handler_add_item_then_submit() {
-        let (_guard, clock, _id_gen) = install_deterministic_context(42);
-        let mut handler = EntityActorHandler::new("Order", "o1", order_table());
-        handler.init().unwrap();
-
-        // AddItem
-        clock.advance();
-        let result = handler.handle_message("AddItem", r#"{"ProductId":"laptop"}"#);
-        assert!(result.is_ok());
-        assert_eq!(handler.current_status(), "Draft");
-        assert_eq!(handler.current_item_count(), 1);
-        assert_eq!(handler.event_count(), 1);
-
-        // SubmitOrder
-        clock.advance();
-        let result = handler.handle_message("SubmitOrder", "{}");
-        assert!(result.is_ok());
-        assert_eq!(handler.current_status(), "Submitted");
-        assert_eq!(handler.event_count(), 2);
-    }
-
-    #[test]
-    fn handler_cannot_submit_empty() {
-        let (_guard, _clock, _id_gen) = install_deterministic_context(42);
-        let mut handler = EntityActorHandler::new("Order", "o1", order_table());
-        handler.init().unwrap();
-
-        let result = handler.handle_message("SubmitOrder", "{}");
-        assert!(result.is_err());
-        assert_eq!(handler.current_status(), "Draft");
-    }
-
-    #[test]
-    fn handler_valid_actions_from_draft() {
-        let (_guard, _clock, _id_gen) = install_deterministic_context(42);
-        let mut handler = EntityActorHandler::new("Order", "o1", order_table());
-        handler.init().unwrap();
-
-        let actions = handler.valid_actions();
-        assert!(actions.contains(&"AddItem".to_string()), "got: {actions:?}");
-        assert!(
-            actions.contains(&"CancelOrder".to_string()),
-            "got: {actions:?}"
-        );
-        // SubmitOrder requires items > 0, so not valid with 0 items
-        assert!(
-            !actions.contains(&"SubmitOrder".to_string()),
-            "got: {actions:?}"
-        );
-    }
-
-    #[test]
-    fn handler_valid_actions_after_add_item() {
-        let (_guard, clock, _id_gen) = install_deterministic_context(42);
-        let mut handler = EntityActorHandler::new("Order", "o1", order_table());
-        handler.init().unwrap();
-
-        clock.advance();
-        handler.handle_message("AddItem", "{}").unwrap();
-
-        let actions = handler.valid_actions();
-        assert!(actions.contains(&"AddItem".to_string()));
-        assert!(
-            actions.contains(&"SubmitOrder".to_string()),
-            "got: {actions:?}"
-        );
-        assert!(
-            actions.contains(&"RemoveItem".to_string()),
-            "got: {actions:?}"
-        );
-    }
-
-    #[test]
-    fn handler_with_ioa_invariants_parses_spec() {
-        let (_guard, _clock, _id_gen) = install_deterministic_context(42);
-        let handler =
-            EntityActorHandler::new("Order", "o1", order_table()).with_ioa_invariants(ORDER_IOA);
-
-        let invariants = handler.spec_invariants();
-        assert!(
-            !invariants.is_empty(),
-            "should have parsed invariants from IOA spec"
-        );
-
-        let names: Vec<&str> = invariants.iter().map(|i| i.name.as_str()).collect();
-        assert!(
-            names.contains(&"SubmitRequiresItems"),
-            "should have SubmitRequiresItems, got: {names:?}"
-        );
-        assert!(
-            names.contains(&"CancelledIsFinal"),
-            "should have CancelledIsFinal, got: {names:?}"
-        );
-        assert!(
-            !names.contains(&"ShipRequiresPayment"),
-            "undeclared bool invariants should be skipped in simulation, got: {names:?}"
-        );
-    }
-
-    #[test]
-    fn handler_without_ioa_invariants_returns_empty() {
-        let (_guard, _clock, _id_gen) = install_deterministic_context(42);
-        let handler = EntityActorHandler::new("Order", "o1", order_table());
-
-        assert!(handler.spec_invariants().is_empty());
-    }
-}
+#[path = "sim_handler_test.rs"]
+mod tests;

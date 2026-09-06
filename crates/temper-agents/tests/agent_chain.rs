@@ -8,9 +8,7 @@ use std::sync::Arc;
 use temper_actor_runtime::spec_actor::SpecActorState;
 use temper_actor_runtime::test_utils::setup_test_pg;
 use temper_actor_runtime::{ActorSystem, SchedulerConfig, SpecMessage};
-use temper_agents::{
-    AGENT_ACTOR_TYPES, MockLlmIntegration, MockToolExecutor, register_agent_actors,
-};
+use temper_agents::{MockLlmIntegration, MockToolExecutor, register_agent_actors};
 
 async fn load_actor_state(
     pool: &deadpool_postgres::Pool,
@@ -65,7 +63,7 @@ async fn test_agent_initialize() {
 }
 
 #[tokio::test]
-async fn test_simple_inference_chain() {
+async fn test_inference_chain_discovers_unspawned_registered_siblings() {
     let (pool, _postgres) = setup_test_pg().await;
     let system = Arc::new(ActorSystem::new(pool.clone(), SchedulerConfig::default()));
     register_agent_actors(&system).await.unwrap();
@@ -74,9 +72,7 @@ async fn test_simple_inference_chain() {
 
     let namespace = format!("test/session/{}", uuid::Uuid::new_v4());
 
-    for actor_type in AGENT_ACTOR_TYPES {
-        system.spawn(&namespace, actor_type).await.unwrap();
-    }
+    system.spawn(&namespace, "Process").await.unwrap();
 
     let agent = temper_actor_runtime::ActorHandle::new(namespace.clone(), "Process");
     system
@@ -100,7 +96,10 @@ async fn test_simple_inference_chain() {
         .await
         .unwrap();
 
-    run_until_quiescent(&system, 50).await;
+    let ((), ()) = tokio::join!(
+        run_until_quiescent(&system, 50),
+        run_until_quiescent(&system, 50)
+    );
 
     let agent_state = load_actor_state(&pool, &namespace, "Process").await;
     assert_eq!(
@@ -109,6 +108,26 @@ async fn test_simple_inference_chain() {
         agent_state.status
     );
     assert_eq!(agent_state.counters.get("turns"), Some(&1usize));
+    let context = load_actor_state(&pool, &namespace, "ContextManager").await;
+    assert_eq!(context.counters.get("preparations_done"), Some(&1usize));
+    // A new scheduler must not process already-consumed messages again.
+    let restarted = Arc::new(ActorSystem::new(pool.clone(), SchedulerConfig::default()));
+    register_agent_actors(&restarted).await.unwrap();
+    restarted
+        .register(Arc::new(MockLlmIntegration))
+        .await
+        .unwrap();
+    restarted
+        .register(Arc::new(MockToolExecutor))
+        .await
+        .unwrap();
+    let ((), ()) = tokio::join!(
+        run_until_quiescent(&system, 5),
+        run_until_quiescent(&restarted, 5)
+    );
+    let after = load_actor_state(&pool, &namespace, "Process").await;
+    assert_eq!(after.counters.get("turns"), Some(&1usize));
+    assert_eq!(after.fields, agent_state.fields);
 }
 
 #[tokio::test]
