@@ -58,6 +58,25 @@ fn parse_json_body_or_400(body: &axum::body::Bytes) -> Result<serde_json::Value,
     })
 }
 
+fn strict_generic_write_response(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+) -> Option<axum::response::Response> {
+    let registry = state.registry.read().expect("registry lock poisoned");
+    registry
+        .get_table(tenant, entity_type)
+        .is_some_and(|table| table.strict_action_params)
+        .then(|| {
+            odata_error(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "StrictActionContract",
+                "Strict entities require a declared action for updates and deletion",
+            )
+            .into_response()
+        })
+}
+
 fn invalid_create_body(message: &str) -> ODataWriteError {
     Box::new(odata_error(StatusCode::BAD_REQUEST, "InvalidBody", message).into_response())
 }
@@ -688,7 +707,14 @@ pub async fn handle_odata_post(
         }
 
         ODataPath::BoundAction { parent, action } => {
-            let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            let body_json = if body.iter().all(u8::is_ascii_whitespace) {
+                serde_json::json!({})
+            } else {
+                match parse_json_body_or_400(&body) {
+                    Ok(value) => value,
+                    Err(response) => return *response,
+                }
+            };
 
             let (set_name, key_str) = match *parent {
                 ODataPath::Entity(ref set, ref key) => (set.clone(), extract_key(key)),
@@ -745,7 +771,39 @@ pub async fn handle_odata_post(
                     }
                 };
                 let actor_state: temper_actor_runtime::spec_actor::SpecActorState =
-                    serde_json::from_slice(&state_bytes).unwrap_or_default();
+                    match serde_json::from_slice(&state_bytes) {
+                        Ok(value) => value,
+                        Err(_) => {
+                            return odata_error(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "ActorReadError",
+                                "Stored actor state is invalid",
+                            )
+                            .into_response();
+                        }
+                    };
+                let strict = {
+                    let registry = state.registry.read().expect("registry lock poisoned");
+                    if let Some(table) = registry.get_table(&tenant, &entity_type) {
+                        if let Err(error) = table.validate_action_params(
+                            action_name,
+                            &body_json,
+                            &actor_state.fields,
+                            &actor_state.counters,
+                            &actor_state.booleans,
+                        ) {
+                            return odata_error(
+                                StatusCode::BAD_REQUEST,
+                                "StrictActionContract",
+                                &error,
+                            )
+                            .into_response();
+                        }
+                        table.strict_action_params
+                    } else {
+                        false
+                    }
+                };
                 let authz_body = serde_json::json!({
                     "entity_id": key_str,
                     "status": actor_state.status,
@@ -780,7 +838,15 @@ pub async fn handle_odata_post(
                     )
                     .await
                 {
-                    Ok(_) => {
+                    Ok(message_id) => {
+                        if strict {
+                            // The PG scheduler is asynchronous. Enqueueing does not
+                            // establish which FIFO message will execute next.
+                            return ODataResponse {
+                                status: StatusCode::ACCEPTED,
+                                body: serde_json::json!({"entity_type":entity_type,"entity_id":key_str,"action":action_name,"message_id":message_id,"accepted":true}),
+                            }.into_response();
+                        }
                         let _ = actor_sys.activate_now(&handle).await;
                         let body = if let Some(actor_state) =
                             actor_sys.get_spec_actor_state(&handle).await
@@ -891,6 +957,9 @@ pub async fn handle_odata_patch(
                 Ok(existing) => existing,
                 Err(resp) => return *resp,
             };
+            if let Some(response) = strict_generic_write_response(&state, &tenant, &entity_type) {
+                return response;
+            }
 
             let body_json = match parse_json_body_or_400(&body) {
                 Ok(v) => v,
@@ -1085,6 +1154,9 @@ pub async fn handle_odata_put(
                 Ok(existing) => existing,
                 Err(resp) => return *resp,
             };
+            if let Some(response) = strict_generic_write_response(&state, &tenant, &entity_type) {
+                return response;
+            }
 
             let body_json = match parse_json_body_or_400(&body) {
                 Ok(v) => v,
@@ -1279,6 +1351,9 @@ pub async fn handle_odata_delete(
                 Ok(existing) => existing,
                 Err(resp) => return *resp,
             };
+            if let Some(response) = strict_generic_write_response(&state, &tenant, &entity_type) {
+                return response;
+            }
             if let Err(v) =
                 pre_delete_relation_checks(&state, &tenant, &entity_type, &key_str, "delete").await
             {

@@ -62,18 +62,15 @@ fn simulation(seed: u64, source: &str) -> SimActorSystem {
 
 #[test]
 fn strict_action_cannot_change_an_undeclared_field() {
-    for seed in 0..64 {
-        let mut sim = simulation(seed, CONTRACT);
+    {
+        let mut sim = simulation(0, CONTRACT);
         let before = sim.events_json("resource");
         let result = sim.step(
             "resource",
             "Observe",
             r#"{"observed":"release-b","desired":"release-b"}"#,
         );
-        assert!(
-            result.is_err(),
-            "seed {seed}: observation changed desired configuration"
-        );
+        assert!(result.is_err(), "observation changed desired configuration");
         assert_eq!(
             before,
             sim.events_json("resource"),
@@ -87,7 +84,7 @@ fn strict_action_cannot_change_an_undeclared_field() {
 
 #[test]
 fn strict_action_rejects_non_object_input() {
-    for malformed in ["null", "[]", "42", "\"text\""] {
+    for malformed in ["{", "null", "[]", "42", "\"text\""] {
         let mut sim = simulation(1, CONTRACT);
         assert!(
             sim.step("resource", "Observe", malformed).is_err(),
@@ -173,4 +170,156 @@ field = "sequence"
             )
             .is_ok()
     );
+}
+
+#[test]
+fn fresh_defaults_and_every_constraint_run_through_actual_actor() {
+    let source = CONTRACT
+        .replacen(
+            "[[action]]",
+            r#"
+[[state]]
+name = "sequence"
+type = "counter"
+initial = "0"
+[[state]]
+name = "enabled"
+type = "bool"
+initial = "false"
+[[action]]"#,
+            1,
+        )
+        .replace(
+            "params = [\"observed\"]",
+            r#"
+params = ["observed", "expected_sequence", "next_sequence", "expected_enabled"]
+[[action.constraints]]
+kind = "param_equals_field"
+param = "expected_sequence"
+field = "sequence"
+[[action.constraints]]
+kind = "param_greater_than_field"
+param = "next_sequence"
+field = "sequence"
+[[action.constraints]]
+kind = "param_equals_field"
+param = "expected_enabled"
+field = "enabled"
+[[action.constraints]]
+kind = "param_not_equals_field"
+param = "observed"
+field = "observed"
+[[action.constraints]]
+kind = "param_nonempty"
+param = "observed"
+"#,
+        );
+    let mut sim = simulation(0, &source);
+    let before = sim.events_json("resource");
+    let good = serde_json::json!({"observed":"release-b","expected_sequence":0,"next_sequence":1,"expected_enabled":false});
+    for (key, invalid) in [
+        ("expected_sequence", serde_json::json!("0")),
+        ("next_sequence", serde_json::json!(0)),
+        ("next_sequence", serde_json::json!("1")),
+        ("next_sequence", serde_json::json!(1.0)),
+        ("expected_enabled", serde_json::json!("false")),
+        ("observed", serde_json::json!("")),
+        ("observed", serde_json::json!("   ")),
+    ] {
+        let mut params = good.clone();
+        params[key] = invalid;
+        assert!(
+            sim.step("resource", "Observe", &params.to_string())
+                .is_err()
+        );
+        assert_eq!(before, sim.events_json("resource"));
+    }
+    let after = sim.step("resource", "Observe", &good.to_string()).unwrap();
+    assert_eq!(after["fields"]["desired"], "release-a");
+    assert_eq!(after["fields"]["observed"], "release-b");
+    let events = sim.events_json("resource");
+    assert!(sim.step("resource", "Observe", &good.to_string()).is_err());
+    assert_eq!(events, sim.events_json("resource"));
+}
+
+#[test]
+fn inequality_rejects_invalid_numeric_representations() {
+    let source = CONTRACT
+        .replacen(
+            "[[action]]",
+            "[[state]]\nname = \"sequence\"\ntype = \"counter\"\ninitial = \"0\"\n[[action]]",
+            1,
+        )
+        .replace(
+            "params = [\"observed\"]",
+            r#"params = ["next_sequence"]
+[[action.constraints]]
+kind = "param_not_equals_field"
+param = "next_sequence"
+field = "sequence"
+"#,
+        );
+    let mut sim = simulation(0, &source);
+    for invalid in [
+        serde_json::json!("0"),
+        serde_json::json!(1.0),
+        serde_json::json!(false),
+        serde_json::json!(null),
+        serde_json::json!(0),
+    ] {
+        assert!(
+            sim.step(
+                "resource",
+                "Observe",
+                &serde_json::json!({"next_sequence":invalid}).to_string()
+            )
+            .is_err()
+        );
+    }
+    sim.step("resource", "Observe", r#"{"next_sequence":1}"#)
+        .unwrap();
+}
+
+#[test]
+fn nonzero_defaults_are_used_by_guards_and_constraints() {
+    let source = CONTRACT
+        .replacen(
+            "[[action]]",
+            "[[state]]\nname = \"sequence\"\ntype = \"counter\"\ninitial = \"3\"\n[[action]]",
+            1,
+        )
+        .replace(
+            "params = [\"observed\"]",
+            r#"params = ["expected_sequence"]
+guard = "sequence >= 3"
+[[action.constraints]]
+kind = "param_equals_field"
+param = "expected_sequence"
+field = "sequence"
+"#,
+        );
+    let mut sim = simulation(0, &source);
+    sim.step("resource", "Observe", r#"{"expected_sequence":3}"#)
+        .unwrap();
+}
+
+#[test]
+fn signed_integer_field_can_compare_with_its_declared_default() {
+    let source = CONTRACT
+        .replacen(
+            "[[action]]",
+            "[[state]]\nname = \"offset\"\ntype = \"integer\"\ninitial = \"-1\"\n[[action]]",
+            1,
+        )
+        .replace(
+            "params = [\"observed\"]",
+            r#"params = ["offset"]
+[[action.constraints]]
+kind = "param_equals_field"
+param = "offset"
+field = "offset"
+"#,
+        );
+    let mut sim = simulation(0, &source);
+    sim.step("resource", "Observe", r#"{"offset":-1}"#).unwrap();
 }

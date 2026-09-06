@@ -39,25 +39,12 @@ impl EntityActorHandler {
     ) -> Self {
         let entity_type = entity_type.into();
         let entity_id = entity_id.into();
-        let mut fields = serde_json::json!({});
-        super::effects::canonicalize_entity_fields(&mut fields, &entity_id, &table.initial_state);
-
-        let state = EntityState {
-            entity_type,
-            entity_id,
-            status: table.initial_state.clone(),
-            item_count: 0,
-            counters: std::collections::BTreeMap::new(),
-            booleans: std::collections::BTreeMap::new(),
-            lists: std::collections::BTreeMap::new(),
-            fields,
-            events: std::collections::VecDeque::new(),
-            total_event_count: 0,
-            events_since_snapshot: 0,
-            last_snapshot_sequence_nr: 0,
-            sequence_nr: 0,
-            processed_idempotency_keys: std::collections::BTreeMap::new(),
-        };
+        let state = super::actor::EntityActor::build_initial_state(
+            &entity_type,
+            &entity_id,
+            &table,
+            &serde_json::json!({}),
+        );
 
         Self {
             table,
@@ -170,28 +157,19 @@ fn is_declared_bool(state: &StateVar) -> bool {
 
 impl SimActorHandler for EntityActorHandler {
     fn init(&mut self) -> Result<serde_json::Value, String> {
-        // Reset to initial state
-        self.state.status = self.table.initial_state.clone();
-        self.state.item_count = 0;
-        self.state.counters.clear();
-        self.state.booleans.clear();
-        self.state.lists.clear();
-        self.state.events.clear();
-        self.state.total_event_count = 0;
-        self.state.events_since_snapshot = 0;
-        self.state.last_snapshot_sequence_nr = 0;
-        self.state.sequence_nr = 0;
-        self.state.fields = serde_json::json!({
-            "Id": self.state.entity_id,
-            "Status": self.state.status,
-        });
+        self.state = super::actor::EntityActor::build_initial_state(
+            &self.state.entity_type,
+            &self.state.entity_id,
+            &self.table,
+            &serde_json::json!({}),
+        );
 
         Ok(serde_json::to_value(&self.state).unwrap_or_default())
     }
 
     fn handle_message(&mut self, action: &str, params: &str) -> Result<serde_json::Value, String> {
-        let params_value: serde_json::Value =
-            serde_json::from_str(params).unwrap_or(serde_json::json!({}));
+        let params_value: serde_json::Value = serde_json::from_str(params)
+            .map_err(|_| "Action parameters must contain valid JSON".to_owned())?;
 
         // Unified process_action — THE SAME CODE as production.
         // FoundationDB DST principle: one function for all paths.

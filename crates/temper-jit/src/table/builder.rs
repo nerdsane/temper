@@ -143,6 +143,9 @@ impl TransitionTable {
             state_var_metadata,
             composite_actions,
             strict_action_params: automaton.automaton.strict_action_params,
+            initial_values: super::action_contract::InitialValues::from_declarations(
+                &automaton.state,
+            ),
             action_contracts: automaton
                 .actions
                 .iter()

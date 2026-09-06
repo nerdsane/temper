@@ -149,6 +149,9 @@ impl EntityActor {
         initial_fields: &serde_json::Value,
     ) -> EntityState {
         let mut fields = initial_fields.clone();
+        let mut counters = BTreeMap::new();
+        let mut booleans = BTreeMap::new();
+        table.initialize_strict_fields(&mut fields, &mut counters, &mut booleans);
         super::effects::canonicalize_entity_fields(&mut fields, entity_id, &table.initial_state);
 
         EntityState {
@@ -156,9 +159,13 @@ impl EntityActor {
             entity_id: entity_id.to_string(),
             status: table.initial_state.clone(),
             item_count: 0,
-            counters: BTreeMap::new(),
-            booleans: BTreeMap::new(),
-            lists: BTreeMap::new(),
+            counters,
+            booleans,
+            lists: if table.strict_action_params {
+                table.initial_values.lists.clone()
+            } else {
+                BTreeMap::new()
+            },
             fields,
             events: std::collections::VecDeque::new(),
             total_event_count: 0,

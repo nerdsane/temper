@@ -23,3 +23,42 @@
 **Chose integer representation because:** It removes the guard/effect disagreement without silently changing payload values or unrelated applications.
 
 **Where:** crates/temper-jit/src/table/action_contract.rs.
+
+
+## D3: Initialize strict entities from their declarations
+
+**Decision:** Strict entities initialize counters, booleans and fields from the IOA declarations, and constraints use those same values.
+
+**Came up because:** Independent review and four reproduced actor regressions found that empty maps made the first observation fail and nonzero defaults disagree with guards.
+
+**Options:** Insert zero-value effects in every app. assume zero only in comparisons. initialize strict actors once from the declared values.
+
+**Chose declared initialization because:** Native execution, PostgreSQL execution and simulation can use the same defaults without application-specific effects. Existing applications retain their current initialization until opting into strict mode.
+
+**Where:** crates/temper-jit/src/table/action_contract.rs; crates/temper-server/src/entity_actor/actor.rs; crates/temper-server/tests/strict_action_contract.rs.
+
+
+## D4: Initialize spawned strict children through declared parameters
+
+**Decision:** A spawn effect creates a strict child with identity only and projects the generated initializer payload onto that child action's declared parameters.
+
+**Came up because:** Review found that the spawn adapter unconditionally supplied undeclared parent metadata to generic child creation, which strict specifications reject.
+
+**Options:** Exempt internal writes from the contract. reject all strict child spawns. construct the declared initializer input from the spawn data.
+
+**Chose the declared initializer because:** It preserves child creation and explicit parent links while enforcing the same input contract on the child. A strict child declares the parent fields it needs on its initialization action.
+
+**Where:** crates/temper-server/src/state/dispatch/cross_entity.rs; crates/temper-server/tests/strict_generic_writes.rs.
+
+
+## D5: Consume deterministic PostgreSQL refusals
+
+**Decision:** PostgreSQL input refusals consume their queue message while preserving actor bytes and discarding buffered messages; retryable handler failures still roll back.
+
+**Came up because:** Returning HandlerFailed for strict validation left the rejected message at the front of the FIFO queue, preventing later valid work.
+
+**Options:** Retry every refusal. silently report success. distinguish a rejected input from a retryable execution failure.
+
+**Chose typed ActorError::Rejected because:** It preserves refusal and queue continuity without storing a result per request. Strict PostgreSQL HTTP requests validate before enqueue and return 202 with the message ID. Actual execution runs through the scheduler and must be read back; activating an arbitrary queued message cannot prove the newly submitted request completed.
+
+**Where:** crates/temper-actor-runtime/src/actor.rs; crates/temper-actor-runtime/src/pg.rs; crates/temper-actor-runtime/src/spec_actor.rs; crates/temper-server/src/odata/write.rs.

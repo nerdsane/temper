@@ -282,7 +282,21 @@ impl crate::state::ServerState {
                         format!("{}_id", to_snake_case(&parent_t)),
                         serde_json::Value::String(parent_i.clone()),
                     );
-                    let initial_fields = serde_json::Value::Object(parent_fields.clone());
+                    let child_table = state
+                        .registry
+                        .read()
+                        .expect("registry lock poisoned")
+                        .get_table(&t, &child_type);
+                    let strict_child = child_table
+                        .as_ref()
+                        .is_some_and(|table| table.strict_action_params);
+                    // A strict child's declared initializer accepts its data. The
+                    // spawn effect supplies only identity to generic creation.
+                    let initial_fields = if strict_child {
+                        serde_json::json!({})
+                    } else {
+                        serde_json::Value::Object(parent_fields.clone())
+                    };
 
                     match state
                         .get_or_create_tenant_entity(&t, &child_type, &child_id, initial_fields)
@@ -306,6 +320,15 @@ impl crate::state::ServerState {
                                 // Merge copied field values (take precedence over parent params)
                                 for (key, value) in &copied_fields {
                                     initial_action_params.insert(key.clone(), value.clone());
+                                }
+                                if strict_child {
+                                    let contract = child_table
+                                        .as_ref()
+                                        .and_then(|table| table.action_contracts.get(&action));
+                                    initial_action_params.retain(|name, _| {
+                                        contract
+                                            .is_some_and(|contract| contract.params.contains(name))
+                                    });
                                 }
                                 if let Err(e) = state
                                     .dispatch_tenant_action(

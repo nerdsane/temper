@@ -98,6 +98,7 @@ mod tests {
             state_var_metadata: Default::default(),
             strict_action_params: false,
             action_contracts: Default::default(),
+            initial_values: Default::default(),
             composite_actions: Default::default(),
             rule_index: Default::default(),
         };

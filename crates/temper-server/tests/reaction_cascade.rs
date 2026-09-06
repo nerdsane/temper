@@ -639,3 +639,85 @@ fn cascade_does_not_cause_invariant_violations() {
 
     assert!(!sys.has_violations());
 }
+
+#[test]
+fn real_actor_fields_drive_both_reaction_levels() {
+    let spec = r#"
+[automaton]
+name = "Relay"
+states = ["New", "Recorded"]
+initial = "New"
+strict_action_params = true
+[[state]]
+name = "expected"
+type = "string"
+initial = "kept"
+[[action]]
+name = "Record"
+from = ["New"]
+to = "Recorded"
+params = ["payload", "middle_id", "leaf_id", "next_id"]
+[[action.constraints]]
+kind = "param_equals_field"
+param = "payload"
+field = "expected"
+"#;
+    let mut registry = ReactionRegistry::new();
+    let mut rules = Vec::new();
+    for (source, target, id_field, mapping) in [
+        (
+            "Root",
+            "Middle",
+            "middle_id",
+            vec![("payload", "payload"), ("next_id", "leaf_id")],
+        ),
+        ("Middle", "Leaf", "next_id", vec![("payload", "payload")]),
+    ] {
+        rules.push(ReactionRule {
+            name: format!("{source}-to-{target}"),
+            when: ReactionTrigger {
+                entity_type: source.into(),
+                action: Some("Record".into()),
+                to_state: None,
+                guard: None,
+            },
+            then: ReactionTarget {
+                entity_type: target.into(),
+                action: "Record".into(),
+                params: serde_json::json!({}),
+                params_from: mapping
+                    .into_iter()
+                    .map(|(a, b)| (a.into(), b.into()))
+                    .collect(),
+            },
+            resolve_target: TargetResolver::Field {
+                field: id_field.into(),
+            },
+            principal: None,
+        });
+    }
+    registry.register_tenant_rules("projection", rules);
+    let mut sys = SimReactionSystem::new(sim_config(), registry, "projection");
+    for (kind, id) in [("Root", "root"), ("Middle", "middle"), ("Leaf", "leaf")] {
+        sys.register_entity(
+            id,
+            kind,
+            id,
+            Arc::new(TransitionTable::from_ioa_source(spec)),
+        );
+    }
+    sys.step(
+        "root",
+        "Record",
+        r#"{"payload":"kept","middle_id":"middle","leaf_id":"leaf"}"#,
+    )
+    .unwrap();
+    assert_eq!(sys.last_results().len(), 2, "{:?}", sys.last_results());
+    assert!(
+        sys.last_results().iter().all(|result| result.success),
+        "{:?}",
+        sys.last_results()
+    );
+    sys.assert_status("middle", "Recorded");
+    sys.assert_status("leaf", "Recorded");
+}
