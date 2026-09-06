@@ -407,3 +407,67 @@ async fn round_three_fresh_identity_is_persisted_before_any_action() {
         assert_eq!(retained.fields["desired"], "changed");
     }
 }
+
+#[tokio::test]
+async fn activation_preserves_recovered_bytes_and_initializes_only_absent_actors() {
+    let (pool, _container) = pool().await;
+    let mailbox = Arc::new(PgMailbox::new(pool.clone(), PgMailboxConfig::default()));
+    let activator = PgActorActivator::new(pool.clone(), mailbox.clone());
+    for recovered_empty in [true, false] {
+        let spec = if recovered_empty {
+            SPEC.to_owned()
+        } else {
+            SPEC.replace("field = \"desired\"", "field = \"Id\"")
+        };
+        let actor = SpecDrivenActor::from_ioa(&spec, HashMap::new()).unwrap();
+        let handle = ActorHandle::new(format!("activation-{}", Uuid::new_v4()), "Strict");
+        if recovered_empty {
+            pool.get()
+                .await
+                .unwrap()
+                .execute(
+                    schema::CREATE_ACTOR,
+                    &[&handle.namespace, &handle.actor_type, &Vec::<u8>::new()],
+                )
+                .await
+                .unwrap();
+        }
+        let expected = if recovered_empty {
+            "first"
+        } else {
+            &handle.namespace
+        };
+        let message_id = mailbox
+            .tell(
+                None,
+                &handle,
+                "SpecMessage",
+                SpecMessage::with_params(
+                    "Replace",
+                    serde_json::json!({"desired":"accepted", "expected_desired":expected}),
+                )
+                .encode_to_vec(),
+            )
+            .await
+            .unwrap();
+        let result = activator.activate(&handle, &actor).await;
+        let (bytes, cursor, version) = read(&pool, &handle).await;
+        assert_eq!(cursor, message_id);
+        if recovered_empty {
+            assert!(matches!(
+                result,
+                Err(ActivationError::ActorError(ActorError::Rejected(_)))
+            ));
+            assert!(
+                bytes.is_empty(),
+                "recovery must not fabricate initial state"
+            );
+            assert_eq!(version, 1, "consuming the refusal advances the row version");
+        } else {
+            assert!(result.unwrap().activated);
+            let state: SpecActorState = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(state.fields["Id"], handle.namespace);
+            assert_eq!(state.fields["desired"], "accepted");
+        }
+    }
+}

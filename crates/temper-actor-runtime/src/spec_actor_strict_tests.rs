@@ -447,3 +447,54 @@ from = ["Idle"]
     let recovered: SpecActorState = serde_json::from_slice(&empty).unwrap();
     assert_eq!(recovered.status, "Idle");
 }
+
+#[tokio::test]
+async fn legacy_identity_and_accepted_inputs_remain_unchanged_but_refusals_do_not_mutate() {
+    let source = STRICT.replace("strict_action_params = true", "strict_action_params = false")
+        .replace("\n[[action.constraints]]\nkind = \"param_equals_field\"\nparam = \"expected_desired\"\nfield = \"desired\"\n", "");
+    let actor = actor(&source);
+    let mut state = actor.initial_state_for(&ActorHandle::new("legacy", "Process"));
+    assert_eq!(
+        state,
+        actor.initial_state(),
+        "legacy creation must not add identity"
+    );
+    let ctx = context();
+    actor
+        .handle(
+            &ctx,
+            &mut state,
+            &message(
+                "StartProcess",
+                json!({
+                    "desired":"accepted", "legacy_extra":"kept"
+                }),
+                false,
+            ),
+        )
+        .await
+        .unwrap();
+    let accepted = state.clone();
+    let parsed: SpecActorState = serde_json::from_slice(&state).unwrap();
+    assert_eq!(parsed.fields["legacy_extra"], "kept");
+    assert_eq!(parsed.status, "Busy");
+    let tells = ctx.pending_tells.lock().await;
+    assert_eq!(tells.len(), 1);
+    let emitted = SpecMessage::decode(tells[0].payload.as_slice()).unwrap();
+    let fields: serde_json::Value = serde_json::from_slice(&emitted.params).unwrap();
+    assert_eq!(fields["legacy_extra"], "kept");
+    drop(tells);
+    for action in ["StartProcess", "Unknown"] {
+        let ctx = context();
+        actor
+            .handle(
+                &ctx,
+                &mut state,
+                &message(action, json!({"desired":"refused"}), false),
+            )
+            .await
+            .unwrap();
+        assert_eq!(state, accepted);
+        assert!(ctx.pending_tells.lock().await.is_empty());
+    }
+}

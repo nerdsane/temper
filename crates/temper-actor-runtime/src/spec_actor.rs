@@ -145,6 +145,14 @@ pub struct SpecDrivenActor {
     input_field_resets: HashMap<String, Vec<String>>,
 }
 
+fn has_input_contracts(table: &TransitionTable) -> bool {
+    table.strict_action_params
+        || table
+            .action_contracts
+            .values()
+            .any(|contract| !contract.constraints.is_empty())
+}
+
 impl SpecDrivenActor {
     /// Create from an IOA TOML source + routing map.
     pub fn from_ioa(
@@ -192,12 +200,7 @@ impl SpecDrivenActor {
             &mut init_state.counters,
             &mut init_state.booleans,
         );
-        if table.strict_action_params
-            || table
-                .action_contracts
-                .values()
-                .any(|contract| !contract.constraints.is_empty())
-        {
+        if has_input_contracts(&table) {
             init_state.lists = table.initial_values.lists.clone();
         }
 
@@ -248,6 +251,9 @@ impl Actor for SpecDrivenActor {
     }
 
     fn initial_state_for(&self, handle: &ActorHandle) -> Vec<u8> {
+        if !has_input_contracts(&self.table) {
+            return self.initial_state();
+        }
         let mut state = self.init_state.clone();
         if state.fields.is_null() {
             state.fields = serde_json::json!({});
@@ -266,14 +272,7 @@ impl Actor for SpecDrivenActor {
         message: &Message,
     ) -> Result<(), ActorError> {
         // Supported creation persists initial bytes before the actor accepts messages.
-        if state.is_empty()
-            && (self.table.strict_action_params
-                || self
-                    .table
-                    .action_contracts
-                    .values()
-                    .any(|contract| !contract.constraints.is_empty()))
-        {
+        if state.is_empty() && has_input_contracts(&self.table) {
             return Err(ActorError::Rejected(
                 "contracted actor has no persisted initial state".into(),
             ));

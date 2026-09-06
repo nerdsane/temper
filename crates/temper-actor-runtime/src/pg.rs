@@ -246,33 +246,28 @@ impl PgActorActivator {
 
         let (mut state, last_msg_id, version) = match rows.first() {
             Some(row) => {
-                let state_bytes: Vec<u8> = row.get("state");
-                // If state is empty (freshly spawned), use handler's initial state.
-                let state = if state_bytes.is_empty() {
-                    handler.initial_state()
-                } else {
-                    state_bytes
-                };
+                // Existing bytes are recovery data, including an empty value.
+                // The actor owns validation; only an absent row is initialization.
                 (
-                    state,
+                    row.get::<_, Vec<u8>>("state"),
                     row.get::<_, i64>("last_msg_id"),
                     row.get::<_, i64>("version"),
                 )
             }
             None => {
-                // Auto-create with initial state.
+                let initial_state = handler.initial_state_for(actor_handle);
                 tx.execute(
                     schema::CREATE_ACTOR,
                     &[
                         &actor_handle.namespace,
                         &actor_handle.actor_type,
-                        &handler.initial_state(),
+                        &initial_state,
                     ],
                 )
                 .await
                 .map_err(|e| ActivationError::Storage(format!("create: {e}")))?;
 
-                (handler.initial_state(), 0i64, 0i64)
+                (initial_state, 0i64, 0i64)
             }
         };
 

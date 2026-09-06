@@ -74,6 +74,9 @@ pub(super) fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError>
             } else {
                 None
             };
+            if matches!(field_type, Some("list" | "set")) {
+                return Err(fail("collection field comparisons are not supported"));
+            }
             let required_type = match constraint {
                 ActionConstraint::ParamGreaterThanField { .. } => {
                     if field_type != Some("integer") {
@@ -122,6 +125,20 @@ field = "sequence"
 "#
         )
     }
+    #[test]
+    fn rejects_collection_field_comparisons_before_installation() {
+        for field_type in ["list", "set"] {
+            for kind in ["param_equals_field", "param_not_equals_field"] {
+                let param = format!(r#"{{name="value",type="{field_type}"}}"#);
+                let source =
+                    spec(field_type, &param, kind).replace("initial = \"0\"", "initial = \"[]\"");
+                let error = parse_automaton(&source)
+                    .expect_err("collection comparison has no runtime contract");
+                assert!(error.to_string().contains("collection field"), "{error}");
+            }
+        }
+    }
+
     #[test]
     fn rejects_unsatisfiable_constraint_types() {
         for field_type in ["string", "bool", "list"] {
