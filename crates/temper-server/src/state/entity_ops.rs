@@ -13,7 +13,7 @@ use temper_runtime::tenant::TenantId;
 
 use super::dispatch::retry;
 use super::{ServerState, projection_backfill};
-use crate::entity_actor::{EntityActor, EntityEvent, EntityMsg, EntityResponse, EntityState};
+use crate::entity_actor::{EntityActor, EntityEvent, EntityMsg, EntityResponse};
 use crate::events::EntityStateChange;
 use crate::registry::{VerificationDetail, VerificationStatus};
 use crate::runtime_metrics;
@@ -1199,29 +1199,8 @@ impl ServerState {
         let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
         let initial_fields =
             crate::entity_actor::effects::sanitize_action_params(&initial_fields).into_owned();
-        let mut fields = initial_fields.clone();
-        crate::entity_actor::effects::canonicalize_entity_fields(
-            &mut fields,
-            entity_id,
-            &table.initial_state,
-        );
-
-        let mut state = EntityState {
-            entity_type: entity_type.to_string(),
-            entity_id: entity_id.to_string(),
-            status: table.initial_state.clone(),
-            item_count: 0,
-            counters: BTreeMap::new(),
-            booleans: BTreeMap::new(),
-            lists: BTreeMap::new(),
-            fields,
-            events: std::collections::VecDeque::new(),
-            total_event_count: 0,
-            events_since_snapshot: 0,
-            last_snapshot_sequence_nr: 0,
-            sequence_nr: 0,
-            processed_idempotency_keys: BTreeMap::new(),
-        };
+        let mut state =
+            EntityActor::build_initial_state(entity_type, entity_id, &table, &initial_fields);
 
         let created = EntityEvent {
             action: "Created".to_string(),

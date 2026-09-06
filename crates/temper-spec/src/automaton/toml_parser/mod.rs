@@ -4,7 +4,6 @@
 //! parser rather than the full `toml` crate for the core parsing. Webhook
 //! sections are delegated to `toml::from_str` in a second pass.
 
-mod constraints;
 mod effects;
 mod guards;
 mod inline;
@@ -136,18 +135,12 @@ impl ParseState {
 
         // ADR-0046: extract [[action.triggers]] via serde and merge into
         // actions by name. The hand-rolled parser skips these blocks.
-        let mut triggers_by_action = extract_action_triggers(input)?;
-        let mut composite_by_action = extract_action_composite_metadata(input)?;
-        let mut constraints_by_action = constraints::extract(input)?;
+        let mut metadata_by_action = extract_action_metadata(input)?;
         let mut actions = self.actions;
         for action in &mut actions {
-            action.constraints = constraints_by_action
-                .remove(&action.name)
-                .unwrap_or_default();
-            if let Some(trigs) = triggers_by_action.remove(&action.name) {
-                action.triggers.extend(trigs);
-            }
-            if let Some(metadata) = composite_by_action.remove(&action.name) {
+            if let Some(metadata) = metadata_by_action.remove(&action.name) {
+                action.triggers.extend(metadata.triggers);
+                action.constraints = metadata.constraints;
                 action.cedar_gate = metadata.cedar_gate;
                 action.sub_writes.extend(metadata.sub_writes);
             }
@@ -491,66 +484,26 @@ fn extract_webhooks(source: &str) -> Vec<super::types::Webhook> {
         .unwrap_or_default()
 }
 
-/// Extract nested `[[action.triggers]]` sections via serde (ADR-0046).
-///
-/// Returns a map from action name to the triggers declared under it.
-/// The hand-rolled parser is unable to handle nested array-of-tables,
-/// so we do a second pass with `toml::from_str` over only the `[[action]]`
-/// sections. Errors are propagated: silently dropping malformed triggers
-/// would change runtime orchestration behavior.
-fn extract_action_triggers(
-    source: &str,
-) -> Result<std::collections::BTreeMap<String, Vec<super::types::ActionTrigger>>, AutomatonParseError>
-{
-    let slice = isolate_action_sections(source);
-    if slice.trim().is_empty() {
-        return Ok(std::collections::BTreeMap::new());
-    }
-
-    #[derive(serde::Deserialize)]
-    struct ActionTriggersWrapper {
-        #[serde(default, rename = "action")]
-        actions: Vec<ActionSkeleton>,
-    }
-    #[derive(serde::Deserialize)]
-    struct ActionSkeleton {
-        #[serde(default)]
-        name: String,
-        #[serde(default)]
-        triggers: Vec<super::types::ActionTrigger>,
-    }
-    let wrapper: ActionTriggersWrapper = toml::from_str(&slice)
-        .map_err(|e| AutomatonParseError::Toml(format!("action.triggers: {e}")))?;
-    let mut map: std::collections::BTreeMap<String, Vec<super::types::ActionTrigger>> =
-        std::collections::BTreeMap::new();
-    for action in wrapper.actions {
-        if action.name.is_empty() || action.triggers.is_empty() {
-            continue;
-        }
-        map.entry(action.name).or_default().extend(action.triggers);
-    }
-    Ok(map)
-}
-
 #[derive(Debug, Default)]
-struct ParsedCompositeActionMetadata {
+struct ParsedActionMetadata {
     cedar_gate: Option<super::types::CompositeCedarGate>,
     sub_writes: Vec<super::types::SubWriteSpec>,
+    triggers: Vec<super::types::ActionTrigger>,
+    constraints: Vec<super::types::ActionConstraint>,
 }
 
-/// Extract nested `[[action.cedar_gate]]` and `[[action.sub_writes]]`
-/// sections via serde (ADR-0040).
-fn extract_action_composite_metadata(
+/// Parse nested action declarations together so each section uses the same TOML.
+/// Unknown constraint forms and malformed integration declarations are errors.
+fn extract_action_metadata(
     source: &str,
-) -> Result<std::collections::BTreeMap<String, ParsedCompositeActionMetadata>, AutomatonParseError>
-{
+) -> Result<std::collections::BTreeMap<String, ParsedActionMetadata>, AutomatonParseError> {
     let slice = isolate_action_sections(source);
     if slice.trim().is_empty() {
         return Ok(std::collections::BTreeMap::new());
     }
 
     #[derive(serde::Deserialize)]
-    struct ActionCompositeWrapper {
+    struct ActionMetadataWrapper {
         #[serde(default, rename = "action")]
         actions: Vec<ActionSkeleton>,
     }
@@ -562,14 +515,17 @@ fn extract_action_composite_metadata(
         cedar_gate: Vec<super::types::CompositeCedarGate>,
         #[serde(default)]
         sub_writes: Vec<super::types::SubWriteSpec>,
+        #[serde(default)]
+        triggers: Vec<super::types::ActionTrigger>,
+        #[serde(default)]
+        constraints: Vec<super::types::ActionConstraint>,
     }
-    let wrapper: ActionCompositeWrapper = toml::from_str(&slice)
-        .map_err(|e| AutomatonParseError::Toml(format!("action composite metadata: {e}")))?;
-    let mut map: std::collections::BTreeMap<String, ParsedCompositeActionMetadata> =
+    let wrapper: ActionMetadataWrapper = toml::from_str(&slice)
+        .map_err(|e| AutomatonParseError::Toml(format!("action metadata: {e}")))?;
+    let mut map: std::collections::BTreeMap<String, ParsedActionMetadata> =
         std::collections::BTreeMap::new();
     for action in wrapper.actions {
-        if action.name.is_empty() || (action.cedar_gate.is_empty() && action.sub_writes.is_empty())
-        {
+        if action.name.is_empty() {
             continue;
         }
         let metadata = map.entry(action.name).or_default();
@@ -577,6 +533,8 @@ fn extract_action_composite_metadata(
             metadata.cedar_gate = Some(gate);
         }
         metadata.sub_writes.extend(action.sub_writes);
+        metadata.triggers.extend(action.triggers);
+        metadata.constraints.extend(action.constraints);
     }
     Ok(map)
 }

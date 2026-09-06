@@ -1805,3 +1805,279 @@ async fn composite_integration_result_rejects_undeclared_sub_write() {
     let err = err.to_string();
     assert!(err.contains("is not declared"), "unexpected error: {err}");
 }
+
+#[cfg(feature = "sim")]
+fn strict_composite_state(store: SimEventStore) -> ServerState {
+    let parent = r#"
+[automaton]
+name="Parent"
+states=["Active"]
+initial="Active"
+[[action]]
+name="CreateChild"
+kind="Composite"
+from=["Active"]
+params=[]
+[[action.sub_writes]]
+target_entity="Child"
+action="Create"
+generated_from="child"
+[[action.sub_writes]]
+target_entity="Child"
+action="Update"
+generated_from="child"
+"#;
+    let child = r#"
+[automaton]
+name="Child"
+states=["Draft","Active"]
+initial="Draft"
+strict_action_params=true
+[[state]]
+name="revision"
+type="counter"
+initial="3"
+[[state]]
+name="enabled"
+type="bool"
+initial="true"
+[[state]]
+name="members"
+type="list"
+initial='["first"]'
+[[state]]
+name="Name"
+type="string"
+initial="initial name"
+[[action]]
+name="Create"
+from=["Draft"]
+to="Active"
+params=["Name","expected_revision"]
+effect=[{type="increment",var="revision"}]
+[[action.constraints]]
+kind="param_equals_field"
+param="expected_revision"
+field="revision"
+[[action]]
+name="Update"
+from=["Active"]
+params=["Name","expected_revision"]
+effect=[{type="increment",var="revision"}]
+[[action.constraints]]
+kind="param_equals_field"
+param="expected_revision"
+field="revision"
+"#;
+    let state = ServerState::with_storage_stack(
+        ActorSystem::new("strict-composite"),
+        parse_csdl(COMPOSITE_CSDL).unwrap(),
+        COMPOSITE_CSDL.into(),
+        BTreeMap::from([
+            ("Parent".into(), parent.into()),
+            ("Child".into(), child.into()),
+        ]),
+        StorageStack::from_sim(store, None),
+    )
+    .unwrap();
+    state
+        .authz
+        .reload_tenant_policies("default", "permit(principal, action, resource);")
+        .unwrap();
+    state
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn strict_composite_preflight_uses_defaults_and_sequential_target_state() {
+    let store = SimEventStore::no_faults(101);
+    let state = strict_composite_state(store);
+    let tenant = TenantId::default();
+    state.apply_composite_integration_result(&tenant,"Parent","parent","CreateChild",&json!({"sub_writes":[
+        {"entity_type":"Child","entity_id":"child","action":"Create","params":{"Name":"first","expected_revision":3}},
+        {"entity_type":"Child","entity_id":"child","action":"Update","params":{"Name":"second","expected_revision":4}}
+    ]}),&AgentContext::for_service("strict-composite")).await.unwrap();
+    let child = state
+        .get_tenant_entity_state(&tenant, "Child", "child")
+        .await
+        .unwrap()
+        .state;
+    assert_eq!(child.status, "Active");
+    assert_eq!(child.counters["revision"], 5);
+    assert!(child.booleans["enabled"]);
+    assert_eq!(child.lists["members"], vec!["first"]);
+    assert_eq!(child.fields["Name"], "second");
+    assert_eq!(child.fields["Id"], "child");
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn strict_composite_rejects_later_bad_inputs_before_any_journal_write() {
+    for invalid in [
+        json!({"Name":"bad","expected_revision":2}),
+        json!({"Name":"bad","expected_revision":3,"forged":true}),
+        json!({"Name":"bad","expected_revision":3,"Id":"forged"}),
+        json!([]),
+    ] {
+        let store = SimEventStore::no_faults(102);
+        let state = strict_composite_state(store.clone());
+        let result = state.apply_composite_integration_result(&TenantId::default(),"Parent","parent","CreateChild",&json!({"sub_writes":[
+            {"entity_type":"Child","entity_id":"first","action":"Create","params":{"Name":"valid","expected_revision":3}},
+            {"entity_type":"Child","entity_id":"second","action":"Create","params":invalid}
+        ]}),&AgentContext::for_service("strict-composite")).await;
+        assert!(
+            matches!(result, Err(DispatchError::Conflict(_))),
+            "expected preflight contract refusal: {result:?}"
+        );
+        for key in [
+            "default:Parent:parent",
+            "default:Child:first",
+            "default:Child:second",
+        ] {
+            assert!(
+                store.dump_journal(key).is_empty(),
+                "partial journal write: {key}"
+            );
+        }
+        assert!(!state.entity_exists(&TenantId::default(), "Child", "first"));
+        assert!(!state.entity_exists(&TenantId::default(), "Child", "second"));
+    }
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn strict_composite_seeded_ordering_replays_once_or_writes_nothing() {
+    use temper_runtime::scheduler::DeterministicRng;
+    for seed in 1..=64 {
+        let mut rng = DeterministicRng::new(seed);
+        let count = 2 + rng.next_bound(7);
+        let invalid_at = 1 + rng.next_bound(count - 1);
+        let kind = rng.next_bound(4);
+        let mut writes = Vec::new();
+        for step in 0..count {
+            let mut params =
+                json!({"Name":format!("name-{}",rng.next_u64()),"expected_revision":3+step});
+            if step == invalid_at {
+                match kind {
+                    0 => params["expected_revision"] = json!(2 + step),
+                    1 => params["forged"] = json!(true),
+                    2 => params = json!([]),
+                    _ => {}
+                }
+            }
+            writes.push(json!({"entity_type":"Child","entity_id":"child",
+                "action":if step==0 {"Create"} else {"Update"},"params":params}));
+        }
+        let payload = json!({"sub_writes":writes});
+        let store = SimEventStore::no_faults(seed);
+        let state = strict_composite_state(store.clone());
+        let tenant = TenantId::default();
+        let agent = AgentContext::for_service("strict-composite");
+        let result = state
+            .apply_composite_integration_result(
+                &tenant,
+                "Parent",
+                "parent",
+                "CreateChild",
+                &payload,
+                &agent,
+            )
+            .await;
+        if kind < 3 {
+            assert!(
+                matches!(result, Err(DispatchError::Conflict(_))),
+                "seed={seed}: {result:?}"
+            );
+            assert!(
+                store.dump_journal("default:Parent:parent").is_empty(),
+                "seed={seed}"
+            );
+            assert!(
+                store.dump_journal("default:Child:child").is_empty(),
+                "seed={seed}"
+            );
+        } else {
+            assert!(result.unwrap(), "seed={seed}");
+            let before = store.dump_journal("default:Child:child");
+            assert_eq!(before.len(), count + 1, "seed={seed}");
+            assert!(
+                state
+                    .apply_composite_integration_result(
+                        &tenant,
+                        "Parent",
+                        "parent",
+                        "CreateChild",
+                        &payload,
+                        &agent
+                    )
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                store.dump_journal("default:Child:child").len(),
+                before.len(),
+                "seed={seed}"
+            );
+            let child = state
+                .get_tenant_entity_state(&tenant, "Child", "child")
+                .await
+                .unwrap()
+                .state;
+            assert_eq!(child.counters["revision"], 3 + count, "seed={seed}");
+        }
+    }
+}
+
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn strict_composite_uses_virtual_authorization_and_rejects_before_overflow_storage() {
+    for allowed in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SimEventStore::no_faults(105);
+        let mut state = strict_composite_state(store.clone());
+        state.data_dir = dir.path().to_path_buf();
+        // Update authorization depends on the preceding Create's virtual status.
+        let policy = if allowed {
+            r#"permit(principal, action == Action::"Create", resource);
+               permit(principal, action == Action::"Update", resource) when { resource.status == "Active" };"#
+        } else {
+            r#"permit(principal, action == Action::"Create", resource);"#
+        };
+        state
+            .authz
+            .reload_tenant_policies("default", policy)
+            .unwrap();
+        let payload = json!({"sub_writes":[
+            {"entity_type":"Child","entity_id":"child","action":"Create","params":{"Name":"x".repeat(512*1024),"expected_revision":3}},
+            {"entity_type":"Child","entity_id":"child","action":"Update","params":{"Name":"bad","expected_revision":3}}
+        ]});
+        let result = state
+            .apply_composite_integration_result(
+                &TenantId::default(),
+                "Parent",
+                "parent",
+                "CreateChild",
+                &payload,
+                &AgentContext::for_service("strict-composite"),
+            )
+            .await;
+        if allowed {
+            assert!(
+                matches!(result, Err(DispatchError::Conflict(_))),
+                "{result:?}"
+            );
+        } else {
+            assert!(
+                matches!(result, Err(DispatchError::AuthzDenied(_))),
+                "{result:?}"
+            );
+        }
+        assert!(store.dump_journal("default:Parent:parent").is_empty());
+        assert!(store.dump_journal("default:Child:child").is_empty());
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "no overflow object may be written before later authorization and constraints pass"
+        );
+    }
+}

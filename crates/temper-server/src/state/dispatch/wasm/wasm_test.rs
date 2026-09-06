@@ -407,3 +407,45 @@ fn llmobs_tool_parent_prefers_workflow_span_id() {
         Some(("trace-1".to_string(), "workflow-parent".to_string()))
     );
 }
+
+#[tokio::test]
+async fn strict_wasm_callbacks_prepare_generated_metadata_but_preserve_constraints() {
+    use super::super::strict_test_support::{read, refused_is_visible, state};
+    for mode in [WasmDispatchMode::Inline, WasmDispatchMode::Background] {
+        for stale in [false, true] {
+            let state = state();
+            let tenant = TenantId::default();
+            let agent = AgentContext::for_service("test-wasm");
+            let before = serde_json::to_value(read(&state).await).unwrap();
+            let params = json!({"observed":"release-b", "expected_revision":if stale {0} else {1},
+                "gen_ai_parent_trace_id":"fixture-trace", "llmobs_agent_span_id":"fixture-span", "integration":"fixture"});
+            let result = state
+                .dispatch_wasm_callback(
+                    WasmEntityRef {
+                        tenant: &tenant,
+                        entity_type: "StrictJob",
+                        entity_id: "job",
+                    },
+                    "Complete",
+                    params,
+                    &agent,
+                    mode,
+                )
+                .await;
+            assert!(
+                result.is_ok(),
+                "a refused callback must not compensate newer state"
+            );
+            let actual = read(&state).await;
+            if stale {
+                assert_eq!(serde_json::to_value(&actual).unwrap(), before);
+                assert!(refused_is_visible(&state));
+            } else {
+                assert_eq!(actual.status, "Done");
+                assert_eq!(actual.fields["observed"], "release-b");
+                assert!(actual.fields.get("gen_ai_parent_trace_id").is_none());
+                assert!(actual.fields.get("llmobs_agent_span_id").is_none());
+            }
+        }
+    }
+}

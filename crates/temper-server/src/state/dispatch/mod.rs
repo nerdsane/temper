@@ -15,8 +15,11 @@ mod compensation;
 mod composite;
 mod cross_entity;
 mod effects;
+mod generated_callbacks;
 pub(crate) mod retry;
 pub(crate) mod state_timeouts;
+#[cfg(test)]
+mod strict_test_support;
 mod wasm;
 pub(crate) use wasm::authorized_http_endpoint_host;
 #[cfg(feature = "observe")]

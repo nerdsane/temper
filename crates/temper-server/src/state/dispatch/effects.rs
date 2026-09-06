@@ -576,14 +576,7 @@ impl crate::state::ServerState {
                 async move {
                     tokio::time::sleep(delay).await; // determinism-ok: scheduled delay
                     let _ = state
-                        .dispatch_tenant_action(
-                            &t,
-                            &et,
-                            &eid,
-                            &action,
-                            serde_json::json!({"__scheduled": true}),
-                            &ctx,
-                        )
+                        .dispatch_tenant_action(&t, &et, &eid, &action, serde_json::json!({}), &ctx)
                         .await;
                 }
                 .instrument(span),
@@ -830,5 +823,52 @@ mod tests {
             dispatch_trajectory_persistence_mode(),
             DispatchTrajectoryPersistenceMode::Background
         );
+    }
+}
+
+#[cfg(test)]
+mod strict_timer_tests {
+    use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn strict_parameterless_timer_reaches_the_native_actor() {
+        let state = super::super::strict_test_support::state();
+        let tenant = TenantId::default();
+        let agent = AgentContext::for_service("test-timer");
+        let scheduled = state
+            .dispatch_tenant_action(
+                &tenant,
+                "StrictJob",
+                "job",
+                "Schedule",
+                serde_json::json!({}),
+                &agent,
+            )
+            .await
+            .unwrap();
+        assert!(scheduled.success);
+        let mut changes = state.event_tx.subscribe();
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        let changed = tokio::time::timeout(std::time::Duration::from_secs(1), changes.recv()).await;
+        assert!(
+            changed.is_ok(),
+            "scheduled action did not reach the strict actor"
+        );
+        assert_eq!(
+            super::super::strict_test_support::read(&state).await.status,
+            "Done"
+        );
+        let rejected = state
+            .dispatch_tenant_action(
+                &tenant,
+                "StrictJob",
+                "job",
+                "Poll",
+                serde_json::json!({"__scheduled":true}),
+                &agent,
+            )
+            .await
+            .unwrap();
+        assert!(!rejected.success);
     }
 }

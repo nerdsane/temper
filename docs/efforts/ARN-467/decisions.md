@@ -1,5 +1,17 @@
 # Decisions and tradeoffs
 
+## D13: Reject contracts the validator cannot execute
+
+**Decision:** Reject repeated action names in contracted IOAs, malformed strict integer defaults, and comparison targets without values in the shared validator.
+
+**Came up because:** Review reproduced a later action replacing an earlier action's contract, invalid integer defaults becoming strings, and accepted comparisons against absent runtime metadata.
+
+**Options:** Select contracts by transition rule and pass all runtime metadata into validation. Reject ambiguous names and unsupported references at the parser boundary.
+
+**Chose parser rejection because:** The current source inventory has no repeated action names, and resources use declared fields or identity for comparison. This fixes the defects without another rule-selection or metadata path. Nested constraints, triggers and composite metadata now share one parse pass.
+
+**Where:** crates/temper-spec/src/automaton/contracts.rs; crates/temper-spec/src/automaton/toml_parser/mod.rs; docs/efforts/ARN-467/spec.md. The three new regression cases failed before the fix; all 275 parser tests pass after it.
+
 ## D1: Enforce contracts in the kernel
 
 **Decision:** Add opt-in strict action parameters and pre-state constraints to IOA and the production actor boundary.
@@ -124,3 +136,27 @@
 **Chose explicit reaction deliveries because:** The target owns its input contract, while ordinary caller and actor messages retain the exact allowlist. Routed requests still satisfy constraints against unmodified target state. An external envelope without an actor sender is rejected, and unknown target actions fail before mutation.
 
 **Where:** crates/temper-actor-runtime/src/spec_actor.rs; crates/temper-actor-runtime/src/pg_strict_tests.rs.
+
+## D11: Prepare generated callbacks without relaxing caller inputs
+
+**Decision:** Remove the unused timer marker and project generated callback payloads onto the target action's declared inputs before the existing strict actor validation.
+
+**Came up because:** Runtime-generated duration, tracing, and failure metadata caused valid strict callbacks to be rejected, while the unused scheduled marker prevented parameterless timers from firing.
+
+**Options:** Sanitize every caller request before validation; allow reserved metadata in every strict action; prepare only generated callbacks at their internal dispatch boundaries.
+
+**Chose internal preparation because:** Public inputs keep their exact allowlist and callback constraints still compare with unmodified target state. A refused callback is surfaced without turning it into an unrelated failure transition on newer state.
+
+**Where:** crates/temper-server/src/state/dispatch/effects.rs; adapter.rs; compensation.rs; wasm/invocation_artifacts.rs; generated_callbacks.rs and native regression tests.
+
+## D12: Preflight strict composite writes in their execution order
+
+**Decision:** Use shared typed initialization and a per-target virtual state to validate every composite sub-write before durable or external effects.
+
+**Came up because:** Composite creation lost declared defaults, normalization inserted an undeclared Id parameter, and independent preflight snapshots could not validate a later write that depends on an earlier write to the same target.
+
+**Options:** Validate only during staging; validate every write against the original snapshot; simulate the same ordered state updates before applying the batch.
+
+**Chose ordered preflight because:** Invalid later inputs leave all target journals and overflow storage untouched, while valid dependent writes retain atomic behavior. Strict sub-write parameters remain explicit inputs; generated identity stays in the resource address and initial state. Data-only creation reuses the same initializer.
+
+**Where:** crates/temper-server/src/state/dispatch/composite.rs and composite/helpers.rs; entity_actor/actor.rs; state/entity_ops.rs and native regression tests.

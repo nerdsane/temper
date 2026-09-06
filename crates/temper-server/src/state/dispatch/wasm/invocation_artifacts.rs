@@ -157,6 +157,19 @@ impl crate::state::ServerState {
         agent_ctx: &AgentContext,
         mode: WasmDispatchMode,
     ) -> Result<Option<EntityResponse>, String> {
+        let callback_params = match self.prepare_generated_action_params(
+            entity_ref.tenant,
+            entity_ref.entity_type,
+            callback_action,
+            callback_params,
+        ) {
+            Ok(params) => params,
+            Err(error) => {
+                return self
+                    .reject_generated_callback(entity_ref, callback_action, error, mode)
+                    .await;
+            }
+        };
         match mode {
             WasmDispatchMode::Inline => {
                 // Preserve inline semantics through nested WASM callbacks.
@@ -177,24 +190,40 @@ impl crate::state::ServerState {
                 )
                 .await
                 .map_err(|e| e.to_string())?;
+                if !resp.success {
+                    self.record_generated_callback_refusal(
+                        entity_ref,
+                        callback_action,
+                        resp.error.as_deref().unwrap_or("callback rejected"),
+                    );
+                }
                 Ok(Some(resp))
             }
             WasmDispatchMode::Background => {
                 let callback_ctx = AgentContext::for_service_inheriting("wasm-runtime", agent_ctx);
-                self.dispatch_tenant_action(
-                    entity_ref.tenant,
-                    entity_ref.entity_type,
-                    entity_ref.entity_id,
-                    callback_action,
-                    callback_params,
-                    &callback_ctx,
-                )
-                .await
-                .map_err(|e| {
-                    let msg = format!("failed to dispatch WASM callback '{callback_action}': {e}");
-                    tracing::error!(callback = %callback_action, error = %e, "{msg}");
-                    msg
-                })?;
+                let response = self
+                    .dispatch_tenant_action(
+                        entity_ref.tenant,
+                        entity_ref.entity_type,
+                        entity_ref.entity_id,
+                        callback_action,
+                        callback_params,
+                        &callback_ctx,
+                    )
+                    .await
+                    .map_err(|e| {
+                        let msg =
+                            format!("failed to dispatch WASM callback '{callback_action}': {e}");
+                        tracing::error!(callback = %callback_action, error = %e, "{msg}");
+                        msg
+                    })?;
+                if !response.success {
+                    self.record_generated_callback_refusal(
+                        entity_ref,
+                        callback_action,
+                        response.error.as_deref().unwrap_or("callback rejected"),
+                    );
+                }
                 Ok(None)
             }
         }

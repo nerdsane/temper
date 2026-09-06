@@ -142,7 +142,7 @@ pub struct EntityActor {
 }
 
 impl EntityActor {
-    pub(super) fn build_initial_state(
+    pub(crate) fn build_initial_state(
         entity_type: &str,
         entity_id: &str,
         table: &TransitionTable,

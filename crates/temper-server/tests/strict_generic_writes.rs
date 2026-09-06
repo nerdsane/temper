@@ -215,6 +215,59 @@ async fn empty_action_body_is_empty_object_and_malformed_body_does_not_execute()
 }
 
 #[tokio::test]
+async fn missing_strict_initializer_reports_refusal_without_creating_child() {
+    let parent = SPEC.replace(
+        "params = [\"Notes\"]",
+        "params = [\"Notes\"]\neffect = [{type=\"spawn\",entity_type=\"Customer\",entity_id_source=\"Notes\",initial_action=\"MissingInitializer\"}]",
+    );
+    let child = SPEC.replace("name = \"Order\"", "name = \"Customer\"");
+    let (state, _) = common::build_single_tenant_state(
+        0,
+        "missing-strict-initializer",
+        "default",
+        &[("Order", &parent), ("Customer", &child)],
+    );
+    state
+        .authz
+        .reload_tenant_policies("default", "permit(principal, action, resource);")
+        .unwrap();
+    let tenant = TenantId::default();
+    state
+        .get_or_create_tenant_entity(&tenant, "Order", "parent", json!({}))
+        .await
+        .unwrap();
+    let mut events = state.entity_observe_tx.subscribe();
+    state
+        .dispatch_tenant_action(
+            &tenant,
+            "Order",
+            "parent",
+            "SubmitOrder",
+            json!({"Notes":"child"}),
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+    let refusal = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        for _ in 0..32 {
+            let event = events.recv().await.unwrap();
+            if event.entity_id == "parent" && event.event_name == "integration_callback_rejected" {
+                assert_eq!(event.data["action"], "MissingInitializer");
+                return;
+            }
+        }
+        panic!("spawn refusal was not reported");
+    })
+    .await;
+    assert_eq!(
+        state.active_actor_count(),
+        1,
+        "created a child with no declared initializer"
+    );
+    refusal.expect("spawn refusal was not observable");
+}
+
+#[tokio::test]
 async fn declared_spawn_initializes_a_strict_child_through_its_action() {
     let parent = r#"
 [automaton]
