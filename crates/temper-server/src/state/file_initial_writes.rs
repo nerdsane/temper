@@ -87,6 +87,7 @@ impl ServerState {
 
         let persistence_id = format!("{tenant}:File:{file_id}");
         let mut state = initial_file_state(file_id, &table, serde_json::json!({}));
+        let initial = state.clone();
         let mut events = Vec::with_capacity(3);
 
         let created = EntityEvent {
@@ -145,7 +146,9 @@ impl ServerState {
         let envelopes = events
             .iter()
             .enumerate()
-            .map(|(idx, event)| synthetic_envelope(&persistence_id, (idx + 1) as u64, event))
+            .map(|(idx, event)| {
+                synthetic_envelope(&persistence_id, (idx + 1) as u64, event, &initial)
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         match store.append(&persistence_id, 0, &envelopes).await {
@@ -345,30 +348,8 @@ fn initial_file_state(
     table: &temper_jit::table::TransitionTable,
     initial_fields: serde_json::Value,
 ) -> EntityState {
-    let mut fields =
-        crate::entity_actor::effects::sanitize_action_params(&initial_fields).into_owned();
-    crate::entity_actor::effects::canonicalize_entity_fields(
-        &mut fields,
-        file_id,
-        &table.initial_state,
-    );
-
-    EntityState {
-        entity_type: "File".to_string(),
-        entity_id: file_id.to_string(),
-        status: table.initial_state.clone(),
-        item_count: 0,
-        counters: std::collections::BTreeMap::new(),
-        booleans: std::collections::BTreeMap::new(),
-        lists: std::collections::BTreeMap::new(),
-        fields,
-        events: std::collections::VecDeque::new(),
-        total_event_count: 0,
-        events_since_snapshot: 0,
-        last_snapshot_sequence_nr: 0,
-        sequence_nr: 0,
-        processed_idempotency_keys: std::collections::BTreeMap::new(),
-    }
+    let fields = crate::entity_actor::effects::sanitize_action_params(&initial_fields).into_owned();
+    crate::entity_actor::EntityActor::build_initial_state("File", file_id, table, &fields)
 }
 
 fn apply_synthetic_file_action(
@@ -412,8 +393,9 @@ fn synthetic_envelope(
     persistence_id: &str,
     sequence_nr: u64,
     event: &EntityEvent,
+    initial: &EntityState,
 ) -> Result<PersistenceEnvelope, FileStreamContentError> {
-    let payload = serde_json::to_value(event)
+    let payload = crate::entity_actor::bootstrap::event_payload(event, initial)
         .map_err(|e| FileStreamContentError::State(format!("failed to serialize event: {e}")))?;
     Ok(PersistenceEnvelope {
         sequence_nr,
@@ -427,4 +409,46 @@ fn synthetic_envelope(
             actor_id: persistence_id.to_string(),
         },
     })
+}
+
+#[cfg(test)]
+mod default_tests {
+    use super::*;
+
+    #[test]
+    fn round_four_atomic_file_initial_state_materializes_declared_defaults() {
+        let table = temper_jit::table::TransitionTable::from_ioa_source(
+            r#"
+[automaton]
+name = "File"
+states = ["Active"]
+initial = "Active"
+strict_action_params = true
+[[state]]
+name = "revision"
+type = "counter"
+initial = "3"
+[[action]]
+name = "StreamUpdated"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["expected"]
+constraints = [{kind="param_equals_field",param="expected",field="revision"}]
+"#,
+        );
+        let mut state = initial_file_state("file", &table, serde_json::json!({}));
+        assert_eq!(state.counters.get("revision"), Some(&3));
+        let result = apply_synthetic_file_action(
+            &mut state,
+            &table,
+            "StreamUpdated",
+            serde_json::json!({"expected":3}),
+            &Default::default(),
+        );
+        assert!(
+            result.is_ok(),
+            "fresh File cannot use its declared initial state: {result:?}"
+        );
+    }
 }

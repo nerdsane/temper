@@ -1,6 +1,7 @@
 //! Postgres-backed implementations of Mailbox and ActorActivator.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -197,11 +198,21 @@ pub enum ActivationError {
 pub struct PgActorActivator {
     pool: Pool,
     mailbox: Arc<dyn Mailbox>,
+    handlers: Arc<RwLock<HashMap<String, Arc<dyn Actor>>>>,
 }
 
 impl PgActorActivator {
-    pub fn new(pool: Pool, mailbox: Arc<dyn Mailbox>) -> Self {
-        Self { pool, mailbox }
+    /// Build an activator using the actor system's existing handler registry.
+    pub fn new(
+        pool: Pool,
+        mailbox: Arc<dyn Mailbox>,
+        handlers: Arc<RwLock<HashMap<String, Arc<dyn Actor>>>>,
+    ) -> Self {
+        Self {
+            pool,
+            mailbox,
+            handlers,
+        }
     }
 
     /// Activate an actor instance.
@@ -246,33 +257,28 @@ impl PgActorActivator {
 
         let (mut state, last_msg_id, version) = match rows.first() {
             Some(row) => {
-                let state_bytes: Vec<u8> = row.get("state");
-                // If state is empty (freshly spawned), use handler's initial state.
-                let state = if state_bytes.is_empty() {
-                    handler.initial_state()
-                } else {
-                    state_bytes
-                };
+                // Existing bytes are recovery data, including an empty value.
+                // The actor owns validation; only an absent row is initialization.
                 (
-                    state,
+                    row.get::<_, Vec<u8>>("state"),
                     row.get::<_, i64>("last_msg_id"),
                     row.get::<_, i64>("version"),
                 )
             }
             None => {
-                // Auto-create with initial state.
+                let initial_state = handler.initial_state_for(actor_handle);
                 tx.execute(
                     schema::CREATE_ACTOR,
                     &[
                         &actor_handle.namespace,
                         &actor_handle.actor_type,
-                        &handler.initial_state(),
+                        &initial_state,
                     ],
                 )
                 .await
                 .map_err(|e| ActivationError::Storage(format!("create: {e}")))?;
 
-                (handler.initial_state(), 0i64, 0i64)
+                (initial_state, 0i64, 0i64)
             }
         };
 
@@ -315,9 +321,40 @@ impl PgActorActivator {
             actor_handle.clone(),
             Some(self.mailbox.clone()),
             Some(self.pool.clone()),
+            self.handlers.clone(),
         );
 
-        handler.handle(&ctx, &mut state, &message).await?;
+        match handler.handle(&ctx, &mut state, &message).await {
+            Ok(()) => {}
+            Err(error @ ActorError::Rejected(_)) => {
+                // Deterministic refusals must not poison FIFO. Advance only the
+                // cursor; never persist modified handler bytes or buffered tells.
+                let changed = tx
+                    .execute(
+                        "UPDATE odp_temper.actor_instances SET last_msg_id = $1, \
+                     version = version + 1, updated_at = NOW() \
+                     WHERE namespace = $2 AND actor_type = $3 AND version = $4",
+                        &[
+                            &new_last_msg_id,
+                            &actor_handle.namespace,
+                            &actor_handle.actor_type,
+                            &version,
+                        ],
+                    )
+                    .await
+                    .map_err(|error| {
+                        ActivationError::Storage(format!("reject message: {error}"))
+                    })?;
+                if changed == 0 {
+                    return Err(ActivationError::ConcurrencyViolation { expected: version });
+                }
+                tx.commit().await.map_err(|error| {
+                    ActivationError::Storage(format!("commit rejection: {error}"))
+                })?;
+                return Err(error.into());
+            }
+            Err(error) => return Err(error.into()),
+        }
 
         // 5. Persist state + advance cursor.
         let rows_affected = tx
@@ -374,3 +411,7 @@ impl PgActorActivator {
         Ok(ActivationResult { activated: true })
     }
 }
+
+#[cfg(test)]
+#[path = "pg_strict_tests.rs"]
+mod strict_tests;

@@ -36,9 +36,9 @@ pub(super) use tokio::time::sleep as sleep_persistence_retry; // determinism-ok:
 
 use crate::storage::{BackendLabel, BoxedEventStore};
 
+use super::action_input::process_action_with_blob_prestate;
 use super::effects::{
-    FieldSyncMode, build_eval_context_with_xref, process_action_with_xref_and_field_mode,
-    prune_transient_action_fields_from_state,
+    FieldSyncMode, build_eval_context_with_xref, prune_transient_action_fields_from_state,
 };
 use super::snapshot_queue::{SnapshotEnqueueOutcome, SnapshotWriteQueue};
 use super::types::{
@@ -139,16 +139,20 @@ pub struct EntityActor {
     idempotency_cache: Option<Arc<crate::idempotency::IdempotencyCache>>,
     /// Object store for field-overflow blob bytes. SQL stores only refs.
     pub(super) blob_store: Option<crate::blob_store::BlobStore>,
+    legacy_blob_store: Option<Arc<dyn crate::storage::BlobStore>>,
 }
 
 impl EntityActor {
-    pub(super) fn build_initial_state(
+    pub(crate) fn build_initial_state(
         entity_type: &str,
         entity_id: &str,
         table: &TransitionTable,
         initial_fields: &serde_json::Value,
     ) -> EntityState {
         let mut fields = initial_fields.clone();
+        let mut counters = BTreeMap::new();
+        let mut booleans = BTreeMap::new();
+        table.initialize_declared_fields(&mut fields, &mut counters, &mut booleans);
         super::effects::canonicalize_entity_fields(&mut fields, entity_id, &table.initial_state);
 
         EntityState {
@@ -156,9 +160,18 @@ impl EntityActor {
             entity_id: entity_id.to_string(),
             status: table.initial_state.clone(),
             item_count: 0,
-            counters: BTreeMap::new(),
-            booleans: BTreeMap::new(),
-            lists: BTreeMap::new(),
+            counters,
+            booleans,
+            lists: if table.strict_action_params
+                || table
+                    .action_contracts
+                    .values()
+                    .any(|contract| !contract.constraints.is_empty())
+            {
+                table.initial_values.lists.clone()
+            } else {
+                BTreeMap::new()
+            },
             fields,
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
@@ -266,6 +279,7 @@ impl EntityActor {
             trace_id: sim_uuid().to_string(),
             idempotency_cache: None,
             blob_store: None,
+            legacy_blob_store: None,
         }
     }
 
@@ -290,6 +304,7 @@ impl EntityActor {
             trace_id: sim_uuid().to_string(),
             idempotency_cache: None,
             blob_store: None,
+            legacy_blob_store: None,
         }
     }
 
@@ -316,6 +331,14 @@ impl EntityActor {
     }
 
     /// Attach the object store used for field-overflow blob writes.
+    pub(crate) fn with_legacy_blob_store(
+        mut self,
+        store: Option<Arc<dyn crate::storage::BlobStore>>,
+    ) -> Self {
+        self.legacy_blob_store = store;
+        self
+    }
+
     pub(crate) fn with_blob_store(
         mut self,
         blob_store: Option<crate::blob_store::BlobStore>,
@@ -361,7 +384,7 @@ impl EntityActor {
         state: &mut EntityState,
         event: &EntityEvent,
     ) -> Result<u64, PersistenceError> {
-        let payload = serde_json::to_value(event)
+        let payload = super::bootstrap::event_payload(event, state)
             .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
         let envelope = PersistenceEnvelope {
             sequence_nr: state.sequence_nr + 1,
@@ -580,6 +603,9 @@ impl EntityActor {
                         MAX_EVENTS_SINCE_SNAPSHOT
                     )));
                 }
+                if !loaded_snapshot && from_sequence == 0 && !envelopes.is_empty() {
+                    super::bootstrap::clear_for_replay(state, &table.initial_state);
+                }
                 let mut expected_sequence = from_sequence.saturating_add(1);
                 for (index, env) in envelopes.iter().enumerate() {
                     if replay_policy.strict_event_validation() {
@@ -744,6 +770,17 @@ impl EntityActor {
                                     table, state, env, &event,
                                 )?;
                             }
+                            let frozen_bootstrap = event.action == "Created"
+                                && event.from_status.is_empty()
+                                && env.payload.get("initial_values").is_some();
+                            if event.action == "Created" && event.from_status.is_empty() {
+                                if env.sequence_nr != 1 || state.total_event_count != 0 {
+                                    return Err(ActorError::custom(
+                                        "initial values require the first bootstrap event",
+                                    ));
+                                }
+                                super::bootstrap::restore(state, &env.payload)?;
+                            }
                             event.params =
                                 super::effects::sanitize_action_params(&event.params).into_owned();
                             // A persisted event is a historical fact: its guard
@@ -758,8 +795,9 @@ impl EntityActor {
                             // longer knows this action/from-state, in which case
                             // the stored `to_status` alone carries the state.
                             let from_status = event.from_status.clone();
-                            if let Some(effects) =
-                                table.replay_effects(&state.status, &event.action)
+                            if !frozen_bootstrap
+                                && let Some(effects) =
+                                    table.replay_effects(&state.status, &event.action)
                             {
                                 let effects = effects.to_vec();
                                 // Shared effect application — same code as handle() and simulation.
@@ -786,12 +824,16 @@ impl EntityActor {
                             // like Title, Description, Priority survive replay.
                             let field_sync_mode =
                                 Self::field_sync_mode_for_backend(Some(backend), blob_store);
-                            let overflow_blobs = super::effects::sync_fields_with_metadata(
-                                state,
-                                &event.params,
-                                field_sync_mode,
-                                Some(&table.state_var_metadata),
-                            );
+                            let overflow_blobs = if frozen_bootstrap {
+                                Vec::new()
+                            } else {
+                                super::effects::sync_fields_with_metadata(
+                                    state,
+                                    &event.params,
+                                    field_sync_mode,
+                                    Some(&table.state_var_metadata),
+                                )
+                            };
                             // Persist replayed overflow blobs so blob-ref envelopes
                             // resolve on subsequent OData reads. Content-addressed
                             // dedup makes this idempotent — if the original live
@@ -873,7 +915,13 @@ impl EntityActor {
                 }
             }
             Err(e) => {
-                if replay_policy.strict_journal_read() {
+                if replay_policy.strict_journal_read()
+                    || table.strict_action_params
+                    || table
+                        .action_contracts
+                        .values()
+                        .any(|contract| !contract.constraints.is_empty())
+                {
                     return Err(ActorError::custom(format!(
                         "failed to read events for replay of {}:{}: {e}",
                         state.entity_type, state.entity_id
@@ -1203,14 +1251,20 @@ impl Actor for EntityActor {
                 // retry can replace them with values re-evaluated against the
                 // caught-up state. The downstream telemetry and reply use
                 // whichever pair last succeeded in persist.
-                let mut result = process_action_with_xref_and_field_mode(
+                let mut result = process_action_with_blob_prestate(
                     state,
                     &table,
                     &name,
                     &params,
                     &cross_entity_booleans,
                     field_sync_mode,
-                );
+                    crate::blobs::BlobReadSource::Staged {
+                        store: self.blob_store.as_ref(),
+                        legacy: self.legacy_blob_store.as_deref(),
+                        blobs: &[],
+                    },
+                )
+                .await;
 
                 if result.success {
                     // process_action returned a successful transition with event.
@@ -1343,14 +1397,20 @@ impl Actor for EntityActor {
                                     // terminal state during the race) — if so,
                                     // surface that error rather than silently
                                     // dropping the caller.
-                                    let retry_result = process_action_with_xref_and_field_mode(
+                                    let retry_result = process_action_with_blob_prestate(
                                         state,
                                         &table,
                                         &name,
                                         &params,
                                         &cross_entity_booleans,
                                         field_sync_mode,
-                                    );
+                                        crate::blobs::BlobReadSource::Staged {
+                                            store: self.blob_store.as_ref(),
+                                            legacy: self.legacy_blob_store.as_deref(),
+                                            blobs: &[],
+                                        },
+                                    )
+                                    .await;
 
                                     if !retry_result.success {
                                         retry_final = Some((
@@ -1692,6 +1752,25 @@ impl Actor for EntityActor {
             EntityMsg::Delete {
                 expected_authorization_precondition,
             } => {
+                if self
+                    .table
+                    .read()
+                    .expect("table lock poisoned")
+                    .strict_action_params
+                {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some(
+                            "Strict entities require a declared action for deletion".to_owned(),
+                        ),
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
                 if let Some(expected) = expected_authorization_precondition
                     && super::effects::entity_authorization_precondition(state) != expected
                 {
@@ -1777,3 +1856,7 @@ mod tests;
 #[cfg(test)]
 #[path = "authoritative_replay_test.rs"]
 mod authoritative_replay_tests;
+
+#[cfg(test)]
+#[path = "contract_state_test.rs"]
+pub(super) mod contract_state_tests;

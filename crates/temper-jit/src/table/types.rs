@@ -65,6 +65,15 @@ pub struct TransitionTable {
     /// Composite-action metadata keyed by action name (ADR-0040).
     #[serde(default)]
     pub composite_actions: BTreeMap<String, CompositeActionMetadata>,
+    /// Whether only declared actions may mutate this entity's data.
+    #[serde(default)]
+    pub strict_action_params: bool,
+    /// Incoming parameter constraints retained across table serialization.
+    #[serde(default)]
+    pub action_contracts: BTreeMap<String, super::action_contract::ActionContract>,
+    /// Declared defaults used by strict actors and pre-state constraints.
+    #[serde(default)]
+    pub initial_values: super::action_contract::InitialValues,
     /// Pre-built index: action name → indices into `rules`.
     ///
     /// Eliminates the O(N) linear scan + Vec allocation in [`evaluate_ctx()`].
@@ -160,6 +169,12 @@ impl<'de> Deserialize<'de> for TransitionTable {
             #[serde(default)]
             composite_actions: BTreeMap<String, CompositeActionMetadata>,
             #[serde(default)]
+            strict_action_params: bool,
+            #[serde(default)]
+            action_contracts: BTreeMap<String, super::action_contract::ActionContract>,
+            #[serde(default)]
+            initial_values: super::action_contract::InitialValues,
+            #[serde(default)]
             keys: Vec<DeclaredKey>,
             #[serde(default)]
             vectors: Vec<DeclaredVector>,
@@ -175,6 +190,9 @@ impl<'de> Deserialize<'de> for TransitionTable {
             vectors: raw.vectors,
             state_var_metadata: raw.state_var_metadata,
             composite_actions: raw.composite_actions,
+            strict_action_params: raw.strict_action_params,
+            action_contracts: raw.action_contracts,
+            initial_values: raw.initial_values,
             rule_index: BTreeMap::new(),
         };
         table.rebuild_index();
@@ -313,6 +331,9 @@ mod tests {
             ],
             state_var_metadata: BTreeMap::new(),
             composite_actions: BTreeMap::new(),
+            strict_action_params: false,
+            action_contracts: BTreeMap::new(),
+            initial_values: Default::default(),
             rule_index: BTreeMap::new(),
         };
         table.rebuild_index();

@@ -2554,11 +2554,33 @@ async fn replay_skip_of_a_field_update_event_is_counted() {
 
     let store = Arc::new(SimEventStore::no_faults(71));
     let pid = "default:Order:arn189-replay-skip-metric";
+    // The value that survives the malformed update must already be durable.
+    let created = EntityEvent {
+        action: "Created".into(),
+        from_status: String::new(),
+        to_status: order_table().read().unwrap().initial_state.clone(),
+        timestamp: sim_now(),
+        params: serde_json::json!({"Customer": "Alice"}),
+        idempotency_key: None,
+    };
+    let created_env = PersistenceEnvelope {
+        sequence_nr: 1,
+        event_type: created.action.clone(),
+        payload: serde_json::to_value(&created).unwrap(),
+        metadata: EventMetadata {
+            event_id: sim_uuid(),
+            causation_id: sim_uuid(),
+            correlation_id: sim_uuid(),
+            timestamp: created.timestamp,
+            actor_id: pid.to_string(),
+        },
+    };
+    store.append(pid, 0, &[created_env]).await.unwrap();
 
     // A journaled field update whose payload does not deserialize as an
     // `EntityEvent` — the shape a build under a previous schema could have left.
     let bad_env = PersistenceEnvelope {
-        sequence_nr: 0,
+        sequence_nr: 2,
         event_type: crate::entity_actor::effects::FIELDS_UPDATED_EVENT.to_string(),
         payload: serde_json::json!({
             "action": 999,
@@ -2573,7 +2595,7 @@ async fn replay_skip_of_a_field_update_event_is_counted() {
         },
     };
     store
-        .append(pid, 0, std::slice::from_ref(&bad_env))
+        .append(pid, 1, std::slice::from_ref(&bad_env))
         .await
         .expect("append malformed field-update event");
 
@@ -2584,7 +2606,7 @@ async fn replay_skip_of_a_field_update_event_is_counted() {
             "Order",
             "arn189-replay-skip-metric",
             order_table(),
-            serde_json::json!({"Customer": "Alice"}),
+            serde_json::json!({"Customer": "Uncommitted constructor value"}),
             crate::storage::BoxedEventStore::from_arc(store.clone()),
             crate::storage::BackendLabel::Sim,
         ),

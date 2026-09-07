@@ -366,3 +366,6 @@ async fn authoritative_replay_rejects_non_object_field_update_payloads() {
         "unexpected error: {error}"
     );
 }
+
+#[path = "bootstrap_recovery_test.rs"]
+mod bootstrap_recovery_tests;

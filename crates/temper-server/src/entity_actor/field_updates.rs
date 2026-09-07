@@ -34,6 +34,14 @@ pub(super) async fn commit_field_update(
     replace: bool,
     expected_precondition: Option<String>,
 ) -> Result<(), String> {
+    if actor
+        .table
+        .read()
+        .expect("table lock poisoned")
+        .strict_action_params
+    {
+        return Err("Strict entities require a declared action for field changes".to_owned());
+    }
     let has_precondition = expected_precondition.is_some();
     if let Some(expected) = expected_precondition
         && effects::entity_authorization_precondition(state) != expected

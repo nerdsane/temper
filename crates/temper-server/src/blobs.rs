@@ -15,15 +15,18 @@ use crate::state::ServerState;
 
 mod descriptor;
 mod hydration;
+mod read_source;
 pub use descriptor::{
     FieldOverflowDescriptor, field_overflow_descriptor, field_overflow_sha256,
     is_valid_field_overflow_key,
 };
 pub(crate) use hydration::{
     BlobHydrationBudget, hydrate_blob_refs_for_tenant, hydrate_blob_refs_for_tenant_with_budget,
+    hydrate_comparison_fields,
 };
 #[cfg(test)]
 pub(crate) use hydration::{hydrate_blob_refs_in_value, hydrate_blob_refs_in_value_with_ceiling};
+pub(crate) use read_source::BlobReadSource;
 
 pub(crate) const FIELD_OVERFLOW_BLOB_PREFIX: &str = "field-overflow/sha256/";
 pub(crate) const FIELD_OVERFLOW_REF_KEY: &str = "__temper_blob_ref";

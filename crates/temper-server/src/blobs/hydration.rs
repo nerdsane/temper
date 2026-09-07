@@ -7,6 +7,7 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use temper_runtime::tenant::TenantId;
 
+use super::read_source::{BlobReadSource, read_blob_ref_bytes};
 use super::{field_overflow_descriptor, field_overflow_sha256};
 #[cfg(test)]
 use crate::blob_store::BlobStore;
@@ -225,31 +226,6 @@ fn collect_blob_ref_pointers(value: &Value, pointer: &str, out: &mut Vec<String>
     }
 }
 
-pub(super) enum BlobReadSource<'a> {
-    #[cfg(test)]
-    Store(&'a BlobStore),
-    Tenant {
-        state: &'a ServerState,
-        tenant: &'a TenantId,
-    },
-}
-
-async fn read_blob_ref_bytes(
-    source: &BlobReadSource<'_>,
-    key: &str,
-    max_bytes: usize,
-) -> Result<BlobReadBounded, String> {
-    match source {
-        #[cfg(test)]
-        BlobReadSource::Store(store) => store.get_bounded(key, max_bytes).await,
-        BlobReadSource::Tenant { state, tenant } => {
-            state
-                .get_blob_with_legacy_fallback_bounded(tenant, key, max_bytes)
-                .await
-        }
-    }
-}
-
 fn blob_bytes_match_key(key: &str, bytes: &[u8]) -> bool {
     let Some(expected) = field_overflow_sha256(key) else {
         return false;
@@ -412,4 +388,33 @@ pub(crate) async fn hydrate_blob_refs_for_tenant_with_budget(
     budget: &BlobHydrationBudget,
 ) -> BTreeMap<String, Vec<u8>> {
     hydrate_blob_refs_with_source(&BlobReadSource::Tenant { state, tenant }, value, budget).await
+}
+
+/// Resolve only a caller-selected set of comparison fields. Unavailable or
+/// invalid referenced bytes cannot turn an equality check into inequality.
+pub(crate) async fn hydrate_comparison_fields(
+    source: &BlobReadSource<'_>,
+    fields: &mut Value,
+) -> Result<(), String> {
+    let mut pointers = Vec::new();
+    collect_blob_ref_pointers(fields, "", &mut pointers);
+    if pointers.is_empty() {
+        return Ok(());
+    }
+    let budget = BlobHydrationBudget::new(
+        WASM_DEFERRED_BLOB_BUDGET_BYTES,
+        WASM_DEFERRED_BLOB_BUDGET_BYTES,
+        0,
+        0,
+    );
+    hydrate_blob_refs_with_source(source, fields, &budget).await;
+    for pointer in pointers {
+        if fields
+            .pointer(&pointer)
+            .is_some_and(|value| field_overflow_descriptor(value).is_some())
+        {
+            return Err("Comparison field blob could not be resolved and verified".to_string());
+        }
+    }
+    Ok(())
 }

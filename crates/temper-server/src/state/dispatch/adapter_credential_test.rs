@@ -542,3 +542,81 @@ async fn adapter_credential_mint_requires_caller_delegation_authority() {
         before
     );
 }
+
+#[tokio::test]
+async fn strict_adapter_callbacks_keep_declared_values_in_both_modes() {
+    use super::super::strict_test_support::{read, state};
+    for mode in [WasmDispatchMode::Inline, WasmDispatchMode::Background] {
+        let state = state();
+        let tenant = TenantId::default();
+        let params = normalize_success_params(AdapterResult::success(
+            serde_json::json!({"observed":"release-b", "expected_revision":1}),
+            17,
+        ));
+        state
+            .dispatch_adapter_callback(
+                WasmEntityRef {
+                    tenant: &tenant,
+                    entity_type: "StrictJob",
+                    entity_id: "job",
+                },
+                "Complete",
+                params,
+                &AgentContext::for_service("test-adapter"),
+                mode,
+            )
+            .await
+            .unwrap();
+        let actual = read(&state).await;
+        assert_eq!(actual.status, "Done");
+        assert_eq!(actual.fields["observed"], "release-b");
+        assert!(
+            !actual
+                .fields
+                .as_object()
+                .unwrap()
+                .contains_key("duration_ms")
+        );
+    }
+}
+
+#[tokio::test]
+async fn strict_adapter_stale_callback_is_visible_without_requesting_compensation() {
+    use super::super::strict_test_support::{read, refused_is_visible, state};
+    for mode in [WasmDispatchMode::Inline, WasmDispatchMode::Background] {
+        let state = state();
+        let tenant = TenantId::default();
+        let agent = AgentContext::for_service("test-adapter");
+        state
+            .dispatch_tenant_action(
+                &tenant,
+                "StrictJob",
+                "job",
+                "Rollover",
+                serde_json::json!({}),
+                &agent,
+            )
+            .await
+            .unwrap();
+        let before = serde_json::to_value(read(&state).await).unwrap();
+        let result = state
+            .dispatch_adapter_callback(
+                WasmEntityRef {
+                    tenant: &tenant,
+                    entity_type: "StrictJob",
+                    entity_id: "job",
+                },
+                "Complete",
+                serde_json::json!({"observed":"stale", "expected_revision":1, "duration_ms":17}),
+                &agent,
+                mode,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "callback refusal must not enter the integration compensation path"
+        );
+        assert_eq!(serde_json::to_value(read(&state).await).unwrap(), before);
+        assert!(refused_is_visible(&state));
+    }
+}

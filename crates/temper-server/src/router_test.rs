@@ -536,6 +536,10 @@ async fn git_receive_pack_bridge_response_uses_pkt_line_report() {
 }
 
 async fn test_state_with_data_only_ioa_and_turso() -> ServerState {
+    test_state_with_data_only_spec_and_turso(false).await
+}
+
+async fn test_state_with_data_only_spec_and_turso(strict: bool) -> ServerState {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let db_url = format!(
@@ -577,7 +581,31 @@ initial = ""
     let csdl = parse_csdl(csdl_xml).unwrap();
     let system = ActorSystem::new("test-data-only-fast-path");
     let mut specs = std::collections::BTreeMap::new();
-    specs.insert("LogEntry".to_string(), log_entry_ioa.to_string());
+    let log_entry_ioa = if strict {
+        log_entry_ioa
+            .replace(
+                "initial = \"Recorded\"",
+                "initial = \"Recorded\"\nstrict_action_params = true",
+            )
+            .replace("initial = \"\"", "initial = \"initial body\"")
+            + r#"
+[[state]]
+name = "revision"
+type = "counter"
+initial = "3"
+[[state]]
+name = "enabled"
+type = "bool"
+initial = "true"
+[[state]]
+name = "members"
+type = "list"
+initial = '["first"]'
+"#
+    } else {
+        log_entry_ioa.to_string()
+    };
+    specs.insert("LogEntry".to_string(), log_entry_ioa);
     let mut state = ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap();
     state.set_storage_stack(StorageStack::from_turso(turso));
     state
@@ -2619,4 +2647,55 @@ fn credential_header_classifier_is_case_insensitive() {
     }
     assert!(!is_credential_header("x-temper-observe-session-id"));
     assert!(!is_credential_header("content-type"));
+}
+
+#[tokio::test]
+async fn strict_data_only_creation_and_hydration_share_typed_defaults() {
+    let state = test_state_with_data_only_spec_and_turso(true).await;
+    let app = authenticated_router(state.clone());
+    let response = app
+        .oneshot(
+            Request::post("/tdata/LogEntries")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"Id":"typed-entry"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let created: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(created["fields"]["Body"], "initial body");
+    assert_eq!(created["counters"]["revision"], 3);
+    assert_eq!(created["booleans"]["enabled"], true);
+    let (journal, _) = state.event_journal().unwrap();
+    let events = journal
+        .read_events("default:LogEntry:typed-entry", 0)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    let initial = &events[0].payload["initial_values"];
+    assert_eq!(initial["fields"]["Body"], "initial body");
+    assert_eq!(initial["counters"]["revision"], 3);
+    assert_eq!(initial["booleans"]["enabled"], true);
+    assert_eq!(initial["lists"]["members"], serde_json::json!(["first"]));
+    assert!(
+        !state
+            .actor_registry
+            .read()
+            .unwrap()
+            .contains_key("default:LogEntry:typed-entry")
+    );
+    let hydrated = state
+        .get_tenant_entity_state(&TenantId::default(), "LogEntry", "typed-entry")
+        .await
+        .unwrap()
+        .state;
+    assert_eq!(hydrated.counters["revision"], 3);
+    assert!(hydrated.booleans["enabled"]);
+    assert_eq!(hydrated.lists["members"], vec!["first"]);
+    assert_eq!(hydrated.fields["Body"], "initial body");
+    assert_eq!(hydrated.sequence_nr, 1);
 }

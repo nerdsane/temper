@@ -282,7 +282,60 @@ impl crate::state::ServerState {
                         format!("{}_id", to_snake_case(&parent_t)),
                         serde_json::Value::String(parent_i.clone()),
                     );
-                    let initial_fields = serde_json::Value::Object(parent_fields.clone());
+                    let child_table = state
+                        .registry
+                        .read()
+                        .expect("registry lock poisoned")
+                        .get_table(&t, &child_type);
+                    let strict_child = child_table
+                        .as_ref()
+                        .is_some_and(|table| table.strict_action_params);
+                    if strict_child && initial_action.is_none() {
+                        state.record_generated_callback_refusal(
+                            super::WasmEntityRef {
+                                tenant: &t,
+                                entity_type: &parent_t,
+                                entity_id: &parent_i,
+                            },
+                            "spawn",
+                            "Strict child requires a declared initializer for its generated fields",
+                        );
+                        return;
+                    }
+                    let initializer = if let Some(action) = initial_action {
+                        let mut params = parent_params.as_object().cloned().unwrap_or_default();
+                        params.extend(parent_fields.clone());
+                        params.extend(copied_fields);
+                        match state.prepare_generated_action_params(
+                            &t,
+                            &child_type,
+                            &action,
+                            serde_json::Value::Object(params),
+                        ) {
+                            Ok(params) => Some((action, params)),
+                            Err(error) => {
+                                state.record_generated_callback_refusal(
+                                    super::WasmEntityRef {
+                                        tenant: &t,
+                                        entity_type: &parent_t,
+                                        entity_id: &parent_i,
+                                    },
+                                    &action,
+                                    &error,
+                                );
+                                return;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    // A strict child's declared initializer accepts its data. The
+                    // spawn effect supplies only identity to generic creation.
+                    let initial_fields = if strict_child {
+                        serde_json::json!({})
+                    } else {
+                        serde_json::Value::Object(parent_fields.clone())
+                    };
 
                     match state
                         .get_or_create_tenant_entity(&t, &child_type, &child_id, initial_fields)
@@ -297,33 +350,35 @@ impl crate::state::ServerState {
                                 "spawned child entity"
                             );
 
-                            if let Some(action) = initial_action {
-                                let mut initial_action_params =
-                                    parent_params.as_object().cloned().unwrap_or_default();
-                                for (key, value) in parent_fields {
-                                    initial_action_params.insert(key, value);
-                                }
-                                // Merge copied field values (take precedence over parent params)
-                                for (key, value) in &copied_fields {
-                                    initial_action_params.insert(key.clone(), value.clone());
-                                }
-                                if let Err(e) = state
+                            if let Some((action, params)) = initializer {
+                                let result = state
                                     .dispatch_tenant_action(
                                         &t,
                                         &child_type,
                                         &child_id,
                                         &action,
-                                        serde_json::Value::Object(initial_action_params),
+                                        params,
                                         &agent,
                                     )
-                                    .await
-                                {
-                                    tracing::error!(
-                                        child_type = %child_type,
-                                        child_id = %child_id,
-                                        action = %action,
-                                        error = %e,
-                                        "failed to dispatch initial action on spawned entity"
+                                    .await;
+                                let refusal = match result {
+                                    Err(error) => Some(error),
+                                    Ok(response) if !response.success => {
+                                        Some(response.error.unwrap_or_else(|| {
+                                            "child initializer refused".to_string()
+                                        }))
+                                    }
+                                    Ok(_) => None,
+                                };
+                                if let Some(error) = refusal {
+                                    state.record_generated_callback_refusal(
+                                        super::WasmEntityRef {
+                                            tenant: &t,
+                                            entity_type: &parent_t,
+                                            entity_id: &parent_i,
+                                        },
+                                        &action,
+                                        &error,
                                     );
                                 }
                             }

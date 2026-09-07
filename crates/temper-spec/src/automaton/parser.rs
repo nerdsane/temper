@@ -561,6 +561,8 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
         }
     }
 
+    super::contracts::validate(automaton)?;
+
     // 3. All `from` and `to` states in actions must be declared states.
     for action in &automaton.actions {
         for from in &action.from {

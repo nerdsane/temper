@@ -173,6 +173,21 @@ pub struct ProcessResult {
     pub error: Option<String>,
 }
 
+impl ProcessResult {
+    /// Refuse before creating any event, integration effect, or overflow write.
+    pub(crate) fn refused(error: String) -> Self {
+        Self {
+            success: false,
+            event: None,
+            custom_effects: vec![],
+            scheduled_actions: vec![],
+            spawn_requests: vec![],
+            overflow_blobs: vec![],
+            error: Some(error),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldSyncMode {
     /// Values exceeding the inline ceiling are replaced with a placeholder string.
@@ -221,6 +236,7 @@ pub fn process_action(
         params,
         &std::collections::BTreeMap::new(),
         FieldSyncMode::InlineTruncate,
+        None,
     )
 }
 
@@ -266,16 +282,19 @@ pub fn process_action_with_xref(
         params,
         cross_entity_booleans,
         FieldSyncMode::InlineTruncate,
+        None,
     )
 }
 
-pub fn process_action_with_xref_and_field_mode(
+/// Storage adapters may supply verified logical comparison fields; callers never do.
+pub(crate) fn process_action_with_xref_and_field_mode(
     state: &mut EntityState,
     table: &TransitionTable,
     action: &str,
     params: &serde_json::Value,
     cross_entity_booleans: &std::collections::BTreeMap<String, bool>,
     field_sync_mode: FieldSyncMode,
+    comparison_fields: Option<&serde_json::Value>,
 ) -> ProcessResult {
     if state.events_since_snapshot >= MAX_EVENTS_SINCE_SNAPSHOT {
         return ProcessResult {
@@ -289,6 +308,46 @@ pub fn process_action_with_xref_and_field_mode(
                 "Event budget exhausted ({MAX_EVENTS_SINCE_SNAPSHOT} max since snapshot)"
             )),
         };
+    }
+
+    if let Err(error) = table.validate_action_params(
+        action,
+        params,
+        comparison_fields.unwrap_or(&state.fields),
+        &state.counters,
+        &state.booleans,
+    ) {
+        return ProcessResult {
+            success: false,
+            event: None,
+            custom_effects: vec![],
+            scheduled_actions: vec![],
+            spawn_requests: vec![],
+            overflow_blobs: vec![],
+            error: Some(error),
+        };
+    }
+
+    if field_sync_mode == FieldSyncMode::InlineTruncate {
+        for field in table
+            .action_contracts
+            .values()
+            .flat_map(|contract| &contract.constraints)
+            .filter_map(|constraint| constraint.field())
+        {
+            if let Some(value) = params.get(field) {
+                let limit = table
+                    .state_var_metadata
+                    .get(field)
+                    .and_then(|metadata| metadata.overflow_inline_max_bytes)
+                    .unwrap_or(DEFAULT_FIELD_INLINE_MAX);
+                if serde_json::to_vec(value).is_ok_and(|bytes| bytes.len() > limit) {
+                    return ProcessResult::refused(format!(
+                        "Action '{action}' would truncate comparison field '{field}'"
+                    ));
+                }
+            }
+        }
     }
 
     let ctx = build_eval_context_with_xref(state, cross_entity_booleans);

@@ -607,10 +607,16 @@ async fn approved_wasm_upload_decision_allows_agent_retry() {
         ))
         .await
         .unwrap();
-    assert_eq!(retried.status(), StatusCode::OK);
+    let retried_status = retried.status();
     let retried_body = axum::body::to_bytes(retried.into_body(), 1024 * 1024)
         .await
         .unwrap();
+    assert_eq!(
+        retried_status,
+        StatusCode::OK,
+        "retry response: {}",
+        String::from_utf8_lossy(&retried_body)
+    );
     let retried_json: serde_json::Value =
         serde_json::from_slice(&retried_body).expect("retry response JSON");
     assert_eq!(retried_json["module_name"], "git_upload_pack");

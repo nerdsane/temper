@@ -122,6 +122,22 @@ impl crate::state::ServerState {
             "error_message": error,
             "trigger_action": triggering_action,
         });
+        let params =
+            match self.prepare_generated_action_params(tenant, entity_type, &action, params) {
+                Ok(params) => params,
+                Err(error) => {
+                    self.surface_dropped_integration_failure(
+                        tenant,
+                        entity_type,
+                        entity_id,
+                        triggering_action,
+                        status.as_str(),
+                        &error,
+                        "invalid compensation input",
+                    );
+                    return;
+                }
+            };
         let agent_ctx = AgentContext::for_service("integration-compensation");
         match self
             .dispatch_tenant_action(tenant, entity_type, entity_id, &action, params, &agent_ctx)
@@ -330,5 +346,29 @@ to = "Done"
             state.find_failure_transition(&tenant, "Job", "Running"),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod strict_compensation_tests {
+    use super::*;
+    #[tokio::test]
+    async fn strict_compensation_uses_only_declared_failure_parameters() {
+        let state = super::super::strict_test_support::state();
+        let tenant = TenantId::default();
+        super::super::strict_test_support::read(&state).await;
+        state
+            .run_integration_failure_compensation(
+                &tenant,
+                "StrictJob",
+                "job",
+                "Complete",
+                "fixture error",
+            )
+            .await;
+        let actual = super::super::strict_test_support::read(&state).await;
+        assert_eq!(actual.status, "Failed");
+        assert_eq!(actual.fields["error"], "fixture error");
+        assert!(actual.fields.get("trigger_action").is_none());
     }
 }

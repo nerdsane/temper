@@ -4,6 +4,7 @@
 //! entity type. It can be built from an I/O Automaton TOML spec and evaluated
 //! at runtime without any compiled transition logic.
 
+pub mod action_contract;
 mod builder;
 mod evaluate;
 pub mod guard;

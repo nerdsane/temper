@@ -79,9 +79,13 @@ tempfile = "3"
 pprof = { version = "0.14", features = ["prost-codec"] }
 
 [dev-dependencies]
+deadpool-postgres = { workspace = true }
+tokio-postgres = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
 tokio-test = { workspace = true }
 criterion = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 wiremock = { workspace = true }
 tracing-subscriber = { workspace = true }
 # `testing` gives the in-memory metric exporter used by the ARN-189 replay-skip

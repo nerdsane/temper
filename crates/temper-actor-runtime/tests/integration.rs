@@ -37,6 +37,10 @@ pub struct GenericMessage {
 // ─── Test setup ──────────────────────────────────────────────────────────────
 
 async fn test_pool() -> deadpool_postgres::Pool {
+    #[cfg(feature = "test-utils")]
+    if std::env::var_os("TEMPER_ACTOR_TEST_DATABASE_URL").is_some() {
+        return temper_actor_runtime::test_utils::setup_test_pg().await.0;
+    }
     let pg = POSTGRES
         .get_or_init(|| async {
             let container = Postgres::default()
