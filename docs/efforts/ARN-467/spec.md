@@ -12,4 +12,10 @@ The parser validates constraint names and references. The transition table carri
 
 The reaction simulator projects real actor result fields in the same shape used by production reactions. It must resolve declared cross-entity IDs and parameters from post-action fields.
 
+Cedar authorization evaluates on an eight-megabyte stack, independent of the
+request handler's remaining stack. A recursion-limit diagnostic refuses the
+request as an engine error even if another permit matched; it cannot silently
+discard a forbid or masquerade as a missing permit. The synthetic stack tests
+exercise a matching permit, a matching forbid and evaluation-budget exhaustion.
+
 An IOA with strict parameters or parameter constraints declares each action name once. Repeated names cannot replace the contract for an earlier rule. Strict integer defaults must fit a signed 64-bit integer, and counter defaults must be natural numbers. Comparison targets are declared state variables or the entity identity (`id` or `Id`), excluding list and set fields. The parser rejects collection comparisons because this parameter contract does not define collection equality. Existing list and set actions and guards remain available. Other server-derived fields require dedicated guards because the parameter validator does not receive their values.

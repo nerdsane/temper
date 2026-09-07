@@ -6777,6 +6777,7 @@ dependencies = [
  "opentelemetry",
  "serde",
  "serde_json",
+ "stacker",
  "temper-runtime",
  "thiserror 2.0.18",
  "uuid",

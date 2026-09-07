@@ -463,5 +463,5 @@ impl SpecDrivenActor {
 }
 
 #[cfg(test)]
-#[path = "spec_actor_strict_tests.rs"]
+#[path = "tests/spec_actor_strict.rs"]
 mod strict_tests;

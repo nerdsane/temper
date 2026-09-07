@@ -286,3 +286,15 @@ Composite creation uses the same bootstrap serializer. Its separate envelope bui
 **Chose mailbox discovery because:** The existing activator already owns initial state and atomic cursor processing. Discovery now includes absent instances with cursor zero, still groups by the same namespace/type identity, filters registered types, and keeps the configured batch bound. The existing mailbox index and instance/type primary keys serve the joins; discovery may examine more historical message rows, so this avoids adding a new registry at the cost of that query work. Concurrent polling and restart tests assert one completed Process turn and one context preparation. Empty-object actor lookups also retain their cached fast path, while any nonempty creation input is validated before a cached result is returned.
 
 **Where:** `crates/temper-actor-runtime/src/schema.rs`, `crates/temper-server/src/odata/write.rs`, `crates/temper-agents/tests/agent_chain.rs`, and `crates/temper-server/tests/strict_postgres_actions.rs`; PR #456.
+
+## D23 — Keep authorization independent of request stack depth
+
+**Decision:** Evaluate Cedar on a fixed eight-megabyte stack and deny with an engine error if Cedar still reports a recursion limit.
+
+**Came up because:** The same installed policy and authenticated identity allowed a collection read through the direct authorization endpoint but denied it through OData. A synthetic one-megabyte-thread regression reproduced the missing permit and also showed a matching long forbid being skipped while a short permit allowed the request.
+
+**Options:** Add overlapping application permissions, increase every server thread's stack, or isolate the existing Cedar evaluation call with the library's documented stack-growth mechanism.
+
+**Chose the evaluation boundary because:** It keeps the policy's meaning independent of HTTP call depth without adding authority or increasing every thread's stack allocation. Evaluation uses up to an eight-megabyte stack and a remaining recursion-limit diagnostic refuses the request, even if another policy permitted it. Other Cedar evaluation-error behavior is unchanged.
+
+**Where:** crates/temper-authz/src/engine/mod.rs; engine/stack_tests.rs; crates/temper-authz/Cargo.toml.

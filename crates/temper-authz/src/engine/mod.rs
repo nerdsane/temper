@@ -23,6 +23,9 @@ mod candidates;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod stack_tests;
+
 /// The result of an authorization check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthzDecision {
@@ -620,10 +623,24 @@ impl AuthzEngine {
             .policy_set
             .as_ref()
             .unwrap_or(&policies.policy_set);
-        let response: CedarResponse =
+        // Cedar checks remaining stack and skips policies that exhaust it.
+        // HTTP call depth must not change a permit or discard a forbid.
+        let response: CedarResponse = stacker::grow(8 * 1024 * 1024, || {
             self.authorizer
-                .is_authorized(&request, effective_policy_set, &entities);
+                .is_authorized(&request, effective_policy_set, &entities)
+        });
         recorder.finish_phase("authorizer");
+
+        if response.diagnostics().errors().any(|error| {
+            matches!(error,
+                cedar_policy::AuthorizationError::PolicyEvaluationError(error)
+                    if matches!(error.inner(), cedar_policy::EvaluationError::RecursionLimit(_)))
+        }) {
+            return recorder.fail(
+                "authorizer",
+                AuthzDenial::EngineError("Cedar policy evaluation exceeded its stack limit".into()),
+            );
+        }
 
         let decision = response.decision();
         recorder.finish(match decision {
