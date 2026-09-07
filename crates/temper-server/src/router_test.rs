@@ -2670,6 +2670,17 @@ async fn strict_data_only_creation_and_hydration_share_typed_defaults() {
     assert_eq!(created["fields"]["Body"], "initial body");
     assert_eq!(created["counters"]["revision"], 3);
     assert_eq!(created["booleans"]["enabled"], true);
+    let (journal, _) = state.event_journal().unwrap();
+    let events = journal
+        .read_events("default:LogEntry:typed-entry", 0)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    let initial = &events[0].payload["initial_values"];
+    assert_eq!(initial["fields"]["Body"], "initial body");
+    assert_eq!(initial["counters"]["revision"], 3);
+    assert_eq!(initial["booleans"]["enabled"], true);
+    assert_eq!(initial["lists"]["members"], serde_json::json!(["first"]));
     assert!(
         !state
             .actor_registry

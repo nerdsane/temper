@@ -1223,7 +1223,7 @@ impl ServerState {
             params: initial_fields,
             idempotency_key: None,
         };
-        let payload = serde_json::to_value(&created)
+        let payload = crate::entity_actor::bootstrap::event_payload(&created, &state)
             .map_err(|e| format!("failed to serialize Created event: {e}"))?;
         let envelope = PersistenceEnvelope {
             sequence_nr: 1,

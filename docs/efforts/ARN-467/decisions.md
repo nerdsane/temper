@@ -262,6 +262,8 @@ The same recovery boundary refuses journal read errors for strict or constrained
 
 Composite creation uses the same bootstrap serializer. Its separate envelope builder had omitted the committed defaults, so replay produced revision 2 after two increments instead of 5 from the declared initial revision 3. The composite regression now checks the stored typed values and both recovery paths after declaration defaults change; the sequential and seeded composite tests retain their original expected values.
 
+The full workspace run also reached data-only creation, whose separate event serializer still omitted committed defaults. It now uses the existing bootstrap serializer; its HTTP regression checks the stored field, counter, boolean and list values before hydration. The lenient replay metric fixture now journals its initial Customer value before the malformed update and supplies a different constructor value. Its unchanged assertion therefore proves that replay preserves committed history, without treating an uncommitted constructor value as history.
+
 ## D21 — Resolve simulated and legacy blob comparisons at the shared read boundary
 
 **Decision:** Retain generated overflow bytes in blob-enabled simulations and allow default-tenant actors to use the existing bounded legacy database read capability.
