@@ -50,7 +50,6 @@ mkdir -p "$(dirname "$OUT_FILE")"
 
 SETTINGS_FILE="$WORKSPACE_ROOT/.claude/settings.json"
 PRE_COMMIT_HOOK="$WORKSPACE_ROOT/.git/hooks/pre-commit"
-PRE_PUSH_HOOK="$WORKSPACE_ROOT/.git/hooks/pre-push"
 POST_COMMIT_HOOK="$WORKSPACE_ROOT/.git/hooks/post-commit"
 TRACE_FILE="$MARKER_DIR/trace-${SESSION_ID}.jsonl"
 
@@ -163,13 +162,6 @@ else
         "pre-commit wrapper missing or not pointed at .claude/hooks/pre-commit.sh." '[".git/hooks/pre-commit",".claude/hooks/pre-commit.sh"]'
 fi
 
-if [ -f "$PRE_PUSH_HOOK" ] && grep -q "\.claude/hooks/pre-push\.sh" "$PRE_PUSH_HOOK"; then
-    add_check "install.git_hook.pre_push" "Git pre-push wrapper installed" "git" true "pass" "mechanical" 0.80 0.48 0.80 \
-        "pre-push wrapper points to .claude/hooks/pre-push.sh." '[".git/hooks/pre-push",".claude/hooks/pre-push.sh"]'
-else
-    add_check "install.git_hook.pre_push" "Git pre-push wrapper installed" "git" true "fail" "mechanical" 0.80 0.48 0.80 \
-        "pre-push wrapper missing or not pointed at .claude/hooks/pre-push.sh." '[".git/hooks/pre-push",".claude/hooks/pre-push.sh"]'
-fi
 
 if [ -f "$POST_COMMIT_HOOK" ] && grep -q "\.claude/hooks/post-commit\.sh" "$POST_COMMIT_HOOK"; then
     add_check "install.git_hook.post_commit" "Git post-commit wrapper installed" "git" true "pass" "mechanical" 0.74 0.42 0.82 \
@@ -218,33 +210,6 @@ else
         "alignment-reviewed marker missing." '["/tmp/temper-harness/*/alignment-reviewed","/tmp/temper-harness/*/alignment-reviewed.toml"]'
 fi
 
-# Push verification marker consistency.
-shopt -s nullglob
-PENDING_MARKERS=("$MARKER_DIR"/push-pending-*)
-shopt -u nullglob
-
-if [ "${#PENDING_MARKERS[@]}" -eq 0 ]; then
-    add_check "evidence.push_post_verify" "Post-push verification marker consistency" "push" true "skip" "mechanical" 0.68 0.30 0.75 \
-        "No push-pending markers found." "$(jq -nc --arg d "$MARKER_DIR" '[$d]')"
-else
-    ALL_VERIFIED=true
-    for PENDING in "${PENDING_MARKERS[@]}"; do
-        MARKER_SESSION="$(basename "$PENDING" | sed 's/^push-pending-//')"
-        if [ ! -f "$MARKER_DIR/test-verified-${MARKER_SESSION}" ] && [ ! -f "$MARKER_DIR/test-verified-${MARKER_SESSION}.toml" ]; then
-            ALL_VERIFIED=false
-            break
-        fi
-    done
-
-    if [ "$ALL_VERIFIED" = true ]; then
-        add_check "evidence.push_post_verify" "Post-push verification marker consistency" "push" true "pass" "mechanical" 0.68 0.30 0.75 \
-            "Every push-pending marker has matching test-verified evidence." "$(jq -nc --arg d "$MARKER_DIR" '[$d]')"
-    else
-        add_check "evidence.push_post_verify" "Post-push verification marker consistency" "push" true "fail" "mechanical" 0.68 0.30 0.75 \
-            "Found push-pending marker(s) without matching test-verified marker." "$(jq -nc --arg d "$MARKER_DIR" '[$d]')"
-    fi
-fi
-
 # Wiring check: stop-gate commit markers are checked but currently unwritten.
 # Only count concrete write operations (redirection/touch/write-marker), not generic mentions.
 COMMIT_MARKER_WRITERS="$(find_commit_marker_writers \
@@ -266,15 +231,6 @@ if grep -q 'marker_exists()' "$WORKSPACE_ROOT/.claude/hooks/pre-commit-review-ga
 else
     add_check "wiring.marker.session_binding" "Marker checks are session/change-bound" "wiring" false "pass" "inferred" 0.35 0.10 0.85 \
         "Marker session/change binding appears configured." '[".claude/hooks/pre-commit-review-gate.sh","scripts/write-marker.sh"]'
-fi
-
-# Wiring check: determinism gate behavior at push time.
-if grep -q 'Determinism is advisory' "$WORKSPACE_ROOT/.claude/hooks/pre-push.sh"; then
-    add_check "wiring.pre_push_determinism_blocking" "Pre-push determinism enforcement is blocking" "wiring" true "warn" "mechanical" 0.30 0.10 0.80 \
-        "pre-push determinism check is currently advisory in practice." '[".claude/hooks/pre-push.sh","scripts/check-determinism.sh"]'
-else
-    add_check "wiring.pre_push_determinism_blocking" "Pre-push determinism enforcement is blocking" "wiring" true "pass" "mechanical" 0.30 0.10 0.80 \
-        "pre-push determinism check appears blocking." '[".claude/hooks/pre-push.sh","scripts/check-determinism.sh"]'
 fi
 
 CHECKS_JSON="$(jq -s '.' "$TMP_CHECKS")"

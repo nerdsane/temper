@@ -13,9 +13,9 @@ The Temper harness is a multi-layered enforcement system that catches problems a
 │   ┌────────┐        ┌────────┐        ┌────────┐       ┌────────┐  │
 │   │Spec    │        │Review  │        │Post-   │       │Exit    │  │
 │   │Verify  │        │Gate    │        │Push    │       │Gate    │  │
-│   │Dep Iso │        │Tests   │        │Tests   │       │Reviews │  │
-│   │DST Scan│        │DST Rev │        │Markers │       │Compile │  │
-│   │Plan    │        │Code Rev│        │        │       │Markers │  │
+│   │Dep Iso │        │Tests   │        │Markers │       │Reviews │  │
+│   │DST Scan│        │DST Rev │        │(CI     │       │Compile │  │
+│   │Plan    │        │Code Rev│        │ tests) │       │Markers │  │
 │   └────────┘        └────────┘        └────────┘       └────────┘  │
 │    BLOCKING          BLOCKING          advisory         BLOCKING    │
 │                                                                     │
@@ -24,11 +24,11 @@ The Temper harness is a multi-layered enforcement system that catches problems a
 │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─  │
 │                                                                     │
 │   ┌─────────────────────┐     ┌─────────────────────┐              │
-│   │ Git Pre-Commit      │     │ Git Pre-Push        │              │
-│   │ • Integrity check   │     │ • Integrity check   │              │
-│   │ • Spec syntax       │     │ • Determinism audit │              │
-│   │ • Dep audit         │     │ • Full test suite   │              │
-│   └─────────────────────┘     └─────────────────────┘              │
+│   │ Git Pre-Commit      │     (no pre-push hook: fmt, clippy,   │
+│   │ • Integrity check   │      readability ratchet, tests and   │
+│   │ • Spec syntax       │      the DST matrix run in CI)        │
+│   │ • Dep audit         │                                       │
+│   └─────────────────────┘                                       │
 │   ┌─────────────────────┐                                           │
 │   │ Git Post-Commit     │                                           │
 │   │ • commit-pending    │                                           │
@@ -80,8 +80,8 @@ This harness enforces quality for **agents developing Temper itself** (the frame
     │Integrity   │       decide              writes markers
     │Spec Syntax │                           checked by
     │Dep Audit   │                           Review Gate +
-    │Full Tests  │                           Exit Gate
-    └────────────┘
+    └────────────┘                           Exit Gate
+
      stops you,
      must fix
 ```
@@ -102,7 +102,6 @@ This harness enforces quality for **agents developing Temper itself** (the frame
 | 12 | Integrity Check | Git hook | pre-commit | `git commit` | **YES** |
 | 13 | Spec Syntax | Git hook | pre-commit | `git commit` | **YES** |
 | 14 | Dep Audit | Git hook | pre-commit | `git commit` | **YES** |
-| 15 | Full Test Suite | Git hook | pre-push | `git push` | **YES** |
 | 16 | Commit Marker Writer | Git hook | post-commit | `git commit` | **YES** (for stop-gate wiring) |
 
 ---
@@ -265,19 +264,13 @@ Trigger:   PostToolUse — Bash (on commands containing `git push`)
 Blocking:  No (but creates markers for Component 7)
 ```
 
-After any `git push`:
-1. Writes `push-pending-{session}` marker
-2. Runs `cargo test --workspace`
-3. On pass: writes `test-verified-{session}` marker
-4. On fail: marker remains unverified — Component 7 blocks session exit
+After any `git push` it records a `push-completed` marker (`{sha} {timestamp}`)
+under the session's marker dir. It runs no tests: CI is the verifier for pushed
+code (ci.yml on pull requests and on pushes to main/staging). Nothing reads the
+marker as a gate today; it is a session trace only.
 
 ```
-  push ──▶ push-pending marker ──▶ cargo test ──▶ test-verified marker
-                                        │
-                                   fail │
-                                        ▼
-                              Session exit BLOCKED
-                              (Component 7 catches this)
+  push ──▶ push-completed marker          CI: fmt, clippy, ratchet, tests, DST
 ```
 
 ### Component 7: Session Exit Gate
@@ -285,15 +278,16 @@ After any `git push`:
 ```
 File:      .claude/hooks/stop-verify.sh
 Trigger:   Stop (session end)
-Blocking:  YES (exit 2)
+Blocking:  YES (exit 2) when enabled - currently DISABLED in .claude/settings.json (Stop: [])
 ```
 
-Before Claude Code session ends, checks four things:
+The script on disk checks one thing when re-enabled: `cargo check --workspace`
+compiles clean if the session changed `.rs` files. The review-marker checks
+below describe the intended gate, not what the script does today.
 
-1. **Unverified pushes**: `push-pending` marker without `test-verified` marker?
-2. **Missing DST review**: Sim-visible code committed without `dst-reviewed` marker?
-3. **Missing code review**: Code committed without `code-reviewed` marker?
-4. **Compilation**: `cargo check --workspace` passes?
+1. **Missing DST review**: Sim-visible code committed without `dst-reviewed` marker?
+2. **Missing code review**: Code committed without `code-reviewed` marker?
+3. **Compilation**: `cargo check --workspace` passes?
 
 This is the **safety net**. Even if the pre-commit gate somehow didn't catch a missing review, you cannot leave the session without resolving it.
 
@@ -394,23 +388,6 @@ Blocking:  YES (part of pre-commit hook)
 
 If any `Cargo.toml` was staged, runs `scripts/audit-deps.sh`. Same check as Component 3, but catches direct git commits that bypass Claude Code hooks.
 
-### Component 13: Pre-Push — Full Test Suite
-
-```
-File:      .claude/hooks/pre-push.sh (installed to .git/hooks/pre-push)
-Blocking:  YES
-```
-
-Runs a 3-gate pipeline before every push:
-
-| Gate | What it checks | Blocking |
-|------|---------------|----------|
-| 1/3 | Integrity (no TODO/unwrap/hacks) | YES |
-| 2/3 | Determinism patterns in sim crates | Advisory |
-| 3/3 | `cargo test --workspace` | YES |
-
-Bypass with `git push --no-verify` for emergencies only.
-
 ### Component 14: Post-Commit — Commit Marker Writer
 
 ```
@@ -448,11 +425,10 @@ The harness uses temporary marker files in `/tmp/temper-harness/{project_hash}/`
   │                                                              │
   │   DST reviewer ────▶ dst-reviewed-{session}   ──┐           │
   │                                                  │           │
-  │   Code reviewer ───▶ code-reviewed-{session}  ──┼──▶ Gate   │
-  │                                                  │   checks  │
-  │   git push ────────▶ push-pending-{session}   ──┤   these   │
-  │                                                  │           │
-  │   cargo test pass ─▶ test-verified-{session}  ──┘           │
+  │   Code reviewer ───▶ code-reviewed-{session}  ──┴──▶ Gate   │
+  │                                                      checks  │
+  │   git push ────────▶ push-completed (trace only,     these   │
+  │                      not gate-checked)                       │
   │                                                              │
   │   Checked by:                                                │
   │   • Pre-commit gate (Component 5) — before commit            │
@@ -490,20 +466,18 @@ A typical development session flows through all enforcement layers:
   │     ▼                                                           │
   │  4. COMMIT                                                      │
   │     ├── Claude Code: Pre-commit gate checks markers [BLOCKING] │
-  │     │   + runs cargo test --workspace               [BLOCKING] │
   │     └── Git hook: integrity, spec syntax, dep audit [BLOCKING] │
   │     │                                                           │
   │     ▼                                                           │
   │  5. PUSH                                                        │
-  │     ├── Git hook: 3-gate pipeline (integrity,       [BLOCKING] │
-  │     │   determinism, full tests)                                │
-  │     └── Claude Code: post-push writes markers,      [advisory] │
-  │         runs tests, coordinates with exit gate                  │
+  │     ├── CI (PR / main): fmt, clippy, readability    [BLOCKING] │
+  │     │   ratchet, tests, doctests, DST matrix                    │
+  │     └── Claude Code: post-push records a            [advisory] │
+  │         push-completed marker (no tests)                        │
   │     │                                                           │
   │     ▼                                                           │
   │  6. SESSION END                                                 │
-  │     └── Exit gate checks:                           [BLOCKING] │
-  │         • Unverified pushes?                                    │
+  │     └── Exit gate (disabled today) checks:          [BLOCKING] │
   │         • Missing DST review?                                   │
   │         • Missing code review?                                  │
   │         • Compilation errors?                                   │
@@ -567,8 +541,6 @@ scripts/setup-hooks.sh
 # Skip git pre-commit checks
 git commit --no-verify
 
-# Skip git pre-push test suite
-git push --no-verify
 ```
 
 Claude Code hooks **cannot be bypassed** — they're enforced by the tool itself. If a blocking hook fires, you must fix the issue. The `// determinism-ok` comment is the only escape hatch for false positives in the DST pattern scan.
@@ -602,9 +574,4 @@ scripts/verification-v1-report.sh --pretty
 
 This exports hook/gate/marker evidence in one model-agnostic JSON document that any runtime can consume.
 
-CI now consumes this contract via job `verification-contract` in `.github/workflows/ci.yml`:
-
-- Generates `verification.v1.json`
-- Validates contract shape
-- Enforces policy (`blocking_failures == 0` and `checks_failed == 0`)
-- Uploads the report as build artifact
+This contract is a LOCAL harness self-report. It is not a CI gate: running the hook installer on a CI runner and validating the resulting report tested the installer, not the code (removed 2026-09-01, ARN-453).

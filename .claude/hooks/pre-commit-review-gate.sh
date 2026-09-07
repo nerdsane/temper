@@ -6,7 +6,7 @@
 # 1. DST review marker exists (if sim-visible code was changed)
 # 2. Code review marker exists (for any significant change)
 #
-# Tests are NOT run here — the pre-push git hook handles that.
+# Tests are NOT run here — CI runs the full suite on every push.
 # This keeps commits fast; the push gate is the quality gate.
 #
 # Markers are session-scoped files in /tmp/temper-harness/{project_hash}/{session_id}/:

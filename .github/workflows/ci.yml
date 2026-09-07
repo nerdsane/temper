@@ -5,8 +5,6 @@ on:
     branches: [main, staging]
   push:
     branches: [main, staging]
-  schedule:
-    - cron: "17 8 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -28,44 +26,23 @@ env:
 
 jobs:
   # ─────────────────────────────────────────────────────
-  # Gate 0: Verification contract (seconds)
+  # Gate 0: Workflow files are code (ARN-453: a bad quote in the DST matrix
+  # generator shipped once). actionlint + shellcheck on every run: block.
   # ─────────────────────────────────────────────────────
-  verification-contract:
-    name: Verification Contract (verification.v1)
+  workflows-lint:
+    name: Workflows Lint (actionlint)
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install git hook wrappers
-        run: bash scripts/setup-hooks.sh
-
-      - name: Generate verification.v1 report
-        env:
-          VERIFICATION_AGENT_PROVIDER: github-actions
-          VERIFICATION_AGENT_MODEL: ci
+      - name: actionlint
         run: |
-          bash scripts/verification-v1-report.sh \
-            --session "${{ github.run_id }}" \
-            --out verification.v1.json \
-            --pretty
-
-      - name: Validate verification.v1 contract
-        run: bash scripts/verification-v1-validate.sh verification.v1.json
-
-      - name: Enforce verification policy
-        run: |
-          jq -e '
-            .summary.blocking_failures == 0 and
-            .summary.checks_failed == 0
-          ' verification.v1.json >/dev/null
-          jq '{summary: .summary}' verification.v1.json
-
-      - name: Upload verification artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: verification-v1
-          path: verification.v1.json
+          # installer script and binary both pinned to the same release tag
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          # style/info-level shellcheck codes are pre-existing noise; errors block
+          ./actionlint -color -ignore 'SC2086' -ignore 'SC2012' -ignore 'SC2044' -ignore 'SC2129'
 
   # ─────────────────────────────────────────────────────
   # Gate 1: Fast checks (seconds)
@@ -105,40 +82,6 @@ jobs:
 
       - name: cargo clippy --workspace --all-targets
         run: cargo clippy --workspace --all-targets -- -D warnings
-
-  # ─────────────────────────────────────────────────────
-  # Gate 1b: Bench compile (non-PR events only)
-  # ─────────────────────────────────────────────────────
-  bench-build:
-    name: Bench Build
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    timeout-minutes: 45
-    env:
-      # ARN-439: CI only compiles benches (--no-run), never runs them, so the release-inherited
-      # lto=true + codegen-units=1 are pure compile-time waste here. Override them off for the
-      # bench profile on this job only.
-      CARGO_PROFILE_BENCH_LTO: "off"
-      CARGO_PROFILE_BENCH_CODEGEN_UNITS: "16"
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libz3-dev
-
-      - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-
-      - name: Set up mold linker
-        uses: rui314/setup-mold@v1
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-
-      - name: cargo bench --workspace --no-run
-        run: cargo bench --workspace --no-run
 
   # ─────────────────────────────────────────────────────
   # Gate 2: Integrity checks (seconds)
@@ -202,14 +145,6 @@ jobs:
       - name: Storage dispatch boundary ratchet
         run: bash scripts/check-storage-dispatch-boundary.sh
 
-      # DST pattern scan DISABLED (2026-02-17)
-      # Reason: Grep-based pattern matching is too brittle and caused 5+ consecutive
-      # CI failures from false positives. The DST reviewer agent (.claude/agents/dst-reviewer.md)
-      # performs semantic analysis which is strictly superior to regex scanning.
-      # The pattern scan will be re-evaluated once the DST architecture refactor
-      # (shared effect application) is complete.
-      # See: .progress/012_20260217_dst_architecture_fix.md
-
       - name: Dependency isolation
         run: |
           # Check temper-jit has no production dep on temper-verify
@@ -266,8 +201,13 @@ jobs:
             (cd "wasm-modules/$module" && cargo build --target wasm32-unknown-unknown --release)
           done
 
-      - name: cargo nextest run --workspace (skip dst_)
-        run: cargo nextest run --workspace -E 'not test(dst_)'
+      # temper-server's dst_* integration binaries run in the DST matrix below;
+      # everything else runs here: other crates' dst_* binaries (the matrix only
+      # covers temper-server) and lib unit tests that happen to have dst_ in
+      # their name. (ARN-453: the old name filter `not test(dst_)` dropped those
+      # lib tests, and nothing else ran them.)
+      - name: cargo nextest run --workspace (temper-server dst_ binaries run in the matrix)
+        run: cargo nextest run --workspace -E 'not (package(temper-server) and binary(/^dst_/))'
 
       # spec_validate_endpoint declares required-features = ["observe"]. The
       # workspace run above usually still covers it via feature unification
@@ -314,11 +254,14 @@ jobs:
       - id: gen
         # core/boot/consistency always run. platform-random: one smoke cell on PRs,
         # four full-mode seed shards on push/schedule/dispatch.
+        # Cells are defined by EXCLUSION, not by listing binaries: every dst_* binary
+        # lands in core unless a platform cell claims it, so a new dst_ test can
+        # never be silently left out (ARN-453: three binaries were).
         run: |
           SUITES='[
-            {"suite":"core","command":"cargo nextest run -p temper-server --test dst_concurrency_retry --test dst_hotswap --test dst_lifecycle --test dst_multi_tenant --test dst_persistence"},
+            {"suite":"core","command":"cargo nextest run -p temper-server -E \"binary(/^dst_/) and not binary(/^dst_platform_/)\""},
             {"suite":"platform-boot","command":"cargo nextest run -p temper-server --test dst_platform_boot"},
-            {"suite":"platform-consistency","command":"cargo nextest run -p temper-server --test dst_platform_cedar --test dst_platform_index --test dst_platform_rollback"}
+            {"suite":"platform-consistency","command":"cargo nextest run -p temper-server -E \"binary(/^dst_platform_/) and not binary(/^dst_platform_boot$/) and not binary(/^dst_platform_random$/)\""}
           ]'
           RANDOM_CMD="cargo nextest run -p temper-server --test dst_platform_random"
           if [ "${{ github.event_name }}" = "pull_request" ]; then

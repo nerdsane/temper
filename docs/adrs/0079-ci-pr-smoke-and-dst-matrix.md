@@ -110,3 +110,15 @@ nightly runs, and manual dispatches will use full mode.
 Revert the workflow job split and remove the `TEMPER_DST_RANDOM_MODE` handling from
 `dst_platform_random.rs`. Because full mode is the default, removing the PR smoke
 environment variable also restores full random coverage immediately.
+
+## Amended 2026-09-01 (ARN-453)
+
+Two parts of this decision were retired once measured:
+
+- The nightly schedule is gone. Every push to main already runs the full-mode DST
+  matrix, so the nightly was a duplicate of the previous main run.
+- `Bench Build` no longer runs on every non-PR event. Benches are compile-checked
+  weekly and on demand in `.github/workflows/bench.yml`; on main pushes the job cost
+  about 16 minutes and never ran the benches.
+
+The PR concurrency group, the PR smoke mode, and the seed-sharded matrix on main stand.

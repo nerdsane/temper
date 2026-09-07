@@ -7,6 +7,16 @@ set -euo pipefail
 
 WORKSPACE_ROOT="$(git rev-parse --show-toplevel)"
 
+# Self-heal (ARN-453): the old installer wrote a pre-push wrapper that execs a
+# script this repo no longer has. Remove it here so a checkout that never re-runs
+# scripts/setup-hooks.sh does not fail its next push.
+STALE_PRE_PUSH="$(git rev-parse --git-path hooks/pre-push)"
+if [ -f "$STALE_PRE_PUSH" ] && grep -q "temper harness" "$STALE_PRE_PUSH" 2>/dev/null \
+   && [ ! -f "$WORKSPACE_ROOT/.claude/hooks/pre-push.sh" ]; then
+    rm -f "$STALE_PRE_PUSH"
+    echo "Pre-commit: removed stale pre-push wrapper (its gates run in CI now)" >&2
+fi
+
 # --- Item 7: Integrity Check (Placeholder Detection) ---
 echo "Pre-commit: checking for placeholders in staged files..." >&2
 

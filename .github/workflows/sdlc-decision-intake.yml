@@ -46,7 +46,7 @@ jobs:
           # which requires a PAT (GITHUB_TOKEN-created events are suppressed).
           if [[ "$COMMENT_BODY" == RESOLVE:* ]]; then
             HEAD=$(gh pr view "$PR_NUM" --json headRefOid -q .headRefOid)
-            RUN=$(gh run list --workflow sdlc-review --limit 200 --json databaseId,headSha,status -q "[.[] | select(.headSha == \"$HEAD\" and .status == \"completed\")][0].databaseId" || true)
+            RUN=$(gh run list --workflow sdlc --limit 200 --json databaseId,headSha,status -q "[.[] | select(.headSha == \"$HEAD\" and .status == \"completed\")][0].databaseId" || true)
             if [ -n "${RUN:-}" ] && [ "$RUN" != "null" ]; then
               gh run rerun "$RUN" && echo "review gate re-run - RESOLVE comments are read live"
             else
