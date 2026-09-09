@@ -1,6 +1,6 @@
 # ADR-0156: Immutable typed cross-entity reference contracts
 
-- Status: Accepted (design; implementation pending)
+- Status: Accepted
 - Date: 2026-07-24
 - Deciders: Temper core maintainers
 - Related:
@@ -141,7 +141,13 @@ the verification cascade.
 
 The deterministic ID is the lowercase SHA-256 string returned by ADR-0153's
 existing `canonical_key_hash(key_name, properties, fields)`. Temper does not add
-a second hash format. A shared pure `derive_or_validate_entity_id` helper runs
+a second hash format. An entity opting into `entity_id = true` must declare its
+CSDL entity key as `Edm.String`, capable of representing the 64-character hash;
+`Edm.Guid` is incompatible. Bundle verification rejects an incompatible key
+schema before activation. Generated metadata and clients use that same string
+key contract.
+
+A shared pure `derive_or_validate_entity_id` helper runs
 at two boundaries:
 
 - **before routing a create**, after its complete input field set is normalized
@@ -322,7 +328,7 @@ new or changed reference/identity contract. The audit checks:
 - consistency of reconstructed historical values with set-once semantics;
 - deterministic-ID equality for `entity_id = true`.
 
-The audit requires sufficient durable history to reconstruct each reference assignment. A latest-value catalog row does not prove historical set-once behavior. If history is unavailable or incomplete, including for data-only records created without a journal, report an incomplete audit and block activation. Do not infer a clean history from the current value or silently introduce an activation baseline.
+The audit requires sufficient durable history to reconstruct each reference assignment. A latest-value catalog row does not prove historical set-once behavior. The data-only create path persists a sequence-1 `Created` event with the initial fields; the audit must use that evidence when available. If required history is unavailable or incomplete, report an incomplete audit and block activation. Do not infer a clean history from the current value or silently introduce an activation baseline.
 
 Iteration is deterministic and bounded. Any violation, incomplete history, or exhausted audit budget
 blocks activation with a report containing bounded entity IDs and violation
