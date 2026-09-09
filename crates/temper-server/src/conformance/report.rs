@@ -127,6 +127,20 @@ pub struct ConformanceStats {
     /// rather than a governed action, and carry no governed action inside
     /// them (see [`decisions`](super::decisions)).
     pub ots_decisions_skipped_as_harness_tool: usize,
+    /// OTS decisions passed over because their name is in no action vocabulary
+    /// the kernel knows: not declared by this actor's spec, not defined by the
+    /// platform, and not dispatched anywhere in this session. In a run driven
+    /// by an agent harness this is the harness's own tooling — `Bash`, `Read`,
+    /// an MCP tool — and it is normally the largest count in this struct.
+    ///
+    /// It is also the checker's blind spot, which is why it is counted rather
+    /// than folded into the line above: an action name the kernel has never
+    /// seen is indistinguishable from a tool name, so a decision claiming an
+    /// action that never reached the platform lands here instead of in
+    /// [`Self::violations_by_kind`]. Actions that *did* reach the platform are
+    /// unaffected — they have rows, and rows are judged in full. See
+    /// [`decisions`](super::decisions) for the rule and its limits.
+    pub ots_decisions_skipped_as_unrecognized_name: usize,
     /// Entities observed reaching a terminal state.
     pub terminal_entities: usize,
     /// Violation count per kind, keyed by [`ViolationKind::as_str`].

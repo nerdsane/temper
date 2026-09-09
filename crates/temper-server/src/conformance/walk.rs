@@ -388,6 +388,7 @@ impl Walk {
             ots_decisions_checked: 0,
             ots_decisions_skipped_as_thinking: 0,
             ots_decisions_skipped_as_harness_tool: 0,
+            ots_decisions_skipped_as_unrecognized_name: 0,
             terminal_entities: self.terminal_at.len(),
             violations_by_kind: BTreeMap::new(),
         }

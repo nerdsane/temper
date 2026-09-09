@@ -355,6 +355,10 @@ async fn conformance_check_folds_in_a_stored_ots_trajectory() {
     .await;
 
     // The agent decided on an action the kernel never recorded a row for.
+    // `Delete` is a platform verb the Order spec does not declare: a name the
+    // kernel can place as an action, so the decision reads as a claim about one
+    // rather than as the agent using its own tooling (see
+    // `crate::conformance::decisions`).
     let data = serde_json::json!({
         "trajectory_id": "traj-1",
         "version": "0.1.0",
@@ -374,7 +378,7 @@ async fn conformance_check_folds_in_a_stored_ots_trajectory() {
             "decisions": [{
                 "decision_id": "decision-1",
                 "decision_type": "tool_selection",
-                "choice": {"action": "Frobnicate"},
+                "choice": {"action": "Delete"},
                 "consequence": {"success": false}
             }]
         }]
@@ -410,8 +414,8 @@ async fn conformance_check_folds_in_a_stored_ots_trajectory() {
     let body = json_body(response).await;
     let violations = body["report"]["violations"].as_array().expect("violations");
     assert_eq!(violations.len(), 1);
-    assert_eq!(violations[0]["kind"], "unknown_action");
-    assert_eq!(violations[0]["action"], "Frobnicate");
+    assert_eq!(violations[0]["kind"], "forbidden_action");
+    assert_eq!(violations[0]["action"], "Delete");
     assert_eq!(
         violations[0]["index"],
         serde_json::json!(1),
