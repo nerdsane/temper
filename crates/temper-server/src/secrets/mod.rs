@@ -1,5 +1,6 @@
 //! Tenant secret management: encrypted storage and template resolution.
 
+pub mod env_overlay;
 pub mod template;
 pub mod vault;
 
