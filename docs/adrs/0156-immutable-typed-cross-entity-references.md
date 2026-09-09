@@ -1,6 +1,6 @@
 # ADR-0156: Immutable typed cross-entity reference contracts
 
-- Status: Proposed
+- Status: Accepted (design; implementation pending)
 - Date: 2026-07-24
 - Deciders: Temper core maintainers
 - Related:
@@ -12,6 +12,10 @@
   - `crates/temper-jit/src/table/` (runtime transition metadata).
   - `crates/temper-verify/src/composite/` (joint-state verification).
   - `crates/temper-server/src/entity_actor/` (pre-commit transition path).
+
+## Implementation status
+
+This documentation-only change accepts the design. Typed references and the activation audit are not implemented by this PR. Acceptance of ADR-0149 and ADR-0150 records their decisions; the known incomplete weak-component coverage in ADR-0150 remains an implementation gap described in Sub-Decision 8.
 
 ## Context
 
@@ -318,15 +322,18 @@ new or changed reference/identity contract. The audit checks:
 - consistency of reconstructed historical values with set-once semantics;
 - deterministic-ID equality for `entity_id = true`.
 
-Iteration is deterministic and bounded. Any violation or exhausted audit budget
+The audit requires sufficient durable history to reconstruct each reference assignment. A latest-value catalog row does not prove historical set-once behavior. If history is unavailable or incomplete, including for data-only records created without a journal, report an incomplete audit and block activation. Do not infer a clean history from the current value or silently introduce an activation baseline.
+
+Iteration is deterministic and bounded. Any violation, incomplete history, or exhausted audit budget
 blocks activation with a report containing bounded entity IDs and violation
 categories. Existing invalid data is not grandfathered and the old verified spec
 remains active. Operators migrate the reported entities, then retry activation.
 
 ## Rollout Plan
 
-1. **Phase 0 — ADR-only PR.** Accept this contract and mark the already-shipped
-   ADR-0149/0150 decisions Accepted.
+1. **Design acceptance — this documentation PR.** Accept this contract and
+   ADR-0149/0150 as decisions. The coverage gap in Sub-Decision 8 remains open
+   until its implementation and regression proof pass.
 2. **Phase 1 — grammar and verification.** Add parser/types, bundle linting,
    finite L0/L1 abstractions, complete weak-component composition, and negative
    tests before runtime activation is possible.

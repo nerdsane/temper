@@ -10,6 +10,10 @@
   - `crates/temper-cli/src/verify/` (the `temper verify` command).
   - `crates/temper-spec/src/automaton/` (trigger parsing + trigger graph).
 
+## Implementation status
+
+Accepted describes the decision, not complete implementation coverage. The current directed-reachability planner can omit upstream members of a weak component (for example, Z in Z -> A). ADR-0156 Sub-Decision 8 specifies the required correction; this documentation PR does not implement it.
+
 ## Context
 
 Cross-entity reactions are the backbone of Temper apps: when one entity's action
