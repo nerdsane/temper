@@ -241,3 +241,274 @@ async fn dst_co_commit_atomic_on_uniqueness_reject() {
         );
     }
 }
+
+/// ARN-238: deleting an entity must RELEASE its declared-key ownership.
+///
+/// The Deleted event's co-commit recomputes key rows from the entity's fields
+/// (which still hold the key values), so the tombstoned entity keeps its
+/// `entity_key_index` rows: keyed reads resolve to a dead entity, and — the
+/// durable damage — any NEW entity claiming the same key value is rejected
+/// with a uniqueness violation forever.
+#[tokio::test]
+async fn dst_deleted_entity_releases_declared_key() {
+    for seed in 0..NUM_SEEDS {
+        let (_guard, _clock, _id) = install_deterministic_context(seed);
+        let store: BoxedEventStore = BoxedEventStore::new(SimEventStore::no_faults(seed));
+        let table = doc_table();
+        let system = ActorSystem::new("dst-keyed-delete");
+
+        // Doc A claims the key, then is deleted.
+        let id_a = format!("doc-a-{seed}");
+        let actor_a = EntityActor::with_persistence(
+            "Doc",
+            &id_a,
+            table.clone(),
+            serde_json::json!({}),
+            store.clone(),
+            BackendLabel::Sim,
+        )
+        .with_tenant("default");
+        let ref_a = system.spawn(actor_a, &id_a);
+        let r = dispatch(
+            &ref_a,
+            "Create",
+            serde_json::json!({ "WorkspaceId": "ws1", "Path": "/a.md" }),
+        )
+        .await;
+        assert!(r.success, "seed {seed}: Create A failed: {:?}", r.error);
+
+        let deleted: EntityResponse = ref_a
+            .ask(EntityMsg::Delete, Duration::from_secs(5))
+            .await
+            .expect("delete responds");
+        assert!(
+            deleted.success,
+            "seed {seed}: Delete failed: {:?}",
+            deleted.error
+        );
+
+        // 1) The dead entity must no longer own the key.
+        let owner = store
+            .lookup_by_key("default", "Doc", "path", &doc_key_hash("ws1", "/a.md"))
+            .await
+            .expect("lookup ok");
+        assert_eq!(
+            owner, None,
+            "seed {seed}: a deleted entity must release its declared key, got {owner:?}"
+        );
+
+        // 2) A new entity must be able to claim the released key value.
+        let id_b = format!("doc-b-{seed}");
+        let actor_b = EntityActor::with_persistence(
+            "Doc",
+            &id_b,
+            table.clone(),
+            serde_json::json!({}),
+            store.clone(),
+            BackendLabel::Sim,
+        )
+        .with_tenant("default");
+        let ref_b = system.spawn(actor_b, &id_b);
+        let r = dispatch(
+            &ref_b,
+            "Create",
+            serde_json::json!({ "WorkspaceId": "ws1", "Path": "/a.md" }),
+        )
+        .await;
+        assert!(
+            r.success,
+            "seed {seed}: a new entity must be able to claim a key released by deletion, got: {:?}",
+            r.error
+        );
+
+        // 3) And the key resolves to the new owner.
+        let owner = store
+            .lookup_by_key("default", "Doc", "path", &doc_key_hash("ws1", "/a.md"))
+            .await
+            .expect("lookup ok");
+        assert_eq!(
+            owner,
+            Some(id_b.clone()),
+            "seed {seed}: the key must resolve to its new living owner"
+        );
+    }
+}
+
+/// ARN-238 healing pass: deletes that happened BEFORE release-on-delete left
+/// stale `entity_key_index` rows behind. The key backfill must release a
+/// tombstoned entity's rows instead of skipping them, so legacy stale
+/// ownership heals on the next boot backfill.
+#[tokio::test]
+async fn dst_key_backfill_releases_stale_rows_of_deleted_entities() {
+    use temper_server::registry::SpecRegistry;
+    use temper_server::state::ServerState;
+    use temper_spec::csdl::parse_csdl;
+
+    const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
+
+    for seed in [7u64, 42u64] {
+        let (_guard, _clock, _id) = install_deterministic_context(seed);
+        let sim = SimEventStore::no_faults(seed);
+        let store: BoxedEventStore = BoxedEventStore::new(sim.clone());
+        let entity_id = format!("legacy-doc-{seed}");
+        let pid = format!("default:Doc:{entity_id}");
+
+        // Simulate the LEGACY sequence directly against the store (bypassing
+        // the fixed actor): a Create that claims the key, then a Deleted
+        // event whose co-commit re-claims it (the pre-fix behavior).
+        let stale_key = EntityKeyRow {
+            key_name: "path".to_string(),
+            key_hash: doc_key_hash("ws1", "/legacy.md"),
+        };
+        let mk_env = |seq: u64, event_type: &str, payload: serde_json::Value| PersistenceEnvelope {
+            sequence_nr: seq,
+            event_type: event_type.to_string(),
+            payload,
+            metadata: EventMetadata {
+                event_id: sim_uuid(),
+                causation_id: sim_uuid(),
+                correlation_id: sim_uuid(),
+                timestamp: sim_now(),
+                actor_id: pid.clone(),
+            },
+        };
+        store
+            .append_with_keys(
+                &pid,
+                0,
+                &[mk_env(
+                    1,
+                    "Create",
+                    serde_json::json!({
+                        "action": "Create", "from_status": "New", "to_status": "Ready",
+                        "timestamp": sim_now(), "params": {"WorkspaceId": "ws1", "Path": "/legacy.md"}
+                    }),
+                )],
+                std::slice::from_ref(&stale_key),
+            )
+            .await
+            .expect("legacy create");
+        store
+            .append_with_keys(
+                &pid,
+                1,
+                &[mk_env(
+                    2,
+                    "Deleted",
+                    serde_json::json!({
+                        "action": "Deleted", "from_status": "Ready", "to_status": "Deleted",
+                        "timestamp": sim_now(), "params": {}
+                    }),
+                )],
+                std::slice::from_ref(&stale_key), // pre-fix: tombstone re-claims
+            )
+            .await
+            .expect("legacy delete with stale re-claim");
+
+        // The stale row exists (the legacy bug's footprint).
+        let stale = store
+            .lookup_by_key("default", "Doc", "path", &stale_key.key_hash)
+            .await
+            .expect("lookup ok");
+        assert_eq!(
+            stale,
+            Some(entity_id.clone()),
+            "seed {seed}: stale row seeded"
+        );
+
+        // Boot-style backfill over a ServerState sharing this store.
+        let csdl = parse_csdl(CSDL_XML).expect("CSDL parses");
+        let mut registry = SpecRegistry::new();
+        registry.register_tenant("default", csdl, CSDL_XML.to_string(), &[("Doc", DOC_IOA)]);
+        let mut server = ServerState::from_registry(ActorSystem::new("dst-key-heal"), registry);
+        server.set_storage_stack(temper_server::storage::StorageStack::from_sim(sim, None));
+        let tenant = temper_runtime::tenant::TenantId::from("default".to_string());
+        server.populate_index_from_store(&tenant).await;
+        server.populate_key_index_from_snapshots(&tenant).await;
+
+        // The healing pass must have released the dead entity's key.
+        let healed = store
+            .lookup_by_key("default", "Doc", "path", &stale_key.key_hash)
+            .await
+            .expect("lookup ok");
+        assert_eq!(
+            healed, None,
+            "seed {seed}: the key backfill must release stale rows held by deleted entities"
+        );
+    }
+}
+
+/// ARN-238 healing pass, nulled-key leg: a LIVING entity whose stale row
+/// predates release-on-null (its declared key no longer resolves from its
+/// current fields) must have that row released by the backfill.
+#[tokio::test]
+async fn dst_key_backfill_releases_stale_rows_of_living_unresolvable_keys() {
+    use temper_server::registry::SpecRegistry;
+    use temper_server::state::ServerState;
+    use temper_spec::csdl::parse_csdl;
+
+    const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
+
+    let seed = 11u64;
+    let (_guard, _clock, _id) = install_deterministic_context(seed);
+    let sim = SimEventStore::no_faults(seed);
+    let store: BoxedEventStore = BoxedEventStore::new(sim.clone());
+    let entity_id = "legacy-null-doc".to_string();
+    let pid = format!("default:Doc:{entity_id}");
+
+    // Legacy footprint: a Create whose event params DO NOT carry the key
+    // components (so the replayed current state cannot resolve the key),
+    // while a stale key row was still committed — the pre-fix behavior for
+    // a key later nulled.
+    let stale_key = EntityKeyRow {
+        key_name: "path".to_string(),
+        key_hash: doc_key_hash("ws1", "/nulled.md"),
+    };
+    store
+        .append_with_keys(
+            &pid,
+            0,
+            &[PersistenceEnvelope {
+                sequence_nr: 1,
+                event_type: "Create".to_string(),
+                payload: serde_json::json!({
+                    "action": "Create", "from_status": "New", "to_status": "Ready",
+                    "timestamp": sim_now(), "params": {}
+                }),
+                metadata: EventMetadata {
+                    event_id: sim_uuid(),
+                    causation_id: sim_uuid(),
+                    correlation_id: sim_uuid(),
+                    timestamp: sim_now(),
+                    actor_id: pid.clone(),
+                },
+            }],
+            std::slice::from_ref(&stale_key),
+        )
+        .await
+        .expect("legacy create with stale key row");
+
+    let stale = store
+        .lookup_by_key("default", "Doc", "path", &stale_key.key_hash)
+        .await
+        .expect("lookup ok");
+    assert_eq!(stale, Some(entity_id.clone()), "stale row seeded");
+
+    let csdl = parse_csdl(CSDL_XML).expect("CSDL parses");
+    let mut registry = SpecRegistry::new();
+    registry.register_tenant("default", csdl, CSDL_XML.to_string(), &[("Doc", DOC_IOA)]);
+    let mut server = ServerState::from_registry(ActorSystem::new("dst-key-heal-null"), registry);
+    server.set_storage_stack(temper_server::storage::StorageStack::from_sim(sim, None));
+    let tenant = temper_runtime::tenant::TenantId::from("default".to_string());
+    server.populate_index_from_store(&tenant).await;
+    server.populate_key_index_from_snapshots(&tenant).await;
+
+    let healed = store
+        .lookup_by_key("default", "Doc", "path", &stale_key.key_hash)
+        .await
+        .expect("lookup ok");
+    assert_eq!(
+        healed, None,
+        "the key backfill must release a living entity's stale row when its key no longer resolves"
+    );
+}
