@@ -1,6 +1,6 @@
 # ADR-0157: Metadata-Generated Typed Module Data SDK
 
-- Status: Proposed
+- Status: Accepted (design; implementation pending)
 - Date: 2026-07-24
 - Deciders: Temper core maintainers
 - Supersedes: ADR-0099
@@ -14,6 +14,10 @@
   - `crates/temper-wasm/src/engine/host_functions.rs`
   - `crates/temper-server/src/odata/`
   - `crates/temper-server/src/state/dispatch/wasm/local_tdata_host.rs`
+
+## Implementation status
+
+Acceptance records the target design. This documentation-only change does not implement the SDK or retire the ADR-0099 host path. That path remains the current implementation until the rollout below is completed and verified.
 
 ## Context
 

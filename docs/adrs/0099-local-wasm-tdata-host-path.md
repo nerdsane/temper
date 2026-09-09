@@ -1,6 +1,6 @@
 # ADR-0099: Local WASM TData Host Path
 
-- Status: Superseded
+- Status: Superseded as a design by ADR-0157; implementation remains in use pending migration
 - Date: 2026-05-17
 - Deciders: Temper core maintainers
 - Superseded by: ADR-0157
