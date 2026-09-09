@@ -75,9 +75,19 @@ The IOA declaration is authoritative. CSDL cross-validation matches the IOA
 reference name to the **dependent structural property** named by
 `ReferentialConstraint.Property`, not to the navigation-property name. The
 navigation's principal target type must equal `entity_type`, and
-`ReferentialConstraint.ReferencedProperty` must name a key property on that
-target. A contradiction fails bundle verification. CSDL navigation metadata is
-not required merely to use a typed reference.
+`ReferentialConstraint.ReferencedProperty` must name the target's complete
+entity-ID key: a single key property whose value is the routed entity ID. A
+reference to only one component of a composite key is rejected; this scalar
+contract does not encode composite OData keys. A contradiction fails bundle
+verification. CSDL navigation metadata is not required merely to use a typed
+reference.
+
+The compiler derives incoming relation edges from every IOA typed-reference
+declaration, whether or not it has a CSDL navigation. Those edges participate in
+the existing incoming-relation delete checks and use the existing default
+`Restrict` policy. Matching CSDL metadata is cross-validated against that edge,
+not required to create it. This preserves IOA as the behavioral source of truth
+without leaving navigation-free references outside deletion checks.
 
 **Why this approach**: relation identity affects legal transitions and therefore
 belongs in the behavioral spec. CSDL remains the derived OData projection rather

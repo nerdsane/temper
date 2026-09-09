@@ -25,3 +25,15 @@ Chose the contract clarification because it preserves the proposed identity form
 Where: PR #411, ADR-0156 Sub-Decisions 4 and 9; `crates/temper-server/src/state/entity_ops.rs`, `try_create_data_only_tenant_entity`; `test-fixtures/specs/model.csdl.xml`.
 
 Scope constraint: This effort changes documentation only. Review requests for runtime implementation, broader verification redesign, or unrelated improvements do not expand this PR.
+
+## Reference identity and deletion coverage
+
+Decision: Scalar references denote the complete routed target ID, and every IOA reference participates in the existing incoming-relation delete policy.
+
+Came up because round two found that matching one composite-key component could disagree with actor identity, and optional CSDL navigation must not be the only source of deletion-check edges.
+
+Options: add composite reference encoding or a new deletion mechanism; require CSDL navigation as a second behavioral source; clarify complete-ID matching and derive existing relation edges from IOA.
+
+Chose complete scalar IDs and IOA-derived edges because those follow the ADR's existing scalar-only and IOA-authoritative decisions. Deletion uses the existing Restrict policy; there is no new deletion policy, transaction mechanism, or runtime implementation in this PR.
+
+Where: PR #411, ADR-0156 Sub-Decision 1; existing default in `crates/temper-server/src/registry/relations.rs`.
