@@ -6,15 +6,16 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, State};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
+use temper_authz::AuthenticatedRequestContext;
 use tracing::instrument;
 
-use crate::authz::{observe_tenant_scope, require_observe_auth};
+use crate::authz::{observe_tenant_scope, require_authenticated_context, require_observe_auth};
 use crate::state::ServerState;
 
 /// A notification emitted when an entity transitions to a new state.
@@ -54,19 +55,17 @@ pub struct EntityStateChange {
 #[instrument(skip_all, fields(otel.name = "GET /tdata/$events"))]
 pub async fn handle_events(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_events", "Entity")?;
-    let tenant_scope = observe_tenant_scope(&state, &headers)?;
-    let filter_tenant = tenant_scope.map(|t| t.as_str().to_string());
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_events", "Entity")?;
+    let filter_tenant = observe_tenant_scope(authenticated).as_str().to_string();
     let rx = state.event_tx.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(move |result| {
         match result {
             Ok(change) => {
                 // Enforce tenant scope: only emit events for the scoped tenant.
-                if let Some(ref tenant) = filter_tenant
-                    && change.tenant != *tenant
-                {
+                if change.tenant != filter_tenant {
                     return None;
                 }
                 let data = serde_json::to_string(&change).unwrap_or_default();

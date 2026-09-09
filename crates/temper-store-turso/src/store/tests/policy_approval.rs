@@ -1,0 +1,137 @@
+use super::make_store;
+
+fn decision_json(status: &str) -> String {
+    serde_json::json!({
+        "id": "decision-1",
+        "tenant": "tenant-a",
+        "status": status,
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn pending_decision_upsert_cannot_move_ownership() {
+    let store = make_store("pending-decision-owner").await;
+    let pending = decision_json("pending");
+    store
+        .upsert_pending_decision("decision-1", "tenant-a", "pending", &pending)
+        .await
+        .unwrap();
+
+    let error = store
+        .upsert_pending_decision("decision-1", "tenant-b", "pending", &pending)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("owned by another tenant"));
+    assert!(
+        store
+            .get_pending_decision("tenant-b", "decision-1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_pending_decision("tenant-a", "decision-1")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn policy_and_decision_commit_and_rollback_together() {
+    let store = make_store("policy-approval-transaction").await;
+    let pending = decision_json("pending");
+    let approved = decision_json("approved");
+    store
+        .upsert_pending_decision("decision-1", "tenant-a", "pending", &pending)
+        .await
+        .unwrap();
+
+    store
+        .commit_policy_approval(crate::TursoPolicyApprovalCommit {
+            tenant: "tenant-a",
+            decision_id: "decision-1",
+            approved_decision_json: &approved,
+            policy_id: "decision:decision-1",
+            cedar_text: "permit(principal, action, resource);",
+            created_by: "reviewer",
+        })
+        .await
+        .unwrap();
+
+    let policies = store.load_policies_for_tenant("tenant-a").await.unwrap();
+    assert_eq!(policies.len(), 1);
+    assert_eq!(
+        store
+            .get_pending_decision("tenant-a", "decision-1")
+            .await
+            .unwrap()
+            .unwrap(),
+        approved
+    );
+
+    store
+        .rollback_policy_approval("tenant-a", "decision-1", &pending, "decision:decision-1")
+        .await
+        .unwrap();
+    assert!(
+        store
+            .load_policies_for_tenant("tenant-a")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .get_pending_decision("tenant-a", "decision-1")
+            .await
+            .unwrap()
+            .unwrap(),
+        pending
+    );
+}
+
+#[tokio::test]
+async fn policy_conflict_leaves_decision_pending() {
+    let store = make_store("policy-approval-conflict").await;
+    let pending = decision_json("pending");
+    store
+        .upsert_pending_decision("decision-1", "tenant-a", "pending", &pending)
+        .await
+        .unwrap();
+    store
+        .save_policy(
+            "tenant-a",
+            "decision:decision-1",
+            "forbid(principal, action, resource);",
+            "existing",
+        )
+        .await
+        .unwrap();
+
+    let error = store
+        .commit_policy_approval(crate::TursoPolicyApprovalCommit {
+            tenant: "tenant-a",
+            decision_id: "decision-1",
+            approved_decision_json: &decision_json("approved"),
+            policy_id: "decision:decision-1",
+            cedar_text: "permit(principal, action, resource);",
+            created_by: "reviewer",
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("already exists"));
+    assert_eq!(
+        store
+            .get_pending_decision("tenant-a", "decision-1")
+            .await
+            .unwrap()
+            .unwrap(),
+        pending
+    );
+    let policies = store.load_policies_for_tenant("tenant-a").await.unwrap();
+    assert_eq!(policies.len(), 1);
+    assert!(policies[0].cedar_text.starts_with("forbid"));
+}

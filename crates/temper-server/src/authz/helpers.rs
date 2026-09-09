@@ -6,73 +6,63 @@
 
 use std::collections::BTreeMap;
 
-use axum::http::{HeaderMap, StatusCode};
-use temper_authz::SecurityContext;
+use axum::http::StatusCode;
+use temper_authz::{AuthenticatedRequestContext, SecurityContext};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
 use crate::request_context::AgentContext;
 use crate::state::{PendingDecision, TrajectoryEntry, TrajectorySource};
 
-/// Extract `X-Temper-*` headers from an axum `HeaderMap` into `(key, value)` pairs
-/// suitable for `SecurityContext::from_headers`.
-pub(crate) fn extract_temper_headers(headers: &HeaderMap) -> Vec<(String, String)> {
-    headers
-        .iter()
-        .filter_map(|(name, value)| {
-            let key = name.as_str().to_lowercase();
-            if key == "x-temper-action-context" {
-                None
-            } else if key.starts_with("x-temper-") {
-                value.to_str().ok().map(|v| (key, v.to_string()))
-            } else {
-                None
-            }
-        })
-        .collect()
+/// Require the credential-derived request context installed by the auth edge.
+///
+/// Protected handlers use `Option<Extension<_>>` so a missing edge context is
+/// an explicit `401` rather than axum's generic missing-extension rejection.
+pub(crate) fn require_authenticated_context(
+    authenticated: Option<&AuthenticatedRequestContext>,
+) -> Result<&AuthenticatedRequestContext, StatusCode> {
+    authenticated.ok_or(StatusCode::UNAUTHORIZED)
 }
 
-/// Build a `SecurityContext` from request headers, optionally enriched with
-/// agent identity from an `AgentContext`.
-pub(crate) fn security_context_from_headers(
-    headers: &HeaderMap,
-    agent_id: Option<&str>,
-    session_id: Option<&str>,
-    agent_type: Option<&str>,
-) -> SecurityContext {
-    let temper_headers = extract_temper_headers(headers);
-    SecurityContext::from_headers(&temper_headers)
-        .with_agent_context(agent_id, session_id, agent_type)
+/// Ensure a tenant path parameter matches the credential-bound tenant.
+///
+/// The path remains useful for route shape, but it is never an authority input.
+/// A credential resolved for one tenant cannot operate on another tenant's
+/// path-scoped resource.
+pub(crate) fn require_tenant_match<'a>(
+    authenticated: &'a AuthenticatedRequestContext,
+    requested_tenant: &str,
+) -> Result<&'a TenantId, StatusCode> {
+    if authenticated.tenant().as_str() != requested_tenant {
+        tracing::warn!(
+            authenticated_tenant = %authenticated.tenant(),
+            requested_tenant,
+            "credential tenant does not match protected route tenant"
+        );
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(authenticated.tenant())
 }
 
 /// Check Cedar authorization for observe endpoints.
 ///
-/// Admin and System principals bypass the check. Other principals must have the
-/// specified `action` on `resource_type`. Returns `Ok(())` if authorized or
+/// Every principal must have the specified `action` on `resource_type`.
+/// System authority is represented by the built-in Cedar policy, not a caller
+/// side channel. Returns `Ok(())` if authorized or
 /// `Err(StatusCode::FORBIDDEN)` if denied.
 pub(crate) fn require_observe_auth(
     state: &crate::state::ServerState,
-    headers: &HeaderMap,
+    authenticated: &AuthenticatedRequestContext,
     action: &str,
     resource_type: &str,
 ) -> Result<(), axum::http::StatusCode> {
-    let security_ctx = security_context_from_headers(headers, None, None, None);
-    if matches!(
-        security_ctx.principal.kind,
-        temper_authz::PrincipalKind::Admin | temper_authz::PrincipalKind::System
-    ) {
-        return Ok(());
-    }
-    let tenant = headers
-        .get("x-tenant-id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("system");
+    let security_ctx = authenticated.security_context();
     if let Err(denial) = state.authorize_with_context(
-        &security_ctx,
+        security_ctx,
         action,
         resource_type,
-        &std::collections::BTreeMap::new(),
-        tenant,
+        &BTreeMap::new(),
+        authenticated.tenant().as_str(),
     ) {
         tracing::warn!(reason = %denial, action, resource_type, "unauthorized observe access");
         return Err(axum::http::StatusCode::FORBIDDEN);
@@ -82,45 +72,58 @@ pub(crate) fn require_observe_auth(
 
 /// Resolve the tenant scope for an observe endpoint.
 ///
-/// Returns `Some(tenant)` when results should be filtered to a single tenant,
-/// or `None` when the caller is authorized for a cross-tenant admin view.
-///
-/// - If `X-Tenant-Id` is present → filter to that tenant.
-/// - If missing and principal is Admin/System → cross-tenant view (`None`).
-/// - If missing in multi-tenant mode for non-admin → `403 Forbidden`.
+/// Every credential is tenant-bound, including operator credentials. Observe
+/// handlers therefore always filter to the authenticated tenant; a cross-tenant
+/// view requires an explicit higher-level aggregation rather than an absent
+/// tenant header.
 #[allow(dead_code)] // False positive: used by observe/ handlers via crate::authz re-export
-pub(crate) fn observe_tenant_scope(
+pub(crate) fn observe_tenant_scope(authenticated: &AuthenticatedRequestContext) -> &TenantId {
+    authenticated.tenant()
+}
+
+/// One exact Cedar resource check derived from authenticated request authority.
+#[cfg(feature = "observe")]
+pub(crate) struct ResourceAuthorization<'a> {
+    pub action: &'a str,
+    pub resource_type: &'a str,
+    pub resource_id: &'a str,
+    pub resource_attrs: BTreeMap<String, serde_json::Value>,
+}
+
+/// Require Cedar authorization for one credential-tenant resource.
+///
+/// The tenant and principal always come from [`AuthenticatedRequestContext`].
+/// Callers may add resource-specific attributes, while this helper guarantees
+/// that Cedar receives the exact resource id used by the operation.
+#[cfg(feature = "observe")]
+pub(crate) fn require_resource_authorization(
     state: &crate::state::ServerState,
-    headers: &axum::http::HeaderMap,
-) -> Result<Option<TenantId>, axum::http::StatusCode> {
-    // If the caller provided an explicit tenant, always scope to it.
-    if let Some(val) = headers.get("x-tenant-id")
-        && let Ok(s) = val.to_str()
-        && !s.is_empty()
-    {
-        return Ok(Some(TenantId::new(s)));
-    }
-
-    // No tenant header — admin/system get cross-tenant view.
-    let security_ctx = security_context_from_headers(headers, None, None, None);
-    if matches!(
-        security_ctx.principal.kind,
-        temper_authz::PrincipalKind::Admin | temper_authz::PrincipalKind::System
+    authenticated: &AuthenticatedRequestContext,
+    mut input: ResourceAuthorization<'_>,
+) -> Result<(), StatusCode> {
+    input.resource_attrs.insert(
+        "id".to_string(),
+        serde_json::Value::String(input.resource_id.to_string()),
+    );
+    if let Err(denial) = state.authorize_with_context(
+        authenticated.security_context(),
+        input.action,
+        input.resource_type,
+        &input.resource_attrs,
+        authenticated.tenant().as_str(),
     ) {
-        return Ok(None);
-    }
-
-    // Non-admin without tenant in multi-tenant mode: reject.
-    if !state.single_tenant_mode {
         tracing::warn!(
-            principal = %security_ctx.principal.id,
-            "non-admin observe request without X-Tenant-Id in multi-tenant mode"
+            reason = %denial,
+            tenant = %authenticated.tenant(),
+            principal_id = %authenticated.security_context().principal.id,
+            action = input.action,
+            resource_type = input.resource_type,
+            resource_id = input.resource_id,
+            "credential-bound resource authorization denied"
         );
-        return Err(axum::http::StatusCode::FORBIDDEN);
+        return Err(StatusCode::FORBIDDEN);
     }
-
-    // Single-tenant compat: cross-tenant view for all principals.
-    Ok(None)
+    Ok(())
 }
 
 /// Input for recording an authorization denial.
@@ -145,6 +148,29 @@ pub(crate) struct DenialInput<'a> {
     pub module_name: Option<String>,
     /// Entity status at the time of denial.
     pub from_status: Option<String>,
+    /// Caller-supplied intent (`X-Intent`) for the denied request.
+    ///
+    /// A denial without the intent behind it tells the Evolution Engine what
+    /// was blocked but not what the agent was trying to accomplish, which is
+    /// the half that drives policy proposals.
+    pub intent: Option<String>,
+    /// Whether the denied operation was a spec-governed dispatch.
+    ///
+    /// `Some(false)` marks rows the conformance checker must never judge:
+    /// pre-flight probes and management-plane denials, whose entity type,
+    /// action, and session can be caller-chosen. Left `None` only by the OData
+    /// entity-dispatch guards, where the row describes a genuine attempted
+    /// dispatch of a registered action (`crate::conformance::walk::row_disposition`
+    /// walks `None` as actor execution, so `None` is an assertion that the row
+    /// belongs in a run's verdict).
+    pub spec_governed: Option<bool>,
+    /// Session the gate resolved for this request, when it had one.
+    ///
+    /// Passed in rather than recomputed: the caller-declared session rides the
+    /// request context now (it must never reach Cedar), so recomputing it from
+    /// `context_attrs` would leave exactly the session-scoped denials the gate
+    /// admitted with no session on their record.
+    pub session_id: Option<String>,
 }
 
 /// Input for a resumable management mutation authorization check.
@@ -169,24 +195,23 @@ pub(crate) struct GovernedMutationAuth<'a> {
 #[allow(unused)] // Staged for governed management endpoints after the latency package lands.
 pub(crate) async fn require_governed_mutation_auth(
     state: &crate::state::ServerState,
-    headers: &HeaderMap,
+    authenticated: &AuthenticatedRequestContext,
     mut input: GovernedMutationAuth<'_>,
 ) -> Option<(StatusCode, String)> {
-    let security_ctx = security_context_from_headers(headers, None, None, None);
-    if matches!(
-        security_ctx.principal.kind,
-        temper_authz::PrincipalKind::Admin
-    ) {
-        return None;
+    if require_tenant_match(authenticated, input.tenant).is_err() {
+        return Some((
+            StatusCode::UNAUTHORIZED,
+            "credential tenant does not match protected route tenant".to_string(),
+        ));
     }
-
+    let security_ctx = authenticated.security_context();
     input
         .resource_attrs
         .entry("id".to_string())
         .or_insert_with(|| serde_json::Value::String(input.resource_id.to_string()));
 
     let Err(denial) = state.authorize_with_context(
-        &security_ctx,
+        security_ctx,
         input.action,
         input.resource_type,
         &input.resource_attrs,
@@ -196,10 +221,16 @@ pub(crate) async fn require_governed_mutation_auth(
     };
 
     let reason = denial.to_string();
-    let session_id = security_ctx
-        .context_attrs
-        .get("sessionId")
-        .and_then(|v| v.as_str());
+    // Either source is valid here, and neither is an authorization input: the
+    // request context carries the caller's declared session (telemetry only),
+    // while `context_attrs` carries one a server-side path minted itself — the
+    // WASM/agent dispatch contexts do this, and their session is not a header.
+    let session_id = authenticated.session_id().or_else(|| {
+        security_ctx
+            .context_attrs
+            .get("sessionId")
+            .and_then(|value| value.as_str())
+    });
     if matches!(
         security_ctx.principal.kind,
         temper_authz::PrincipalKind::Agent
@@ -211,7 +242,7 @@ pub(crate) async fn require_governed_mutation_auth(
             state,
             DenialInput {
                 tenant: input.tenant,
-                security_ctx: &security_ctx,
+                security_ctx,
                 agent_id_override: None,
                 action: input.action,
                 resource_type: input.resource_type,
@@ -220,6 +251,10 @@ pub(crate) async fn require_governed_mutation_auth(
                 reason: &reason,
                 module_name: input.module_name.map(str::to_string),
                 from_status: input.from_status.map(str::to_string),
+                intent: authenticated.intent().map(str::to_string),
+                session_id: session_id.map(str::to_string),
+                // Management-plane denial, not a spec-governed dispatch.
+                spec_governed: Some(false),
             },
         )
         .await;
@@ -261,12 +296,15 @@ pub(crate) async fn record_authz_denial(
         .agent_id_override
         .unwrap_or(input.security_ctx.principal.id.as_str());
     let denied_module = input.module_name.clone();
-    let session_id = input
-        .security_ctx
-        .context_attrs
-        .get("sessionId")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let denial_request_body = input.resource_attrs.clone();
+    let session_id = input.session_id.clone().or_else(|| {
+        input
+            .security_ctx
+            .context_attrs
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    });
 
     let mut pd = PendingDecision::from_denial(
         input.tenant,
@@ -358,11 +396,15 @@ pub(crate) async fn record_authz_denial(
         denied_resource: Some(format!("{}:{}", input.resource_type, input.resource_id)),
         denied_module,
         source: Some(TrajectorySource::Authz),
-        spec_governed: None,
+        spec_governed: input.spec_governed,
         agent_type: input.security_ctx.principal.agent_type.clone(),
-        request_body: None,
-        intent: None,
+        // The Cedar-evaluated resource attributes are the request payload for
+        // an authorization decision; without them a denial cannot be replayed
+        // against a revised policy.
+        request_body: Some(denial_request_body),
+        intent: input.intent.clone(),
         matched_policy_ids: None,
+        capture_seq: None,
     };
     if !state.enqueue_trajectory_entry(traj.clone()) {
         tracing::warn!("failed to enqueue authz trajectory");
@@ -399,117 +441,35 @@ pub(crate) async fn record_authz_denial(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::header::HeaderValue as AxumHeaderValue;
-    use axum::http::{HeaderMap, HeaderName, HeaderValue};
-    use serde_json::Value;
-    use temper_authz::PrincipalKind;
+    use temper_authz::AuthenticatedRequestContext;
 
     #[test]
-    fn extract_temper_headers_filters_correctly() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static("x-temper-principal"),
-            HeaderValue::from_static("agent-007"),
-        );
-        headers.insert(
-            HeaderName::from_static("x-temper-session"),
-            HeaderValue::from_static("sess-123"),
-        );
-        headers.insert(
-            HeaderName::from_static("content-type"),
-            HeaderValue::from_static("application/json"),
-        );
-        headers.insert(
-            HeaderName::from_static("authorization"),
-            HeaderValue::from_static("Bearer tok"),
-        );
-
-        let result = extract_temper_headers(&headers);
-        assert_eq!(result.len(), 2);
-        assert!(result.contains(&("x-temper-principal".to_string(), "agent-007".to_string())));
-        assert!(result.contains(&("x-temper-session".to_string(), "sess-123".to_string())));
-    }
-
-    #[test]
-    fn extract_temper_headers_empty() {
-        let headers = HeaderMap::new();
-        assert!(extract_temper_headers(&headers).is_empty());
-    }
-
-    #[test]
-    fn extract_temper_headers_case_insensitive() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static("x-temper-test"),
-            HeaderValue::from_static("val"),
-        );
-        let result = extract_temper_headers(&headers);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].0, "x-temper-test");
-    }
-
-    #[test]
-    fn security_context_from_headers_preserves_agent_type_from_http_header() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-temper-principal-id",
-            AxumHeaderValue::from_static("bot-1"),
-        );
-        headers.insert(
-            "x-temper-principal-kind",
-            AxumHeaderValue::from_static("agent"),
-        );
-        headers.insert(
-            "x-temper-agent-type",
-            AxumHeaderValue::from_static("supervisor"),
-        );
-
-        let ctx = security_context_from_headers(&headers, None, None, None);
-        assert_eq!(ctx.principal.kind, PrincipalKind::Agent);
-        assert_eq!(ctx.principal.id, "bot-1");
-        assert_eq!(ctx.principal.agent_type.as_deref(), Some("supervisor"));
-    }
-
-    #[test]
-    fn security_context_from_headers_preserves_principal_attrs_from_http_headers() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-temper-principal-id",
-            AxumHeaderValue::from_static("bot-1"),
-        );
-        headers.insert(
-            "x-temper-principal-kind",
-            AxumHeaderValue::from_static("agent"),
-        );
-        headers.insert(
-            "x-temper-attr-region",
-            AxumHeaderValue::from_static("us-east-1"),
-        );
-
-        let ctx = security_context_from_headers(&headers, None, None, None);
+    fn missing_authenticated_context_is_unauthorized() {
         assert_eq!(
-            ctx.principal.attributes.get("region"),
-            Some(&Value::String("us-east-1".to_string()))
+            require_authenticated_context(None).unwrap_err(),
+            StatusCode::UNAUTHORIZED
         );
     }
 
     #[test]
-    fn security_context_from_headers_drops_action_context_from_http_headers() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-temper-principal-id",
-            AxumHeaderValue::from_static("bot-1"),
-        );
-        headers.insert(
-            "x-temper-principal-kind",
-            AxumHeaderValue::from_static("agent"),
-        );
-        headers.insert(
-            "x-temper-action-context",
-            AxumHeaderValue::from_static("composite:App.Fork"),
-        );
+    fn typed_context_preserves_resolved_identity_and_tenant() {
+        let authenticated =
+            AuthenticatedRequestContext::new(TenantId::new("tenant-a"), SecurityContext::system());
 
-        let ctx = security_context_from_headers(&headers, None, None, None);
-        assert!(!ctx.principal.attributes.contains_key("action_context"));
+        let resolved = require_authenticated_context(Some(&authenticated)).unwrap();
+
+        assert_eq!(resolved.tenant().as_str(), "tenant-a");
+        assert_eq!(resolved.security_context().principal.id, "system");
+    }
+
+    #[test]
+    fn tenant_mismatch_is_unauthorized() {
+        let authenticated =
+            AuthenticatedRequestContext::new(TenantId::new("tenant-a"), SecurityContext::system());
+
+        assert_eq!(
+            require_tenant_match(&authenticated, "tenant-b").unwrap_err(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 }

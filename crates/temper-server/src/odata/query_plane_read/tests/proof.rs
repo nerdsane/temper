@@ -851,7 +851,6 @@ async fn session_entry_chain_parent_lookup_uses_bounded_native_page() {
         .await
         .expect("create local turso db");
     let mut state = build_order_state("query-plane-session-parent");
-    state.set_storage_stack(StorageStack::from_turso(store.clone()));
     let tenant = TenantId::default();
 
     for index in 0usize..1200 {
@@ -867,6 +866,10 @@ async fn session_entry_chain_parent_lookup_uses_bounded_native_page() {
         )
         .await;
     }
+    // Keep fixture materialization single-owner. Installing the shared store
+    // starts query-plane maintenance workers, which must not race the bulk
+    // fixture transaction loop on libSQL's local connection.
+    state.set_storage_stack(StorageStack::from_turso(store.clone()));
 
     let security_ctx = SecurityContext::system();
     let query_options = QueryOptions {
@@ -928,7 +931,6 @@ async fn session_entry_leaf_id_lookup_uses_bounded_native_page() {
         .await
         .expect("create local turso db");
     let mut state = build_order_state("query-plane-session-leaf");
-    state.set_storage_stack(StorageStack::from_turso(store.clone()));
     let tenant = TenantId::default();
 
     for index in 0usize..1200 {
@@ -944,6 +946,7 @@ async fn session_entry_leaf_id_lookup_uses_bounded_native_page() {
         )
         .await;
     }
+    state.set_storage_stack(StorageStack::from_turso(store.clone()));
 
     let security_ctx = SecurityContext::system();
     let query_options = QueryOptions {

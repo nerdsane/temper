@@ -18,7 +18,7 @@ use futures_util::StreamExt;
 use serde_json::Value;
 
 use temper_wasm::WasmHost;
-use temper_wasm::host_trait::ProductionWasmHost;
+use temper_wasm::host_trait::{InternalHttpCapability, ProductionWasmHost};
 use temper_wasm::http_stream::{HttpRequestHead, StreamError};
 use temper_wasm::types::WasmInvocationContext;
 
@@ -85,35 +85,44 @@ async fn spawn_echo_server() -> String {
 async fn outbound_streaming_injects_internal_auth_headers() {
     let base = spawn_echo_server().await;
 
-    let mut secrets = BTreeMap::new();
-    secrets.insert("temper_api_url".to_string(), base.clone());
-    secrets.insert("temper_api_key".to_string(), "secret123".to_string());
-
-    let host = Arc::new(ProductionWasmHost::new(secrets).with_invocation_context(
-        WasmInvocationContext {
-            tenant: "default".to_string(),
-            entity_type: "Workspace".to_string(),
-            entity_id: "ws-1".to_string(),
-            trigger_action: "CreateFile".to_string(),
-            wasm_module: Some("blob_adapter".to_string()),
-            trigger_params: Value::Null,
-            entity_state: Value::Null,
-            agent_id: Some("operator".to_string()),
-            session_id: None,
-            integration_config: BTreeMap::new(),
-            trace_id: String::new(),
-            workflow_root_entity_type: Some("CurationQuery".to_string()),
-            workflow_root_entity_id: Some("cq-1".to_string()),
-            workflow_run_id: Some("CurationQuery:cq-1".to_string()),
-            http_request: None,
-        },
-    ));
+    let host = Arc::new(
+        ProductionWasmHost::new(BTreeMap::new())
+            .with_internal_api_base_url(Some(base.clone()))
+            .with_internal_capability_issuer(Arc::new(|method, url| {
+                assert_eq!(method, "PUT");
+                assert!(url.ends_with("/internal"));
+                InternalHttpCapability::new("stream-capability".to_string(), "tenant-a".to_string())
+            }))
+            .with_invocation_context(WasmInvocationContext {
+                tenant: "default".to_string(),
+                entity_type: "Workspace".to_string(),
+                entity_id: "ws-1".to_string(),
+                trigger_action: "CreateFile".to_string(),
+                wasm_module: Some("blob_adapter".to_string()),
+                trigger_params: Value::Null,
+                entity_state: Value::Null,
+                agent_id: Some("operator".to_string()),
+                session_id: None,
+                integration_config: BTreeMap::new(),
+                trace_id: String::new(),
+                workflow_root_entity_type: Some("CurationQuery".to_string()),
+                workflow_root_entity_id: Some("cq-1".to_string()),
+                workflow_run_id: Some("CurationQuery:cq-1".to_string()),
+                http_request: None,
+            }),
+    );
 
     let handles = host
         .http_stream_begin_outbound(HttpRequestHead {
             method: "PUT".into(),
             url: format!("{base}/internal"),
-            headers: vec![("content-type".into(), "image/png".into())],
+            headers: vec![
+                ("content-type".into(), "image/png".into()),
+                ("authorization".into(), "Bearer guest-root".into()),
+                ("x-tenant-id".into(), "victim".into()),
+                ("x-temper-principal-kind".into(), "admin".into()),
+                ("x-temper-principal-id".into(), "attacker".into()),
+            ],
         })
         .await
         .unwrap();
@@ -146,10 +155,12 @@ async fn outbound_streaming_injects_internal_auth_headers() {
     }
     let body = String::from_utf8(body).unwrap();
 
-    assert!(body.contains("authorization=Bearer secret123"));
-    assert!(body.contains("tenant=default"));
-    assert!(body.contains("principal_kind=agent"));
-    assert!(body.contains("principal_id=operator"));
+    assert!(body.contains("authorization=Bearer stream-capability"));
+    assert!(body.contains("tenant=tenant-a"));
+    assert!(body.contains("principal_kind=;principal_id=;"));
+    assert!(!body.contains("guest-root"));
+    assert!(!body.contains("victim"));
+    assert!(!body.contains("attacker"));
     assert!(body.contains("workflow_type=CurationQuery"));
     assert!(body.contains("body=raw-image-bytes"));
 }

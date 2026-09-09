@@ -80,6 +80,14 @@ const CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 </edmx:Edmx>
 "#;
 
+const VEC_ITEM_READ_TEST_POLICY: &str = r#"
+    permit(
+        principal,
+        action in [Action::"list", Action::"read"],
+        resource is VecItem
+    );
+"#;
+
 fn build_state() -> ServerState {
     let mut registry = SpecRegistry::new();
     let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
@@ -92,6 +100,10 @@ fn build_state() -> ServerState {
     let system = ActorSystem::new("nearest-odata");
     let mut state = ServerState::from_registry(system, registry);
     state.set_storage_stack(StorageStack::from_sim(SimEventStore::no_faults(7), None));
+    state
+        .authz
+        .reload_tenant_policies(TenantId::default().as_str(), VEC_ITEM_READ_TEST_POLICY)
+        .expect("install VecItem read/list test policy");
     state
 }
 
@@ -145,7 +157,16 @@ async fn delete_item(state: &ServerState, tenant: &TenantId, id: &str) {
 
 async fn get_json(state: &ServerState, path: &str) -> (StatusCode, serde_json::Value) {
     let router = build_router(state.clone());
-    let req = Request::builder().uri(path).body(Body::empty()).unwrap();
+    let mut req = Request::builder().uri(path).body(Body::empty()).unwrap();
+    req.extensions_mut()
+        .insert(temper_authz::AuthenticatedRequestContext::new(
+            TenantId::default(),
+            temper_authz::SecurityContext::from_resolved_identity(
+                "nearest-odata-test",
+                "test-customer",
+                None,
+            ),
+        ));
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)

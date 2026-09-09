@@ -1257,6 +1257,7 @@ mod tests {
                 request_body: Some("{\"ok\":true}"),
                 intent: Some("test"),
                 matched_policy_ids: Some("[\"policy:test\"]"),
+                capture_seq: Some(1),
             });
             let _ = store.save_policy(
                 "tenant",
@@ -1287,6 +1288,7 @@ mod tests {
         let _ = PostgresEventStore::count_trajectories_by_tenant;
         let _ = PostgresEventStore::query_trajectory_stats;
         let _ = PostgresEventStore::query_trajectories_by_agent;
+        let _ = PostgresEventStore::query_trajectories_by_session;
         let _ = PostgresEventStore::query_agent_summaries;
 
         let _ = PostgresEventStore::upsert_feature_request;

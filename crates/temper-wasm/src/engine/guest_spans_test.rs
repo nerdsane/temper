@@ -126,3 +126,178 @@ fn cleanup_closes_unended_spans() {
     registry.cleanup_unclosed();
     assert!(registry.enter_active().is_none());
 }
+
+/// ARN-243 / ADR-0166. The guest manual-span API lets an untrusted module name
+/// its own span attributes, including the canonical `gen_ai.*` keys that LLM
+/// Observability reads. For a tenant that has not opted into content export, a
+/// module holding a prompt and a completion must not be able to publish them
+/// simply by calling `host_start_span` with those names.
+#[test]
+fn guest_span_attributes_drop_llm_content_for_non_opted_in_tenant() {
+    let mut attributes = BTreeMap::new();
+    attributes.insert(
+        "gen_ai.input.messages".to_string(),
+        Value::String("SECRET PROMPT".to_string()),
+    );
+    attributes.insert(
+        "gen_ai.completion".to_string(),
+        Value::String("SECRET COMPLETION".to_string()),
+    );
+    attributes.insert(
+        "gen_ai.request.model".to_string(),
+        Value::String("claude-opus-4-8".to_string()),
+    );
+    // A name inside the namespace that no denylist enumerates.
+    attributes.insert(
+        "gen_ai.response.text".to_string(),
+        Value::String("SECRET COMPLETION".to_string()),
+    );
+    // The module's own application telemetry, which must keep working.
+    attributes.insert("order.id".to_string(), Value::String("A-17".to_string()));
+
+    let redacted = manual_span_attributes(&context(), 1, &allowed_attributes(&attributes, false));
+
+    assert_eq!(
+        redacted.get("gen_ai.input.messages"),
+        None,
+        "prompt must not export"
+    );
+    assert_eq!(
+        redacted.get("gen_ai.completion"),
+        None,
+        "completion must not export"
+    );
+    assert_eq!(
+        redacted.get("gen_ai.response.text"),
+        None,
+        "an unrecognized gen_ai.* key must not export just because it is unlisted"
+    );
+    assert_eq!(
+        redacted.get("gen_ai.request.model"),
+        Some(&Value::String("claude-opus-4-8".to_string())),
+        "recognized metadata must survive"
+    );
+    assert_eq!(
+        redacted.get("order.id"),
+        Some(&Value::String("A-17".to_string())),
+        "non-LLM guest telemetry must keep working"
+    );
+
+    // The opted-in tenant is unaffected.
+    let exported = manual_span_attributes(&context(), 1, &allowed_attributes(&attributes, true));
+    assert_eq!(
+        exported.get("gen_ai.completion"),
+        Some(&Value::String("SECRET COMPLETION".to_string())),
+        "an opted-in tenant still exports content"
+    );
+}
+
+/// A key name cannot make an untrusted value into metadata: without a bound, a
+/// module hides the whole prompt inside `gen_ai.request.model` and the allowlist
+/// waves it through.
+#[test]
+fn guest_span_metadata_values_are_bounded_for_non_opted_in_tenant() {
+    let prompt = "P".repeat(4096);
+    let mut attributes = BTreeMap::new();
+    attributes.insert(
+        "gen_ai.request.model".to_string(),
+        Value::String(prompt.clone()),
+    );
+
+    let redacted = manual_span_attributes(&context(), 1, &allowed_attributes(&attributes, false));
+    let Some(Value::String(value)) = redacted.get("gen_ai.request.model") else {
+        panic!("metadata key should survive, bounded");
+    };
+    assert!(
+        value.len() <= 256,
+        "metadata value must be clamped, got {} bytes",
+        value.len()
+    );
+
+    let exported = manual_span_attributes(&context(), 1, &allowed_attributes(&attributes, true));
+    assert_eq!(
+        exported.get("gen_ai.request.model"),
+        Some(&Value::String(prompt)),
+        "an opted-in tenant is not clamped"
+    );
+}
+
+/// A clamp that only matches `Value::String` is not a clamp. `gen_ai.request.model
+/// = ["<the whole prompt>"]` is a recognised metadata key holding unbounded
+/// content, and its serialized form reaches the backend all the same. No key in
+/// the metadata allowlist is structured, so structured values are dropped.
+#[test]
+fn structured_llm_metadata_values_do_not_escape_the_clamp() {
+    let prompt = "P".repeat(4096);
+    let mut attributes = BTreeMap::new();
+    attributes.insert(
+        "gen_ai.request.model".to_string(),
+        Value::Array(vec![Value::String(prompt.clone())]),
+    );
+    attributes.insert(
+        "gen_ai.response.model".to_string(),
+        serde_json::json!({ "smuggled": prompt }),
+    );
+    // Scalars that are legitimately structured-adjacent still work.
+    attributes.insert(
+        "gen_ai.usage.input_tokens".to_string(),
+        Value::Number(42.into()),
+    );
+    attributes.insert(
+        "gen_ai.request.temperature".to_string(),
+        serde_json::json!(0.7),
+    );
+
+    let redacted = allowed_attributes(&attributes, false);
+
+    assert_eq!(
+        redacted.get("gen_ai.request.model"),
+        None,
+        "an array under a metadata key must be dropped, not passed through"
+    );
+    assert_eq!(
+        redacted.get("gen_ai.response.model"),
+        None,
+        "an object under a metadata key must be dropped"
+    );
+    assert_eq!(
+        redacted.get("gen_ai.usage.input_tokens"),
+        Some(&Value::Number(42.into())),
+        "numeric metadata must keep working"
+    );
+    assert!(redacted.contains_key("gen_ai.request.temperature"));
+
+    // The opted-in tenant keeps everything.
+    let exported = allowed_attributes(&attributes, true);
+    assert!(exported.contains_key("gen_ai.request.model"));
+}
+
+/// The guest chooses its span *name* too, and it is unbounded free text on the
+/// same channel as the attributes.
+#[test]
+fn guest_span_name_is_bounded_for_non_opted_in_tenant() {
+    let registry_name = |export: bool| {
+        let mut registry = if export {
+            GuestSpanRegistry::new_exporting_content(context())
+        } else {
+            GuestSpanRegistry::new(context())
+        };
+        let payload = serde_json::json!({ "name": "N".repeat(4096) }).to_string();
+        registry.start_span(&payload).expect("span starts");
+        registry
+    };
+
+    // Non-opted-in: the recorded name is clamped.
+    let registry = registry_name(false);
+    let entry = registry.spans.values().next().expect("one span");
+    assert!(
+        entry.name.len() <= 256,
+        "guest span name must be clamped, got {} bytes",
+        entry.name.len()
+    );
+
+    // Opted-in: untouched.
+    let registry = registry_name(true);
+    let entry = registry.spans.values().next().expect("one span");
+    assert_eq!(entry.name.len(), 4096, "an opted-in tenant is not clamped");
+}

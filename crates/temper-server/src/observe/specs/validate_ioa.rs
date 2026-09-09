@@ -1,9 +1,10 @@
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, State};
+use axum::http::StatusCode;
 use axum::response::Json;
+use temper_authz::AuthenticatedRequestContext;
 use tracing::instrument;
 
-use crate::authz::require_observe_auth;
+use crate::authz::{require_authenticated_context, require_observe_auth};
 use crate::state::ServerState;
 
 use super::types::ValidateIoaRequest;
@@ -21,10 +22,12 @@ const MAX_IOA_SOURCE_BYTES: usize = 1_048_576;
 #[instrument(skip_all, fields(otel.name = "POST /api/specs/validate-ioa"))]
 pub(crate) async fn handle_validate_ioa(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Json(body): Json<ValidateIoaRequest>,
 ) -> Result<Json<temper_verify::CascadeResult>, (StatusCode, String)> {
-    require_observe_auth(&state, &headers, "run_verification", "Verification")
+    let authenticated = require_authenticated_context(authenticated.as_deref())
+        .map_err(|status| (status, "authentication required".to_string()))?;
+    require_observe_auth(&state, authenticated, "run_verification", "Verification")
         .map_err(|status| (status, "verification authorization failed".to_string()))?;
 
     let ioa_source = body.ioa_source;

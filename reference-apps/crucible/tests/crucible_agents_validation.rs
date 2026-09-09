@@ -44,6 +44,25 @@ const AGENT_VERSION_IOA: &str = include_str!("../specs/agent_version.ioa.toml");
 const CALLABLE_AGENT_IOA: &str = include_str!("../specs/callable_agent.ioa.toml");
 const CROSS_INVARIANTS_TOML: &str = include_str!("../specs/cross-invariants.toml");
 const MODEL_CSDL: &str = include_str!("../specs/model.csdl.xml");
+const CRUCIBLE_AGENT_VALIDATION_POLICY: &str = r#"
+permit(
+    principal,
+    action in [
+        Action::"list",
+        Action::"read",
+        Action::"create",
+        Action::"update",
+        Action::"delete",
+        Action::"ArchiveManagedAgent"
+    ],
+    resource is ManagedAgent
+);
+permit(principal, action in [Action::"list", Action::"read", Action::"create", Action::"update", Action::"delete"], resource is AgentMcpServer);
+permit(principal, action in [Action::"list", Action::"read", Action::"create", Action::"update", Action::"delete"], resource is AgentSkill);
+permit(principal, action in [Action::"list", Action::"read", Action::"create", Action::"update", Action::"delete"], resource is AgentTool);
+permit(principal, action in [Action::"list", Action::"read", Action::"create", Action::"update", Action::"delete"], resource is AgentToolConfig);
+permit(principal, action in [Action::"list", Action::"read", Action::"create", Action::"update", Action::"delete"], resource is AgentVersion);
+"#;
 
 /// Build a `ServerState` preloaded with all nine Crucible IOAs (three from
 /// the Environment slice + six from the ManagedAgent slice) and the extended
@@ -106,6 +125,35 @@ fn build_crucible_state() -> ServerState {
         }
     }
     state
+        .authz
+        .reload_tenant_policies(
+            TenantId::default().as_str(),
+            CRUCIBLE_AGENT_VALIDATION_POLICY,
+        )
+        .expect("install Crucible agent validation policy");
+    state
+}
+
+fn authenticate(mut request: Request<Body>) -> Request<Body> {
+    let security_context = temper_authz::SecurityContext {
+        principal: temper_authz::Principal {
+            id: "crucible-agent-validation".to_string(),
+            kind: temper_authz::PrincipalKind::Customer,
+            role: None,
+            acting_for: None,
+            agent_type: None,
+            attributes: Default::default(),
+        },
+        context_attrs: Default::default(),
+        correlation_id: "crucible-agent-validation".to_string(),
+    };
+    request
+        .extensions_mut()
+        .insert(temper_authz::AuthenticatedRequestContext::new(
+            TenantId::default(),
+            security_context,
+        ));
+    request
 }
 
 async fn send(
@@ -115,12 +163,14 @@ async fn send(
     body: &str,
 ) -> (StatusCode, serde_json::Value) {
     let router = build_router(state.clone());
-    let req = Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("Content-Type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
+    let req = authenticate(
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    );
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
@@ -251,12 +301,15 @@ async fn create_agent_archived_without_archived_at_is_rejected() {
     let (status, body_out) = post(&state, "/tdata/ManagedAgents", body).await;
     assert_eq!(
         status,
-        StatusCode::CONFLICT,
-        "Archived without ArchivedAt must be rejected: {body_out:?}"
+        StatusCode::BAD_REQUEST,
+        "creating directly into Archived must be rejected before field invariants: {body_out:?}"
     );
-    assert_eq!(
-        body_out["error"]["details"]["invariant"].as_str(),
-        Some("ArchivedRequiresArchivedAt")
+    assert_eq!(body_out["error"]["code"].as_str(), Some("InvalidBody"));
+    assert!(
+        body_out["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("initial state 'Active'")),
+        "rejection must preserve the spec-defined initial-state contract: {body_out:?}"
     );
 }
 

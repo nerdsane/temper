@@ -1,4 +1,5 @@
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{CONTENT_TYPE, HeaderMap};
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use temper_runtime::tenant::TenantId;
 use tracing::{Span, instrument};
@@ -12,6 +13,16 @@ use telemetry::{PublishedArtifactTelemetry, emit_published_artifact_persisted_lo
 mod telemetry;
 
 const DEFAULT_PUBLIC_ARTIFACT_NAMESPACE: &str = "published-artifacts";
+pub(crate) const PUBLISH_ARTIFACT_STALE_AUTHORIZATION: &str =
+    "publish source authorization became stale; retry against current state";
+
+/// Exact source state/resource view used for a public-artifact Cedar decision.
+pub(crate) struct PublishArtifactAuthorization {
+    pub source_entity_type: String,
+    pub source_entity_id: String,
+    pub state_precondition: String,
+    pub resource_attrs: BTreeMap<String, serde_json::Value>,
+}
 
 #[derive(Debug, Clone)]
 pub struct PublishFileArtifactRequest {
@@ -23,7 +34,67 @@ pub struct PublishFileArtifactRequest {
     pub namespace: Option<String>,
 }
 
+impl PublishFileArtifactRequest {
+    /// Validate every caller-controlled object-key component as one segment.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_path_segment("label", &self.label)?;
+        validate_path_segment("owner_ref_type", &self.owner_ref_type)?;
+        validate_path_segment("owner_ref_id", &self.owner_ref_id)?;
+        if let Some(namespace) = self.namespace.as_deref() {
+            validate_path_segment("namespace", namespace)?;
+        }
+        Ok(())
+    }
+}
+
 impl ServerState {
+    /// Resolve the immutable parent File recorded by a FileVersion.
+    ///
+    /// The durable query projection is the fast path. Actor state is the
+    /// read-after-write fallback when the projection has not caught up yet.
+    #[cfg(feature = "observe")]
+    pub(crate) async fn file_version_source_file_id(
+        &self,
+        tenant: &TenantId,
+        file_version_id: &str,
+    ) -> Result<String, String> {
+        if let Some(query_plane) = self.query_plane_store() {
+            let ids = [file_version_id.to_string()];
+            let rows = query_plane
+                .load_projection_fields_many(tenant.as_str(), "FileVersion", &ids, &["file_id"])
+                .await
+                .map_err(|error| {
+                    format!("failed to load FileVersion '{file_version_id}' relationship: {error}")
+                })?
+                .unwrap_or_default();
+            if let Some(file_id) = rows
+                .first()
+                .and_then(|row| row.fields.get("file_id"))
+                .and_then(Option::as_deref)
+                .filter(|file_id| !file_id.is_empty())
+            {
+                return Ok(file_id.to_string());
+            }
+        }
+
+        let response = self
+            .get_tenant_entity_state(tenant, "FileVersion", file_version_id)
+            .await
+            .map_err(|error| {
+                format!("failed to load FileVersion '{file_version_id}' relationship: {error}")
+            })?;
+        response
+            .state
+            .fields
+            .get("file_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|file_id| !file_id.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                format!("FileVersion '{file_version_id}' has no immutable file_id relationship")
+            })
+    }
+
     #[instrument(skip_all, fields(
         otel.name = "state.publish_file_artifact",
         tenant = %tenant,
@@ -50,6 +121,19 @@ impl ServerState {
         tenant: &TenantId,
         request: PublishFileArtifactRequest,
     ) -> Result<PublishedArtifactStoreRow, String> {
+        self.publish_file_artifact_authorized(tenant, request, Vec::new())
+            .await
+    }
+
+    /// Publish only while the source still matches the exact Cedar-authorized
+    /// state and derived resource attributes.
+    pub(crate) async fn publish_file_artifact_authorized(
+        &self,
+        tenant: &TenantId,
+        request: PublishFileArtifactRequest,
+        authorizations: Vec<PublishArtifactAuthorization>,
+    ) -> Result<PublishedArtifactStoreRow, String> {
+        request.validate()?;
         let source_display = if request.source_file_version_id.trim().is_empty() {
             format!("File('{}')", request.file_id)
         } else {
@@ -83,6 +167,26 @@ impl ServerState {
             }
         };
 
+        for authorization in authorizations {
+            let snapshot = self
+                .load_authz_resource_snapshot(
+                    tenant,
+                    &authorization.source_entity_type,
+                    &authorization.source_entity_id,
+                )
+                .await
+                .map_err(|_| PUBLISH_ARTIFACT_STALE_AUTHORIZATION.to_string())?;
+            let current_precondition =
+                crate::entity_actor::effects::entity_authorization_precondition(
+                    &snapshot.current_state.state,
+                );
+            if current_precondition != authorization.state_precondition
+                || snapshot.resource_attrs != authorization.resource_attrs
+            {
+                return Err(PUBLISH_ARTIFACT_STALE_AUTHORIZATION.to_string());
+            }
+        }
+
         let public_base_url = self
             .secret(tenant, "published_blob_public_base_url")
             .ok_or_else(|| "missing published_blob_public_base_url secret".to_string())?;
@@ -110,7 +214,7 @@ impl ServerState {
             &request.label,
             &content_hash,
             &mime_type,
-        );
+        )?;
         put_public_blob(
             self,
             tenant,
@@ -196,6 +300,32 @@ async fn put_public_blob(
     mime_type: &str,
     bytes: &[u8],
 ) -> Result<(), String> {
+    if crate::blob_store::is_local_internal_blob_endpoint(endpoint) {
+        let object_key = format!(
+            "{}/{}",
+            bucket.trim_matches('/'),
+            storage_key.trim_start_matches('/')
+        );
+        state
+            .put_blob_object(tenant, &object_key, bytes, None)
+            .await
+            .map_err(|error| {
+                format!(
+                    "direct tenant-scoped public blob write failed for bucket '{bucket}' key '{storage_key}': {error}"
+                )
+            })?;
+        tracing::Span::current().record("http.status_code", 204_u16);
+        tracing::info!(
+            tenant = %tenant,
+            bucket,
+            storage_key,
+            mime_type = %stream_content_type(mime_type),
+            byte_length = bytes.len(),
+            "public blob stored through tenant-scoped local API"
+        );
+        return Ok(());
+    }
+
     let url = format!(
         "{}/{}/{}",
         endpoint.trim_end_matches('/'),
@@ -277,21 +407,7 @@ fn build_public_blob_put_headers(
     mime_type: &str,
     bytes: &[u8],
 ) -> Result<HeaderMap, String> {
-    let mut headers = HeaderMap::new();
-    if crate::blob_store::is_local_internal_blob_endpoint(url) {
-        if let Some(api_key) = std::env::var("TEMPER_API_KEY") // determinism-ok: deployment config read
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-        {
-            headers.insert(
-                AUTHORIZATION,
-                HeaderValue::from_str(&format!("Bearer {api_key}"))
-                    .map_err(|e| format!("invalid internal blob authorization header: {e}"))?,
-            );
-        }
-        return Ok(headers);
-    }
-
+    let headers = HeaderMap::new();
     let access_key = state
         .secret(tenant, "published_blob_access_key")
         .or_else(|| state.secret(tenant, "blob_access_key"));
@@ -326,17 +442,22 @@ fn public_storage_key(
     label: &str,
     content_hash: &str,
     mime_type: &str,
-) -> String {
+) -> Result<String, String> {
     let hash = content_hash.trim_start_matches("sha256:");
-    format!(
+    validate_path_segment("namespace", namespace)?;
+    validate_path_segment("owner_ref_type", owner_ref_type)?;
+    validate_path_segment("owner_ref_id", owner_ref_id)?;
+    validate_path_segment("label", label)?;
+    validate_path_segment("content_hash", hash)?;
+    Ok(format!(
         "{}/{}/{}/{}-{}.{}",
-        sanitize_path_segment(namespace).trim_matches('/'),
-        sanitize_path_segment(owner_ref_type),
-        sanitize_path_segment(owner_ref_id),
-        sanitize_path_segment(label),
+        namespace,
+        owner_ref_type,
+        owner_ref_id,
+        label,
         hash,
         extension_for_mime(mime_type)
-    )
+    ))
 }
 
 fn published_artifact_id(
@@ -351,16 +472,22 @@ fn published_artifact_id(
     format!("part-{}", &digest[..32])
 }
 
-fn sanitize_path_segment(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.') {
-            out.push(ch);
-        } else {
-            out.push('-');
-        }
+fn validate_path_segment(field: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{field} must not be empty"));
     }
-    out.trim_matches('-').to_string()
+    if value == "." || value == ".." {
+        return Err(format!("{field} must not be a relative path segment"));
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~'))
+    {
+        return Err(format!(
+            "{field} must be one URI-safe path segment using only letters, digits, '-', '_', '.' or '~'"
+        ));
+    }
+    Ok(())
 }
 
 fn extension_for_mime(mime_type: &str) -> &'static str {

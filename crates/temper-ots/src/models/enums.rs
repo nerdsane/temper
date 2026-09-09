@@ -16,6 +16,28 @@ pub enum DecisionType {
     ResponseFormulation,
 }
 
+impl DecisionType {
+    /// Whether a decision of this type names something the agent tried to
+    /// invoke, as opposed to something it thought or said.
+    ///
+    /// `choice.action` means different things per type. On a tool selection or
+    /// a parameter choice it is a callable name — a tool, or a governed
+    /// action — and the agent attempted to invoke it. On a reasoning step or a
+    /// response formulation it is free-form prose describing the thought
+    /// ("compare shipping options"), and nothing was invoked.
+    ///
+    /// Every consumer that reads `choice.action` as an invocation must ask
+    /// this first. Treating prose as an invocation fabricates environment
+    /// interactions in exported trajectories and reports imaginary actions in
+    /// conformance checks.
+    pub fn is_invocation(self) -> bool {
+        match self {
+            Self::ToolSelection | Self::ParameterChoice => true,
+            Self::ReasoningStep | Self::ResponseFormulation => false,
+        }
+    }
+}
+
 /// Trajectory outcome types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -136,15 +136,46 @@ impl TursoEventStore {
 
     /// Retrieve a blob by key. Returns `None` if not found.
     pub async fn get_blob(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+        self.get_blob_with_size_predicate(key, None).await
+    }
+
+    /// Retrieve a blob only when the durable size metadata fits the caller's
+    /// allocation budget. `None` means missing or larger than `max_bytes`.
+    pub async fn get_blob_if_size_at_most(
+        &self,
+        key: &str,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let max_bytes = i64::try_from(max_bytes)
+            .map_err(|_| "legacy blob read budget exceeds i64".to_string())?;
+        self.get_blob_with_size_predicate(key, Some(max_bytes))
+            .await
+    }
+
+    async fn get_blob_with_size_predicate(
+        &self,
+        key: &str,
+        max_bytes: Option<i64>,
+    ) -> Result<Option<Vec<u8>>, String> {
         for attempt in 1..=BLOB_STORE_ATTEMPTS {
             let conn = self
                 .configured_connection()
                 .await
                 .map_err(|e| e.to_string())?;
-            let mut rows = match conn
-                .query("SELECT data FROM blobs WHERE blob_key = ?1", params![key])
-                .await
-            {
+            let query = match max_bytes {
+                Some(max_bytes) => {
+                    conn.query(
+                        "SELECT data FROM blobs WHERE blob_key = ?1 AND length(data) <= ?2",
+                        params![key, max_bytes],
+                    )
+                    .await
+                }
+                None => {
+                    conn.query("SELECT data FROM blobs WHERE blob_key = ?1", params![key])
+                        .await
+                }
+            };
+            let mut rows = match query {
                 Ok(rows) => rows,
                 Err(error) => {
                     let message = error.to_string();

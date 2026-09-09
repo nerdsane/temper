@@ -6,6 +6,7 @@ use crate::entity_actor::EntityState;
 use crate::request_context::AgentContext;
 use temper_runtime::tenant::TenantId;
 use temper_wasm::{WasmAuthzContext, WasmAuthzDecision, WasmAuthzGate};
+use tokio::spawn as spawn_background_wasm_integration; // determinism-ok: external WASM side effects
 use tracing::Instrument;
 
 mod actions;
@@ -17,6 +18,9 @@ mod effects;
 pub(crate) mod retry;
 pub(crate) mod state_timeouts;
 mod wasm;
+pub(crate) use wasm::authorized_http_endpoint_host;
+#[cfg(feature = "observe")]
+pub(crate) use wasm::internal_http_capability_issuer;
 mod wasm_secrets;
 
 pub use state_timeouts::StateTimeoutTracker;
@@ -385,7 +389,7 @@ impl crate::state::ServerState {
             entity_type = %entity_type,
             entity_id = %entity_id,
         );
-        tokio::spawn(
+        spawn_background_wasm_integration(
             async move {
                 // determinism-ok: async integration side-effects run outside simulation core
                 let req = WasmDispatchRequest {
@@ -443,7 +447,7 @@ mod tests {
         let state = test_state();
         state
             .authz
-            .reload_policies("")
+            .reload_tenant_policies("test-tenant", "")
             .expect("empty policy set should parse");
 
         let gate = state.wasm_authz_gate();
@@ -465,7 +469,8 @@ mod tests {
         let state = test_state();
         state
             .authz
-            .reload_policies(
+            .reload_tenant_policies(
+                "test-tenant",
                 r#"
                 permit(
                     principal is Agent,

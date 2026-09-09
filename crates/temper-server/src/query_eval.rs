@@ -7,7 +7,7 @@ use temper_odata::query::types::{
     BinaryOperator, FilterExpr, ODataValue, OrderByClause, OrderDirection, QueryOptions,
 };
 
-use crate::blobs::hydrate_blob_refs_for_tenant;
+use crate::blobs::{BlobHydrationBudget, hydrate_blob_refs_for_tenant_with_budget};
 
 /// Maximum nesting depth for recursive $expand (prevents infinite loops).
 const MAX_EXPAND_DEPTH: u8 = 3;
@@ -396,6 +396,7 @@ struct ExpansionContext<'a> {
     state: &'a crate::state::ServerState,
     tenant: &'a temper_runtime::tenant::TenantId,
     security_ctx: &'a temper_authz::SecurityContext,
+    hydration_budget: &'a BlobHydrationBudget,
 }
 
 /// Resolve navigation properties for $expand on a single entity.
@@ -412,11 +413,13 @@ pub async fn expand_entity(
     state: &crate::state::ServerState,
     tenant: &temper_runtime::tenant::TenantId,
     security_ctx: &temper_authz::SecurityContext,
+    hydration_budget: &BlobHydrationBudget,
 ) -> Result<(), axum::response::Response> {
     let context = ExpansionContext {
         state,
         tenant,
         security_ctx,
+        hydration_budget,
     };
     expand_entity_recursive(entity, expand_items, entity_type, &context, 0, &mut vec![]).await
 }
@@ -434,6 +437,7 @@ async fn expand_entity_recursive(
         state,
         tenant,
         security_ctx,
+        hydration_budget,
     } = context;
     if depth >= MAX_EXPAND_DEPTH {
         return Ok(());
@@ -514,8 +518,7 @@ async fn expand_entity_recursive(
                             .get_tenant_entity_state(tenant, &info.target_type, fk)
                             .await
                     {
-                        let mut json = serde_json::to_value(&response.state).unwrap_or_default();
-                        hydrate_blob_refs_for_tenant(state, tenant, &mut json).await;
+                        let json = serde_json::to_value(&response.state).unwrap_or_default();
                         related_entities.push(json);
                     }
                 }
@@ -528,9 +531,7 @@ async fn expand_entity_recursive(
                             .get_tenant_entity_state(tenant, &info.target_type, related_id)
                             .await
                         {
-                            let mut json =
-                                serde_json::to_value(&response.state).unwrap_or_default();
-                            hydrate_blob_refs_for_tenant(state, tenant, &mut json).await;
+                            let json = serde_json::to_value(&response.state).unwrap_or_default();
                             let matches = json
                                 .get("fields")
                                 .and_then(|f| f.get(target_fk_field.as_str()))
@@ -550,9 +551,7 @@ async fn expand_entity_recursive(
                             .get_tenant_entity_state(tenant, &info.target_type, related_id)
                             .await
                         {
-                            let mut json =
-                                serde_json::to_value(&response.state).unwrap_or_default();
-                            hydrate_blob_refs_for_tenant(state, tenant, &mut json).await;
+                            let json = serde_json::to_value(&response.state).unwrap_or_default();
                             if matches_parent_reference(&json, entity_type, parent_id) {
                                 related_entities.push(json);
                             }
@@ -586,6 +585,13 @@ async fn expand_entity_recursive(
                 .is_ok()
             })
         });
+
+        // Keep authorization ahead of object-store I/O. Relationship matching
+        // and Cedar evaluation use descriptor metadata; only rows the caller
+        // may read are allowed to consume the shared hydration budget.
+        for entity in &mut related_entities {
+            hydrate_blob_refs_for_tenant_with_budget(state, tenant, entity, hydration_budget).await;
+        }
 
         // Apply nested query options if present
         if let Some(ref nested_opts) = item.options {

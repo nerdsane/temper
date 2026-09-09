@@ -2,6 +2,7 @@
 
 mod protocol;
 mod runtime;
+mod trajectory_bounds;
 
 pub mod repl;
 pub use runtime::run_stdio_server;

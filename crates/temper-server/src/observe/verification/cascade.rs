@@ -1,12 +1,13 @@
 //! POST /observe/verify/{entity} -- run verification cascade on a spec.
 
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, Path, State};
+use axum::http::StatusCode;
 use axum::response::Json;
+use temper_authz::AuthenticatedRequestContext;
 use temper_runtime::scheduler::sim_now;
 use tracing::instrument;
 
-use crate::authz::require_observe_auth;
+use crate::authz::{require_authenticated_context, require_observe_auth};
 use crate::registry::VerificationStatus;
 use crate::state::ServerState;
 
@@ -17,10 +18,11 @@ use crate::state::ServerState;
 #[instrument(skip_all, fields(entity, otel.name = "POST /observe/verify/{entity}"))]
 pub(crate) async fn handle_run_verification(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Path(entity): Path<String>,
 ) -> Result<Json<temper_verify::CascadeResult>, StatusCode> {
-    require_observe_auth(&state, &headers, "run_verification", "Verification")?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "run_verification", "Verification")?;
 
     let Some((tenant_id, ioa_source)) = state.find_entity_ioa_source(&entity) else {
         tracing::warn!("entity spec not found for verification");

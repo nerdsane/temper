@@ -5,6 +5,11 @@ use temper_runtime::tenant::TenantId;
 
 use super::ServerState;
 
+mod profile;
+mod reservations;
+use profile::OwnerStorageProfile;
+pub(crate) use reservations::CommonsStorageReservationEntry;
+
 const OWNER_ENTITY_TYPE: &str = "Owner";
 const REPOSITORY_ENTITY_TYPE: &str = "Repository";
 const BLOB_ENTITY_TYPE: &str = "Blob";
@@ -35,6 +40,7 @@ pub(crate) struct CommonsStorageCapExceeded {
 #[derive(Debug, Clone)]
 pub(crate) enum CommonsStorageCapError {
     Exceeded(CommonsStorageCapExceeded),
+    ReservationCapacityExhausted,
     OwnerSuspended(String),
     MissingAttribution(String),
     Internal(String),
@@ -51,6 +57,9 @@ impl std::fmt::Display for CommonsStorageCapError {
                 exceeded.additional_bytes,
                 exceeded.cap_bytes
             ),
+            CommonsStorageCapError::ReservationCapacityExhausted => {
+                f.write_str("pending storage reservation capacity is exhausted")
+            }
             CommonsStorageCapError::OwnerSuspended(owner_id) => {
                 write!(f, "owner '{owner_id}' is suspended")
             }
@@ -61,13 +70,6 @@ impl std::fmt::Display for CommonsStorageCapError {
 }
 
 impl std::error::Error for CommonsStorageCapError {}
-
-#[derive(Debug, Clone)]
-struct OwnerStorageProfile {
-    owner_id: String,
-    cap_bytes: i64,
-    suspended: bool,
-}
 
 impl ServerState {
     pub(crate) async fn acquire_commons_write_guardrail_lock(
@@ -205,11 +207,13 @@ impl ServerState {
                 .get(&profile.owner_id)
                 .copied()
                 .unwrap_or(0);
-            if projection.used_bytes.saturating_add(additional_bytes) > projection.cap_bytes {
+            let reserved_bytes = self.pending_reserved_bytes(tenant, &profile.owner_id)?;
+            let effective_used = projection.used_bytes.saturating_add(reserved_bytes);
+            if effective_used.saturating_add(additional_bytes) > projection.cap_bytes {
                 return Err(CommonsStorageCapError::Exceeded(
                     CommonsStorageCapExceeded {
                         owner_id: projection.owner_id,
-                        used_bytes: projection.used_bytes,
+                        used_bytes: effective_used,
                         additional_bytes,
                         cap_bytes: projection.cap_bytes,
                     },
@@ -441,30 +445,6 @@ impl ServerState {
                 ))
             })?;
         OwnerStorageProfile::from_fields(owner_entity_id, &owner.state.fields).map(Some)
-    }
-}
-
-impl OwnerStorageProfile {
-    fn from_fields(entity_id: &str, fields: &Value) -> Result<Self, CommonsStorageCapError> {
-        let owner_id = read_string(fields, "AccountId")
-            .or_else(|| read_string(fields, "Id"))
-            .unwrap_or_else(|| entity_id.to_string());
-        let Some(cap_bytes) = read_i64(fields, "StorageCapBytes") else {
-            return Ok(Self {
-                owner_id,
-                cap_bytes: i64::MAX,
-                suspended: false,
-            });
-        };
-        let suspended = fields
-            .get("Status")
-            .and_then(|v| v.as_str())
-            .is_some_and(|status| status == "Suspended");
-        Ok(Self {
-            owner_id,
-            cap_bytes: cap_bytes.max(0),
-            suspended,
-        })
     }
 }
 

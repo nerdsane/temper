@@ -39,6 +39,8 @@ impl EntityActorHandler {
     ) -> Self {
         let entity_type = entity_type.into();
         let entity_id = entity_id.into();
+        let mut fields = serde_json::json!({});
+        super::effects::canonicalize_entity_fields(&mut fields, &entity_id, &table.initial_state);
 
         let state = EntityState {
             entity_type,
@@ -48,7 +50,7 @@ impl EntityActorHandler {
             counters: std::collections::BTreeMap::new(),
             booleans: std::collections::BTreeMap::new(),
             lists: std::collections::BTreeMap::new(),
-            fields: serde_json::json!({}),
+            fields,
             events: std::collections::VecDeque::new(),
             total_event_count: 0,
             events_since_snapshot: 0,

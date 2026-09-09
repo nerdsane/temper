@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use temper_runtime::tenant::TenantId;
+use tokio::spawn as spawn_http_endpoint_reconciler; // determinism-ok: production HTTP route watcher
 use tokio::sync::RwLock;
 
 const ACTOR_ASK_TIMEOUT: Duration = Duration::from_millis(500);
@@ -80,6 +81,38 @@ pub struct MatchedRoute {
     /// Path parameters extracted from `{name}` segments, keyed on
     /// the param name (without braces).
     pub params: BTreeMap<String, String>,
+}
+
+/// Immutable route admission produced by the trusted outer authentication
+/// edge and consumed by the kernel fallback.
+///
+/// Binding the snapshot to tenant, method, and path prevents a public-route
+/// decision from being replayed onto another request. The matched route is not
+/// re-read after admission, closing Public→Private configuration races.
+#[derive(Debug, Clone)]
+pub struct AdmittedHttpEndpoint {
+    tenant: TenantId,
+    method: String,
+    path: String,
+    matched: MatchedRoute,
+}
+
+impl AdmittedHttpEndpoint {
+    /// Bind a matched endpoint to the exact inbound request.
+    pub fn new(tenant: TenantId, method: &str, path: &str, matched: MatchedRoute) -> Self {
+        Self {
+            tenant,
+            method: method.to_uppercase(),
+            path: path.to_string(),
+            matched,
+        }
+    }
+
+    /// Consume the admission only when its request binding still matches.
+    pub fn into_matched(self, tenant: &TenantId, method: &str, path: &str) -> Option<MatchedRoute> {
+        (self.tenant == *tenant && self.method == method.to_uppercase() && self.path == path)
+            .then_some(self.matched)
+    }
 }
 
 /// In-memory route table. One instance per tenant in the kernel.
@@ -174,6 +207,12 @@ impl HttpEndpointTables {
             .entry(tenant.clone())
             .or_insert_with(|| std::sync::Arc::new(HttpEndpointTable::new()))
             .clone()
+    }
+
+    /// Look up an existing tenant table without allocating attacker-controlled
+    /// routing state for an unknown tenant.
+    pub async fn get(&self, tenant: &TenantId) -> Option<std::sync::Arc<HttpEndpointTable>> {
+        self.by_tenant.read().await.get(tenant).cloned()
     }
 
     pub async fn tenant_count(&self) -> usize {
@@ -282,7 +321,7 @@ pub async fn rebuild_tenant_table(state: &crate::state::ServerState, tenant: &Te
 /// row count (O(hundreds) per tenant per ADR-0069).
 pub fn spawn_reconciler(state: crate::state::ServerState) {
     let mut rx = state.event_tx.subscribe();
-    tokio::spawn(async move {
+    spawn_http_endpoint_reconciler(async move {
         loop {
             match rx.recv().await {
                 Ok(change) if change.entity_type == "HttpEndpoint" => {
@@ -583,6 +622,52 @@ mod tests {
         let table_b = tables.table_for(&t2).await;
         assert!(!std::sync::Arc::ptr_eq(&table_a, &table_b));
         assert_eq!(tables.tenant_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn admitted_route_is_immutable_across_public_to_private_update() {
+        let tenant = TenantId::new("tenant-a");
+        let table = HttpEndpointTable::new();
+        table
+            .replace(vec![route("public", "/repo.git", &["GET"], "public")])
+            .await;
+        let admitted = AdmittedHttpEndpoint::new(
+            tenant.clone(),
+            "GET",
+            "/repo.git/info/refs",
+            table
+                .match_request("GET", "/repo.git/info/refs")
+                .await
+                .unwrap(),
+        );
+
+        let mut private = route("private", "/repo.git", &["GET"], "private");
+        private.requires_auth = true;
+        table.replace(vec![private]).await;
+
+        let snapshot = admitted
+            .into_matched(&tenant, "GET", "/repo.git/info/refs")
+            .expect("exact request binding should consume admission");
+        assert_eq!(snapshot.route.id, "public");
+        assert!(!snapshot.route.requires_auth);
+    }
+
+    #[test]
+    fn admitted_route_rejects_request_binding_changes() {
+        let tenant = TenantId::new("tenant-a");
+        let matched = MatchedRoute {
+            route: route("public", "/repo.git", &["GET"], "public"),
+            params: BTreeMap::new(),
+        };
+        for (bound_tenant, method, path) in [
+            (TenantId::new("tenant-b"), "GET", "/repo.git"),
+            (tenant.clone(), "POST", "/repo.git"),
+            (tenant.clone(), "GET", "/other"),
+        ] {
+            let admitted =
+                AdmittedHttpEndpoint::new(tenant.clone(), "GET", "/repo.git", matched.clone());
+            assert!(admitted.into_matched(&bound_tenant, method, path).is_none());
+        }
     }
 
     #[tokio::test]

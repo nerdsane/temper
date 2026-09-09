@@ -352,6 +352,7 @@ mod tests {
                 request_body: None,
                 intent: None,
                 matched_policy_ids: None,
+                capture_seq: None,
             })
             .collect();
 
@@ -401,6 +402,7 @@ mod tests {
                 request_body: None,
                 intent: None,
                 matched_policy_ids: None,
+                capture_seq: None,
             })
             .collect();
 

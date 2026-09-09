@@ -1,13 +1,13 @@
 //! Projection correctness observe endpoints.
 
-use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, Query, State};
+use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
+use temper_authz::AuthenticatedRequestContext;
 use tracing::instrument;
 
-use crate::authz::require_observe_auth;
-use crate::odata::extract_tenant;
+use crate::authz::{require_authenticated_context, require_observe_auth};
 use crate::state::ServerState;
 
 const DEFAULT_REPLAY_PARITY_LIMIT: usize = 100;
@@ -36,11 +36,12 @@ pub(crate) struct ReplayParityParams {
 )]
 pub(crate) async fn handle_replay_parity(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Query(params): Query<ReplayParityParams>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_entities", "Projection")?;
-    let tenant = extract_tenant(&headers, &state).map_err(|(code, _)| code)?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_entities", "Projection")?;
+    let tenant = authenticated.tenant();
     let entity_type = params
         .entity_type
         .as_deref()
@@ -57,7 +58,7 @@ pub(crate) async fn handle_replay_parity(
 
     let report = state
         .verify_query_projection_replay_parity_bounded(
-            &tenant,
+            tenant,
             entity_type,
             Some(limit),
             "observe_probe",

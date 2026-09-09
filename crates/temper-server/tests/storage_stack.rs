@@ -396,5 +396,6 @@ fn trajectory_entry() -> TrajectoryEntry {
         request_body: None,
         intent: None,
         matched_policy_ids: None,
+        capture_seq: None,
     }
 }

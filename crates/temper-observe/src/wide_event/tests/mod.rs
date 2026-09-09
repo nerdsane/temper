@@ -116,10 +116,12 @@ fn test_authz_decision_event() {
     let event = from_authz_decision(AuthzDecisionInput {
         action: "SubmitOrder",
         resource_type: "Order",
+        entity_id: "order-123",
         principal_kind: "user",
         decision: "Allow",
         duration_ns: 500_000,
         tenant: "tenant-b",
+        trace_id: "4bf92f3577b34da6a3ce929d0e0e4736",
     });
     assert_eq!(event.event_kind, EventKind::AuthzDecision);
     assert_eq!(event.tags["decision"], "Allow");
@@ -129,14 +131,56 @@ fn test_authz_decision_event() {
 }
 
 #[test]
+fn test_authz_decision_carries_entity_and_trace_correlation() {
+    let event = from_authz_decision(AuthzDecisionInput {
+        action: "SubmitOrder",
+        resource_type: "Order",
+        entity_id: "order-123",
+        principal_kind: "user",
+        decision: "Allow",
+        duration_ns: 500_000,
+        tenant: "tenant-b",
+        trace_id: "4bf92f3577b34da6a3ce929d0e0e4736",
+    });
+
+    assert_eq!(event.entity_id, "order-123");
+    assert_eq!(event.trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
+    assert_eq!(event.attributes["entity_id"], "order-123");
+    // entity_id must stay out of metric tags — it is high-cardinality.
+    assert!(!event.tags.contains_key("entity_id"));
+}
+
+#[test]
+fn test_authz_decision_without_instance_or_trace_context() {
+    // Set-wide checks (e.g. `list`) and unsampled requests have no instance id
+    // or trace id; the event must still build rather than fabricate values.
+    let event = from_authz_decision(AuthzDecisionInput {
+        action: "list",
+        resource_type: "Order",
+        entity_id: "",
+        principal_kind: "user",
+        decision: "Allow",
+        duration_ns: 100_000,
+        tenant: "tenant-b",
+        trace_id: "",
+    });
+
+    assert!(event.entity_id.is_empty());
+    assert!(event.trace_id.is_empty());
+    assert_eq!(event.attributes["entity_id"], "");
+}
+
+#[test]
 fn test_authz_deny_decision() {
     let event = from_authz_decision(AuthzDecisionInput {
         action: "DeleteOrder",
         resource_type: "Order",
+        entity_id: "order-123",
         principal_kind: "user",
         decision: "Deny",
         duration_ns: 800_000,
         tenant: "tenant-b",
+        trace_id: "4bf92f3577b34da6a3ce929d0e0e4736",
     });
     assert!(!event.success);
 }
@@ -309,10 +353,12 @@ fn test_emit_span_all_event_kinds() {
         from_authz_decision(AuthzDecisionInput {
             action: "a",
             resource_type: "T",
+            entity_id: "id",
             principal_kind: "user",
             decision: "Allow",
             duration_ns: 0,
             tenant: "t",
+            trace_id: "",
         }),
         from_invariant_check(InvariantCheckInput {
             invariant_name: "inv",

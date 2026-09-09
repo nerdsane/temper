@@ -1144,3 +1144,80 @@ fn upsert_query_projection_removes_index_row_when_value_becomes_too_long() {
             .unwrap();
     });
 }
+
+/// The session read replays a run in capture order on Postgres too.
+///
+/// Rows are persisted by independently spawned tasks, so inside one
+/// `created_at` tick the BIGSERIAL id is the order the writes landed rather
+/// than the order the kernel captured them. The Turso path proves the same
+/// property in `temper-store-turso`; this is the Postgres half, so the two
+/// backends cannot drift into different replay orders.
+///
+/// Gated on DATABASE_URL (skips otherwise); isolated by a unique tenant.
+#[test]
+fn session_read_follows_capture_order_not_insert_order() {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+
+    sqlx::test_block_on(async {
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let store = PostgresEventStore::new(pool.clone());
+        let tenant = format!("tenant-capture-order-{}", uuid::Uuid::new_v4());
+        let session = format!("session-{}", uuid::Uuid::new_v4());
+
+        // Captured first, inserted second.
+        for (action, capture_seq) in [("SubmitOrder", 2i64), ("AddItem", 1i64)] {
+            store
+                .persist_trajectory(crate::PostgresTrajectoryInsert {
+                    tenant: &tenant,
+                    entity_type: "Order",
+                    entity_id: "order-1",
+                    action,
+                    success: true,
+                    from_status: Some("Draft"),
+                    to_status: Some("Draft"),
+                    error: None,
+                    agent_id: Some("agent-1"),
+                    session_id: Some(&session),
+                    authz_denied: None,
+                    denied_resource: None,
+                    denied_module: None,
+                    source: Some("Entity"),
+                    spec_governed: Some(true),
+                    created_at: "2026-01-01T00:00:00Z",
+                    request_body: None,
+                    intent: None,
+                    matched_policy_ids: None,
+                    capture_seq: Some(capture_seq),
+                })
+                .await
+                .unwrap();
+        }
+
+        let rows = store
+            .query_trajectories_by_session(&session, Some(&tenant), None, 100)
+            .await
+            .unwrap();
+        let actions: Vec<&str> = rows.iter().map(|row| row.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            vec!["AddItem", "SubmitOrder"],
+            "the read must follow capture order, not the order the writes landed"
+        );
+        assert_eq!(
+            rows.iter()
+                .filter_map(|row| row.capture_seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        crate::dbm::postgres_query!("DELETE FROM trajectories WHERE tenant = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+}

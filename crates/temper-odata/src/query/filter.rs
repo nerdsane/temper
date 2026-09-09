@@ -5,10 +5,20 @@
 use super::types::{BinaryOperator, FilterExpr, ODataValue, UnaryOperator};
 use crate::error::ODataError;
 
+mod budget;
+
+use budget::FilterBudget;
+#[cfg(test)]
+use budget::{
+    FILTER_ARGUMENT_BUDGET, FILTER_INPUT_BYTE_BUDGET, FILTER_LITERAL_BYTE_BUDGET,
+    FILTER_NODE_BUDGET, FILTER_OPERATOR_BUDGET, FILTER_TOKEN_BUDGET,
+};
+
 /// Parse a `$filter` expression string into a [`FilterExpr`] AST.
 pub fn parse_filter(input: &str) -> Result<FilterExpr, ODataError> {
-    let tokens = tokenize_filter(input)?;
-    let mut parser = FilterParser::new(&tokens);
+    let mut budget = FilterBudget::new(input)?;
+    let tokens = tokenize_filter(input, &mut budget)?;
+    let mut parser = FilterParser::new(&tokens, budget);
     let expr = parser.parse_or()?;
 
     // Make sure we consumed everything
@@ -33,7 +43,7 @@ struct Token {
     offset: usize,
 }
 
-fn tokenize_filter(input: &str) -> Result<Vec<Token>, ODataError> {
+fn tokenize_filter(input: &str, budget: &mut FilterBudget) -> Result<Vec<Token>, ODataError> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = input.chars().collect();
     let mut i = 0;
@@ -51,6 +61,7 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, ODataError> {
         if chars[i] == '\'' {
             i += 1;
             let mut s = String::new();
+            let mut closed = false;
             while i < chars.len() {
                 if chars[i] == '\'' {
                     // Check for escaped quote ''
@@ -59,6 +70,7 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, ODataError> {
                         i += 2;
                     } else {
                         i += 1;
+                        closed = true;
                         break;
                     }
                 } else {
@@ -66,19 +78,22 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, ODataError> {
                     i += 1;
                 }
             }
-            tokens.push(Token {
-                text: format!("'{s}'"),
-                offset,
-            });
+            // An unterminated literal (no closing quote) must be rejected rather
+            // than silently accepted as if it were closed.
+            if !closed {
+                return Err(ODataError::InvalidFilter {
+                    message: "unterminated string literal".into(),
+                    position: offset,
+                });
+            }
+            budget.consume_literal_bytes(s.len(), offset)?;
+            push_token(&mut tokens, budget, format!("'{s}'"), offset)?;
             continue;
         }
 
         // Parentheses and comma
         if chars[i] == '(' || chars[i] == ')' || chars[i] == ',' {
-            tokens.push(Token {
-                text: chars[i].to_string(),
-                offset,
-            });
+            push_token(&mut tokens, budget, chars[i].to_string(), offset)?;
             i += 1;
             continue;
         }
@@ -96,12 +111,18 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, ODataError> {
                 num.push(chars[i]);
                 i += 1;
             }
-            tokens.push(Token { text: num, offset });
+            push_token(&mut tokens, budget, num, offset)?;
             continue;
         }
 
-        // Identifiers and keywords (including dotted names like 'guid', property paths)
-        if chars[i].is_ascii_alphabetic() || chars[i] == '_' || chars[i] == '$' {
+        // Identifiers and keywords (dotted names like 'guid', property paths).
+        //
+        // '$' is deliberately NOT an identifier-start character. It is not valid
+        // in a property path, and accepting it here while the loop below does not
+        // consume it previously spun forever without advancing `i` — a
+        // denial-of-service on any `$filter` value containing a bare '$'. A stray
+        // '$' now falls through to the "unexpected character" error below (400).
+        if chars[i].is_ascii_alphabetic() || chars[i] == '_' {
             let mut word = String::new();
             while i < chars.len()
                 && (chars[i].is_ascii_alphanumeric()
@@ -110,14 +131,14 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, ODataError> {
                     || chars[i] == '/'
                     || chars[i] == '-')
             {
-                // Stop at '.' if it looks like it's followed by whitespace or end
-                // (to not consume e.g. "Name eq" as "Name.eq"). Actually, dots
-                // are used in property paths like Address/City and in GUIDs.
-                // Let's keep consuming alphanumeric, underscore, dot, slash, and hyphen.
                 word.push(chars[i]);
                 i += 1;
             }
-            tokens.push(Token { text: word, offset });
+            // Invariant: the identifier-start set (alphabetic | '_') is a subset
+            // of the continue set above, so the loop always consumes at least one
+            // character. This guarantees the tokenizer makes forward progress.
+            debug_assert!(i > offset, "tokenizer failed to advance on identifier");
+            push_token(&mut tokens, budget, word, offset)?;
             continue;
         }
 
@@ -130,16 +151,73 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, ODataError> {
     Ok(tokens)
 }
 
+fn push_token(
+    tokens: &mut Vec<Token>,
+    budget: &mut FilterBudget,
+    text: String,
+    offset: usize,
+) -> Result<(), ODataError> {
+    budget.consume_token(offset)?;
+    tokens.push(Token { text, offset });
+    Ok(())
+}
+
 // -- Recursive descent parser ------------------------------------------------
+
+/// Nesting-depth budget for a `$filter` expression.
+///
+/// The recursive-descent parser descends one level per parenthesized
+/// sub-expression, `not` operand, and function-call argument. Without a bound, a
+/// crafted filter such as `((((…))))` or `not not not …` would recurse until the
+/// request thread's stack overflows and the process aborts — a denial-of-service
+/// reachable from the public OData query surface. A well-formed query never
+/// nests anywhere near this deep.
+// Keep ample headroom below the request worker's stack: filter canaries
+// exercise the accepted boundary on 512 KiB, rather than merely fitting a
+// default 2 MiB worker before the surrounding request frames are considered.
+const FILTER_DEPTH_BUDGET: usize = 32;
 
 struct FilterParser<'a> {
     tokens: &'a [Token],
     pos: usize,
+    /// Current recursion depth, bounded by [`FILTER_DEPTH_BUDGET`].
+    depth: usize,
+    budget: FilterBudget,
 }
 
 impl<'a> FilterParser<'a> {
-    fn new(tokens: &'a [Token]) -> Self {
-        Self { tokens, pos: 0 }
+    fn new(tokens: &'a [Token], budget: FilterBudget) -> Self {
+        Self {
+            tokens,
+            pos: 0,
+            depth: 0,
+            budget,
+        }
+    }
+
+    /// Enter one nesting level, rejecting filters that nest past
+    /// [`FILTER_DEPTH_BUDGET`] before the recursion can overflow the stack.
+    ///
+    /// Every recursive descent (parentheses, `not`, function arguments) must be
+    /// wrapped in a matching [`descend`](Self::descend)/[`ascend`](Self::ascend)
+    /// pair so that width (many siblings) does not count as depth.
+    fn descend(&mut self) -> Result<(), ODataError> {
+        if self.depth == FILTER_DEPTH_BUDGET {
+            return Err(ODataError::InvalidFilter {
+                message: format!(
+                    "filter expression nesting exceeds depth budget of {FILTER_DEPTH_BUDGET}"
+                ),
+                position: self.current_offset(),
+            });
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    /// Leave a nesting level previously entered via [`descend`](Self::descend).
+    fn ascend(&mut self) {
+        assert!(self.depth > 0, "filter parser depth underflow");
+        self.depth -= 1;
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -176,39 +254,41 @@ impl<'a> FilterParser<'a> {
 
     // or_expr = and_expr ( 'or' and_expr )*
     fn parse_or(&mut self) -> Result<FilterExpr, ODataError> {
-        let mut left = self.parse_and()?;
+        let mut operands = vec![self.parse_and()?];
         while self.peek_text_is("or") {
+            let operator_offset = self.current_offset();
+            self.budget.consume_operator(operator_offset)?;
+            self.budget.consume_node(operator_offset)?;
             self.advance();
-            let right = self.parse_and()?;
-            left = FilterExpr::BinaryOp {
-                left: Box::new(left),
-                op: BinaryOperator::Or,
-                right: Box::new(right),
-            };
+            operands.push(self.parse_and()?);
         }
-        Ok(left)
+        Ok(balance_associative(operands, BinaryOperator::Or))
     }
 
     // and_expr = not_expr ( 'and' not_expr )*
     fn parse_and(&mut self) -> Result<FilterExpr, ODataError> {
-        let mut left = self.parse_not()?;
+        let mut operands = vec![self.parse_not()?];
         while self.peek_text_is("and") {
+            let operator_offset = self.current_offset();
+            self.budget.consume_operator(operator_offset)?;
+            self.budget.consume_node(operator_offset)?;
             self.advance();
-            let right = self.parse_not()?;
-            left = FilterExpr::BinaryOp {
-                left: Box::new(left),
-                op: BinaryOperator::And,
-                right: Box::new(right),
-            };
+            operands.push(self.parse_not()?);
         }
-        Ok(left)
+        Ok(balance_associative(operands, BinaryOperator::And))
     }
 
     // not_expr = 'not' not_expr | comparison
     fn parse_not(&mut self) -> Result<FilterExpr, ODataError> {
         if self.peek_text_is("not") {
+            let operator_offset = self.current_offset();
+            self.budget.consume_operator(operator_offset)?;
+            self.budget.consume_node(operator_offset)?;
             self.advance();
-            let operand = self.parse_not()?;
+            self.descend()?;
+            let operand = self.parse_not();
+            self.ascend();
+            let operand = operand?;
             return Ok(FilterExpr::UnaryOp {
                 op: UnaryOperator::Not,
                 operand: Box::new(operand),
@@ -221,6 +301,9 @@ impl<'a> FilterParser<'a> {
     fn parse_comparison(&mut self) -> Result<FilterExpr, ODataError> {
         let left = self.parse_primary()?;
         if let Some(op) = self.peek_comparison_op() {
+            let operator_offset = self.current_offset();
+            self.budget.consume_operator(operator_offset)?;
+            self.budget.consume_node(operator_offset)?;
             self.advance();
             let right = self.parse_primary()?;
             Ok(FilterExpr::BinaryOp {
@@ -250,20 +333,25 @@ impl<'a> FilterParser<'a> {
         // Parenthesized sub-expression
         if text == "(" {
             self.advance();
-            let expr = self.parse_or()?;
+            self.descend()?;
+            let expr = self.parse_or();
+            self.ascend();
+            let expr = expr?;
             self.expect_text(")")?;
             return Ok(expr);
         }
 
         // String literal
         if text.starts_with('\'') && text.ends_with('\'') && text.len() >= 2 {
-            let s = text[1..text.len() - 1].to_string();
+            self.budget.consume_node(offset)?;
             self.advance();
+            let s = text[1..text.len() - 1].to_string();
             return Ok(FilterExpr::Literal(ODataValue::String(s)));
         }
 
         // Numeric literal
         if text.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
+            self.budget.consume_node(offset)?;
             self.advance();
             if text.contains('.') {
                 let val: f64 = text.parse().map_err(|_| ODataError::InvalidFilter {
@@ -282,14 +370,17 @@ impl<'a> FilterParser<'a> {
 
         // Keywords: null, true, false
         if text == "null" {
+            self.budget.consume_node(offset)?;
             self.advance();
             return Ok(FilterExpr::Literal(ODataValue::Null));
         }
         if text == "true" {
+            self.budget.consume_node(offset)?;
             self.advance();
             return Ok(FilterExpr::Literal(ODataValue::Boolean(true)));
         }
         if text == "false" {
+            self.budget.consume_node(offset)?;
             self.advance();
             return Ok(FilterExpr::Literal(ODataValue::Boolean(false)));
         }
@@ -301,6 +392,7 @@ impl<'a> FilterParser<'a> {
 
             // Check for function call: name followed by '('
             if self.peek_text_is("(") {
+                self.budget.consume_node(offset)?;
                 self.advance(); // consume '('
                 let args = self.parse_argument_list()?;
                 self.expect_text(")")?;
@@ -308,6 +400,7 @@ impl<'a> FilterParser<'a> {
             }
 
             // Otherwise it's a property reference
+            self.budget.consume_node(offset)?;
             return Ok(FilterExpr::Property(name));
         }
 
@@ -326,7 +419,11 @@ impl<'a> FilterParser<'a> {
         }
 
         loop {
-            args.push(self.parse_or()?);
+            self.budget.consume_argument(self.current_offset())?;
+            self.descend()?;
+            let arg = self.parse_or();
+            self.ascend();
+            args.push(arg?);
             if self.peek_text_is(",") {
                 self.advance();
             } else {
@@ -359,180 +456,48 @@ impl<'a> FilterParser<'a> {
     }
 }
 
+/// Build an order-preserving balanced tree for an associative boolean operator.
+///
+/// A left fold makes an accepted wide filter's AST as deep as its width. Every
+/// downstream consumer then inherits that attacker-controlled recursion depth,
+/// including in-memory evaluation, SQL translation, and `Drop`. Pairing adjacent
+/// operands keeps the same left-to-right order and boolean meaning while bounding
+/// tree depth logarithmically.
+fn balance_associative(mut operands: Vec<FilterExpr>, op: BinaryOperator) -> FilterExpr {
+    assert!(
+        !operands.is_empty(),
+        "boolean chain must contain an operand"
+    );
+
+    while operands.len() > 1 {
+        let mut next_level = Vec::with_capacity(operands.len().div_ceil(2));
+        let mut iter = operands.into_iter();
+        while let Some(left) = iter.next() {
+            if let Some(right) = iter.next() {
+                next_level.push(FilterExpr::BinaryOp {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                });
+            } else {
+                next_level.push(left);
+            }
+        }
+        operands = next_level;
+    }
+
+    debug_assert_eq!(operands.len(), 1, "balancing must produce one root");
+    operands.remove(0)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+#[path = "filter/basic_tests.rs"]
+mod basic_tests;
 
-    #[test]
-    fn filter_simple_eq_string() {
-        let expr = parse_filter("Name eq 'foo'").unwrap();
-        assert_eq!(
-            expr,
-            FilterExpr::BinaryOp {
-                left: Box::new(FilterExpr::Property("Name".into())),
-                op: BinaryOperator::Eq,
-                right: Box::new(FilterExpr::Literal(ODataValue::String("foo".into()))),
-            }
-        );
-    }
-
-    #[test]
-    fn filter_simple_gt_float() {
-        let expr = parse_filter("Price gt 5.0").unwrap();
-        assert_eq!(
-            expr,
-            FilterExpr::BinaryOp {
-                left: Box::new(FilterExpr::Property("Price".into())),
-                op: BinaryOperator::Gt,
-                right: Box::new(FilterExpr::Literal(ODataValue::Float(5.0))),
-            }
-        );
-    }
-
-    #[test]
-    fn filter_and_or_precedence() {
-        // `A eq 1 and B eq 2 or C eq 3` should parse as `(A eq 1 and B eq 2) or (C eq 3)`
-        let expr = parse_filter("A eq 1 and B eq 2 or C eq 3").unwrap();
-        match &expr {
-            FilterExpr::BinaryOp {
-                op: BinaryOperator::Or,
-                left,
-                right,
-            } => {
-                // Left should be the 'and' node
-                match left.as_ref() {
-                    FilterExpr::BinaryOp {
-                        op: BinaryOperator::And,
-                        ..
-                    } => {}
-                    other => panic!("expected And on left, got {other:?}"),
-                }
-                // Right should be a comparison
-                match right.as_ref() {
-                    FilterExpr::BinaryOp {
-                        op: BinaryOperator::Eq,
-                        ..
-                    } => {}
-                    other => panic!("expected Eq on right, got {other:?}"),
-                }
-            }
-            other => panic!("expected Or at top, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn filter_compound_and() {
-        let expr = parse_filter("Name eq 'foo' and Price gt 5.0").unwrap();
-        assert_eq!(
-            expr,
-            FilterExpr::BinaryOp {
-                left: Box::new(FilterExpr::BinaryOp {
-                    left: Box::new(FilterExpr::Property("Name".into())),
-                    op: BinaryOperator::Eq,
-                    right: Box::new(FilterExpr::Literal(ODataValue::String("foo".into()))),
-                }),
-                op: BinaryOperator::And,
-                right: Box::new(FilterExpr::BinaryOp {
-                    left: Box::new(FilterExpr::Property("Price".into())),
-                    op: BinaryOperator::Gt,
-                    right: Box::new(FilterExpr::Literal(ODataValue::Float(5.0))),
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn filter_not_operator() {
-        let expr = parse_filter("not Active eq true").unwrap();
-        match &expr {
-            FilterExpr::UnaryOp {
-                op: UnaryOperator::Not,
-                operand,
-            } => match operand.as_ref() {
-                FilterExpr::BinaryOp {
-                    op: BinaryOperator::Eq,
-                    ..
-                } => {}
-                other => panic!("expected Eq inside not, got {other:?}"),
-            },
-            other => panic!("expected Not at top, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn filter_parenthesized_expression() {
-        let expr = parse_filter("(A eq 1 or B eq 2) and C eq 3").unwrap();
-        match &expr {
-            FilterExpr::BinaryOp {
-                op: BinaryOperator::And,
-                left,
-                ..
-            } => match left.as_ref() {
-                FilterExpr::BinaryOp {
-                    op: BinaryOperator::Or,
-                    ..
-                } => {}
-                other => panic!("expected Or in parens, got {other:?}"),
-            },
-            other => panic!("expected And at top, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn filter_function_call() {
-        let expr = parse_filter("contains(Name, 'foo')").unwrap();
-        assert_eq!(
-            expr,
-            FilterExpr::FunctionCall {
-                name: "contains".into(),
-                args: vec![
-                    FilterExpr::Property("Name".into()),
-                    FilterExpr::Literal(ODataValue::String("foo".into())),
-                ],
-            }
-        );
-    }
-
-    #[test]
-    fn filter_null_literal() {
-        let expr = parse_filter("Name eq null").unwrap();
-        assert_eq!(
-            expr,
-            FilterExpr::BinaryOp {
-                left: Box::new(FilterExpr::Property("Name".into())),
-                op: BinaryOperator::Eq,
-                right: Box::new(FilterExpr::Literal(ODataValue::Null)),
-            }
-        );
-    }
-
-    #[test]
-    fn filter_boolean_literal() {
-        let expr = parse_filter("Active eq true").unwrap();
-        assert_eq!(
-            expr,
-            FilterExpr::BinaryOp {
-                left: Box::new(FilterExpr::Property("Active".into())),
-                op: BinaryOperator::Eq,
-                right: Box::new(FilterExpr::Literal(ODataValue::Boolean(true))),
-            }
-        );
-    }
-
-    #[test]
-    fn filter_negative_number() {
-        let expr = parse_filter("Amount gt -10").unwrap();
-        assert_eq!(
-            expr,
-            FilterExpr::BinaryOp {
-                left: Box::new(FilterExpr::Property("Amount".into())),
-                op: BinaryOperator::Gt,
-                right: Box::new(FilterExpr::Literal(ODataValue::Int(-10))),
-            }
-        );
-    }
-}
+#[cfg(test)]
+#[path = "filter/security_tests.rs"]
+mod security_tests;

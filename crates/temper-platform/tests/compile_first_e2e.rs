@@ -18,7 +18,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::http::{body_json, body_string};
-use temper_platform::bootstrap::bootstrap_system_tenant;
+use temper_platform::bootstrap::{bootstrap_operator_credential, bootstrap_system_tenant};
 use temper_platform::router::build_platform_router;
 use temper_platform::state::PlatformState;
 use temper_runtime::tenant::TenantId;
@@ -29,6 +29,55 @@ use temper_spec::csdl::parse_csdl;
 
 const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
 const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
+const AGENT_TYPE_IOA: &str = include_str!("../src/specs/agent_type.ioa.toml");
+const AGENT_CREDENTIAL_IOA: &str = include_str!("../src/specs/agent_credential.ioa.toml");
+
+const CREDENTIAL_CSDL_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="AgentType">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="name" Type="Edm.String"/>
+      </EntityType>
+      <EntityType Name="AgentCredential">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="agent_type_id" Type="Edm.String"/>
+        <Property Name="agent_instance_id" Type="Edm.String"/>
+        <Property Name="key_hash" Type="Edm.String"/>
+        <Property Name="key_prefix" Type="Edm.String"/>
+        <Property Name="description" Type="Edm.String"/>
+        <Property Name="created_by" Type="Edm.String"/>
+        <Property Name="expires_at" Type="Edm.String"/>
+      </EntityType>
+      <EntityContainer Name="CredentialService">
+        <EntitySet Name="AgentTypes" EntityType="Temper.AgentType"/>
+        <EntitySet Name="AgentCredentials" EntityType="Temper.AgentCredential"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+
+const ORDER_OPERATOR_POLICY: &str = r#"
+permit(principal == Agent::"operator", action == Action::"create", resource is Order);
+permit(principal == Agent::"operator", action == Action::"read", resource is Order);
+permit(principal == Agent::"operator", action == Action::"list", resource is Order);
+permit(principal == Agent::"operator", action == Action::"CancelOrder", resource is Order);
+"#;
+
+const TASK_OPERATOR_POLICY: &str = r#"
+permit(principal == Agent::"operator", action == Action::"create", resource is Task);
+permit(principal == Agent::"operator", action == Action::"StartWork", resource is Task);
+"#;
+
+const PROJECT_OPERATOR_POLICY: &str = r#"
+permit(principal == Agent::"operator", action == Action::"create", resource is Project);
+permit(principal == Agent::"operator", action == Action::"UpdateSpecs", resource is Project);
+"#;
 
 /// Minimal Task IOA spec for multi-tenant tests.
 const TASK_IOA: &str = r#"
@@ -111,6 +160,59 @@ fn build_user_registry(tenant: &str, ioa_specs: &[(&str, &str)]) -> SpecRegistry
     registry
 }
 
+async fn register_test_operator(
+    state: &PlatformState,
+    tenant: &str,
+    credential: &str,
+    cedar_policy: &str,
+) {
+    let credential_csdl = parse_csdl(CREDENTIAL_CSDL_XML).expect("credential CSDL should parse");
+    let credential_specs = [
+        ("AgentType", AGENT_TYPE_IOA),
+        ("AgentCredential", AGENT_CREDENTIAL_IOA),
+    ];
+    let tenant_id = TenantId::new(tenant);
+    {
+        let mut registry = state
+            .registry
+            .write()
+            .expect("test registry lock should be available");
+        registry
+            .try_register_tenant_with_reactions_and_constraints(
+                tenant_id.clone(),
+                credential_csdl,
+                CREDENTIAL_CSDL_XML.to_string(),
+                &credential_specs,
+                Vec::new(),
+                None,
+                true,
+            )
+            .expect("credential specs should merge into the test tenant");
+        for (entity_type, _) in credential_specs {
+            registry.set_verification_status(
+                &tenant_id,
+                entity_type,
+                VerificationStatus::Completed(EntityVerificationResult {
+                    all_passed: true,
+                    levels: vec![EntityLevelSummary {
+                        level: "E2E fixture".to_string(),
+                        passed: true,
+                        summary: "Credential fixture pre-verified".to_string(),
+                        details: None,
+                    }],
+                    verified_at: "2026-07-10T00:00:00Z".to_string(),
+                }),
+            );
+        }
+    }
+    bootstrap_operator_credential(state, credential, tenant).await;
+    state
+        .server
+        .authz
+        .reload_tenant_policies(tenant, cedar_policy)
+        .expect("test operator policy should parse");
+}
+
 // =========================================================================
 // Test 1: Full Order lifecycle through compile-first path
 // =========================================================================
@@ -122,6 +224,7 @@ async fn e2e_compile_first_order_lifecycle() {
     let registry = build_user_registry("alpha", &[("Order", ORDER_IOA)]);
     let state = PlatformState::with_registry(registry, None);
     bootstrap_system_tenant(&state, &BTreeMap::new());
+    register_test_operator(&state, "alpha", "alpha-operator-key", ORDER_OPERATOR_POLICY).await;
     let app = build_platform_router(state);
 
     // POST /tdata/Orders → 201, creates entity in Draft
@@ -130,7 +233,7 @@ async fn e2e_compile_first_order_lifecycle() {
         .oneshot(
             Request::post("/tdata/Orders")
                 .header("Content-Type", "application/json")
-                .header("X-Temper-Principal-Kind", "admin")
+                .header("Authorization", "Bearer alpha-operator-key")
                 .header("X-Tenant-Id", "alpha")
                 .body(Body::from("{}"))
                 .unwrap(),
@@ -157,7 +260,7 @@ async fn e2e_compile_first_order_lifecycle() {
                 "/tdata/Orders('{entity_id}')/Temper.Example.CancelOrder"
             ))
             .header("Content-Type", "application/json")
-            .header("X-Temper-Principal-Kind", "admin")
+            .header("Authorization", "Bearer alpha-operator-key")
             .header("X-Tenant-Id", "alpha")
             .body(Body::from(r#"{"Reason": "changed mind"}"#))
             .unwrap(),
@@ -173,6 +276,7 @@ async fn e2e_compile_first_order_lifecycle() {
         .clone()
         .oneshot(
             Request::get(format!("/tdata/Orders('{entity_id}')"))
+                .header("Authorization", "Bearer alpha-operator-key")
                 .header("X-Tenant-Id", "alpha")
                 .body(Body::empty())
                 .unwrap(),
@@ -188,6 +292,7 @@ async fn e2e_compile_first_order_lifecycle() {
         .clone()
         .oneshot(
             Request::get("/tdata/$metadata")
+                .header("Authorization", "Bearer alpha-operator-key")
                 .header("X-Tenant-Id", "alpha")
                 .body(Body::empty())
                 .unwrap(),
@@ -206,6 +311,7 @@ async fn e2e_compile_first_order_lifecycle() {
         .clone()
         .oneshot(
             Request::get("/tdata")
+                .header("Authorization", "Bearer alpha-operator-key")
                 .header("X-Tenant-Id", "alpha")
                 .body(Body::empty())
                 .unwrap(),
@@ -270,6 +376,8 @@ async fn e2e_compile_first_two_tenants() {
 
     let state = PlatformState::with_registry(registry, None);
     bootstrap_system_tenant(&state, &BTreeMap::new());
+    register_test_operator(&state, "alpha", "alpha-operator-key", ORDER_OPERATOR_POLICY).await;
+    register_test_operator(&state, "beta", "beta-operator-key", TASK_OPERATOR_POLICY).await;
     let app = build_platform_router(state);
 
     // POST /tdata/Orders with X-Tenant-Id: alpha → 201
@@ -278,7 +386,7 @@ async fn e2e_compile_first_two_tenants() {
         .oneshot(
             Request::post("/tdata/Orders")
                 .header("Content-Type", "application/json")
-                .header("X-Temper-Principal-Kind", "admin")
+                .header("Authorization", "Bearer alpha-operator-key")
                 .header("X-Tenant-Id", "alpha")
                 .body(Body::from("{}"))
                 .unwrap(),
@@ -305,7 +413,7 @@ async fn e2e_compile_first_two_tenants() {
                 "/tdata/Orders('{alpha_id}')/Temper.Example.CancelOrder"
             ))
             .header("Content-Type", "application/json")
-            .header("X-Temper-Principal-Kind", "admin")
+            .header("Authorization", "Bearer alpha-operator-key")
             .header("X-Tenant-Id", "alpha")
             .body(Body::from("{}"))
             .unwrap(),
@@ -322,7 +430,7 @@ async fn e2e_compile_first_two_tenants() {
         .oneshot(
             Request::post("/tdata/Tasks")
                 .header("Content-Type", "application/json")
-                .header("X-Temper-Principal-Kind", "admin")
+                .header("Authorization", "Bearer beta-operator-key")
                 .header("X-Tenant-Id", "beta")
                 .body(Body::from("{}"))
                 .unwrap(),
@@ -349,7 +457,7 @@ async fn e2e_compile_first_two_tenants() {
                 "/tdata/Tasks('{beta_id}')/Temper.Example.StartWork"
             ))
             .header("Content-Type", "application/json")
-            .header("X-Temper-Principal-Kind", "admin")
+            .header("Authorization", "Bearer beta-operator-key")
             .header("X-Tenant-Id", "beta")
             .body(Body::from("{}"))
             .unwrap(),
@@ -365,6 +473,7 @@ async fn e2e_compile_first_two_tenants() {
         .clone()
         .oneshot(
             Request::get("/tdata")
+                .header("Authorization", "Bearer alpha-operator-key")
                 .header("X-Tenant-Id", "alpha")
                 .body(Body::empty())
                 .unwrap(),
@@ -384,6 +493,7 @@ async fn e2e_compile_first_two_tenants() {
         .clone()
         .oneshot(
             Request::get("/tdata")
+                .header("Authorization", "Bearer beta-operator-key")
                 .header("X-Tenant-Id", "beta")
                 .body(Body::empty())
                 .unwrap(),
@@ -411,6 +521,14 @@ async fn e2e_compile_first_system_and_user_coexist() {
     let registry = build_user_registry("alpha", &[("Order", ORDER_IOA)]);
     let state = PlatformState::with_registry(registry, None);
     bootstrap_system_tenant(&state, &BTreeMap::new());
+    register_test_operator(&state, "alpha", "alpha-operator-key", ORDER_OPERATOR_POLICY).await;
+    register_test_operator(
+        &state,
+        "temper-system",
+        "system-operator-key",
+        PROJECT_OPERATOR_POLICY,
+    )
+    .await;
     let app = build_platform_router(state);
 
     // GET /tdata/$metadata with X-Tenant-Id: alpha → sees user entities (Order)
@@ -418,6 +536,7 @@ async fn e2e_compile_first_system_and_user_coexist() {
         .clone()
         .oneshot(
             Request::get("/tdata/$metadata")
+                .header("Authorization", "Bearer alpha-operator-key")
                 .header("X-Tenant-Id", "alpha")
                 .body(Body::empty())
                 .unwrap(),
@@ -436,6 +555,7 @@ async fn e2e_compile_first_system_and_user_coexist() {
         .clone()
         .oneshot(
             Request::get("/tdata/$metadata")
+                .header("Authorization", "Bearer system-operator-key")
                 .header("X-Tenant-Id", "temper-system")
                 .body(Body::empty())
                 .unwrap(),
@@ -457,7 +577,7 @@ async fn e2e_compile_first_system_and_user_coexist() {
         .oneshot(
             Request::post("/tdata/Orders")
                 .header("Content-Type", "application/json")
-                .header("X-Temper-Principal-Kind", "admin")
+                .header("Authorization", "Bearer alpha-operator-key")
                 .header("X-Tenant-Id", "alpha")
                 .body(Body::from("{}"))
                 .unwrap(),
@@ -482,7 +602,7 @@ async fn e2e_compile_first_system_and_user_coexist() {
                 "/tdata/Orders('{order_id}')/Temper.Example.CancelOrder"
             ))
             .header("Content-Type", "application/json")
-            .header("X-Temper-Principal-Kind", "admin")
+            .header("Authorization", "Bearer alpha-operator-key")
             .header("X-Tenant-Id", "alpha")
             .body(Body::from("{}"))
             .unwrap(),
@@ -499,7 +619,7 @@ async fn e2e_compile_first_system_and_user_coexist() {
         .oneshot(
             Request::post("/tdata/Projects")
                 .header("Content-Type", "application/json")
-                .header("X-Temper-Principal-Kind", "admin")
+                .header("Authorization", "Bearer system-operator-key")
                 .header("X-Tenant-Id", "temper-system")
                 .body(Body::from("{}"))
                 .unwrap(),
@@ -525,7 +645,7 @@ async fn e2e_compile_first_system_and_user_coexist() {
                 "/tdata/Projects('{proj_id}')/Temper.System.UpdateSpecs"
             ))
             .header("Content-Type", "application/json")
-            .header("X-Temper-Principal-Kind", "admin")
+            .header("Authorization", "Bearer system-operator-key")
             .header("X-Tenant-Id", "temper-system")
             .body(Body::from("{}"))
             .unwrap(),

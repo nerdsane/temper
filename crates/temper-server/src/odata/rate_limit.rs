@@ -1,12 +1,9 @@
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use serde_json::Value;
-use temper_authz::{PrincipalKind, SecurityContext};
+use temper_authz::SecurityContext;
 use temper_runtime::tenant::TenantId;
 
-use crate::authz::security_context_from_headers;
-use crate::identity::ResolvedIdentity;
-use crate::request_context::AgentContext;
 use crate::response::odata_error;
 use crate::state::ServerState;
 
@@ -29,29 +26,18 @@ pub(super) fn owner_id_from_action(fields: &Value, params: &Value) -> Option<Str
     owner_id_from_fields(params).or_else(|| owner_id_from_fields(fields))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn enforce_commons_write_rate_limit(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
     owner_id: Option<String>,
-    headers: &HeaderMap,
-    agent_ctx: &AgentContext,
-    resolved_identity: Option<&ResolvedIdentity>,
+    security_context: &SecurityContext,
 ) -> Result<(), axum::response::Response> {
     if !state.commons_guardrails_enabled(tenant) || rate_limit_exempt_entity(entity_type) {
         return Ok(());
     }
 
-    let security_ctx = request_security_context(headers, agent_ctx, resolved_identity);
-    if matches!(
-        security_ctx.principal.kind,
-        PrincipalKind::Admin | PrincipalKind::System
-    ) {
-        return Ok(());
-    }
-
-    let owner_id = owner_id.unwrap_or_else(|| security_ctx.principal.id.clone());
+    let owner_id = owner_id.unwrap_or_else(|| security_context.principal.id.clone());
     if owner_id.trim().is_empty() || owner_id == "anonymous" {
         return Ok(());
     }
@@ -84,22 +70,6 @@ pub(super) async fn enforce_commons_write_rate_limit(
             &err.to_string(),
         )
         .into_response()),
-    }
-}
-
-fn request_security_context(
-    headers: &HeaderMap,
-    agent_ctx: &AgentContext,
-    resolved_identity: Option<&ResolvedIdentity>,
-) -> SecurityContext {
-    if let Some(identity) = resolved_identity {
-        SecurityContext::from_resolved_identity(
-            &identity.agent_instance_id,
-            &identity.agent_type_name,
-            agent_ctx.session_id.as_deref(),
-        )
-    } else {
-        security_context_from_headers(headers, None, agent_ctx.session_id.as_deref(), None)
     }
 }
 

@@ -374,6 +374,14 @@ pub struct OTSDecision {
     /// Optional embedding vector for similarity search
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedding: Option<Vec<f32>>,
+
+    /// The `tool_call` id that links this decision to the observation it caused.
+    ///
+    /// Without it a decision and the tool result that followed can only be
+    /// paired by position, which breaks under interleaved or parallel tool
+    /// calls. Carries the provider's tool-call id verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause_id: Option<String>,
 }
 
 impl OTSDecision {
@@ -395,6 +403,7 @@ impl OTSDecision {
             evaluation: None,
             credit_assignment: None,
             embedding: None,
+            cause_id: None,
         }
     }
 
@@ -437,6 +446,12 @@ impl OTSDecision {
     /// Set the embedding vector
     pub fn with_embedding(mut self, embedding: Vec<f32>) -> Self {
         self.embedding = Some(embedding);
+        self
+    }
+
+    /// Set the causing `tool_call` id, linking this decision to its observation
+    pub fn with_cause_id(mut self, cause_id: impl Into<String>) -> Self {
+        self.cause_id = Some(cause_id.into());
         self
     }
 }

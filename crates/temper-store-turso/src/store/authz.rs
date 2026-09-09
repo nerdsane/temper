@@ -61,13 +61,17 @@ impl TursoEventStore {
 
     /// Get a single pending decision by ID, returning the full JSON data.
     #[instrument(skip_all, fields(id, otel.name = "turso.get_pending_decision"))]
-    pub async fn get_pending_decision(&self, id: &str) -> Result<Option<String>, PersistenceError> {
+    pub async fn get_pending_decision(
+        &self,
+        tenant: &str,
+        id: &str,
+    ) -> Result<Option<String>, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.get_pending_decision");
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT data FROM pending_decisions WHERE id = ?1",
-                params![id],
+                "SELECT data FROM pending_decisions WHERE tenant = ?1 AND id = ?2",
+                params![tenant, id],
             )
             .await
             .map_err(storage_error)?;
@@ -89,14 +93,21 @@ impl TursoEventStore {
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.upsert_pending_decision");
         let conn = self.configured_connection().await?;
-        conn.execute(
-            "INSERT INTO pending_decisions (id, tenant, status, data, updated_at) \
+        let affected = conn
+            .execute(
+                "INSERT INTO pending_decisions (id, tenant, status, data, updated_at) \
              VALUES (?1, ?2, ?3, ?4, datetime('now')) \
-             ON CONFLICT(id) DO UPDATE SET status = ?3, data = ?4, updated_at = datetime('now')",
-            params![id, tenant, status, data_json],
-        )
-        .await
-        .map_err(storage_error)?;
+             ON CONFLICT(id) DO UPDATE SET status = ?3, data = ?4, updated_at = datetime('now') \
+             WHERE pending_decisions.tenant = excluded.tenant",
+                params![id, tenant, status, data_json],
+            )
+            .await
+            .map_err(storage_error)?;
+        if affected != 1 {
+            return Err(PersistenceError::Storage(format!(
+                "pending decision '{id}' is owned by another tenant"
+            )));
+        }
         Ok(())
     }
 
@@ -112,6 +123,37 @@ impl TursoEventStore {
             .query(
                 "SELECT data FROM pending_decisions ORDER BY created_at DESC LIMIT ?1",
                 params![limit],
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(row.get::<String>(0).map_err(storage_error)?);
+        }
+        Ok(out)
+    }
+
+    /// Load approved decisions whose scope names `session_id`, for one tenant.
+    ///
+    /// Backs session-grant validation (ADR-0157): a caller-asserted session id
+    /// becomes a Cedar input only when an approved decision binds that session,
+    /// so the lookup filters on the approved scope's session, not the denial's.
+    #[instrument(skip_all, fields(tenant, otel.name = "turso.load_approved_session_decisions"))]
+    pub async fn load_approved_session_decisions(
+        &self,
+        tenant: &str,
+        session_id: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.load_approved_session_decisions");
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT data FROM pending_decisions \
+                 WHERE tenant = ?1 \
+                   AND status = 'approved' \
+                   AND json_extract(data, '$.approved_scope.session_id') = ?2",
+                params![tenant, session_id],
             )
             .await
             .map_err(storage_error)?;

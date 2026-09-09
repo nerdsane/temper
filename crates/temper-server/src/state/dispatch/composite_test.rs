@@ -318,13 +318,18 @@ fn composite_test_state() -> ServerState {
     specs.insert("App".to_string(), APP_IOA.to_string());
     specs.insert("Blob".to_string(), BLOB_IOA.to_string());
     specs.insert("Ref".to_string(), REF_IOA.to_string());
-    ServerState::with_specs(
+    let state = ServerState::with_specs(
         ActorSystem::new("composite-dispatch-test"),
         csdl,
         COMPOSITE_CSDL.to_string(),
         specs,
     )
-    .expect("test state should build")
+    .expect("test state should build");
+    state
+        .authz
+        .reload_tenant_policies("default", "permit(principal, action, resource);")
+        .expect("composite functional test policy should parse");
+    state
 }
 
 #[cfg(feature = "sim")]
@@ -336,14 +341,19 @@ fn composite_test_state_with_store(store: SimEventStore) -> ServerState {
     specs.insert("App".to_string(), APP_IOA.to_string());
     specs.insert("Blob".to_string(), BLOB_IOA.to_string());
     specs.insert("Ref".to_string(), REF_IOA.to_string());
-    ServerState::with_storage_stack(
+    let state = ServerState::with_storage_stack(
         ActorSystem::new("composite-dispatch-test"),
         csdl,
         COMPOSITE_CSDL.to_string(),
         specs,
         StorageStack::from_sim(store, None),
     )
-    .expect("test state should build")
+    .expect("test state should build");
+    state
+        .authz
+        .reload_tenant_policies("default", "permit(principal, action, resource);")
+        .expect("composite functional test policy should parse");
+    state
 }
 
 #[tokio::test]
@@ -440,7 +450,8 @@ async fn composite_sub_write_authorization_receives_action_context() {
 
     state
         .authz
-        .reload_policies(
+        .reload_tenant_policies(
+            tenant.as_str(),
             r#"
                 permit(
                   principal is Agent,
@@ -476,7 +487,8 @@ async fn composite_sub_write_authorization_receives_action_context() {
 
     state
         .authz
-        .reload_policies(
+        .reload_tenant_policies(
+            tenant.as_str(),
             r#"
                 permit(
                   principal is Agent,
@@ -581,19 +593,25 @@ async fn composite_app_create_sub_write_authorization_can_enforce_owner_scope() 
     let state = composite_test_state();
     let tenant = TenantId::default();
     let agent = AgentContext {
-        security_ctx: Some(SecurityContext::from_headers(&[
-            ("X-Temper-Principal-Id".to_string(), "alice".to_string()),
-            (
-                "X-Temper-Principal-Kind".to_string(),
-                "customer".to_string(),
-            ),
-        ])),
+        security_ctx: Some(SecurityContext {
+            principal: temper_authz::Principal {
+                id: "alice".to_string(),
+                kind: temper_authz::PrincipalKind::Customer,
+                role: None,
+                acting_for: None,
+                agent_type: None,
+                attributes: std::collections::HashMap::new(),
+            },
+            context_attrs: std::collections::HashMap::new(),
+            correlation_id: "composite-owner-scope".to_string(),
+        }),
         ..Default::default()
     };
 
     state
         .authz
-        .reload_policies(
+        .reload_tenant_policies(
+            tenant.as_str(),
             r#"
                 permit(
                   principal,
@@ -673,7 +691,8 @@ async fn composite_preflights_sub_write_auth_before_persisting_any_write() {
 
     state
         .authz
-        .reload_policies(
+        .reload_tenant_policies(
+            tenant.as_str(),
             r#"
                 permit(
                   principal is Agent,

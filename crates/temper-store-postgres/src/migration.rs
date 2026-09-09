@@ -37,6 +37,10 @@ mod tests {
             include_str!("../migrations/0006_segmented_event_history.sql"),
             include_str!("../migrations/0007_installed_app_follow_policy.sql"),
             include_str!("../migrations/0008_ots_trajectory_outbox_status.sql"),
+            include_str!("../migrations/0009_entity_key_index.sql"),
+            include_str!("../migrations/0010_key_index_backfill_watermark.sql"),
+            include_str!("../migrations/0011_key_index_watermark_key_set.sql"),
+            include_str!("../migrations/0012_evolution_tenant_ownership.sql"),
         ]
         .join("\n")
         .to_lowercase();
@@ -100,6 +104,51 @@ mod tests {
         assert!(
             !migration_six.contains("entity_catalog"),
             "entity_catalog state must not reuse migration version 0006"
+        );
+    }
+
+    #[test]
+    fn capture_order_column_exists_on_both_schema_paths() {
+        // A fresh bootstrap reads schema.rs and an existing database reads the
+        // migration; a session read that orders by `capture_seq` fails on
+        // whichever path forgets it.
+        let migration = include_str!("../migrations/0014_trajectory_capture_seq.sql");
+        assert!(
+            migration.contains("ADD COLUMN IF NOT EXISTS capture_seq"),
+            "migration 0014 must add the capture-order column idempotently"
+        );
+        assert!(
+            migration.contains("idx_trajectories_session_capture"),
+            "migration 0014 must cover the session read's ordering columns"
+        );
+        assert!(
+            schema::CREATE_TRAJECTORIES_TABLE.contains("capture_seq"),
+            "a freshly bootstrapped trajectories table must carry the capture-order column"
+        );
+    }
+
+    #[test]
+    fn ots_trajectory_identity_is_tenant_scoped_on_both_schema_paths() {
+        // A fresh bootstrap reads schema.rs and an existing database reads the
+        // migration. Whichever path keeps the global key lets one tenant's
+        // upload overwrite another tenant's trajectory.
+        let migration = include_str!("../migrations/0015_ots_trajectory_tenant_identity.sql");
+        assert!(
+            migration.contains("DROP CONSTRAINT IF EXISTS ots_trajectories_pkey"),
+            "migration 0015 must drop the globally keyed primary key idempotently"
+        );
+        assert!(
+            migration.contains("PRIMARY KEY (tenant, trajectory_id)"),
+            "migration 0015 must rekey the table by (tenant, trajectory_id)"
+        );
+        assert!(
+            schema::CREATE_OTS_TRAJECTORIES_TABLE.contains("PRIMARY KEY (tenant, trajectory_id)"),
+            "a freshly bootstrapped ots_trajectories table must be keyed by tenant and id"
+        );
+        assert!(
+            !schema::CREATE_OTS_TRAJECTORIES_TABLE
+                .contains("trajectory_id TEXT         PRIMARY KEY"),
+            "the globally keyed column definition must be gone, not shadowed"
         );
     }
 

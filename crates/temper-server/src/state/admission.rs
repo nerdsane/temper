@@ -377,6 +377,7 @@ impl crate::state::ServerState {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::spawn as spawn_admission_test_task; // determinism-ok: test-only concurrency harness
 
     fn tenant(name: &str) -> TenantId {
         TenantId::from(name.to_string())
@@ -422,6 +423,38 @@ mod tests {
             AdmissionOutcome::Passthrough => {}
             _ => panic!("expected Passthrough for uncapped action"),
         }
+    }
+
+    /// Red regression for the separately tracked runtime-override redesign.
+    ///
+    /// The admin endpoint currently records an override here, but dispatch
+    /// immediately supplies spec caps to `try_acquire_with_caps`, which
+    /// replaces the registered value. Unignore when overrides are keyed by
+    /// tenant and are resolved ahead of spec defaults at dispatch.
+    #[tokio::test]
+    #[ignore = "runtime admission overrides are currently overwritten by inline spec caps"]
+    async fn runtime_override_should_precede_inline_spec_caps() {
+        let ac = AdmissionController::new();
+        ac.override_caps(
+            "Session",
+            Some(make_admission(None, &[("Submit", 1)], Some(0))),
+        )
+        .await;
+        let spec_caps = make_admission(None, &[("Submit", 2)], Some(1));
+        let tenant = tenant("acme");
+
+        let _first = match ac
+            .try_acquire_with_caps(&tenant, "Session", "Submit", Some(&spec_caps))
+            .await
+        {
+            AdmissionOutcome::Granted(permit) => permit,
+            _ => panic!("first request should acquire the runtime cap"),
+        };
+        assert!(matches!(
+            ac.try_acquire_with_caps(&tenant, "Session", "Submit", Some(&spec_caps))
+                .await,
+            AdmissionOutcome::Deferred { .. }
+        ));
     }
 
     #[tokio::test]
@@ -517,8 +550,7 @@ mod tests {
             let t_c = t.clone();
             let grant_order = grant_order.clone();
             let arrived = arrived.clone();
-            let handle = tokio::spawn(async move {
-                // determinism-ok: test-only concurrency harness
+            let handle = spawn_admission_test_task(async move {
                 // Stagger arrivals deterministically so arrival order
                 // matches spawn index, exercising the FIFO contract.
                 while arrived.load(Ordering::Acquire) < i {

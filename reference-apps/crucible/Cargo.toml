@@ -32,6 +32,7 @@ axum = { workspace = true }
 hyper = { workspace = true }
 temper-jit = { path = "../../crates/temper-jit" }
 temper-runtime = { path = "../../crates/temper-runtime" }
+temper-authz = { path = "../../crates/temper-authz" }
 temper-server = { path = "../../crates/temper-server" }
 temper-verify = { path = "../../crates/temper-verify" }
 temper-spec = { path = "../../crates/temper-spec" }

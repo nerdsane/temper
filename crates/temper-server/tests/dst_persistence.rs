@@ -41,6 +41,7 @@ async fn dispatch_action(
                 params,
                 cross_entity_booleans: BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             Duration::from_secs(5),
         )

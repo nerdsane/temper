@@ -25,6 +25,7 @@ pub enum PgRecordStoreError {
 #[allow(dead_code)]
 struct EvolutionRow {
     id: String,
+    tenant: String,
     record_type: String,
     status: String,
     created_by: String,
@@ -41,6 +42,8 @@ struct EvolutionRow {
 pub struct GenericEvolutionRow {
     /// Record ID.
     pub id: String,
+    /// Owning tenant.
+    pub tenant: String,
     /// Record type: Observation, Problem, Analysis, Decision, Insight.
     pub record_type: String,
     /// Status: Open, Resolved, Superseded, Rejected.
@@ -55,10 +58,30 @@ pub struct GenericEvolutionRow {
     pub timestamp: String,
 }
 
+/// Backend-neutral values for one generic evolution-record insert.
+#[derive(Clone, Copy, Debug)]
+pub struct GenericEvolutionRecordInsert<'a> {
+    /// Tenant that owns the record.
+    pub tenant: &'a str,
+    /// Stable evolution record identifier.
+    pub id: &'a str,
+    /// Evolution record kind.
+    pub record_type: &'a str,
+    /// Current record status.
+    pub status: &'a str,
+    /// Principal that created the record.
+    pub created_by: &'a str,
+    /// Optional predecessor record identifier.
+    pub derived_from: Option<&'a str>,
+    /// Serialized record payload.
+    pub data_json: &'a str,
+}
+
 impl From<EvolutionRow> for GenericEvolutionRow {
     fn from(row: EvolutionRow) -> Self {
         Self {
             id: row.id,
+            tenant: row.tenant,
             record_type: row.record_type,
             status: row.status,
             created_by: row.created_by,
@@ -90,6 +113,7 @@ impl PostgresRecordStore {
             r#"
             CREATE TABLE IF NOT EXISTS evolution_records (
                 id          TEXT PRIMARY KEY,
+                tenant      TEXT NOT NULL DEFAULT 'default',
                 record_type TEXT NOT NULL,
                 status      TEXT NOT NULL,
                 created_by  TEXT NOT NULL,
@@ -98,6 +122,12 @@ impl PostgresRecordStore {
                 payload     JSONB NOT NULL
             )
             "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "ALTER TABLE evolution_records ADD COLUMN IF NOT EXISTS tenant TEXT NOT NULL DEFAULT 'default'",
         )
         .execute(&self.pool)
         .await?;
@@ -202,7 +232,7 @@ impl PostgresRecordStore {
     /// Get all open observations (status = 'Open').
     pub async fn open_observations(&self) -> Result<Vec<ObservationRecord>, PgRecordStoreError> {
         let rows: Vec<EvolutionRow> = sqlx::query_as(
-            "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
+            "SELECT id, tenant, record_type, status, created_by, derived_from, timestamp, payload \
              FROM evolution_records WHERE record_type = 'Observation' AND status = 'Open' \
              ORDER BY timestamp DESC",
         )
@@ -220,7 +250,7 @@ impl PostgresRecordStore {
     /// Get all open insights sorted by priority score (highest first).
     pub async fn ranked_insights(&self) -> Result<Vec<InsightRecord>, PgRecordStoreError> {
         let rows: Vec<EvolutionRow> = sqlx::query_as(
-            "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
+            "SELECT id, tenant, record_type, status, created_by, derived_from, timestamp, payload \
              FROM evolution_records WHERE record_type = 'Insight' AND status = 'Open' \
              ORDER BY (payload->>'priority_score')::float8 DESC",
         )
@@ -301,38 +331,43 @@ impl PostgresRecordStore {
     /// data_json, timestamp_rfc3339)` tuples for backend-neutral consumption.
     pub async fn list_records_generic(
         &self,
+        tenant: &str,
         record_type: Option<&str>,
         status: Option<&str>,
     ) -> Result<Vec<GenericEvolutionRow>, PgRecordStoreError> {
         let rows: Vec<EvolutionRow> =
             match (record_type, status) {
                 (Some(rt), Some(st)) => sqlx::query_as(
-                    "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
-                     FROM evolution_records WHERE record_type = $1 AND status = $2 \
+                    "SELECT id, tenant, record_type, status, created_by, derived_from, timestamp, payload \
+                     FROM evolution_records WHERE tenant = $1 AND record_type = $2 AND status = $3 \
                      ORDER BY timestamp DESC",
                 )
+                .bind(tenant)
                 .bind(rt)
                 .bind(st)
                 .fetch_all(&self.pool)
                 .await?,
                 (Some(rt), None) => sqlx::query_as(
-                    "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
-                     FROM evolution_records WHERE record_type = $1 ORDER BY timestamp DESC",
+                    "SELECT id, tenant, record_type, status, created_by, derived_from, timestamp, payload \
+                     FROM evolution_records WHERE tenant = $1 AND record_type = $2 ORDER BY timestamp DESC",
                 )
+                .bind(tenant)
                 .bind(rt)
                 .fetch_all(&self.pool)
                 .await?,
                 (None, Some(st)) => sqlx::query_as(
-                    "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
-                     FROM evolution_records WHERE status = $1 ORDER BY timestamp DESC",
+                    "SELECT id, tenant, record_type, status, created_by, derived_from, timestamp, payload \
+                     FROM evolution_records WHERE tenant = $1 AND status = $2 ORDER BY timestamp DESC",
                 )
+                .bind(tenant)
                 .bind(st)
                 .fetch_all(&self.pool)
                 .await?,
                 (None, None) => sqlx::query_as(
-                    "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
-                     FROM evolution_records ORDER BY timestamp DESC",
+                    "SELECT id, tenant, record_type, status, created_by, derived_from, timestamp, payload \
+                     FROM evolution_records WHERE tenant = $1 ORDER BY timestamp DESC",
                 )
+                .bind(tenant)
                 .fetch_all(&self.pool)
                 .await?,
             };
@@ -343,12 +378,14 @@ impl PostgresRecordStore {
     /// Get a single evolution record by ID.
     pub async fn get_record_generic(
         &self,
+        tenant: &str,
         id: &str,
     ) -> Result<Option<GenericEvolutionRow>, PgRecordStoreError> {
         let row: Option<EvolutionRow> = sqlx::query_as(
-            "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
-             FROM evolution_records WHERE id = $1",
+            "SELECT id, tenant, record_type, status, created_by, derived_from, timestamp, payload \
+             FROM evolution_records WHERE tenant = $1 AND id = $2",
         )
+        .bind(tenant)
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
@@ -359,12 +396,14 @@ impl PostgresRecordStore {
     /// List ranked insights as generic rows, sorted by priority_score descending.
     pub async fn list_ranked_insights_generic(
         &self,
+        tenant: &str,
     ) -> Result<Vec<GenericEvolutionRow>, PgRecordStoreError> {
         let rows: Vec<EvolutionRow> = sqlx::query_as(
-            "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
-             FROM evolution_records WHERE record_type = 'Insight' AND status = 'Open' \
+            "SELECT id, tenant, record_type, status, created_by, derived_from, timestamp, payload \
+             FROM evolution_records WHERE tenant = $1 AND record_type = 'Insight' AND status = 'Open' \
              ORDER BY (payload->>'priority_score')::float8 DESC",
         )
+        .bind(tenant)
         .fetch_all(&self.pool)
         .await?;
 
@@ -374,22 +413,27 @@ impl PostgresRecordStore {
     /// Insert a generic evolution record (for backend-neutral writes).
     pub async fn insert_record_generic(
         &self,
-        id: &str,
-        record_type: &str,
-        status: &str,
-        created_by: &str,
-        derived_from: Option<&str>,
-        data_json: &str,
+        record: GenericEvolutionRecordInsert<'_>,
     ) -> Result<(), PgRecordStoreError> {
+        let GenericEvolutionRecordInsert {
+            tenant,
+            id,
+            record_type,
+            status,
+            created_by,
+            derived_from,
+            data_json,
+        } = record;
         let payload: serde_json::Value = serde_json::from_str(data_json)
             .map_err(|e| PgRecordStoreError::Serialization(e.to_string()))?;
         let now = chrono::Utc::now(); // determinism-ok: pg_store is I/O-bound, not sim-visible
         sqlx::query(
             "INSERT INTO evolution_records \
-             (id, record_type, status, created_by, derived_from, timestamp, payload) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+             (id, tenant, record_type, status, created_by, derived_from, timestamp, payload) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(id)
+        .bind(tenant)
         .bind(record_type)
         .bind(status)
         .bind(created_by)
@@ -436,7 +480,7 @@ impl PostgresRecordStore {
         expected_type: &str,
     ) -> Result<Option<T>, PgRecordStoreError> {
         let row: Option<EvolutionRow> = sqlx::query_as(
-            "SELECT id, record_type, status, created_by, derived_from, timestamp, payload \
+            "SELECT id, tenant, record_type, status, created_by, derived_from, timestamp, payload \
              FROM evolution_records WHERE id = $1 AND record_type = $2",
         )
         .bind(id)

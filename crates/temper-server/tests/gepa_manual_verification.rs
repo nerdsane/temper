@@ -469,6 +469,7 @@ async fn manual_gepa_verification() {
             request_body: None,
             intent: None,
             matched_policy_ids: None,
+            capture_seq: None,
         })
         .collect();
 
@@ -514,6 +515,7 @@ async fn manual_gepa_verification() {
             request_body: None,
             intent: None,
             matched_policy_ids: None,
+            capture_seq: None,
         })
         .collect();
     let few_alerts =

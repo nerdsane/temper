@@ -6,6 +6,9 @@ mod records_detail;
 mod records_list;
 mod trajectories;
 
+#[cfg(test)]
+mod tenant_test;
+
 pub(crate) use operations::{
     handle_evolution_analyze, handle_evolution_materialize, handle_evolution_stream,
     handle_feature_requests, handle_intent_evidence, handle_sentinel_check, handle_unmet_intents,

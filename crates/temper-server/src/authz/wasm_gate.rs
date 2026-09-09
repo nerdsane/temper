@@ -40,10 +40,6 @@ impl WasmAuthzGate for CedarWasmAuthzGate {
         url: &str,
         ctx: &WasmAuthzContext,
     ) -> WasmAuthzDecision {
-        if crate::blob_store::is_local_internal_blob_endpoint(url) {
-            return WasmAuthzDecision::Allow;
-        }
-
         let security_ctx = build_wasm_security_context(ctx);
 
         // Build resource attrs with BTreeMap (DST compliant)
@@ -108,6 +104,58 @@ impl WasmAuthzGate for CedarWasmAuthzGate {
             AuthzDecision::Deny(denial) => WasmAuthzDecision::Deny(denial.to_string()),
         }
     }
+}
+
+/// Capability gate bound to one tenant-authorized local blob endpoint.
+///
+/// The generic Cedar gate deliberately has no localhost exception. The
+/// exception exists only on a concrete host after that host has been given the
+/// tenant's authorized `blob_endpoint` bootstrap secret.
+struct BoundLocalBlobWasmAuthzGate {
+    inner: Arc<dyn WasmAuthzGate>,
+    endpoint: crate::blob_store::LocalInternalBlobEndpoint,
+}
+
+impl WasmAuthzGate for BoundLocalBlobWasmAuthzGate {
+    fn authorize_http_call(
+        &self,
+        domain: &str,
+        method: &str,
+        url: &str,
+        ctx: &WasmAuthzContext,
+    ) -> WasmAuthzDecision {
+        if matches!(method.to_ascii_uppercase().as_str(), "GET" | "PUT")
+            && self.endpoint.object_key(url).is_some()
+        {
+            return WasmAuthzDecision::Allow;
+        }
+        self.inner.authorize_http_call(domain, method, url, ctx)
+    }
+
+    fn authorize_secret_access(
+        &self,
+        secret_key: &str,
+        ctx: &WasmAuthzContext,
+    ) -> WasmAuthzDecision {
+        self.inner.authorize_secret_access(secret_key, ctx)
+    }
+}
+
+/// Bind the local-blob exception to the exact endpoint authorized for this
+/// host. Invalid, remote, or near-match endpoint values leave the Cedar gate
+/// unchanged.
+pub(crate) fn bind_local_blob_endpoint(
+    gate: Arc<dyn WasmAuthzGate>,
+    endpoint: Option<&str>,
+) -> Arc<dyn WasmAuthzGate> {
+    let Some(endpoint) = endpoint.and_then(crate::blob_store::LocalInternalBlobEndpoint::parse)
+    else {
+        return gate;
+    };
+    Arc::new(BoundLocalBlobWasmAuthzGate {
+        inner: gate,
+        endpoint,
+    })
 }
 
 /// Permissive gate that allows all WASM host function calls.
@@ -220,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn cedar_gate_allows_local_internal_blob_endpoint() {
+    fn generic_cedar_gate_has_no_loopback_blob_bypass() {
         let engine = Arc::new(AuthzEngine::empty());
         let gate = CedarWasmAuthzGate::new(engine);
         let ctx = test_ctx();
@@ -232,7 +280,66 @@ mod tests {
             &ctx,
         );
 
-        assert_eq!(result, WasmAuthzDecision::Allow);
+        assert_eq!(
+            result,
+            WasmAuthzDecision::Deny("no matching permit policy".to_string())
+        );
+    }
+
+    #[test]
+    fn local_blob_gate_allows_only_the_bound_origin_path_and_methods() {
+        let inner: Arc<dyn WasmAuthzGate> =
+            Arc::new(CedarWasmAuthzGate::new(Arc::new(AuthzEngine::empty())));
+        let gate = bind_local_blob_endpoint(inner, Some("http://127.0.0.1:3000/_internal/blobs"));
+        let ctx = test_ctx();
+
+        for (method, url) in [
+            (
+                "GET",
+                "http://127.0.0.1:3000/_internal/blobs/field-overflow/sha256/a.json",
+            ),
+            (
+                "PUT",
+                "http://127.0.0.1:3000/_internal/blobs/field-overflow/sha256/a.json",
+            ),
+        ] {
+            assert_eq!(
+                gate.authorize_http_call("127.0.0.1", method, url, &ctx),
+                WasmAuthzDecision::Allow,
+                "{method} {url}"
+            );
+        }
+
+        for (method, url) in [
+            (
+                "GET",
+                "http://127.0.0.1:3001/_internal/blobs/field-overflow/sha256/a.json",
+            ),
+            (
+                "GET",
+                "http://127.0.0.1:3000/proxy/_internal/blobs/field-overflow/sha256/a.json",
+            ),
+            (
+                "GET",
+                "http://127.0.0.1:3000/_internal/blobs.evil/field-overflow/sha256/a.json",
+            ),
+            (
+                "GET",
+                "http://127.0.0.1:3000/_internal/blobs/field-overflow/sha256/a.json?redirect=1",
+            ),
+            (
+                "POST",
+                "http://127.0.0.1:3000/_internal/blobs/field-overflow/sha256/a.json",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    gate.authorize_http_call("127.0.0.1", method, url, &ctx),
+                    WasmAuthzDecision::Deny(_)
+                ),
+                "near-match unexpectedly allowed: {method} {url}"
+            );
+        }
     }
 
     #[test]
@@ -247,6 +354,9 @@ mod tests {
             };
         "#;
         let engine = Arc::new(AuthzEngine::new(policy).unwrap());
+        engine
+            .reload_tenant_policies("test-tenant", policy)
+            .expect("tenant policy should load");
         let gate = CedarWasmAuthzGate::new(engine);
         let ctx = test_ctx();
 
@@ -271,6 +381,9 @@ mod tests {
             };
         "#;
         let engine = Arc::new(AuthzEngine::new(policy).unwrap());
+        engine
+            .reload_tenant_policies("test-tenant", policy)
+            .expect("tenant policy should load");
         let gate = CedarWasmAuthzGate::new(engine);
         let ctx = test_ctx();
 

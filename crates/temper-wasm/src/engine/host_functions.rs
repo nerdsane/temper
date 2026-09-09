@@ -97,6 +97,14 @@ pub(crate) enum FieldResolution {
     HostError,
 }
 
+/// True if a `[ptr, ptr + len)` read lies fully within a guest linear memory of
+/// `mem_size` bytes. Checked BEFORE allocating a read buffer so a guest-supplied
+/// `len` can't force a large host allocation ahead of wasmtime's own bounds check
+/// (ARN-226). `checked_add` also rejects a `ptr + len` that overflows `usize`.
+pub(super) fn guest_read_bounds_ok(mem_size: usize, ptr: usize, len: usize) -> bool {
+    ptr.checked_add(len).is_some_and(|end| end <= mem_size)
+}
+
 fn read_guest_string(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> Result<String, ()> {
     if ptr < 0 || len < 0 {
         return Err(());
@@ -105,9 +113,18 @@ fn read_guest_string(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> 
     let Some(memory) = memory else {
         return Err(());
     };
+    if !guest_read_bounds_ok(memory.data_size(&mut *caller), ptr as usize, len as usize) {
+        tracing::warn!(
+            host_fn = "read_guest_string",
+            ptr,
+            len,
+            "guest string read range exceeds linear memory; returning error before allocating"
+        );
+        return Err(());
+    }
     let mut buf = vec![0u8; len as usize];
     memory
-        .read(caller, ptr as usize, &mut buf)
+        .read(&mut *caller, ptr as usize, &mut buf)
         .map_err(|_| ())?;
     String::from_utf8(buf).map_err(|_| ())
 }
@@ -136,6 +153,16 @@ fn read_guest_bytes(
         );
         return Err(());
     }
+    if !guest_read_bounds_ok(memory.data_size(caller), ptr as usize, len as usize) {
+        tracing::warn!(
+            host_fn,
+            operand = what,
+            ptr,
+            len,
+            "guest read range exceeds linear memory; returning error before allocating"
+        );
+        return Err(());
+    }
     let mut buf = vec![0u8; len as usize];
     if let Err(error) = memory.read(caller, ptr as usize, &mut buf) {
         tracing::warn!(
@@ -160,7 +187,12 @@ fn read_guest_lossy(
     what: &'static str,
 ) -> Result<String, ()> {
     let buf = read_guest_bytes(caller, memory, ptr, len, host_fn, what)?;
-    Ok(String::from_utf8_lossy(&buf).to_string())
+    // Take the buffer by value when it is already valid UTF-8 (the common case);
+    // only the invalid path pays for a second, lossy copy.
+    Ok(match String::from_utf8(buf) {
+        Ok(text) => text,
+        Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
+    })
 }
 
 /// Write `bytes` into guest memory at `ptr`.
@@ -424,15 +456,9 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
             "env",
             "host_emit_progress",
             |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i32 {
-                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
-                let Some(memory) = memory else {
-                    return -1;
-                };
-                let mut buf = vec![0u8; len as usize];
-                if memory.read(&caller, ptr as usize, &mut buf).is_err() {
-                    return -1;
-                }
-                let Ok(payload) = String::from_utf8(buf) else {
+                // ARN-226: read via the bounds-checked helper so a guest-supplied
+                // `len` can't drive a host allocation ahead of the bounds check.
+                let Ok(payload) = read_guest_string(&mut caller, ptr, len) else {
                     return -1;
                 };
                 let _guest_span = caller.data().guest_spans.enter_active();
@@ -450,15 +476,9 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
             "env",
             "host_emit_wide_event",
             |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i32 {
-                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
-                let Some(memory) = memory else {
-                    return -1;
-                };
-                let mut buf = vec![0u8; len as usize];
-                if memory.read(&caller, ptr as usize, &mut buf).is_err() {
-                    return -1;
-                }
-                let Ok(payload) = String::from_utf8(buf) else {
+                // ARN-226: read via the bounds-checked helper so a guest-supplied
+                // `len` can't drive a host allocation ahead of the bounds check.
+                let Ok(payload) = read_guest_string(&mut caller, ptr, len) else {
                     return -1;
                 };
                 let _guest_span = caller.data().guest_spans.enter_active();
@@ -476,15 +496,9 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
             "env",
             "host_log_structured",
             |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i32 {
-                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
-                let Some(memory) = memory else {
-                    return -1;
-                };
-                let mut buf = vec![0u8; len as usize];
-                if memory.read(&caller, ptr as usize, &mut buf).is_err() {
-                    return -1;
-                }
-                let Ok(payload) = String::from_utf8(buf) else {
+                // ARN-226: read via the bounds-checked helper so a guest-supplied
+                // `len` can't drive a host allocation ahead of the bounds check.
+                let Ok(payload) = read_guest_string(&mut caller, ptr, len) else {
                     return -1;
                 };
                 let _guest_span = caller.data().guest_spans.enter_active();
@@ -502,15 +516,9 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
             "env",
             "host_emit_metric",
             |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i32 {
-                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
-                let Some(memory) = memory else {
-                    return -1;
-                };
-                let mut buf = vec![0u8; len as usize];
-                if memory.read(&caller, ptr as usize, &mut buf).is_err() {
-                    return -1;
-                }
-                let Ok(payload) = String::from_utf8(buf) else {
+                // ARN-226: read via the bounds-checked helper so a guest-supplied
+                // `len` can't drive a host allocation ahead of the bounds check.
+                let Ok(payload) = read_guest_string(&mut caller, ptr, len) else {
                     return -1;
                 };
                 let _guest_span = caller.data().guest_spans.enter_active();
@@ -1323,14 +1331,17 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     return -3;
                 };
 
-                let mut name_buf = vec![0u8; field_name_len as usize];
-                if memory
-                    .read(&caller, field_name_ptr as usize, &mut name_buf)
-                    .is_err()
-                {
+                // ARN-226: bounds-checked read before allocating.
+                let Ok(field_name) = read_guest_lossy(
+                    &caller,
+                    &memory,
+                    field_name_ptr,
+                    field_name_len,
+                    "host_read_field",
+                    "field_name",
+                ) else {
                     return -3;
-                }
-                let field_name = String::from_utf8_lossy(&name_buf).to_string();
+                };
                 let started = Instant::now();
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let span = tracing::info_span!(
@@ -1708,46 +1719,51 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     return -1;
                 };
 
-                // Read IOA source
-                let mut ioa_buf = vec![0u8; ioa_len as usize];
-                if memory
-                    .read(&caller, ioa_ptr as usize, &mut ioa_buf)
-                    .is_err()
-                {
+                // ARN-226: bounds-checked reads before allocating.
+                let Ok(ioa_source) = read_guest_lossy(
+                    &caller,
+                    &memory,
+                    ioa_ptr,
+                    ioa_len,
+                    "host_evaluate_spec",
+                    "ioa_source",
+                ) else {
                     return -1;
-                }
-                let ioa_source = String::from_utf8_lossy(&ioa_buf).to_string();
-
-                // Read current state
-                let mut state_buf = vec![0u8; state_len as usize];
-                if memory
-                    .read(&caller, state_ptr as usize, &mut state_buf)
-                    .is_err()
-                {
+                };
+                let Ok(current_state) = read_guest_lossy(
+                    &caller,
+                    &memory,
+                    state_ptr,
+                    state_len,
+                    "host_evaluate_spec",
+                    "current_state",
+                ) else {
                     return -1;
-                }
-                let current_state = String::from_utf8_lossy(&state_buf).to_string();
-
-                // Read action
-                let mut action_buf = vec![0u8; action_len as usize];
-                if memory
-                    .read(&caller, action_ptr as usize, &mut action_buf)
-                    .is_err()
-                {
+                };
+                let Ok(action) = read_guest_lossy(
+                    &caller,
+                    &memory,
+                    action_ptr,
+                    action_len,
+                    "host_evaluate_spec",
+                    "action",
+                ) else {
                     return -1;
-                }
-                let action = String::from_utf8_lossy(&action_buf).to_string();
+                };
 
-                // Read params JSON
+                // Read params JSON (ARN-226: bounds-checked read before allocating).
                 let params_json = if params_len > 0 {
-                    let mut params_buf = vec![0u8; params_len as usize];
-                    if memory
-                        .read(&caller, params_ptr as usize, &mut params_buf)
-                        .is_err()
-                    {
-                        return -1;
+                    match read_guest_lossy(
+                        &caller,
+                        &memory,
+                        params_ptr,
+                        params_len,
+                        "host_evaluate_spec",
+                        "params_json",
+                    ) {
+                        Ok(s) => s,
+                        Err(()) => return -1,
                     }
-                    String::from_utf8_lossy(&params_buf).to_string()
                 } else {
                     "{}".to_string()
                 };
@@ -2148,10 +2164,17 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let memory = caller.get_export("memory").and_then(|e| e.into_memory());
                 let Some(memory) = memory else { return -4 };
 
-                let mut buf = vec![0u8; head_len as usize];
-                if memory.read(&caller, head_ptr as usize, &mut buf).is_err() {
+                // ARN-226: bounds-checked read before allocating.
+                let Ok(buf) = read_guest_bytes(
+                    &caller,
+                    &memory,
+                    head_ptr,
+                    head_len,
+                    "host_http_stream_send_response_head",
+                    "head",
+                ) else {
                     return -4;
-                }
+                };
                 #[derive(serde::Deserialize)]
                 struct RawHead {
                     status: u16,
@@ -2217,6 +2240,41 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_read_bounds_ok_rejects_out_of_bounds_and_overflow() {
+        // ARN-226: a guest-supplied `len` must be validated against the guest memory
+        // size BEFORE a read buffer is allocated. Out-of-bounds or overflowing
+        // `(ptr, len)` ranges must be rejected so a huge `len` can't drive a large
+        // host allocation.
+        let mem = 64 * 1024; // 64 KiB guest linear memory
+        assert!(
+            !guest_read_bounds_ok(mem, 0, i32::MAX as usize),
+            "an i32::MAX len must be rejected before allocating ~2 GiB"
+        );
+        assert!(
+            !guest_read_bounds_ok(mem, 0, mem + 1),
+            "a len past the end of memory must be rejected"
+        );
+        assert!(
+            !guest_read_bounds_ok(mem, mem, 1),
+            "a read starting at the end of memory must be rejected"
+        );
+        assert!(
+            !guest_read_bounds_ok(mem, usize::MAX, 1),
+            "a ptr + len that overflows usize must be rejected"
+        );
+        // Legitimate in-bounds reads are still allowed.
+        assert!(
+            guest_read_bounds_ok(mem, 0, mem),
+            "a full in-bounds read is allowed"
+        );
+        assert!(guest_read_bounds_ok(mem, 0, 0), "an empty read is allowed");
+        assert!(
+            guest_read_bounds_ok(mem, 100, 200),
+            "an interior read is allowed"
+        );
+    }
 
     fn ctx_json_with_fields(fields: serde_json::Value) -> String {
         serde_json::json!({

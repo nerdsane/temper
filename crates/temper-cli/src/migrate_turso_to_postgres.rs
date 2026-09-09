@@ -388,6 +388,8 @@ async fn migrate_tenant_platform_tables(
     migrate_secrets(source, pool, tenant, dry_run, builder).await?;
     migrate_policy_denial_patterns(source, pool, tenant, dry_run, builder).await?;
     migrate_query_projections(source, target, tenant, dry_run, builder).await?;
+    migrate_feature_requests(source, pool, tenant, dry_run, builder).await?;
+    migrate_evolution_records(source, pool, tenant, dry_run, builder).await?;
     Ok(())
 }
 
@@ -397,8 +399,6 @@ async fn migrate_global_platform_tables(
     dry_run: bool,
     builder: &mut ManifestBuilder,
 ) -> Result<()> {
-    migrate_feature_requests(source, pool, dry_run, builder).await?;
-    migrate_evolution_records(source, pool, dry_run, builder).await?;
     migrate_blobs(source, pool, dry_run, builder).await?;
     Ok(())
 }
@@ -677,12 +677,8 @@ async fn migrate_trajectories(
     dry_run: bool,
     builder: &mut ManifestBuilder,
 ) -> Result<()> {
-    let all_rows = source.load_recent_trajectories(MAX_ROWS).await?;
-    ensure_row_bound("trajectories", all_rows.len())?;
-    let rows = all_rows
-        .into_iter()
-        .filter(|row| row.tenant == tenant)
-        .collect::<Vec<_>>();
+    let rows = source.load_recent_trajectories(tenant, MAX_ROWS).await?;
+    ensure_row_bound("trajectories", rows.len())?;
     builder.record_source(
         tenant,
         "trajectories",
@@ -707,8 +703,8 @@ async fn migrate_trajectories(
         sqlx::query(
             "INSERT INTO trajectories \
              (tenant, entity_type, entity_id, action, success, from_status, to_status, error, agent_id, session_id, \
-              authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids) \
-             SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19 \
+              authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids, capture_seq) \
+             SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20 \
              WHERE NOT EXISTS ( \
                SELECT 1 FROM trajectories \
                WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 AND action = $4 \
@@ -735,6 +731,10 @@ async fn migrate_trajectories(
         .bind(request_body)
         .bind(row.intent)
         .bind(matched_policy_ids)
+        // Carried, not regenerated: capture order is what the session read
+        // replays, and dropping it would leave migrated rows ordered by the
+        // order the migration happened to insert them.
+        .bind(row.capture_seq)
         .execute(pool)
         .await?;
     }
@@ -966,8 +966,9 @@ async fn migrate_ots_trajectories(
     let mut rows_with_data = Vec::new();
     for row in rows {
         let data = source
-            .get_ots_trajectory(&row.trajectory_id)
+            .get_ots_trajectory(&row.tenant, &row.trajectory_id)
             .await?
+            .map(|document| document.data)
             .unwrap_or_else(|| "{}".to_string());
         values.push(json!({
             "trajectory_id": row.trajectory_id,
@@ -1154,12 +1155,13 @@ async fn migrate_query_projections(
 async fn migrate_feature_requests(
     source: &TursoEventStore,
     pool: &PgPool,
+    tenant: &str,
     dry_run: bool,
     builder: &mut ManifestBuilder,
 ) -> Result<()> {
-    let rows = source.list_feature_requests(None).await?;
+    let rows = source.list_feature_requests(tenant, None).await?;
     builder.record_source(
-        GLOBAL_TENANT,
+        tenant,
         "feature_requests",
         rows.iter()
             .map(feature_request_value)
@@ -1169,15 +1171,17 @@ async fn migrate_feature_requests(
         return Ok(());
     }
     for row in rows {
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO feature_requests \
              (id, tenant, category, description, frequency, trajectory_refs, disposition, developer_notes, created_at, updated_at) \
-             VALUES ($1, 'default', $2, $3, $4, $5, $6, $7, $8, $9) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
              ON CONFLICT (id) DO UPDATE SET category = EXCLUDED.category, description = EXCLUDED.description, \
                  frequency = EXCLUDED.frequency, trajectory_refs = EXCLUDED.trajectory_refs, disposition = EXCLUDED.disposition, \
-                 developer_notes = EXCLUDED.developer_notes, created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at",
+                 developer_notes = EXCLUDED.developer_notes, created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at \
+             WHERE feature_requests.tenant = EXCLUDED.tenant",
         )
         .bind(row.id)
+        .bind(row.tenant)
         .bind(row.category)
         .bind(row.description)
         .bind(row.frequency)
@@ -1188,6 +1192,11 @@ async fn migrate_feature_requests(
         .bind(parse_source_timestamp(&row.updated_at)?)
         .execute(pool)
         .await?;
+        if result.rows_affected() != 1 {
+            return Err(anyhow!(
+                "feature request ID collision across tenants during migration"
+            ));
+        }
     }
     Ok(())
 }
@@ -1195,18 +1204,19 @@ async fn migrate_feature_requests(
 async fn migrate_evolution_records(
     source: &TursoEventStore,
     pool: &PgPool,
+    tenant: &str,
     dry_run: bool,
     builder: &mut ManifestBuilder,
 ) -> Result<()> {
-    let rows = source.list_evolution_records(None, None).await?;
+    let rows = source.list_evolution_records(tenant, None, None).await?;
     builder.record_source(
-        GLOBAL_TENANT,
+        tenant,
         "evolution_records",
         rows.iter()
             .map(|row| {
                 json!({
                     "id": row.id,
-                    "tenant": "default",
+                    "tenant": row.tenant,
                     "record_type": row.record_type,
                     "status": row.status,
                     "created_by": row.created_by,
@@ -1221,14 +1231,16 @@ async fn migrate_evolution_records(
         return Ok(());
     }
     for row in rows {
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO evolution_records (id, tenant, record_type, status, created_by, derived_from, payload, timestamp) \
-             VALUES ($1, 'default', $2, $3, $4, $5, $6, $7) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
              ON CONFLICT (id) DO UPDATE SET tenant = EXCLUDED.tenant, record_type = EXCLUDED.record_type, \
                  status = EXCLUDED.status, created_by = EXCLUDED.created_by, derived_from = EXCLUDED.derived_from, \
-                 payload = EXCLUDED.payload, timestamp = EXCLUDED.timestamp",
+                 payload = EXCLUDED.payload, timestamp = EXCLUDED.timestamp \
+             WHERE evolution_records.tenant = EXCLUDED.tenant",
         )
         .bind(row.id)
+        .bind(row.tenant)
         .bind(row.record_type)
         .bind(row.status)
         .bind(row.created_by)
@@ -1237,6 +1249,11 @@ async fn migrate_evolution_records(
         .bind(parse_source_timestamp(&row.timestamp)?)
         .execute(pool)
         .await?;
+        if result.rows_affected() != 1 {
+            return Err(anyhow!(
+                "evolution record ID collision across tenants during migration"
+            ));
+        }
     }
     Ok(())
 }
@@ -1477,7 +1494,7 @@ async fn target_installed_apps(pool: &PgPool, tenant: &str) -> Result<Vec<Value>
 async fn target_trajectories(pool: &PgPool, tenant: &str) -> Result<Vec<Value>> {
     let rows = sqlx::query(
         "SELECT tenant, entity_type, entity_id, action, success, from_status, to_status, error, agent_id, session_id, \
-                authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids \
+                authz_denied, denied_resource, denied_module, source, spec_governed, created_at, request_body, intent, matched_policy_ids, capture_seq \
          FROM trajectories WHERE tenant = $1 ORDER BY created_at, entity_type, entity_id, action",
     )
     .bind(tenant)
@@ -1846,6 +1863,7 @@ fn trajectory_value(row: &temper_store_turso::TursoTrajectoryRow) -> Result<Valu
         "request_body": row.request_body.as_deref().map(json_or_string).transpose()?,
         "intent": row.intent,
         "matched_policy_ids": row.matched_policy_ids,
+        "capture_seq": row.capture_seq,
     }))
 }
 
@@ -1870,6 +1888,7 @@ fn trajectory_pg_value(row: sqlx::postgres::PgRow) -> Value {
         "request_body": row.get::<Option<Value>, _>("request_body"),
         "intent": row.get::<Option<String>, _>("intent"),
         "matched_policy_ids": row.get::<Option<Value>, _>("matched_policy_ids"),
+        "capture_seq": row.get::<Option<i64>, _>("capture_seq"),
     })
 }
 

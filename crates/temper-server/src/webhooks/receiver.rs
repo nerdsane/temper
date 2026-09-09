@@ -7,16 +7,22 @@
 
 use std::collections::BTreeMap;
 
+use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Path, Query, State};
-use axum::http::{Method, StatusCode};
+use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::response::IntoResponse;
 
 use tracing::instrument;
 
+use crate::aws_sigv4::{hex_encode, hmac_sha256};
 use crate::request_context::AgentContext;
+use crate::secrets::template::resolve_secret_templates;
 use crate::state::ServerState;
+use temper_authz::SecurityContext;
 use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::Webhook;
+
+const WEBHOOK_BODY_BUDGET_BYTES: usize = 64 * 1024;
 
 /// Handle an inbound webhook request.
 ///
@@ -36,6 +42,7 @@ pub async fn handle_webhook(
     State(state): State<ServerState>,
     Path((tenant_str, webhook_path)): Path<(String, String)>,
     Query(query): Query<BTreeMap<String, String>>,
+    request: Request<Body>,
 ) -> impl IntoResponse {
     let tenant = TenantId::new(&tenant_str);
 
@@ -80,6 +87,37 @@ pub async fn handle_webhook(
         );
     };
 
+    let path_and_query = request
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| request.uri().path().to_string());
+    let headers = request.headers().clone();
+    let body = match to_bytes(request.into_body(), WEBHOOK_BODY_BUDGET_BYTES).await {
+        Ok(body) => body,
+        Err(_) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("Webhook body exceeds {WEBHOOK_BODY_BUDGET_BYTES} bytes"),
+            );
+        }
+    };
+
+    let security_ctx = match admit_webhook(
+        &state,
+        &tenant,
+        &webhook,
+        &method,
+        &path_and_query,
+        &headers,
+        &body,
+    ) {
+        Ok(ctx) => ctx,
+        Err(status) => {
+            return (status, "Webhook admission denied".to_string());
+        }
+    };
+
     // Extract action parameters from the configured extraction map.
     let mut params = serde_json::Map::new();
     for (param_name, source) in &webhook.extract {
@@ -89,11 +127,30 @@ pub async fn handle_webhook(
     }
 
     let action = &webhook.action;
+    let mut resource_attrs = BTreeMap::new();
+    resource_attrs.insert(
+        "id".to_string(),
+        serde_json::Value::String(entity_id.clone()),
+    );
+    if let Err(denial) = state.authorize_with_context(
+        &security_ctx,
+        action,
+        &entity_type,
+        &resource_attrs,
+        tenant.as_str(),
+    ) {
+        tracing::warn!(reason = %denial, webhook = %webhook.name, "webhook action denied");
+        return (
+            StatusCode::FORBIDDEN,
+            format!("Webhook action denied: {denial}"),
+        );
+    }
+
     let agent_ctx = AgentContext {
-        security_ctx: None,
+        security_ctx: Some(security_ctx),
         agent_id: Some(format!("webhook:{}", webhook.name)),
         session_id: None,
-        agent_type: None,
+        agent_type: Some("webhook".to_string()),
         intent: None,
         ..AgentContext::default()
     };
@@ -121,6 +178,78 @@ pub async fn handle_webhook(
             )
         }
     }
+}
+
+/// Class B admission: HMAC is required and fail-closed.
+fn admit_webhook(
+    state: &ServerState,
+    tenant: &TenantId,
+    webhook: &Webhook,
+    method: &Method,
+    path_and_query: &str,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<SecurityContext, StatusCode> {
+    let Some(secret_template) = webhook.hmac_secret.as_deref().filter(|s| !s.is_empty()) else {
+        tracing::warn!(webhook = %webhook.name, "webhook missing hmac_secret");
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let Some(header_name) = webhook.hmac_header.as_deref().filter(|s| !s.is_empty()) else {
+        tracing::warn!(webhook = %webhook.name, "webhook missing hmac_header");
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let Some(vault) = state.secrets_vault.as_ref() else {
+        tracing::warn!(webhook = %webhook.name, "webhook HMAC required but no secrets vault");
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let mut templates = BTreeMap::new();
+    templates.insert("hmac".to_string(), secret_template.to_string());
+    let resolved = resolve_secret_templates(&templates, vault, tenant.as_str());
+    let secret = resolved.get("hmac").cloned().unwrap_or_default();
+    if secret.is_empty() || secret.contains("{secret:") {
+        tracing::warn!(webhook = %webhook.name, "webhook HMAC secret did not resolve");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let Some(provided) = headers
+        .get(header_name)
+        .and_then(|value| value.to_str().ok())
+    else {
+        tracing::warn!(webhook = %webhook.name, header = %header_name, "missing HMAC header");
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let mut payload =
+        Vec::with_capacity(method.as_str().len() + path_and_query.len() + body.len() + 2);
+    payload.extend_from_slice(method.as_str().as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(path_and_query.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(body);
+    if !hmac_hex_matches(secret.as_bytes(), &payload, provided) {
+        tracing::warn!(webhook = %webhook.name, "HMAC mismatch");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(SecurityContext::from_resolved_identity(
+        &format!("webhook:{}", webhook.name),
+        "webhook",
+        None,
+    ))
+}
+
+fn hmac_hex_matches(secret: &[u8], payload: &[u8], provided: &str) -> bool {
+    let expected = hex_encode(&hmac_sha256(secret, payload));
+    let provided = provided
+        .strip_prefix("sha256=")
+        .unwrap_or(provided)
+        .to_ascii_lowercase();
+    if expected.len() != provided.len() {
+        return false;
+    }
+    expected
+        .as_bytes()
+        .iter()
+        .zip(provided.as_bytes())
+        .fold(0u8, |acc, (left, right)| acc | (left ^ right))
+        == 0
 }
 
 /// Find a webhook matching (tenant, path) in the registry.
@@ -158,193 +287,5 @@ fn extract_param(source: &str, query: &BTreeMap<String, String>) -> Option<Strin
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::body::Body;
-    use axum::http::Request;
-    use temper_runtime::ActorSystem;
-    use temper_spec::csdl::parse_csdl;
-    use tower::ServiceExt;
-
-    const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
-
-    /// IOA spec with a webhook declaration for OAuth callback.
-    const ORDER_IOA_WITH_WEBHOOK: &str = r#"
-[automaton]
-name = "Order"
-states = ["Draft", "Submitted", "Confirmed", "Cancelled", "Authorized"]
-initial = "Draft"
-
-[[action]]
-name = "SubmitOrder"
-kind = "input"
-from = ["Draft"]
-to = "Submitted"
-
-[[action]]
-name = "ConfirmOrder"
-kind = "input"
-from = ["Submitted"]
-to = "Confirmed"
-
-[[action]]
-name = "CancelOrder"
-kind = "input"
-from = ["Draft", "Submitted"]
-to = "Cancelled"
-
-[[action]]
-name = "HandleOAuthCallback"
-kind = "input"
-from = ["Submitted"]
-to = "Authorized"
-params = ["code"]
-
-[[webhook]]
-name = "oauth_callback"
-path = "oauth/callback"
-method = "GET"
-action = "HandleOAuthCallback"
-entity_lookup = "query_param"
-entity_param = "state"
-
-[webhook.extract]
-code = "query.code"
-"#;
-
-    fn build_test_state() -> ServerState {
-        let csdl = parse_csdl(CSDL_XML).unwrap();
-        let system = ActorSystem::new("webhook-test");
-        let state = ServerState::new(system, csdl, CSDL_XML.to_string());
-
-        // Register tenant with webhook-enabled spec.
-        {
-            let mut registry = state.registry.write().unwrap();
-            let csdl2 = parse_csdl(CSDL_XML).unwrap();
-            registry.register_tenant(
-                "test-tenant",
-                csdl2,
-                CSDL_XML.to_string(),
-                &[("Order", ORDER_IOA_WITH_WEBHOOK)],
-            );
-        }
-
-        state
-    }
-
-    fn build_test_router() -> axum::Router {
-        crate::router::build_router(build_test_state())
-    }
-
-    #[tokio::test]
-    async fn webhook_dispatches_action() {
-        let state = build_test_state();
-        let tenant = TenantId::new("test-tenant");
-
-        // Create entity directly via dispatch.
-        let _create = state
-            .get_or_create_tenant_entity(
-                &tenant,
-                "Order",
-                "ent-1",
-                serde_json::json!({"id": "ent-1"}),
-            )
-            .await
-            .expect("entity creation should succeed");
-
-        // Submit to move to "Submitted".
-        let submit = state
-            .dispatch_tenant_action(
-                &tenant,
-                "Order",
-                "ent-1",
-                "SubmitOrder",
-                serde_json::json!({}),
-                &AgentContext::default(),
-            )
-            .await
-            .expect("SubmitOrder should succeed");
-        assert!(submit.success, "SubmitOrder should succeed");
-        assert_eq!(submit.state.status, "Submitted");
-
-        // Build router and call webhook.
-        let app = crate::router::build_router(state);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/webhooks/test-tenant/oauth/callback?state=ent-1&code=abc123")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(
-            json["success"].as_bool().unwrap_or(false),
-            "HandleOAuthCallback should succeed"
-        );
-        assert_eq!(json["state"]["status"], "Authorized");
-    }
-
-    #[tokio::test]
-    async fn webhook_missing_entity_id_returns_400() {
-        let app = build_test_router();
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/webhooks/test-tenant/oauth/callback?code=abc123")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn webhook_unknown_path_returns_404() {
-        let app = build_test_router();
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/webhooks/test-tenant/nonexistent/path?entity_id=ent-1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn webhook_extracts_query_params() {
-        let query: BTreeMap<String, String> = [
-            ("code".to_string(), "auth-code-123".to_string()),
-            ("state".to_string(), "entity-id".to_string()),
-        ]
-        .into_iter()
-        .collect();
-
-        assert_eq!(
-            extract_param("query.code", &query),
-            Some("auth-code-123".to_string())
-        );
-        assert_eq!(
-            extract_param("query.state", &query),
-            Some("entity-id".to_string())
-        );
-        assert_eq!(extract_param("query.missing", &query), None);
-    }
-}
+#[path = "receiver_test.rs"]
+mod tests;

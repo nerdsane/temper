@@ -2,44 +2,23 @@
 //!
 //! Handles Cedar policy CRUD operations for tenants, including full replacement,
 //! incremental rule addition, individual policy listing/toggling/editing/deletion,
-//! and cross-tenant policy views.
+//! and credential-tenant policy views.
 
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, Path, State};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use temper_authz::AuthenticatedRequestContext;
 use tracing::instrument;
 
 use super::PolicyAuthed;
-use crate::authz::{load_and_activate_tenant_policies, persist_and_activate_policy};
+use crate::authz::persist_and_activate_policy;
 use crate::state::ServerState;
-use crate::storage::PolicyStoreRow;
 
-/// Derive a human-readable source label from a `policy_id`.
-fn policy_source(policy_id: &str) -> &'static str {
-    if policy_id.starts_with("os-app:") {
-        "os-app"
-    } else if policy_id.starts_with("decision:") {
-        "decision"
-    } else if policy_id == "migrated-legacy" {
-        "migrated-legacy"
-    } else {
-        "manual"
-    }
-}
-
-/// Serialize a [`PolicyRow`] to a JSON value for API responses.
-fn policy_row_to_json(row: &PolicyStoreRow) -> serde_json::Value {
-    serde_json::json!({
-        "tenant": row.tenant,
-        "policy_id": row.policy_id,
-        "cedar_text": row.cedar_text,
-        "enabled": row.enabled,
-        "policy_hash": row.policy_hash,
-        "created_at": row.created_at,
-        "created_by": row.created_by,
-        "source": policy_source(&row.policy_id),
-    })
-}
+mod support;
+use support::{
+    build_prospective_enabled_text, build_prospective_enabled_text_with_override,
+    policy_row_to_json, reload_tenant_from_store,
+};
 
 // ---------------------------------------------------------------------------
 // Existing endpoints (unchanged interface, kept for backward compatibility)
@@ -51,9 +30,10 @@ fn policy_row_to_json(row: &PolicyStoreRow) -> serde_json::Value {
 #[instrument(skip_all, fields(tenant, otel.name = "GET /api/tenants/{tenant}/policies"))]
 pub(crate) async fn handle_get_policies(
     State(state): State<ServerState>,
-    Path(tenant): Path<String>,
-    _auth: PolicyAuthed,
+    Path(_tenant): Path<String>,
+    auth: PolicyAuthed,
 ) -> impl IntoResponse {
+    let tenant = auth.tenant().as_str().to_string();
     let policies = state.tenant_policies.read().unwrap(); // ci-ok: infallible lock
     let text = policies.get(&tenant).cloned().unwrap_or_default();
     (
@@ -69,10 +49,11 @@ pub(crate) async fn handle_get_policies(
 #[instrument(skip_all, fields(tenant, otel.name = "PUT /api/tenants/{tenant}/policies"))]
 pub(crate) async fn handle_put_policies(
     State(state): State<ServerState>,
-    Path(tenant): Path<String>,
-    _auth: PolicyAuthed,
+    Path(_tenant): Path<String>,
+    auth: PolicyAuthed,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    let tenant = auth.tenant().as_str().to_string();
     let body_json: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -102,7 +83,14 @@ pub(crate) async fn handle_put_policies(
         policies.insert(tenant.clone(), policy_text.clone());
     }
 
-    persist_and_activate_policy(&state, &tenant, "primary", &policy_text, "api").await;
+    persist_and_activate_policy(
+        &state,
+        &tenant,
+        "primary",
+        &policy_text,
+        &auth.security_context().principal.id,
+    )
+    .await;
 
     let _ = state
         .observe_refresh_tx
@@ -121,10 +109,11 @@ pub(crate) async fn handle_put_policies(
 #[instrument(skip_all, fields(tenant, otel.name = "POST /api/tenants/{tenant}/policies/rules"))]
 pub(crate) async fn handle_add_policy_rule(
     State(state): State<ServerState>,
-    Path(tenant): Path<String>,
-    _auth: PolicyAuthed,
+    Path(_tenant): Path<String>,
+    auth: PolicyAuthed,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    let tenant = auth.tenant().as_str().to_string();
     let body_json: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -164,7 +153,14 @@ pub(crate) async fn handle_add_policy_rule(
         policies.insert(tenant.clone(), new_tenant_text.clone());
     }
 
-    persist_and_activate_policy(&state, &tenant, "primary", &new_tenant_text, "api").await;
+    persist_and_activate_policy(
+        &state,
+        &tenant,
+        "primary",
+        &new_tenant_text,
+        &auth.security_context().principal.id,
+    )
+    .await;
 
     let _ = state
         .observe_refresh_tx
@@ -188,9 +184,10 @@ pub(crate) async fn handle_add_policy_rule(
 #[instrument(skip_all, fields(tenant, otel.name = "GET /api/tenants/{tenant}/policies/list"))]
 pub(crate) async fn handle_list_policies(
     State(state): State<ServerState>,
-    Path(tenant): Path<String>,
-    _auth: PolicyAuthed,
+    Path(_tenant): Path<String>,
+    auth: PolicyAuthed,
 ) -> impl IntoResponse {
+    let tenant = auth.tenant().as_str().to_string();
     let Some(store) = state.policy_store() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -227,16 +224,21 @@ pub(crate) async fn handle_list_policies(
     }
 }
 
-/// GET /api/policies — list policies across all tenants (admin only).
+/// GET /api/policies — list policies in the credential-bound tenant.
 #[instrument(skip_all, fields(otel.name = "GET /api/policies"))]
 pub(crate) async fn handle_list_all_policies(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
 ) -> impl IntoResponse {
-    if let Err(status) =
-        crate::authz::require_observe_auth(&state, &headers, "manage_policies", "PolicySet")
+    let authenticated = match crate::authz::require_authenticated_context(authenticated.as_deref())
     {
-        return (status, "Authorization required for cross-tenant access").into_response();
+        Ok(authenticated) => authenticated,
+        Err(status) => return status.into_response(),
+    };
+    if let Err(status) =
+        crate::authz::require_observe_auth(&state, authenticated, "manage_policies", "PolicySet")
+    {
+        return (status, "Authorization required").into_response();
     }
 
     let Some(store) = state.policy_store() else {
@@ -247,7 +249,8 @@ pub(crate) async fn handle_list_all_policies(
             .into_response();
     };
 
-    let mut rows = match store.load_all_policies().await {
+    let tenant = authenticated.tenant().as_str();
+    let mut rows = match store.load_policies_for_tenant(tenant).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(error = %e, "failed to list policies from durable store");
@@ -290,10 +293,11 @@ pub(crate) async fn handle_list_all_policies(
 #[instrument(skip_all, fields(tenant, otel.name = "POST /api/tenants/{tenant}/policies/create"))]
 pub(crate) async fn handle_create_policy(
     State(state): State<ServerState>,
-    Path(tenant): Path<String>,
-    _auth: PolicyAuthed,
+    Path(_tenant): Path<String>,
+    auth: PolicyAuthed,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let tenant = auth.tenant().as_str().to_string();
     let policy_id = match body.get("policy_id").and_then(|v| v.as_str()) {
         Some(v) if !v.is_empty() => v.to_string(),
         _ => {
@@ -323,10 +327,7 @@ pub(crate) async fn handle_create_policy(
     }
 
     // Persist the new policy entry.
-    let created_by = body
-        .get("created_by")
-        .and_then(|v| v.as_str())
-        .unwrap_or("api");
+    let created_by = auth.security_context().principal.id.as_str();
     persist_and_activate_policy(&state, &tenant, &policy_id, &cedar_text, created_by).await;
 
     // Update in-memory map to match the prospective text.
@@ -358,10 +359,11 @@ pub(crate) async fn handle_create_policy(
 #[instrument(skip_all, fields(tenant, policy_id, otel.name = "PATCH /api/tenants/{tenant}/policies/entry/{policy_id}"))]
 pub(crate) async fn handle_patch_policy(
     State(state): State<ServerState>,
-    Path((tenant, policy_id)): Path<(String, String)>,
-    _auth: PolicyAuthed,
+    Path((_tenant, policy_id)): Path<(String, String)>,
+    auth: PolicyAuthed,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let tenant = auth.tenant().as_str().to_string();
     let Some(store) = state.policy_store() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -396,10 +398,7 @@ pub(crate) async fn handle_patch_policy(
             return resp;
         }
 
-        let created_by = body
-            .get("created_by")
-            .and_then(|v| v.as_str())
-            .unwrap_or("api");
+        let created_by = auth.security_context().principal.id.as_str();
         if let Err(e) = store
             .update_policy_text(&tenant, &policy_id, cedar_text, created_by)
             .await
@@ -458,9 +457,10 @@ pub(crate) async fn handle_patch_policy(
 #[instrument(skip_all, fields(tenant, policy_id, otel.name = "DELETE /api/tenants/{tenant}/policies/entry/{policy_id}"))]
 pub(crate) async fn handle_delete_policy_entry(
     State(state): State<ServerState>,
-    Path((tenant, policy_id)): Path<(String, String)>,
-    _auth: PolicyAuthed,
+    Path((_tenant, policy_id)): Path<(String, String)>,
+    auth: PolicyAuthed,
 ) -> impl IntoResponse {
+    let tenant = auth.tenant().as_str().to_string();
     let Some(store) = state.policy_store() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -494,79 +494,4 @@ pub(crate) async fn handle_delete_policy_entry(
         })),
     )
         .into_response()
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Reload a tenant's in-memory policy state from durable storage.
-///
-/// Reads all enabled policies, concatenates them, updates `tenant_policies`,
-/// and reloads the Cedar engine.
-async fn reload_tenant_from_store(state: &ServerState, tenant: &str) {
-    load_and_activate_tenant_policies(state, tenant).await;
-}
-
-/// Build the prospective enabled policy text for a tenant, optionally including
-/// a new policy entry that isn't persisted yet.
-async fn build_prospective_enabled_text(
-    state: &ServerState,
-    tenant: &str,
-    additional: Option<(&str, &str)>,
-) -> String {
-    let mut text = {
-        let policies = state.tenant_policies.read().unwrap(); // ci-ok: infallible lock
-        policies.get(tenant).cloned().unwrap_or_default()
-    };
-    if let Some((_id, cedar_text)) = additional {
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str(cedar_text);
-    }
-    text
-}
-
-/// Build the prospective enabled policy text for a tenant, replacing one
-/// specific policy entry's text and/or enabled state.
-async fn build_prospective_enabled_text_with_override(
-    state: &ServerState,
-    tenant: &str,
-    override_policy_id: &str,
-    override_cedar_text: &str,
-    override_enabled: Option<bool>,
-) -> String {
-    // Load all current policies from durable storage to get accurate per-entry data.
-    let rows = if let Some(store) = state.policy_store() {
-        store
-            .load_policies_for_tenant(tenant)
-            .await
-            .unwrap_or_default()
-    } else {
-        vec![]
-    };
-
-    let mut combined = String::new();
-    for row in &rows {
-        let is_target = row.policy_id == override_policy_id;
-        let cedar_text = if is_target {
-            override_cedar_text
-        } else {
-            &row.cedar_text
-        };
-        let enabled = if is_target {
-            override_enabled.unwrap_or(row.enabled)
-        } else {
-            row.enabled
-        };
-        if !enabled {
-            continue;
-        }
-        if !combined.is_empty() {
-            combined.push('\n');
-        }
-        combined.push_str(cedar_text);
-    }
-    combined
 }

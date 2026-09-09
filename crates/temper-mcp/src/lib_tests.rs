@@ -5,12 +5,64 @@ use std::collections::BTreeMap;
 
 use axum::Router;
 use serde_json::{Value, json};
-use temper_runtime::ActorSystem;
-use temper_server::{ServerState, StorageStack};
-use temper_spec::parse_csdl;
+use temper_platform::bootstrap::{bootstrap_operator_credential, bootstrap_system_tenant};
+use temper_platform::router::build_platform_router;
+use temper_platform::state::PlatformState;
+use temper_runtime::tenant::TenantId;
+use temper_server::StorageStack;
+use temper_server::registry::{
+    EntityLevelSummary, EntityVerificationResult, SpecRegistry, VerificationStatus,
+};
+use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoEventStore;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+
+const TEST_TENANT: &str = "demo";
+const TEST_OPERATOR_KEY: &str = "temper-mcp-test-operator-key";
+const ORDER_CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
+const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
+const AGENT_TYPE_IOA: &str = include_str!("../../temper-platform/src/specs/agent_type.ioa.toml");
+const AGENT_CREDENTIAL_IOA: &str =
+    include_str!("../../temper-platform/src/specs/agent_credential.ioa.toml");
+
+const CREDENTIAL_CSDL_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="AgentType">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="name" Type="Edm.String"/>
+      </EntityType>
+      <EntityType Name="AgentCredential">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="agent_type_id" Type="Edm.String"/>
+        <Property Name="agent_instance_id" Type="Edm.String"/>
+        <Property Name="key_hash" Type="Edm.String"/>
+        <Property Name="key_prefix" Type="Edm.String"/>
+        <Property Name="description" Type="Edm.String"/>
+        <Property Name="created_by" Type="Edm.String"/>
+        <Property Name="expires_at" Type="Edm.String"/>
+      </EntityType>
+      <EntityContainer Name="CredentialService">
+        <EntitySet Name="AgentTypes" EntityType="Temper.AgentType"/>
+        <EntitySet Name="AgentCredentials" EntityType="Temper.AgentCredential"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+
+const TEST_OPERATOR_POLICY: &str = r#"
+permit(principal == Agent::"operator", action == Action::"create", resource is Order);
+permit(principal == Agent::"operator", action == Action::"read", resource is Order);
+permit(principal == Agent::"operator", action == Action::"list", resource is Order);
+permit(principal == Agent::"operator", action == Action::"CancelOrder", resource is Order);
+permit(principal == Agent::"operator", action == Action::"read_specs", resource is Spec);
+"#;
 
 /// Build a RuntimeContext pointing at a local port.
 fn ctx_for_port(port: u16) -> RuntimeContext {
@@ -25,6 +77,19 @@ fn ctx_for_port(port: u16) -> RuntimeContext {
     .expect("ctx")
 }
 
+/// Build an authenticated RuntimeContext pointing at a local test server.
+fn authenticated_ctx_for_port(port: u16) -> RuntimeContext {
+    RuntimeContext::from_config(&McpConfig {
+        temper_port: Some(port),
+        temper_url: None,
+        agent_id: None,
+        agent_type: None,
+        session_id: Some("temper-mcp-test-session".to_string()),
+        api_key: Some(TEST_OPERATOR_KEY.to_string()),
+    })
+    .expect("ctx")
+}
+
 /// Build a RuntimeContext pointing at a URL.
 fn ctx_for_url(url: &str) -> RuntimeContext {
     RuntimeContext::from_config(&McpConfig {
@@ -34,6 +99,19 @@ fn ctx_for_url(url: &str) -> RuntimeContext {
         agent_type: None,
         session_id: None,
         api_key: None,
+    })
+    .expect("ctx")
+}
+
+/// Build an authenticated RuntimeContext pointing at a URL.
+fn authenticated_ctx_for_url(url: &str) -> RuntimeContext {
+    RuntimeContext::from_config(&McpConfig {
+        temper_port: None,
+        temper_url: Some(url.to_string()),
+        agent_id: None,
+        agent_type: None,
+        session_id: Some("temper-mcp-test-session".to_string()),
+        api_key: Some(TEST_OPERATOR_KEY.to_string()),
     })
     .expect("ctx")
 }
@@ -70,6 +148,68 @@ fn tool_text(response: &Value) -> (&str, bool) {
     (text, is_error)
 }
 
+fn build_test_registry() -> SpecRegistry {
+    let csdl = parse_csdl(ORDER_CSDL_XML).expect("parse order CSDL");
+    let mut registry = SpecRegistry::new();
+    registry.register_tenant(
+        TEST_TENANT,
+        csdl,
+        ORDER_CSDL_XML.to_string(),
+        &[("Order", ORDER_IOA)],
+    );
+    mark_specs_verified(&mut registry, TEST_TENANT, &[("Order", ORDER_IOA)]);
+    registry
+}
+
+fn mark_specs_verified(registry: &mut SpecRegistry, tenant: &str, specs: &[(&str, &str)]) {
+    let tenant_id = TenantId::new(tenant);
+    for (entity_type, _) in specs {
+        registry.set_verification_status(
+            &tenant_id,
+            entity_type,
+            VerificationStatus::Completed(EntityVerificationResult {
+                all_passed: true,
+                levels: vec![EntityLevelSummary {
+                    level: "MCP fixture".to_string(),
+                    passed: true,
+                    summary: "Pre-verified for authenticated MCP E2E tests".to_string(),
+                    details: None,
+                }],
+                verified_at: "2026-07-11T00:00:00Z".to_string(),
+            }),
+        );
+    }
+}
+
+async fn register_test_operator(state: &PlatformState) {
+    let credential_csdl = parse_csdl(CREDENTIAL_CSDL_XML).expect("parse credential CSDL");
+    let credential_specs = [
+        ("AgentType", AGENT_TYPE_IOA),
+        ("AgentCredential", AGENT_CREDENTIAL_IOA),
+    ];
+    {
+        let mut registry = state.registry.write().expect("registry lock");
+        registry
+            .try_register_tenant_with_reactions_and_constraints(
+                TenantId::new(TEST_TENANT),
+                credential_csdl,
+                CREDENTIAL_CSDL_XML.to_string(),
+                &credential_specs,
+                Vec::new(),
+                None,
+                true,
+            )
+            .expect("merge credential specs");
+        mark_specs_verified(&mut registry, TEST_TENANT, &credential_specs);
+    }
+    bootstrap_operator_credential(state, TEST_OPERATOR_KEY, TEST_TENANT).await;
+    state
+        .server
+        .authz
+        .reload_tenant_policies(TEST_TENANT, TEST_OPERATOR_POLICY)
+        .expect("load test operator policy");
+}
+
 async fn start_test_temper_server() -> (u16, oneshot::Sender<()>) {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -79,25 +219,14 @@ async fn start_test_temper_server() -> (u16, oneshot::Sender<()>) {
         .await
         .expect("create local turso db");
 
-    let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
-    let csdl = parse_csdl(csdl_xml).expect("parse csdl");
+    let mut state = PlatformState::with_registry(build_test_registry(), None);
+    state
+        .server
+        .set_storage_stack(StorageStack::from_turso(turso));
+    bootstrap_system_tenant(&state, &BTreeMap::new());
+    register_test_operator(&state).await;
 
-    let mut ioa_sources = BTreeMap::new();
-    ioa_sources.insert(
-        "Order".to_string(),
-        include_str!("../../../test-fixtures/specs/order.ioa.toml").to_string(),
-    );
-
-    let mut state = ServerState::with_specs(
-        ActorSystem::new("temper-mcp-tests"),
-        csdl,
-        csdl_xml.to_string(),
-        ioa_sources,
-    )
-    .unwrap();
-    state.set_storage_stack(StorageStack::from_turso(turso));
-
-    let router: Router = temper_server::build_router(state);
+    let router: Router = build_platform_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().expect("addr").port();
 
@@ -253,7 +382,7 @@ fn from_config_port_mode() {
 #[tokio::test]
 async fn execute_url_mode_works() {
     let (port, shutdown) = start_test_temper_server().await;
-    let mut ctx = ctx_for_url(&format!("http://127.0.0.1:{port}"));
+    let mut ctx = authenticated_ctx_for_url(&format!("http://127.0.0.1:{port}"));
 
     let response = rpc(
         &mut ctx,
@@ -279,7 +408,7 @@ async fn execute_url_mode_works() {
 #[tokio::test]
 async fn execute_creates_entity_and_reads_it_back() {
     let (port, shutdown) = start_test_temper_server().await;
-    let mut ctx = ctx_for_port(port);
+    let mut ctx = authenticated_ctx_for_port(port);
 
     let response = rpc(
         &mut ctx,
@@ -306,7 +435,7 @@ return fetched['fields']['customer']
 #[tokio::test]
 async fn execute_invalid_action_returns_409_cleanly() {
     let (port, shutdown) = start_test_temper_server().await;
-    let mut ctx = ctx_for_port(port);
+    let mut ctx = authenticated_ctx_for_port(port);
 
     let response = rpc(
             &mut ctx,
@@ -315,7 +444,8 @@ async fn execute_invalid_action_returns_409_cleanly() {
                 "execute",
                 r#"
 await temper.create('demo', 'Orders', {'id': 'mcp-bad-action-1'})
-await temper.action('demo', 'Orders', 'mcp-bad-action-1', 'ShipOrder', {'Reason': 'invalid from draft'})
+await temper.action('demo', 'Orders', 'mcp-bad-action-1', 'CancelOrder', {'Reason': 'first cancel'})
+await temper.action('demo', 'Orders', 'mcp-bad-action-1', 'CancelOrder', {'Reason': 'cancelled is final'})
 return 'unreachable'
 "#,
             ),
@@ -335,7 +465,7 @@ return 'unreachable'
 #[tokio::test]
 async fn execute_supports_compound_operation() {
     let (port, shutdown) = start_test_temper_server().await;
-    let mut ctx = ctx_for_port(port);
+    let mut ctx = authenticated_ctx_for_port(port);
 
     let response = rpc(
         &mut ctx,
@@ -363,11 +493,10 @@ return fetched['status']
 #[tokio::test]
 async fn execute_specs_returns_data() {
     let (port, shutdown) = start_test_temper_server().await;
-    let mut ctx = ctx_for_port(port);
+    let mut ctx = authenticated_ctx_for_port(port);
 
-    // The test server uses with_specs() which doesn't populate the spec registry.
-    // The /observe/specs endpoint reads from the registry, so it returns an empty list
-    // (not a 404). This verifies the specs() method dispatches correctly.
+    // The authenticated fixture uses the platform router so this call verifies
+    // specs() dispatches with the same bearer-to-typed-context path as runtime.
     let response = rpc(
         &mut ctx,
         call_tool_request(10, "execute", "return await temper.specs('demo')"),

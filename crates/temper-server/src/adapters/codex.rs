@@ -5,7 +5,10 @@ use std::time::Instant;
 use async_trait::async_trait;
 use tokio::process::Command;
 
-use super::{AdapterContext, AdapterError, AdapterResult, AgentAdapter};
+use super::{
+    AdapterContext, AdapterError, AdapterResult, AgentAdapter, CliAdapterEnvironment,
+    configure_cli_child_environment, execute_cli_command,
+};
 
 /// Adapter implementation for local `codex` CLI execution.
 #[derive(Debug, Default)]
@@ -15,6 +18,10 @@ pub struct CodexAdapter;
 impl AgentAdapter for CodexAdapter {
     fn adapter_type(&self) -> &str {
         "codex"
+    }
+
+    fn requires_platform_credential(&self) -> bool {
+        true
     }
 
     async fn execute(&self, ctx: AdapterContext) -> Result<AdapterResult, AdapterError> {
@@ -35,16 +42,10 @@ impl AgentAdapter for CodexAdapter {
             command.current_dir(workdir);
         }
 
-        if let Some(codex_home) = ctx.integration_config.get("codex_home")
-            && !codex_home.trim().is_empty()
-        {
-            command.env("CODEX_HOME", codex_home);
-        }
-
-        // Pass platform-minted credential for identity resolution (ADR-0033).
-        if let Some(ref api_key) = ctx.agent_ctx.agent_api_key {
-            command.env("TEMPER_API_KEY", api_key);
-        }
+        // Start from an empty environment, then install only the Codex
+        // provider's tenant-scoped auth/config and invocation credential.
+        configure_cli_child_environment(&mut command, &ctx, CliAdapterEnvironment::Codex);
+        command.kill_on_drop(true);
         command
             .env("TEMPER_RUN_ID", ctx.entity_id.clone())
             .env("TEMPER_TASK_ID", ctx.entity_id.clone())
@@ -68,9 +69,7 @@ impl AgentAdapter for CodexAdapter {
             }
         }
 
-        let output = command.output().await.map_err(|e| {
-            AdapterError::Invocation(format!("failed to spawn '{command_name}': {e}"))
-        })?;
+        let output = execute_cli_command(&mut command, command_name).await?;
 
         let duration_ms = started.elapsed().as_millis() as u64;
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();

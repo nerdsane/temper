@@ -1,13 +1,14 @@
 //! GET /observe/workflows -- full workflow view per app/tenant.
 
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, State};
+use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Serialize;
+use temper_authz::AuthenticatedRequestContext;
 use temper_runtime::tenant::TenantId;
 use tracing::instrument;
 
-use crate::authz::{observe_tenant_scope, require_observe_auth};
+use crate::authz::{observe_tenant_scope, require_authenticated_context, require_observe_auth};
 use crate::registry::{SpecRegistry, VerificationStatus};
 use crate::state::ServerState;
 
@@ -44,11 +45,16 @@ pub(in crate::observe) struct WorkflowsResponse {
 }
 
 /// Fetch design-time events from the durable metadata backend.
-async fn fetch_event_log(state: &ServerState) -> Vec<crate::state::DesignTimeEvent> {
-    let stores = state.collect_all_metadata_stores().await;
+async fn fetch_event_log(
+    state: &ServerState,
+    tenant: &TenantId,
+) -> Vec<crate::state::DesignTimeEvent> {
     let mut all_events = Vec::new();
-    for store in &stores {
-        match store.list_design_time_events(None, 10_000).await {
+    if let Some(store) = state.metadata_store_for_tenant(tenant.as_str()).await {
+        match store
+            .list_design_time_events(Some(tenant.as_str()), 10_000)
+            .await
+        {
             Ok(rows) => {
                 all_events.extend(rows.into_iter().map(|r| crate::state::DesignTimeEvent {
                     kind: r.kind,
@@ -73,8 +79,23 @@ async fn fetch_event_log(state: &ServerState) -> Vec<crate::state::DesignTimeEve
 /// Fetch per-tenant trajectory counts using a SQL aggregate query.
 ///
 /// Previously loaded up to 100,000 raw rows just to count them in Rust.
-async fn fetch_runtime_counts(state: &ServerState) -> std::collections::BTreeMap<String, u64> {
-    state.count_trajectories_by_tenant().await
+async fn fetch_runtime_counts(
+    state: &ServerState,
+    tenant: &TenantId,
+) -> std::collections::BTreeMap<String, u64> {
+    let Some(store) = state.metadata_store_for_tenant(tenant.as_str()).await else {
+        return std::collections::BTreeMap::new();
+    };
+    match store.count_trajectories_by_tenant().await {
+        Ok(counts) => counts
+            .into_iter()
+            .filter(|(stored_tenant, _)| stored_tenant == tenant.as_str())
+            .collect(),
+        Err(error) => {
+            tracing::warn!(error = %error, backend = store.backend_name(), "failed to count workflow trajectories");
+            std::collections::BTreeMap::new()
+        }
+    }
 }
 
 /// Build a step from an event log entry matching a given kind.
@@ -212,20 +233,19 @@ fn build_entity_workflow(
 #[instrument(skip_all, fields(otel.name = "GET /observe/workflows"))]
 pub(crate) async fn handle_workflows(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
 ) -> Result<Json<WorkflowsResponse>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_events", "Event")?;
-    let tenant_scope = observe_tenant_scope(&state, &headers)?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_events", "Event")?;
+    let tenant_scope = observe_tenant_scope(authenticated);
 
-    let event_log = fetch_event_log(&state).await;
-    let runtime_counts = fetch_runtime_counts(&state).await;
+    let event_log = fetch_event_log(&state, tenant_scope).await;
+    let runtime_counts = fetch_runtime_counts(&state, tenant_scope).await;
     let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
 
     let mut workflows = Vec::new();
     for tenant_id in registry.tenant_ids() {
-        if let Some(ref scope) = tenant_scope
-            && tenant_id != scope
-        {
+        if tenant_id != tenant_scope {
             continue;
         }
         let tenant_str = tenant_id.as_str().to_string();

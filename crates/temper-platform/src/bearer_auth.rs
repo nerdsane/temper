@@ -1,384 +1,193 @@
-//! Bearer token authentication middleware.
+//! Tenant-scoped bearer authentication middleware.
 //!
-//! Every non-health-check request must include `Authorization: Bearer <key>`.
-//! The middleware resolves agent credentials first, then falls back to the
-//! global `TEMPER_API_KEY` for admin/operator access.
-//!
-//! See ADR-0033: Platform-Assigned Agent Identity.
+//! Every protected request resolves a bearer credential in the requested
+//! tenant and receives one typed [`temper_authz::AuthenticatedRequestContext`].
+//! `TEMPER_API_KEY` may bootstrap a normal tenant credential, but it has no
+//! special runtime fallback or deployment-wide Admin authority.
 
 use crate::state::PlatformState;
 use axum::extract::{Request, State};
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
+use base64::Engine as _;
 use temper_runtime::tenant::TenantId;
 
-/// Marker extension for requests that were already authenticated by an
-/// outer layer and have trusted principal headers injected server-side.
-#[derive(Debug, Clone, Copy)]
-pub struct PreAuthenticatedRequest;
+const BASIC_CREDENTIAL_DECODE_BUDGET: usize = 8 * 1024;
 
-/// Axum middleware that validates Bearer token authentication and resolves
-/// agent identity from credentials.
-///
-/// Resolution order:
-/// 1. Health check paths → passthrough (no auth needed)
-/// 2. No `api_token` configured → passthrough (local dev mode)
-/// 3. Try agent credential resolution → if match, set `ResolvedIdentity` extension
-/// 4. Try global `TEMPER_API_KEY` match → admin/operator access
-/// 5. No match → 401 Unauthorized
+/// Resolve the request's bearer credential and attach typed authority.
 pub async fn bearer_auth_check(
     State(state): State<PlatformState>,
     mut req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // Allow health checks without auth (Railway probes these paths).
-    if req.method() == axum::http::Method::GET
-        && (req.uri().path() == "/tdata" || req.uri().path() == "/healthz")
+    let bearer = bearer_credential(&req);
+    let tenant = requested_tenant(&req)?;
+
+    if bearer
+        .as_deref()
+        .is_some_and(temper_server::internal_invocation::is_internal_invocation_bearer)
     {
+        let token = bearer.as_deref().ok_or(StatusCode::UNAUTHORIZED)?;
+        let authenticated = state
+            .server
+            .internal_invocation_credentials
+            .consume_for_request(token, &tenant, req.method(), req.uri())
+            .map_err(|_| StatusCode::UNAUTHORIZED)?;
+        // The capability has already been consumed; do not expose it to
+        // downstream handlers, logs, or accidental forwarding.
+        req.headers_mut().remove("authorization");
+        req.extensions_mut().insert(authenticated);
         return Ok(next.run(req).await);
     }
 
-    // Allow identity resolution endpoint without auth — the token in the
-    // request body IS the credential being resolved (self-resolving).
-    if req.method() == axum::http::Method::POST && req.uri().path() == "/api/identity/resolve" {
-        return Ok(next.run(req).await);
-    }
-
-    let Some(ref _expected) = state.api_token else {
-        // No API key configured — passthrough (local dev mode).
-        return Ok(next.run(req).await);
-    };
-
-    if req.extensions().get::<PreAuthenticatedRequest>().is_some()
-        && req.headers().contains_key("x-temper-principal-kind")
-        && req.headers().contains_key("x-temper-principal-id")
-    {
-        return Ok(next.run(req).await);
-    }
-
-    let Some(auth_header) = req.headers().get("authorization") else {
-        return Err(StatusCode::UNAUTHORIZED);
-    };
-
-    let auth_str = auth_header.to_str().map_err(|_| StatusCode::UNAUTHORIZED)?;
-
-    let Some(token) = auth_str.strip_prefix("Bearer ") else {
-        return Err(StatusCode::UNAUTHORIZED);
-    };
-
-    let has_explicit_principal = req.headers().contains_key("x-temper-principal-kind")
-        && req.headers().contains_key("x-temper-principal-id");
-    let matches_global_api_key = state
-        .api_token
-        .as_ref()
-        .is_some_and(|expected| constant_time_eq(token.as_bytes(), expected.as_bytes()));
-
-    // ADR-0043 guest override path: internal loopback callers may present the
-    // platform API key while explicitly declaring the principal they are acting
-    // as. Preserve those headers instead of collapsing the request into the
-    // bootstrapped operator credential.
-    if matches_global_api_key && has_explicit_principal {
-        return Ok(next.run(req).await);
-    }
-
-    // Step 1: Try to resolve as an agent credential.
-    let tenant = extract_tenant(&req);
-    if let Some(identity) = state
-        .identity_resolver
-        .resolve(&state.server, &tenant, token)
-        .await
-    {
-        // Agent credential resolved — inject into request extensions.
-        req.extensions_mut().insert(identity);
-        return Ok(next.run(req).await);
-    }
-
-    // Step 2: Fall back to global API key (admin/operator access).
-    if matches_global_api_key {
-        if !req.headers().contains_key("x-temper-principal-kind") {
-            req.headers_mut().insert(
-                "x-temper-principal-kind",
-                "admin"
-                    .parse()
-                    .expect("valid x-temper-principal-kind header"),
-            );
-        }
-        if !req.headers().contains_key("x-temper-principal-id") {
-            req.headers_mut().insert(
-                "x-temper-principal-id",
-                "api-key-holder"
-                    .parse()
-                    .expect("valid x-temper-principal-id header"),
-            );
+    if is_public_request(&req) {
+        if !req.uri().path().starts_with("/webhooks/") {
+            req.headers_mut().remove("authorization");
         }
         return Ok(next.run(req).await);
     }
 
-    // No match — reject.
+    let matched_endpoint = match state.server.http_endpoint_tables.get(&tenant).await {
+        Some(table) => {
+            table
+                .match_request(req.method().as_str(), req.uri().path())
+                .await
+        }
+        None => None,
+    };
+    let request_method = req.method().as_str().to_string();
+    let request_path = req.uri().path().to_string();
+
+    if let Some(token) = request_credential(&req)
+        && let Some(identity) = temper_server::identity::IdentityResolver::new()
+            .resolve(&state.server, &tenant, &token)
+            .await
+    {
+        let session_id = temper_server::request_context::session_id_from_headers(req.headers());
+        let intent = temper_server::request_context::intent_from_headers(req.headers());
+        let verified_session = match session_id.as_deref() {
+            Some(sid) => state
+                .server
+                .session_grant_verified(tenant.as_str(), &identity.agent_instance_id, sid)
+                .await
+                .then_some(sid),
+            None => None,
+        };
+        let security_context = temper_authz::SecurityContext::from_resolved_identity(
+            &identity.agent_instance_id,
+            &identity.agent_type_name,
+            verified_session,
+        );
+        let authenticated =
+            temper_authz::AuthenticatedRequestContext::new(tenant.clone(), security_context)
+                .with_intent(intent)
+                .with_session_id(session_id);
+
+        req.extensions_mut().insert(authenticated);
+        if let Some(matched) = matched_endpoint {
+            req.extensions_mut()
+                .insert(temper_server::http_endpoint::AdmittedHttpEndpoint::new(
+                    tenant.clone(),
+                    &request_method,
+                    &request_path,
+                    matched,
+                ));
+        }
+        // The credential has served its only purpose. Downstream handlers and
+        // tenant WASM modules receive typed authority, never the reusable secret.
+        req.headers_mut().remove("authorization");
+        return Ok(next.run(req).await);
+    }
+
+    // Routes declared public have an explicit anonymous Customer context.
+    // This lets foreign-protocol adapters serve public reads without the old
+    // System fallback or trusting a guest-returned principal.
+    if let Some(matched) = matched_endpoint {
+        if matched.route.requires_auth {
+            return Ok((
+                StatusCode::UNAUTHORIZED,
+                [("www-authenticate", "Basic realm=\"Temper\"")],
+            )
+                .into_response());
+        }
+        req.headers_mut().remove("authorization");
+        req.extensions_mut()
+            .insert(temper_authz::AuthenticatedRequestContext::new(
+                tenant.clone(),
+                temper_authz::SecurityContext::anonymous(),
+            ));
+        req.extensions_mut()
+            .insert(temper_server::http_endpoint::AdmittedHttpEndpoint::new(
+                tenant,
+                &request_method,
+                &request_path,
+                matched,
+            ));
+        return Ok(next.run(req).await);
+    }
+
     Err(StatusCode::UNAUTHORIZED)
 }
 
-/// Extract tenant ID from request headers, defaulting to "default".
-fn extract_tenant(req: &Request) -> TenantId {
-    req.headers()
-        .get("x-tenant-id")
-        .and_then(|v| v.to_str().ok())
-        .map(TenantId::new)
-        .unwrap_or_default()
+fn authorization_parts(req: &Request) -> Option<(&str, &str)> {
+    let value = req.headers().get("authorization")?.to_str().ok()?;
+    let (scheme, credential) = value.split_once(' ')?;
+    let credential = credential.trim();
+    (!credential.is_empty()).then_some((scheme, credential))
 }
 
-/// Constant-time byte comparison.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
+fn bearer_credential(req: &Request) -> Option<String> {
+    let (scheme, credential) = authorization_parts(req)?;
+    (scheme.eq_ignore_ascii_case("bearer")
+        && credential.len() <= temper_server::identity::MAX_CREDENTIAL_BYTES)
+        .then(|| credential.to_string())
+}
+
+fn request_credential(req: &Request) -> Option<String> {
+    let (scheme, credential) = authorization_parts(req)?;
+    if scheme.eq_ignore_ascii_case("bearer") {
+        return (credential.len() <= temper_server::identity::MAX_CREDENTIAL_BYTES)
+            .then(|| credential.to_string());
     }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
+    if !scheme.eq_ignore_ascii_case("basic") || credential.len() > BASIC_CREDENTIAL_DECODE_BUDGET {
+        return None;
     }
-    diff == 0
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(credential)
+        .ok()?;
+    if decoded.len() > BASIC_CREDENTIAL_DECODE_BUDGET {
+        return None;
+    }
+    let decoded = std::str::from_utf8(&decoded).ok()?;
+    let (username, password) = decoded.split_once(':')?;
+    let token = if password.is_empty() {
+        username
+    } else {
+        password
+    };
+    (!token.is_empty()).then(|| token.to_string())
+}
+
+fn is_public_request(req: &Request) -> bool {
+    temper_server::authz::is_public_kernel_request(req.method(), req.uri().path())
+        || matches!(
+            (req.method(), req.uri().path()),
+            (&Method::GET, "/healthz") | (&Method::POST, "/api/identity/resolve")
+        )
+}
+
+fn requested_tenant(req: &Request) -> Result<TenantId, StatusCode> {
+    let tenant = req
+        .headers()
+        .get("x-tenant-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|tenant| !tenant.is_empty())
+        .unwrap_or("default");
+    TenantId::try_new(tenant).map_err(|_| StatusCode::BAD_REQUEST)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::Router;
-    use axum::body::Body;
-    use axum::body::to_bytes;
-    use axum::extract::Extension;
-    use axum::http::HeaderMap;
-    use axum::http::Request as HttpRequest;
-    use axum::middleware;
-    use axum::routing::get;
-    use std::collections::BTreeMap;
-    use temper_server::identity::ResolvedIdentity;
-    use tower::ServiceExt;
-
-    async fn ok_handler() -> &'static str {
-        "ok"
-    }
-
-    async fn inspect_identity_handler(
-        headers: HeaderMap,
-        resolved_identity: Option<Extension<ResolvedIdentity>>,
-    ) -> String {
-        let resolved = resolved_identity
-            .map(|Extension(identity)| identity.agent_type_name)
-            .unwrap_or_else(|| "none".to_string());
-        let principal_kind = headers
-            .get("x-temper-principal-kind")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let principal_id = headers
-            .get("x-temper-principal-id")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let agent_type = headers
-            .get("x-temper-agent-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        format!(
-            "resolved={resolved};principal_kind={principal_kind};principal_id={principal_id};agent_type={agent_type}"
-        )
-    }
-
-    fn app_with_token(token: Option<String>) -> Router {
-        let mut state = PlatformState::new(None);
-        state.api_token = token;
-        Router::new()
-            .route("/tdata", get(ok_handler))
-            .route("/healthz", get(ok_handler))
-            .route("/tdata/Orders", get(ok_handler))
-            .route("/api/specs", get(ok_handler))
-            .layer(middleware::from_fn_with_state(
-                state.clone(),
-                bearer_auth_check,
-            ))
-            .with_state(state)
-    }
-
-    #[tokio::test]
-    async fn no_token_configured_passes_all() {
-        let app = app_with_token(None);
-        let resp = app
-            .oneshot(HttpRequest::get("/api/specs").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn health_check_passes_without_auth() {
-        let app = app_with_token(Some("secret123".into()));
-        let resp = app
-            .clone()
-            .oneshot(HttpRequest::get("/tdata").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        let resp_healthz = app
-            .oneshot(HttpRequest::get("/healthz").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(resp_healthz.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn valid_bearer_passes() {
-        let app = app_with_token(Some("secret123".into()));
-        let resp = app
-            .oneshot(
-                HttpRequest::get("/api/specs")
-                    .header("authorization", "Bearer secret123")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn missing_auth_returns_401() {
-        let app = app_with_token(Some("secret123".into()));
-        let resp = app
-            .oneshot(HttpRequest::get("/api/specs").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn wrong_token_returns_401() {
-        let app = app_with_token(Some("secret123".into()));
-        let resp = app
-            .oneshot(
-                HttpRequest::get("/api/specs")
-                    .header("authorization", "Bearer wrong")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn non_bearer_scheme_returns_401() {
-        let app = app_with_token(Some("secret123".into()));
-        let resp = app
-            .oneshot(
-                HttpRequest::get("/api/specs")
-                    .header("authorization", "Basic secret123")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn tdata_subpath_requires_auth() {
-        let app = app_with_token(Some("secret123".into()));
-        // /tdata/Orders is NOT the health check path — requires auth.
-        let resp = app
-            .oneshot(
-                HttpRequest::get("/tdata/Orders")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn pre_authenticated_request_bypasses_bearer_requirement() {
-        async fn mark_pre_authenticated(
-            mut req: Request,
-            next: Next,
-        ) -> Result<Response, StatusCode> {
-            req.extensions_mut().insert(PreAuthenticatedRequest);
-            req.headers_mut()
-                .insert("x-tenant-id", "default".parse().unwrap());
-            req.headers_mut()
-                .insert("x-temper-principal-kind", "admin".parse().unwrap());
-            req.headers_mut()
-                .insert("x-temper-principal-id", "dashboard-user".parse().unwrap());
-            Ok(next.run(req).await)
-        }
-
-        let mut state = PlatformState::new(None);
-        state.api_token = Some("secret123".into());
-        let app = Router::new()
-            .route("/tdata/Orders", get(ok_handler))
-            .layer(middleware::from_fn_with_state(
-                state.clone(),
-                bearer_auth_check,
-            ))
-            .layer(middleware::from_fn(mark_pre_authenticated))
-            .with_state(state);
-
-        let resp = app
-            .oneshot(
-                HttpRequest::get("/tdata/Orders")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn global_api_key_preserves_explicit_principal_headers() {
-        let mut state = PlatformState::new(None);
-        state.api_token = Some("secret123".into());
-        crate::bootstrap::bootstrap_system_tenant(&state, &BTreeMap::new());
-        crate::bootstrap::bootstrap_agent_specs(&state, "default", false, &BTreeMap::new());
-        crate::bootstrap::bootstrap_operator_credential(&state, "secret123", "default").await;
-
-        let app = Router::new()
-            .route("/inspect", get(inspect_identity_handler))
-            .layer(middleware::from_fn_with_state(
-                state.clone(),
-                bearer_auth_check,
-            ))
-            .with_state(state);
-
-        let resp = app
-            .oneshot(
-                HttpRequest::get("/inspect")
-                    .header("authorization", "Bearer secret123")
-                    .header("x-tenant-id", "default")
-                    .header("x-temper-principal-kind", "agent")
-                    .header("x-temper-principal-id", "system")
-                    .header("x-temper-agent-type", "system")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        let body = String::from_utf8(body.to_vec()).unwrap();
-        assert!(
-            body.contains("resolved=none"),
-            "global API key with explicit principal headers must not inject operator identity: {body}"
-        );
-        assert!(body.contains("principal_kind=agent"));
-        assert!(body.contains("principal_id=system"));
-        assert!(body.contains("agent_type=system"));
-    }
-
-    #[test]
-    fn constant_time_eq_works() {
-        assert!(constant_time_eq(b"hello", b"hello"));
-        assert!(!constant_time_eq(b"hello", b"world"));
-        assert!(!constant_time_eq(b"hello", b"hell"));
-    }
-}
+#[path = "bearer_auth/tests.rs"]
+mod tests;

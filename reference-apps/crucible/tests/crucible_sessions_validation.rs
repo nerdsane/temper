@@ -50,6 +50,66 @@ const CALLABLE_AGENT_IOA: &str = include_str!("../specs/callable_agent.ioa.toml"
 const SESSION_THREAD_IOA: &str = include_str!("../specs/session_thread.ioa.toml");
 const CROSS_INVARIANTS_TOML: &str = include_str!("../specs/cross-invariants.toml");
 const MODEL_CSDL: &str = include_str!("../specs/model.csdl.xml");
+const CRUCIBLE_SESSION_VALIDATION_POLICY: &str = r#"
+permit(
+    principal,
+    action in [
+        Action::"list",
+        Action::"read",
+        Action::"create",
+        Action::"update",
+        Action::"delete",
+        Action::"ArchiveEnvironment"
+    ],
+    resource is Environment
+);
+permit(
+    principal,
+    action in [
+        Action::"list",
+        Action::"read",
+        Action::"create",
+        Action::"update",
+        Action::"delete",
+        Action::"ArchiveManagedAgent"
+    ],
+    resource is ManagedAgent
+);
+permit(
+    principal,
+    action in [
+        Action::"list",
+        Action::"read",
+        Action::"create",
+        Action::"update",
+        Action::"delete",
+        Action::"StartSession",
+        Action::"IdleSession",
+        Action::"ResumeSession",
+        Action::"RescheduleSession",
+        Action::"TerminateSession",
+        Action::"ArchiveSession"
+    ],
+    resource is Session
+);
+permit(principal, action in [Action::"list", Action::"read", Action::"create", Action::"update", Action::"delete"], resource is SessionResource);
+permit(principal, action in [Action::"list", Action::"read", Action::"create", Action::"update", Action::"delete"], resource is SessionEvent);
+permit(principal, action in [Action::"list", Action::"read", Action::"create", Action::"update", Action::"delete"], resource is CallableAgent);
+permit(
+    principal,
+    action in [
+        Action::"list",
+        Action::"read",
+        Action::"create",
+        Action::"update",
+        Action::"delete",
+        Action::"IdleThread",
+        Action::"ResumeThread",
+        Action::"TerminateThread"
+    ],
+    resource is SessionThread
+);
+"#;
 
 /// Build a `ServerState` preloaded with all twelve Crucible IOAs (three from
 /// the Environment slice, six from the ManagedAgent slice, three from the
@@ -121,6 +181,35 @@ fn build_crucible_state() -> ServerState {
         }
     }
     state
+        .authz
+        .reload_tenant_policies(
+            TenantId::default().as_str(),
+            CRUCIBLE_SESSION_VALIDATION_POLICY,
+        )
+        .expect("install Crucible session validation policy");
+    state
+}
+
+fn authenticate(mut request: Request<Body>) -> Request<Body> {
+    let security_context = temper_authz::SecurityContext {
+        principal: temper_authz::Principal {
+            id: "crucible-session-validation".to_string(),
+            kind: temper_authz::PrincipalKind::Customer,
+            role: None,
+            acting_for: None,
+            agent_type: None,
+            attributes: Default::default(),
+        },
+        context_attrs: Default::default(),
+        correlation_id: "crucible-session-validation".to_string(),
+    };
+    request
+        .extensions_mut()
+        .insert(temper_authz::AuthenticatedRequestContext::new(
+            TenantId::default(),
+            security_context,
+        ));
+    request
 }
 
 async fn send(
@@ -130,12 +219,14 @@ async fn send(
     body: &str,
 ) -> (StatusCode, serde_json::Value) {
     let router = build_router(state.clone());
-    let req = Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("Content-Type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
+    let req = authenticate(
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    );
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
@@ -276,10 +367,17 @@ async fn create_session_with_unknown_status_is_rejected() {
         "UpdatedAt": "2026-04-11T00:00:00Z"
     }"#;
     let (status, body_out) = post(&state, "/tdata/Sessions", body).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{body_out:?}");
     assert_eq!(
-        body_out["error"]["details"]["invariant"].as_str(),
-        Some("StatusMustBeKnown")
+        status,
+        StatusCode::BAD_REQUEST,
+        "creating directly into an unknown status must be rejected before field invariants: {body_out:?}"
+    );
+    assert_eq!(body_out["error"]["code"].as_str(), Some("InvalidBody"));
+    assert!(
+        body_out["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("initial state 'Rescheduling'")),
+        "rejection must preserve the spec-defined initial-state contract: {body_out:?}"
     );
 }
 
@@ -298,10 +396,17 @@ async fn create_session_terminated_without_terminated_at_is_rejected() {
         "UpdatedAt": "2026-04-11T00:00:00Z"
     }"#;
     let (status, body_out) = post(&state, "/tdata/Sessions", body).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{body_out:?}");
     assert_eq!(
-        body_out["error"]["details"]["invariant"].as_str(),
-        Some("TerminatedRequiresTerminatedAt")
+        status,
+        StatusCode::BAD_REQUEST,
+        "creating directly into Terminated must be rejected before field invariants: {body_out:?}"
+    );
+    assert_eq!(body_out["error"]["code"].as_str(), Some("InvalidBody"));
+    assert!(
+        body_out["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("initial state 'Rescheduling'")),
+        "rejection must preserve the spec-defined initial-state contract: {body_out:?}"
     );
 }
 
@@ -320,10 +425,17 @@ async fn create_session_archived_without_archived_at_is_rejected() {
         "UpdatedAt": "2026-04-11T00:00:00Z"
     }"#;
     let (status, body_out) = post(&state, "/tdata/Sessions", body).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{body_out:?}");
     assert_eq!(
-        body_out["error"]["details"]["invariant"].as_str(),
-        Some("ArchivedRequiresArchivedAt")
+        status,
+        StatusCode::BAD_REQUEST,
+        "creating directly into Archived must be rejected before field invariants: {body_out:?}"
+    );
+    assert_eq!(body_out["error"]["code"].as_str(), Some("InvalidBody"));
+    assert!(
+        body_out["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("initial state 'Rescheduling'")),
+        "rejection must preserve the spec-defined initial-state contract: {body_out:?}"
     );
 }
 

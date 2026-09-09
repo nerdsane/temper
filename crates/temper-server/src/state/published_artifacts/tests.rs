@@ -10,8 +10,8 @@ use tracing_subscriber::{Layer, registry::LookupSpan};
 use crate::storage::PublishedArtifactStoreRow;
 
 use super::{
-    PublishedArtifactTelemetry, emit_published_artifact_persisted_log,
-    public_blob_put_status_error, public_storage_key, published_artifact_id,
+    PublishFileArtifactRequest, PublishedArtifactTelemetry, emit_published_artifact_persisted_log,
+    public_blob_put_status_error, public_storage_key, published_artifact_id, validate_path_segment,
 };
 
 #[derive(Clone, Default)]
@@ -60,18 +60,65 @@ impl Visit for FieldVisitor {
 #[test]
 fn public_storage_key_is_generic_and_content_addressed() {
     let key = public_storage_key(
-        "public/demo artifacts",
+        "public-demo-artifacts",
         "Report",
         "quarterly-2026",
-        "preview image",
+        "preview-image",
         "sha256:abc123",
         "image/png",
-    );
+    )
+    .expect("valid path segments");
 
     assert_eq!(
         key,
-        "public/demo-artifacts/Report/quarterly-2026/preview-image-abc123.png"
+        "public-demo-artifacts/Report/quarterly-2026/preview-image-abc123.png"
     );
+}
+
+#[test]
+fn artifact_path_segments_reject_breakout_and_ambiguous_values() {
+    for value in ["", ".", "..", "a/b", r"a\b", "line\nbreak", "has space"] {
+        assert!(
+            validate_path_segment("label", value).is_err(),
+            "segment should be rejected: {value:?}"
+        );
+    }
+    for value in ["artifact", "artifact_1", "Artifact-2026", "v1.2"] {
+        assert!(
+            validate_path_segment("label", value).is_ok(),
+            "segment should be accepted: {value:?}"
+        );
+    }
+}
+
+#[test]
+fn publish_request_rejects_invalid_namespace_owner_and_label() {
+    let valid = PublishFileArtifactRequest {
+        file_id: "file-a".to_string(),
+        label: "latest".to_string(),
+        owner_ref_type: "Document".to_string(),
+        owner_ref_id: "doc-a".to_string(),
+        source_file_version_id: String::new(),
+        namespace: Some("published-artifacts".to_string()),
+    };
+    assert!(valid.validate().is_ok());
+
+    for invalid in [
+        PublishFileArtifactRequest {
+            namespace: Some("../escape".to_string()),
+            ..valid.clone()
+        },
+        PublishFileArtifactRequest {
+            owner_ref_id: "owner/escape".to_string(),
+            ..valid.clone()
+        },
+        PublishFileArtifactRequest {
+            label: "..".to_string(),
+            ..valid.clone()
+        },
+    ] {
+        assert!(invalid.validate().is_err());
+    }
 }
 
 #[test]

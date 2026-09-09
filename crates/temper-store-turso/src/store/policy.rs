@@ -392,7 +392,7 @@ impl TursoEventStore {
 ///
 /// Identical inputs always produce the same digest, enabling cheap change
 /// detection before issuing an expensive Turso write.
-fn compute_policy_hash(cedar_text: &str) -> String {
+pub(super) fn compute_policy_hash(cedar_text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(cedar_text.as_bytes());
     format!("{:x}", hasher.finalize())

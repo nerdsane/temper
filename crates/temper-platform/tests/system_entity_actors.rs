@@ -51,6 +51,7 @@ async fn actor_project_full_lifecycle() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -67,6 +68,7 @@ async fn actor_project_full_lifecycle() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -83,6 +85,7 @@ async fn actor_project_full_lifecycle() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -107,6 +110,7 @@ async fn actor_project_verify_requires_building_state() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -137,6 +141,7 @@ async fn actor_tenant_full_lifecycle() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -153,6 +158,7 @@ async fn actor_tenant_full_lifecycle() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -169,6 +175,7 @@ async fn actor_tenant_full_lifecycle() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -185,6 +192,7 @@ async fn actor_tenant_full_lifecycle() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -208,6 +216,7 @@ async fn actor_tenant_cannot_deploy_archived() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -220,6 +229,7 @@ async fn actor_tenant_cannot_deploy_archived() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -234,6 +244,7 @@ async fn actor_tenant_cannot_deploy_archived() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -269,6 +280,7 @@ async fn actor_catalog_publish_and_fork() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -285,6 +297,7 @@ async fn actor_catalog_publish_and_fork() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -301,6 +314,7 @@ async fn actor_catalog_publish_and_fork() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -335,6 +349,7 @@ async fn actor_collaborator_invite_accept_remove() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -351,6 +366,7 @@ async fn actor_collaborator_invite_accept_remove() {
                 params: serde_json::json!({"role": "editor"}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -366,6 +382,7 @@ async fn actor_collaborator_invite_accept_remove() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -395,6 +412,7 @@ async fn actor_version_lifecycle() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -410,6 +428,7 @@ async fn actor_version_lifecycle() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -463,6 +482,7 @@ async fn actor_multiple_system_entities_independent() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -475,6 +495,7 @@ async fn actor_multiple_system_entities_independent() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )
@@ -487,6 +508,7 @@ async fn actor_multiple_system_entities_independent() {
                 params: serde_json::json!({}),
                 cross_entity_booleans: std::collections::BTreeMap::new(),
                 idempotency_key: None,
+                expected_authorization_precondition: None,
             },
             TIMEOUT,
         )

@@ -20,7 +20,15 @@ pub(super) async fn enforce_commons_storage_cap(
         .await
     {
         Ok(()) => Ok(()),
-        Err(CommonsStorageCapError::Exceeded(exceeded)) => Err(odata_error(
+        Err(error) => Err(storage_cap_error_response(error)),
+    }
+}
+
+pub(super) fn storage_cap_error_response(
+    error: CommonsStorageCapError,
+) -> axum::response::Response {
+    match error {
+        CommonsStorageCapError::Exceeded(exceeded) => odata_error(
             StatusCode::PAYLOAD_TOO_LARGE,
             "StorageCapExceeded",
             &format!(
@@ -31,24 +39,24 @@ pub(super) async fn enforce_commons_storage_cap(
                 exceeded.cap_bytes
             ),
         )
-        .into_response()),
-        Err(CommonsStorageCapError::OwnerSuspended(owner_id)) => Err(odata_error(
+        .into_response(),
+        CommonsStorageCapError::ReservationCapacityExhausted => odata_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "StorageReservationCapacityExhausted",
+            "Too many storage-reserved writes are already in flight",
+        )
+        .into_response(),
+        CommonsStorageCapError::OwnerSuspended(owner_id) => odata_error(
             StatusCode::FORBIDDEN,
             "OwnerSuspended",
             &format!("Owner '{owner_id}' is suspended"),
         )
-        .into_response()),
-        Err(CommonsStorageCapError::MissingAttribution(msg)) => {
-            Err(
-                odata_error(StatusCode::CONFLICT, "StorageAttributionMissing", &msg)
-                    .into_response(),
-            )
+        .into_response(),
+        CommonsStorageCapError::MissingAttribution(msg) => {
+            odata_error(StatusCode::CONFLICT, "StorageAttributionMissing", &msg).into_response()
         }
-        Err(CommonsStorageCapError::Internal(msg)) => {
-            Err(
-                odata_error(StatusCode::INTERNAL_SERVER_ERROR, "StorageCapError", &msg)
-                    .into_response(),
-            )
+        CommonsStorageCapError::Internal(msg) => {
+            odata_error(StatusCode::INTERNAL_SERVER_ERROR, "StorageCapError", &msg).into_response()
         }
     }
 }

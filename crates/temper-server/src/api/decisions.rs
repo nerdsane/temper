@@ -2,26 +2,30 @@
 //!
 //! Handles listing, approving, and denying evolution decisions, plus SSE
 //! streaming for real-time decision notifications (both per-tenant and
-//! cross-tenant).
+//! credential-tenant views).
 
-use std::convert::Infallible;
-
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::response::sse::{Event, KeepAlive, Sse};
+use temper_authz::AuthenticatedRequestContext;
 use temper_evolution::records::{Decision, DecisionRecord, RecordHeader, RecordType};
 use temper_runtime::scheduler::sim_now;
-use tokio_stream::StreamExt;
-use tokio_stream::wrappers::BroadcastStream;
 use tracing::instrument;
 
 use temper_runtime::tenant::TenantId;
 
 use super::{PolicyAuthed, decisions_access, empty_decision_list, format_decision_list};
-use crate::authz::{persist_and_activate_policy, require_observe_auth};
+use crate::authz::{
+    record_policy_change, require_authenticated_context, require_observe_auth, require_tenant_match,
+};
 use crate::request_context::AgentContext;
 use crate::state::{DecisionStatus, PendingDecision, ServerState};
+
+mod approval;
+mod streams;
+pub(crate) use streams::{
+    handle_agent_progress_stream, handle_all_decisions_stream, handle_decision_stream,
+};
 
 /// Query parameters for listing decisions.
 #[derive(serde::Deserialize)]
@@ -35,8 +39,6 @@ pub(crate) struct DecisionListParams {
 pub(crate) struct ApproveBody {
     /// Policy scope matrix for Cedar generation.
     scope: temper_authz::PolicyScopeMatrix,
-    /// Optional: who approved.
-    decided_by: Option<String>,
 }
 
 /// GET /api/tenants/{tenant}/decisions — list decisions with optional status filter.
@@ -45,17 +47,25 @@ pub(crate) struct ApproveBody {
 #[instrument(skip_all, fields(tenant, otel.name = "GET /api/tenants/{tenant}/decisions"))]
 pub(crate) async fn handle_list_decisions(
     State(state): State<ServerState>,
-    Path(tenant): Path<String>,
-    headers: HeaderMap,
+    Path(path_tenant): Path<String>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Query(params): Query<DecisionListParams>,
 ) -> impl IntoResponse {
-    let access = match decisions_access::decision_list_access(&state, &headers, &tenant).await {
+    let authenticated = match require_authenticated_context(authenticated.as_deref()) {
+        Ok(authenticated) => authenticated,
+        Err(status) => return status.into_response(),
+    };
+    if let Err(status) = require_tenant_match(authenticated, &path_tenant) {
+        return status.into_response();
+    }
+    let tenant = authenticated.tenant().as_str();
+    let access = match decisions_access::decision_list_access(&state, authenticated).await {
         Ok(access) => access,
         Err(resp) => return resp,
     };
-    if let Some(store) = state.metadata_store_for_tenant(&tenant).await {
+    if let Some(store) = state.metadata_store_for_tenant(tenant).await {
         match store
-            .query_decisions(&tenant, params.status.as_deref())
+            .query_decisions(tenant, params.status.as_deref())
             .await
         {
             Ok(data_strings) => return format_decision_list(access.filter(data_strings)),
@@ -71,10 +81,13 @@ pub(crate) async fn handle_list_decisions(
 #[instrument(skip_all, fields(tenant, id, otel.name = "POST /api/tenants/{tenant}/decisions/{id}/approve"))]
 pub(crate) async fn handle_approve_decision(
     State(state): State<ServerState>,
-    Path((tenant, id)): Path<(String, String)>,
-    _auth: PolicyAuthed,
+    Path((_tenant, id)): Path<(String, String)>,
+    auth: PolicyAuthed,
     axum::Json(body): axum::Json<ApproveBody>,
 ) -> impl IntoResponse {
+    let tenant = auth.tenant().as_str().to_string();
+    let decided_by = auth.security_context().principal.id.clone();
+    let approval_guard = state.policy_approval_lock.lock().await;
     let scope = body.scope;
     if let Err(e) = temper_authz::validate_policy_scope_matrix(&scope) {
         return (
@@ -94,7 +107,7 @@ pub(crate) async fn handle_approve_decision(
             )
                 .into_response();
         };
-        match store.get_pending_decision(&id).await {
+        match store.get_pending_decision(&tenant, &id).await {
             Ok(Some(data_str)) => match serde_json::from_str::<PendingDecision>(&data_str) {
                 Ok(d) if d.tenant == tenant => d,
                 _ => {
@@ -126,8 +139,23 @@ pub(crate) async fn handle_approve_decision(
             .into_response();
     }
 
+    if let Some(resp) = decisions_access::reject_self_resolution(&decided_by, &decision) {
+        return resp;
+    }
+
     let generated_policy = decision.generate_policy_from_matrix(&scope);
     let evolution_record_id = decision.evolution_record_id.clone();
+    let pending_decision_json = match serde_json::to_string(&decision) {
+        Ok(json) => json,
+        Err(error) => {
+            tracing::error!(%error, "failed to serialize pending decision before approval");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to serialize pending decision: {error}"),
+            )
+                .into_response();
+        }
+    };
 
     // Validate the generated policy combined with existing enabled policies.
     let prospective = {
@@ -139,39 +167,96 @@ pub(crate) async fn handle_approve_decision(
             format!("{existing}\n{generated_policy}")
         }
     };
-    if let Err(resp) = super::validate_and_reload_policies(&state, &tenant, &prospective) {
-        return resp;
+    if let Err(error) = state.authz.validate_tenant_policies(&prospective) {
+        tracing::warn!(%error, "policy validation failed");
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("Policy validation failed: {error}"),
+        )
+            .into_response();
     }
 
-    // Persist the individual policy to the granular `policies` table.
-    let decided_by_ref = body.decided_by.as_deref().unwrap_or("unknown");
-    persist_and_activate_policy(
-        &state,
-        &tenant,
-        &format!("decision:{id}"),
-        &generated_policy,
-        decided_by_ref,
-    )
-    .await;
-
-    // Update in-memory map to reflect the new policy.
-    {
-        let mut policies = state.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-        policies.insert(tenant.clone(), prospective);
-    }
-
-    // Mark decision approved only after policy reload succeeds.
+    // Construct the durable approved form before starting the transaction.
     decision.status = DecisionStatus::Approved;
     decision.approved_scope = Some(scope.clone());
     decision.generated_policy = Some(generated_policy.clone());
-    decision.decided_by = body.decided_by.clone();
+    decision.decided_by = Some(decided_by.clone());
     decision.decided_at = Some(sim_now().to_rfc3339());
     let approved_decision = decision.clone();
-
-    // Persist updated decision synchronously.
-    if let Err(e) = state.persist_pending_decision(&approved_decision).await {
-        tracing::warn!(id = %id, error = %e, "failed to persist approved decision");
+    let approved_decision_json = match serde_json::to_string(&approved_decision) {
+        Ok(json) => json,
+        Err(error) => {
+            tracing::error!(%error, "failed to serialize approved decision");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to serialize approved decision: {error}"),
+            )
+                .into_response();
+        }
+    };
+    let policy_id = format!("decision:{id}");
+    let Some(store) = state.metadata_store_for_tenant(&tenant).await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "durable metadata backend not configured",
+        )
+            .into_response();
+    };
+    let existing_policy_text = {
+        let policies = state.tenant_policies.read().unwrap(); // ci-ok: infallible lock
+        policies.get(&tenant).cloned().unwrap_or_default()
+    };
+    let result = approval::commit_then_activate(
+        || async {
+            store
+                .commit_policy_approval(crate::storage::PolicyApprovalCommit {
+                    tenant: &tenant,
+                    decision_id: &id,
+                    approved_decision_json: &approved_decision_json,
+                    policy_id: &policy_id,
+                    cedar_text: &generated_policy,
+                    created_by: &decided_by,
+                })
+                .await
+                .map_err(|error| error.to_string())
+        },
+        || {
+            state
+                .authz
+                .reload_tenant_policies(&tenant, &prospective)
+                .map_err(|error| error.to_string())?;
+            match state.tenant_policies.write() {
+                Ok(mut policies) => {
+                    policies.insert(tenant.clone(), prospective.clone());
+                    Ok(())
+                }
+                Err(error) => {
+                    let rollback_runtime = state
+                        .authz
+                        .reload_tenant_policies(&tenant, &existing_policy_text)
+                        .err()
+                        .map(|rollback| format!("; runtime rollback failed: {rollback}"))
+                        .unwrap_or_default();
+                    Err(format!(
+                        "tenant policy cache lock poisoned: {error}{rollback_runtime}"
+                    ))
+                }
+            }
+        },
+        || async {
+            store
+                .rollback_policy_approval(&tenant, &id, &pending_decision_json, &policy_id)
+                .await
+                .map_err(|error| error.to_string())
+        },
+    )
+    .await;
+    if let Err(error) = result {
+        tracing::error!(decision_id = %id, %error, "policy approval failed");
+        return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
     }
+    drop(approval_guard);
+    record_policy_change(&state, &tenant, &policy_id, &decided_by);
     let _ = state
         .observe_refresh_tx
         .send(crate::state::ObserveRefreshHint::Decisions);
@@ -186,10 +271,7 @@ pub(crate) async fn handle_approve_decision(
     let d_record = DecisionRecord {
         header: d_header,
         decision: Decision::Approved,
-        decided_by: body
-            .decided_by
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string()),
+        decided_by: decided_by.clone(),
         rationale: format!(
             "Approved with scope: {:?}. Policy: {}",
             scope, generated_policy
@@ -198,17 +280,18 @@ pub(crate) async fn handle_approve_decision(
         implementation: None,
     };
     // Persist D-Record to the platform metadata backend.
-    if let Some(store) = state.platform_metadata_store() {
+    if let Some(store) = state.metadata_store_for_tenant(&tenant).await {
         let data_json = serde_json::to_string(&d_record).unwrap_or_default();
         if let Err(e) = store
-            .insert_evolution_record(
-                &d_record.header.id,
-                "Decision",
-                &format!("{:?}", d_record.header.status),
-                &d_record.header.created_by,
-                d_record.header.derived_from.as_deref(),
-                &data_json,
-            )
+            .insert_evolution_record(crate::storage::EvolutionRecordWrite {
+                tenant: &tenant,
+                id: &d_record.header.id,
+                record_type: "Decision",
+                status: &format!("{:?}", d_record.header.status),
+                created_by: &d_record.header.created_by,
+                derived_from: d_record.header.derived_from.as_deref(),
+                data_json: &data_json,
+            })
             .await
         {
             tracing::warn!(error = %e, backend = store.backend_name(), "failed to persist D-Record");
@@ -220,7 +303,7 @@ pub(crate) async fn handle_approve_decision(
     if let Some(ref gd_id) = approved_decision.governance_decision_id {
         let state_c = state.clone();
         let gd_id = gd_id.clone();
-        let decided_by = body.decided_by.clone().unwrap_or_else(|| "unknown".into());
+        let decided_by = decided_by.clone();
         let generated_policy = generated_policy.clone();
         let resolution_task = async move {
             // determinism-ok: async callback dispatch for governance decision resolution
@@ -263,15 +346,12 @@ pub(crate) async fn handle_approve_decision(
 #[instrument(skip_all, fields(tenant, id, otel.name = "POST /api/tenants/{tenant}/decisions/{id}/deny"))]
 pub(crate) async fn handle_deny_decision(
     State(state): State<ServerState>,
-    Path((tenant, id)): Path<(String, String)>,
-    _auth: PolicyAuthed,
-    body: Option<axum::Json<serde_json::Value>>,
+    Path((_tenant, id)): Path<(String, String)>,
+    auth: PolicyAuthed,
+    _body: Option<axum::Json<serde_json::Value>>,
 ) -> impl IntoResponse {
-    let decided_by = body
-        .as_ref()
-        .and_then(|b| b.get("decided_by"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
+    let tenant = auth.tenant().as_str().to_string();
+    let principal_id = auth.security_context().principal.id.clone();
 
     // Read decision from the durable metadata backend.
     let mut decision: PendingDecision = {
@@ -283,7 +363,7 @@ pub(crate) async fn handle_deny_decision(
             )
                 .into_response();
         };
-        match store.get_pending_decision(&id).await {
+        match store.get_pending_decision(&tenant, &id).await {
             Ok(Some(data_str)) => match serde_json::from_str::<PendingDecision>(&data_str) {
                 Ok(d) if d.tenant == tenant => d,
                 _ => {
@@ -315,8 +395,12 @@ pub(crate) async fn handle_deny_decision(
             .into_response();
     }
 
+    if let Some(resp) = decisions_access::reject_self_resolution(&principal_id, &decision) {
+        return resp;
+    }
+
     decision.status = DecisionStatus::Denied;
-    decision.decided_by = decided_by;
+    decision.decided_by = Some(principal_id);
     decision.decided_at = Some(sim_now().to_rfc3339());
     let denied_decision = decision.clone();
 
@@ -369,56 +453,31 @@ pub(crate) async fn handle_deny_decision(
         .into_response()
 }
 
-/// GET /api/tenants/{tenant}/decisions/stream — SSE for new pending decisions.
-///
-/// Cedar-gated: requires `manage_policies` action on `PolicySet` resource.
-#[instrument(skip_all, fields(tenant, otel.name = "GET /api/tenants/{tenant}/decisions/stream"))]
-pub(crate) async fn handle_decision_stream(
-    State(state): State<ServerState>,
-    Path(tenant): Path<String>,
-    _auth: PolicyAuthed,
-) -> impl IntoResponse {
-    let rx = state.pending_decision_tx.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(move |result| {
-        match result {
-            Ok(pd) => {
-                if pd.tenant != tenant {
-                    return None;
-                }
-                let data = serde_json::to_string(&pd).unwrap_or_default();
-                Some(Ok::<Event, Infallible>(
-                    Event::default().event("pending_decision").data(data),
-                ))
-            }
-            // Lagged receiver: skip missed events and continue.
-            Err(_) => None,
-        }
-    });
-
-    Sse::new(stream)
-        .keep_alive(KeepAlive::default())
-        .into_response()
-}
-
-/// GET /api/decisions — list all decisions across all tenants.
-///
-/// Requires admin-level authorization for cross-tenant visibility.
+/// GET /api/decisions — list decisions in the credential-bound tenant.
 #[instrument(skip_all, fields(otel.name = "GET /api/decisions"))]
 pub(crate) async fn handle_list_all_decisions(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Query(params): Query<DecisionListParams>,
 ) -> impl IntoResponse {
-    if let Err(status) = require_observe_auth(&state, &headers, "manage_policies", "PolicySet") {
-        return (status, "Authorization required for cross-tenant access").into_response();
+    let authenticated = match require_authenticated_context(authenticated.as_deref()) {
+        Ok(authenticated) => authenticated,
+        Err(status) => return status.into_response(),
+    };
+    if let Err(status) = require_observe_auth(&state, authenticated, "manage_policies", "PolicySet")
+    {
+        return (status, "Authorization required").into_response();
     }
-    let stores = state.collect_all_metadata_stores().await;
+    let tenant = authenticated.tenant().as_str();
     let mut all_data = Vec::new();
-    for store in &stores {
-        match store.query_all_decisions(params.status.as_deref()).await {
+    if let Some(store) = state.metadata_store_for_tenant(tenant).await {
+        match store
+            .query_decisions(tenant, params.status.as_deref())
+            .await
+        {
             Ok(data_strings) => all_data.extend(data_strings),
             Err(e) => {
-                tracing::warn!(error = %e, backend = store.backend_name(), "failed to query decisions from metadata store");
+                tracing::warn!(error = %e, backend = store.backend_name(), tenant, "failed to query decisions from metadata store");
             }
         }
     }
@@ -426,65 +485,4 @@ pub(crate) async fn handle_list_all_decisions(
         return format_decision_list(all_data);
     }
     empty_decision_list()
-}
-
-/// GET /api/decisions/stream — SSE for all pending decisions across all tenants.
-///
-/// Requires admin-level authorization for cross-tenant visibility.
-#[instrument(skip_all, fields(otel.name = "GET /api/decisions/stream"))]
-pub(crate) async fn handle_all_decisions_stream(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(status) = require_observe_auth(&state, &headers, "manage_policies", "PolicySet") {
-        return (status, "Authorization required for cross-tenant access").into_response();
-    }
-    let rx = state.pending_decision_tx.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(move |result| match result {
-        Ok(pd) => {
-            let data = serde_json::to_string(&pd).unwrap_or_default();
-            Some(Ok::<Event, Infallible>(
-                Event::default().event("pending_decision").data(data),
-            ))
-        }
-        Err(_) => None,
-    });
-
-    Sse::new(stream)
-        .keep_alive(KeepAlive::default())
-        .into_response()
-}
-
-/// GET /api/agents/{agent_id}/stream — SSE for agent progress events.
-///
-/// Requires admin-level authorization.
-#[instrument(skip_all, fields(agent_id, otel.name = "GET /api/agents/{agent_id}/stream"))]
-pub(crate) async fn handle_agent_progress_stream(
-    State(state): State<ServerState>,
-    Path(agent_id): Path<String>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(status) = require_observe_auth(&state, &headers, "read_agents", "AgentAudit") {
-        return (status, "Authorization required").into_response();
-    }
-    let rx = state.agent_progress_tx.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(move |result| {
-        match result {
-            Ok(event) => {
-                if event.agent_id != agent_id {
-                    return None;
-                }
-                let data = serde_json::to_string(&event).unwrap_or_default();
-                Some(Ok::<Event, Infallible>(
-                    Event::default().event(&event.kind).data(data),
-                ))
-            }
-            // Lagged receiver: skip missed events and continue.
-            Err(_) => None,
-        }
-    });
-
-    Sse::new(stream)
-        .keep_alive(KeepAlive::default())
-        .into_response()
 }

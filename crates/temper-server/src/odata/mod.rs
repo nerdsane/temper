@@ -4,6 +4,7 @@ mod account_verification;
 mod app_uniqueness;
 pub(crate) mod authz;
 mod bindings;
+mod blob_media;
 mod common;
 pub(crate) mod constraints;
 mod content_addressed;
@@ -19,8 +20,6 @@ mod stream_fast_path;
 mod stream_put;
 mod write;
 
-#[cfg(feature = "observe")]
-pub(crate) use common::extract_tenant;
 pub use content_addressed::handle_blob_ingest_raw;
 pub use read::handle_hints;
 pub use read::handle_metadata;

@@ -35,7 +35,10 @@ scan_nondeterminism() {
             esac
 
             local MATCHES
-            MATCHES="$(grep -nE "$PATTERN" "$FILE" 2>/dev/null | grep -v '// determinism-ok' | grep -v '^[[:space:]]*//' || true)"
+            # `grep -n` prefixes every line with `NN:`, so the comment filter
+            # has to skip that prefix — anchored at `^` it matched nothing and
+            # every mention in a doc comment counted as a finding.
+            MATCHES="$(grep -nE "$PATTERN" "$FILE" 2>/dev/null | grep -v '// determinism-ok' | grep -vE '^[0-9]+:[[:space:]]*(//|/\*|\*)' || true)"
             if [ -n "$MATCHES" ]; then
                 local REL_FILE
                 REL_FILE="$(realpath --relative-to="$WORKSPACE_ROOT" "$FILE" 2>/dev/null || echo "$FILE")"
@@ -60,6 +63,14 @@ scan_nondeterminism \
     "HashMap usage" \
     'HashMap' \
     "Use BTreeMap for deterministic iteration order"
+
+# The per-edit hook guard has always scanned for this; this repo-wide audit did
+# not, so a HashSet could reach a simulation-visible crate with neither
+# catching it.
+scan_nondeterminism \
+    "HashSet usage" \
+    'HashSet' \
+    "Use BTreeSet for deterministic iteration order"
 
 scan_nondeterminism \
     "Wall-clock time" \

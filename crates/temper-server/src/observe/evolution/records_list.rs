@@ -1,10 +1,11 @@
-use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, Query, State};
+use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
+use temper_authz::AuthenticatedRequestContext;
 use tracing::instrument;
 
-use crate::authz::require_observe_auth;
+use crate::authz::{require_authenticated_context, require_observe_auth};
 use crate::state::ServerState;
 
 /// Query parameters for listing evolution records.
@@ -20,13 +21,18 @@ pub(crate) struct EvolutionRecordParams {
 #[instrument(skip_all, fields(otel.name = "GET /observe/evolution/records"))]
 pub(crate) async fn handle_list_evolution_records(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
     Query(params): Query<EvolutionRecordParams>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_evolution", "Evolution")?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_evolution", "Evolution")?;
 
     match state
-        .list_evolution_records(params.record_type.as_deref(), params.status.as_deref())
+        .list_evolution_records(
+            authenticated.tenant().as_str(),
+            params.record_type.as_deref(),
+            params.status.as_deref(),
+        )
         .await
     {
         Ok(rows) => {
@@ -77,11 +83,15 @@ pub(crate) async fn handle_list_evolution_records(
 #[instrument(skip_all, fields(otel.name = "GET /observe/evolution/insights"))]
 pub(crate) async fn handle_list_evolution_insights(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_evolution", "Evolution")?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_evolution", "Evolution")?;
 
-    match state.list_ranked_insights().await {
+    match state
+        .list_ranked_insights(authenticated.tenant().as_str())
+        .await
+    {
         Ok(rows) => {
             let items: Vec<serde_json::Value> = rows
                 .iter()

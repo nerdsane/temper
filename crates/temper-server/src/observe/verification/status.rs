@@ -1,12 +1,13 @@
 //! GET /observe/verification-status -- all entity verification statuses.
 
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, State};
+use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Serialize;
+use temper_authz::AuthenticatedRequestContext;
 use tracing::instrument;
 
-use crate::authz::{observe_tenant_scope, require_observe_auth};
+use crate::authz::{observe_tenant_scope, require_authenticated_context, require_observe_auth};
 use crate::registry::VerificationStatus;
 use crate::state::ServerState;
 
@@ -37,10 +38,11 @@ struct EntityVerificationStatusResponse {
 #[instrument(skip_all, fields(otel.name = "GET /observe/verification-status"))]
 pub(crate) async fn handle_verification_status(
     State(state): State<ServerState>,
-    headers: HeaderMap,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
 ) -> Result<Json<AllVerificationStatus>, StatusCode> {
-    require_observe_auth(&state, &headers, "read_verification", "Spec")?;
-    let tenant_scope = observe_tenant_scope(&state, &headers)?;
+    let authenticated = require_authenticated_context(authenticated.as_deref())?;
+    require_observe_auth(&state, authenticated, "read_verification", "Spec")?;
+    let tenant_scope = observe_tenant_scope(authenticated);
     let registry = state.registry.read().unwrap(); // ci-ok: infallible lock
     let mut pending = 0usize;
     let mut running = 0usize;
@@ -50,9 +52,7 @@ pub(crate) async fn handle_verification_status(
     let mut entities = Vec::new();
 
     for tenant_id in registry.tenant_ids() {
-        if let Some(ref scope) = tenant_scope
-            && tenant_id != scope
-        {
+        if tenant_id != tenant_scope {
             continue;
         }
         if let Some(statuses) = registry.verification_statuses(tenant_id) {

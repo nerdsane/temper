@@ -48,6 +48,9 @@ pub enum EntityMsg {
         /// Covers the race where a dispatch-layer retry produces a second
         /// in-flight ask after the first one already processed.
         idempotency_key: Option<String>,
+        /// Digest of the exact local state used for an external Cedar
+        /// decision. Internal dispatches omit it.
+        expected_authorization_precondition: Option<String>,
     },
     /// Get the current entity state.
     GetState,
@@ -57,9 +60,17 @@ pub enum EntityMsg {
     UpdateFields {
         fields: serde_json::Value,
         replace: bool,
+        /// Digest of the exact state used for an external authorization
+        /// decision. The actor rejects the update if that state changed before
+        /// this message reached its mailbox.
+        expected_precondition: Option<String>,
     },
     /// Delete this entity.
-    Delete,
+    Delete {
+        /// Digest of the exact local state used for an external Cedar
+        /// decision. Internal dispatches omit it.
+        expected_authorization_precondition: Option<String>,
+    },
 }
 
 impl Message for EntityMsg {}
