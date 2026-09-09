@@ -1,0 +1,5 @@
+{
+  "//": "Cursor Background Agent environment. install runs once on snapshot build.",
+  "install": "bash scripts/cloud-setup.sh && cargo fetch 2>/dev/null || true",
+  "terminals": []
+}
