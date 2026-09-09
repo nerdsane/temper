@@ -246,8 +246,12 @@ DataOperationV1 =
   | FileStreamAbort { stream_handle }
 ```
 
-Every sum type is adjacently tagged by a `kind` field with its fields in the
-same object. For example:
+Sum types use a `kind` tag with named fields in the same JSON object
+(internal tagging). Scalar variants with a single payload encode that payload
+in a `value` field, for example `{"kind":"int64","value":7}` or
+`{"kind":"boolean","value":true}`. `Enum` keeps its named `type_name` and
+`member` fields. This is the wire shape, independent of a Rust enum
+representation. For example:
 
 ```json
 {"abi":1,"operation":{"kind":"entity_get","entity_type":"Temper.App.Task","entity_id":"task-1","at_least":{"entity_type":"Temper.App.Task","entity_id":"task-1","sequence":7}}}
@@ -355,7 +359,8 @@ host_temper_file_stream_try_write(
 - `-1` for zero/negative request length or a pointer/length range outside guest
   memory;
 - `-2` when the raw request exceeds the module's request-byte budget;
-- `-3` when the bounded response-handle registry has no capacity; and
+- `-3` when the response-handle slot or response-byte budget cannot be
+  reserved before dispatch; and
 - `-4` for a host trap or exhausted invocation deadline before dispatch.
 
 These negative codes reject the request before it runs. Once dispatch starts, a known committed outcome must use its reserved response slot and compact acknowledgement, including if the deadline expires after commit. A process loss or interrupted invocation leaves the outcome unknown; it is not a failed-write acknowledgement and does not authorize a blind retry of a non-idempotent operation.
