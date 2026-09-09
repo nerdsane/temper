@@ -1,4 +1,4 @@
-# ADR-0157: Metadata-Generated Typed Module Data SDK
+# ADR-0176: Metadata-Generated Typed Module Data SDK
 
 - Status: Accepted (design; implementation pending)
 - Date: 2026-07-24
@@ -233,7 +233,7 @@ DataRequestV1 {
 }
 
 DataOperationV1 =
-    EntityGet { entity_type, entity_id, at_least_sequence? }
+    EntityGet { entity_type, entity_id, at_least: CommitToken? }
   | EntityQuery { entity_type, filter?, order_by[], page }
   | EntityCreate { entity_type, value }
   | EntityPatch { entity_type, entity_id, expected_sequence?, value }
@@ -250,7 +250,7 @@ Every sum type is adjacently tagged by a `kind` field with its fields in the
 same object. For example:
 
 ```json
-{"abi":1,"operation":{"kind":"entity_get","entity_type":"Temper.App.Task","entity_id":"task-1","at_least_sequence":7}}
+{"abi":1,"operation":{"kind":"entity_get","entity_type":"Temper.App.Task","entity_id":"task-1","at_least":{"entity_type":"Temper.App.Task","entity_id":"task-1","sequence":7}}}
 ```
 
 `value` and `params` are JSON objects whose exact property types are validated
@@ -350,16 +350,15 @@ host_temper_file_stream_try_write(
 ) -> i32
 ```
 
-`host_temper_data_call` copies a request from guest memory, completes the
-bounded async operation, stores the encoded response in a host-owned,
-invocation-scoped response registry, and returns a positive handle. It returns:
+`host_temper_data_call` validates and copies a request from guest memory, then reserves an invocation-scoped response handle and the response-byte budget before dispatch. If either reservation fails, no operation runs. It completes the bounded async operation, stores the encoded response in the reserved host-owned slot, and returns its positive handle. Unused reservations are released on pre-dispatch rejection. It returns:
 
 - `-1` for zero/negative request length or a pointer/length range outside guest
   memory;
 - `-2` when the raw request exceeds the module's request-byte budget;
 - `-3` when the bounded response-handle registry has no capacity; and
-- `-4` for a host trap or exhausted invocation deadline before a response can
-  be registered.
+- `-4` for a host trap or exhausted invocation deadline before dispatch.
+
+These negative codes reject the request before it runs. Once dispatch starts, a known committed outcome must use its reserved response slot and compact acknowledgement, including if the deadline expires after commit. A process loss or interrupted invocation leaves the outcome unknown; it is not a failed-write acknowledgement and does not authorize a blind retry of a non-idempotent operation.
 
 Domain, authorization, schema, consistency, and operation-budget failures are
 encoded as `DataResponseV1::Err`, not negative ABI codes.
@@ -572,7 +571,8 @@ without making HTTP the source of truth.
 ### Sub-Decision 8: Writes Return Commit Tokens
 
 Every successful create, patch, action, composite action, or file metadata write
-returns the resulting entity and:
+returns a commit token. It also returns the resulting entity or action result when that value fits the reserved response budget; otherwise the response sets the omission flag specified in Sub-Decision 4. The token is always present in a successful write response:
+
 
 ```text
 CommitToken {
@@ -601,7 +601,7 @@ Discarding it forces callers to infer consistency from timing.
 ### Sub-Decision 9: Keyed Reads Can Require A Sequence
 
 Keyed reads and bounded keyed-read batches accept an optional
-`at_least_sequence` requirement. The service follows one bounded decision:
+`at_least: CommitToken` requirement (including its entity identity). The service follows one bounded decision:
 
 1. Serve the projected row when its sequence is at least the requirement.
 2. Otherwise load the authoritative actor/event state once through the existing
