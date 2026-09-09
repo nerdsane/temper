@@ -164,7 +164,11 @@ pub(super) fn parse_annotation_children(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(quick_xml::events::Event::Start(ref element)) if local_name(element) == "String" => {
-                let text = reader.read_text(element.name()).unwrap_or_default();
+                let text = reader
+                    .read_text(element.name())
+                    .ok()
+                    .and_then(|t| t.xml10_content().ok().map(|s| s.into_owned()))
+                    .unwrap_or_default();
                 let text = text.trim().to_string();
                 if !text.is_empty() {
                     collection_items.push(text);

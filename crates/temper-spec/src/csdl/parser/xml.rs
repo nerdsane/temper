@@ -48,7 +48,11 @@ pub(super) fn attr_str(element: &BytesStart, name: &str) -> Option<String> {
         .attributes()
         .flatten()
         .find(|attribute| std::str::from_utf8(attribute.key.as_ref()).unwrap_or("") == name)
-        .and_then(|attribute| attribute.unescape_value().ok())
+        .and_then(|attribute| {
+            attribute
+                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                .ok()
+        })
         .map(|value| value.into_owned())
 }
 
