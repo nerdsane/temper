@@ -66,12 +66,12 @@ Suites: `platform_e2e_dst`, `system_entity_dst` (crates/temper-platform/tests/).
 cargo test --workspace                                  # full suite
 cargo test -p temper-platform --test platform_e2e_dst   # E2E shared-registry proof
 cargo run -p temper-cli -- serve --port 3000            # HTTP server, OData API, Observe UI
-scripts/setup-hooks.sh                                  # install git hooks (pre-commit integrity, pre-push 4-gate)
+scripts/setup-hooks.sh                                  # install git hooks (pre-commit integrity)
 ```
 
 ## Enforcement hooks
 
-`.claude/settings.json` wires blocking hooks: L0-L3 spec verification on every `.ioa.toml` edit, a 25-pattern determinism guard on `.rs` edits in sim-visible crates, and a pre-commit gate requiring DST-review and code-review markers (`.agents/agents/dst-reviewer.md`, `code-reviewer.md` write them on PASS). Tests run at push time, not commit time.
+`.claude/settings.json` wires blocking hooks: L0-L3 spec verification on every `.ioa.toml` edit, a 25-pattern determinism guard on `.rs` edits in sim-visible crates, and a pre-commit gate requiring DST-review and code-review markers (`.agents/agents/dst-reviewer.md`, `code-reviewer.md` write them on PASS). Tests are not run by local hooks; CI runs the full suite, the DST matrix and the readability ratchet on every pull request and on pushes to main/staging (ci.yml `on:`). A branch push with no PR starts nothing.
 
 ## Deploying spec changes
 

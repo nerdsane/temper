@@ -1,11 +1,14 @@
 #!/bin/bash
 # Item 15: Git Hook Installer
-# Installs pre-commit, pre-push, and post-commit hooks into .git/hooks/
+# Installs pre-commit and post-commit hooks into .git/hooks/ (the former pre-push
+# suite is CI's job - fmt/clippy/readability/tests all run there; ARN-453)
 # Idempotent — safe to run multiple times.
 set -euo pipefail
 
 WORKSPACE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HOOKS_DIR="$WORKSPACE_ROOT/.git/hooks"
+# Resolve against the repo this script lives in, not the caller's cwd; git-path is
+# worktree-safe (.git is a file in linked worktrees).
+HOOKS_DIR="$(git -C "$WORKSPACE_ROOT" rev-parse --path-format=absolute --git-path hooks)"
 SOURCE_DIR="$WORKSPACE_ROOT/.claude/hooks"
 
 echo "=== Installing Git Hooks ==="
@@ -29,21 +32,12 @@ HOOK_EOF
 chmod +x "$HOOKS_DIR/pre-commit"
 echo "Installed: pre-commit (integrity check, spec syntax, dep audit)"
 
-# Install pre-push hook
-if [ -f "$HOOKS_DIR/pre-push" ] && ! grep -q "temper harness" "$HOOKS_DIR/pre-push" 2>/dev/null; then
-    echo "WARNING: Existing pre-push hook found. Backing up to pre-push.backup"
-    cp "$HOOKS_DIR/pre-push" "$HOOKS_DIR/pre-push.backup"
+# Remove the pre-push wrapper the old installer wrote (its target,
+# .claude/hooks/pre-push.sh, was deleted in ARN-453; a stale wrapper fails every push).
+if [ -f "$HOOKS_DIR/pre-push" ] && grep -q "temper harness" "$HOOKS_DIR/pre-push" 2>/dev/null; then
+    rm -f "$HOOKS_DIR/pre-push"
+    echo "Removed: stale pre-push wrapper (its gates run in CI now)"
 fi
-
-cat > "$HOOKS_DIR/pre-push" << 'HOOK_EOF'
-#!/bin/bash
-# temper harness — pre-push hook (Item 10)
-# Installed by scripts/setup-hooks.sh
-WORKSPACE_ROOT="$(git rev-parse --show-toplevel)"
-exec "$WORKSPACE_ROOT/.claude/hooks/pre-push.sh"
-HOOK_EOF
-chmod +x "$HOOKS_DIR/pre-push"
-echo "Installed: pre-push (integrity/readability + fmt/check/clippy/tests)"
 
 # Install post-commit hook
 if [ -f "$HOOKS_DIR/post-commit" ] && ! grep -q "temper harness" "$HOOKS_DIR/post-commit" 2>/dev/null; then
@@ -64,7 +58,6 @@ echo "Installed: post-commit (commit-pending/sim-changed markers)"
 echo ""
 echo "=== Git hooks installed ==="
 echo "Pre-commit: integrity check, spec syntax validation, dependency audit"
-echo "Pre-push: integrity + readability + fmt + check + clippy + cargo test --workspace"
 echo "Post-commit: commit lifecycle markers for stop gate"
 echo ""
-echo "Bypass for emergencies: git commit --no-verify / git push --no-verify"
+echo "Bypass for emergencies: git commit --no-verify"

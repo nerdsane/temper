@@ -9,8 +9,8 @@
 <p align="center">
   <a href="https://github.com/nerdsane/temper/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/nerdsane/temper/ci.yml?style=for-the-badge&label=CI" alt="CI"></a>
   <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/License-MIT%2FApache--2.0-blue?style=for-the-badge" alt="License"></a>
-  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-1.92%2B-orange?style=for-the-badge" alt="Rust"></a>
-  <a href="#status"><img src="https://img.shields.io/badge/Version-0.1.0-yellow?style=for-the-badge" alt="Pre-release"></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2Fnerdsane%2Ftemper%2Fmain%2FCargo.toml&query=%24.workspace.package.rust-version&label=rust&suffix=%2B&color=orange&style=for-the-badge" alt="Rust"></a>
+  <a href="#status"><img src="https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2Fnerdsane%2Ftemper%2Fmain%2FCargo.toml&query=%24.workspace.package.version&label=version&color=yellow&style=for-the-badge" alt="Version"></a>
 </p>
 
 ---

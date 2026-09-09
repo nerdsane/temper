@@ -38,7 +38,7 @@ For authenticated entity reads and dispatches, set `TEMPER_API_KEY=<any local va
 
 ## Verify a change
 
-Pick the feature file matching what changed (see `features/`); a proof that drives one convenient entry point is incomplete when the map lists others. Always finish with the suite for the crates you touched (`cargo test -p <crate>`), then `cargo test --workspace` before push (the pre-push hook runs it anyway).
+Pick the feature file matching what changed (see `features/`); a proof that drives one convenient entry point is incomplete when the map lists others. Always finish with the suite for the crates you touched (`cargo test -p <crate>`), then `cargo test --workspace` before push (CI runs the full suite, the DST matrix and the readability ratchet on every PR; there is no pre-push hook).
 
 ## Evidence
 

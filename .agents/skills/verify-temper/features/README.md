@@ -21,6 +21,7 @@ Plus the DST suites (`crates/temper-server/tests/dst_*`, `crates/temper-platform
 | DST proof | dst-proof.md | temper-runtime, temper-server sim paths, determinism |
 | MCP bridge + REPL | mcp-bridge.md | temper-mcp, temper-sandbox, SDK surface |
 | Observe UI | observe-ui.md | temper-observe, the browser surface |
+| Developer harness | dev-harness.md | scripts/setup-hooks.sh, scripts/verification-v1-*.sh, .claude/hooks/ |
 
 ## Not yet mapped
 
