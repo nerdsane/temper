@@ -26,9 +26,9 @@ impl PostgresEventStore {
         }
 
         let clause = postgres_placeholders(where_clause, params.len() + 2);
-        let order_sql = postgres_query_field_order_sql(order_by);
-        let limit_param = params.len() + 3;
-        let offset_param = params.len() + 4;
+        let (order_sql, order_params) = postgres_query_field_order_sql(order_by, params.len() + 3);
+        let limit_param = params.len() + order_params.len() + 3;
+        let offset_param = limit_param + 1;
         let sql = postgres_query_field_page_sql(
             &clause,
             &order_sql,
@@ -44,6 +44,9 @@ impl PostgresEventStore {
             for param in params.iter().cloned() {
                 query = query.bind(param);
             }
+            for field_name in order_params.iter().cloned() {
+                query = query.bind(field_name);
+            }
             query = query
                 .bind(top.min(i64::MAX as usize) as i64)
                 .bind(skip.min(i64::MAX as usize) as i64);
@@ -57,6 +60,9 @@ impl PostgresEventStore {
             .bind(entity_type);
         for param in params.iter().cloned() {
             query = query.bind(param);
+        }
+        for field_name in order_params {
+            query = query.bind(field_name);
         }
         query = query
             .bind(top.min(i64::MAX as usize) as i64)
@@ -127,8 +133,12 @@ fn postgres_query_field_page_sql(
     )
 }
 
-fn postgres_query_field_order_sql(order_by: &[(String, bool)]) -> String {
+fn postgres_query_field_order_sql(
+    order_by: &[(String, bool)],
+    first_param: usize,
+) -> (String, Vec<String>) {
     let mut clauses = Vec::new();
+    let mut params = Vec::new();
     for (field_name, descending) in order_by {
         let direction = if *descending { "DESC" } else { "ASC" };
         let nulls = if *descending {
@@ -141,7 +151,8 @@ fn postgres_query_field_order_sql(order_by: &[(String, bool)]) -> String {
         } else if field_name == "status" || field_name == "Status" {
             clauses.push(format!("status {direction} {nulls}"));
         } else {
-            let field = postgres_string_literal(field_name);
+            let field = format!("${}", first_param + params.len());
+            params.push(field_name.clone());
             clauses.push(format!(
                 "CASE WHEN jsonb_typeof(fields -> {field}) = 'number' \
                  THEN (fields ->> {field})::numeric END {direction} {nulls}"
@@ -153,11 +164,7 @@ fn postgres_query_field_order_sql(order_by: &[(String, bool)]) -> String {
         }
     }
     clauses.push("entity_id ASC".to_string());
-    clauses.join(", ")
-}
-
-fn postgres_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+    (clauses.join(", "), params)
 }
 
 #[cfg(test)]
@@ -177,5 +184,15 @@ mod tests {
         let sql = postgres_query_field_page_sql("entity_id = $3", "entity_id ASC", 4, 5, true);
 
         assert!(sql.contains("COUNT(*) OVER() AS total_count"));
+    }
+
+    #[test]
+    fn custom_order_fields_are_bound_not_interpolated() {
+        let attack = "field'\\; DROP TABLE entity_catalog; --";
+        let (sql, params) = postgres_query_field_order_sql(&[(attack.to_string(), false)], 7);
+
+        assert!(sql.contains("fields -> $7"));
+        assert!(!sql.contains("DROP TABLE"));
+        assert_eq!(params, vec![attack]);
     }
 }
