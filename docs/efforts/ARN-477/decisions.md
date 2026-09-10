@@ -38,3 +38,15 @@ Chose the existing `-3` capacity error and a named `value` field for scalar payl
 Where: PR #412, ADR-0176 Sub-Decision 4.
 
 Scope constraint: This PR accepts a design. Review rounds may correct contradictions in that design; they do not authorize SDK implementation, migration tooling, broader architecture changes, or unrelated improvements.
+
+## Human-authorized terminal pass
+
+Decision: Clarify root generation-input hashing and File-operation identity, then end the full-panel loop with targeted verification.
+
+Came up because arbitration after three rounds identified these remaining contract inconsistencies without a need for new capabilities.
+
+Options: continue the full-panel loop; leave the ambiguities; apply the prepared documentation patch with targeted verification.
+
+Chose the prepared patch because the user authorized it on 2026-09-10 and reiterated no scope creep. Root compilation inputs exclude their generated outputs; File open calls identify the entity type. No runtime implementation or architecture expansion is included. Original panel records retain their reviewed commits.
+
+Where: PR #412, ADR-0176 Sub-Decisions 1 and 4; Temper Ask en-01a08869-9373-7063-a217-271bb8a34531.

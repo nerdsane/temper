@@ -67,10 +67,12 @@ module transport or the source language of generated module calls.
 SDK generation happens before WASM compilation, not during publication. The
 build pipeline uses this fixed order:
 
-1. Resolve the root application and every named dependency to an immutable
-   bundle version and content digest.
+1. Resolve the root application's generation inputs (CSDL, IOA, and capability
+   declarations) and every named dependency bundle to immutable versions and
+   content digests.
 2. Write a deterministically ordered dependency lock containing application
-   identity, version, bundle digest, and dependency edges.
+   identity, version, the root generation-input digest, dependency bundle
+   digests, and dependency edges.
 3. Verify and merge the locked closure's CSDL entity/container metadata, IOA
    actions and parameters, declared File capabilities, and declared
    composite/atomic actions.
@@ -80,6 +82,10 @@ build pipeline uses this fixed order:
    with its manifest binding.
 6. During publication and activation, resolve the lock again, recompute the
    canonical inputs and binding, and reject any mismatch before loading WASM.
+
+The root generation-input digest excludes generated SDK code, WASM binaries,
+and their manifest bindings. The final root bundle digest is computed after
+packaging; it is the publication identity, not an input to its own module binding.
 
 Named dependencies that cannot be resolved to immutable versions and digests
 are a build error. Publication does not silently re-resolve a name to a newer
@@ -240,8 +246,8 @@ DataOperationV1 =
   | ActionInvoke { entity_type, entity_id, action, expected_sequence?, params }
   | Batch { items[] }
   | CompositeInvoke { entity_type, entity_id, action, expected_sequence?, params }
-  | FileReadOpen { file_id, version_id? }
-  | FileWriteOpen { file_id, expected_sequence?, content_length?, content_hash? }
+  | FileReadOpen { entity_type, file_id, version_id? }
+  | FileWriteOpen { entity_type, file_id, expected_sequence?, content_length?, content_hash? }
   | FileWriteCommit { stream_handle }
   | FileStreamAbort { stream_handle }
 ```
