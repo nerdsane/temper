@@ -37,3 +37,15 @@ Options: add composite reference encoding or a new deletion mechanism; require C
 Chose complete scalar IDs and IOA-derived edges because those follow the ADR's existing scalar-only and IOA-authoritative decisions. Deletion uses the existing Restrict policy; there is no new deletion policy, transaction mechanism, or runtime implementation in this PR.
 
 Where: PR #411, ADR-0156 Sub-Decision 1; existing default in `crates/temper-server/src/registry/relations.rs`.
+
+## Human-authorized terminal pass
+
+Decision: Clarify the existing property-name mapping and end the full-panel loop with targeted verification.
+
+Came up because three review rounds and arbitration left a naming ambiguity and requests to expand existing deletion enforcement.
+
+Options: expand the deletion design; continue the full-panel loop; apply the prepared naming clarification only.
+
+Chose the prepared clarification because the user authorized it on 2026-09-10 and reiterated no scope creep. Existing deletion-path bypasses remain outside this effort. The original three review rounds and arbiter assessment remain evidence; they are not relabeled as reviews of the final commit.
+
+Where: PR #411, ADR-0156 Sub-Decision 1; Temper Ask en-01a08869-9373-7063-a217-271bb8a34531.

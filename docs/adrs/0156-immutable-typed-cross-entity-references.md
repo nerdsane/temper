@@ -71,8 +71,9 @@ A typed reference is immutable by definition:
 3. Replacing the value, clearing it, or assigning a value of another reference
    type is rejected before state mutation or event append.
 
-The IOA declaration is authoritative. CSDL cross-validation matches the IOA
-reference name to the **dependent structural property** named by
+The IOA declaration is authoritative. CSDL cross-validation applies the existing
+snake_case/PascalCase property-name mapping, then matches the IOA reference
+name to the **dependent structural property** named by
 `ReferentialConstraint.Property`, not to the navigation-property name. The
 navigation's principal target type must equal `entity_type`, and
 `ReferentialConstraint.ReferencedProperty` must name the target's complete
