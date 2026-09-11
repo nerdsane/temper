@@ -3,6 +3,9 @@
 //! `*_test.rs` file.
 
 use super::*;
+use crate::code_analysis::{
+    extract_temper_call_metadata, extract_trajectory_actions_from_code, parse_python_json_value,
+};
 use crate::trajectory_bounds::{MAX_TRAJECTORY_ACTIONS, MAX_TRAJECTORY_TEXT_BYTES};
 use axum::{Router, extract::State, http::HeaderMap, http::StatusCode, routing::post};
 use std::sync::Mutex;
@@ -112,6 +115,7 @@ fn trajectory_test_ctx(identity: &str) -> RuntimeContext {
         agent_type: None,
         session_id: None,
         api_key: None,
+        approver_key: None,
         identity_tenant: identity.to_string(),
         sandbox: temper_sandbox::runner::PersistentSandbox::new(&[("temper", "Temper", 1)]),
         trajectory: None,
@@ -119,6 +123,9 @@ fn trajectory_test_ctx(identity: &str) -> RuntimeContext {
         turns_recorded: 0,
         trajectory_bytes: 0,
         capped_warned: false,
+        client_supports_elicitation: false,
+        elicit_approvals_enabled: true,
+        requester: None,
     }
 }
 
@@ -313,6 +320,7 @@ async fn finalize_trajectory_retries_retryable_ots_upload_failure() {
         agent_type: Some("test-agent".to_string()),
         session_id: Some("session".to_string()),
         api_key: None,
+        approver_key: None,
         identity_tenant: "tenant".to_string(),
         sandbox: temper_sandbox::runner::PersistentSandbox::new(&[("temper", "Temper", 1)]),
         trajectory: None,
@@ -320,6 +328,9 @@ async fn finalize_trajectory_retries_retryable_ots_upload_failure() {
         turns_recorded: 0,
         trajectory_bytes: 0,
         capped_warned: false,
+        client_supports_elicitation: false,
+        elicit_approvals_enabled: true,
+        requester: None,
     };
     ctx.init_trajectory();
 
