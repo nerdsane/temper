@@ -99,7 +99,7 @@ impl PlatformState {
             spec_store,
         };
         state.server.bound_action_hook = Some(Arc::new(
-            crate::genesis_install::GenesisInstallHook::new(state.clone()),
+            crate::policy_activation::PlatformActionHooks::new(state.clone()),
         ));
         state
     }
@@ -134,7 +134,7 @@ impl PlatformState {
             spec_store,
         };
         state.server.bound_action_hook = Some(Arc::new(
-            crate::genesis_install::GenesisInstallHook::new(state.clone()),
+            crate::policy_activation::PlatformActionHooks::new(state.clone()),
         ));
         state
     }
