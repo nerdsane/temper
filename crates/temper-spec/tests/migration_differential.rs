@@ -399,6 +399,35 @@ fn normalize_new_config_for_expected_evolution(
 
 fn allowed_extra_config_keys(path: &str, trigger_name: &str) -> &'static [&'static str] {
     match (path, trigger_name) {
+        // Agent runtime PoC: tool runner needs the Tensorlake API key to
+        // authenticate file/process/checkpoint proxy calls.
+        ("os-apps/temper-agent/specs/temper_agent.ioa.toml", "run_tools") => {
+            &["tensorlake_api_key"]
+        }
+        // Agent runtime PoC: provision_sandbox gained Tensorlake and GitHub
+        // config plus an explicit timeout for network-bound provisioning.
+        ("os-apps/temper-agent/specs/temper_agent.ioa.toml", "provision_sandbox") => &[
+            "github_token",
+            "tensorlake_api_key",
+            "tensorlake_api_url",
+            "timeout_secs",
+        ],
+        // Agent runtime PoC: bootstrap_sandbox is a new split trigger that
+        // reuses the same network-bound config as provision_sandbox.
+        ("os-apps/temper-agent/specs/temper_agent.ioa.toml", "bootstrap_sandbox") => &[
+            "github_token",
+            "tensorlake_api_key",
+            "tensorlake_api_url",
+            "timeout_secs",
+        ],
+        // Agent runtime PoC: delete_sandbox needs provider credentials for
+        // strict teardown-gated deletion.
+        ("os-apps/temper-agent/specs/temper_agent.ioa.toml", "delete_sandbox") => &[
+            "e2b_api_key",
+            "e2b_api_url",
+            "tensorlake_api_key",
+            "tensorlake_api_url",
+        ],
         ("os-apps/paw-agent/specs/session.ioa.toml", "call_provider") => {
             &["openai_api_key", "openai_api_url"]
         }

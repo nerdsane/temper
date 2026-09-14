@@ -17,7 +17,7 @@ permit(
   action in [Action::"create", Action::"Configure", Action::"Provision", Action::"Resume"],
   resource is TemperAgent
 ) when {
-  ["supervisor", "human"].contains(principal.agent_type)
+  ["supervisor", "human", "operator"].contains(principal.agent_type)
 };
 
 // --- Read and List: any authenticated agent ---
@@ -35,7 +35,7 @@ permit(
   action in [Action::"Steer"],
   resource is TemperAgent
 ) when {
-  ["supervisor", "human", "system"].contains(principal.agent_type)
+  ["supervisor", "human", "system", "operator"].contains(principal.agent_type)
 };
 
 // --- Dispatch pipeline callbacks: system agents ---
@@ -44,6 +44,7 @@ permit(
 permit(
   principal,
   action in [
+    Action::"SandboxAllocated",
     Action::"SandboxReady",
     Action::"ProcessToolCalls",
     Action::"HandleToolResults",
@@ -54,7 +55,12 @@ permit(
     Action::"ContinueWithSteering",
     Action::"FinalizeResult",
     Action::"Heartbeat",
-    Action::"TimeoutFail"
+    Action::"TimeoutFail",
+    Action::"SandboxLost",
+    Action::"SandboxRestored",
+    Action::"RestoreFailed",
+    Action::"DeletionTeardownSucceeded",
+    Action::"DeletionTeardownFailed"
   ],
   resource is TemperAgent
 ) when {
@@ -68,7 +74,7 @@ permit(
   action == Action::"http_call",
   resource is HttpEndpoint
 ) when {
-  ["sandbox_provisioner", "llm_caller", "tool_runner", "workspace_restorer", "context_compactor", "steering_checker", "heartbeat_scan", "heartbeat_scheduler", "cron_trigger", "cron_scheduler_check", "cron_scheduler_heartbeat"].contains(context.module)
+  ["sandbox_provisioner", "llm_caller", "tool_runner", "workspace_restorer", "sandbox_destroyer", "context_compactor", "steering_checker", "heartbeat_scan", "heartbeat_scheduler", "cron_trigger", "cron_scheduler_check", "cron_scheduler_heartbeat"].contains(context.module)
 };
 
 // Allow agent WASM modules to access secrets
@@ -77,15 +83,35 @@ permit(
   action == Action::"access_secret",
   resource is Secret
 ) when {
-  ["sandbox_provisioner", "llm_caller", "tool_runner", "workspace_restorer", "context_compactor"].contains(context.module)
+  ["sandbox_provisioner", "llm_caller", "tool_runner", "workspace_restorer", "sandbox_destroyer", "context_compactor"].contains(context.module)
 };
 
-// --- Failure and cancellation: supervisors, humans, and system ---
+// --- Failure, cancellation, and recovery: supervisors, humans, and system ---
 
 permit(
   principal,
-  action in [Action::"Fail", Action::"Cancel"],
+  action in [
+    Action::"Fail",
+    Action::"Cancel",
+    Action::"SandboxLost",
+    Action::"RequestDeletion",
+    Action::"RetryDeletion"
+  ],
   resource is TemperAgent
 ) when {
-  ["supervisor", "human", "system"].contains(principal.agent_type)
+  ["supervisor", "human", "system", "operator"].contains(principal.agent_type)
+};
+
+// --- Restricted tool policy (Milestone 3) ---
+// Deny non-admin, non-supervisor agents from configuring tools that include
+// "bash" — only supervisors and humans can grant shell access.
+// This is an explicit deny so it overrides any broader permit.
+
+forbid(
+  principal,
+  action == Action::"Configure",
+  resource is TemperAgent
+) when {
+  !["admin", "supervisor", "human", "operator"].contains(principal.agent_type) &&
+  resource.tools_enabled.contains("bash")
 };
