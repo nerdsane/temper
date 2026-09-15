@@ -1,8 +1,9 @@
 # ADR-0099: Local WASM TData Host Path
 
-- Status: Proposed
+- Status: Superseded as a design by ADR-0176; implementation remains in use pending migration
 - Date: 2026-05-17
 - Deciders: Temper core maintainers
+- Superseded by: ADR-0176
 - Related:
   - ADR-0095: Projection Transaction Fast Path
   - ADR-0098: Background WASM Trace Retention
