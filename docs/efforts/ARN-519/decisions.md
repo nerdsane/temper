@@ -28,25 +28,27 @@ same module depending on who triggered it.
 `internal_http_capability_issuer`; callers in the same file and
 `api/repl.rs`. Review records rounds 1–2 on PR #474.
 
-## D2: An anonymous caller gets an anonymous capability, not none
+## D2: No security context still means no capability
 
-**Decision:** When the triggering caller has no security context, the issuer
-delegates `SecurityContext::anonymous()` (with `context.module`) instead of
-returning no issuer.
+**Decision:** The issuer's `None` arm is unchanged: a dispatch whose caller has
+no security context gets no internal capability.
 
-**Came up because:** With no issuer, the ingest integration's blob write left
-the process unauthenticated and the gate could only refuse it — the
-`principal_id="anonymous"` denial that started this effort.
+**Came up because:** An earlier cut delegated `SecurityContext::anonymous()`
+in that arm, believing a public push reached it. Review round 4 (fable)
+checked the path: the edge already admits a public push as the anonymous
+principal (`bearer_auth`), the router copies it into the trigger context, so
+the push takes the `Some` arm — the original `principal_id="anonymous"`
+denial was itself proof a capability existed. The callers that really reach
+`None` are sentinel and compensation dispatches (`AgentContext::default()`),
+whose integrations' internal calls are refused at the edge today; delegating
+anonymous there would have let a module-scoped permit admit them.
 
-**Options:** Keep "no caller, no capability"; delegate the anonymous
-principal.
+**Options:** Delegate anonymous in the `None` arm; leave the arm alone.
 
-**Chose delegation because** anonymous is a principal Cedar can reason about,
-and the policy — not the absence of a token — should decide what a module may
-do on an anonymous caller's behalf. Nothing widens: a permit that matched
-anonymous before still does, and one that did not still does not.
+**Chose leaving it because** the accepted defect never needed it, and it
+widened what sentinel- and compensation-driven integrations can reach.
 
-**Where.** `internal_http_capability_issuer`, the `None` arm.
+**Where.** `internal_http_capability_issuer`; round-4 review record.
 
 ## D3: Proven live, plus one unit test on the capability
 
@@ -61,8 +63,9 @@ resolve what the issuer minted.
 **Options:** Live proof only; a dispatch fixture; the capability round-trip.
 
 **Chose the round-trip because** it checks the contract this effort adds
-(principal unchanged, `context.module` present, anonymous delegated) without
-faking the policy or the modules the live push exercises.
+(principal unchanged, `context.module` set for this hop or cleared, no
+capability without a context) without faking the policy or the modules the
+live push exercises.
 
 **Where.** `state/dispatch/wasm/wasm_test.rs`; proof record on the PR.
 

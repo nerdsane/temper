@@ -65,35 +65,36 @@ fn wasm_module_security_context(module_name: &str) -> SecurityContext {
 /// caused the transition, which is what every tenant's policy was written
 /// against — plus `context.module`, the name of the module making the call,
 /// so a policy can also grant a module reach in its own right (ARN-519). The
-/// principal is never rewritten: a module is not promoted to its caller, and a
-/// caller is not replaced by the module.
+/// principal is never rewritten, and the module attribute is set or cleared
+/// on every issue so it names this hop, never a previous one.
 ///
-/// A caller without an identity is the anonymous principal, and gets an
-/// anonymous capability rather than none. A public `git push` is the case:
-/// nothing authenticates the pusher, the ingest integration still has to
-/// write the object cache, and the policy decides whether `context.module`
-/// earns that. Without a capability the same call arrived unauthenticated
-/// and could only ever be refused.
+/// A caller with no security context still gets no capability; that is the
+/// sentinel and compensation dispatches, and their integrations' internal
+/// calls stay refused at the edge as before. A public `git push` is not that
+/// case: the edge admits it as the anonymous principal, so the ingest
+/// integration acts as anonymous and the policy decides whether
+/// `context.module` earns the object-cache write.
 pub(crate) fn internal_http_capability_issuer(
     state: &crate::state::ServerState,
     tenant: &TenantId,
     security_context: Option<&SecurityContext>,
     module: Option<&str>,
 ) -> Option<InternalHttpCapabilityIssuerFn> {
-    let mut security_context = match security_context {
-        Some(context) if context.principal.kind == PrincipalKind::System => return None,
-        Some(context) => context.clone(),
-        None => SecurityContext {
-            // `anonymous()` mints a wall-clock id; this path is simulator-visible.
-            correlation_id: temper_runtime::scheduler::sim_uuid().to_string(),
-            ..SecurityContext::anonymous()
-        },
-    };
-    if let Some(module) = module {
-        security_context.context_attrs.insert(
-            "module".to_string(),
-            serde_json::Value::String(module.to_string()),
-        );
+    let security_context = security_context?;
+    if security_context.principal.kind == PrincipalKind::System {
+        return None;
+    }
+    let mut security_context = security_context.clone();
+    match module {
+        Some(module) => {
+            security_context.context_attrs.insert(
+                "module".to_string(),
+                serde_json::Value::String(module.to_string()),
+            );
+        }
+        None => {
+            security_context.context_attrs.remove("module");
+        }
     }
     let authenticated = AuthenticatedRequestContext::new(tenant.clone(), security_context);
     let tenant = tenant.clone();

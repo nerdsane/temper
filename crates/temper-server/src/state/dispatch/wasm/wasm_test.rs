@@ -17,9 +17,10 @@ fn internal_http_issuer_refuses_system_and_accepts_resolved_agents() {
     assert!(internal_http_capability_issuer(&state, &tenant, Some(&agent), None).is_some());
 }
 
-/// ARN-519: the capability keeps the caller's principal and adds the module
-/// name as `context.module`; a caller with no identity gets an anonymous
-/// capability instead of none.
+/// ARN-519: the capability keeps the caller's principal and names the module
+/// making the call as `context.module` — set on every issue, cleared when the
+/// caller passes none, so a stale hop's name never survives. A caller with
+/// no security context still gets no capability.
 #[test]
 fn internal_http_capability_carries_the_module_and_keeps_the_caller() {
     let state = crate::state::ServerState::from_registry(
@@ -39,27 +40,48 @@ fn internal_http_capability_carries_the_module_and_keeps_the_caller() {
             )
             .expect("capability resolves")
     };
+    let module_of = |resolved: &AuthenticatedRequestContext| {
+        resolved
+            .security_context()
+            .context_attrs
+            .get("module")
+            .cloned()
+    };
 
-    let agent = SecurityContext::from_resolved_identity("agent-1", "worker", None);
+    let anonymous = SecurityContext::anonymous();
     let issuer =
-        internal_http_capability_issuer(&state, &tenant, Some(&agent), Some("scm_ingest_pack"))
-            .expect("issuer for a resolved caller");
-    let capability = issuer("PUT", url).expect("capability");
-    let resolved = resolve(capability.bearer_token());
-    assert_eq!(resolved.security_context().principal.id, "agent-1");
-    assert_eq!(
-        resolved.security_context().context_attrs.get("module"),
-        Some(&serde_json::Value::String("scm_ingest_pack".to_string()))
-    );
-
-    let issuer = internal_http_capability_issuer(&state, &tenant, None, Some("scm_ingest_pack"))
-        .expect("an anonymous caller still gets a capability");
-    let capability = issuer("PUT", url).expect("capability");
-    let resolved = resolve(capability.bearer_token());
+        internal_http_capability_issuer(&state, &tenant, Some(&anonymous), Some("scm_ingest_pack"))
+            .expect("issuer for the anonymous principal");
+    let resolved = resolve(issuer("PUT", url).expect("capability").bearer_token());
     assert_eq!(resolved.security_context().principal.id, "anonymous");
     assert_eq!(
-        resolved.security_context().context_attrs.get("module"),
-        Some(&serde_json::Value::String("scm_ingest_pack".to_string()))
+        module_of(&resolved),
+        Some(serde_json::Value::String("scm_ingest_pack".to_string()))
+    );
+
+    // A context that already names a module is re-labelled for this hop, or
+    // cleared when this hop names none.
+    let issuer = internal_http_capability_issuer(
+        &state,
+        &tenant,
+        Some(resolved.security_context()),
+        Some("scm_merge_pr"),
+    )
+    .expect("issuer");
+    let relabelled = resolve(issuer("PUT", url).expect("capability").bearer_token());
+    assert_eq!(
+        module_of(&relabelled),
+        Some(serde_json::Value::String("scm_merge_pr".to_string()))
+    );
+    let issuer =
+        internal_http_capability_issuer(&state, &tenant, Some(resolved.security_context()), None)
+            .expect("issuer");
+    let cleared = resolve(issuer("PUT", url).expect("capability").bearer_token());
+    assert_eq!(module_of(&cleared), None);
+
+    assert!(
+        internal_http_capability_issuer(&state, &tenant, None, Some("scm_ingest_pack")).is_none(),
+        "no security context, no capability"
     );
 }
 
