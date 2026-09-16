@@ -1,0 +1,119 @@
+# Investigation Entity — I/O Automaton Specification
+#
+# Shared Deep Sci-Fi Datadog investigation walk. Howl and TemperPaw both
+# drive this. Hands run on TensorLake sandbox dsf. Gather HTTP is the
+# dsf_investigate WASM module.
+
+[automaton]
+name = "Investigation"
+states = ["Idle", "Gathering", "Analyzing", "Ready", "Failed", "Cancelled"]
+initial = "Idle"
+
+[[state]]
+name = "has_query"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "findings_recorded"
+type = "bool"
+initial = "false"
+
+[[action]]
+name = "Arm"
+kind = "input"
+from = ["Idle"]
+to = "Idle"
+effect = "set has_query true"
+params = ["Service", "Query", "TimeRange"]
+hint = "Name the investigation query. Stays Idle until StartGather."
+
+[[action]]
+name = "StartGather"
+kind = "input"
+from = ["Idle", "Failed"]
+to = "Gathering"
+guard = "has_query"
+effect = [{ type = "trigger", name = "gather_findings" }]
+hint = "Gather Datadog findings for the armed query. Runs dsf_investigate."
+
+[[action.triggers]]
+name = "gather_findings"
+kind = "wasm"
+module = "dsf_investigate"
+on_success = "RecordFindings"
+on_failure = "MarkFailed"
+
+[action.triggers.config]
+dd_site = "{secret:dd_site}"
+dd_access_token = "{secret:dd_access_token}"
+dd_api_key = "{secret:dd_api_key}"
+dd_app_key = "{secret:dd_app_key}"
+
+[[action]]
+name = "RecordFindings"
+kind = "input"
+from = ["Gathering"]
+to = "Analyzing"
+effect = "set findings_recorded true"
+params = ["FindingCount"]
+hint = "Record how many findings the gather returned."
+
+[[action]]
+name = "MarkReady"
+kind = "input"
+from = ["Analyzing"]
+to = "Ready"
+guard = "findings_recorded"
+hint = "Investigation is ready. Terminal success."
+
+[[action]]
+name = "MarkFailed"
+kind = "input"
+from = ["Gathering", "Analyzing"]
+to = "Failed"
+hint = "Gather failed. Resume can retry."
+
+[[action]]
+name = "Cancel"
+kind = "input"
+from = ["Idle", "Gathering", "Analyzing"]
+to = "Cancelled"
+hint = "Abandon the investigation. Terminal."
+
+[[action]]
+name = "Resume"
+kind = "input"
+from = ["Failed"]
+to = "Gathering"
+guard = "has_query"
+effect = [{ type = "trigger", name = "resume_gather" }]
+hint = "Resume a failed investigation. Re-gathers via dsf_investigate."
+
+[[action.triggers]]
+name = "resume_gather"
+kind = "wasm"
+module = "dsf_investigate"
+on_success = "RecordFindings"
+on_failure = "MarkFailed"
+
+[action.triggers.config]
+dd_site = "{secret:dd_site}"
+dd_access_token = "{secret:dd_access_token}"
+dd_api_key = "{secret:dd_api_key}"
+dd_app_key = "{secret:dd_app_key}"
+
+[[invariant]]
+name = "CancelledIsFinal"
+when = ["Cancelled"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "ReadyIsFinal"
+when = ["Ready"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "WorkRequiresQuery"
+when = ["Gathering", "Analyzing", "Ready"]
+assert = "has_query"

@@ -409,6 +409,15 @@ fn allowed_extra_config_keys(path: &str, trigger_name: &str) -> &'static [&'stat
             "openai_codex_api_url",
             "openrouter_api_url",
         ],
+        // ADR-0173: named-sandbox gate + TensorLake connect door on existing
+        // WASM triggers. Pre-migration SHA still has the original keys;
+        // current spec adds these without dropping any.
+        ("os-apps/temper-agent/specs/temper_agent.ioa.toml", "provision_sandbox") => {
+            &["temper_sandbox_name", "temper_sandbox_url"]
+        }
+        ("os-apps/temper-agent/specs/temper_agent.ioa.toml", "run_tools") => {
+            &["temper_sandbox_name", "tensorlake_api_key"]
+        }
         _ => &[],
     }
 }
