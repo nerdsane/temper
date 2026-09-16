@@ -501,20 +501,25 @@ fn decisions_never_substitute_for_the_rows_a_run_did_not_leave() {
 fn a_run_with_no_actor_rows_still_fails_on_a_disagreeing_decision() {
     // The other half of the rule: decisions still *fail* a run. Only the path
     // to Pass is closed to them.
-    let ots = ots_with_decisions(&["Frobnicate"]);
+    //
+    // `Delete` rather than an invented name: the platform defines it, so the
+    // kernel can place it as an action and read the decision as a claim about
+    // one. A name nothing in this deployment defines cannot be told apart from
+    // a harness tool — see `conformance::decisions` for the rule.
+    let ots = ots_with_decisions(&["Delete"]);
 
     let report = check(&order_automaton(), &[], Some(&ots));
 
     assert_eq!(report.verdict, Verdict::Fail);
-    assert_eq!(only_violation(&report).kind, ViolationKind::UnknownAction);
+    assert_eq!(only_violation(&report).kind, ViolationKind::ForbiddenAction);
 }
 
 #[test]
 fn ots_decisions_the_kernel_never_recorded_are_checked_after_the_rows() {
     let rows = vec![row("AddItem", Some("Draft"), Some("Draft"))];
-    // `AddItem` already has a row and must not be double-counted; `Frobnicate`
-    // never reached the kernel at all.
-    let ots = ots_with_decisions(&["AddItem", "Frobnicate"]);
+    // `AddItem` already has a row and must not be double-counted; `Delete` is a
+    // platform verb the Order spec never declares and no row accounts for.
+    let ots = ots_with_decisions(&["AddItem", "Delete"]);
 
     let report = check(&order_automaton(), &rows, Some(&ots));
 
@@ -523,8 +528,8 @@ fn ots_decisions_the_kernel_never_recorded_are_checked_after_the_rows() {
         violation.index, 1,
         "OTS decisions are indexed after the kernel rows"
     );
-    assert_eq!(violation.kind, ViolationKind::UnknownAction);
-    assert_eq!(violation.action, "Frobnicate");
+    assert_eq!(violation.kind, ViolationKind::ForbiddenAction);
+    assert_eq!(violation.action, "Delete");
     assert!(violation.detail.contains("never recorded a row"));
     assert_eq!(report.stats.ots_decisions_checked, 1);
     assert_eq!(report.stats.stream_length, 2);
@@ -974,4 +979,250 @@ fn an_undeclared_action_that_moved_the_entity_is_reported_once() {
     let violation = only_violation(&report);
     assert_eq!(violation.index, 1);
     assert_eq!(violation.kind, ViolationKind::UnknownAction);
+}
+
+/// The tools a Claude Code trajectory records one decision apiece for. Every
+/// one of these has the shape of an action name, which is why they were being
+/// judged as governed-action claims.
+const HARNESS_TOOLS: &[&str] = &[
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "Agent",
+    "ToolSearch",
+    "SendMessage",
+    "mcp__linear__list_issues",
+];
+
+#[test]
+fn harness_tool_decisions_are_counted_rather_than_reported() {
+    // The regression this fixture exists for: a clean Claude Code run against
+    // a conforming session returned `fail` with one `unknown_action` per tool
+    // call — 81 of them in the run that found this — each saying the agent
+    // "decided on `Bash`, which the kernel never recorded a row for".
+    let rows = vec![
+        row("AddItem", Some("Draft"), Some("Draft")),
+        row("SubmitOrder", Some("Draft"), Some("Submitted")),
+    ];
+    let ots = ots_with_decisions(HARNESS_TOOLS);
+
+    let report = check(&order_automaton(), &rows, Some(&ots));
+
+    assert!(
+        report.passed,
+        "the agent's own tools are not this actor's alphabet: {:?}",
+        report.violations
+    );
+    assert_eq!(
+        report.stats.ots_decisions_skipped_as_unrecognized_name,
+        HARNESS_TOOLS.len()
+    );
+    assert_eq!(report.stats.ots_decisions_checked, 0);
+    assert_eq!(
+        report.stats.ots_decisions_skipped_as_harness_tool, 0,
+        "a bare tool name is not the MCP envelope shape, and the two counts say \
+         different things"
+    );
+}
+
+#[test]
+fn harness_tools_mixed_with_governed_actions_leave_the_governed_ones_judged() {
+    // The realistic stream: tool calls interleaved with the actor's own
+    // actions. Skipping the tools must not skip anything else.
+    let rows = vec![row("AddItem", Some("Draft"), Some("Draft"))];
+    let mut stream: Vec<&str> = vec!["Bash", "AddItem", "Read"];
+    // Declared, and no row accounts for it: judged, and raises nothing.
+    stream.push("CancelOrder");
+    // A platform verb the Order spec does not declare: still reported.
+    stream.extend(["Edit", "Delete"]);
+    let ots = ots_with_decisions(&stream);
+
+    let report = check(&order_automaton(), &rows, Some(&ots));
+
+    let violation = only_violation(&report);
+    assert_eq!(violation.kind, ViolationKind::ForbiddenAction);
+    assert_eq!(violation.action, "Delete");
+    assert_eq!(
+        report.stats.ots_decisions_skipped_as_unrecognized_name, 3,
+        "Bash, Read and Edit"
+    );
+    assert_eq!(
+        report.stats.ots_decisions_checked, 2,
+        "CancelOrder and Delete; AddItem has a row and is not re-judged"
+    );
+}
+
+#[test]
+fn an_undeclared_action_reached_through_the_harness_is_still_reported() {
+    // The check that must survive the fix. The envelope's own action list says
+    // these were governed calls, so an undeclared one is a violation however
+    // many tool calls surround it.
+    let rows = vec![row("AddItem", Some("Draft"), Some("Draft"))];
+    let mut ots = mcp_execute_trajectory(
+        "temper.action('default', 'Order', 'Frobnicate', {})",
+        &["Frobnicate"],
+    );
+    let now = "2026-01-01T00:00:00Z"
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .expect("timestamp parses");
+    let mut noise = OTSTurn::new(2, now);
+    for tool in HARNESS_TOOLS {
+        noise = noise.with_decision(OTSDecision::new(
+            DecisionType::ToolSelection,
+            OTSChoice::new(*tool),
+            OTSConsequence::success(),
+        ));
+    }
+    ots = ots.with_turn(noise);
+
+    let report = check(&order_automaton(), &rows, Some(&ots));
+
+    let violation = only_violation(&report);
+    assert_eq!(violation.kind, ViolationKind::UnknownAction);
+    assert_eq!(violation.action, "Frobnicate");
+    assert_eq!(report.stats.ots_decisions_checked, 1);
+}
+
+#[test]
+fn an_action_the_session_dispatched_on_another_entity_stays_judgeable() {
+    // `PayInvoice` is not in the Order alphabet and not a platform verb, but
+    // the kernel dispatched it in this session, so it is an action name in this
+    // deployment rather than a tool name — and a decision claiming it against
+    // Order is still the fault it always was.
+    let rows = vec![
+        row("AddItem", Some("Draft"), Some("Draft")),
+        TursoTrajectoryRow {
+            entity_type: "Invoice".to_string(),
+            ..row("PayInvoice", Some("Due"), Some("Paid"))
+        },
+    ];
+    let ots = ots_with_decisions(&["Bash", "PayInvoice"]);
+
+    let report = check(&order_automaton(), &rows, Some(&ots));
+
+    let violation = only_violation(&report);
+    assert_eq!(violation.kind, ViolationKind::UnknownAction);
+    assert_eq!(violation.action, "PayInvoice");
+    assert_eq!(report.stats.ots_decisions_skipped_as_unrecognized_name, 1);
+}
+
+#[test]
+fn a_caller_supplied_audit_row_cannot_make_a_harness_tool_look_governed() {
+    // The injection the vocabulary has to refuse. `POST /api/audit` takes a
+    // caller-chosen session and action name; if those names counted as
+    // governed, writing one record called `Bash` into somebody else's session
+    // would turn every `Bash` in their run into a violation of their spec.
+    let rows = vec![
+        row("AddItem", Some("Draft"), Some("Draft")),
+        TursoTrajectoryRow {
+            spec_governed: Some(false),
+            ..row("Bash", Some("Draft"), Some("Draft"))
+        },
+    ];
+    let ots = ots_with_decisions(&["Bash"]);
+
+    let report = check(&order_automaton(), &rows, Some(&ots));
+
+    assert!(
+        report.passed,
+        "a caller does not get to decide what counts as an action: {:?}",
+        report.violations
+    );
+    assert_eq!(report.stats.ots_decisions_skipped_as_unrecognized_name, 1);
+    assert_eq!(report.stats.non_governed_rows_skipped, 1);
+}
+
+#[test]
+fn an_authorization_denial_row_cannot_widen_the_vocabulary() {
+    // `POST /api/authorize` reaches `record_authz_denial` with a caller-chosen
+    // action name, resource type and `X-Temper-Ctx-SessionId`, and the row it
+    // writes leaves `spec_governed` unset — so a filter that only rejects
+    // `spec_governed = false` lets it through.
+    //
+    // The attack it would open: one unauthenticated call naming action `Bash`
+    // against somebody else's session puts `Bash` in that session's vocabulary,
+    // and every `Bash` in their clean run reports as a violation of a spec they
+    // followed. A verdict anyone can flip is not a verdict.
+    let rows = vec![
+        row("AddItem", Some("Draft"), Some("Draft")),
+        TursoTrajectoryRow {
+            entity_type: "Widget".to_string(),
+            source: Some("Authz".to_string()),
+            spec_governed: None,
+            success: false,
+            authz_denied: Some(true),
+            to_status: None,
+            ..row("Bash", None, None)
+        },
+    ];
+    let ots = ots_with_decisions(&["Bash"]);
+
+    let report = check(&order_automaton(), &rows, Some(&ots));
+
+    assert!(
+        report.passed,
+        "an authorization denial names what a caller asked about, not what the \
+         kernel dispatched: {:?}",
+        report.violations
+    );
+    assert_eq!(report.stats.ots_decisions_skipped_as_unrecognized_name, 1);
+}
+
+#[test]
+fn a_platform_bookkeeping_row_does_not_widen_the_vocabulary() {
+    // Kernel-written, so the names are not a caller's — but they are already in
+    // KERNEL_PLATFORM_ACTIONS, so admitting the source adds nothing and would
+    // reopen the marker case. Narrow on purpose.
+    let rows = vec![
+        row("AddItem", Some("Draft"), Some("Draft")),
+        TursoTrajectoryRow {
+            source: Some("Platform".to_string()),
+            ..row("Bash", Some("Draft"), Some("Draft"))
+        },
+    ];
+    let ots = ots_with_decisions(&["Bash"]);
+
+    let report = check(&order_automaton(), &rows, Some(&ots));
+
+    assert!(report.passed, "{:?}", report.violations);
+    assert_eq!(report.stats.ots_decisions_skipped_as_unrecognized_name, 1);
+    assert_eq!(report.stats.platform_rows_skipped, 1);
+}
+
+#[test]
+fn a_harness_tool_named_after_a_platform_verb_is_reported() {
+    // The one place the tie-break runs toward reporting, pinned so it stays a
+    // decision rather than a surprise. A harness tool called `Delete` is
+    // indistinguishable from an agent reaching for the platform's `Delete`, and
+    // the checker reports it — the module doc says why.
+    let rows = vec![row("AddItem", Some("Draft"), Some("Draft"))];
+    let ots = ots_with_decisions(&["Delete"]);
+
+    let report = check(&order_automaton(), &rows, Some(&ots));
+
+    let violation = only_violation(&report);
+    assert_eq!(violation.kind, ViolationKind::ForbiddenAction);
+    assert_eq!(violation.action, "Delete");
+    assert_eq!(
+        report.stats.ots_decisions_skipped_as_unrecognized_name, 0,
+        "a platform verb is placeable, so it is judged rather than counted"
+    );
+}
+
+#[test]
+fn a_capture_loss_marker_does_not_widen_the_vocabulary() {
+    // The marker's action name is the capture path's own. Reading it as an
+    // action would make a decision named `CaptureLost` judgeable, and the
+    // marker is not an action at all.
+    let rows = vec![
+        row("AddItem", Some("Draft"), Some("Draft")),
+        capture_loss_marker_row(),
+    ];
+    let ots = ots_with_decisions(&[CAPTURE_LOSS_ACTION]);
+
+    let report = check(&order_automaton(), &rows, Some(&ots));
+
+    assert!(report.violations.is_empty(), "{:?}", report.violations);
+    assert_eq!(report.stats.ots_decisions_skipped_as_unrecognized_name, 1);
 }
