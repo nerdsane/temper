@@ -289,3 +289,75 @@ fn safety_cap_rejects_incomplete_row_authorized_reads() {
     assert_eq!(error.candidate_count, 15_000);
     assert_eq!(error.candidate_budget, 10_000);
 }
+
+/// ARN-522: a loaded actor is ahead of the catalog by up to one queued
+/// projection write, so a read serves the catalog only when the entity's
+/// actor is not in memory.
+#[tokio::test]
+async fn catalog_answers_only_when_the_actor_is_not_loaded() {
+    use super::try_load_entity_body_from_catalog;
+    use crate::registry::SpecRegistry;
+    use crate::state::ServerState;
+    use crate::storage::StorageStack;
+    use temper_runtime::ActorSystem;
+    use temper_runtime::tenant::TenantId;
+    use temper_spec::csdl::parse_csdl;
+    use temper_store_turso::TursoEventStore;
+
+    const CSDL_XML: &str = include_str!("../../../../../test-fixtures/specs/model.csdl.xml");
+    const ORDER_IOA: &str = include_str!("../../../../../test-fixtures/specs/order.ioa.toml");
+
+    let db_url = format!("file:/tmp/temper-arn522-test-{}.db", std::process::id());
+    let _ = std::fs::remove_file(db_url.trim_start_matches("file:"));
+    let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
+    let mut registry = SpecRegistry::new();
+    registry.register_tenant(
+        "default",
+        csdl,
+        CSDL_XML.to_string(),
+        &[("Order", ORDER_IOA)],
+    );
+    let mut state = ServerState::from_registry(ActorSystem::new("arn522-catalog"), registry);
+    let turso = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("local turso db");
+    state.set_storage_stack(StorageStack::from_turso(turso));
+    let tenant = TenantId::new("default");
+
+    // The catalog holds an older projection of the entity.
+    state
+        .query_plane_store()
+        .expect("query plane")
+        .upsert_projection(
+            "default",
+            "Order",
+            "ord-1",
+            "Stale",
+            &serde_json::json!({}),
+            &serde_json::json!({"status": "Stale", "fields": {}}),
+            1,
+        )
+        .await
+        .expect("seed catalog row");
+
+    // While the actor is loaded, the catalog does not answer.
+    state
+        .get_or_spawn_tenant_actor(&tenant, "Order", "ord-1")
+        .expect("spawn actor");
+    assert!(state.has_loaded_actor(&tenant, "Order", "ord-1"));
+    assert!(
+        try_load_entity_body_from_catalog(&state, &tenant, "Order", "Orders", "ord-1", true)
+            .await
+            .is_none(),
+        "a loaded actor must be asked instead of the catalog"
+    );
+
+    // Once the actor is out of memory, the catalog serves the read.
+    state.stop_and_remove_entity(&tenant, "Order", "ord-1");
+    assert!(!state.has_loaded_actor(&tenant, "Order", "ord-1"));
+    let body = try_load_entity_body_from_catalog(&state, &tenant, "Order", "Orders", "ord-1", true)
+        .await
+        .expect("catalog row for a cold entity");
+    assert_eq!(body["status"], "Stale");
+    let _ = std::fs::remove_file(db_url.trim_start_matches("file:"));
+}

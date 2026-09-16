@@ -229,6 +229,11 @@ pub(super) async fn try_load_entity_body_from_catalog(
     if !should_read_catalog_for_materialization(prefer_catalog) {
         return None;
     }
+    // A loaded actor is ahead of the catalog by up to one queued projection
+    // write; a read that follows a dispatch must see that dispatch (ARN-522).
+    if state.has_loaded_actor(tenant, entity_type, key) {
+        return None;
+    }
     let ids = [key.to_string()];
     let rows = try_load_catalog_rows(state, tenant, entity_type, &ids).await;
     let row = rows.into_iter().next().map(|(_, r)| r)?;
@@ -262,6 +267,9 @@ pub(super) async fn materialize_entity_set_entities(
         } else {
             BTreeMap::new()
         };
+    // Same rule as the single-entity read: an entity whose actor is loaded is
+    // served by the actor, not by a catalog row that may trail it (ARN-522).
+    catalog_hits.retain(|id, _| !state.has_loaded_actor(tenant, entity_type, id));
     let mut shadow_budget = CatalogShadowReadBudget::for_entity_set();
 
     let concurrency = entity_set_materialization_concurrency();

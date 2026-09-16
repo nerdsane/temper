@@ -981,6 +981,26 @@ impl ServerState {
         runtime_metrics::record_server_state_metrics(self);
     }
 
+    /// Whether the entity's actor is in memory right now.
+    ///
+    /// A loaded actor holds every dispatch applied to the entity; the entity
+    /// catalog is a projection written behind the dispatch by a queue. Reads
+    /// ask a loaded actor and let the catalog answer only for entities that
+    /// are not in memory (ARN-522).
+    pub(crate) fn has_loaded_actor(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> bool {
+        let key = format!("{tenant}:{entity_type}:{entity_id}");
+        self.actor_registry
+            .read()
+            .ok()
+            .and_then(|registry| registry.get(&key).map(|actor| !actor.is_closed()))
+            .unwrap_or(false)
+    }
+
     /// Stop and evict an entity actor plus its in-memory indexes.
     ///
     /// Used after an out-of-band durable append (for example, an atomic
