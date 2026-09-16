@@ -295,7 +295,7 @@ fn safety_cap_rejects_incomplete_row_authorized_reads() {
 /// actor is not in memory.
 #[tokio::test]
 async fn catalog_answers_only_when_the_actor_is_not_loaded() {
-    use super::try_load_entity_body_from_catalog;
+    use super::{materialize_entity_set_entities, try_load_entity_body_from_catalog};
     use crate::registry::SpecRegistry;
     use crate::state::ServerState;
     use crate::storage::StorageStack;
@@ -350,6 +350,30 @@ async fn catalog_answers_only_when_the_actor_is_not_loaded() {
             .await
             .is_none(),
         "a loaded actor must be asked instead of the catalog"
+    );
+
+    // The entity-set path applies the same rule: the actor's state is what a
+    // collection read returns, and the stale catalog row is left alone — the
+    // projection queue owns it while the actor is live.
+    let ids = vec!["ord-1".to_string()];
+    let set =
+        materialize_entity_set_entities(&state, &tenant, "Order", "Orders", &ids, true, None).await;
+    assert_eq!(set.entities.len(), 1);
+    assert_ne!(
+        set.entities[0]["status"], "Stale",
+        "a loaded actor's state wins over the catalog row"
+    );
+    let rows = state
+        .query_plane_store()
+        .expect("query plane")
+        .load_entity_catalog_rows("default", "Order", &ids)
+        .await
+        .expect("catalog read")
+        .expect("catalog rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].status, "Stale",
+        "a read must not write the catalog back while the actor is live"
     );
 
     // Once the actor is out of memory, the catalog serves the read.

@@ -269,7 +269,15 @@ pub(super) async fn materialize_entity_set_entities(
         };
     // Same rule as the single-entity read: an entity whose actor is loaded is
     // served by the actor, not by a catalog row that may trail it (ARN-522).
-    catalog_hits.retain(|id, _| !state.has_loaded_actor(tenant, entity_type, id));
+    // Those ids are remembered so the actor fallback below does not "repair"
+    // a catalog row that the projection queue owns while the actor is live.
+    let actor_preferred: BTreeSet<String> = entity_ids
+        .iter()
+        .filter(|id| state.has_loaded_actor(tenant, entity_type, id))
+        .cloned()
+        .collect();
+    catalog_hits.retain(|id, _| !actor_preferred.contains(id));
+    let actor_preferred = std::sync::Arc::new(actor_preferred);
     let mut shadow_budget = CatalogShadowReadBudget::for_entity_set();
 
     let concurrency = entity_set_materialization_concurrency();
@@ -292,6 +300,7 @@ pub(super) async fn materialize_entity_set_entities(
             let entity_type = entity_type.to_string();
             let entity_set_name = entity_set_name.to_string();
             let selected_catalog_fields = selected_catalog_fields_owned.clone();
+            let actor_preferred = actor_preferred.clone();
             async move {
                 if let Some(row) = catalog_row {
                     let entity = match selected_catalog_fields.as_deref() {
@@ -310,7 +319,11 @@ pub(super) async fn materialize_entity_set_entities(
                     .await
                 {
                     Ok(response) => {
+                        // A catalog miss is repaired from the actor; a row the
+                        // actor was preferred over is left to the queue, which
+                        // carries the newer sequence (ARN-522, review round 1).
                         if response.state.status != "Deleted"
+                            && !actor_preferred.contains(&id)
                             && let Some(query_plane) = state.query_plane_store()
                         {
                             let fields = state.query_projection_fields(
