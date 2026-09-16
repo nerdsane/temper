@@ -175,3 +175,50 @@ And the DST scenario is still owed — now for ~90 lines instead of ~330.
 
 **Where.** `crates/temper-platform/src/policy_activation.rs`,
 `crates/temper-platform/src/state.rs`.
+
+## D7: A Policy's row is namespaced, self-describing, and checked after recompose
+
+**Decision:** Key the durable row `policy-entity:{entity_id}`, store the
+statement under a Cedar comment naming the entity, and after recomposing the
+engine read the live text back and refuse if the marker is not where the action
+says it should be.
+
+**Came up because:** The review round read `save_policy` more carefully than I
+had. It keys on `(tenant, policy_id)` — so a bare entity id could overwrite the
+bootstrap or an app policy row — and it skips the insert when identical text is
+already enabled under another id, so two Policies with the same statement would
+have shared one row: revoking one would have removed the other's grant while it
+still said Active. And `load_and_activate_tenant_policies` reports failure only
+by logging, so the hook could return success with the engine unchanged.
+
+**Options:** Change the store's semantics; add a Result-returning recompose to the
+kernel; work within the store as it is.
+
+**Chose to work within the store because** its dedup is a reasonable property for
+its other callers, and the two-line fix on this side — a namespace and a comment
+that makes each row's text unique — is exact. Reading the engine back is the
+same "assert on the effect, not the receipt" rule this effort keeps relearning.
+
+**Where.** `crates/temper-platform/src/policy_activation.rs`
+(`policy_row_id`, `policy_row_marker`, `policy_row_text`, the post-recompose
+check).
+
+## D8: An idempotent retry must not return a success whose hook failed
+
+**Decision:** In the OData action dispatch, fill the idempotency cache only after
+the post-action hook has succeeded.
+
+**Came up because:** The cache was written before the hook ran. A `Policy.Activate`
+whose install failed answered 500 once — and then, on an idempotent retry,
+answered the cached 200 without ever running the hook again. That is the
+silent-success shape this effort exists to remove, one layer up.
+
+**Options:** Evict the entry on hook failure (the cache has no remove); leave it
+and document; move the write after the hook.
+
+**Chose moving the write because** it is the smallest change that makes the cache
+mean what callers assume it means — "this succeeded" — and it needs no new
+cache API. A retry that races the hook is refused by the actor's own state
+machine, which is the correct answer for it.
+
+**Where.** `crates/temper-server/src/odata/bindings.rs`.

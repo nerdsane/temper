@@ -57,6 +57,8 @@ impl BoundActionHook for PolicyActivationHook {
             ));
         };
 
+        let row_id = policy_row_id(ctx.entity_id);
+        let marker = policy_row_marker(ctx.entity_id);
         match action {
             "Activate" => {
                 let fields = ctx.state_json.get("fields").unwrap_or(ctx.state_json);
@@ -66,32 +68,63 @@ impl BoundActionHook for PolicyActivationHook {
                     .map(str::trim)
                     .filter(|statement| !statement.is_empty())
                     .ok_or_else(|| "Policy.Activate: cedar_statement is empty".to_string())?;
+                let row_text = policy_row_text(ctx.entity_id, statement);
 
                 // Refuse a statement that does not parse BEFORE it becomes a row,
                 // or every later recompose — including the next boot — would
                 // fail on it.
                 ctx.state
                     .authz
-                    .validate_tenant_policies(statement)
+                    .validate_tenant_policies(&row_text)
                     .map_err(|error| {
                         format!("Policy.Activate: statement does not parse: {error}")
                     })?;
 
+                // `save_policy` keys on (tenant, policy_id) and skips the insert
+                // when identical text is already enabled under ANOTHER id. The
+                // marker comment makes this row's text unique to this Policy,
+                // so the only way it returns Ok(false) is the idempotent one:
+                // this row, this text, already there.
                 store
-                    .save_policy(tenant, ctx.entity_id, statement, WRITER)
+                    .save_policy(tenant, &row_id, &row_text, WRITER)
                     .await
                     .map_err(|error| format!("Policy.Activate: could not persist: {error}"))?;
             }
             "Revoke" => {
-                store
-                    .toggle_policy_enabled(tenant, ctx.entity_id, false)
+                let changed = store
+                    .toggle_policy_enabled(tenant, &row_id, false)
                     .await
                     .map_err(|error| format!("Policy.Revoke: could not disable: {error}"))?;
+                if !changed {
+                    tracing::warn!(
+                        tenant,
+                        entity_id = ctx.entity_id,
+                        "Policy.Revoke: no enabled row to disable (never activated on this kernel, or already revoked)"
+                    );
+                }
             }
             _ => unreachable!("filtered above"),
         }
 
+        // Recompose, then CHECK. `load_and_activate_tenant_policies` reports
+        // failure by logging, so the only way to know the engine changed is to
+        // read it back: the marker must be present after Activate and absent
+        // after Revoke.
         load_and_activate_tenant_policies(ctx.state, tenant).await;
+        let live = ctx
+            .state
+            .authz
+            .get_tenant_policy_text(tenant)
+            .unwrap_or_default();
+        let in_force = live.contains(&marker);
+        let expected = action == "Activate";
+        if in_force != expected {
+            return Err(format!(
+                "Policy.{action}: the authorization engine did not take the change \
+                 (statement {} after recompose); see the kernel log for the reload error",
+                if in_force { "still present" } else { "absent" }
+            ));
+        }
         tracing::info!(
             tenant,
             entity_id = ctx.entity_id,
@@ -100,6 +133,24 @@ impl BoundActionHook for PolicyActivationHook {
         );
         Ok(None)
     }
+}
+
+/// The durable row for a Policy entity, namespaced so it can never collide with
+/// a bootstrap or app policy id.
+fn policy_row_id(entity_id: &str) -> String {
+    format!("policy-entity:{entity_id}")
+}
+
+/// A Cedar comment naming the entity, placed at the top of its row text. It
+/// makes the row self-describing and unique per Policy — two Policies with
+/// identical statements are two rows — and it is what the post-recompose check
+/// looks for in the live engine text.
+fn policy_row_marker(entity_id: &str) -> String {
+    format!("// policy-entity:{entity_id}")
+}
+
+fn policy_row_text(entity_id: &str, statement: &str) -> String {
+    format!("{}\n{}", policy_row_marker(entity_id), statement.trim())
 }
 
 /// The platform's single bound-action hook slot, shared by the concerns that
@@ -180,5 +231,21 @@ mod tests {
                 "{entity_type}.{action} must be a no-op"
             );
         }
+    }
+
+    #[test]
+    fn a_policy_row_is_namespaced_and_self_describing() {
+        assert_eq!(policy_row_id("p1"), "policy-entity:p1");
+        let text = policy_row_text("p1", "  permit(principal, action, resource);  ");
+        assert!(text.starts_with("// policy-entity:p1\n"), "{text}");
+        assert!(
+            text.ends_with("permit(principal, action, resource);"),
+            "{text}"
+        );
+        // two Policies with the same statement are two distinct rows
+        assert_ne!(
+            policy_row_text("p1", "permit(principal, action, resource);"),
+            policy_row_text("p2", "permit(principal, action, resource);")
+        );
     }
 }
