@@ -61,6 +61,33 @@ export class TemperClient {
 
   // ── Entity CRUD ──────────────────────────────────────────────────
 
+  /** A page size must be a positive integer; anything else (0, negative,
+   *  fractional, NaN, Infinity) yields a malformed request or an empty page. */
+  private static pageSize(value: number): number {
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error(`pageSize must be a positive integer, got ${value}`);
+    }
+    return value;
+  }
+
+  /** Validate one OData page envelope and return its rows. `value` must be an
+   *  array; a `@odata.nextLink`, when present, must be a non-empty string.
+   *  Otherwise a 200 with `{}` / `{"value":null}` would silently end paging. */
+  private static pageRows(
+    body: unknown,
+    what: string
+  ): { rows: unknown[]; next: string | null } {
+    const b = (body ?? {}) as { value?: unknown; "@odata.nextLink"?: unknown };
+    if (!Array.isArray(b.value)) {
+      throw new Error(`${what} returned a response without a value array`);
+    }
+    const next = b["@odata.nextLink"];
+    if (next !== undefined && (typeof next !== "string" || next === "")) {
+      throw new Error(`${what} returned an invalid @odata.nextLink`);
+    }
+    return { rows: b.value, next: (next as string | undefined) ?? null };
+  }
+
   /**
    * List entities of the given type, following server-driven paging to
    * completion.
@@ -82,24 +109,26 @@ export class TemperClient {
     const filterQ = options?.filter
       ? `$filter=${encodeURIComponent(options.filter)}&`
       : "";
-    const top = options?.pageSize ?? 500;
+    const top = TemperClient.pageSize(options?.pageSize ?? 500);
     let url: string | null = `${this.baseUrl}/tdata/${entityType}?${filterQ}$top=${top}`;
     const out: unknown[] = [];
-    // Bounded loop: a defensive ceiling so a misbehaving server can never
-    // spin this forever.
-    for (let page = 0; url && page < 10_000; page++) {
+    const seen = new Set<string>();
+    // A repeated nextLink (the `seen` guard below) is the real loop protection;
+    // this ceiling is only a runaway backstop, set far above any real traversal
+    // (even pageSize:1 over a huge set) so it never rejects valid pagination.
+    const MAX_PAGES = 10_000_000;
+    for (let page = 0; url; page++) {
+      if (page >= MAX_PAGES) throw new Error(`list ${entityType} exceeded ${MAX_PAGES} pages`);
+      if (seen.has(url)) throw new Error(`list ${entityType} looped on a repeated nextLink`);
+      seen.add(url);
       const current: string = url;
-      const resp = await fetch(current, { headers: this.defaultHeaders() });
+      const resp: Response = await fetch(current, { headers: this.defaultHeaders() });
       this.checkStatus(resp, "list", entityType);
-      const body = (await resp.json()) as {
-        value?: unknown[];
-        "@odata.nextLink"?: string;
-      };
-      if (Array.isArray(body.value)) out.push(...body.value);
-      const next = body["@odata.nextLink"];
-      // nextLink may be absolute or relative to the request URI; resolve it
-      // the spec-correct way against the URL we just fetched.
-      url = next ? new URL(next, current).toString() : null;
+      const { rows, next } = TemperClient.pageRows(await resp.json(), `list ${entityType}`);
+      out.push(...rows);
+      // Resolve against the response URL (always absolute) so a relative
+      // baseUrl — valid in the browser — still yields an absolute next URL.
+      url = next ? new URL(next, resp.url).toString() : null;
     }
     return out;
   }
@@ -113,12 +142,11 @@ export class TemperClient {
     const filterQ = options?.filter
       ? `$filter=${encodeURIComponent(options.filter)}&`
       : "";
-    const top = options?.pageSize ?? 100;
+    const top = TemperClient.pageSize(options?.pageSize ?? 100);
     const url = `${this.baseUrl}/tdata/${entityType}?${filterQ}$top=${top}`;
     const resp = await fetch(url, { headers: this.defaultHeaders() });
     this.checkStatus(resp, "list", entityType);
-    const body = await resp.json();
-    return body?.value ?? [];
+    return TemperClient.pageRows(await resp.json(), `listPage ${entityType}`).rows;
   }
 
   /** Get a single entity by type and ID. */
@@ -295,6 +323,12 @@ export class TemperClient {
   private defaultHeaders(): Record<string, string> {
     return {
       "x-tenant-id": this.tenant,
+      // Carry the configured principal on EVERY request, reads included —
+      // otherwise principal-dependent read authorization is evaluated against
+      // no identity (or the wrong one) on list/get.
+      ...(this.principal
+        ? { "x-temper-principal-id": this.principal, "x-temper-principal-kind": "Agent" }
+        : {}),
     };
   }
 
