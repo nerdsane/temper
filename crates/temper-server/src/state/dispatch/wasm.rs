@@ -811,10 +811,19 @@ impl crate::state::ServerState {
                     module_name.clone(),
                 );
                 let host_invocation_context = inv_ctx.clone();
+                // A triggered integration's internal calls run as the integration,
+                // not as whoever caused the transition — the same rule the
+                // HttpEndpoint path applies above (ARN-499 D7). A git push is
+                // anonymous by design, so `scm_ingest_pack` writing the object
+                // cache as its caller wrote it as "anonymous", which a permit
+                // scoped to the git modules correctly refuses (ARN-519). The
+                // TData host below keeps the caller's context on purpose: D7
+                // rebound only the internal HTTP capability, and so does this.
+                let module_identity = wasm_module_security_context(&module_name);
                 let internal_capability_issuer = internal_http_capability_issuer(
                     self,
                     ctx.entity_ref.tenant,
-                    ctx.agent_ctx.security_ctx.as_ref(),
+                    Some(&module_identity),
                 );
                 let mut production_host_builder =
                     ProductionWasmHost::with_timeout(tenant_secrets, http_timeout)
