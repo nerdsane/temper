@@ -184,6 +184,28 @@ module = "failing_job"
                     ticks, 13,
                     "budget must allow all twelve remaining compensations"
                 );
+                let callback_refusal = state
+                    .entity_observe_log
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .flatten()
+                    .any(|event| {
+                        event.event_name == "integration_callback_rejected"
+                            && event.data["action"] == "Fail"
+                            && event.data["error"] == "integration callback hop budget exhausted"
+                    });
+                assert!(
+                    callback_refusal,
+                    "compensation exhaustion omitted the generated callback refusal event"
+                );
+                let unchanged = state
+                    .get_tenant_entity_state(&tenant, "Job", "job")
+                    .await
+                    .unwrap()
+                    .state;
+                assert_eq!(unchanged.counters["ticks"], ticks);
+                assert_eq!(unchanged.status, "Idle");
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;

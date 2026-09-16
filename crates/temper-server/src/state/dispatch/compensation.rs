@@ -16,6 +16,7 @@
 //! inside the existing `// determinism-ok` background spawn, outside the
 //! simulation core; what is deterministic is the chosen action and its dispatch.
 
+use super::WasmEntityRef;
 use temper_runtime::tenant::TenantId;
 use tracing::Instrument;
 
@@ -145,6 +146,15 @@ impl crate::state::ServerState {
         let callback_ctx = match parent_ctx.for_callback() {
             Ok(context) => context,
             Err(budget_error) => {
+                self.record_generated_callback_refusal(
+                    WasmEntityRef {
+                        tenant,
+                        entity_type,
+                        entity_id,
+                    },
+                    &action,
+                    &budget_error.to_string(),
+                );
                 self.surface_dropped_integration_failure(
                     tenant,
                     entity_type,
