@@ -67,7 +67,15 @@ jobs:
             echo "::error::STACK_TOKEN is missing from the trusted base-repository gate configuration"; exit 1; fi
           git clone --depth 1 https://x-access-token:${STACK_TOKEN}@github.com/arni-labs/stack /tmp/stack || {
             echo "::error::cannot reach arni-labs/stack"; exit 1; }
+      - name: Read exact-head owner waiver
+        id: owner_waiver
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+        run: python3 /tmp/stack/review/owner_waiver.py
       - name: Find the record for this head
+        if: steps.owner_waiver.outputs.accepted != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
@@ -99,6 +107,7 @@ jobs:
           print("record found for the current head")
           PY
       - name: Merge Greptile findings into the record
+        if: steps.owner_waiver.outputs.accepted != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUM: ${{ github.event.pull_request.number }}
@@ -119,6 +128,7 @@ jobs:
           json.dump(r,open(".review/review.json","w"),indent=2)
           PY
       - name: Apply owner adjudications (RESOLVE comments)
+        if: steps.owner_waiver.outputs.accepted != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
@@ -168,6 +178,7 @@ jobs:
               print(f"adjudications applied: {hit}")
           PY
       - name: Validate the record (the gate)
+        if: steps.owner_waiver.outputs.accepted != 'true'
         id: validate
         env:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
@@ -183,7 +194,7 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          RISK=$(python3 -c "import json; r=json.load(open('.review/review.json')); print('human' if r.get('risk_flags') or r.get('risk')!='low' else 'low')")
+          RISK=$(python3 -c "import json, pathlib; p=pathlib.Path('.review/owner-waiver.json'); r={} if p.exists() else json.load(open('.review/review.json')); print('human' if p.exists() or r.get('risk_flags') or r.get('risk')!='low' else 'low')")
           CHANGED=$(git diff --name-only "${PR_BASE}...${PR_HEAD}")
           if [ "$RISK" != "low" ] || grep -q '^\.github/workflows/' <<<"$CHANGED"; then
             ARMED=$(gh pr view "$PR_NUM" --json autoMergeRequest -q '.autoMergeRequest != null')
@@ -198,6 +209,15 @@ jobs:
         with:
           script: |
             const fs = require('fs');
+            if (fs.existsSync('.review/owner-waiver.json')) {
+              const w = JSON.parse(fs.readFileSync('.review/owner-waiver.json', 'utf8'));
+              const body = `<!-- sdlc-owner-waiver -->\n### Review requirement — OWNER WAIVER\n` +
+                `Authorized commit: ${w.commit}\nHistorical reviewed commit: ${w.reviewed_commit}\n` +
+                `[Owner decision](${w.source}) · [Original review](${w.historical_source})\n` +
+                `No additional model review ran. Other required checks remain in force.`;
+              await github.rest.issues.createComment({...context.repo, issue_number: context.issue.number, body});
+              return;
+            }
             if (!fs.existsSync('.review/review.json')) return;
             const r = JSON.parse(fs.readFileSync('.review/review.json','utf8'));
             const open = (r.findings||[]).filter(f => f.severity==='act-on' && !f.resolved).length;

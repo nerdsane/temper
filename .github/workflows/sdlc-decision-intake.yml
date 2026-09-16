@@ -26,7 +26,7 @@ jobs:
     # Only PR comments beginning with an existing DECISION or RESOLVE command.
     if: >-
       github.event.issue.pull_request != null &&
-      (startsWith(github.event.comment.body, 'DECISION:') || startsWith(github.event.comment.body, 'RESOLVE:'))
+      (startsWith(github.event.comment.body, 'DECISION:') || startsWith(github.event.comment.body, 'RESOLVE:') || startsWith(github.event.comment.body, 'REVIEW-WAIVER:'))
     runs-on: ubuntu-latest
     steps:
       - name: Record the ruling and re-arm the gate
@@ -45,7 +45,7 @@ jobs:
           # the PR BODY (the intent reviewers read) and a rerun replays the
           # ORIGINAL payload - so the body edit must fire a real `edited` event,
           # which requires a PAT (GITHUB_TOKEN-created events are suppressed).
-          if [[ "$COMMENT_BODY" == RESOLVE:* ]]; then
+          if [[ "$COMMENT_BODY" == RESOLVE:* || "$COMMENT_BODY" == REVIEW-WAIVER:* ]]; then
             HEAD=$(gh pr view "$PR_NUM" --json headRefOid -q .headRefOid)
             if [ -z "${STACK_TOKEN:-}" ]; then
               echo "::error::STACK_TOKEN is required to read the trusted gate helper"; exit 1
