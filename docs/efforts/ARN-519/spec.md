@@ -1,16 +1,19 @@
-# Integration identity on the trigger path
+# Module name on a guest's internal calls
 
-When the kernel invokes a WASM integration because an entity transitioned, the
-integration's internal calls back into the kernel — the HTTP capability its
-blob reads and writes travel on, and the in-process TData host — carry the
-integration's own module identity,
-`Agent::"<module>"`, not the identity of the principal that caused the
-transition.
+When a WASM integration calls back into the kernel — over the internal HTTP
+capability its blob reads and writes travel on — the call carries two things:
+the identity of the principal the integration acts for, unchanged, and
+`context.module`, the name of the module making the call.
 
-This is the rule ARN-499 D7 already established for HttpEndpoint guests. The
-two invocation paths now agree: a module is the same principal however it was
-started, and a tenant's Cedar policy names that module directly to grant it
-reach. Nothing an integration can do is widened by this; a call that was
-denied to `Agent::"scm_ingest_pack"` before is still denied. What changes is
-that a call the policy grants to that module is no longer refused because the
-module was wearing its caller's identity.
+The principal is what it always was. A spec-triggered integration acts for
+whoever caused the transition; an HttpEndpoint guest acts as its module
+(ARN-499 D7). Nothing a tenant's existing policy relied on changes, because
+no principal is rewritten.
+
+What is new is that a policy can grant a module reach in its own right, by
+name, for calls made on behalf of a principal that has no standing of its own.
+A public `git push` is that case: the pusher is anonymous by design, the
+ingest integration must still write the object cache, and Genesis's
+BlobObject permit names `scm_ingest_pack` in `context.module`. A caller
+without an identity is therefore the anonymous principal with a capability,
+not a call without one — the policy decides, instead of the transport.

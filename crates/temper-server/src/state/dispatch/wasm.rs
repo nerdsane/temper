@@ -59,16 +59,39 @@ fn wasm_module_security_context(module_name: &str) -> SecurityContext {
     }
 }
 
+/// The capability a guest presents on its internal calls back into the kernel.
+///
+/// It carries the caller's identity — a triggered integration acts for whoever
+/// caused the transition, which is what every tenant's policy was written
+/// against — plus `context.module`, the name of the module making the call,
+/// so a policy can also grant a module reach in its own right (ARN-519). The
+/// principal is never rewritten: a module is not promoted to its caller, and a
+/// caller is not replaced by the module.
+///
+/// A caller without an identity is the anonymous principal, and gets an
+/// anonymous capability rather than none. A public `git push` is the case:
+/// nothing authenticates the pusher, the ingest integration still has to
+/// write the object cache, and the policy decides whether `context.module`
+/// earns that. Without a capability the same call arrived unauthenticated
+/// and could only ever be refused.
 pub(crate) fn internal_http_capability_issuer(
     state: &crate::state::ServerState,
     tenant: &TenantId,
     security_context: Option<&SecurityContext>,
+    module: Option<&str>,
 ) -> Option<InternalHttpCapabilityIssuerFn> {
-    let security_context = security_context?;
-    if security_context.principal.kind == PrincipalKind::System {
-        return None;
+    let mut security_context = match security_context {
+        Some(context) if context.principal.kind == PrincipalKind::System => return None,
+        Some(context) => context.clone(),
+        None => SecurityContext::anonymous(),
+    };
+    if let Some(module) = module {
+        security_context.context_attrs.insert(
+            "module".to_string(),
+            serde_json::Value::String(module.to_string()),
+        );
     }
-    let authenticated = AuthenticatedRequestContext::new(tenant.clone(), security_context.clone());
+    let authenticated = AuthenticatedRequestContext::new(tenant.clone(), security_context);
     let tenant = tenant.clone();
     let store = state.internal_invocation_credentials.clone();
     Some(Arc::new(move |method, url| {
@@ -135,11 +158,12 @@ pub(crate) fn authorized_http_endpoint_host(
     // Tradeoff, recorded deliberately: a guest no longer inherits its caller's
     // reach for internal calls. For a protocol guest that is correct, because it
     // was never enforcing on the caller's behalf. It would be wrong for a guest
-    // that expects the kernel to scope its reads. Trigger dispatch applies the
-    // same rule since ARN-519: a module is one principal however it is started.
+    // that expects the kernel to scope its reads, so this applies to the
+    // HttpEndpoint path only.
     let module_identity = wasm_module_security_context(module_name);
-    let capability_issuer = internal_http_capability_issuer(state, tenant, Some(&module_identity))
-        .ok_or_else(|| "HttpEndpoint caller authority cannot be delegated".to_string())?;
+    let capability_issuer =
+        internal_http_capability_issuer(state, tenant, Some(&module_identity), Some(module_name))
+            .ok_or_else(|| "HttpEndpoint caller authority cannot be delegated".to_string())?;
     let internal_api_url = internal_api_base_url(state);
     let local_blob_interceptor = local_blob_binary_interceptor(
         state.clone(),
@@ -811,20 +835,11 @@ impl crate::state::ServerState {
                     module_name.clone(),
                 );
                 let host_invocation_context = inv_ctx.clone();
-                // A triggered integration's internal calls run as the integration,
-                // not as whoever caused the transition — the same rule the
-                // HttpEndpoint path applies above (ARN-499 D7), and for both
-                // hosts it binds: the internal HTTP capability here and the
-                // in-process TData host below. One identity for every call,
-                // whichever transport carries it. A git push is anonymous by
-                // design, so `scm_ingest_pack` writing the object cache as its
-                // caller wrote it as "anonymous", which a permit scoped to the
-                // git modules correctly refuses (ARN-519).
-                let module_identity = wasm_module_security_context(&module_name);
                 let internal_capability_issuer = internal_http_capability_issuer(
                     self,
                     ctx.entity_ref.tenant,
-                    Some(&module_identity),
+                    ctx.agent_ctx.security_ctx.as_ref(),
+                    Some(&module_name),
                 );
                 let mut production_host_builder =
                     ProductionWasmHost::with_timeout(tenant_secrets, http_timeout)
@@ -859,7 +874,7 @@ impl crate::state::ServerState {
                 let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
                     self.clone(),
                     ctx.entity_ref.tenant.clone(),
-                    Some(&module_identity),
+                    ctx.agent_ctx.security_ctx.as_ref(),
                     production_host,
                 ));
                 let host: Arc<dyn WasmHost> =

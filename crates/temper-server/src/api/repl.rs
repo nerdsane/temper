@@ -113,6 +113,7 @@ pub(crate) async fn handle_repl(
         &state,
         authenticated.tenant(),
         Some(authenticated.security_context()),
+        None,
     ) else {
         tracing::error!("authenticated REPL request has no internal capability issuer");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();

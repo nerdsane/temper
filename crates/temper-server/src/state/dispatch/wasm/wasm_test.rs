@@ -10,11 +10,57 @@ fn internal_http_issuer_refuses_system_and_accepts_resolved_agents() {
     let tenant = TenantId::new("tenant-a");
 
     assert!(
-        internal_http_capability_issuer(&state, &tenant, Some(&SecurityContext::system()))
+        internal_http_capability_issuer(&state, &tenant, Some(&SecurityContext::system()), None)
             .is_none()
     );
     let agent = SecurityContext::from_resolved_identity("agent-1", "worker", None);
-    assert!(internal_http_capability_issuer(&state, &tenant, Some(&agent)).is_some());
+    assert!(internal_http_capability_issuer(&state, &tenant, Some(&agent), None).is_some());
+}
+
+/// ARN-519: the capability keeps the caller's principal and adds the module
+/// name as `context.module`; a caller with no identity gets an anonymous
+/// capability instead of none.
+#[test]
+fn internal_http_capability_carries_the_module_and_keeps_the_caller() {
+    let state = crate::state::ServerState::from_registry(
+        temper_runtime::ActorSystem::new("internal-capability-module-test"),
+        crate::registry::SpecRegistry::new(),
+    );
+    let tenant = TenantId::new("tenant-a");
+    let url = "http://127.0.0.1:1/_internal/blobs/field-overflow/sha256/abc.json";
+    let resolve = |bearer: &str| {
+        state
+            .internal_invocation_credentials
+            .consume_for_request(
+                bearer,
+                &tenant,
+                &axum::http::Method::PUT,
+                &url.parse().expect("uri"),
+            )
+            .expect("capability resolves")
+    };
+
+    let agent = SecurityContext::from_resolved_identity("agent-1", "worker", None);
+    let issuer =
+        internal_http_capability_issuer(&state, &tenant, Some(&agent), Some("scm_ingest_pack"))
+            .expect("issuer for a resolved caller");
+    let capability = issuer("PUT", url).expect("capability");
+    let resolved = resolve(capability.bearer_token());
+    assert_eq!(resolved.security_context().principal.id, "agent-1");
+    assert_eq!(
+        resolved.security_context().context_attrs.get("module"),
+        Some(&serde_json::Value::String("scm_ingest_pack".to_string()))
+    );
+
+    let issuer = internal_http_capability_issuer(&state, &tenant, None, Some("scm_ingest_pack"))
+        .expect("an anonymous caller still gets a capability");
+    let capability = issuer("PUT", url).expect("capability");
+    let resolved = resolve(capability.bearer_token());
+    assert_eq!(resolved.security_context().principal.id, "anonymous");
+    assert_eq!(
+        resolved.security_context().context_attrs.get("module"),
+        Some(&serde_json::Value::String("scm_ingest_pack".to_string()))
+    );
 }
 
 #[test]

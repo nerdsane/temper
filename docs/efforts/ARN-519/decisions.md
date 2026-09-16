@@ -1,77 +1,78 @@
 # Decisions and tradeoffs
 
-## D1: A triggered integration acts as its module, exactly as an endpoint guest does
+## D1: Carry the module name on the capability; do not rebind the principal
 
-**Decision:** On the trigger path, feed `internal_http_capability_issuer` the
-module's own security context instead of the triggering caller's.
+**Decision:** The internal HTTP capability keeps the caller's identity and adds
+`context.module`; a triggered integration is not given its module as
+principal.
 
-**Came up because:** The genesis #50 round-trip failed at the push with
-`internal blob object access denied … principal_id="anonymous"`. The ingest
-integration was writing the object cache as its caller — and a push's caller
-is anonymous by design. ARN-499's D7 fixed the same problem for HttpEndpoint
-guests and stopped there.
+**Came up because:** The first two cuts of this effort mirrored ARN-499 D7 on
+the trigger path — the integration acts as `Agent::"<module>"`. Review round 2
+(codex, act-on) showed what that costs: TemperPaw's os-apps gate twelve
+policies on the *triggering* principal's `agent_type` (`system`,
+`file-service`), and their triggered modules make loopback GET/POST/PATCH/PUT
+calls under that identity. Rebinding the principal turns those into 403s
+across another repository.
 
-**Options:** Widen Genesis's object-cache permit back to an unconstrained
-principal; special-case the blob gate to trust triggered integrations; give
-the trigger path the identity binding the endpoint path already has.
+**Options:** Module as principal on the trigger path plus module permits in
+every TemperPaw app; module name as a context attribute with the principal
+untouched; a fallback to the module only when the caller is anonymous.
 
-**Chose the binding because** the first is the security hole two reviewers
-just had closed, the second encodes an exception where a rule belongs, and the
-third makes the two invocation paths agree on what a module is. It is the
-change D7 should have made in both places.
+**Chose the context attribute because** it is additive — no existing policy
+changes meaning, no other repository has to move — and Genesis's permit was
+already written to accept `context.module` for triggered integrations. The
+fallback was rejected because a policy would then answer differently for the
+same module depending on who triggered it.
 
-**Where.** `crates/temper-server/src/state/dispatch/wasm.rs`, the trigger
-dispatch host construction.
+**Where.** `crates/temper-server/src/state/dispatch/wasm.rs`,
+`internal_http_capability_issuer`; callers in the same file and
+`api/repl.rs`. Review records rounds 1–2 on PR #474.
 
-## D2: The TData host is rebound too — one identity per module, whatever the transport
+## D2: An anonymous caller gets an anonymous capability, not none
 
-**Decision:** Bind the trigger path's `LocalTDataWasmHost` to the module's
-security context as well, not only the internal HTTP capability.
+**Decision:** When the triggering caller has no security context, the issuer
+delegates `SecurityContext::anonymous()` (with `context.module`) instead of
+returning no issuer.
 
-**Came up because:** The first cut rebound only the capability issuer and
-said D7 had done the same. Review round 1 (fable) checked: the endpoint path
-constructs its `LocalTDataWasmHost` with the module identity (wasm.rs ~L180),
-so the first cut mirrored D7 by half — and the half left a triggered
-integration split by transport: in-process GET/POST `/tdata` as the caller,
-everything else as the module, so one policy answered differently by HTTP
-method.
+**Came up because:** With no issuer, the ingest integration's blob write left
+the process unauthenticated and the gate could only refuse it — the
+`principal_id="anonymous"` denial that started this effort.
 
-**Options:** Keep the split and document it; rebind the TData host too.
+**Options:** Keep "no caller, no capability"; delegate the anonymous
+principal.
 
-**Chose the rebind because** D7's rule is "a module is one principal", the
-endpoint path already applies it to both hosts, and a split identity is the
-kind of exception a reader cannot predict from the policy.
+**Chose delegation because** anonymous is a principal Cedar can reason about,
+and the policy — not the absence of a token — should decide what a module may
+do on an anonymous caller's behalf. Nothing widens: a permit that matched
+anonymous before still does, and one that did not still does not.
 
-**Where.** `crates/temper-server/src/state/dispatch/wasm.rs`, the
-`LocalTDataWasmHost::new` call in trigger dispatch. Round-1 review record.
+**Where.** `internal_http_capability_issuer`, the `None` arm.
 
-## D3: Proven live, not by a unit test
+## D3: Proven live, plus one unit test on the capability
 
-**Decision:** The acceptance evidence is the live Genesis push that failed
-before and passes after, plus an independent verifier rerun; no unit test is
-added.
+**Decision:** Acceptance evidence is the live Genesis push that failed before
+and passes after, an independent verifier's rerun, and a unit test that mints
+a capability and resolves it.
 
-**Came up because:** The changed line sits inside trigger dispatch, which has
-no test seam short of standing up server state; D7 was accepted on the same
-basis.
+**Came up because:** Trigger dispatch has no test seam short of standing up
+server state, but the capability round-trip does — the credential store can
+resolve what the issuer minted.
 
-**Options:** Build a dispatch-state test fixture; prove live and record it.
+**Options:** Live proof only; a dispatch fixture; the capability round-trip.
 
-**Chose live proof because** a fixture is machinery this one-line change does
-not justify, and the live push exercises the real policy, real modules, and
-the real gate — which a fixture would have to fake.
+**Chose the round-trip because** it checks the contract this effort adds
+(principal unchanged, `context.module` present, anonymous delegated) without
+faking the policy or the modules the live push exercises.
 
-**Where.** Proof record on the PR.
+**Where.** `state/dispatch/wasm/wasm_test.rs`; proof record on the PR.
 
 ## D4: Correlation id from `sim_uuid()`
 
 **Decision:** `wasm_module_security_context` takes its correlation id from
-`crate::sim_uuid()` instead of `uuid::Uuid::now_v7()`.
+`temper_runtime::scheduler::sim_uuid()` instead of `uuid::Uuid::now_v7()`.
 
-**Came up because:** Review round 1 (fable) noted that trigger dispatch is a
-simulator-visible path, and the wall-clock id, harmless on the endpoint path,
-now ran on every triggered invocation under a determinism suppression written
-for the endpoint path.
+**Came up because:** Review round 1 (fable) noted the wall-clock id sat under
+a determinism suppression on a simulator-visible path.
 
 **Options:** Keep the suppression; use the simulator-aware source the rest of
 the server uses.
