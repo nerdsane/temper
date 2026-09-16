@@ -83,7 +83,11 @@ pub(crate) fn internal_http_capability_issuer(
     let mut security_context = match security_context {
         Some(context) if context.principal.kind == PrincipalKind::System => return None,
         Some(context) => context.clone(),
-        None => SecurityContext::anonymous(),
+        None => SecurityContext {
+            // `anonymous()` mints a wall-clock id; this path is simulator-visible.
+            correlation_id: temper_runtime::scheduler::sim_uuid().to_string(),
+            ..SecurityContext::anonymous()
+        },
     };
     if let Some(module) = module {
         security_context.context_attrs.insert(
