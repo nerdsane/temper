@@ -11,6 +11,7 @@ use crate::storage::{
 };
 
 mod config;
+mod projection_repair;
 mod select_projection;
 mod shadow;
 
@@ -322,36 +323,15 @@ pub(super) async fn materialize_entity_set_entities(
                         // A catalog miss is repaired from the actor; a row the
                         // actor was preferred over is left to the queue, which
                         // carries the newer sequence (ARN-522, review round 1).
-                        if response.state.status != "Deleted"
-                            && !actor_preferred.contains(&id)
-                            && let Some(query_plane) = state.query_plane_store()
-                        {
-                            let fields = state.query_projection_fields(
+                        if !actor_preferred.contains(&id) {
+                            projection_repair::repair_from_actor(
+                                &state,
                                 &tenant,
                                 &entity_type,
-                                &response.state.fields,
-                            );
-                            let projected_state = state.query_projection_state(&response.state);
-                            if let Err(error) = query_plane
-                                .upsert_projection(
-                                    tenant.as_str(),
-                                    &entity_type,
-                                    &id,
-                                    &response.state.status,
-                                    &fields,
-                                    &projected_state,
-                                    response.state.sequence_nr,
-                                )
-                                .await
-                            {
-                                tracing::debug!(
-                                    error = %error,
-                                    tenant = %tenant,
-                                    entity_type = %entity_type,
-                                    entity_id = %id,
-                                    "failed to repair query projection after actor materialization fallback"
-                                );
-                            }
+                                &id,
+                                &response.state,
+                            )
+                            .await;
                         }
                         let mut entity = serde_json::to_value(&response.state).unwrap_or_default();
                         if let Some(obj) = entity.as_object_mut() {
