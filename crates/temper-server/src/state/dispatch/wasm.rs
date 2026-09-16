@@ -55,7 +55,7 @@ fn wasm_module_security_context(module_name: &str) -> SecurityContext {
             attributes: std::collections::HashMap::new(), // determinism-ok: Principal uses HashMap
         },
         context_attrs: std::collections::HashMap::new(), // determinism-ok: SecurityContext uses HashMap
-        correlation_id: uuid::Uuid::now_v7().to_string(), // determinism-ok: correlation only
+        correlation_id: temper_runtime::scheduler::sim_uuid().to_string(),
     }
 }
 
@@ -135,8 +135,8 @@ pub(crate) fn authorized_http_endpoint_host(
     // Tradeoff, recorded deliberately: a guest no longer inherits its caller's
     // reach for internal calls. For a protocol guest that is correct, because it
     // was never enforcing on the caller's behalf. It would be wrong for a guest
-    // that expects the kernel to scope its reads, so this applies to the
-    // HttpEndpoint path only.
+    // that expects the kernel to scope its reads. Trigger dispatch applies the
+    // same rule since ARN-519: a module is one principal however it is started.
     let module_identity = wasm_module_security_context(module_name);
     let capability_issuer = internal_http_capability_issuer(state, tenant, Some(&module_identity))
         .ok_or_else(|| "HttpEndpoint caller authority cannot be delegated".to_string())?;
@@ -813,12 +813,13 @@ impl crate::state::ServerState {
                 let host_invocation_context = inv_ctx.clone();
                 // A triggered integration's internal calls run as the integration,
                 // not as whoever caused the transition — the same rule the
-                // HttpEndpoint path applies above (ARN-499 D7). A git push is
-                // anonymous by design, so `scm_ingest_pack` writing the object
-                // cache as its caller wrote it as "anonymous", which a permit
-                // scoped to the git modules correctly refuses (ARN-519). The
-                // TData host below keeps the caller's context on purpose: D7
-                // rebound only the internal HTTP capability, and so does this.
+                // HttpEndpoint path applies above (ARN-499 D7), and for both
+                // hosts it binds: the internal HTTP capability here and the
+                // in-process TData host below. One identity for every call,
+                // whichever transport carries it. A git push is anonymous by
+                // design, so `scm_ingest_pack` writing the object cache as its
+                // caller wrote it as "anonymous", which a permit scoped to the
+                // git modules correctly refuses (ARN-519).
                 let module_identity = wasm_module_security_context(&module_name);
                 let internal_capability_issuer = internal_http_capability_issuer(
                     self,
@@ -858,7 +859,7 @@ impl crate::state::ServerState {
                 let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
                     self.clone(),
                     ctx.entity_ref.tenant.clone(),
-                    ctx.agent_ctx.security_ctx.as_ref(),
+                    Some(&module_identity),
                     production_host,
                 ));
                 let host: Arc<dyn WasmHost> =

@@ -23,24 +23,27 @@ change D7 should have made in both places.
 **Where.** `crates/temper-server/src/state/dispatch/wasm.rs`, the trigger
 dispatch host construction.
 
-## D2: The TData host keeps the caller's context
+## D2: The TData host is rebound too — one identity per module, whatever the transport
 
-**Decision:** Leave `LocalTDataWasmHost` on the trigger path bound to the
-triggering caller's security context.
+**Decision:** Bind the trigger path's `LocalTDataWasmHost` to the module's
+security context as well, not only the internal HTTP capability.
 
-**Came up because:** The trigger path hands the caller's context to two
-consumers, and it was tempting to rebind both for symmetry.
+**Came up because:** The first cut rebound only the capability issuer and
+said D7 had done the same. Review round 1 (fable) checked: the endpoint path
+constructs its `LocalTDataWasmHost` with the module identity (wasm.rs ~L180),
+so the first cut mirrored D7 by half — and the half left a triggered
+integration split by transport: in-process GET/POST `/tdata` as the caller,
+everything else as the module, so one policy answered differently by HTTP
+method.
 
-**Options:** Rebind both; rebind only the internal HTTP capability.
+**Options:** Keep the split and document it; rebind the TData host too.
 
-**Chose the HTTP capability only because** that is exactly what D7 did on the
-endpoint path, and D7 said why: a guest that expects the kernel to scope its
-TData reads must keep inheriting its caller's reach. The failing case
-(object-cache PUT) travels the HTTP capability, so this is also the smallest
-change that fixes it.
+**Chose the rebind because** D7's rule is "a module is one principal", the
+endpoint path already applies it to both hosts, and a split identity is the
+kind of exception a reader cannot predict from the policy.
 
-**Where.** `crates/temper-server/src/state/dispatch/wasm.rs`, trigger dispatch;
-the TData host construction a few lines below the change is untouched.
+**Where.** `crates/temper-server/src/state/dispatch/wasm.rs`, the
+`LocalTDataWasmHost::new` call in trigger dispatch. Round-1 review record.
 
 ## D3: Proven live, not by a unit test
 
@@ -59,3 +62,22 @@ not justify, and the live push exercises the real policy, real modules, and
 the real gate — which a fixture would have to fake.
 
 **Where.** Proof record on the PR.
+
+## D4: Correlation id from `sim_uuid()`
+
+**Decision:** `wasm_module_security_context` takes its correlation id from
+`crate::sim_uuid()` instead of `uuid::Uuid::now_v7()`.
+
+**Came up because:** Review round 1 (fable) noted that trigger dispatch is a
+simulator-visible path, and the wall-clock id, harmless on the endpoint path,
+now ran on every triggered invocation under a determinism suppression written
+for the endpoint path.
+
+**Options:** Keep the suppression; use the simulator-aware source the rest of
+the server uses.
+
+**Chose `sim_uuid()` because** it is what every other id on this path uses,
+and it deletes a suppression instead of widening one.
+
+**Where.** `crates/temper-server/src/state/dispatch/wasm.rs`,
+`wasm_module_security_context`.
