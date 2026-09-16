@@ -270,14 +270,18 @@ pub(super) async fn materialize_entity_set_entities(
         };
     // Same rule as the single-entity read: an entity whose actor is loaded is
     // served by the actor, not by a catalog row that may trail it (ARN-522).
-    // Those ids are remembered so the actor fallback below does not "repair"
-    // a catalog row that the projection queue owns while the actor is live.
-    let actor_preferred: BTreeSet<String> = entity_ids
-        .iter()
-        .filter(|id| state.has_loaded_actor(tenant, entity_type, id))
-        .cloned()
-        .collect();
-    catalog_hits.retain(|id, _| !actor_preferred.contains(id));
+    // Only ids whose row was skipped are remembered: the fallback must not
+    // "repair" a row the projection queue owns while the actor is live, but a
+    // loaded actor with no row at all is still a miss and is repaired.
+    let mut actor_preferred: BTreeSet<String> = BTreeSet::new();
+    catalog_hits.retain(|id, _| {
+        if state.has_loaded_actor(tenant, entity_type, id) {
+            actor_preferred.insert(id.clone());
+            false
+        } else {
+            true
+        }
+    });
     let actor_preferred = std::sync::Arc::new(actor_preferred);
     let mut shadow_budget = CatalogShadowReadBudget::for_entity_set();
 
@@ -322,7 +326,7 @@ pub(super) async fn materialize_entity_set_entities(
                     Ok(response) => {
                         // A catalog miss is repaired from the actor; a row the
                         // actor was preferred over is left to the queue, which
-                        // carries the newer sequence (ARN-522, review round 1).
+                        // carries the newer sequence (ARN-522, rounds 1–2).
                         if !actor_preferred.contains(&id) {
                             projection_repair::repair_from_actor(
                                 &state,

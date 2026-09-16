@@ -25,9 +25,10 @@ is a local message, not a database read.
 
 ## D2: A read never writes the catalog back for an entity whose actor is live
 
-**Decision:** The entity-set fallback repairs a catalog row from the actor
-only on a catalog miss; when the catalog was skipped because the actor is
-loaded, the read does not upsert the projection.
+**Decision:** The entity-set fallback still repairs a catalog *miss* from the
+actor — including a loaded actor whose row never landed — but when a row
+existed and was skipped because the actor is loaded, the read does not upsert
+the projection.
 
 **Came up because:** Review round 1 (fable, act-on): with D1 alone, every hot
 row on a collection page went through the actor fallback, which upserts the
@@ -44,8 +45,11 @@ newest sequence. A sequence guard in the store is a fine second line of
 defence but is not what this effort needs.
 
 **Where.** `crates/temper-server/src/odata/read_support.rs`,
-`materialize_entity_set_entities`; the test asserts the catalog row is
-untouched after a collection read with the actor loaded.
+`materialize_entity_set_entities`, `read_support/projection_repair.rs`; the
+test asserts the catalog row is untouched after a collection read with the
+actor loaded. Review round 2 (codex) caught the first cut skipping the repair
+for every loaded actor, which would have left a queue-dropped row absent for
+good; the skip is now keyed on "a row was present and skipped".
 
 ## D3: The regression test runs against a local Turso store, not a seeded simulation
 
