@@ -13,6 +13,20 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 mod observation_metadata;
 
+/// Maximum callbacks along one server-owned internal context lineage.
+///
+/// This is not a global fanout quota and is not persisted across restarts or
+/// propagated through external HTTP requests.
+pub const MAX_CALLBACK_HOPS: u32 = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum CallbackBudgetExceeded {
+    #[error("integration callback depth budget exhausted")]
+    InlineDepth,
+    #[error("integration callback hop budget exhausted")]
+    TotalHops,
+}
+
 /// Agent identity context extracted from HTTP headers and credential resolution.
 ///
 /// Threads identity through the dispatch chain for attribution in
@@ -29,6 +43,8 @@ mod observation_metadata;
 pub struct AgentContext {
     /// Runtime-owned integration nesting depth; never populated from request headers.
     pub callback_depth: u32,
+    /// Runtime-owned cumulative callback count; never populated from request headers.
+    pub callback_hops: u32,
     /// Full Cedar security context when known at the request boundary.
     ///
     /// External HTTP entrypoints populate this after credential resolution so
@@ -75,14 +91,28 @@ pub struct AgentContext {
 }
 
 impl AgentContext {
-    /// Carry the existing reaction depth budget through integration callbacks.
-    pub(crate) fn for_callback(&self) -> Option<Self> {
+    /// Admit a callback only within both the inline and cumulative budgets.
+    pub(crate) fn for_callback(&self) -> Result<Self, CallbackBudgetExceeded> {
         if self.callback_depth >= temper_runtime::reaction::MAX_REACTION_DEPTH {
-            return None;
+            return Err(CallbackBudgetExceeded::InlineDepth);
+        }
+        if self.callback_hops >= MAX_CALLBACK_HOPS {
+            return Err(CallbackBudgetExceeded::TotalHops);
         }
         let mut next = self.clone();
         next.callback_depth += 1;
-        Some(next)
+        next.callback_hops += 1;
+        Ok(next)
+    }
+
+    /// Begin a detached task without replenishing its causal callback budget.
+    ///
+    /// Call only at a runtime-owned spawn boundary: the parent inline stack
+    /// ends there, but its callback lineage continues in the detached task.
+    pub(crate) fn for_background_task(&self) -> Self {
+        let mut next = self.clone();
+        next.callback_depth = 0;
+        next
     }
 
     /// Create a system-level agent context for internal operations.
@@ -93,6 +123,7 @@ impl AgentContext {
     pub fn system() -> Self {
         Self {
             callback_depth: 0,
+            callback_hops: 0,
             security_ctx: Some(SecurityContext::system()),
             agent_id: Some("system".to_string()),
             session_id: None,
@@ -129,6 +160,7 @@ impl AgentContext {
 
         Self {
             callback_depth: 0,
+            callback_hops: 0,
             security_ctx: Some(security_ctx),
             agent_id: Some(service_id),
             session_id: None,
@@ -164,6 +196,7 @@ impl AgentContext {
     /// Copy the execution budget and non-authority observability fields from a parent.
     pub fn inherit_observability_from(mut self, parent: &AgentContext) -> Self {
         self.callback_depth = parent.callback_depth;
+        self.callback_hops = parent.callback_hops;
         self.session_id = parent.session_id.clone();
         self.intent = parent.intent.clone();
         self.trace_id = parent.trace_id.clone();
@@ -274,6 +307,7 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
 
     AgentContext {
         callback_depth: 0,
+        callback_hops: 0,
         security_ctx: None,
         agent_id: None,
         session_id,
@@ -320,3 +354,7 @@ pub(crate) fn remote_parent_context(agent_ctx: &AgentContext) -> Option<opentele
 #[cfg(test)]
 #[path = "request_context/mod_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "request_context/callback_budget_test.rs"]
+mod callback_budget_tests;

@@ -379,7 +379,7 @@ impl crate::state::ServerState {
         let action = _action.to_string();
         let custom_effects = custom_effects.to_vec();
         let entity_state = _entity_state.clone();
-        let agent_ctx = agent_ctx.clone();
+        let agent_ctx = agent_ctx.for_background_task();
         let action_params = action_params.clone();
         let workflow_root_entity_type = workflow_root_type(&agent_ctx, &entity_type);
         let workflow_root_entity_id = workflow_root_id(&agent_ctx, &entity_id);

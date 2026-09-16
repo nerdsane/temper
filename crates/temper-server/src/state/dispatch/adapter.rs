@@ -175,7 +175,7 @@ impl crate::state::ServerState {
         let action = input.action.to_string();
         let custom_effects = input.custom_effects.to_vec();
         let entity_state = input.entity_state.clone();
-        let agent_ctx = input.agent_ctx.clone();
+        let agent_ctx = input.agent_ctx.for_background_task();
         let action_params = input.action_params.clone();
         let workflow_root_entity_type = agent_ctx
             .workflow_root_entity_type
@@ -569,15 +569,13 @@ impl crate::state::ServerState {
         agent_ctx: &AgentContext,
         mode: WasmDispatchMode,
     ) -> Result<Option<EntityResponse>, String> {
-        let Some(callback_ctx) = agent_ctx.for_callback() else {
-            return self
-                .reject_generated_callback(
-                    entity_ref,
-                    callback_action,
-                    "integration callback depth budget exhausted".into(),
-                    mode,
-                )
-                .await;
+        let callback_ctx = match agent_ctx.for_callback() {
+            Ok(context) => context,
+            Err(error) => {
+                return self
+                    .reject_generated_callback(entity_ref, callback_action, error.to_string(), mode)
+                    .await;
+            }
         };
         let agent_ctx = &callback_ctx;
         let callback_params = match self.prepare_generated_action_params(

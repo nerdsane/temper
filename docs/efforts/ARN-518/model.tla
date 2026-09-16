@@ -17,7 +17,9 @@ Detach ==
     /\ depth' = 0
     /\ UNCHANGED hops
 
-Next == AdmitCallback \/ Detach
+Exhausted == /\ hops = HopLimit /\ UNCHANGED vars
+
+Next == AdmitCallback \/ Detach \/ Exhausted
 Spec == Init /\ [][Next]_vars
 
 TypeOK == /\ depth \in Nat /\ hops \in Nat
