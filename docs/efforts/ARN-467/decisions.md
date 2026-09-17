@@ -645,3 +645,15 @@ D30 caller review: Generic stream uploads also need to materialize their authori
 **Where:** crates/temper-server/src/trigger/registry.rs:53-61; commit 3878ad82; nerdsane/temper#464.
 
 **Review disposition (Greptile, two findings, both acted on):** The first — that a non-fatal budget contradicts the repository's "budgets not limits, fail fast on invariant violation" line — was correct as written, so the convention now states the distinction the code relies on (a budget asserts only where exceeding it corrupts something; a count over a growable structure is reported), recorded as ADR-0176 because it outlives this effort. The second — that the regression test's comment claimed every rule "still dispatches" while the test calls only `ReactionRegistry::lookup` — was also correct; the comment now says what is proven, that every rule is found by `lookup`, which is the single call the dispatcher makes to decide what fires and the stage that previously came up empty. Guard evaluation, authorization and target resolution run per rule afterwards and do not vary with the tenant's rule count; they are covered by the dispatcher's own tests.
+
+## MCP setup: explicit human administration
+
+**Decision:** Add an argument-free native MCP setup operation using the existing service administration API, rather than changing the self-approval guard or allowing execute code to set policy.
+
+**Came up because:** Genesis has only an operator requester, so its real human approval fails self-resolution. Recovered TemperPaw setup history shows manual operator identity provisioning was the missing initial step. Rita approved making that human setup possible through chat.
+
+**Options:** Reuse the operator on both sides; grant access from execute code; add a native human-only administration operation.
+
+**Chose the native operation because:** The human sees the fixed service, tenant, and grant, while agent input cannot choose policies or provide consent. Existing governance continues after setup. This adds a second MCP tool and requires private per-service credential storage.
+
+**Where:** docs/adrs/0177-human-authorized-mcp-identity-setup.md; crates/temper-mcp/src/setup.rs; setup_consent.rs; setup_identity.rs.

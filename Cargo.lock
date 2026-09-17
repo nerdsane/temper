@@ -7177,6 +7177,7 @@ dependencies = [
  "temper-store-turso",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

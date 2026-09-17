@@ -30,3 +30,11 @@ A first action whose input violates its parameter contract leaves no actor, inde
 ## Turso cleanup contract (September 9)
 
 Replace vendored libSQL with current official Turso packages. Existing event ordering, idempotency, tenant isolation, atomic commit/rollback, authorization persistence, schema upgrades, local files and remote connections remain required. A successful migration removes the vendored source and its checker, changes the storage adapter, and proves the actual runtime path before deployment. No new engine fork or engine patches are permitted. Compatibility qualification may establish a blocker; do not weaken invariants to claim support. ADR-0176 records this decision.
+
+## MCP identity setup contract
+
+ADR-0177 defines the missing setup boundary. `setup_connection` has no tool arguments. Trusted connector configuration determines the service, tenant, operator credential, and private identity file. A native correlated human response authorizes a fixed identity-provisioning policy and a separate nonoperator requester. Decline, cancel, disconnect, malformed content, and unrelated response IDs produce no writes. Ordinary execute calls cannot supply consent, policy text, or credentials.
+
+State model: Unconfigured -> AwaitingHuman -> Consented -> Provisioning -> Verified -> Ready. The first remote write and file creation require Consented; Ready requires a verified requester distinct from the operator. Repeating setup reuses the private credential. Existing inactive or mismatched identities are not overwritten. Responses and credential storage have explicit byte budgets. No secret is returned to the agent. The server's self-resolution rejection is unchanged.
+
+Required proof includes real local Temper provisioning and subsequent denied action -> native test-client response -> operator resolution -> successful retry, plus negative self-approval, zero-write rejection paths, private file checks, reconnection and failure recovery. Production completion separately requires actual human setup and approval responses, identity readback for Genesis and Foresight, local and Foundry verification, recorded review/proof, and one real DSF deployment verified through the twin. Local test-client consent is not production human consent.

@@ -64,6 +64,8 @@ pub(crate) struct RuntimeContext {
     /// self-approval guard rejects it. Falls back to `api_key` when unset.
     pub(crate) approver_key: Option<String>,
     pub(crate) identity_tenant: String,
+    /// Operator-configured private storage; never supplied by tool arguments.
+    pub(crate) identity_file: Option<std::path::PathBuf>,
     sandbox: temper_sandbox::runner::PersistentSandbox,
     /// OTS trajectory builder for capturing agent execution traces.
     pub(crate) trajectory: Option<TrajectoryBuilder>,
@@ -99,7 +101,7 @@ impl RuntimeContext {
                  Use --port <n> for a local server or --url <url> for a remote server."
             ),
         };
-        Ok(Self {
+        let mut context = Self {
             base_url,
             http: reqwest::Client::new(),
             agent_id: config.agent_id.clone(),
@@ -116,6 +118,7 @@ impl RuntimeContext {
                 .ok()
                 .filter(|v| !v.trim().is_empty())
                 .unwrap_or_else(|| "default".to_string()), // determinism-ok: startup config
+            identity_file: crate::setup::identity_path()?,
             sandbox: temper_sandbox::runner::PersistentSandbox::new(&[("temper", "Temper", 1)]),
             trajectory: None,
             tenants_seen: BTreeMap::new(),
@@ -127,7 +130,25 @@ impl RuntimeContext {
                 std::env::var("TEMPER_MCP_ELICIT_APPROVALS").ok().as_deref(),
             ), // determinism-ok: startup config
             requester: None,
-        })
+        };
+        if let Some(path) = context.identity_file.clone() {
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => {
+                    let identity = crate::setup_identity::load_identity(
+                        &path,
+                        &context.base_url,
+                        &context.identity_tenant,
+                    )?;
+                    if context.approver_key.is_none() {
+                        context.approver_key = context.api_key.clone();
+                    }
+                    context.api_key = Some(identity.token);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(context)
     }
 
     /// Whether a Cedar denial can be put to the human via elicitation:

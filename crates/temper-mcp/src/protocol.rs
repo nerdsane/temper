@@ -109,6 +109,18 @@ pub(super) async fn dispatch_json_value(ctx: &mut RuntimeContext, raw: Value) ->
                 }
             };
 
+            if params.name == "setup_connection" {
+                let result = crate::setup::setup_connection(ctx, &params.arguments).await;
+                ctx.record_execute_turn("setup_connection", &result);
+                let (text, is_error) = match result {
+                    Ok(text) => (text, false),
+                    Err(error) => (error.to_string(), true),
+                };
+                return Some(json!({"jsonrpc":"2.0", "id":id, "result": {
+                    "content":[{"type":"text", "text":text}], "isError":is_error
+                }}));
+            }
+
             let code = match params.arguments.get("code").and_then(Value::as_str) {
                 Some(code) => code,
                 None => {
@@ -259,21 +271,28 @@ OTS FLUSH: `await temper.flush_trajectory()` uploads a mid-session OTS snapshot\
 without ending the session.\n\
 You cannot approve or set policies — only humans can do that.";
 
-    vec![json!({
-        "name": "execute",
-        "description": execute_desc,
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "code": {
-                    "type": "string",
-                    "description": "Python snippet. Use async calls like `await temper.list(...)` and `return ...`."
-                }
-            },
-            "required": ["code"],
-            "additionalProperties": false
-        }
-    })]
+    vec![
+        json!({
+            "name": "execute",
+            "description": execute_desc,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "Python snippet. Use async calls like `await temper.list(...)` and `return ...`."
+                    }
+                },
+                "required": ["code"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "setup_connection",
+            "description": "Ask the human to set up distinct requester and approver identities for the configured Temper service. Accepts no arguments. Only a native human setup response authorizes administration. Does not approve pending decisions. Requires TEMPER_MCP_IDENTITY_FILE to name a file in a private directory.",
+            "inputSchema": {"type":"object", "properties":{}, "additionalProperties":false}
+        }),
+    ]
 }
 
 fn is_flush_trajectory_request(code: &str) -> bool {

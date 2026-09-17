@@ -14,3 +14,11 @@
 3. Run existing store invariants, old-file/restart proof and relevant server e2e. Review the complete diff, record proof/review, merge and deploy through Temper only after qualification.
 
 Foundry and Copy delivery are not waiting on this migration. Local worktree execution is authorized by Rita for this migration.
+
+## Chat-based setup implementation
+
+1. Reuse correlated native elicitation for an argument-free setup tool; isolate consent from execute input.
+2. Use the existing authorized administration API only after native human consent; create and verify a fixed nonoperator requester.
+3. Bind private persisted identity to server/tenant and restore it on reconnect while retaining the operator solely for human administration and approvals.
+4. Verify negative consent, real server provisioning, ordinary two-key approvals, persistence, repeated setup, and failure boundaries. Run the required review panel and publish the connector change.
+5. Install the reviewed connector, obtain genuine native setup for each authorized service, verify approvals and caller propagation, then complete the original Foundry SDLC deployment gates.

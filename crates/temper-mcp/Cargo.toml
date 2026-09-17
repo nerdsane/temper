@@ -18,6 +18,7 @@ reqwest = { workspace = true }
 sha2 = { workspace = true }
 tracing = { workspace = true }
 hostname = { workspace = true }
+uuid = { workspace = true }
 
 # pydantic/monty Rust sandbox crate
 monty = { git = "https://github.com/pydantic/monty.git", package = "monty", rev = "bf7c7ef" }

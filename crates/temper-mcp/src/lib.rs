@@ -5,6 +5,9 @@ mod code_analysis;
 mod elicit;
 mod protocol;
 mod runtime;
+mod setup;
+mod setup_consent;
+mod setup_identity;
 mod stdio;
 mod trajectory_bounds;
 

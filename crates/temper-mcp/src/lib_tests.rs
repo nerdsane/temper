@@ -333,7 +333,7 @@ async fn mcp_initialize_without_client_info_keeps_defaults() {
 }
 
 #[tokio::test]
-async fn tool_list_has_single_execute_tool() {
+async fn tool_list_separates_execute_from_human_only_setup() {
     let mut ctx = ctx_for_port(3001);
 
     let response = rpc(
@@ -347,8 +347,11 @@ async fn tool_list_has_single_execute_tool() {
     .await;
 
     let tools = response["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 1, "should have exactly one tool");
+    assert_eq!(tools.len(), 2);
     assert_eq!(tools[0]["name"], "execute");
+    assert_eq!(tools[1]["name"], "setup_connection");
+    assert_eq!(tools[1]["inputSchema"]["properties"], json!({}));
+    assert_eq!(tools[1]["inputSchema"]["additionalProperties"], false);
 }
 
 #[test]
