@@ -879,14 +879,24 @@ const temperPlugin = {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       api.logger.error(`[temper] ${message}`);
-      api.registerTool({
-        name: "temper_execute",
-        description: "Execute governed Temper operations (plugin misconfigured)",
-        parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
-        async execute() {
-          return errorResult(`[temper] Plugin misconfigured: ${message}`);
-        },
-      });
+      for (const stub of [
+        { name: "temper_search", required: ["code"] },
+        { name: "temper_execute", required: ["code"] },
+        { name: "temper_setup_connection", required: [] },
+      ]) {
+        api.registerTool({
+          name: stub.name,
+          description: `${stub.name} (plugin misconfigured)`,
+          parameters: {
+            type: "object",
+            properties: stub.required.length > 0 ? { code: { type: "string" } } : {},
+            required: stub.required,
+          },
+          async execute() {
+            return errorResult(`[temper] Plugin misconfigured: ${message}`);
+          },
+        });
+      }
       return;
     }
 
