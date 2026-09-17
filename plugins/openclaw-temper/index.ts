@@ -246,6 +246,10 @@ class McpStdioBridge {
   }
 
   async callTool(name: string, code: string): Promise<ToolResult> {
+    return this.callToolWithArgs(name, { code });
+  }
+
+  async callToolWithArgs(name: string, args: Record<string, unknown>): Promise<ToolResult> {
     if (!this.isReady()) {
       await this.restartIfNeeded();
     }
@@ -270,7 +274,7 @@ class McpStdioBridge {
         method: "tools/call",
         params: {
           name,
-          arguments: { code },
+          arguments: args,
         },
       });
     });
@@ -542,6 +546,30 @@ const createExecuteTool = (bridge: McpStdioBridge) => ({
       return errorResult("code parameter is required");
     }
     return bridge.callTool("execute", code);
+  },
+});
+
+const createSetupConnectionTool = (bridge: McpStdioBridge) => ({
+  name: "temper_setup_connection",
+  description: [
+    "Ask the human to authorize distinct requester and approver identities for the configured Temper service.",
+    "",
+    "This tool initiates the human-authorized connection setup flow. The Temper MCP server",
+    "will prompt the human through native elicitation to confirm identity parameters.",
+    "Only a native human response authorizes administration — the agent cannot self-approve.",
+    "",
+    "Requires TEMPER_MCP_IDENTITY_FILE to be set to an absolute path in a private directory.",
+    "Invoke this once before governed operations when the connection has not yet been configured.",
+    "",
+    "Takes no arguments.",
+  ].join("\n"),
+  parameters: {
+    type: "object",
+    properties: {},
+    additionalProperties: false,
+  } as const,
+  async execute(_toolCallId: string, _params: Record<string, unknown>) {
+    return bridge.callToolWithArgs("setup_connection", {});
   },
 });
 
@@ -851,14 +879,24 @@ const temperPlugin = {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       api.logger.error(`[temper] ${message}`);
-      api.registerTool({
-        name: "temper_execute",
-        description: "Execute governed Temper operations (plugin misconfigured)",
-        parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
-        async execute() {
-          return errorResult(`[temper] Plugin misconfigured: ${message}`);
-        },
-      });
+      for (const stub of [
+        { name: "temper_search", required: ["code"] },
+        { name: "temper_execute", required: ["code"] },
+        { name: "temper_setup_connection", required: [] },
+      ]) {
+        api.registerTool({
+          name: stub.name,
+          description: `${stub.name} (plugin misconfigured)`,
+          parameters: {
+            type: "object",
+            properties: stub.required.length > 0 ? { code: { type: "string" } } : {},
+            required: stub.required,
+          },
+          async execute() {
+            return errorResult(`[temper] Plugin misconfigured: ${message}`);
+          },
+        });
+      }
       return;
     }
 
@@ -868,6 +906,7 @@ const temperPlugin = {
     // Register tools
     api.registerTool(createSearchTool(bridge));
     api.registerTool(createExecuteTool(bridge));
+    api.registerTool(createSetupConnectionTool(bridge));
 
     // Register MCP bridge as a service (lifecycle management)
     api.registerService({
