@@ -212,6 +212,7 @@ pub(super) async fn missing_catalog_entity_ids(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn materialize_entity_set_entities(
     state: &ServerState,
     tenant: &TenantId,
