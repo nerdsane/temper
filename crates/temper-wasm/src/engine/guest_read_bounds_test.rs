@@ -33,12 +33,20 @@ const WAT_RESULT_LENGTH_OVERRUNS_END: &str = r#"
     (module
       (memory (export "memory") 1)
       (func (export "run") (param i32 i32) (result i32)
-        ;; length 10000 stored at 59996, so the host reads it for ptr = 60000.
-        ;; 10000 < 65536, but 60000 + 10000 = 70000 > 65536.
-        i32.const 59996
+        ;; Use the actual memory end, including pages reserved for input.
+        ;; The result starts 5536 bytes before it but claims 10000 bytes.
+        memory.size
+        i32.const 65536
+        i32.mul
+        i32.const 5540
+        i32.sub
         i32.const 10000
         i32.store
-        i32.const 60000
+        memory.size
+        i32.const 65536
+        i32.mul
+        i32.const 5536
+        i32.sub
       )
     )
 "#;

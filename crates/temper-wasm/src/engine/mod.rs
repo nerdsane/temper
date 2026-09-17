@@ -378,8 +378,11 @@ impl WasmEngine {
     /// Each invocation gets a fresh Store with fuel and memory limits.
     /// The module must export a `run` function that takes `(i32, i32)` ->
     /// `i32` where the inputs are (context_ptr, context_len) and the return
-    /// is a result pointer. Alternatively, the module can use `host_set_result`
-    /// to provide the result via host call.
+    /// is a result pointer. Modules importing `host_get_context` receive a null
+    /// entry pointer and obtain context through that host function instead.
+    /// Pointer-based modules receive context in additional memory pages, charged
+    /// against the invocation budget. They must not assume a fixed address.
+    /// Alternatively, the module can use `host_set_result` for its result.
     pub async fn invoke(
         &self,
         module_hash: &str,
@@ -647,7 +650,9 @@ impl WasmEngine {
         };
 
         let ctx_bytes = context_json.as_bytes();
-        let mut ctx_ptr = 1024_usize;
+        let ctx_len = i32::try_from(ctx_bytes.len())
+            .map_err(|_| WasmError::Invocation("context exceeds the 32-bit ABI".into()))?;
+        let mut ctx_ptr = 0_i32;
         {
             let phase = tracing::info_span!(
                 "wasm.invoke.write_context",
@@ -656,16 +661,24 @@ impl WasmEngine {
                 context_bytes = ctx_bytes.len() as u64,
             );
             let _entered = phase.enter();
-            let current_len = memory.data_size(&store);
-            if ctx_bytes.len() <= current_len.saturating_sub(ctx_ptr) {
-                memory.write(&mut store, ctx_ptr, ctx_bytes).map_err(|e| {
+            let reads_host_context = cached
+                .module
+                .imports()
+                .any(|import| import.module() == "env" && import.name() == "host_get_context");
+            if !reads_host_context {
+                // Existing memory belongs to the guest, including its static data
+                // and allocator. Reserve separate pages for pointer-based input.
+                let start = memory.data_size(&store);
+                ctx_ptr = i32::try_from(start).map_err(|_| {
+                    WasmError::Invocation("context pointer exceeds the 32-bit ABI".into())
+                })?;
+                let pages = ctx_bytes.len().div_ceil(65_536) as u64;
+                memory.grow(&mut store, pages).map_err(|e| {
+                    WasmError::Invocation(format!("cannot reserve context memory: {e}"))
+                })?;
+                memory.write(&mut store, start, ctx_bytes).map_err(|e| {
                     WasmError::Invocation(format!("failed to write context to memory: {e}"))
                 })?;
-            } else {
-                // SDK-backed modules read the canonical context through host_get_context.
-                // Avoid growing and dirtying fresh guest heap pages before the guest
-                // allocator can initialize them; that can corrupt large-context parses.
-                ctx_ptr = 0;
             }
         }
 
@@ -677,7 +690,7 @@ impl WasmEngine {
                 context_bytes = ctx_bytes.len() as u64,
             );
             let _entered = phase.enter();
-            match run_fn.call(&mut store, (ctx_ptr as i32, ctx_bytes.len() as i32)) {
+            match run_fn.call(&mut store, (ctx_ptr, ctx_len)) {
                 Ok(result_ptr) => result_ptr,
                 Err(e) => {
                     let err = telemetry::map_invoke_error(

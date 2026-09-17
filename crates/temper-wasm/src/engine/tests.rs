@@ -453,9 +453,9 @@ async fn memory_growth_denied_by_limiter() {
         .compile_and_cache(WAT_MEMORY_GROW.as_bytes())
         .unwrap();
 
-    // Limit to 1 page (64 KB). Module tries to grow by 1000 pages.
+    // One guest page plus one input page. Module still cannot grow by 1000 pages.
     let limits = WasmResourceLimits {
-        max_memory: 64 * 1024, // 1 WASM page
+        max_memory: 2 * 64 * 1024,
         ..WasmResourceLimits::default()
     };
     let result = engine

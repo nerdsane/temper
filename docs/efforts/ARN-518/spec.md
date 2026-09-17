@@ -34,3 +34,16 @@ Inline recursion still stops at the existing boundary. A background cycle stops 
 A regression must fail against bd15e8920032fef5617bee6bde7729e411fdeb05 for a finite background workflow longer than eight callbacks. Production budget code runs under seeded schedules and identity transitions. Tests must also demonstrate inline and background cycle exhaustion, preserved hop count at detach, and unchanged reaction and authorization boundaries. A real detached callback path complements the state model and simulation.
 
 After these checks, pin TemperPaw to the reviewed kernel commit, rebuild, and run the actual provider-backed Foresight flow. No production success is claimed by this kernel change alone.
+
+
+## Follow-up: invocation context memory
+
+
+Invocation context is input, not a license to overwrite a guest's existing memory.
+
+- Modules importing `env.host_get_context` read the canonical input through that host function; the engine must not write a second unsolicited copy into their linear memory.
+- Pointer-based modules retain the `run(context_ptr, context_len)` contract. The engine places the complete context in newly added pages after existing guest memory, subject to the invocation memory budget. No initialized data may be overwritten, and no null or truncated input may be silently supplied.
+- Context length and pointer must fit the signed 32-bit ABI. Insufficient memory returns a visible invocation error.
+- Result delivery, HTTP capability checks, fuel, time limits, and per-invocation isolation retain their existing contracts.
+
+The executable model is a real WASM invocation with a sentinel in initialized memory and assertions that input is complete and the sentinel remains unchanged. Tests cover small inputs, the observed intermediate size, and inputs larger than initial memory. A separate captured Foresight journal replay verifies the actual failing module and input.
