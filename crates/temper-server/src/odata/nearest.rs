@@ -197,6 +197,7 @@ pub(super) async fn handle_nearest(
                 &set_name,
                 std::slice::from_ref(&reference_id.to_string()),
                 true,
+                false,
                 None,
             )
             .await;
@@ -356,6 +357,7 @@ pub(super) async fn handle_nearest(
             &set_name,
             std::slice::from_ref(&scored.entity_id),
             true,
+            false,
             None,
         )
         .await;

@@ -356,13 +356,21 @@ async fn catalog_answers_only_when_the_actor_is_not_loaded() {
     // collection read returns, and the stale catalog row is left alone — the
     // projection queue owns it while the actor is live.
     let ids = vec!["ord-1".to_string()];
-    let set =
-        materialize_entity_set_entities(&state, &tenant, "Order", "Orders", &ids, true, None).await;
+    let set = materialize_entity_set_entities(
+        &state, &tenant, "Order", "Orders", &ids, true, false, None,
+    )
+    .await;
     assert_eq!(set.entities.len(), 1);
     assert_ne!(
         set.entities[0]["status"], "Stale",
         "a loaded actor's state wins over the catalog row"
     );
+    // A page ordered or sliced by catalog values keeps its catalog rows, so
+    // the values returned are the ones the ordering was computed from.
+    let ordered =
+        materialize_entity_set_entities(&state, &tenant, "Order", "Orders", &ids, true, true, None)
+            .await;
+    assert_eq!(ordered.entities[0]["status"], "Stale");
     let rows = state
         .query_plane_store()
         .expect("query plane")

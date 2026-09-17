@@ -26,7 +26,8 @@ use super::query_plane_read::{
     QueryPlaneReadBudget, QueryPlaneReadRequest, read_entity_set_from_query_plane,
 };
 use super::read_support::{
-    record_entity_set_not_found, resolve_entity_set_name, try_load_entity_body_from_catalog,
+    catalog_body_ignoring_actor, record_entity_set_not_found, resolve_entity_set_name,
+    try_load_entity_body_from_catalog,
 };
 use super::response::annotate_entity;
 use super::stream_fast_path::try_file_stream_fast_path;
@@ -239,11 +240,17 @@ pub(super) async fn load_existing_entity_descriptor_body(
     {
         return Err(resource_not_found_response(set_name, key));
     }
-    state
+    match state
         .get_tenant_entity_state(tenant, entity_type, key)
         .await
-        .map(|response| serde_json::to_value(&response.state).unwrap_or_default())
-        .map_err(|_| resource_not_found_response(set_name, key))
+    {
+        Ok(response) => Ok(serde_json::to_value(&response.state).unwrap_or_default()),
+        // The actor was loaded a moment ago and is gone now (passivation);
+        // the catalog row, if any, answers rather than a 404 (ARN-522).
+        Err(_) => catalog_body_ignoring_actor(state, tenant, entity_type, set_name, key)
+            .await
+            .ok_or_else(|| resource_not_found_response(set_name, key)),
+    }
 }
 
 async fn load_authorized_entity_body(

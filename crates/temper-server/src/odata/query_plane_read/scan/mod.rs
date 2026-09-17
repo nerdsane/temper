@@ -185,6 +185,7 @@ pub(super) async fn materialize_and_authorize_ids(
         request.entity_set_name,
         entity_ids,
         prefer_catalog,
+        request.query_options.orderby.is_some(),
         None,
     )
     .await;
@@ -212,6 +213,7 @@ pub(super) async fn materialize_filter_and_authorize_ids(
         request.entity_set_name,
         entity_ids,
         prefer_catalog,
+        request.query_options.orderby.is_some(),
         None,
     )
     .await;

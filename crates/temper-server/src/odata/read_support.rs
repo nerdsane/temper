@@ -12,6 +12,10 @@ use crate::storage::{
 
 mod config;
 mod projection_repair;
+mod single_entity;
+pub(in crate::odata) use single_entity::{
+    catalog_body_ignoring_actor, try_load_entity_body_from_catalog,
+};
 mod select_projection;
 mod shadow;
 
@@ -208,44 +212,6 @@ pub(super) async fn missing_catalog_entity_ids(
         .collect()
 }
 
-/// Try to load a single entity body from the durable `entity_catalog`.
-///
-/// Returns `Some(json)` when the catalog has a row for `(tenant, entity_type,
-/// key)` and catalog materialization is preferred or the catalog fast-read
-/// feature flag is enabled. Returns `None` when catalog reads are disabled,
-/// the catalog has no row, or the read fails — caller is expected to fall
-/// back to actor hydration in that case.
-///
-/// The returned JSON has the same shape as the actor's serialized
-/// `EntityState` so downstream code (`enrich_entity_response`, OData
-/// clients, blob hydration) can't tell the difference.
-pub(super) async fn try_load_entity_body_from_catalog(
-    state: &ServerState,
-    tenant: &TenantId,
-    entity_type: &str,
-    entity_set_name: &str,
-    key: &str,
-    prefer_catalog: bool,
-) -> Option<serde_json::Value> {
-    if !should_read_catalog_for_materialization(prefer_catalog) {
-        return None;
-    }
-    // A loaded actor is ahead of the catalog by up to one queued projection
-    // write; a read that follows a dispatch must see that dispatch (ARN-522).
-    if state.has_loaded_actor(tenant, entity_type, key) {
-        return None;
-    }
-    let ids = [key.to_string()];
-    let rows = try_load_catalog_rows(state, tenant, entity_type, &ids).await;
-    let row = rows.into_iter().next().map(|(_, r)| r)?;
-    maybe_spawn_catalog_shadow_check(state, tenant, entity_type, &row);
-    Some(catalog_row_to_entity_body(
-        entity_type,
-        entity_set_name,
-        row,
-    ))
-}
-
 pub(super) async fn materialize_entity_set_entities(
     state: &ServerState,
     tenant: &TenantId,
@@ -253,6 +219,7 @@ pub(super) async fn materialize_entity_set_entities(
     entity_set_name: &str,
     entity_ids: &[String],
     prefer_catalog: bool,
+    ordered_by_catalog: bool,
     selected_catalog_fields: Option<&[String]>,
 ) -> MaterializedEntitySet {
     let selected_catalog_fields_owned = selected_catalog_fields.map(Vec::from);
@@ -270,19 +237,26 @@ pub(super) async fn materialize_entity_set_entities(
         };
     // Same rule as the single-entity read: an entity whose actor is loaded is
     // served by the actor, not by a catalog row that may trail it (ARN-522).
-    // Only ids whose row was skipped are remembered: the fallback must not
-    // "repair" a row the projection queue owns while the actor is live, but a
-    // loaded actor with no row at all is still a miss and is repaired.
-    let mut actor_preferred: BTreeSet<String> = BTreeSet::new();
-    catalog_hits.retain(|id, _| {
-        if state.has_loaded_actor(tenant, entity_type, id) {
-            actor_preferred.insert(id.clone());
-            false
-        } else {
-            true
-        }
-    });
-    let actor_preferred = std::sync::Arc::new(actor_preferred);
+    // Two exceptions keep pages honest. A page the caller ordered or sliced by
+    // catalog values keeps its catalog rows, so the values returned are the
+    // values the ordering was computed from. And a row skipped for a loaded
+    // actor is kept aside: if the actor passivates between the check and the
+    // ask, the row answers instead of the entity vanishing from the page. The
+    // skipped rows also mark which ids the fallback must not "repair" — the
+    // projection queue owns those — while a loaded actor with no row at all is
+    // still a miss and is repaired.
+    let mut skipped_rows: BTreeMap<String, EntityCatalogRow> = BTreeMap::new();
+    if !ordered_by_catalog {
+        catalog_hits.retain(|id, row| {
+            if state.has_loaded_actor(tenant, entity_type, id) {
+                skipped_rows.insert(id.clone(), row.clone());
+                false
+            } else {
+                true
+            }
+        });
+    }
+    let skipped_rows = std::sync::Arc::new(skipped_rows);
     let mut shadow_budget = CatalogShadowReadBudget::for_entity_set();
 
     let concurrency = entity_set_materialization_concurrency();
@@ -305,7 +279,7 @@ pub(super) async fn materialize_entity_set_entities(
             let entity_type = entity_type.to_string();
             let entity_set_name = entity_set_name.to_string();
             let selected_catalog_fields = selected_catalog_fields_owned.clone();
-            let actor_preferred = actor_preferred.clone();
+            let skipped_rows = skipped_rows.clone();
             async move {
                 if let Some(row) = catalog_row {
                     let entity = match selected_catalog_fields.as_deref() {
@@ -327,7 +301,7 @@ pub(super) async fn materialize_entity_set_entities(
                         // A catalog miss is repaired from the actor; a row the
                         // actor was preferred over is left to the queue, which
                         // carries the newer sequence (ARN-522, rounds 1–2).
-                        if !actor_preferred.contains(&id) {
+                        if !skipped_rows.contains_key(&id) {
                             projection_repair::repair_from_actor(
                                 &state,
                                 &tenant,
@@ -354,7 +328,12 @@ pub(super) async fn materialize_entity_set_entities(
                             entity_id = %id,
                             "failed to materialize entity for OData collection"
                         );
-                        None
+                        // The actor went away between the presence check and
+                        // the ask (passivation); the row it was preferred over
+                        // is still the best answer we hold (ARN-522, round 3).
+                        skipped_rows.get(&id).cloned().map(|row| {
+                            catalog_row_to_entity_body(&entity_type, &entity_set_name, row)
+                        })
                     }
                 }
             }
