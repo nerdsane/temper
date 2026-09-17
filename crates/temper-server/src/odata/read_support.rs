@@ -212,18 +212,40 @@ pub(super) async fn missing_catalog_entity_ids(
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
+/// How an entity-set read treats the entity catalog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::odata) enum CatalogPreference {
+    /// Ask actors; the catalog answers only if the fast-read flag is on.
+    Fallback,
+    /// Prefer catalog rows, except for entities whose actor is loaded.
+    Prefer,
+    /// Prefer catalog rows and keep them even for loaded actors: the caller
+    /// ordered or sliced this page by catalog values (ARN-522 D4).
+    PreferOrdered,
+}
+
+impl CatalogPreference {
+    pub(in crate::odata) fn for_query(prefer_catalog: bool, ordered_by_catalog: bool) -> Self {
+        match (prefer_catalog, ordered_by_catalog) {
+            (false, _) => Self::Fallback,
+            (true, false) => Self::Prefer,
+            (true, true) => Self::PreferOrdered,
+        }
+    }
+}
+
 pub(super) async fn materialize_entity_set_entities(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
     entity_set_name: &str,
     entity_ids: &[String],
-    prefer_catalog: bool,
-    ordered_by_catalog: bool,
+    catalog: CatalogPreference,
     selected_catalog_fields: Option<&[String]>,
 ) -> MaterializedEntitySet {
     let selected_catalog_fields_owned = selected_catalog_fields.map(Vec::from);
+    let prefer_catalog = catalog != CatalogPreference::Fallback;
+    let ordered_by_catalog = catalog == CatalogPreference::PreferOrdered;
     let mut catalog_hits: BTreeMap<String, EntityCatalogRow> =
         if should_read_catalog_for_materialization(prefer_catalog) {
             match selected_catalog_fields {

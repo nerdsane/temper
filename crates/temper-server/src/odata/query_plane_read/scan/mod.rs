@@ -7,7 +7,7 @@ pub(super) use read_source::read_from_source_cursor;
 use temper_odata::query::types::QueryOptions;
 
 use super::super::authz::{READ_ACTION, authorize_read, entity_id_from_body};
-use super::super::read_support::materialize_entity_set_entities;
+use super::super::read_support::{CatalogPreference, materialize_entity_set_entities};
 use super::types::{
     QueryPlaneCoverageReport, QueryPlaneFallbackReason, QueryPlaneReadBudget, QueryPlaneReadError,
     QueryPlaneReadRequest, QueryPlaneReadStrategy, QueryPlaneReadTelemetry,
@@ -184,8 +184,7 @@ pub(super) async fn materialize_and_authorize_ids(
         request.entity_type,
         request.entity_set_name,
         entity_ids,
-        prefer_catalog,
-        request.query_options.orderby.is_some(),
+        CatalogPreference::for_query(prefer_catalog, request.query_options.orderby.is_some()),
         None,
     )
     .await;
@@ -212,8 +211,7 @@ pub(super) async fn materialize_filter_and_authorize_ids(
         request.entity_type,
         request.entity_set_name,
         entity_ids,
-        prefer_catalog,
-        request.query_options.orderby.is_some(),
+        CatalogPreference::for_query(prefer_catalog, request.query_options.orderby.is_some()),
         None,
     )
     .await;

@@ -92,9 +92,11 @@ query, and a page consistent with its own ordering is worth more than a
 value one queued write fresher. Unordered reads — the merge read-back among
 them — still get the actor's state.
 
-**Where.** `materialize_entity_set_entities(ordered_by_catalog)`; the scan
-wrappers pass `request.query_options.orderby.is_some()`, `Temper.Nearest`
-passes `false` (it ranks by vector score, not catalog values).
+**Where.** `materialize_entity_set_entities` takes a `CatalogPreference`
+(`Fallback` / `Prefer` / `PreferOrdered`; one argument in place of two
+booleans, which clippy's argument limit asked for). The scan wrappers build
+it from `request.query_options.orderby.is_some()`; `Temper.Nearest` passes
+`Prefer` (it ranks by vector score, not catalog values).
 
 ## D5: If the actor passivates between the check and the ask, the catalog row answers
 

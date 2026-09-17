@@ -295,7 +295,9 @@ fn safety_cap_rejects_incomplete_row_authorized_reads() {
 /// actor is not in memory.
 #[tokio::test]
 async fn catalog_answers_only_when_the_actor_is_not_loaded() {
-    use super::{materialize_entity_set_entities, try_load_entity_body_from_catalog};
+    use super::{
+        CatalogPreference, materialize_entity_set_entities, try_load_entity_body_from_catalog,
+    };
     use crate::registry::SpecRegistry;
     use crate::state::ServerState;
     use crate::storage::StorageStack;
@@ -357,7 +359,13 @@ async fn catalog_answers_only_when_the_actor_is_not_loaded() {
     // projection queue owns it while the actor is live.
     let ids = vec!["ord-1".to_string()];
     let set = materialize_entity_set_entities(
-        &state, &tenant, "Order", "Orders", &ids, true, false, None,
+        &state,
+        &tenant,
+        "Order",
+        "Orders",
+        &ids,
+        CatalogPreference::Prefer,
+        None,
     )
     .await;
     assert_eq!(set.entities.len(), 1);
@@ -367,9 +375,16 @@ async fn catalog_answers_only_when_the_actor_is_not_loaded() {
     );
     // A page ordered or sliced by catalog values keeps its catalog rows, so
     // the values returned are the ones the ordering was computed from.
-    let ordered =
-        materialize_entity_set_entities(&state, &tenant, "Order", "Orders", &ids, true, true, None)
-            .await;
+    let ordered = materialize_entity_set_entities(
+        &state,
+        &tenant,
+        "Order",
+        "Orders",
+        &ids,
+        CatalogPreference::PreferOrdered,
+        None,
+    )
+    .await;
     assert_eq!(ordered.entities[0]["status"], "Stale");
     let rows = state
         .query_plane_store()
