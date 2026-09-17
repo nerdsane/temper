@@ -112,11 +112,13 @@ pub(super) async fn dispatch_json_value(ctx: &mut RuntimeContext, raw: Value) ->
             if params.name == "setup_connection" {
                 let result = crate::setup::setup_connection(ctx, &params.arguments).await;
                 ctx.record_execute_turn("setup_connection", &result);
+                // Respect the notification guard: id-less calls get no response.
+                let response_id = id?;
                 let (text, is_error) = match result {
                     Ok(text) => (text, false),
                     Err(error) => (error.to_string(), true),
                 };
-                return Some(json!({"jsonrpc":"2.0", "id":id, "result": {
+                return Some(json!({"jsonrpc":"2.0", "id":response_id, "result": {
                     "content":[{"type":"text", "text":text}], "isError":is_error
                 }}));
             }
