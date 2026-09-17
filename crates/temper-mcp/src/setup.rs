@@ -27,7 +27,7 @@ pub(crate) async fn setup_connection(
     ctx: &mut RuntimeContext,
     arguments: &Value,
 ) -> Result<String> {
-    if !arguments.as_object().is_some_and(|args| args.is_empty()) {
+    if !arguments.is_null() && !arguments.as_object().is_some_and(|args| args.is_empty()) {
         bail!("setup_connection accepts no arguments");
     }
     if !ctx.elicitation_available() {
@@ -52,6 +52,7 @@ async fn setup_at(ctx: &mut RuntimeContext, path: &std::path::Path) -> Result<St
     if operator["verified"] != true || operator["agent_type_name"] != "operator" {
         bail!("Configured setup credential is not a verified service operator");
     }
+    let (identity, is_new) = candidate_identity(path, &ctx.base_url, &ctx.identity_tenant)?;
     let requester = ctx
         .requester
         .clone()
@@ -59,7 +60,12 @@ async fn setup_at(ctx: &mut RuntimeContext, path: &std::path::Path) -> Result<St
     let response = requester
         .request(
             "elicitation/create",
-            setup_params(&ctx.base_url, &ctx.identity_tenant),
+            setup_params(
+                &ctx.base_url,
+                &ctx.identity_tenant,
+                &identity.principal,
+                path,
+            ),
             None,
         )
         .await
@@ -67,7 +73,18 @@ async fn setup_at(ctx: &mut RuntimeContext, path: &std::path::Path) -> Result<St
     let Some(consent) = SetupConsent::from_client_response(&response) else {
         return Ok(json!({"status":"unchanged", "note":"No setup was authorized"}).to_string());
     };
-    let identity = prepare_identity(&consent, path, &ctx.base_url, &ctx.identity_tenant)?;
+    if is_new {
+        save_identity(&consent, path, &identity)?;
+    }
+    // Complete the old audit with its original identity before any policy write.
+    ctx.finalize_trajectory().await;
+    // No await separates credential replacement from subsequent administration.
+    // Failure or cancellation now leaves only the unprivileged requester active.
+    ctx.approver_key = Some(admin.key.clone());
+    ctx.api_key = Some(identity.token.clone());
+    ctx.agent_id = Some(identity.principal.clone());
+    ctx.agent_type = Some(REQUESTER_TYPE.into());
+    ctx.init_trajectory();
     admin.provision(&consent, &identity).await?;
     let resolved = admin.resolve(&identity.token).await?;
     if resolved["verified"] != true
@@ -77,10 +94,6 @@ async fn setup_at(ctx: &mut RuntimeContext, path: &std::path::Path) -> Result<St
     {
         bail!("Setup did not resolve to the expected distinct nonoperator identity");
     }
-    ctx.approver_key = Some(admin.key);
-    ctx.api_key = Some(identity.token);
-    ctx.agent_id = Some(identity.principal.clone());
-    ctx.agent_type = Some(REQUESTER_TYPE.into());
     Ok(
         json!({"status":"configured", "requester": identity.principal,
             "tenant":ctx.identity_tenant, "server":ctx.base_url,
@@ -109,14 +122,13 @@ pub(crate) fn identity_path() -> Result<Option<PathBuf>> {
     Ok(Some(path))
 }
 
-fn prepare_identity(
-    consent: &SetupConsent,
+fn candidate_identity(
     path: &std::path::Path,
     server: &str,
     tenant: &str,
-) -> Result<RequesterIdentity> {
+) -> Result<(RequesterIdentity, bool)> {
     match std::fs::symlink_metadata(path) {
-        Ok(_) => return load_identity(path, server, tenant),
+        Ok(_) => return Ok((load_identity(path, server, tenant)?, false)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
@@ -131,8 +143,7 @@ fn prepare_identity(
             uuid::Uuid::new_v4().simple()
         ),
     };
-    save_identity(consent, path, &identity)?;
-    Ok(identity)
+    Ok((identity, true))
 }
 
 /// The operator key is confined to this module; no Debug or serialized form.

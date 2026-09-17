@@ -35,6 +35,11 @@ Persist the requester credential only in an explicitly configured private local
 identity file, bound to the configured server and tenant. Do not expose tokens
 in tool results, logs, trajectories, or source files. Reconnect loads and
 revalidates that identity. Existing two-key configurations continue working.
+After consent, close the old audit under its original identity and activate the
+requester before any administration write. Provisioning failure or cancellation
+therefore leaves requester execution unauthenticated or unprivileged, never on
+the newly empowered operator credential. Candidate identity generation before
+consent is memory-only; the card shows its principal and private file path.
 Partial setup retains enough private state to reconcile rather than minting
 another credential on a blind retry. Revoked identities are not reactivated.
 

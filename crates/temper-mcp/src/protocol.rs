@@ -110,6 +110,7 @@ pub(super) async fn dispatch_json_value(ctx: &mut RuntimeContext, raw: Value) ->
             };
 
             if params.name == "setup_connection" {
+                let id = id?; // Notifications cannot initiate human administration.
                 let result = crate::setup::setup_connection(ctx, &params.arguments).await;
                 ctx.record_execute_turn("setup_connection", &result);
                 let (text, is_error) = match result {

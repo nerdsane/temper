@@ -43,6 +43,8 @@ async fn human_setup_provisions_distinct_identity_on_real_temper() {
     })
     .unwrap();
     ctx.approver_key = None;
+    ctx.agent_id = Some("operator".into());
+    ctx.init_trajectory();
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     let pending = PendingClientRequests::default();
     ctx.requester = Some(ClientRequester::new(tx, pending.clone()));
@@ -62,7 +64,7 @@ async fn human_setup_provisions_distinct_identity_on_real_temper() {
         }}));
     };
     let call = json!({"jsonrpc":"2.0","id":42,"method":"tools/call",
-        "params":{"name":"setup_connection","arguments":{}}});
+        "params":{"name":"setup_connection"}});
     let (result, ()) = tokio::join!(crate::protocol::dispatch_json_value(&mut ctx, call), answer);
     let envelope = result.unwrap();
     assert_eq!(envelope["id"], 42);
@@ -71,6 +73,9 @@ async fn human_setup_provisions_distinct_identity_on_real_temper() {
         serde_json::from_str(envelope["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(result["status"], "configured");
     assert_eq!(ctx.agent_type.as_deref(), Some(REQUESTER_TYPE));
+    let audit = serde_json::to_value(ctx.trajectory.as_ref().unwrap().snapshot()).unwrap();
+    assert!(audit.to_string().contains(ctx.agent_id.as_ref().unwrap()));
+    assert!(!audit.to_string().contains("\"agent_id\":\"operator\""));
     assert_ne!(ctx.api_key, ctx.approver_key);
     let saved = load_identity(&path, &ctx.base_url, &ctx.identity_tenant).unwrap();
     assert_eq!(ctx.api_key.as_deref(), Some(saved.token.as_str()));

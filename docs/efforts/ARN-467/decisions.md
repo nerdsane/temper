@@ -657,3 +657,16 @@ D30 caller review: Generic stream uploads also need to materialize their authori
 **Chose the native operation because:** The human sees the fixed service, tenant, and grant, while agent input cannot choose policies or provide consent. Existing governance continues after setup. This adds a second MCP tool and requires private per-service credential storage.
 
 **Where:** docs/adrs/0177-human-authorized-mcp-identity-setup.md; crates/temper-mcp/src/setup.rs; setup_consent.rs; setup_identity.rs.
+
+
+## MCP setup: fail closed during partial provisioning
+
+**Decision:** After human consent and private persistence, finish the old audit and switch execution to the candidate requester before the first administration write.
+
+**Came up because:** Review showed that a successful policy grant followed by failed or canceled identity provisioning would otherwise leave execute using the newly empowered operator, and successful setup retained the operator's audit attribution.
+
+**Options:** Restore operator execution on failure; add a separate execution-block flag; replace requester credentials before provisioning and initialize a new audit.
+
+**Chose credential replacement because:** The existing credential boundary fails closed even if provisioning is interrupted. The operator remains available only for native setup recovery and human approvals. An unregistered requester receives authentication failures until explicit recovery completes; it never falls back to operator execution.
+
+**Where:** crates/temper-mcp/src/setup.rs; setup_test.rs; setup_server_test.rs; ADR-0177.

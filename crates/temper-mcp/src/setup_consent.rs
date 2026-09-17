@@ -27,11 +27,17 @@ impl SetupConsent {
 }
 
 /// Build the native card from trusted connector configuration only.
-pub(crate) fn setup_params(server: &str, tenant: &str) -> Value {
+pub(crate) fn setup_params(
+    server: &str,
+    tenant: &str,
+    principal: &str,
+    path: &std::path::Path,
+) -> Value {
+    let path = path.display();
     json!({
         "message": format!(
             "Set up separate agent and human identities for this Temper connection?\n\n\
-             Server: {server}\nTenant: {tenant}\n\n\
+             Server: {server}\nTenant: {tenant}\nRequester: {principal}\nPrivate identity file: {path}\n\n\
              This grants the verified operator permission to manage agent identity \
              records in this tenant and creates a separate nonoperator requester. \
              The requester credential will be saved in the connector's configured \
@@ -86,10 +92,17 @@ mod tests {
 
     #[test]
     fn card_discloses_target_and_persistent_operator_authority() {
-        let params = setup_params("https://genesis.example", "default");
+        let params = setup_params(
+            "https://genesis.example",
+            "default",
+            "mcp-example",
+            std::path::Path::new("/private/requester.json"),
+        );
         let message = params["message"].as_str().unwrap();
         assert!(message.contains("https://genesis.example"));
         assert!(message.contains("Tenant: default"));
+        assert!(message.contains("Requester: mcp-example"));
+        assert!(message.contains("/private/requester.json"));
         assert!(message.contains("manage agent identity records"));
         assert!(message.contains("does not approve any pending agent action"));
     }
