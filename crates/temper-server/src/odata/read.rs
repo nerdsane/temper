@@ -245,8 +245,9 @@ pub(super) async fn load_existing_entity_descriptor_body(
         .await
     {
         Ok(response) => Ok(serde_json::to_value(&response.state).unwrap_or_default()),
-        // The actor was loaded a moment ago and is gone now (passivation);
-        // the catalog row, if any, answers rather than a 404 (ARN-522).
+        // The actor answered `loaded` a moment ago and the ask still failed
+        // after retries (mailbox full, timeout); the catalog row, if any, is
+        // the answer the read would have had before ARN-522, rather than a 404.
         Err(_) => catalog_body_ignoring_actor(state, tenant, entity_type, set_name, key)
             .await
             .ok_or_else(|| resource_not_found_response(set_name, key)),

@@ -94,19 +94,26 @@ them — still get the actor's state.
 
 **Where.** `materialize_entity_set_entities` takes a `CatalogPreference`
 (`Fallback` / `Prefer` / `PreferOrdered`; one argument in place of two
-booleans, which clippy's argument limit asked for). The scan wrappers build
-it from `request.query_options.orderby.is_some()`; `Temper.Nearest` passes
+booleans, which clippy's argument limit asked for). Only the native pushdown
+wrapper (`materialize_filter_and_authorize_ids`) derives `PreferOrdered` from
+`$orderby`: it pages by catalog values. The source-cursor readers sort in
+memory after materialization, so they pass `Prefer` — review round 5 (fable)
+showed that `PreferOrdered` there re-opened the stale read for
+`$orderby` on a field without a native index. `Temper.Nearest` passes
 `Prefer` (it ranks by vector score, not catalog values).
 
-## D5: If the actor passivates between the check and the ask, the catalog row answers
+## D5: If the actor's ask fails after retries, the catalog row answers
 
 **Decision:** A row skipped for a loaded actor is kept aside and served if the
 actor's ask fails; the single-entity path falls back to the catalog row
 before answering 404.
 
 **Came up because:** Review round 3 (codex, fable): `has_loaded_actor` and
-the later ask are not atomic; idle passivation in between turned a read that
-the catalog would have answered into a 404 or an omitted row.
+the later ask are not atomic, and an ask that fails turned a read the catalog
+would have answered into a 404 or an omitted row. Round 5 (fable) corrected
+the mechanism: a passivated actor is respawned and rehydrated by
+`get_or_spawn_tenant_actor`, so the arm is reached on ask failure after
+retries (mailbox full, timeout), not on passivation itself.
 
 **Options:** Make the check-and-ask atomic; retry the ask on a fresh actor
 ref; fall back to the row already in hand.
@@ -118,3 +125,22 @@ race, not a steady state.
 **Where.** `materialize_entity_set_entities` (`skipped_rows`),
 `read.rs::load_existing_entity_descriptor_body`,
 `read_support::catalog_body_ignoring_actor`.
+
+## D6: Reads of a hot entity keep its actor resident
+
+**Decision:** Accepted as is: asking a loaded actor touches its access time,
+so a steady stream of reads keeps that actor from idle passivation.
+
+**Came up because:** Review round 5 (fable): before this change a polled
+collection of hot entities was served from the catalog and let the actors
+passivate; now each poll touches them.
+
+**Options:** Ask without touching; accept.
+
+**Chose accepting because** a read of a loaded entity is an access, the
+actor is the state being read, and catalog-miss reads already behaved this
+way. Reads that do not want to pin actors can pass `Fallback`; a dedicated
+"peek without touch" ask is a follow-up recorded on ARN-522, not a
+prerequisite.
+
+**Where.** `get_or_spawn_tenant_actor_with_fields` (`touch_actor_access`).

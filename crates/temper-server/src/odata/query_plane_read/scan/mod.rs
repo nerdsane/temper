@@ -184,7 +184,9 @@ pub(super) async fn materialize_and_authorize_ids(
         request.entity_type,
         request.entity_set_name,
         entity_ids,
-        CatalogPreference::for_query(prefer_catalog, request.query_options.orderby.is_some()),
+        // The source readers sort in memory after materialization, so a
+        // loaded actor's newer state never disturbs their ordering.
+        CatalogPreference::for_query(prefer_catalog, false),
         None,
     )
     .await;
@@ -211,6 +213,8 @@ pub(super) async fn materialize_filter_and_authorize_ids(
         request.entity_type,
         request.entity_set_name,
         entity_ids,
+        // The native pushdown pages by catalog values, so an ordered page
+        // keeps the rows its ordering was computed from (ARN-522 D4).
         CatalogPreference::for_query(prefer_catalog, request.query_options.orderby.is_some()),
         None,
     )

@@ -263,11 +263,12 @@ pub(super) async fn materialize_entity_set_entities(
     // Two exceptions keep pages honest. A page the caller ordered or sliced by
     // catalog values keeps its catalog rows, so the values returned are the
     // values the ordering was computed from. And a row skipped for a loaded
-    // actor is kept aside: if the actor passivates between the check and the
-    // ask, the row answers instead of the entity vanishing from the page. The
-    // skipped rows also mark which ids the fallback must not "repair" — the
-    // projection queue owns those — while a loaded actor with no row at all is
-    // still a miss and is repaired.
+    // actor is kept aside: if the ask still fails after retries (mailbox full,
+    // timeout — a passivated actor is simply respawned), the row answers
+    // instead of the entity vanishing from the page. The skipped rows also
+    // mark which ids the fallback must not "repair" — the projection queue
+    // owns those — while a loaded actor with no row at all is still a miss
+    // and is repaired.
     let mut skipped_rows: BTreeMap<String, EntityCatalogRow> = BTreeMap::new();
     if !ordered_by_catalog {
         catalog_hits.retain(|id, row| {
@@ -351,9 +352,9 @@ pub(super) async fn materialize_entity_set_entities(
                             entity_id = %id,
                             "failed to materialize entity for OData collection"
                         );
-                        // The actor went away between the presence check and
-                        // the ask (passivation); the row it was preferred over
-                        // is still the best answer we hold (ARN-522, round 3).
+                        // The ask failed after retries; the row the actor was
+                        // preferred over is the answer this read would have
+                        // had before ARN-522 (round 3).
                         skipped_rows.get(&id).cloned().map(|row| {
                             catalog_row_to_entity_body(&entity_type, &entity_set_name, row)
                         })
