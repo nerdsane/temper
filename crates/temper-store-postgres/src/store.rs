@@ -143,6 +143,10 @@ impl EventStore for PostgresEventStore {
         // a reject is atomic (the journal does not advance). A different entity
         // already holding the key is the violation (reject + surface).
         for key in key_rows {
+            // Release markers (empty hash, ARN-238) claim nothing.
+            if key.key_hash.is_empty() {
+                continue;
+            }
             let holder: Option<(String,)> = crate::dbm::postgres_query_as!(
                 "SELECT entity_id FROM entity_key_index \
                  WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND key_hash = $4",
@@ -229,6 +233,10 @@ impl EventStore for PostgresEventStore {
             .execute(&mut *tx)
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            // A release marker (ARN-238) only drops the prior row.
+            if key.key_hash.is_empty() {
+                continue;
+            }
             crate::dbm::postgres_query!(
                 "INSERT INTO entity_key_index \
                  (tenant, entity_type, key_name, key_hash, entity_id, sequence_nr) \
@@ -316,6 +324,21 @@ impl EventStore for PostgresEventStore {
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
         for key in key_rows {
+            // A release marker (empty hash, ARN-238) only drops the entity's row.
+            if key.key_hash.is_empty() {
+                crate::dbm::postgres_query!(
+                    "DELETE FROM entity_key_index \
+                     WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND entity_id = $4",
+                )
+                .bind(tenant)
+                .bind(entity_type)
+                .bind(&key.key_name)
+                .bind(entity_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+                continue;
+            }
             // A different entity already holding this key is a pre-existing data
             // conflict — log and skip (don't fail the whole backfill on one row;
             // the conflict surfaces via the metric and a keyed read still resolves
