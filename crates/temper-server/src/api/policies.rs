@@ -14,7 +14,9 @@ use super::PolicyAuthed;
 use crate::authz::persist_and_activate_policy;
 use crate::state::ServerState;
 
+mod replacement;
 mod support;
+pub(crate) use replacement::handle_replace_policy;
 use support::{
     build_prospective_enabled_text, build_prospective_enabled_text_with_override, persist_new_rule,
     policy_row_to_json, reload_tenant_from_store,

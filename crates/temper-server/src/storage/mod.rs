@@ -827,6 +827,17 @@ pub trait PolicyStore: Send + Sync {
         created_by: &str,
     ) -> Result<bool, String>;
 
+    /// Replace an enabled entry only if its stored hash still matches the reviewed version.
+    /// Returns false for absent, disabled or changed entries; errors do not acknowledge a write.
+    async fn replace_policy_if_hash(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        expected_hash: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, String>;
+
     async fn delete_policy(&self, tenant: &str, policy_id: &str) -> Result<(), String>;
 }
 
@@ -1666,6 +1677,21 @@ impl PolicyStore for PostgresEventStore {
             .map_err(|e| e.to_string())
     }
 
+    /// Replace an enabled entry only if its stored hash still matches the reviewed version.
+    /// Returns false for absent, disabled or changed entries; errors do not acknowledge a write.
+    async fn replace_policy_if_hash(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        expected_hash: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, String> {
+        self.replace_policy_if_hash(tenant, policy_id, expected_hash, cedar_text, created_by)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn delete_policy(&self, tenant: &str, policy_id: &str) -> Result<(), String> {
         self.delete_policy(tenant, policy_id)
             .await
@@ -1720,6 +1746,21 @@ impl PolicyStore for TursoEventStore {
         created_by: &str,
     ) -> Result<bool, String> {
         self.update_policy_text(tenant, policy_id, cedar_text, created_by)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Replace an enabled entry only if its stored hash still matches the reviewed version.
+    /// Returns false for absent, disabled or changed entries; errors do not acknowledge a write.
+    async fn replace_policy_if_hash(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        expected_hash: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, String> {
+        self.replace_policy_if_hash(tenant, policy_id, expected_hash, cedar_text, created_by)
             .await
             .map_err(|e| e.to_string())
     }
@@ -1811,6 +1852,26 @@ impl PolicyStore for TenantStoreRouter {
             .map_err(|e| e.to_string())?;
         store
             .update_policy_text(tenant, policy_id, cedar_text, created_by)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Replace an enabled entry only if its stored hash still matches the reviewed version.
+    /// Returns false for absent, disabled or changed entries; errors do not acknowledge a write.
+    async fn replace_policy_if_hash(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        expected_hash: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, String> {
+        let store = self
+            .store_for_tenant(tenant)
+            .await
+            .map_err(|e| e.to_string())?;
+        store
+            .replace_policy_if_hash(tenant, policy_id, expected_hash, cedar_text, created_by)
             .await
             .map_err(|e| e.to_string())
     }

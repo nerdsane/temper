@@ -384,6 +384,41 @@ impl TursoEventStore {
         Ok(affected > 0)
     }
 
+    /// Conditionally replace an enabled policy with the exact reviewed hash.
+    ///
+    /// # Errors
+    /// Returns a persistence error if the atomic database update fails.
+    #[instrument(skip_all, fields(tenant, policy_id, otel.name = "turso.replace_policy_if_hash"))]
+    pub async fn replace_policy_if_hash(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        expected_hash: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.replace_policy_if_hash");
+        let policy_hash = compute_policy_hash(cedar_text);
+        let conn = self.configured_connection().await?;
+        let affected = conn
+            .execute(
+                "UPDATE policies SET cedar_text = ?3, policy_hash = ?4, created_by = ?5, \
+             created_at = datetime('now') \
+             WHERE tenant = ?1 AND policy_id = ?2 AND policy_hash = ?6 AND enabled = 1",
+                params![
+                    tenant,
+                    policy_id,
+                    cedar_text,
+                    policy_hash,
+                    created_by,
+                    expected_hash
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+        Ok(affected > 0)
+    }
+
     /// Delete a single Cedar policy entry by `(tenant, policy_id)`.
     ///
     /// Silently succeeds if the row does not exist.
@@ -436,3 +471,7 @@ async fn enabled_duplicate_hash_exists(
         .map_err(storage_error)?;
     Ok(rows.next().await.map_err(storage_error)?.is_some())
 }
+
+#[cfg(test)]
+#[path = "policy_replacement_test.rs"]
+mod replacement_tests;

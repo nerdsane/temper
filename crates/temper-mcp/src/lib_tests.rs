@@ -347,11 +347,11 @@ async fn tool_list_separates_execute_from_human_only_setup() {
     .await;
 
     let tools = response["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 2);
+    assert_eq!(tools.len(), 3);
     assert_eq!(tools[0]["name"], "execute");
-    assert_eq!(tools[1]["name"], "setup_connection");
-    assert_eq!(tools[1]["inputSchema"]["properties"], json!({}));
-    assert_eq!(tools[1]["inputSchema"]["additionalProperties"], false);
+    assert_eq!(tools[2]["name"], "setup_connection");
+    assert_eq!(tools[2]["inputSchema"]["properties"], json!({}));
+    assert_eq!(tools[2]["inputSchema"]["additionalProperties"], false);
 }
 
 #[test]
@@ -911,4 +911,25 @@ async fn real_server_denials_keep_decision_identity_out_of_entity_names() {
         assert_eq!(parsed["decision_id"], decision_id);
     }
     let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn tool_list_exposes_exact_policy_proposal_without_approval_argument() {
+    let mut ctx = ctx_for_port(3001);
+    let response = rpc(
+        &mut ctx,
+        json!({"jsonrpc":"2.0","id":91,"method":"tools/list"}),
+    )
+    .await;
+    let tools = response["result"]["tools"].as_array().unwrap();
+    let tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "request_policy_replacement")
+        .expect("native human policy replacement must be advertised");
+    let properties = tool["inputSchema"]["properties"].as_object().unwrap();
+    assert_eq!(properties.len(), 3);
+    for name in ["policy_id", "expected_hash", "cedar_text"] {
+        assert!(properties.contains_key(name));
+    }
+    assert_eq!(tool["inputSchema"]["additionalProperties"], false);
 }

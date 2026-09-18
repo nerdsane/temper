@@ -146,6 +146,10 @@ pub fn build_api_router() -> Router<ServerState> {
             "/tenants/{tenant}/policies/suggestions",
             get(handle_policy_suggestions),
         )
+        .route(
+            "/tenants/{tenant}/policies/entry/{policy_id}/replace",
+            post(policies::handle_replace_policy),
+        )
         // Cross-tenant policy listing
         .route("/policies", get(policies::handle_list_all_policies))
         // Decision approve/deny (Phase 4)

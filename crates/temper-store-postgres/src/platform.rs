@@ -1347,6 +1347,27 @@ impl PostgresEventStore {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Conditionally replace an enabled policy with the exact reviewed hash.
+    ///
+    /// # Errors
+    /// Returns a persistence error if the atomic database update fails.
+    pub async fn replace_policy_if_hash(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        expected_hash: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<bool, PersistenceError> {
+        let policy_hash = compute_policy_hash(cedar_text);
+        let result = crate::dbm::postgres_query!(
+            "UPDATE policies SET cedar_text = $3, policy_hash = $4, created_by = $5, created_at = now() \
+             WHERE tenant = $1 AND policy_id = $2 AND policy_hash = $6 AND enabled = TRUE",
+        ).bind(tenant).bind(policy_id).bind(cedar_text).bind(&policy_hash)
+            .bind(created_by).bind(expected_hash).execute(self.pool()).await.map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn delete_policy(
         &self,
         tenant: &str,
