@@ -114,6 +114,9 @@ pub enum ModelGuard {
         required_status: Vec<String>,
         forbidden_status: Vec<String>,
     },
+    /// A recorded external judgment. Local state cannot guarantee an answer;
+    /// exploration considers every satisfiable assertion outcome.
+    SystemOne(temper_spec::automaton::SystemOneGuard),
     /// All sub-guards must hold.
     And(Vec<ModelGuard>),
 }
@@ -124,6 +127,15 @@ impl ModelGuard {
         match self {
             ModelGuard::CrossEntityState { .. } => true,
             ModelGuard::And(guards) => guards.iter().any(ModelGuard::contains_cross_entity),
+            _ => false,
+        }
+    }
+
+    /// Returns true when this guard contains an external System One judgment.
+    pub fn contains_system_one(&self) -> bool {
+        match self {
+            ModelGuard::SystemOne(_) => true,
+            ModelGuard::And(guards) => guards.iter().any(ModelGuard::contains_system_one),
             _ => false,
         }
     }

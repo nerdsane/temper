@@ -544,6 +544,8 @@ pub struct ServerState {
     /// State ownership permits deterministic capacity injection in simulation.
     pub(crate) raw_blob_ingest_budget: crate::blob_store::BlobIngestBudget,
     pub secrets_vault: Option<Arc<SecretsVault>>,
+    /// Injected environment boundary for typed pre-transition judgments.
+    pub system_one_provider: Option<Arc<dyn crate::system_one::provider::SystemOneProvider>>,
     /// Broadcast channel for agent progress events (SSE subscriptions).
     /// // determinism-ok: broadcast channel for external observation only
     pub agent_progress_tx: Arc<tokio::sync::broadcast::Sender<AgentProgressEvent>>,
@@ -796,6 +798,7 @@ impl ServerState {
             commons_write_guardrail_lock: Arc::new(tokio::sync::Mutex::new(())),
             raw_blob_ingest_budget: crate::blob_store::BlobIngestBudget::runtime(),
             secrets_vault: None,
+            system_one_provider: None,
             agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
             entity_event_sequences: Arc::new(Mutex::new(BTreeMap::new())),
             entity_observe_log: Arc::new(Mutex::new(BTreeMap::new())),
@@ -1053,6 +1056,7 @@ impl ServerState {
             commons_write_guardrail_lock: Arc::new(tokio::sync::Mutex::new(())),
             raw_blob_ingest_budget: crate::blob_store::BlobIngestBudget::runtime(),
             secrets_vault: None,
+            system_one_provider: None,
             agent_progress_tx: Arc::new(agent_progress_tx), // determinism-ok: broadcast for external observation
             entity_event_sequences: Arc::new(Mutex::new(BTreeMap::new())),
             entity_observe_log: Arc::new(Mutex::new(BTreeMap::new())),
@@ -1184,6 +1188,15 @@ impl ServerState {
     /// Attach an encrypted secrets vault.
     pub fn with_secrets_vault(mut self, vault: SecretsVault) -> Self {
         self.secrets_vault = Some(Arc::new(vault));
+        self
+    }
+
+    /// Attach the provider used to resolve native `system_one` IOA guards.
+    pub fn with_system_one_provider(
+        mut self,
+        provider: Arc<dyn crate::system_one::provider::SystemOneProvider>,
+    ) -> Self {
+        self.system_one_provider = Some(provider);
         self
     }
 

@@ -143,6 +143,17 @@ impl SecretsVault {
             .or_else(|| self.get_platform_secret(key))
     }
 
+    /// Get a tenant-local secret without shared platform fallback.
+    ///
+    /// Use this for external account credentials that must remain isolated
+    /// between tenants, even when a platform secret has the same key name.
+    pub fn get_tenant_secret(&self, tenant: &str, key: &str) -> Option<String> {
+        let cache = self.cache.read().expect("tenant secrets lock poisoned");
+        cache
+            .get(tenant)
+            .and_then(|secrets| secrets.get(key).cloned())
+    }
+
     /// Remove a secret from the in-memory cache.
     pub fn remove_secret(&self, tenant: &str, key: &str) -> bool {
         let mut cache = self.cache.write().unwrap(); // ci-ok: infallible lock
@@ -234,6 +245,22 @@ mod tests {
             vault.get_secret("tenant-b", "API_KEY"),
             Some("sk-platform".into())
         );
+    }
+
+    #[test]
+    fn tenant_local_lookup_excludes_platform_fallback() {
+        let vault = SecretsVault::new(&test_key());
+        vault
+            .cache_platform_secret("API_KEY", "platform-key".into())
+            .unwrap();
+        vault
+            .cache_secret("tenant-a", "API_KEY", "tenant-key".into())
+            .unwrap();
+        assert_eq!(
+            vault.get_tenant_secret("tenant-a", "API_KEY"),
+            Some("tenant-key".into())
+        );
+        assert_eq!(vault.get_tenant_secret("tenant-b", "API_KEY"), None);
     }
 
     #[test]

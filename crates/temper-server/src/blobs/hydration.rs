@@ -396,25 +396,35 @@ pub(crate) async fn hydrate_comparison_fields(
     source: &BlobReadSource<'_>,
     fields: &mut Value,
 ) -> Result<(), String> {
-    let mut pointers = Vec::new();
-    collect_blob_ref_pointers(fields, "", &mut pointers);
-    if pointers.is_empty() {
-        return Ok(());
-    }
     let budget = BlobHydrationBudget::new(
         WASM_DEFERRED_BLOB_BUDGET_BYTES,
         WASM_DEFERRED_BLOB_BUDGET_BYTES,
         0,
         0,
     );
-    hydrate_blob_refs_with_source(source, fields, &budget).await;
-    for pointer in pointers {
-        if fields
-            .pointer(&pointer)
-            .is_some_and(|value| field_overflow_descriptor(value).is_some())
-        {
-            return Err("Comparison field blob could not be resolved and verified".to_string());
-        }
+    hydrate_comparison_fields_with_budget(source, fields, &budget).await
+}
+
+/// Resolve selected comparison data under a caller-specified aggregate budget.
+/// Missing, corrupt, nested, or oversized references fail rather than remaining
+/// in the material used to make a guard decision.
+pub(crate) async fn hydrate_comparison_fields_with_budget(
+    source: &BlobReadSource<'_>,
+    fields: &mut Value,
+    budget: &BlobHydrationBudget,
+) -> Result<(), String> {
+    let mut pointers = Vec::new();
+    collect_blob_ref_pointers(fields, "", &mut pointers);
+    if pointers.is_empty() {
+        return Ok(());
+    }
+    hydrate_blob_refs_with_source(source, fields, budget).await;
+    // Recollect after hydration: referenced JSON can itself contain descriptors.
+    // Accepting those without their verified bytes would change guard meaning.
+    pointers.clear();
+    collect_blob_ref_pointers(fields, "", &mut pointers);
+    if !pointers.is_empty() {
+        return Err("Comparison field blob could not be resolved and verified".to_string());
     }
     Ok(())
 }

@@ -11,6 +11,7 @@ mod actor_runtime;
 mod bootstrap;
 mod loader;
 mod storage;
+mod verification_cache;
 
 use std::collections::{BTreeMap, HashMap};
 use std::{path::Path, sync::Arc};
@@ -32,6 +33,7 @@ use temper_verify::cascade::VerificationCascade;
 use crate::{ActorRuntimeBackend, StorageBackend};
 
 use loader::read_ioa_sources;
+use verification_cache::ioa_sources_requiring_background_verification;
 
 /// Parsed specs loaded from disk for a tenant.
 struct LoadedTenantSpecs {
@@ -133,7 +135,11 @@ pub async fn run(
             key
         };
         let vault = temper_server::secrets::vault::SecretsVault::new(&key_bytes);
-        state.server.secrets_vault = Some(std::sync::Arc::new(vault));
+        let vault = Arc::new(vault);
+        state.server.secrets_vault = Some(vault.clone());
+        state.server = state.server.with_system_one_provider(Arc::new(
+            temper_server::system_one::provider::TypesafeSystemOneProvider::new(vault),
+        ));
         println!("  Secrets vault: configured");
     }
 
@@ -650,7 +656,12 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
     }
 
     let source_count = ioa_sources.len();
-    ioa_sources = ioa_sources_requiring_background_verification(ioa_sources, &verification_cache);
+    ioa_sources = ioa_sources_requiring_background_verification(
+        ioa_sources,
+        &verification_cache,
+        &mut registry.write().unwrap(),
+        &TenantId::new(&tenant_str),
+    );
     let skipped_count = source_count.saturating_sub(ioa_sources.len());
     if skipped_count > 0 {
         println!(
@@ -906,26 +917,9 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
     }
 }
 
-fn ioa_sources_requiring_background_verification(
-    ioa_sources: HashMap<String, String>,
-    verification_cache: &BTreeMap<String, (String, bool)>,
-) -> HashMap<String, String> {
-    ioa_sources
-        .into_iter()
-        .filter(|(entity_name, ioa_source)| {
-            !verification_cache
-                .get(entity_name)
-                .is_some_and(|(cached_hash, verified)| {
-                    *verified && cached_hash == &temper_store_turso::spec_content_hash(ioa_source)
-                })
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{cache_platform_secret_if_present, ioa_sources_requiring_background_verification};
-    use std::collections::{BTreeMap, HashMap};
+    use super::cache_platform_secret_if_present;
     use temper_server::secrets::vault::SecretsVault;
 
     fn test_vault() -> SecretsVault {
@@ -951,42 +945,5 @@ mod tests {
         cache_platform_secret_if_present(&vault, "exa_api_key", None);
 
         assert_eq!(vault.get_platform_secret("exa_api_key"), None);
-    }
-
-    #[test]
-    fn background_verification_skips_cached_verified_hashes() {
-        let mut ioa_sources = HashMap::new();
-        ioa_sources.insert(
-            "Issue".to_string(),
-            "[automaton]\nname = \"Issue\"\n".to_string(),
-        );
-        ioa_sources.insert(
-            "Task".to_string(),
-            "[automaton]\nname = \"Task\"\n".to_string(),
-        );
-
-        let mut verification_cache = BTreeMap::new();
-        verification_cache.insert(
-            "Issue".to_string(),
-            (
-                temper_store_turso::spec_content_hash(
-                    ioa_sources.get("Issue").expect("Issue source"),
-                ),
-                true,
-            ),
-        );
-        verification_cache.insert(
-            "Task".to_string(),
-            (
-                temper_store_turso::spec_content_hash("different source"),
-                true,
-            ),
-        );
-
-        let pending =
-            ioa_sources_requiring_background_verification(ioa_sources, &verification_cache);
-
-        assert_eq!(pending.len(), 1);
-        assert!(pending.contains_key("Task"));
     }
 }

@@ -2556,6 +2556,7 @@ async fn replay_skip_of_a_field_update_event_is_counted() {
     let pid = "default:Order:arn189-replay-skip-metric";
     // The value that survives the malformed update must already be durable.
     let created = EntityEvent {
+        system_one_receipts: vec![],
         action: "Created".into(),
         from_status: String::new(),
         to_status: order_table().read().unwrap().initial_state.clone(),

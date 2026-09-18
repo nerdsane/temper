@@ -91,6 +91,7 @@ impl ServerState {
         let mut events = Vec::with_capacity(3);
 
         let created = EntityEvent {
+            system_one_receipts: vec![],
             action: "Created".to_string(),
             from_status: String::new(),
             to_status: state.status.clone(),

@@ -86,7 +86,7 @@ pub struct CascadeResult {
     pub all_passed: bool,
     /// Per-level results.
     pub levels: Vec<LevelResult>,
-    /// Warnings about invariants that could not be verified at model level.
+    /// Warnings about unverifiable invariants and external-answer assumptions.
     pub warnings: Vec<String>,
     /// Reachable paths extracted after L1 model check (if path extraction was configured).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -246,6 +246,7 @@ impl VerificationCascade {
 
         // Collect warnings for Unverifiable invariants.
         let mut warnings = collect_unverifiable_warnings(&model);
+        warnings.extend(checker::external_guard_assumptions(&model));
 
         // Level 0: SMT symbolic verification
         let l0 = self.run_symbolic_verification();
@@ -407,10 +408,15 @@ impl VerificationCascade {
     fn run_model_check(&self, model: &TemperModel) -> LevelResult {
         let verification = checker::check_model(model);
         let passed = verification.all_properties_hold;
-        let summary = if passed {
+        let mut summary = if passed {
             format!(
-                "L1 Model Check PASSED: {} states explored, all properties hold",
+                "L1 Model Check PASSED: {} states explored, {}",
                 verification.states_explored,
+                if verification.external_guard_assumptions.is_empty() {
+                    "all properties hold"
+                } else {
+                    "properties hold in the abstract external-answer model"
+                },
             )
         } else {
             let mut parts = Vec::new();
@@ -433,6 +439,10 @@ impl VerificationCascade {
                 parts.join("; "),
             )
         };
+        if !verification.external_guard_assumptions.is_empty() {
+            summary.push_str("; external judgment model: ");
+            summary.push_str(&verification.external_guard_assumptions.join(" | "));
+        }
 
         LevelResult {
             level: CascadeLevel::ModelCheck,

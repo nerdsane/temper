@@ -274,6 +274,10 @@ assert = "items > 0"
 4. `[[invariant]]`: Define safety invariants with `name`, `when` (trigger states), and `assert` expression.
 5. Action kinds: `input` = from environment (HTTP), always enabled in from-states; `output` = emitted events; `internal` = private state transitions.
 
+Typed guard lists also support recorded TypeSafe judgments through
+`type = "system_one"`. See [System One guards](system-one-guards.md) for Choice,
+Score, Noul, explicit state bindings, tenant credentials, and replay semantics.
+
 ### 3.3 Cedar (Access Control)
 
 Cedar policies define **who** can do **what** to **which** resources.

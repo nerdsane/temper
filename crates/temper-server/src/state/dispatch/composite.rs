@@ -135,6 +135,8 @@ impl crate::state::ServerState {
 
         let sub_writes = parse_sub_writes(callback_params)?;
         validate_sub_writes(&metadata, &sub_writes)?;
+        let parent_table = self.transition_table_for_dispatch(tenant, entity_type)?;
+        reject_system_one_composite_action(&parent_table, action)?;
         let parent_idempotency = composite_parent_idempotency(agent_ctx, callback_params);
 
         let _commons_guardrail_lock = self.acquire_commons_write_guardrail_lock(tenant).await;
@@ -228,6 +230,12 @@ impl crate::state::ServerState {
         if prepared_sub_writes.is_empty() {
             return Ok(true);
         }
+        let parent_table = self.transition_table_for_dispatch(tenant, parent_entity_type)?;
+        reject_system_one_composite_action(&parent_table, parent_action)?;
+        for write in prepared_sub_writes {
+            let table = self.transition_table_for_dispatch(tenant, &write.entity_type)?;
+            reject_system_one_composite_action(&table, &write.action)?;
+        }
 
         let field_sync_mode = self.composite_batch_field_sync_mode(tenant, backend);
         let blob_store = self.blob_store_for_tenant(tenant).ok();
@@ -293,6 +301,7 @@ impl crate::state::ServerState {
             .await?;
 
             let table = self.transition_table_for_dispatch(tenant, &write.entity_type)?;
+            reject_system_one_composite_action(&table, &write.action)?;
             let cross_entity_booleans =
                 if table_has_cross_entity_guards_for_action(&table, &write.action) {
                     self.resolve_cross_entity_guards(
@@ -509,6 +518,7 @@ impl crate::state::ServerState {
             && state.total_event_count == 0
         {
             let bootstrap = crate::entity_actor::EntityEvent {
+                system_one_receipts: vec![],
                 action: "Created".to_string(),
                 from_status: String::new(),
                 to_status: state.status.clone(),
@@ -592,6 +602,7 @@ impl crate::state::ServerState {
             let sub_entity_id = sub_write.entity_id.clone();
             let sub_action = sub_write.action.clone();
             let table = self.transition_table_for_dispatch(tenant, &sub_entity_type)?;
+            reject_system_one_composite_action(&table, &sub_action)?;
             let sub_params = normalize_sub_write_params(sub_write, table.strict_action_params);
 
             let governed = match governed_cache.get(&sub_entity_type) {
@@ -754,6 +765,7 @@ impl crate::state::ServerState {
         let parent_entity_type = parent.entity_type;
         let parent_action = parent.action;
         let table = self.transition_table_for_dispatch(tenant, &write.entity_type)?;
+        reject_system_one_composite_action(&table, &write.action)?;
         let before = if let Some(previous) = previous {
             previous
         } else {
@@ -836,6 +848,7 @@ impl crate::state::ServerState {
                 || table.has_input_contracts())
         {
             let created = crate::entity_actor::EntityEvent {
+                system_one_receipts: vec![],
                 action: "Created".into(),
                 from_status: String::new(),
                 to_status: stream.state.status.clone(),

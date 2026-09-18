@@ -259,6 +259,16 @@ fn validate_actor_runtime_compatible(
     }
 
     for action in &spec.automaton.actions {
+        if action
+            .guard
+            .iter()
+            .any(|guard| matches!(guard, temper_spec::automaton::Guard::SystemOne(_)))
+        {
+            bail!(
+                "tenant {tenant} entity {entity_type} action {} declares system_one guards, which are not supported by --actor-runtime postgres",
+                action.name
+            );
+        }
         if !action.triggers.is_empty() {
             bail!(
                 "tenant {tenant} entity {entity_type} action {} declares action triggers, which are not yet supported by --actor-runtime postgres",

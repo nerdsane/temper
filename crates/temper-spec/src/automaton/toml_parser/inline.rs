@@ -125,7 +125,7 @@ pub(super) fn join_multiline_arrays(input: &str) -> Vec<String> {
         let trimmed = line.trim();
 
         if bracket_depth > 0 {
-            buffer.push(' ');
+            buffer.push('\n');
             buffer.push_str(trimmed);
             bracket_depth += net_bracket_depth(trimmed);
             if bracket_depth <= 0 {
@@ -202,9 +202,27 @@ fn split_top_level(s: &str, delimiter: char) -> Vec<&str> {
 }
 
 fn net_bracket_depth(value: &str) -> i32 {
-    value.chars().fold(0, |depth, ch| match ch {
-        '[' => depth + 1,
-        ']' => depth - 1,
-        _ => depth,
-    })
+    let mut depth = 0;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+    for ch in value.chars() {
+        if ch == '#' && !in_single_quote && !in_double_quote {
+            break;
+        }
+        if ch == '"' && !in_single_quote && !escaped {
+            in_double_quote = !in_double_quote;
+        } else if ch == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+        }
+        if !in_single_quote && !in_double_quote {
+            match ch {
+                '[' => depth += 1,
+                ']' => depth -= 1,
+                _ => {}
+            }
+        }
+        escaped = in_double_quote && ch == '\\' && !escaped;
+    }
+    depth
 }

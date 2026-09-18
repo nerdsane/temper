@@ -482,7 +482,7 @@ fn is_supported_state_var_type(var_type: &str) -> bool {
 
 fn guard_var(guard: &Guard) -> Option<&str> {
     match guard {
-        Guard::StateIn { .. } => None,
+        Guard::StateIn { .. } | Guard::SystemOne(_) => None,
         Guard::MinCount { var, .. } => Some(var.as_str()),
         Guard::MaxCount { var, .. } => Some(var.as_str()),
         Guard::IsTrue { var } => Some(var.as_str()),
@@ -511,6 +511,7 @@ fn effect_var(effect: &Effect) -> Option<&str> {
 
 fn render_guard(guard: &Guard) -> String {
     match guard {
+        Guard::SystemOne(guard) => format!("system_one {}", guard.assertion),
         Guard::StateIn { values } => format!("state_in {:?}", values),
         Guard::MinCount { var, min } => format!("min {var} {min}"),
         Guard::MaxCount { var, max } => format!("max {var} {max}"),

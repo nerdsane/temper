@@ -1,5 +1,4 @@
 use super::AutomatonParseError;
-use super::inline::{parse_inline_fields, parse_string_array, split_inline_tables};
 use crate::automaton::Guard;
 
 pub(super) fn parse_guard_value(
@@ -8,7 +7,7 @@ pub(super) fn parse_guard_value(
 ) -> Result<(), AutomatonParseError> {
     let trimmed = value.trim();
 
-    if trimmed.starts_with('[') && trimmed.contains('{') {
+    if trimmed.starts_with('[') {
         return parse_guard_array(trimmed, guards);
     }
 
@@ -33,78 +32,20 @@ pub(super) fn parse_guard_clause(value: &str) -> Result<Guard, AutomatonParseErr
 }
 
 fn parse_guard_array(value: &str, guards: &mut Vec<Guard>) -> Result<(), AutomatonParseError> {
-    let trimmed = value.trim();
-    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
-        return Ok(());
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct GuardList {
+        guard: Vec<Guard>,
     }
-
-    let inner = &trimmed[1..trimmed.len() - 1];
-    for entry in split_inline_tables(inner) {
-        let entry = entry.trim().trim_matches('{').trim_matches('}').trim();
-        guards.push(parse_guard_fields(&parse_inline_fields(entry))?);
-    }
-
-    Ok(())
-}
-
-fn parse_guard_fields(
-    fields: &std::collections::BTreeMap<String, String>,
-) -> Result<Guard, AutomatonParseError> {
-    let guard_type = fields.get("type").map(|s| s.as_str()).unwrap_or("");
-
-    let guard = match guard_type {
-        "cross_entity_state" => Guard::CrossEntityState {
-            entity_type: fields.get("entity_type").cloned().unwrap_or_default(),
-            entity_id_source: fields.get("entity_id_source").cloned().unwrap_or_default(),
-            required_status: fields
-                .get("required_status")
-                .map(|s| parse_string_array(s))
-                .unwrap_or_default(),
-            forbidden_status: fields
-                .get("forbidden_status")
-                .map(|s| parse_string_array(s))
-                .unwrap_or_default(),
-            required: fields
-                .get("required")
-                .map(|s| s.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
-        },
-        "state_in" => Guard::StateIn {
-            values: fields
-                .get("values")
-                .map(|s| parse_string_array(s))
-                .unwrap_or_default(),
-        },
-        "min_count" => Guard::MinCount {
-            var: fields.get("var").cloned().unwrap_or_default(),
-            min: fields.get("min").and_then(|s| s.parse().ok()).unwrap_or(0),
-        },
-        "max_count" => Guard::MaxCount {
-            var: fields.get("var").cloned().unwrap_or_default(),
-            max: fields.get("max").and_then(|s| s.parse().ok()).unwrap_or(0),
-        },
-        "is_true" => Guard::IsTrue {
-            var: fields.get("var").cloned().unwrap_or_default(),
-        },
-        "is_false" => Guard::IsFalse {
-            var: fields.get("var").cloned().unwrap_or_default(),
-        },
-        "list_contains" => Guard::ListContains {
-            var: fields.get("var").cloned().unwrap_or_default(),
-            value: fields.get("value").cloned().unwrap_or_default(),
-        },
-        "list_length_min" => Guard::ListLengthMin {
-            var: fields.get("var").cloned().unwrap_or_default(),
-            min: fields.get("min").and_then(|s| s.parse().ok()).unwrap_or(0),
-        },
-        _ => {
-            return Err(AutomatonParseError::Validation(format!(
-                "unsupported guard type '{guard_type}'"
-            )));
+    let parsed: GuardList = toml::from_str(&format!("guard = {value}"))
+        .map_err(|error| AutomatonParseError::Toml(format!("guard list: {error}")))?;
+    for guard in &parsed.guard {
+        if let Guard::SystemOne(guard) = guard {
+            guard.validate().map_err(AutomatonParseError::Validation)?;
         }
-    };
-
-    Ok(guard)
+    }
+    guards.extend(parsed.guard);
+    Ok(())
 }
 
 fn parse_infix_guard(

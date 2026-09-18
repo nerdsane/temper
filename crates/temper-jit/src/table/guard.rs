@@ -58,6 +58,8 @@ pub enum Guard {
         #[serde(default)]
         required: bool,
     },
+    /// Native TypeSafe question declaration consuming trusted recorded evidence.
+    SystemOne(temper_spec::automaton::SystemOneGuard),
     /// All inner guards must pass.
     And(Vec<Guard>),
 }
@@ -86,6 +88,8 @@ pub enum GuardFailureKind {
     ListLengthMin,
     /// A [`Guard::CrossEntityStateIn`] cross-entity status check failed.
     CrossEntityState,
+    /// A typed external judgment is missing or its assertion is unsatisfied.
+    SystemOne,
 }
 
 impl GuardFailureKind {
@@ -105,6 +109,7 @@ impl GuardFailureKind {
             GuardFailureKind::ListContains => "list_contains",
             GuardFailureKind::ListLengthMin => "list_length_min",
             GuardFailureKind::CrossEntityState => "cross_entity_state",
+            GuardFailureKind::SystemOne => "system_one",
         }
     }
 }
@@ -162,6 +167,7 @@ impl Guard {
     pub fn check(&self, current_state: &str, ctx: &EvalContext) -> bool {
         match self {
             Guard::Always => true,
+            Guard::SystemOne(guard) => ctx.booleans.get(&guard.key()).copied().unwrap_or(false),
             Guard::StateIn(states) => states.iter().any(|s| s == current_state),
             Guard::ItemCountMin(n) => ctx.counters.get("items").copied().unwrap_or(0) >= *n,
             Guard::CounterMin { var, min } => ctx.counters.get(var).copied().unwrap_or(0) >= *min,
@@ -200,6 +206,19 @@ impl Guard {
     pub fn check_detailed(&self, current_state: &str, ctx: &EvalContext) -> Option<GuardFailure> {
         match self {
             Guard::Always => None,
+            Guard::SystemOne(guard) => {
+                let key = guard.key();
+                if ctx.booleans.get(&key).copied().unwrap_or(false) {
+                    None
+                } else {
+                    Some(GuardFailure {
+                        kind: GuardFailureKind::SystemOne,
+                        var: Some(key.clone()),
+                        required: Some(guard.assertion.clone()),
+                        found: Some(found_bool(ctx, &key)),
+                    })
+                }
+            }
             Guard::StateIn(states) => {
                 if states.iter().any(|s| s == current_state) {
                     None

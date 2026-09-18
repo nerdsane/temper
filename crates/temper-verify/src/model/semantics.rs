@@ -16,8 +16,10 @@ use super::types::{ModelEffect, ModelGuard, TemperModelState};
 /// A [`ModelGuard::CrossEntityState`] depends on a *different* entity that the
 /// single-entity model does not track, so it is **not** locally enabled: this
 /// arm returns `false`. This keeps "is the entity locally waiting / terminal?"
-/// proofs sound — a state whose only exit is a cross-entity gate is correctly
+/// proofs sound — a state whose only exit is an external gate is correctly
 /// treated as a place the local automaton may sit and wait.
+/// A [`ModelGuard::SystemOne`] is also not locally guaranteed: the provider
+/// can fail or return an answer that does not satisfy its assertion.
 ///
 /// For state-space *exploration* (which edges could ever fire), use
 /// [`guard_may_hold`] instead, which treats a cross-entity guard as a free
@@ -42,6 +44,7 @@ pub fn evaluate_guard(guard: &ModelGuard, state: &TemperModelState) -> bool {
             .is_some_and(|vals| vals.iter().any(|v| v == value)),
         ModelGuard::ListLengthMin { var, min } => state.lists.get(var).map_or(0, Vec::len) >= *min,
         ModelGuard::CrossEntityState { .. } => false,
+        ModelGuard::SystemOne(_) => false,
         ModelGuard::And(guards) => guards.iter().all(|g| evaluate_guard(g, state)),
     }
 }
@@ -59,7 +62,11 @@ pub fn evaluate_guard(guard: &ModelGuard, state: &TemperModelState) -> bool {
 /// The complementary **guard-false branch** needs no special handling: the BFS
 /// also visits every state in which the gated transition is simply not taken,
 /// which is exactly "the environment did not satisfy the guard." Together the
-/// two branches give the sound free-boolean abstraction.
+/// two branches overapproximate possible safety executions. They do not model
+/// an external service withholding an answer forever, so eventual progress
+/// through external guards requires a separate environmental assumption.
+/// System One assertions share the production scalar comparison semantics:
+/// contradictory predicates on the same answer cannot enable an edge.
 ///
 /// This is deliberately *not* used by local-enablement safety checks (see
 /// [`evaluate_guard`]): treating the gate as always-true there would mask real
@@ -68,6 +75,9 @@ pub fn guard_may_hold(guard: &ModelGuard, state: &TemperModelState) -> bool {
     match guard {
         // Free boolean: the environment may satisfy a cross-entity gate.
         ModelGuard::CrossEntityState { .. } => true,
+        // Unknown/malformed guards are explored conservatively for safety.
+        // Deployed specs are validated; SMT reports invalid assertions dead.
+        ModelGuard::SystemOne(guard) => guard.assertion_may_hold().unwrap_or(true),
         // Compound guards: a conjunction may hold iff every conjunct may hold.
         // Locally resolvable conjuncts are still resolved concretely, so a
         // cross-entity gate combined with an unsatisfiable local condition stays

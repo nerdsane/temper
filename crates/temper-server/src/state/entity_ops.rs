@@ -1291,6 +1291,7 @@ impl ServerState {
             EntityActor::build_initial_state(entity_type, entity_id, &table, &initial_fields);
 
         let created = EntityEvent {
+            system_one_receipts: vec![],
             action: "Created".to_string(),
             from_status: String::new(),
             to_status: state.status.clone(),

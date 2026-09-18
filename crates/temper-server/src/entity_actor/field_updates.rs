@@ -177,6 +177,7 @@ const STALE_AUTHORIZATION: &str =
 
 fn field_event(action: &str, state: &EntityState, fields: &Value) -> EntityEvent {
     EntityEvent {
+        system_one_receipts: vec![],
         action: action.to_string(),
         from_status: state.status.clone(),
         to_status: state.status.clone(),

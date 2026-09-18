@@ -97,6 +97,7 @@ fn envelope(
     to_status: &str,
 ) -> PersistenceEnvelope {
     let event = EntityEvent {
+        system_one_receipts: vec![],
         action: action.to_string(),
         from_status: from_status.to_string(),
         to_status: to_status.to_string(),
@@ -341,6 +342,7 @@ async fn authoritative_replay_rejects_malformed_field_update_events() {
 #[tokio::test]
 async fn authoritative_replay_rejects_non_object_field_update_payloads() {
     let event = EntityEvent {
+        system_one_receipts: vec![],
         action: crate::entity_actor::effects::FIELDS_REPLACED_EVENT.to_string(),
         from_status: "Draft".to_string(),
         to_status: "Draft".to_string(),

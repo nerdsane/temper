@@ -433,6 +433,7 @@ fn format_guards(guards: &[Guard]) -> String {
     guards
         .iter()
         .map(|g| match g {
+            Guard::SystemOne(guard) => format!("system_one({})", guard.assertion),
             Guard::StateIn { values } => {
                 format!(
                     "status \\in {{{}}}",
@@ -562,6 +563,8 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
     }
 
     super::contracts::validate(automaton)?;
+    super::system_one::validate_action_declarations(automaton)
+        .map_err(AutomatonParseError::Validation)?;
 
     // 3. All `from` and `to` states in actions must be declared states.
     for action in &automaton.actions {

@@ -22,7 +22,7 @@ pub use descriptor::{
 };
 pub(crate) use hydration::{
     BlobHydrationBudget, hydrate_blob_refs_for_tenant, hydrate_blob_refs_for_tenant_with_budget,
-    hydrate_comparison_fields,
+    hydrate_comparison_fields, hydrate_comparison_fields_with_budget,
 };
 #[cfg(test)]
 pub(crate) use hydration::{hydrate_blob_refs_in_value, hydrate_blob_refs_in_value_with_ceiling};
