@@ -849,11 +849,49 @@ impl EventStore for PostgresEventStore {
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
 
+        // ARN-239: read current latest for monotonic CAS.
+        let current: Option<(i64, Vec<u8>)> = crate::dbm::postgres_query_as!(
+            "SELECT sequence_nr, state FROM snapshots \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+             FOR UPDATE",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+
+        if let Some((existing_seq, existing_state)) = current {
+            let existing_seq = existing_seq as u64;
+            if sequence_nr < existing_seq {
+                return Err(PersistenceError::ConcurrencyViolation {
+                    expected: existing_seq,
+                    actual: sequence_nr,
+                });
+            }
+            if sequence_nr == existing_seq {
+                if existing_state.as_slice() == snapshot {
+                    // Idempotent same-content retry.
+                    tx.commit()
+                        .await
+                        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+                    return Ok(());
+                }
+                return Err(PersistenceError::ConcurrencyViolation {
+                    expected: existing_seq,
+                    actual: sequence_nr,
+                });
+            }
+        }
+
+        // Only advance latest pointer forward (never backward).
         crate::dbm::postgres_query!(
             "INSERT INTO snapshots (tenant, entity_type, entity_id, sequence_nr, state) \
              VALUES ($1, $2, $3, $4, $5) \
              ON CONFLICT (tenant, entity_type, entity_id) \
-             DO UPDATE SET sequence_nr = $4, state = $5, created_at = now()",
+             DO UPDATE SET sequence_nr = EXCLUDED.sequence_nr, state = EXCLUDED.state, created_at = now() \
+             WHERE snapshots.sequence_nr < EXCLUDED.sequence_nr",
         )
         .bind(tenant)
         .bind(entity_type)
@@ -864,11 +902,11 @@ impl EventStore for PostgresEventStore {
         .await
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
 
+        // History is insert-only for a sequence (no content overwrite on conflict).
         crate::dbm::postgres_query!(
             "INSERT INTO snapshot_history (tenant, entity_type, entity_id, sequence_nr, state) \
              VALUES ($1, $2, $3, $4, $5) \
-             ON CONFLICT (tenant, entity_type, entity_id, sequence_nr) \
-             DO UPDATE SET state = $5, created_at = now()",
+             ON CONFLICT (tenant, entity_type, entity_id, sequence_nr) DO NOTHING",
         )
         .bind(tenant)
         .bind(entity_type)
