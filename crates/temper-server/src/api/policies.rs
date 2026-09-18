@@ -14,7 +14,9 @@ use super::PolicyAuthed;
 use crate::authz::persist_and_activate_policy;
 use crate::state::ServerState;
 
+mod replacement;
 mod support;
+pub(crate) use replacement::handle_replace_policy;
 use support::{
     build_prospective_enabled_text, build_prospective_enabled_text_with_override, persist_new_rule,
     policy_row_to_json, reload_tenant_from_store,
@@ -53,6 +55,7 @@ pub(crate) async fn handle_put_policies(
     auth: PolicyAuthed,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    let _policy_guard = state.policy_approval_lock.lock().await;
     let tenant = auth.tenant().as_str().to_string();
     let body_json: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -113,6 +116,7 @@ pub(crate) async fn handle_add_policy_rule(
     auth: PolicyAuthed,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    let _policy_guard = state.policy_approval_lock.lock().await;
     let tenant = auth.tenant().as_str().to_string();
     let body_json: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -267,6 +271,7 @@ pub(crate) async fn handle_create_policy(
     auth: PolicyAuthed,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let _policy_guard = state.policy_approval_lock.lock().await;
     let tenant = auth.tenant().as_str().to_string();
     let policy_id = match body.get("policy_id").and_then(|v| v.as_str()) {
         Some(v) if !v.is_empty() => v.to_string(),
@@ -333,6 +338,7 @@ pub(crate) async fn handle_patch_policy(
     auth: PolicyAuthed,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let _policy_guard = state.policy_approval_lock.lock().await;
     let tenant = auth.tenant().as_str().to_string();
     let Some(store) = state.policy_store() else {
         return (
@@ -430,6 +436,7 @@ pub(crate) async fn handle_delete_policy_entry(
     Path((_tenant, policy_id)): Path<(String, String)>,
     auth: PolicyAuthed,
 ) -> impl IntoResponse {
+    let _policy_guard = state.policy_approval_lock.lock().await;
     let tenant = auth.tenant().as_str().to_string();
     let Some(store) = state.policy_store() else {
         return (

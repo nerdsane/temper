@@ -510,8 +510,8 @@ pub struct ServerState {
     pub pending_decision_tx: Arc<tokio::sync::broadcast::Sender<PendingDecision>>,
     /// Per-tenant Cedar policy text (tenant -> policy text).
     pub tenant_policies: Arc<RwLock<BTreeMap<String, String>>>,
-    /// Serializes approval commit/activation so concurrent approvals cannot
-    /// replace one another with policy text derived from a stale cache.
+    /// Serializes policy API writes and approval commit/activation so concurrent
+    /// edits cannot activate a policy snapshot derived from a stale cache.
     #[cfg(feature = "observe")]
     pub(crate) policy_approval_lock: Arc<tokio::sync::Mutex<()>>,
     /// Tenants installed in commons mode. Collection creates for these tenants

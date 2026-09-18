@@ -109,6 +109,21 @@ pub(super) async fn dispatch_json_value(ctx: &mut RuntimeContext, raw: Value) ->
                 }
             };
 
+            if params.name == "request_policy_replacement" {
+                let id = id?;
+                let result =
+                    crate::policy_replacement::request_policy_replacement(ctx, &params.arguments)
+                        .await;
+                ctx.record_execute_turn("request_policy_replacement", &result);
+                let (text, is_error) = match result {
+                    Ok(text) => (text, false),
+                    Err(error) => (error.to_string(), true),
+                };
+                return Some(json!({"jsonrpc":"2.0", "id":id, "result": {
+                    "content":[{"type":"text", "text":text}], "isError":is_error
+                }}));
+            }
+
             if params.name == "setup_connection" {
                 let id = id?; // Notifications cannot initiate human administration.
                 let result = crate::setup::setup_connection(ctx, &params.arguments).await;
@@ -239,6 +254,7 @@ ENTITY OPERATIONS:\n\
 DEVELOPER:\n\
 \x20 await temper.submit_specs(tenant, {\"entity.ioa.toml\": \"...\", \"model.csdl.xml\": \"...\"}) -> submit specs\n\
 \x20 await temper.get_policies(tenant) -> Cedar policies\n\
+\x20 await temper.get_policy_entries(tenant) -> stored policy IDs, hashes and Cedar text (authorized read)\n\
 \x20 await temper.upload_wasm(tenant, module_name, wasm_path) -> upload WASM module\n\
 \x20 await temper.compile_wasm(tenant, module_name, rust_source) -> compile + upload WASM\n\
 \n\
@@ -287,6 +303,15 @@ You cannot approve or set policies — only humans can do that.";
                 "required": ["code"],
                 "additionalProperties": false
             }
+        }),
+        json!({
+            "name":"request_policy_replacement",
+            "description":"Propose replacement of one enabled durable Cedar policy entry. Requires its current SHA-256, exact new text and native human consent. The configured human approver remains separate from execute; ordinary decision approval cannot authorize this operation. Never retries a stale proposal.",
+            "inputSchema":{"type":"object","properties":{
+                "policy_id":{"type":"string","description":"Durable entry ID from policies/list, not an evaluator policy number"},
+                "expected_hash":{"type":"string","description":"Current lowercase SHA-256"},
+                "cedar_text":{"type":"string","description":"Exact complete proposed Cedar text"}
+            },"required":["policy_id","expected_hash","cedar_text"],"additionalProperties":false}
         }),
         json!({
             "name": "setup_connection",
