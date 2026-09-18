@@ -174,3 +174,36 @@ async fn invalid_cedar_never_reaches_storage_or_active_engine() {
         assert!(engine.get_tenant_policy_text("demo").is_none());
     }
 }
+
+#[tokio::test]
+async fn replacement_waits_for_inflight_policy_writer() {
+    let state = ServerState::from_registry(
+        temper_runtime::ActorSystem::new("replacement-serialization"),
+        crate::registry::SpecRegistry::new(),
+    );
+    let guard = state.policy_approval_lock.lock().await;
+    let auth = crate::api::PolicyAuthed(temper_authz::AuthenticatedRequestContext::new(
+        temper_runtime::tenant::TenantId::new("demo"),
+        temper_authz::SecurityContext::system(),
+    ));
+    let operation = handle_replace_policy(
+        State(state.clone()),
+        Path(("demo".into(), "legacy".into())),
+        auth,
+        Json(Replacement {
+            expected_hash: hash(OLD),
+            cedar_text: NEW.into(),
+        }),
+    );
+    tokio::pin!(operation);
+    // Poll the real handler while an existing policy writer owns activation.
+    // No clock or scheduler timing is involved: it must yield at the shared lock.
+    tokio::select! {
+        biased;
+        _ = &mut operation => panic!("replacement overtook the in-flight policy writer"),
+        () = async {} => {}
+    }
+    drop(guard);
+    // With no store configured, passing the lock reaches the storage boundary.
+    assert_eq!(operation.await.status(), StatusCode::SERVICE_UNAVAILABLE);
+}

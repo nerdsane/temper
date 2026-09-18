@@ -86,6 +86,8 @@ pub(crate) struct RuntimeContext {
     pub(crate) client_supports_elicitation: bool,
     /// Config gate for elicitation approvals (`TEMPER_MCP_ELICIT_APPROVALS`).
     pub(crate) elicit_approvals_enabled: bool,
+    /// Trusted host relays human administration without exposing its approver credential.
+    pub(crate) policy_approval_relay: bool,
     /// Handle for server→client requests; present only when running inside
     /// the stdio loop (unit tests dispatching directly have none).
     pub(crate) requester: Option<ClientRequester>,
@@ -119,6 +121,8 @@ impl RuntimeContext {
                 .api_key
                 .clone()
                 .or_else(|| std::env::var("TEMPER_API_KEY").ok()), // determinism-ok: startup config
+            policy_approval_relay: std::env::var("TEMPER_MCP_POLICY_APPROVAL_RELAY")
+                .is_ok_and(|value| value == "1"),
             approver_key: std::env::var("TEMPER_MCP_APPROVER_KEY")
                 .ok()
                 .filter(|v| !v.trim().is_empty()), // determinism-ok: startup config

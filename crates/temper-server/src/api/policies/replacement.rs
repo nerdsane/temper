@@ -28,6 +28,7 @@ pub(crate) async fn handle_replace_policy(
     auth: PolicyAuthed,
     Json(proposal): Json<Replacement>,
 ) -> Response {
+    let _policy_guard = state.policy_approval_lock.lock().await;
     let tenant = auth.tenant().as_str();
     let Some(store) = state.policy_store() else {
         return (
@@ -50,8 +51,8 @@ pub(crate) async fn handle_replace_policy(
             state
                 .tenant_policies
                 .write()
-                .unwrap()
-                .insert(tenant.to_owned(), text); // ci-ok: infallible lock
+                .expect("tenant policy cache lock poisoned")
+                .insert(tenant.to_owned(), text);
             crate::authz::record_policy_change(
                 &state,
                 tenant,

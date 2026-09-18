@@ -254,6 +254,7 @@ ENTITY OPERATIONS:\n\
 DEVELOPER:\n\
 \x20 await temper.submit_specs(tenant, {\"entity.ioa.toml\": \"...\", \"model.csdl.xml\": \"...\"}) -> submit specs\n\
 \x20 await temper.get_policies(tenant) -> Cedar policies\n\
+\x20 await temper.get_policy_entries(tenant) -> stored policy IDs, hashes and Cedar text (authorized read)\n\
 \x20 await temper.upload_wasm(tenant, module_name, wasm_path) -> upload WASM module\n\
 \x20 await temper.compile_wasm(tenant, module_name, rust_source) -> compile + upload WASM\n\
 \n\

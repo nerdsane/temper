@@ -38,3 +38,6 @@ pub use platform::{
     PostgresWasmModuleRow,
 };
 pub use store::PostgresEventStore;
+
+#[cfg(test)]
+mod policy_replacement_test;

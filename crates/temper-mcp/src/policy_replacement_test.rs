@@ -33,6 +33,15 @@ async fn service(State(state): State<Fixture>, request: Request) -> axum::respon
     let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
         .await
         .unwrap();
+    if path == "/api/mcp/policy-replacements" {
+        assert_eq!(key, "Bearer fixture-requester");
+        let proposal: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            proposal,
+            json!({"policy_id":"legacy", "expected_hash":digest(OLD), "cedar_text":NEW})
+        );
+        return axum::Json(json!({"status":"pending", "ask_id":"00000000-0000-4000-8000-000000000123", "policy_id":"legacy"})).into_response();
+    }
     if path == "/api/identity/resolve" {
         let requester = key == "Bearer fixture-requester";
         return axum::Json(
@@ -179,4 +188,58 @@ fn identities_and_destinations_must_be_unambiguous() {
     assert!(
         require_distinct_identities(&json!({"verified":true}), &json!({"verified":true})).is_err()
     );
+}
+
+#[tokio::test]
+async fn host_relay_can_only_propose_without_a_local_approver() {
+    let state = Fixture::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let router = Router::new().fallback(service).with_state(state.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let mut ctx = RuntimeContext::from_config(&McpConfig {
+        temper_url: Some(format!("http://127.0.0.1:{port}")),
+        temper_port: None,
+        api_key: Some("fixture-requester".into()),
+        agent_id: None,
+        agent_type: None,
+        session_id: None,
+    })
+    .unwrap();
+    ctx.approver_key = None;
+    ctx.policy_approval_relay = true;
+    let args = json!({"policy_id":"legacy","expected_hash":digest(OLD),"cedar_text":NEW});
+    let result = request_policy_replacement(&mut ctx, &args).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&result).unwrap()["status"],
+        "pending"
+    );
+    assert_eq!(state.writes.load(Ordering::SeqCst), 0);
+    assert!(ctx.approver_key.is_none());
+    server.abort();
+}
+
+#[test]
+fn relay_receipt_must_match_the_exact_proposal() {
+    let proposal = Proposal {
+        policy_id: "legacy".into(),
+        expected_hash: digest(OLD),
+        cedar_text: NEW.into(),
+    };
+    let receipt = json!({"status":"verified", "ask_id":"00000000-0000-4000-8000-000000000123", "policy_id":"legacy", "tenant":"default", "policy_hash":digest(NEW)});
+    validate_relay_receipt(&receipt, &proposal, "default").unwrap();
+    for (field, bad) in [
+        ("ask_id", "not-an-ask"),
+        ("policy_id", "unrelated"),
+        ("tenant", "other"),
+        ("policy_hash", "wrong"),
+        ("status", "success"),
+    ] {
+        let mut altered = receipt.clone();
+        altered[field] = json!(bad);
+        assert!(
+            validate_relay_receipt(&altered, &proposal, "default").is_err(),
+            "accepted altered {field}"
+        );
+    }
 }

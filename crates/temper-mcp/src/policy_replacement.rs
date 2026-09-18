@@ -35,6 +35,25 @@ impl Consent {
     }
 }
 
+fn validate_relay_receipt(receipt: &Value, proposal: &Proposal, tenant: &str) -> Result<()> {
+    let valid_ask = receipt["ask_id"]
+        .as_str()
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok());
+    if !valid_ask || receipt["policy_id"] != proposal.policy_id {
+        bail!("Human approval relay returned an invalid receipt");
+    }
+    match receipt["status"].as_str() {
+        Some("pending" | "unchanged") => Ok(()),
+        Some("verified")
+            if receipt["tenant"] == tenant
+                && receipt["policy_hash"] == digest(&proposal.cedar_text) =>
+        {
+            Ok(())
+        }
+        _ => bail!("Human approval relay returned an invalid receipt"),
+    }
+}
+
 /// Only this native call can turn a correlated human response into replacement consent.
 pub(crate) async fn request_policy_replacement(
     ctx: &mut RuntimeContext,
@@ -43,6 +62,25 @@ pub(crate) async fn request_policy_replacement(
     let proposal: Proposal =
         serde_json::from_value(args.clone()).context("Invalid replacement proposal")?;
     proposal.validate()?;
+    if ctx.policy_approval_relay {
+        let key = ctx
+            .api_key
+            .as_deref()
+            .context("Configured requester required")?;
+        let api = PolicyApi::new(&ctx.base_url, &ctx.identity_tenant)?;
+        // This creates or reads a host-owned human request. It cannot apply policy
+        // and does not send a tool-controlled approval or a native client response.
+        let receipt = api
+            .request(
+                Method::POST,
+                "/api/mcp/policy-replacements",
+                key,
+                Some(args.clone()),
+            )
+            .await?;
+        validate_relay_receipt(&receipt, &proposal, &ctx.identity_tenant)?;
+        return Ok(receipt.to_string());
+    }
     if !ctx.elicitation_available() {
         bail!("Replacement requires native human elicitation");
     }

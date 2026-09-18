@@ -46,6 +46,11 @@ async fn native_replacement_commits_and_conflicts_on_real_temper() {
         session_id: None,
     })
     .unwrap();
+    let (entries, denied) = ctx
+        .run_execute("return await temper.get_policy_entries('default')")
+        .await;
+    assert!(denied.is_empty());
+    assert!(entries.unwrap().contains("policies"));
     ctx.approver_key = None;
     ctx.identity_tenant = "default".into();
     ctx.identity_file = Some(directory.join("requester.json"));

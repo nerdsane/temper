@@ -84,7 +84,9 @@ pub async fn dispatch_temper_method(
             dispatch_entity(ctx, method, args).await
         }
         // --- Spec management ---
-        "submit_specs" | "get_policies" => dispatch_specs(ctx, method, args).await,
+        "submit_specs" | "get_policies" | "get_policy_entries" => {
+            dispatch_specs(ctx, method, args).await
+        }
         // --- Governance ---
         "get_decisions" | "get_decision_status" | "poll_decision" => {
             dispatch_governance(ctx, method, args).await
@@ -159,7 +161,7 @@ pub async fn dispatch_temper_method(
         _ => Err(format!(
             "unknown temper method '{method}'. Available: \
              list, get, create, action, patch, navigate, get_agent_id, \
-             submit_specs, get_policies, \
+             submit_specs, get_policies, get_policy_entries, \
              upload_wasm, compile_wasm, \
              get_decisions, get_decision_status, poll_decision, \
              get_trajectories, get_insights, get_evolution_records, check_sentinel, \
@@ -355,7 +357,12 @@ async fn dispatch_specs(
             )
             .await
         }
-        "get_policies" => {
+        "get_policies" | "get_policy_entries" => {
+            let suffix = if method == "get_policy_entries" {
+                "/list"
+            } else {
+                ""
+            };
             temper_request(
                 ctx.http,
                 ctx.base_url,
@@ -363,7 +370,7 @@ async fn dispatch_specs(
                 &ctx.identity(),
                 ctx.api_key,
                 Method::GET,
-                &format!("/api/tenants/{}/policies", ctx.tenant),
+                &format!("/api/tenants/{}/policies{suffix}", ctx.tenant),
                 None,
             )
             .await

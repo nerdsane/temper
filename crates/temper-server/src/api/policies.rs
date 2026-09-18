@@ -55,6 +55,7 @@ pub(crate) async fn handle_put_policies(
     auth: PolicyAuthed,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    let _policy_guard = state.policy_approval_lock.lock().await;
     let tenant = auth.tenant().as_str().to_string();
     let body_json: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -115,6 +116,7 @@ pub(crate) async fn handle_add_policy_rule(
     auth: PolicyAuthed,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    let _policy_guard = state.policy_approval_lock.lock().await;
     let tenant = auth.tenant().as_str().to_string();
     let body_json: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -269,6 +271,7 @@ pub(crate) async fn handle_create_policy(
     auth: PolicyAuthed,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let _policy_guard = state.policy_approval_lock.lock().await;
     let tenant = auth.tenant().as_str().to_string();
     let policy_id = match body.get("policy_id").and_then(|v| v.as_str()) {
         Some(v) if !v.is_empty() => v.to_string(),
@@ -335,6 +338,7 @@ pub(crate) async fn handle_patch_policy(
     auth: PolicyAuthed,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let _policy_guard = state.policy_approval_lock.lock().await;
     let tenant = auth.tenant().as_str().to_string();
     let Some(store) = state.policy_store() else {
         return (
@@ -432,6 +436,7 @@ pub(crate) async fn handle_delete_policy_entry(
     Path((_tenant, policy_id)): Path<(String, String)>,
     auth: PolicyAuthed,
 ) -> impl IntoResponse {
+    let _policy_guard = state.policy_approval_lock.lock().await;
     let tenant = auth.tenant().as_str().to_string();
     let Some(store) = state.policy_store() else {
         return (
