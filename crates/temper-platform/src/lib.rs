@@ -16,6 +16,7 @@ pub mod integration;
 mod operator_manage_policies;
 pub mod optimization;
 pub mod os_apps;
+pub mod policy_activation;
 pub mod protocol;
 pub mod recovery;
 pub mod router;
