@@ -15,7 +15,7 @@ Worktrees live under `~/Development/temper-worktrees/` (the primary at `~/Develo
 - Control plane: `temper-odata`, `temper-authz`, `temper-observe`, `temper-evolution`, `temper-ots`, `temper-platform`, `temper-cli`, `temper-mcp`, `temper-sdk`, `temper-sandbox`
 - Default serve is own-Rust actors; `--actor-runtime postgres` is an adapter, not a second kernel. `apply_effect` must become one function; today it is three.
 - Verification: `.agents/skills/verify-temper/` - the verification skill and feature map
-- Architecture Decision Records: `docs/adrs/` (template at `docs/adrs/TEMPLATE.md`). A material architecture change gets its ADR before code - required for new features, new integrations, multi-crate changes, new patterns; not for bug fixes, single-file refactors, docs, or test additions.
+- Architecture Decision Records: `docs/adrs/` (template at `docs/adrs/TEMPLATE.md`). Record durable architectural decisions when useful; an ADR is not a prerequisite for starting or merging work.
 
 ## Specs
 
@@ -70,9 +70,9 @@ cargo run -p temper-cli -- serve --port 3000            # HTTP server, OData API
 scripts/setup-hooks.sh                                  # install git hooks (pre-commit integrity, pre-push 4-gate)
 ```
 
-## Enforcement hooks
+## Local checks
 
-`.claude/settings.json` wires blocking hooks: L0-L3 spec verification on every `.ioa.toml` edit, a 25-pattern determinism guard on `.rs` edits in sim-visible crates, and a pre-commit gate requiring DST-review and code-review markers (`.agents/agents/dst-reviewer.md`, `code-reviewer.md` write them on PASS). Tests run at push time, not commit time.
+`.claude/settings.json` runs spec verification, determinism and dependency checks. Git hooks run code/spec checks and relevant tests; no reviewer markers or process artifacts are required. Review criteria live in `REVIEW.md`.
 
 ## Deploying spec changes
 

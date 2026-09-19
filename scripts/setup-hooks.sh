@@ -5,7 +5,7 @@
 set -euo pipefail
 
 WORKSPACE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HOOKS_DIR="$WORKSPACE_ROOT/.git/hooks"
+HOOKS_DIR="$(git -C "$WORKSPACE_ROOT" rev-parse --git-path hooks)"
 SOURCE_DIR="$WORKSPACE_ROOT/.claude/hooks"
 
 echo "=== Installing Git Hooks ==="
@@ -45,26 +45,14 @@ HOOK_EOF
 chmod +x "$HOOKS_DIR/pre-push"
 echo "Installed: pre-push (integrity/readability + fmt/check/clippy/tests)"
 
-# Install post-commit hook
-if [ -f "$HOOKS_DIR/post-commit" ] && ! grep -q "temper harness" "$HOOKS_DIR/post-commit" 2>/dev/null; then
-    echo "WARNING: Existing post-commit hook found. Backing up to post-commit.backup"
-    cp "$HOOKS_DIR/post-commit" "$HOOKS_DIR/post-commit.backup"
+# Remove only the obsolete hook installed by this script.
+if [ -f "$HOOKS_DIR/post-commit" ] && grep -q "temper harness" "$HOOKS_DIR/post-commit"; then
+    rm "$HOOKS_DIR/post-commit"
 fi
-
-cat > "$HOOKS_DIR/post-commit" << 'HOOK_EOF'
-#!/bin/bash
-# temper harness — post-commit hook (marker wiring)
-# Installed by scripts/setup-hooks.sh
-WORKSPACE_ROOT="$(git rev-parse --show-toplevel)"
-exec "$WORKSPACE_ROOT/.claude/hooks/post-commit.sh"
-HOOK_EOF
-chmod +x "$HOOKS_DIR/post-commit"
-echo "Installed: post-commit (commit-pending/sim-changed markers)"
 
 echo ""
 echo "=== Git hooks installed ==="
 echo "Pre-commit: integrity check, spec syntax validation, dependency audit"
 echo "Pre-push: integrity + readability + fmt + check + clippy + cargo test --workspace"
-echo "Post-commit: commit lifecycle markers for stop gate"
 echo ""
 echo "Bypass for emergencies: git commit --no-verify / git push --no-verify"

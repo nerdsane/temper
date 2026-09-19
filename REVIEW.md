@@ -1,31 +1,13 @@
 # Reviewing temper
 
-Repo-specific passes on top of the global review bar. Severity + `file:line` + concrete failure scenario for every finding.
+Use the [Stack review contract](https://github.com/arni-labs/stack/blob/main/REVIEW.md). Review the accepted outcome and changed behavior; independently exercise the feature when useful. Report concrete defects introduced or worsened by this change, with reproduction evidence and location. No mandatory panel, review markers, JSON record or unrelated cleanup.
 
-## Pass 1: Determinism (DST)
+Apply these repository checks only where the change touches them:
 
-Any touched code in `temper-runtime`, `temper-jit`, `temper-server`: scan against the DST ruleset in `.agents/agents/dst-reviewer.md`. Wall clock, random UUIDs, HashMap iteration, thread spawns, direct I/O, and global state are all findings even when tests pass - they break seeded reproduction. Check that new `// determinism-ok` suppressions are justified, not convenient.
+- For simulation-visible changes, run the affected DST scenarios with reproducible seeds. Check simulated time, randomness, ordering and I/O; preserve failing seeds as regressions.
+- Check that IOA invariants and runtime transitions agree, including replay and recovery. Keep application-specific state out of the kernel.
+- Exercise changed authorization paths with allowed and denied principals and distinct tenants. Fail closed on missing policy or unverified identity.
+- Check changed queue/buffer bounds, external-input error handling and dependency isolation (`temper-jit` must not pull verification tooling into production).
+- Use the affected crate tests and `.agents/skills/verify-temper/` for the changed running flow.
 
-DST-driven development checks (`.agents/skills/deterministic-simulation/`):
-- New stateful behavior with no simulator scenario + invariant covering it is a finding.
-- A fix that weakens an invariant or narrows a workload to go green is a finding.
-- A bug fixed without its failing seed committed as a regression case is a finding.
-
-## Pass 2: Invariants and the spec contract
-
-- A spec change and its TransitionTable behavior must say the same thing; look for code paths that bypass the table.
-- New states or actions without `[[invariant]]` coverage are a finding.
-- Framework code hardcoding entity-specific state names is a finding.
-- `from_tla_source()` outside `#[cfg(test)]` is a finding.
-
-## Pass 3: Authorization fail-closed
-
-Every new route, action dispatch, and effect path goes through Cedar with an explicit principal. Look for: `is_system` -style bypasses, handlers that default-allow on policy load failure, tenant id taken from request data instead of authenticated context, `agentTypeVerified: false` principals granted trust.
-
-## Pass 4: TigerStyle bounds
-
-Unbounded mailboxes, queues, or retries; missing pre/post assertions on new pub functions; limits where budgets belong; error paths that swallow instead of log-or-propagate; `unwrap`/`expect` on external input.
-
-## Pass 5: Dependency discipline
-
-`temper-jit` gaining a `temper-verify` dependency, or production binaries pulling `stateright`/`proptest`, fails the review outright.
+Report what you tested, the revision, findings and material limits in plain language.
