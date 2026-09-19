@@ -1825,6 +1825,7 @@ impl WasmHost for ProductionWasmHost {
                 let req_body = reqwest::Body::wrap_stream(body_stream);
 
                 let send_result = builder.body(req_body).send().await;
+                let _ = streams.close(bridge_req).await;
                 let resp = match send_result {
                     Ok(r) => r,
                     Err(e) => {
