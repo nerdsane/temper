@@ -36,6 +36,23 @@ Ask for comparison or a prototype when a choice is consequential and evidence is
 
 A good checkpoint contains what works, evidence, and the remaining uncertainty. Verification ends when the relevant checks pass, unless a new change or failure justifies more work.
 
+## See exactly what agents review
+
+Start with [the shared review contract](../REVIEW.md): the accepted outcome, concrete defects caused by the change, and independent testing of meaningful features when useful. Review is advice, not another approval process. The full criteria are short enough to read directly.
+
+Each repository adds only checks relevant to its software, applied when the change touches them:
+
+| Repository | Additional focus | Current brief |
+| --- | --- | --- |
+| Temper | Simulation determinism, state invariants, tenant authorization, replay/recovery | [REVIEW.md](https://github.com/nerdsane/temper/blob/main/REVIEW.md) |
+| TemperPaw | App specs/policies/integrations, OData flows, installed app behavior | [REVIEW.md](https://github.com/nerdsane/temperpaw/blob/main/REVIEW.md) |
+| Foundry | Session continuity, streaming, organization isolation, real UI | [REVIEW.md](https://github.com/arni-labs/foundry/blob/main/REVIEW.md) |
+| Genesis | Real git round trips, object/ref integrity, storage durability | [REVIEW.md](https://github.com/arni-labs/genesis/blob/main/REVIEW.md) |
+| Katagami | Gallery/contribution flows, images/layout, permissions and app contracts | [REVIEW.md](https://github.com/arni-labs/katagami/blob/master/REVIEW.md) |
+| Deep Sci-Fi | Agent API/story flows, authorization, database migrations | [REVIEW.md](https://github.com/arni-labs/deep-sci-fi/blob/main/REVIEW.md) |
+
+This table is a navigation aid; the linked briefs own the details. For your own review, read the PR's behavior change and verification result, then try the changed flow. A missing panel or paperwork artifact does not mean a missing product check.
+
 ## Use memory without accumulating rules
 
 Record stable environment facts and decisions in Garden. Keep operating instructions at their canonical owner. When a recurring failure needs a durable fix, improve a check, tool or existing instruction; avoid adding the same rule to every prompt and skill.
