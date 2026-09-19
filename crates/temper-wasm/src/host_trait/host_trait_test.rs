@@ -8,6 +8,36 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::prelude::*;
 
 #[test]
+fn failed_outbound_stream_closes_the_request_reader() {
+    tokio_test::block_on(async {
+        let host = ProductionWasmHost::new(BTreeMap::new());
+        let handles = host
+            .http_stream_begin_outbound(crate::http_stream::HttpRequestHead {
+                method: "PUT".to_string(),
+                url: "http://127.0.0.1:9/unreachable".to_string(),
+                headers: Vec::new(),
+            })
+            .await
+            .expect("open outbound exchange");
+
+        host.http_stream_try_write(handles.request_body, b"first".to_vec())
+            .await
+            .expect("queue first request chunk");
+        let head = host
+            .http_stream_response_head(handles.response_body)
+            .await
+            .expect("receive transport failure head");
+        assert_eq!(head.status, 0);
+
+        let error = host
+            .http_stream_try_write(handles.request_body, b"after failure".to_vec())
+            .await
+            .expect_err("failed transport must close the request reader");
+        assert_eq!(error, crate::http_stream::StreamError::Closed);
+    });
+}
+
+#[test]
 fn guest_metric_count_kind_is_counter() {
     assert!(guest_metric_is_counter_kind(Some("count")));
     assert!(guest_metric_is_counter_kind(Some("counter")));
