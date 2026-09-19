@@ -1835,6 +1835,7 @@ impl WasmHost for ProductionWasmHost {
                             status: 0,
                             headers: vec![("x-temper-stream-error".into(), format!("{e}"))],
                         });
+                        let _ = streams.close(bridge_req).await;
                         let _ = streams.close(bridge_resp).await;
                         return;
                     }
