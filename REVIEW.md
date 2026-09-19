@@ -1,6 +1,6 @@
 # Reviewing temper
 
-Use the [Stack review contract](https://github.com/arni-labs/stack/blob/main/REVIEW.md). Review the accepted outcome and changed behavior; independently exercise the feature when useful. Report concrete defects introduced or worsened by this change, with reproduction evidence and location. No mandatory panel, review markers, JSON record or unrelated cleanup.
+Use the installed Stack review contract, or the bundled [Stack review contract](.stack/REVIEW.md) when Stack is not installed. Review the accepted outcome and changed behavior; independently exercise the feature when useful. Report concrete defects introduced or worsened by this change, with reproduction evidence and location. No mandatory panel, review markers, JSON record or unrelated cleanup.
 
 Apply these repository checks only where the change touches them:
 
