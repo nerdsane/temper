@@ -1707,11 +1707,11 @@ impl WasmHost for ProductionWasmHost {
                         tracing::Span::current().record("status_code", 0u64);
                         tracing::Span::current()
                             .record("duration_ms", started.elapsed().as_millis() as u64);
+                        let _ = streams.close(bridge_req).await;
                         let _ = head_tx.send(crate::http_stream::HttpResponseHead {
                             status: 0,
                             headers: vec![("x-temper-stream-error".into(), format!("{e}"))],
                         });
-                        let _ = streams.close(bridge_req).await;
                         let _ = streams.close(bridge_resp).await;
                         return;
                     }
