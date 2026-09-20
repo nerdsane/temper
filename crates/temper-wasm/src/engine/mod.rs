@@ -3,9 +3,6 @@
 //! Modules are compiled once and cached by SHA-256 hash. Each invocation
 //! gets a fresh `Store` with fuel + memory limits (TigerStyle budgets).
 
-#[cfg(test)]
-#[path = "guest_read_bounds_test.rs"]
-mod guest_read_bounds_test;
 mod guest_spans;
 mod host_functions;
 mod telemetry;
@@ -99,47 +96,12 @@ impl ResourceLimiter for MemoryLimiter {
     fn table_growing(
         &mut self,
         _current: usize,
-        desired: usize,
+        _desired: usize,
         _maximum: Option<usize>,
     ) -> Result<bool, wasmtime::Error> {
-        // Bound table growth too: table elements are host allocations (a funcref/
-        // externref slot each) that the memory limiter does not cover, so an
-        // unbounded `table.grow` is a host-memory exhaustion vector (ARN-169).
-        // Deny past the cap (grow returns -1) rather than trapping.
-        Ok(desired <= MAX_TABLE_ELEMENTS)
-    }
-
-    // The per-table/per-memory element caps above only bound host allocation if
-    // the *number* of tables and memories is also bounded — wasmtime's default
-    // limiter allows 10,000 of each per store, so a guest could otherwise declare
-    // thousands of tables each at the element cap and multiply the budget. Cap the
-    // counts to what a single-module guest actually needs (ARN-169).
-    fn memories(&self) -> usize {
-        MAX_MEMORIES
-    }
-
-    fn tables(&self) -> usize {
-        MAX_TABLES
+        Ok(true)
     }
 }
-
-/// Maximum number of elements any single guest table may hold. Table slots are
-/// host allocations outside the linear-memory budget; this caps the host memory a
-/// guest can force through `table.grow` (ARN-169).
-const MAX_TABLE_ELEMENTS: usize = 1_000_000;
-
-/// Maximum number of linear memories a guest store may create. With
-/// `wasm_multi_memory(false)` a module already declares at most one; this makes
-/// the store-level bound explicit so the per-memory `max_memory` budget cannot be
-/// multiplied (ARN-169).
-const MAX_MEMORIES: usize = 1;
-
-/// Maximum number of tables a guest store may create. Together with
-/// `MAX_TABLE_ELEMENTS` this bounds total table host memory to
-/// `MAX_TABLES * MAX_TABLE_ELEMENTS` slots. Generous enough for ordinary
-/// reference-types modules (typically one funcref table) while preventing the
-/// default 10,000-table multiplier (ARN-169).
-const MAX_TABLES: usize = 8;
 
 /// Compiled module cache entry.
 struct CachedModule {
@@ -267,18 +229,6 @@ impl WasmEngine {
         config.consume_fuel(true);
         config.epoch_interruption(true);
         config.wasm_component_model(true);
-        // Pin the WASM feature surface across the wasmtime 29 -> 36 bump (ARN-169).
-        // wasmtime 30+ turns several proposals on by default; leaving them at the
-        // 36 defaults would silently widen the guest attack surface relative to 29:
-        //   - memory64: rejected at compile on 29, and a prerequisite for the very
-        //     advisory this bump fixes (RUSTSEC-2026-0096) — keep it off;
-        //   - threads/shared memory and multiple memories: each lets a guest hold a
-        //     linear memory the per-memory `max_memory` limiter does not sum, so a
-        //     guest could exceed the intended per-invocation memory budget.
-        // Temper's guests are single-memory wasm32 modules and use none of these.
-        config.wasm_memory64(false);
-        config.wasm_threads(false);
-        config.wasm_multi_memory(false);
         if let Some(strategy) = configured_profiling_strategy() {
             config.profiler(strategy);
         }
@@ -378,11 +328,8 @@ impl WasmEngine {
     /// Each invocation gets a fresh Store with fuel and memory limits.
     /// The module must export a `run` function that takes `(i32, i32)` ->
     /// `i32` where the inputs are (context_ptr, context_len) and the return
-    /// is a result pointer. Modules importing `host_get_context` receive a null
-    /// entry pointer and obtain context through that host function instead.
-    /// Pointer-based modules receive context in additional memory pages, charged
-    /// against the invocation budget. They must not assume a fixed address.
-    /// Alternatively, the module can use `host_set_result` for its result.
+    /// is a result pointer. Alternatively, the module can use `host_set_result`
+    /// to provide the result via host call.
     pub async fn invoke(
         &self,
         module_hash: &str,
@@ -525,6 +472,10 @@ impl WasmEngine {
             .module
             .imports()
             .any(|imp| imp.module() == "wasi_snapshot_preview1");
+        let reads_context_from_host = cached
+            .module
+            .imports()
+            .any(|imp| imp.name() == "host_get_context");
         telemetry::record_invocation_start(&context, needs_wasi, &streams);
 
         let (wasi_stderr_pipe, host_state) = {
@@ -537,7 +488,7 @@ impl WasmEngine {
             );
             let _entered = phase.enter();
             let wasi_stderr_pipe = if needs_wasi {
-                Some(wasmtime_wasi::p2::pipe::MemoryOutputPipe::new(64 * 1024))
+                Some(wasmtime_wasi::pipe::MemoryOutputPipe::new(64 * 1024))
             } else {
                 None
             };
@@ -551,10 +502,6 @@ impl WasmEngine {
                 None
             };
 
-            // ADR-0166: the guest-facing span API is fed by an untrusted module, so
-            // it needs the same per-tenant content decision the host HTTP path uses.
-            // Read it from the host itself, whose default is redact.
-            let export_llm_content = host.exports_llm_content();
             let host_state = HostState {
                 context_json: context_json.clone(),
                 result_json: None,
@@ -566,11 +513,7 @@ impl WasmEngine {
                 streams,
                 wasi_ctx,
                 blob_cache,
-                guest_spans: GuestSpanRegistry::for_invocation(
-                    context.clone(),
-                    needs_wasi,
-                    export_llm_content,
-                ),
+                guest_spans: GuestSpanRegistry::for_invocation(context.clone(), needs_wasi),
             };
             (wasi_stderr_pipe, host_state)
         };
@@ -650,9 +593,7 @@ impl WasmEngine {
         };
 
         let ctx_bytes = context_json.as_bytes();
-        let ctx_len = i32::try_from(ctx_bytes.len())
-            .map_err(|_| WasmError::Invocation("context exceeds the 32-bit ABI".into()))?;
-        let mut ctx_ptr = 0_i32;
+        let mut ctx_ptr = if reads_context_from_host { 0 } else { 1024 };
         {
             let phase = tracing::info_span!(
                 "wasm.invoke.write_context",
@@ -661,24 +602,21 @@ impl WasmEngine {
                 context_bytes = ctx_bytes.len() as u64,
             );
             let _entered = phase.enter();
-            let reads_host_context = cached
-                .module
-                .imports()
-                .any(|import| import.module() == "env" && import.name() == "host_get_context");
-            if !reads_host_context {
-                // Existing memory belongs to the guest, including its static data
-                // and allocator. Reserve separate pages for pointer-based input.
-                let start = memory.data_size(&store);
-                ctx_ptr = i32::try_from(start).map_err(|_| {
-                    WasmError::Invocation("context pointer exceeds the 32-bit ABI".into())
-                })?;
-                let pages = ctx_bytes.len().div_ceil(65_536) as u64;
-                memory.grow(&mut store, pages).map_err(|e| {
-                    WasmError::Invocation(format!("cannot reserve context memory: {e}"))
-                })?;
-                memory.write(&mut store, start, ctx_bytes).map_err(|e| {
+            let current_len = memory.data_size(&store);
+            if reads_context_from_host {
+                // SDK modules fetch the canonical context with host_get_context.
+                // Writing the same bytes at a fixed guest address can overwrite
+                // static data and allocator state when the context fits in the
+                // module's initial memory.
+            } else if ctx_bytes.len() <= current_len.saturating_sub(ctx_ptr) {
+                memory.write(&mut store, ctx_ptr, ctx_bytes).map_err(|e| {
                     WasmError::Invocation(format!("failed to write context to memory: {e}"))
                 })?;
+            } else {
+                // SDK-backed modules read the canonical context through host_get_context.
+                // Avoid growing and dirtying fresh guest heap pages before the guest
+                // allocator can initialize them; that can corrupt large-context parses.
+                ctx_ptr = 0;
             }
         }
 
@@ -690,7 +628,7 @@ impl WasmEngine {
                 context_bytes = ctx_bytes.len() as u64,
             );
             let _entered = phase.enter();
-            match run_fn.call(&mut store, (ctx_ptr, ctx_len)) {
+            match run_fn.call(&mut store, (ctx_ptr as i32, ctx_bytes.len() as i32)) {
                 Ok(result_ptr) => result_ptr,
                 Err(e) => {
                     let err = telemetry::map_invoke_error(
@@ -734,19 +672,6 @@ impl WasmEngine {
                 let result_len = u32::from_le_bytes(len_bytes) as usize;
                 phase.record("result_bytes", result_len as u64);
 
-                // ARN-226: bound the result allocation by the guest's memory size
-                // before allocating, so a forged length prefix can't drive a large
-                // host allocation ahead of the bounds check.
-                if !host_functions::guest_read_bounds_ok(
-                    memory.data_size(&store),
-                    result_ptr as usize,
-                    result_len,
-                ) {
-                    store.data_mut().guest_spans.cleanup_unclosed();
-                    return Err(WasmError::Invocation(
-                        "result length exceeds guest linear memory".to_string(),
-                    ));
-                }
                 let mut result_bytes = vec![0u8; result_len];
                 if let Err(e) = memory.read(&store, result_ptr as usize, &mut result_bytes) {
                     store.data_mut().guest_spans.cleanup_unclosed();

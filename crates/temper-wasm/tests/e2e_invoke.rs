@@ -15,6 +15,14 @@ use temper_wasm::{
 const ECHO_WASM: &[u8] = include_bytes!("fixtures/echo_integration.wasm");
 /// Pre-built SDK-backed module that exercises `temper_wasm_sdk::Context::from_host`.
 const SDK_CONTEXT_READER_WASM: &[u8] = include_bytes!("fixtures/sdk_context_reader.wasm");
+const HOST_CONTEXT_STATIC_RESULT_WAT: &[u8] = br#"
+    (module
+      (import "env" "host_get_context" (func $host_get_context (param i32 i32) (result i32)))
+      (memory (export "memory") 1)
+      (data (i32.const 1020) "\39\00\00\00{\22action\22:\22callback\22,\22params\22:{\22ok\22:true},\22success\22:true}")
+      (func (export "run") (param i32 i32) (result i32)
+        i32.const 1024))
+"#;
 
 fn build_context() -> WasmInvocationContext {
     WasmInvocationContext {
@@ -43,6 +51,30 @@ fn build_large_context(blob_len: usize) -> WasmInvocationContext {
         "large_blob": "x".repeat(blob_len),
     });
     ctx
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn host_context_import_preserves_guest_static_memory() {
+    let engine = WasmEngine::new().expect("engine should create");
+    let hash = engine
+        .compile_and_cache(HOST_CONTEXT_STATIC_RESULT_WAT)
+        .expect("host-context fixture should compile");
+
+    let ctx = build_large_context(2_000);
+    let streams = Arc::new(RwLock::new(StreamRegistry::default()));
+    let result = engine
+        .invoke(
+            &hash,
+            &ctx,
+            Arc::new(SimWasmHost::new()),
+            &WasmResourceLimits::default(),
+            streams,
+        )
+        .await
+        .expect("host-context module should retain its static result bytes");
+
+    assert!(result.success);
+    assert_eq!(result.callback_params["ok"].as_bool(), Some(true));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -155,7 +187,10 @@ async fn invoke_sdk_module_with_large_context_succeeds() {
         .compile_and_cache(SDK_CONTEXT_READER_WASM)
         .expect("sdk context reader should compile");
 
-    let ctx = build_large_context(4_000_000);
+    // This size fits inside the SDK guest's initial memory. The engine must
+    // still leave that memory untouched because the module imports
+    // host_get_context; copying at address 1024 corrupts its static data.
+    let ctx = build_large_context(1_000_000);
     let host = Arc::new(SimWasmHost::new());
 
     let streams = Arc::new(RwLock::new(StreamRegistry::default()));
@@ -177,7 +212,7 @@ async fn invoke_sdk_module_with_large_context_succeeds() {
         result.callback_params["entity_state_len"]
             .as_u64()
             .unwrap_or_default()
-            > 4_000_000,
+            > 1_000_000,
         "entity state should include the large payload"
     );
 }
