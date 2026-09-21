@@ -207,3 +207,57 @@ async fn replacement_waits_for_inflight_policy_writer() {
     // With no store configured, passing the lock reaches the storage boundary.
     assert_eq!(operation.await.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
+
+#[tokio::test]
+async fn large_bundle_exact_replacement_preserves_unrelated_entries_and_cas() {
+    let old = format!("{}{}", "// retained bytes\n".repeat(28000), OLD);
+    let new = old.replace(OLD, NEW);
+    assert!(new.len() > 441883);
+    for schedule in [0, 2] {
+        let engine = AuthzEngine::empty();
+        let store = SimStore {
+            rows: Mutex::new(vec![row("legacy", &old), row("unrelated", OTHER)]),
+            schedule,
+            reads: Mutex::new(0),
+        };
+        let result = replace_and_activate(
+            &engine,
+            &store,
+            "demo",
+            "legacy",
+            &Replacement {
+                expected_hash: hash(&old),
+                cedar_text: new.clone(),
+            },
+            "human",
+        )
+        .await;
+        assert_eq!(result.is_ok(), schedule == 0);
+        assert_eq!(store.rows.lock().unwrap()[1].cedar_text, OTHER);
+        if schedule == 0 {
+            assert_eq!(store.rows.lock().unwrap()[0].cedar_text, new);
+        } else {
+            assert!(engine.get_tenant_policy_text("demo").is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn oversized_valid_document_is_rejected_without_storage_mutation() {
+    let engine = AuthzEngine::empty();
+    let store = SimStore {
+        rows: Mutex::new(vec![row("legacy", OLD)]),
+        schedule: 0,
+        reads: Mutex::new(0),
+    };
+    let proposal = Replacement {
+        expected_hash: hash(OLD),
+        cedar_text: format!("// {}\n{NEW}", "x".repeat(2 * 1024 * 1024)),
+    };
+    let error = replace_and_activate(&engine, &store, "demo", "legacy", &proposal, "human")
+        .await
+        .unwrap_err();
+    assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    assert_eq!(store.rows.lock().unwrap()[0].cedar_text, OLD);
+    assert_eq!(*store.reads.lock().unwrap(), 0);
+}

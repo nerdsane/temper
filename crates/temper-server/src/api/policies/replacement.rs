@@ -84,7 +84,7 @@ async fn replace_and_activate(
     created_by: &str,
 ) -> ReplacementResult {
     if proposal.cedar_text.is_empty()
-        || proposal.cedar_text.len() > 256 * 1024
+        || proposal.cedar_text.len() > 2 * 1024 * 1024
         || proposal.expected_hash.len() != 64
         || !proposal
             .expected_hash
@@ -93,7 +93,7 @@ async fn replace_and_activate(
     {
         return Err((
             StatusCode::BAD_REQUEST,
-            "Expected lowercase SHA-256 and 1..262144 bytes of Cedar",
+            "Expected lowercase SHA-256 and 1..2097152 bytes of Cedar",
         ));
     }
     // Parse without mutating the active engine.

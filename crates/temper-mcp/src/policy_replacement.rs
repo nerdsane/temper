@@ -157,26 +157,29 @@ fn digest(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
+fn validate_policy_target(policy_id: &str, expected_hash: &str) -> Result<()> {
+    if policy_id.is_empty()
+        || policy_id.len() > 512
+        || !policy_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.'))
+        || matches!(policy_id, "." | "..")
+    {
+        bail!("Invalid durable policy ID");
+    }
+    if expected_hash.len() != 64
+        || !expected_hash
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        bail!("Expected lowercase SHA-256 of the current policy text");
+    }
+    Ok(())
+}
+
 impl Proposal {
     fn validate(&self) -> Result<()> {
-        if self.policy_id.is_empty()
-            || self.policy_id.len() > 512
-            || !self
-                .policy_id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.'))
-            || matches!(self.policy_id.as_str(), "." | "..")
-        {
-            bail!("Invalid durable policy ID");
-        }
-        if self.expected_hash.len() != 64
-            || !self
-                .expected_hash
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-        {
-            bail!("Expected lowercase SHA-256 of the current policy text");
-        }
+        validate_policy_target(&self.policy_id, &self.expected_hash)?;
         if self.cedar_text.is_empty() || self.cedar_text.len() > 256 * 1024 {
             bail!("Proposed Cedar must be between 1 and 262144 bytes");
         }
@@ -335,3 +338,6 @@ mod tests;
 #[cfg(all(test, unix))]
 #[path = "policy_replacement_server_test.rs"]
 mod server_tests;
+
+#[path = "policy_amendment.rs"]
+pub(crate) mod amendment;

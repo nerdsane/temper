@@ -33,6 +33,15 @@ async fn service(State(state): State<Fixture>, request: Request) -> axum::respon
     let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
         .await
         .unwrap();
+    if path == "/api/mcp/policy-amendments" {
+        assert_eq!(key, "Bearer fixture-requester");
+        let proposal: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            proposal,
+            json!({"policy_id":"legacy","expected_hash":digest(OLD),"edits":[{"old":OLD,"new":NEW}]})
+        );
+        return axum::Json(json!({"status":"pending","ask_id":"00000000-0000-4000-8000-000000000123","policy_id":"legacy"})).into_response();
+    }
     if path == "/api/mcp/policy-replacements" {
         assert_eq!(key, "Bearer fixture-requester");
         let proposal: Value = serde_json::from_slice(&body).unwrap();
@@ -242,4 +251,99 @@ fn relay_receipt_must_match_the_exact_proposal() {
             "accepted altered {field}"
         );
     }
+}
+
+#[tokio::test]
+async fn amendment_native_response_is_the_only_path_to_privileged_write() {
+    for response in [
+        json!({"action":"accept","content":{"replacement":"apply_exact_replacement"}}),
+        json!({"action":"decline","content":{"replacement":"apply_exact_replacement"}}),
+        json!({"action":"cancel"}),
+        json!({"action":"accept","content":{"decision":"approve_broad"}}),
+        json!({"action":"accept","content":{"replacement":"leave_unchanged"}}),
+        json!({"action":"accept","content":{"replacement":"apply_exact_replacement","approved":true}}),
+        Value::Null,
+    ] {
+        let state = Fixture::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let router = Router::new().fallback(service).with_state(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut ctx = RuntimeContext::from_config(&McpConfig {
+            temper_url: Some(format!("http://127.0.0.1:{port}")),
+            temper_port: None,
+            api_key: Some("fixture-requester".into()),
+            agent_id: None,
+            agent_type: None,
+            session_id: None,
+        })
+        .unwrap();
+        ctx.approver_key = Some("fixture-human".into());
+        ctx.identity_tenant = "default".into();
+        ctx.client_supports_elicitation = true;
+        ctx.elicit_approvals_enabled = true;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let pending = PendingClientRequests::default();
+        ctx.requester = Some(ClientRequester::new(tx, pending.clone()));
+        let call = json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
+            "name":"request_policy_amendment","arguments":{"policy_id":"legacy","expected_hash":digest(OLD),"edits":[{"old":OLD,"new":NEW}]}}});
+        let answer = async {
+            let prompt = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let message = prompt["params"]["message"].as_str().unwrap();
+            for disclosed in [OLD, NEW, "legacy", &digest(OLD), &digest(NEW)] {
+                assert!(message.contains(disclosed));
+            }
+            assert!(!message.contains("fixture-human"));
+            assert_eq!(state.writes.load(Ordering::SeqCst), 0);
+            assert!(!pending.resolve(json!({"id":"wrong-correlation","result":response})));
+            if response.is_null() {
+                pending.fail_all();
+            } else {
+                assert!(pending.resolve(json!({"id":prompt["id"],"result":response})));
+            }
+        };
+        let (result, ()) =
+            tokio::join!(crate::protocol::dispatch_json_value(&mut ctx, call), answer);
+        let exact = response
+            == json!({"action":"accept","content":{"replacement":"apply_exact_replacement"}});
+        assert_eq!(state.writes.load(Ordering::SeqCst), usize::from(exact));
+        assert_eq!(result.unwrap()["result"]["isError"], response.is_null());
+        assert_eq!(ctx.api_key.as_deref(), Some("fixture-requester"));
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn amendment_host_relay_cannot_write_without_human_answer() {
+    let state = Fixture::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let router = Router::new().fallback(service).with_state(state.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let mut ctx = RuntimeContext::from_config(&McpConfig {
+        temper_url: Some(format!("http://127.0.0.1:{port}")),
+        temper_port: None,
+        api_key: Some("fixture-requester".into()),
+        agent_id: None,
+        agent_type: None,
+        session_id: None,
+    })
+    .unwrap();
+    ctx.approver_key = None;
+    ctx.policy_approval_relay = true;
+    let args =
+        json!({"policy_id":"legacy","expected_hash":digest(OLD),"edits":[{"old":OLD,"new":NEW}]});
+    let result = amendment::request_policy_amendment(&mut ctx, &args)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&result).unwrap()["status"],
+        "pending"
+    );
+    assert_eq!(state.writes.load(Ordering::SeqCst), 0);
+    assert!(ctx.approver_key.is_none());
+    server.abort();
 }
