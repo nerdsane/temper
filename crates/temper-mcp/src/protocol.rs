@@ -109,12 +109,22 @@ pub(super) async fn dispatch_json_value(ctx: &mut RuntimeContext, raw: Value) ->
                 }
             };
 
-            if params.name == "request_policy_replacement" {
+            if matches!(
+                params.name.as_str(),
+                "request_policy_replacement" | "request_policy_amendment"
+            ) {
                 let id = id?;
-                let result =
+                let result = if params.name == "request_policy_amendment" {
+                    crate::policy_replacement::amendment::request_policy_amendment(
+                        ctx,
+                        &params.arguments,
+                    )
+                    .await
+                } else {
                     crate::policy_replacement::request_policy_replacement(ctx, &params.arguments)
-                        .await;
-                ctx.record_execute_turn("request_policy_replacement", &result);
+                        .await
+                };
+                ctx.record_execute_turn(&params.name, &result);
                 let (text, is_error) = match result {
                     Ok(text) => (text, false),
                     Err(error) => (error.to_string(), true),
@@ -312,6 +322,14 @@ You cannot approve or set policies — only humans can do that.";
                 "expected_hash":{"type":"string","description":"Current lowercase SHA-256"},
                 "cedar_text":{"type":"string","description":"Exact complete proposed Cedar text"}
             },"required":["policy_id","expected_hash","cedar_text"],"additionalProperties":false}
+        }),
+        json!({
+            "name":"request_policy_amendment",
+            "description":"Propose exact text edits to one enabled Cedar entry, including large bundles. Human reviews every complete old/new edit and whole-document hashes. Other bytes remain unchanged. Requires separate native human approval; stale, missing, ambiguous or overlapping edits are rejected.",
+            "inputSchema":{"type":"object","properties":{
+                "policy_id":{"type":"string"},"expected_hash":{"type":"string"},
+                "edits":{"type":"array","minItems":1,"maxItems":16,"items":{"type":"object","properties":{"old":{"type":"string","minLength":1},"new":{"type":"string"}},"required":["old","new"],"additionalProperties":false}}
+            },"required":["policy_id","expected_hash","edits"],"additionalProperties":false}
         }),
         json!({
             "name": "setup_connection",

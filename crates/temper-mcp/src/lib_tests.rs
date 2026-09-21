@@ -347,11 +347,11 @@ async fn tool_list_separates_execute_from_human_only_setup() {
     .await;
 
     let tools = response["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 3);
+    assert_eq!(tools.len(), 4);
     assert_eq!(tools[0]["name"], "execute");
-    assert_eq!(tools[2]["name"], "setup_connection");
-    assert_eq!(tools[2]["inputSchema"]["properties"], json!({}));
-    assert_eq!(tools[2]["inputSchema"]["additionalProperties"], false);
+    assert_eq!(tools[3]["name"], "setup_connection");
+    assert_eq!(tools[3]["inputSchema"]["properties"], json!({}));
+    assert_eq!(tools[3]["inputSchema"]["additionalProperties"], false);
 }
 
 #[test]
@@ -931,5 +931,26 @@ async fn tool_list_exposes_exact_policy_proposal_without_approval_argument() {
     for name in ["policy_id", "expected_hash", "cedar_text"] {
         assert!(properties.contains_key(name));
     }
+    assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+}
+
+#[tokio::test]
+async fn amendment_tool_exposes_exact_edits_without_consent_argument() {
+    let mut ctx = ctx_for_port(3001);
+    let response = rpc(
+        &mut ctx,
+        json!({"jsonrpc":"2.0","id":92,"method":"tools/list"}),
+    )
+    .await;
+    let tools = response["result"]["tools"].as_array().unwrap();
+    let tool = tools
+        .iter()
+        .find(|t| t["name"] == "request_policy_amendment")
+        .unwrap();
+    assert_eq!(
+        tool["inputSchema"]["properties"].as_object().unwrap().len(),
+        3
+    );
+    assert_eq!(tool["inputSchema"]["properties"]["edits"]["maxItems"], 16);
     assert_eq!(tool["inputSchema"]["additionalProperties"], false);
 }
