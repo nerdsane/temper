@@ -6,7 +6,7 @@ use serde_json::json;
 use std::sync::atomic::Ordering;
 use temper_runtime::scheduler::install_deterministic_context;
 
-#[path = "causal_projection_test/fixture.rs"]
+#[path = "causal_projection_test/fixture_test.rs"]
 mod fixture;
 use fixture::fixture;
 
