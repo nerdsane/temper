@@ -607,6 +607,29 @@ impl crate::state::ServerState {
             return response;
         }
 
+        // A reaction or integration may immediately GET this source through
+        // the query plane. Queue admission does not establish visibility.
+        let projected_before_dependents = self.has_projection_dependents(ctx, &response);
+        if projected_before_dependents
+            && let Err(error) = self.project_before_dependents(ctx, &response).await
+        {
+            tracing::error!(tenant = %ctx.tenant, entity_type = ctx.entity_type,
+                entity_id = ctx.entity_id, action = ctx.action, %error,
+                "Committed transition projection failed; dependents not started");
+            let mut response = response;
+            response.success = false;
+            response.error = Some(format!(
+                "Action committed, but its query projection failed; dependents were not started: {error}"
+            ));
+            return response;
+        }
+
+        if projected_before_dependents && response.state.status == "Deleted" {
+            // Queue cleanup before integrations can return early. Older queued
+            // writes remain guarded until this ordered removal is applied.
+            self.apply_query_projection_update(ctx, &response).await;
+        }
+
         // 3. Broadcast SSE + cache
         self.broadcast_state_change(ctx, &response);
 
@@ -797,7 +820,9 @@ impl crate::state::ServerState {
         // 8. Enqueue durable query-plane maintenance (ADR-0148). The journal
         // append is already durable; projection writes are derived rows and
         // are coalesced by entity/sequence before DB access.
-        self.apply_query_projection_update(ctx, &response).await;
+        if !projected_before_dependents {
+            self.apply_query_projection_update(ctx, &response).await;
+        }
 
         response
     }
@@ -872,3 +897,7 @@ mod strict_timer_tests {
         assert!(!rejected.success);
     }
 }
+
+#[cfg(test)]
+#[path = "causal_projection_test.rs"]
+mod causal_projection_tests;

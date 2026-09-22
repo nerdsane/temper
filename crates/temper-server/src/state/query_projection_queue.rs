@@ -84,7 +84,11 @@ impl QueryProjectionWriteQueue {
     }
 
     #[cfg(test)]
-    fn new_for_test(store: Arc<dyn QueryPlaneStore>, capacity: usize, drain_batch: usize) -> Self {
+    pub(crate) fn new_for_test(
+        store: Arc<dyn QueryPlaneStore>,
+        capacity: usize,
+        drain_batch: usize,
+    ) -> Self {
         Self {
             store,
             pending: Arc::new(Mutex::new(PendingProjectionUpdates::default())),
@@ -222,6 +226,13 @@ impl QueryProjectionWriteQueue {
         tokio::spawn(async move {
             queue.run().await;
         });
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn drain_once_for_test(&self) {
+        for update in self.take_batch() {
+            self.apply(update).await;
+        }
     }
 
     async fn run(self: Arc<Self>) {

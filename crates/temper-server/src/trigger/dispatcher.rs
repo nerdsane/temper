@@ -30,6 +30,20 @@ impl ReactionDispatcher {
         Self { registry }
     }
 
+    /// Whether this committed transition has declared cross-entity dependents.
+    pub(crate) fn has_reactions(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        action: &str,
+        to_state: &str,
+    ) -> bool {
+        !self
+            .registry
+            .lookup(tenant, entity_type, action, to_state)
+            .is_empty()
+    }
+
     /// Dispatch reactions triggered by a successful entity action.
     ///
     /// This is called after the source action has been committed and the SSE
