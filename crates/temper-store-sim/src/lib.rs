@@ -459,6 +459,10 @@ impl EventStore for SimEventStore {
             let entity_type = parts.next().unwrap_or("");
             let entity_id = parts.next().unwrap_or("");
             for row in key_rows {
+                // Release markers (empty hash, ARN-238) claim nothing.
+                if row.key_hash.is_empty() {
+                    continue;
+                }
                 if let Some(existing) = inner.key_index.get(&(
                     tenant.to_string(),
                     entity_type.to_string(),
@@ -542,6 +546,10 @@ impl EventStore for SimEventStore {
                         && kn.as_str() == row.key_name.as_str()
                         && eid.as_str() == entity_id)
                 });
+                // A release marker (ARN-238) only drops the prior row.
+                if row.key_hash.is_empty() {
+                    continue;
+                }
                 inner.key_index.insert(
                     (
                         tenant.to_string(),
@@ -600,6 +608,16 @@ impl EventStore for SimEventStore {
                 row.key_name.clone(),
                 row.key_hash.clone(),
             );
+            // A release marker (empty hash, ARN-238) only drops the prior row.
+            if row.key_hash.is_empty() {
+                inner.key_index.retain(|(t, et, kn, _), eid| {
+                    !(t.as_str() == tenant
+                        && et.as_str() == entity_type
+                        && kn.as_str() == row.key_name.as_str()
+                        && eid.as_str() == entity_id)
+                });
+                continue;
+            }
             match inner.key_index.get(&slot) {
                 // A different entity holds it — pre-existing conflict; skip (don't
                 // clobber, don't fail the backfill).
