@@ -933,14 +933,50 @@ impl EventStore for SimEventStore {
             ));
         }
 
-        inner
-            .snapshots
-            .insert(persistence_id.to_string(), (sequence_nr, snapshot.to_vec()));
-        inner
+        // ARN-239: monotonic snapshot contract — reject stale, idempotent same content.
+        if let Some((existing_seq, existing_bytes)) = inner.snapshots.get(persistence_id) {
+            if sequence_nr < *existing_seq {
+                return Err(PersistenceError::ConcurrencyViolation {
+                    expected: *existing_seq,
+                    actual: sequence_nr,
+                });
+            }
+            if sequence_nr == *existing_seq {
+                if existing_bytes.as_slice() == snapshot {
+                    return Ok(());
+                }
+                return Err(PersistenceError::ConcurrencyViolation {
+                    expected: *existing_seq,
+                    actual: sequence_nr,
+                });
+            }
+            // Higher sequence: keep history immutable; do not rewrite prior seq keys.
+        }
+
+        // History check BEFORE latest pointer update so a conflict never leaves
+        // snapshots advanced to uncommitted content (ARN-239 / TigerStyle).
+        use std::collections::btree_map::Entry;
+        match inner
             .snapshot_history
             .entry(persistence_id.to_string())
             .or_default()
-            .insert(sequence_nr, snapshot.to_vec());
+            .entry(sequence_nr)
+        {
+            Entry::Occupied(occ) => {
+                if occ.get().as_slice() != snapshot {
+                    return Err(PersistenceError::ConcurrencyViolation {
+                        expected: sequence_nr,
+                        actual: sequence_nr,
+                    });
+                }
+            }
+            Entry::Vacant(vac) => {
+                vac.insert(snapshot.to_vec());
+            }
+        }
+        inner
+            .snapshots
+            .insert(persistence_id.to_string(), (sequence_nr, snapshot.to_vec()));
         let segments = inner
             .event_segments
             .entry(persistence_id.to_string())
