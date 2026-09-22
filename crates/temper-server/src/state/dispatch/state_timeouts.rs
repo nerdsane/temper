@@ -506,6 +506,7 @@ mod tests {
     fn test_event(action: &str, from: &str, to: &str, ts_ms_after_epoch: i64) -> EntityEvent {
         let ts = DateTime::<Utc>::from_timestamp_millis(ts_ms_after_epoch).unwrap();
         EntityEvent {
+            system_one_receipts: vec![],
             action: action.to_string(),
             from_status: from.to_string(),
             to_status: to.to_string(),

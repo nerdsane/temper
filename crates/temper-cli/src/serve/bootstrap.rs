@@ -447,8 +447,10 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
     agent_spec_tenants.insert("default".to_string());
 
     let default_cache = load_verified_cache(state, "default").await;
+    // Preserve app specs loaded or restored for the default tenant in Phase 2.
+    // Built-in agent entities augment that tenant just as they do other apps.
     let default_hashes =
-        temper_platform::bootstrap_agent_specs(state, "default", false, &default_cache);
+        temper_platform::bootstrap_agent_specs(state, "default", true, &default_cache);
     if let Some(turso) = state.server.turso_store_for_tenant("default").await {
         temper_platform::persist_agent_verification(
             &turso,
@@ -649,7 +651,40 @@ mod tests {
     use temper_spec::csdl::parse_csdl;
     use temper_store_turso::TursoEventStore;
 
-    use super::bootstrap_installed_apps;
+    use super::{bootstrap_installed_apps, bootstrap_tenants};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bootstrap_keeps_default_tenant_app_entities_and_odata_bindings() {
+        let state = PlatformState::new(None);
+        let tenant = TenantId::default();
+        let csdl = r#"<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+<edmx:DataServices><Schema Namespace="Demo" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+<EntityType Name="SupportCase"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/></EntityType>
+<EntityContainer Name="Container"><EntitySet Name="SupportCases" EntityType="Demo.SupportCase"/></EntityContainer>
+</Schema></edmx:DataServices></edmx:Edmx>"#;
+        let ioa = "[automaton]\nname = \"SupportCase\"\nstates = [\"Open\"]\ninitial = \"Open\"\n";
+        state.registry.write().unwrap().register_tenant(
+            tenant.clone(),
+            parse_csdl(csdl).unwrap(),
+            csdl.into(),
+            &[("SupportCase", ioa)],
+        );
+        bootstrap_tenants(&state, &[]).await;
+        let registry = state.registry.read().unwrap();
+        assert!(
+            registry.get_table(&tenant, "SupportCase").is_some(),
+            "startup removed the application spec"
+        );
+        assert_eq!(
+            registry.resolve_entity_type(&tenant, "SupportCases"),
+            Some("SupportCase".into()),
+            "startup removed the public OData binding"
+        );
+        assert!(
+            registry.get_table(&tenant, "Agent").is_some(),
+            "agent bootstrap must still add its built-ins"
+        );
+    }
 
     #[tokio::test]
     async fn bootstrap_installed_apps_replays_persisted_app_when_registry_specs_are_stale() {

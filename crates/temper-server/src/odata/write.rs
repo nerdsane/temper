@@ -84,6 +84,30 @@ fn strict_generic_write_response(
         })
 }
 
+fn unsupported_pg_system_one_response(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    action: Option<&str>,
+) -> Option<axum::response::Response> {
+    let registry = state.registry.read().expect("registry lock poisoned");
+    let table = registry
+        .get_table(tenant, entity_type)
+        .or_else(|| state.transition_tables.get(entity_type).cloned())?;
+    let unsupported = match action {
+        Some(action) => !crate::system_one::collect_guards(&table, action).is_empty(),
+        None => table
+            .rules
+            .iter()
+            .any(|rule| !crate::system_one::collect_guards(&table, &rule.name).is_empty()),
+    };
+    unsupported.then(|| odata_error(
+        StatusCode::BAD_REQUEST,
+        "UnsupportedSystemOneGuard",
+        "system_one guards require the native actor runtime; the Postgres actor runtime is unsupported",
+    ).into_response())
+}
+
 fn invalid_create_body(message: &str) -> ODataWriteError {
     Box::new(odata_error(StatusCode::BAD_REQUEST, "InvalidBody", message).into_response())
 }
@@ -568,6 +592,12 @@ pub async fn handle_odata_post(
                 return odata_error(StatusCode::BAD_REQUEST, "StrictActionContract", &error)
                     .into_response();
             }
+            if state.is_pg_actor_backed(&tenant, &entity_type)
+                && let Some(response) =
+                    unsupported_pg_system_one_response(&state, &tenant, &entity_type, None)
+            {
+                return response;
+            }
             let _commons_guardrail_lock = state.acquire_commons_write_guardrail_lock(&tenant).await;
 
             if let Err(resp) = run_write_prechecks(
@@ -861,6 +891,14 @@ pub async fn handle_odata_post(
                 };
                 if let Err(resp) = check_verification_gate_or_423(&state, &tenant, &entity_type) {
                     return *resp;
+                }
+                if let Some(response) = unsupported_pg_system_one_response(
+                    &state,
+                    &tenant,
+                    &entity_type,
+                    Some(action_name),
+                ) {
+                    return response;
                 }
                 {
                     let registry = state.registry.read().expect("registry lock poisoned");

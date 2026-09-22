@@ -183,6 +183,7 @@ impl TransitionTable {
 fn convert_guard(guard: ResolvedGuard) -> Guard {
     match guard {
         ResolvedGuard::Always => Guard::Always,
+        ResolvedGuard::SystemOne(guard) => Guard::SystemOne(guard),
         ResolvedGuard::StateIn(values) => Guard::StateIn(values),
         ResolvedGuard::CounterMin { var, min } => Guard::CounterMin { var, min },
         ResolvedGuard::CounterMax { var, max } => Guard::CounterMax { var, max },

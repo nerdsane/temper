@@ -269,6 +269,49 @@ pub(super) async fn dispatch_bound_action(
             .idempotency_cache
             .get_after_effects_applied(&actor_key, idem_key)
     {
+        // This HTTP cache precedes dispatch, so validate the durable attempt
+        // binding here too. A removed guard still has an immutable reservation.
+        if let Some((store, _)) = state.event_journal() {
+            let validation = async {
+                let table = state.transition_table_for_dispatch(tenant, entity_type)?;
+                let principal =
+                    crate::system_one::canonical_principal_identity(&dispatch_agent_ctx)
+                        .map_err(DispatchError::Internal)?;
+                let reserved = crate::system_one::check_attempt(
+                    &store,
+                    crate::system_one::AttemptInput {
+                        tenant,
+                        table: &table,
+                        state: &current_state.state,
+                        action,
+                        params: &body_json,
+                        principal: &principal,
+                        attempt: idem_key,
+                    },
+                    true,
+                )
+                .await
+                .map_err(DispatchError::Conflict)?;
+                if !reserved && !crate::system_one::collect_guards(&table, action).is_empty() {
+                    return Err(DispatchError::Conflict(
+                        "attempt key already belongs to a different action".into(),
+                    ));
+                }
+                Ok::<(), DispatchError>(())
+            }
+            .await;
+            if let Err(error) = validation {
+                http_span.set_status(Status::error("IdempotencyConflict"));
+                http_span.set_attribute(OtelKeyValue::new("http.status_code", 409i64));
+                http_span.end_with_timestamp(sim_now().into());
+                return odata_error(
+                    StatusCode::CONFLICT,
+                    "IdempotencyConflict",
+                    &error.to_string(),
+                )
+                .into_response();
+            }
+        }
         let body = annotate_entity(
             serde_json::to_value(&cached.state).unwrap_or_default(),
             format!("$metadata#{set_name}/$entity"),

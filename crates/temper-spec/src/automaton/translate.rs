@@ -46,6 +46,8 @@ pub enum ResolvedGuard {
         /// guard rather than passing vacuously (ARN-92 #2).
         required: bool,
     },
+    /// An external typed judgment whose recorded answer gates the action.
+    SystemOne(super::system_one::SystemOneGuard),
     /// All inner guards must pass.
     And(Vec<ResolvedGuard>),
 }
@@ -195,6 +197,7 @@ fn translate_guards(from_states: &[String], guards: &[Guard]) -> ResolvedGuard {
 /// Translate a single IOA guard to its resolved form.
 fn translate_single_guard(guard: &Guard) -> ResolvedGuard {
     match guard {
+        Guard::SystemOne(guard) => ResolvedGuard::SystemOne(guard.clone()),
         Guard::StateIn { values } => ResolvedGuard::StateIn(values.clone()),
         Guard::MinCount { var, min } => ResolvedGuard::CounterMin {
             var: var.clone(),

@@ -389,6 +389,7 @@ pub(crate) fn process_action_with_xref_and_field_mode(
             all_scheduled.extend(resolve_schedule_at_requests(state, &schedule_at_requests));
 
             let event = EntityEvent {
+                system_one_receipts: vec![],
                 action: action.to_string(),
                 from_status,
                 to_status: state.status.clone(),
@@ -517,10 +518,15 @@ pub(crate) fn entity_authorization_precondition(state: &EntityState) -> String {
     }
 
     let mut hasher = Sha256::new();
-    hasher.update(b"temper-entity-authorization-precondition-v1");
+    hasher.update(b"temper-entity-authorization-precondition-v2");
+    update_bytes(&mut hasher, state.entity_type.as_bytes());
+    update_bytes(&mut hasher, state.entity_id.as_bytes());
     hasher.update(state.sequence_nr.to_be_bytes());
     update_bytes(&mut hasher, state.status.as_bytes());
     update_json(&mut hasher, &state.fields);
+    update_json(&mut hasher, &serde_json::json!(state.counters));
+    update_json(&mut hasher, &serde_json::json!(state.booleans));
+    update_json(&mut hasher, &serde_json::json!(state.lists));
     format!("{:x}", hasher.finalize())
 }
 

@@ -392,3 +392,15 @@ pub(super) fn composite_app_uniqueness_error(error: CommonsAppUniquenessError) -
         CommonsAppUniquenessError::Internal(_) => DispatchError::Internal(error.to_string()),
     }
 }
+/// Refuse inference guards before a composite can stage or persist any write.
+pub(super) fn reject_system_one_composite_action(
+    table: &temper_jit::table::TransitionTable,
+    action: &str,
+) -> Result<(), super::DispatchError> {
+    if !crate::system_one::collect_guards(table, action).is_empty() {
+        return Err(super::DispatchError::Conflict(
+            "system_one guards are not supported by composite execution".into(),
+        ));
+    }
+    Ok(())
+}

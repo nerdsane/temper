@@ -91,6 +91,9 @@ pub struct SimulationResult {
     pub seed: u64,
     /// Per-actor final states.
     pub actor_final_states: Vec<(String, TemperModelState)>,
+    /// Environmental limits of abstract external judgment simulation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_guard_assumptions: Vec<String>,
 }
 
 /// A liveness violation found during or after simulation.
@@ -254,6 +257,7 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
         liveness_violations,
         seed: config.seed,
         actor_final_states: actor_states,
+        external_guard_assumptions: crate::checker::external_guard_assumptions(model),
     }
 }
 

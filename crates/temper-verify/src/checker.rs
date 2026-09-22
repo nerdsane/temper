@@ -25,7 +25,8 @@ pub struct Counterexample {
 pub struct VerificationResult {
     /// Total number of unique states explored.
     pub states_explored: usize,
-    /// Whether all declared properties hold across all reachable states.
+    /// Whether declared properties hold in the abstract model's reachable
+    /// states. Consult `external_guard_assumptions` for environmental limits.
     pub all_properties_hold: bool,
     /// Counterexamples found (one per violated property).
     pub counterexamples: Vec<Counterexample>,
@@ -33,6 +34,9 @@ pub struct VerificationResult {
     pub dead_transitions: Vec<String>,
     /// Whether the checker completed its exploration (vs. hitting a limit).
     pub is_complete: bool,
+    /// Limits of external judgment modeling, including liveness assumptions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_guard_assumptions: Vec<String>,
 }
 
 /// Run exhaustive BFS model checking on the given `TemperModel`.
@@ -69,7 +73,32 @@ pub fn check_model(model: &TemperModel) -> VerificationResult {
         counterexamples,
         dead_transitions,
         is_complete,
+        external_guard_assumptions: external_guard_assumptions(model),
     }
+}
+
+/// Describe the external-answer assumptions used by this abstract model.
+pub(crate) fn external_guard_assumptions(model: &TemperModel) -> Vec<String> {
+    let actions: Vec<&str> = model
+        .transitions
+        .iter()
+        .filter(|transition| transition.guard.contains_system_one())
+        .map(|transition| transition.name.as_str())
+        .collect();
+    if actions.is_empty() {
+        return Vec::new();
+    }
+    let mut assumptions = vec![format!(
+        "System One guards on {} are external nondeterministic inputs; safety verification explores satisfiable answers and does not establish model accuracy",
+        actions.join(", "),
+    )];
+    if !model.liveness.is_empty() {
+        assumptions.push(
+            "unconditional liveness is not established: eventual-state results assume the environment supplies enabling answers and the provider completes; local no-deadlock checks do not assume external success"
+                .into(),
+        );
+    }
+    assumptions
 }
 
 fn find_dead_transitions(model: &TemperModel) -> Vec<String> {

@@ -664,6 +664,7 @@ impl EntityActor {
                                 )));
                             }
                             Err(_) => EntityEvent {
+                                system_one_receipts: vec![],
                                 action: "Deleted".to_string(),
                                 from_status: state.status.clone(),
                                 to_status: "Deleted".to_string(),
@@ -1039,6 +1040,7 @@ impl Actor for EntityActor {
             let initial_params =
                 super::effects::sanitize_action_params(&self.initial_fields).into_owned();
             let created = EntityEvent {
+                system_one_receipts: vec![],
                 action: "Created".to_string(),
                 from_status: String::new(),
                 to_status: state.status.clone(),
@@ -1070,11 +1072,20 @@ impl Actor for EntityActor {
         state: &mut Self::State,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
+        let (msg, system_one_evidence) = match msg {
+            EntityMsg::GuardedAction { command, evidence } => {
+                if !matches!(command.as_ref(), EntityMsg::Action { .. }) {
+                    return Err(ActorError::custom("System One evidence requires an action"));
+                }
+                (*command, Some(evidence))
+            }
+            msg => (msg, None),
+        };
         match msg {
             EntityMsg::Action {
                 name,
                 params,
-                cross_entity_booleans,
+                mut cross_entity_booleans,
                 idempotency_key,
                 expected_authorization_precondition,
             } => {
@@ -1172,6 +1183,42 @@ impl Actor for EntityActor {
                     return Ok(());
                 }
 
+                if system_one_evidence.is_some()
+                    || !crate::system_one::collect_guards(&table, &name).is_empty()
+                {
+                    let validation = system_one_evidence
+                        .as_ref()
+                        .ok_or_else(|| "system_one evaluation evidence is missing".to_string())
+                        .and_then(|evidence| {
+                            evidence.validate(
+                                &table,
+                                state,
+                                &name,
+                                &params,
+                                idempotency_key.as_deref(),
+                            )
+                        });
+                    if let Err(error) = validation {
+                        ctx.reply(EntityResponse {
+                            success: false,
+                            state: state.clone(),
+                            error: Some(error),
+                            custom_effects: vec![],
+                            scheduled_actions: vec![],
+                            spawn_requests: vec![],
+                            spec_governed: true,
+                        });
+                        return Ok(());
+                    }
+                    cross_entity_booleans.extend(
+                        system_one_evidence
+                            .as_ref()
+                            .expect("evidence validated")
+                            .outcomes
+                            .clone(),
+                    );
+                }
+
                 // TigerStyle: Assert preconditions before every transition.
                 // These run in production, not just tests.
                 debug_assert!(
@@ -1264,6 +1311,10 @@ impl Actor for EntityActor {
                         .clone()
                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
                     event.idempotency_key = idempotency_key.clone();
+                    event.system_one_receipts = system_one_evidence
+                        .as_ref()
+                        .map(|e| e.receipt_ids.clone())
+                        .unwrap_or_default();
 
                     if !result.overflow_blobs.is_empty()
                         && let Err(e) = Self::persist_overflow_blobs(
@@ -1381,6 +1432,24 @@ impl Actor for EntityActor {
                                     state_before = state.clone();
                                     event_count_before = state.total_event_count;
 
+                                    if let Some(evidence) = &system_one_evidence {
+                                        // Catch-up awaited storage; a live spec
+                                        // swap can invalidate evidence even
+                                        // when the entity journal did not move.
+                                        let current_table =
+                                            self.table.read().expect("table lock poisoned").clone();
+                                        if let Err(error) = evidence.validate(
+                                            &current_table,
+                                            state,
+                                            &name,
+                                            &params,
+                                            idempotency_key.as_deref(),
+                                        ) {
+                                            retry_final = Some((crate::runtime_metrics::ConcurrencyRetryOutcome::ActionIllegal, Some(error)));
+                                            break;
+                                        }
+                                    }
+
                                     // Re-evaluate the action against the caught-up
                                     // state. It may now fail (entity reached a
                                     // terminal state during the race) — if so,
@@ -1419,6 +1488,10 @@ impl Actor for EntityActor {
                                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
                                     let mut retry_event = retry_event;
                                     retry_event.idempotency_key = idempotency_key.clone();
+                                    retry_event.system_one_receipts = system_one_evidence
+                                        .as_ref()
+                                        .map(|e| e.receipt_ids.clone())
+                                        .unwrap_or_default();
 
                                     // Overflow blobs for the re-evaluated result.
                                     if !retry_result.overflow_blobs.is_empty()
@@ -1692,6 +1765,9 @@ impl Actor for EntityActor {
                     ask_reply_start.elapsed(),
                 );
             }
+            EntityMsg::GuardedAction { .. } => {
+                return Err(ActorError::custom("nested System One action wrapper"));
+            }
             EntityMsg::GetState => {
                 ctx.reply(EntityResponse {
                     success: true,
@@ -1778,6 +1854,7 @@ impl Actor for EntityActor {
                     return Ok(());
                 }
                 let deleted = EntityEvent {
+                    system_one_receipts: vec![],
                     action: "Deleted".to_string(),
                     from_status: state.status.clone(),
                     to_status: "Deleted".to_string(),

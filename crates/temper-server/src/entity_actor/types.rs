@@ -37,6 +37,13 @@ pub fn recent_events_budget() -> usize {
 /// Messages the entity actor can receive.
 #[derive(Debug)]
 pub enum EntityMsg {
+    /// Execute an action with durable external judgment evidence from dispatch.
+    GuardedAction {
+        /// The underlying action. Nested wrappers and non-actions are refused.
+        command: Box<EntityMsg>,
+        /// Trusted evaluation outcomes and exact input/spec bindings.
+        evidence: crate::system_one::SystemOneEvidence,
+    },
     /// Execute a state machine action (e.g., "SubmitOrder", "CancelOrder").
     Action {
         name: String,
@@ -167,6 +174,9 @@ impl EntityState {
 /// A recorded state transition event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityEvent {
+    /// Durable evaluation streams used to permit this action, empty for old events.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system_one_receipts: Vec<String>,
     /// The action that triggered the transition.
     pub action: String,
     /// The status before the transition.

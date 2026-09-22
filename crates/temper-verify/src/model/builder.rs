@@ -2,8 +2,8 @@
 //!
 //! Uses the shared translation layer in `temper-spec` for guard/effect translation,
 //! then converts to verification-specific types. Runtime-only effects (Emit, Trigger,
-//! Schedule, Spawn) are filtered out; CrossEntityState guards are kept as abstract
-//! guards so single-entity checks do not silently treat them as locally enabled.
+//! Schedule, Spawn) are filtered out; external guards are kept abstract so
+//! single-entity checks do not silently treat them as locally enabled.
 
 use std::collections::BTreeMap;
 
@@ -128,6 +128,7 @@ fn convert_guard(guard: ResolvedGuard) -> ModelGuard {
             required_status,
             forbidden_status,
         },
+        ResolvedGuard::SystemOne(guard) => ModelGuard::SystemOne(guard),
         ResolvedGuard::And(guards) => {
             ModelGuard::And(guards.into_iter().map(convert_guard).collect())
         }

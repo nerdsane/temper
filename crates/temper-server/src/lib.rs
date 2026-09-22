@@ -45,6 +45,7 @@ pub mod sentinel;
 pub mod state;
 mod static_web;
 pub mod storage;
+pub mod system_one;
 pub(crate) mod trajectory_outbox;
 pub mod trigger;
 pub mod vector_index;

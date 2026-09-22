@@ -236,3 +236,50 @@ fn check_and_check_detailed_agree_on_pass_fail() {
         guard.check_detailed("S", &ctx).is_none()
     );
 }
+
+#[test]
+fn system_one_missing_evidence_never_enables_action() {
+    let source = r#"
+[automaton]
+name = "Review"
+states = ["Open", "Escalated"]
+initial = "Open"
+[[action]]
+name = "Escalate"
+from = ["Open"]
+to = "Escalated"
+guard = [{ type = "system_one", model = "jev-latest", state = "Please connect me with a human", questions = { human_requested = { type = "noul", instructions = "Is a human requested?" } }, assert = "answers.human_requested.noul >= 0.8" }]
+"#;
+    let table =
+        super::super::TransitionTable::try_from_ioa_source(source).expect("system_one must parse");
+    let guard = &table.rules[0].guard;
+    assert!(!guard.check("Open", &EvalContext::default()));
+}
+
+#[test]
+fn system_one_evidence_is_pure_and_conjunctive_with_local_guards() {
+    let declaration: temper_spec::automaton::SystemOneGuard =
+        serde_json::from_value(serde_json::json!({
+            "model":"jev-latest", "state":"Please help",
+            "questions":{"q":{"type":"noul","instructions":"Is help requested?"}},
+            "assert":"answers.q.noul >= 0.8"
+        }))
+        .unwrap();
+    let key = declaration.key();
+    let guard = Guard::And(vec![
+        Guard::BoolTrue("assigned".into()),
+        Guard::SystemOne(declaration),
+    ]);
+    let mut ctx = EvalContext::default();
+    ctx.booleans.insert("assigned".into(), true);
+    let missing = guard.check_detailed("Open", &ctx).unwrap();
+    assert_eq!(missing.kind, GuardFailureKind::SystemOne);
+    assert_eq!(missing.found.as_deref(), Some("<missing>"));
+    ctx.booleans.insert(key.clone(), false);
+    assert!(!guard.check("Open", &ctx));
+    ctx.booleans.insert(key, true);
+    assert!(guard.check("Open", &ctx));
+    assert!(guard.check_detailed("Open", &ctx).is_none());
+    ctx.booleans.insert("assigned".into(), false);
+    assert!(!guard.check("Open", &ctx));
+}

@@ -456,6 +456,15 @@ impl crate::state::ServerState {
         // Entry points retain their authorization boundary. Invalid first inputs
         // must not materialize an actor; existing actors validate hydrated state.
         let table = self.transition_table_for_dispatch(tenant, entity_type)?;
+        if !crate::system_one::collect_guards(&table, action).is_empty()
+            && (table.composite_actions.contains_key(action)
+                || self.is_pg_actor_backed(tenant, entity_type))
+        {
+            return Err(DispatchError::Internal(
+                "system_one guards are not supported by composite or Postgres actor execution"
+                    .into(),
+            ));
+        }
         if table.has_input_contracts() && !self.entity_exists(tenant, entity_type, entity_id) {
             let snapshot = self
                 .load_authz_resource_snapshot(tenant, entity_type, entity_id)
@@ -602,13 +611,78 @@ impl crate::state::ServerState {
         let action_name = action.to_string();
         let params_for_retry = params;
         let cross_for_retry = cross_entity_booleans;
-        let authorization_precondition_for_retry = expected_authorization_precondition;
+        let mut authorization_precondition_for_retry = expected_authorization_precondition;
         let idempotency_key = Some(agent_ctx.idempotency_key.clone().unwrap_or_else(|| {
             format!(
                 "dispatch:{tenant}:{entity_type}:{entity_id}:{action}:{}",
                 sim_uuid()
             )
         }));
+        let has_system_one = !crate::system_one::collect_guards(&table, action).is_empty();
+        let system_one_evidence = if has_system_one || agent_ctx.idempotency_key.is_some() {
+            let current: EntityResponse = actor_ref
+                .ask(EntityMsg::GetState, self.action_dispatch_timeout)
+                .await
+                .map_err(|e| DispatchError::Permanent { source: e })?;
+            let attempt = idempotency_key.as_deref().expect("attempt key exists");
+            let completed = current.state.has_processed_idempotency_key(attempt);
+            if let Some((store, _)) = self.event_journal() {
+                let principal = crate::system_one::canonical_principal_identity(agent_ctx)
+                    .map_err(DispatchError::Internal)?;
+                let reserved = crate::system_one::check_attempt(
+                    &store,
+                    crate::system_one::AttemptInput {
+                        tenant,
+                        table: &table,
+                        state: &current.state,
+                        action,
+                        params: &params_for_retry,
+                        principal: &principal,
+                        attempt,
+                    },
+                    completed,
+                )
+                .await
+                .map_err(DispatchError::Conflict)?;
+                if completed && has_system_one && !reserved {
+                    return Err(DispatchError::Conflict(
+                        "attempt key already belongs to a different action".into(),
+                    ));
+                }
+            }
+            if completed || !has_system_one {
+                None
+            } else {
+                let current_precondition =
+                    crate::entity_actor::effects::entity_authorization_precondition(&current.state);
+                if authorization_precondition_for_retry
+                    .as_ref()
+                    .is_some_and(|p| p != &current_precondition)
+                {
+                    return Err(DispatchError::Conflict(
+                        "action authorization became stale before system_one evaluation".into(),
+                    ));
+                }
+                let evidence = self
+                    .resolve_system_one_guards(crate::system_one::SystemOneResolution {
+                        tenant,
+                        table: &table,
+                        state: &current.state,
+                        action,
+                        params: &params_for_retry,
+                        agent_ctx,
+                        attempt_id: attempt,
+                        cross_entity_booleans: &cross_for_retry,
+                    })
+                    .await?;
+                if let Some(evidence) = &evidence {
+                    authorization_precondition_for_retry = Some(evidence.expected_state.clone());
+                }
+                evidence
+            }
+        } else {
+            None
+        };
         // W2 phase: ask_reply — round-trip through the retry layer to the
         // actor and back. Aggregates with other phase spans by prefix.
         let ask_span = tracing::info_span!(
@@ -621,13 +695,22 @@ impl crate::state::ServerState {
             use tracing::Instrument;
             retry::ask_with_backoff::<_, EntityResponse, _>(
                 &actor_ref,
-                || EntityMsg::Action {
-                    name: action_name.clone(),
-                    params: params_for_retry.clone(),
-                    cross_entity_booleans: cross_for_retry.clone(),
-                    idempotency_key: idempotency_key.clone(),
-                    expected_authorization_precondition: authorization_precondition_for_retry
-                        .clone(),
+                || {
+                    let command = EntityMsg::Action {
+                        name: action_name.clone(),
+                        params: params_for_retry.clone(),
+                        cross_entity_booleans: cross_for_retry.clone(),
+                        idempotency_key: idempotency_key.clone(),
+                        expected_authorization_precondition: authorization_precondition_for_retry
+                            .clone(),
+                    };
+                    match &system_one_evidence {
+                        Some(evidence) => EntityMsg::GuardedAction {
+                            command: Box::new(command),
+                            evidence: evidence.clone(),
+                        },
+                        None => command,
+                    }
                 },
                 &policy,
             )

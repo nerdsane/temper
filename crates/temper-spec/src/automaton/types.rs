@@ -320,8 +320,11 @@ pub struct SubWriteSpec {
 
 /// A guard condition (precondition predicate on pre-state).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum Guard {
+    /// Native TypeSafe judgment resolved before deterministic guard checking.
+    #[serde(rename = "system_one")]
+    SystemOne(super::system_one::SystemOneGuard),
     /// Status must be one of these values.
     #[serde(rename = "state_in")]
     StateIn { values: Vec<String> },

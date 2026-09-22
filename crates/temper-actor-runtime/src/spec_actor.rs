@@ -22,6 +22,9 @@ use temper_spec::automaton::Automaton;
 
 use crate::actor::{Actor, ActorContext, ActorError, ActorHandle, Message};
 
+#[path = "spec_actor_system_one.rs"]
+mod system_one;
+
 // ─── SpecMessage ─────────────────────────────────────────────────────────────
 
 /// Generic message for spec-driven actor communication.
@@ -127,6 +130,7 @@ impl SpecDrivenActor {
     ) -> Result<Self, String> {
         let automaton = temper_spec::parse_automaton(ioa_source)
             .map_err(|e| format!("failed to parse spec: {e}"))?;
+        system_one::reject_declarations(&automaton)?;
         Ok(Self::from_automaton(&automaton, routing))
     }
 
@@ -280,6 +284,7 @@ impl Actor for SpecDrivenActor {
             .filter(|message| !message.action.is_empty())
             .map(|message| message.action.as_str())
             .unwrap_or(&message.message_type);
+        system_one::reject_action(&self.table, action)?;
         let validates_input = self.table.strict_action_params
             || self
                 .table
@@ -468,3 +473,7 @@ impl SpecDrivenActor {
 #[cfg(test)]
 #[path = "tests/spec_actor_strict.rs"]
 mod strict_tests;
+
+#[cfg(test)]
+#[path = "tests/spec_actor_system_one.rs"]
+mod system_one_tests;
