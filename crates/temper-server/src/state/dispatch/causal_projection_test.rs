@@ -7,8 +7,8 @@ use std::sync::atomic::Ordering;
 use temper_runtime::scheduler::install_deterministic_context;
 
 #[path = "causal_projection_test/fixture_test.rs"]
-mod fixture;
-use fixture::fixture;
+mod fixture_test;
+use fixture_test::fixture;
 
 #[tokio::test]
 async fn causal_submit_reaction_wasm_reads_committed_source_under_projection_lag() {
