@@ -16,6 +16,7 @@ mod composite;
 mod cross_entity;
 mod effects;
 mod generated_callbacks;
+mod projection_barrier;
 pub(crate) mod retry;
 pub(crate) mod state_timeouts;
 #[cfg(test)]

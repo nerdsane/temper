@@ -607,8 +607,39 @@ impl crate::state::ServerState {
             return response;
         }
 
+        // Cancellation is bookkeeping for the committed transition, not a
+        // dependent launch. An old reset timer must not fire during the wait.
+        self.invalidate_state_timeouts_if_needed(ctx, &response);
+
+        // A reaction or integration may immediately GET this source through
+        // the query plane. Queue admission does not establish visibility.
+        let projected_before_dependents = self.has_projection_dependents(ctx, &response);
+        if projected_before_dependents
+            && let Err(error) = self.project_before_dependents(ctx, &response).await
+        {
+            tracing::error!(tenant = %ctx.tenant, entity_type = ctx.entity_type,
+                entity_id = ctx.entity_id, action = ctx.action, %error,
+                "Committed transition projection failed; dependents not started");
+            let mut response = response;
+            response.success = false;
+            response.error = Some(format!(
+                "Action committed, but its query projection failed; dependents were not started: {error}"
+            ));
+            return response;
+        }
+
+        if projected_before_dependents && response.state.status == "Deleted" {
+            // Queue cleanup before integrations can return early. Older queued
+            // writes remain guarded until this ordered removal is applied.
+            self.apply_query_projection_update(ctx, &response).await;
+        }
+
         // 3. Broadcast SSE + cache
         self.broadcast_state_change(ctx, &response);
+
+        // Arm the successor only after visibility, before an inline adapter
+        // can return early or dispatch another transition.
+        self.arm_state_timeouts_if_needed(ctx, &response);
 
         // 4. Fire webhooks
         self.fire_webhooks(ctx, &response);
@@ -789,15 +820,12 @@ impl crate::state::ServerState {
             );
         }
 
-        // 7b. ADR-0049 state-timeout arming. Arms (or re-arms) a timer on
-        // state entry and on any reset_on action. Sequence-based
-        // cancellation ensures stale timers become no-ops.
-        self.arm_state_timeouts_if_needed(ctx, &response);
-
         // 8. Enqueue durable query-plane maintenance (ADR-0148). The journal
         // append is already durable; projection writes are derived rows and
         // are coalesced by entity/sequence before DB access.
-        self.apply_query_projection_update(ctx, &response).await;
+        if !projected_before_dependents {
+            self.apply_query_projection_update(ctx, &response).await;
+        }
 
         response
     }
@@ -872,3 +900,7 @@ mod strict_timer_tests {
         assert!(!rejected.success);
     }
 }
+
+#[cfg(test)]
+#[path = "causal_projection_test.rs"]
+mod causal_projection_tests;

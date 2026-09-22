@@ -78,6 +78,23 @@ Read-your-writes is preserved by response semantics and read planning:
 being served stale by a projection-only read. The fix is to make reads aware of
 projection lag, not to make every dispatch wait for all derived indexes.
 
+### Dependent dispatch requires source visibility
+
+Before launching declared reactions, integrations, webhooks, spawns or timers,
+single-action dispatch awaits the source's sequence-guarded query projection.
+Those dependents can immediately read the source through OData without a
+requested sequence, so queue admission alone cannot establish their causal
+read guarantee. Ordinary transitions without declared dependents remain queued.
+
+If this write fails or exceeds its 30-second budget, the journal transition
+remains committed, but dependents
+are not launched. The response explicitly reports that partial outcome; an
+idempotent retry can establish visibility and resume dispatch without appending
+another source transition. Delayed older projection writes remain subject to
+the store's sequence guard. Superseded state timers are invalidated before
+waiting, so a committed reset cannot leave its old deadline active during a
+slow write. Successor timers start only after visibility is established.
+
 ### Sub-Decision 3: Session Collection Reads Must Push Down Bounds
 
 Supported Session/OData queries used by Foresight and DSF2 must use the query
