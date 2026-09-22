@@ -14,9 +14,9 @@
 //! fires, it re-reads the current counter; any mismatch means a newer arm
 //! (or a state change) invalidated this one, so the fire is a no-op.
 //!
-//! Cancellation on state exit is implicit: before arming a new timer, we
-//! bump once for the old state if it had a declaration. That bump renders
-//! any in-flight timer for the old state stale.
+//! State exits and reset signals invalidate the old timer before waiting
+//! for query visibility. Successor timers are armed after that wait, so an
+//! old deadline cannot fire while a committed reset is being projected.
 //!
 //! Durability (ADR-0056): on every post-dispatch the arm logic also detects
 //! the **hydration case** — the entity is in a state with a declared
@@ -190,6 +190,53 @@ impl StateTimeoutTracker {
 }
 
 impl crate::state::ServerState {
+    /// Invalidate timers superseded by the durable transition before any I/O.
+    pub(crate) fn invalidate_state_timeouts_if_needed(
+        &self,
+        ctx: &PostDispatchContext<'_>,
+        response: &EntityResponse,
+    ) {
+        let Ok(registry) = self.registry.read() else {
+            return;
+        };
+        let Some(spec) = registry.get_spec(ctx.tenant, ctx.entity_type) else {
+            return;
+        };
+        let pre_state = response
+            .state
+            .events
+            .back()
+            .map(|event| event.from_status.as_str())
+            .unwrap_or_default();
+        let post_state = response.state.status.as_str();
+        let state_changed = pre_state != post_state;
+        let cancels_prior = state_changed
+            && spec
+                .automaton
+                .state_timeouts
+                .iter()
+                .any(|timeout| timeout.state == pre_state);
+        let resets_current = !state_changed
+            && spec.automaton.state_timeouts.iter().any(|timeout| {
+                timeout.state == post_state
+                    && timeout.reset_on.iter().any(|action| action == ctx.action)
+            });
+        if cancels_prior || resets_current {
+            self.state_timeout_tracker.bump(&EntityKey::new(
+                ctx.tenant,
+                ctx.entity_type,
+                ctx.entity_id,
+            ));
+        }
+        if cancels_prior {
+            crate::runtime_metrics::record_state_timeout_cancelled(
+                ctx.tenant.as_str(),
+                ctx.entity_type,
+                pre_state,
+            );
+        }
+    }
+
     /// Arm or re-arm state timers based on the just-completed transition.
     ///
     /// Invoked from `run_post_dispatch_effects`. Walks the spec's
@@ -224,20 +271,7 @@ impl crate::state::ServerState {
         let state_changed = pre_state != post_state;
         let key = EntityKey::new(ctx.tenant, ctx.entity_type, ctx.entity_id);
 
-        // 1. Invalidate any outstanding timer for the prior state.
-        if state_changed {
-            let pre_had_timeout = state_timeouts.iter().any(|st| st.state == pre_state);
-            if pre_had_timeout {
-                self.state_timeout_tracker.bump(&key);
-                crate::runtime_metrics::record_state_timeout_cancelled(
-                    ctx.tenant.as_str(),
-                    ctx.entity_type,
-                    &pre_state,
-                );
-            }
-        }
-
-        // 2. Arm timers for any matching state_timeout declaration.
+        // Arm timers for any matching state_timeout declaration.
         for st in &state_timeouts {
             if st.state != post_state {
                 continue;
@@ -410,6 +444,18 @@ impl crate::state::ServerState {
                 .await;
             });
         }
+    }
+}
+
+#[cfg(test)]
+impl StateTimeoutTracker {
+    pub(crate) fn sequence_for_test(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> u64 {
+        self.current(&EntityKey::new(tenant, entity_type, entity_id))
     }
 }
 

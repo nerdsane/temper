@@ -91,7 +91,9 @@ remains committed, but dependents
 are not launched. The response explicitly reports that partial outcome; an
 idempotent retry can establish visibility and resume dispatch without appending
 another source transition. Delayed older projection writes remain subject to
-the store's sequence guard.
+the store's sequence guard. Superseded state timers are invalidated before
+waiting, so a committed reset cannot leave its old deadline active during a
+slow write. Successor timers start only after visibility is established.
 
 ### Sub-Decision 3: Session Collection Reads Must Push Down Bounds
 

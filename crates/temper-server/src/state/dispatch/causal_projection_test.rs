@@ -321,3 +321,69 @@ async fn causal_projection_timeout_keeps_commit_and_stops_dependents() {
         .unwrap();
     assert_eq!(child.state.status, "Idle");
 }
+
+#[tokio::test]
+async fn causal_reset_invalidates_old_timer_before_projection_wait() {
+    let (state, query, _queue, _temp) = fixture_test::fixture_with_timeout().await;
+    let tenant = TenantId::default();
+    let agent = AgentContext::system();
+    let first = state
+        .dispatch_tenant_action(
+            &tenant,
+            "Source",
+            "source",
+            "Edit",
+            json!({"prompt_template":"old"}),
+            &agent,
+        )
+        .await
+        .unwrap();
+    assert!(first.success);
+    let old_sequence = state
+        .state_timeout_tracker
+        .sequence_for_test(&tenant, "Source", "source");
+    assert!(old_sequence > 0);
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(5)).await;
+    tokio::time::resume();
+    query.hang_source_write.store(true, Ordering::SeqCst);
+    let reset = state.dispatch_tenant_action(
+        &tenant,
+        "Source",
+        "source",
+        "Edit",
+        json!({"prompt_template":"new"}),
+        &agent,
+    );
+    let observe = async {
+        query.projection_started.notified().await;
+        assert!(
+            state
+                .state_timeout_tracker
+                .sequence_for_test(&tenant, "Source", "source")
+                > old_sequence,
+            "old timer remains valid after the reset transition committed"
+        );
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(16)).await;
+        tokio::task::yield_now().await;
+        let source = state
+            .get_tenant_entity_state(&tenant, "Source", "source")
+            .await
+            .unwrap();
+        assert_eq!(
+            source.state.status, "Draft",
+            "previous deadline must not expire the reset state"
+        );
+        tokio::time::advance(std::time::Duration::from_secs(15)).await;
+    };
+    let result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let (response, ()) = tokio::join!(reset, observe);
+        response
+    })
+    .await;
+    tokio::time::resume();
+    let response = result.unwrap().unwrap();
+    assert!(!response.success);
+    assert!(response.error.unwrap().contains("committed"));
+}

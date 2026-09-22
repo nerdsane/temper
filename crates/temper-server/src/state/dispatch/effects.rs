@@ -607,6 +607,10 @@ impl crate::state::ServerState {
             return response;
         }
 
+        // Cancellation is bookkeeping for the committed transition, not a
+        // dependent launch. An old reset timer must not fire during the wait.
+        self.invalidate_state_timeouts_if_needed(ctx, &response);
+
         // A reaction or integration may immediately GET this source through
         // the query plane. Queue admission does not establish visibility.
         let projected_before_dependents = self.has_projection_dependents(ctx, &response);
@@ -632,6 +636,10 @@ impl crate::state::ServerState {
 
         // 3. Broadcast SSE + cache
         self.broadcast_state_change(ctx, &response);
+
+        // Arm the successor only after visibility, before an inline adapter
+        // can return early or dispatch another transition.
+        self.arm_state_timeouts_if_needed(ctx, &response);
 
         // 4. Fire webhooks
         self.fire_webhooks(ctx, &response);
@@ -811,11 +819,6 @@ impl crate::state::ServerState {
                 ctx.agent_ctx,
             );
         }
-
-        // 7b. ADR-0049 state-timeout arming. Arms (or re-arms) a timer on
-        // state entry and on any reset_on action. Sequence-based
-        // cancellation ensures stale timers become no-ops.
-        self.arm_state_timeouts_if_needed(ctx, &response);
 
         // 8. Enqueue durable query-plane maintenance (ADR-0148). The journal
         // append is already durable; projection writes are derived rows and

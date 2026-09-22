@@ -179,7 +179,9 @@ fn verifier_wat() -> String {
     )
 }
 
-pub(super) async fn fixture() -> (
+async fn fixture_from_source(
+    source: &str,
+) -> (
     crate::ServerState,
     Arc<FaultQueryPlane>,
     Arc<QueryProjectionWriteQueue>,
@@ -206,7 +208,7 @@ pub(super) async fn fixture() -> (
             "default",
             parse_csdl(CSDL).unwrap(),
             CSDL.into(),
-            &[("Source", SOURCE), ("Verifier", VERIFIER)],
+            &[("Source", source), ("Verifier", VERIFIER)],
             Vec::new(),
         )
         .unwrap();
@@ -247,4 +249,35 @@ pub(super) async fn fixture() -> (
         .await
         .unwrap();
     (state, query, queue, temp)
+}
+
+pub(super) async fn fixture() -> (
+    crate::ServerState,
+    Arc<FaultQueryPlane>,
+    Arc<QueryProjectionWriteQueue>,
+    tempfile::TempDir,
+) {
+    fixture_from_source(SOURCE).await
+}
+
+pub(super) async fn fixture_with_timeout() -> (
+    crate::ServerState,
+    Arc<FaultQueryPlane>,
+    Arc<QueryProjectionWriteQueue>,
+    tempfile::TempDir,
+) {
+    let source = format!(
+        r#"{SOURCE}
+[[action]]
+name="Expire"
+from=["Draft"]
+to="Deleted"
+[[state_timeout]]
+state="Draft"
+after_seconds=20
+on_timeout="Expire"
+reset_on=["Edit"]
+"#
+    );
+    fixture_from_source(&source).await
 }
