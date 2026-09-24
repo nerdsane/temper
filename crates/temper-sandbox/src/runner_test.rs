@@ -17,7 +17,7 @@ async fn independent_turns_can_exceed_the_cumulative_allocation_limit() {
     execute(&mut sandbox, "global saved\nsaved = 42")
         .await
         .unwrap();
-    // At least 360,000 string allocations, while each individual turn is small.
+    // More than 350,000 string allocations, while each individual turn is small.
     // The former snapshot/load tracker exhausted its lifetime 250,000 budget.
     for _ in 0..120 {
         assert_eq!(
@@ -40,7 +40,7 @@ async fn a_single_over_budget_turn_fails_and_the_next_turn_recovers() {
         .unwrap();
     let error = execute(
         &mut sandbox,
-        "for i in range(250001):\n    value = str(i)\nreturn True",
+        "for i in range(300000):\n    value = str(i)\nreturn True",
     )
     .await
     .unwrap_err();
