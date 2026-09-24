@@ -15,6 +15,7 @@ use serde_json::Value;
 
 use crate::convert::{json_to_monty_object, monty_object_to_json};
 use crate::helpers::{default_limits, format_monty_exception, wrap_user_code};
+use crate::turn_tracker::TurnTracker;
 
 /// Run Python code in the Monty sandbox with the given dataclass objects and dispatch closure.
 ///
@@ -144,7 +145,8 @@ where
 /// [`execute`](Self::execute) runs only the new code against accumulated state —
 /// variables, functions, and heap mutations all survive between calls.
 pub struct PersistentSandbox {
-    repl: Option<MontyRepl<LimitedTracker>>,
+    repl: Option<MontyRepl<TurnTracker>>,
+    tracker: TurnTracker,
     dataclasses: Vec<(&'static str, &'static str, u64)>,
 }
 
@@ -153,6 +155,7 @@ impl PersistentSandbox {
     pub fn new(dataclasses: &[(&'static str, &'static str, u64)]) -> Self {
         Self {
             repl: None,
+            tracker: TurnTracker::new(default_limits()),
             dataclasses: dataclasses.to_vec(),
         }
     }
@@ -163,8 +166,9 @@ impl PersistentSandbox {
         F: Fn(String, Vec<MontyObject>, Vec<(MontyObject, MontyObject)>) -> Fut,
         Fut: Future<Output = Result<Value, String>>,
     {
+        self.tracker.begin_turn();
         let repl = match self.repl.take() {
-            Some(repl) => self.restore_repl_for_next_turn(repl)?,
+            Some(repl) => repl,
             None => self.init_repl()?,
         };
 
@@ -182,23 +186,8 @@ impl PersistentSandbox {
         self.drive_repl_progress(progress, dispatch).await
     }
 
-    /// Serialize/deserialize the REPL between turns to refresh tracker start time.
-    ///
-    /// Monty's `LimitedTracker` resets `start_time` on deserialization while
-    /// preserving heap + namespace state, giving per-turn time budgets with
-    /// persistent REPL variables.
-    fn restore_repl_for_next_turn(
-        &self,
-        repl: MontyRepl<LimitedTracker>,
-    ) -> Result<MontyRepl<LimitedTracker>> {
-        let snapshot = repl
-            .dump()
-            .context("failed to snapshot persistent sandbox state")?;
-        MontyRepl::load(&snapshot).context("failed to restore persistent sandbox state")
-    }
-
     /// Initialize the REPL with dataclass inputs and empty code.
-    fn init_repl(&self) -> Result<MontyRepl<LimitedTracker>> {
+    fn init_repl(&self) -> Result<MontyRepl<TurnTracker>> {
         let input_names: Vec<String> = self
             .dataclasses
             .iter()
@@ -216,7 +205,7 @@ impl PersistentSandbox {
             })
             .collect();
 
-        let tracker = LimitedTracker::new(default_limits());
+        let tracker = self.tracker.clone();
         let mut print = PrintWriter::Disabled;
         let (repl, _) = MontyRepl::new(
             String::new(),
@@ -234,7 +223,7 @@ impl PersistentSandbox {
     /// Drive the [`ReplProgress`] state machine to completion, handling external calls.
     async fn drive_repl_progress<F, Fut>(
         &mut self,
-        mut progress: ReplProgress<LimitedTracker>,
+        mut progress: ReplProgress<TurnTracker>,
         dispatch: F,
     ) -> Result<String>
     where
@@ -363,3 +352,7 @@ impl PersistentSandbox {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "runner_test.rs"]
+mod tests;
