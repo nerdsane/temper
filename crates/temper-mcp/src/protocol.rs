@@ -134,6 +134,21 @@ pub(super) async fn dispatch_json_value(ctx: &mut RuntimeContext, raw: Value) ->
                 }}));
             }
 
+            if params.name == "upload_file_bytes" {
+                let id = id?;
+                let (result, denials) =
+                    crate::file_bytes::upload_file_bytes(ctx, &params.arguments).await;
+                let result = crate::elicit::apply_denial_elicitation(ctx, result, denials).await;
+                ctx.record_execute_turn("upload_file_bytes", &result);
+                let (text, is_error) = match result {
+                    Ok(text) => (text, false),
+                    Err(error) => (error.to_string(), true),
+                };
+                return Some(json!({"jsonrpc":"2.0", "id":id, "result": {
+                    "content":[{"type":"text", "text":text}], "isError":is_error
+                }}));
+            }
+
             if params.name == "setup_connection" {
                 let id = id?; // Notifications cannot initiate human administration.
                 let result = crate::setup::setup_connection(ctx, &params.arguments).await;
@@ -313,6 +328,15 @@ You cannot approve or set policies — only humans can do that.";
                 "required": ["code"],
                 "additionalProperties": false
             }
+        }),
+        json!({
+            "name":"upload_file_bytes",
+            "description":"Upload at most 32 MiB from an absolute local path ON THIS MCP HOST to an existing File through its governed $value stream endpoint. Uses the configured connection and identity; no redirects, new entities, Lock or quality attestations. expected_sha256 binds the exact bytes sent. A remote MCP service cannot read a laptop path. After success verify stored File content_hash, size and status through the native entity read, then use the live Lock action. On ambiguous failure inspect state before retrying.",
+            "inputSchema":{"type":"object","properties":{
+                "tenant":{"type":"string"},"file_id":{"type":"string"},
+                "local_path":{"type":"string"},"content_type":{"type":"string"},
+                "expected_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"}
+            },"required":["tenant","file_id","local_path","content_type","expected_sha256"],"additionalProperties":false}
         }),
         json!({
             "name":"request_policy_replacement",
