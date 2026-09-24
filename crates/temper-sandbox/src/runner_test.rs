@@ -23,7 +23,7 @@ async fn independent_turns_can_exceed_the_cumulative_allocation_limit() {
         assert_eq!(
             execute(
                 &mut sandbox,
-                "values = [str(i) for i in range(3000)]\nreturn saved"
+                "global saved\nvalues = [str(i) for i in range(3000)]\nreturn saved"
             )
             .await
             .unwrap(),
@@ -45,7 +45,12 @@ async fn a_single_over_budget_turn_fails_and_the_next_turn_recovers() {
     .await
     .unwrap_err();
     assert!(error.to_string().contains("allocation"), "{error}");
-    assert_eq!(execute(&mut sandbox, "return saved").await.unwrap(), "42");
+    assert_eq!(
+        execute(&mut sandbox, "global saved\nreturn saved")
+            .await
+            .unwrap(),
+        "42"
+    );
 }
 
 #[tokio::test]
