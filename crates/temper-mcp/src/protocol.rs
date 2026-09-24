@@ -331,7 +331,7 @@ You cannot approve or set policies — only humans can do that.";
         }),
         json!({
             "name":"upload_file_bytes",
-            "description":"Upload at most 32 MiB from an absolute local path ON THIS MCP HOST to an existing File through its governed $value stream endpoint. Uses the configured connection and identity; no redirects, new entities, Lock or quality attestations. expected_sha256 binds the exact bytes sent. A remote MCP service cannot read a laptop path. After success read back File and byte hashes, then use the live Lock action. On ambiguous failure inspect state before retrying.",
+            "description":"Upload at most 32 MiB from an absolute local path ON THIS MCP HOST to an existing File through its governed $value stream endpoint. Uses the configured connection and identity; no redirects, new entities, Lock or quality attestations. expected_sha256 binds the exact bytes sent. A remote MCP service cannot read a laptop path. After success verify stored File content_hash, size and status through the native entity read, then use the live Lock action. On ambiguous failure inspect state before retrying.",
             "inputSchema":{"type":"object","properties":{
                 "tenant":{"type":"string"},"file_id":{"type":"string"},
                 "local_path":{"type":"string"},"content_type":{"type":"string"},

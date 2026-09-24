@@ -155,7 +155,7 @@ async fn perform(ctx: &RuntimeContext, upload: &Upload) -> Result<Uploaded> {
         .send()
         .await
         .context("File byte upload failed; inspect File state before retrying")?;
-    let receipt = json!({"file_id":upload.file_id,"tenant":upload.tenant,"size_bytes":size,"sha256":upload.expected_sha256,"content_type":upload.content_type,"uploaded":true,"locked":false,"verification":"hash of exact bytes sent; read back File and bytes before Lock"});
+    let receipt = json!({"file_id":upload.file_id,"tenant":upload.tenant,"size_bytes":size,"sha256":upload.expected_sha256,"content_type":upload.content_type,"uploaded":true,"locked":false,"verification":"hash of exact bytes sent; verify stored File content_hash, size and status before Lock"});
     read_response(response, receipt).await
 }
 async fn read_response(mut response: reqwest::Response, receipt: Value) -> Result<Uploaded> {
