@@ -3,7 +3,7 @@ use crate::McpConfig;
 use axum::{
     Router,
     body::Bytes,
-    http::{HeaderMap, StatusCode, Uri},
+    http::{HeaderMap, Method, StatusCode, Uri},
     response::IntoResponse,
 };
 use std::{
@@ -35,20 +35,25 @@ async fn server(
 ) -> (RuntimeContext, Captured, tokio::task::JoinHandle<()>) {
     let captures: Captured = Arc::new(Mutex::new(Vec::new()));
     let seen = captures.clone();
-    let app = Router::new().fallback(move |uri: Uri, headers: HeaderMap, bytes: Bytes| {
-        let seen = seen.clone();
-        async move {
-            seen.lock()
-                .unwrap()
-                .push((uri.to_string(), headers, bytes.to_vec()));
-            (
-                status,
-                [("location", "http://127.0.0.1:1/never-follow")],
-                body,
-            )
-                .into_response()
-        }
-    });
+    let app = Router::new().fallback(
+        move |method: Method, uri: Uri, headers: HeaderMap, bytes: Bytes| {
+            let seen = seen.clone();
+            async move {
+                if method == Method::GET && status != StatusCode::NOT_FOUND {
+                    return (StatusCode::OK, "{}").into_response();
+                }
+                seen.lock()
+                    .unwrap()
+                    .push((uri.to_string(), headers, bytes.to_vec()));
+                (
+                    status,
+                    [("location", "http://127.0.0.1:1/never-follow")],
+                    body,
+                )
+                    .into_response()
+            }
+        },
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
@@ -115,7 +120,7 @@ async fn mismatch_and_invalid_route_never_send() {
 #[tokio::test]
 async fn denial_preserved_and_redirect_not_followed() {
     let file = LocalFile::new(b"actual");
-    let denial = r#"{"status":"authorization_denied","decision_id":"PD-fixture","reason":"File update forbidden"}"#;
+    let denial = r#"{"error":{"code":"AuthorizationDenied","message":"File update forbidden"},"decision_id":"PD-fixture"}"#;
     for (status, body) in [
         (StatusCode::FORBIDDEN, denial),
         (StatusCode::TEMPORARY_REDIRECT, "redirect denied"),
@@ -212,5 +217,18 @@ async fn oversized_success_response_is_not_a_success_receipt() {
     let error = result.unwrap_err().to_string();
     assert!(error.contains("response truncated at 64 KiB"));
     assert!(error.len() < MAX_RESPONSE_BYTES + 200);
+    handle.abort();
+}
+
+#[tokio::test]
+async fn missing_file_is_not_created_by_stream_put() {
+    let file = LocalFile::new(b"actual");
+    let (ctx, seen, handle) = server(StatusCode::NOT_FOUND, "File missing").await;
+    let (result, _) = upload_file_bytes(&ctx, &file.args(b"actual")).await;
+    assert!(result.unwrap_err().to_string().contains("404"));
+    let requests = seen.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(!requests[0].0.contains("$value"));
+    assert!(requests[0].2.is_empty());
     handle.abort();
 }

@@ -125,21 +125,40 @@ async fn perform(ctx: &RuntimeContext, upload: &Upload) -> Result<Uploaded> {
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(90))
         .build()?;
-    let mut request = http
-        .put(url)
-        .header("X-Tenant-Id", &upload.tenant)
-        .header("Content-Type", &upload.content_type);
-    if let Some(key) = &ctx.api_key {
-        request = request.bearer_auth(key);
+    let authenticated = |request: reqwest::RequestBuilder| {
+        let mut request = request.header("X-Tenant-Id", &upload.tenant);
+        if let Some(key) = &ctx.api_key {
+            request = request.bearer_auth(key);
+        }
+        if let Some(session) = &ctx.session_id {
+            request = request.header("X-Session-Id", session);
+        }
+        request
+    };
+    // Stream PUT can create a missing File. Require an existing readable File first.
+    // File has no delete/tombstone transition, so an existing ID cannot become new.
+    let mut entity_url = url.clone();
+    entity_url
+        .path_segments_mut()
+        .map_err(|()| anyhow::anyhow!("Invalid File URL"))?
+        .pop();
+    let existing = authenticated(http.get(entity_url))
+        .send()
+        .await
+        .context("Cannot verify existing File")?;
+    if !existing.status().is_success() {
+        return read_response(existing, Value::Null).await;
     }
-    if let Some(session) = &ctx.session_id {
-        request = request.header("X-Session-Id", session);
-    }
-    let mut response = request
+    let response = authenticated(http.put(url))
+        .header("Content-Type", &upload.content_type)
         .body(bytes)
         .send()
         .await
         .context("File byte upload failed; inspect File state before retrying")?;
+    let receipt = json!({"file_id":upload.file_id,"tenant":upload.tenant,"size_bytes":size,"sha256":upload.expected_sha256,"content_type":upload.content_type,"uploaded":true,"locked":false,"verification":"hash of exact bytes sent; read back File and bytes before Lock"});
+    read_response(response, receipt).await
+}
+async fn read_response(mut response: reqwest::Response, receipt: Value) -> Result<Uploaded> {
     let status = response.status();
     let mut body = Vec::new();
     while let Some(chunk) = response
@@ -163,7 +182,7 @@ async fn perform(ctx: &RuntimeContext, upload: &Upload) -> Result<Uploaded> {
     Ok(Uploaded {
         status,
         body: String::from_utf8_lossy(&body).into_owned(),
-        receipt: json!({"file_id":upload.file_id,"tenant":upload.tenant,"size_bytes":size,"sha256":upload.expected_sha256,"content_type":upload.content_type,"uploaded":true,"locked":false,"verification":"hash of exact bytes sent; read back File and bytes before Lock"}),
+        receipt,
     })
 }
 /// Import bytes only: never create, Lock, or attest an artifact.
@@ -181,8 +200,8 @@ pub(crate) async fn upload_file_bytes(
             (Ok(response.receipt.to_string()), Vec::new())
         }
         Ok(response) => {
-            let denials = serde_json::from_str::<Value>(&response.body)
-                .ok()
+            let denials = temper_sandbox::helpers::format_authz_denied(&response.body)
+                .or_else(|| serde_json::from_str::<Value>(&response.body).ok())
                 .and_then(|v| denial_from_dispatch_value(&upload.tenant, &v))
                 .into_iter()
                 .collect();
