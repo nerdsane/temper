@@ -347,11 +347,14 @@ async fn tool_list_separates_execute_from_human_only_setup() {
     .await;
 
     let tools = response["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 4);
+    assert_eq!(tools.len(), 5);
     assert_eq!(tools[0]["name"], "execute");
-    assert_eq!(tools[3]["name"], "setup_connection");
-    assert_eq!(tools[3]["inputSchema"]["properties"], json!({}));
-    assert_eq!(tools[3]["inputSchema"]["additionalProperties"], false);
+    let setup = tools
+        .iter()
+        .find(|tool| tool["name"] == "setup_connection")
+        .unwrap();
+    assert_eq!(setup["inputSchema"]["properties"], json!({}));
+    assert_eq!(setup["inputSchema"]["additionalProperties"], false);
 }
 
 #[test]
