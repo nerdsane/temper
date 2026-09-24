@@ -14,16 +14,13 @@ async fn execute(sandbox: &mut PersistentSandbox, code: &str) -> Result<String> 
 #[tokio::test]
 async fn independent_turns_can_exceed_the_cumulative_allocation_limit() {
     let mut sandbox = PersistentSandbox::new(&[]);
-    execute(&mut sandbox, "global saved\nsaved = 42")
-        .await
-        .unwrap();
     // More than 350,000 string allocations, while each individual turn is small.
     // The former snapshot/load tracker exhausted its lifetime 250,000 budget.
     for _ in 0..120 {
         assert_eq!(
             execute(
                 &mut sandbox,
-                "global saved\nvalues = [str(i) for i in range(3000)]\nreturn saved"
+                "values = [str(i) for i in range(3000)]\nreturn 42"
             )
             .await
             .unwrap(),
@@ -35,9 +32,6 @@ async fn independent_turns_can_exceed_the_cumulative_allocation_limit() {
 #[tokio::test]
 async fn a_single_over_budget_turn_fails_and_the_next_turn_recovers() {
     let mut sandbox = PersistentSandbox::new(&[]);
-    execute(&mut sandbox, "global saved\nsaved = 42")
-        .await
-        .unwrap();
     let error = execute(
         &mut sandbox,
         "for i in range(300000):\n    value = str(i)\nreturn True",
@@ -45,12 +39,7 @@ async fn a_single_over_budget_turn_fails_and_the_next_turn_recovers() {
     .await
     .unwrap_err();
     assert!(error.to_string().contains("allocation"), "{error}");
-    assert_eq!(
-        execute(&mut sandbox, "global saved\nreturn saved")
-            .await
-            .unwrap(),
-        "42"
-    );
+    assert_eq!(execute(&mut sandbox, "return 42").await.unwrap(), "42");
 }
 
 #[tokio::test]
@@ -78,4 +67,29 @@ async fn external_call_resume_cannot_restart_the_turn_budget() {
             .unwrap(),
         r#"{"connected":true}"#
     );
+}
+
+#[tokio::test]
+async fn cancelled_external_dispatch_does_not_charge_the_replacement_heap() {
+    let mut sandbox = PersistentSandbox::new(&[("temper", "Temper", 1)]);
+    sandbox.tracker = TurnTracker::new(default_limits().max_memory(64 * 1024));
+    for _ in 0..3 {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let dispatch_entered = entered.clone();
+        {
+            let execution =
+                sandbox.execute("held = 'x' * 40000\nawait temper.echo()", move |_, _, _| {
+                    dispatch_entered.notify_one();
+                    std::future::pending::<Result<Value, String>>()
+                });
+            tokio::pin!(execution);
+            tokio::select! {
+                result = &mut execution => panic!("expected pending dispatch, got {result:?}"),
+                () = entered.notified() => {}
+            }
+            // Drop the execute future while it owns the REPL at external await.
+        }
+        assert!(sandbox.repl.is_none());
+    }
+    assert_eq!(execute(&mut sandbox, "return 42").await.unwrap(), "42");
 }

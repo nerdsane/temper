@@ -16,18 +16,26 @@ struct Budget {
 /// The sandbox and its REPL share this handle. Only execute entry starts a turn;
 /// external function suspension/resumption continues using the same budget.
 #[derive(Clone, Debug)]
-pub(crate) struct TurnTracker(Arc<Mutex<Budget>>);
+pub(crate) struct TurnTracker(Arc<Mutex<Budget>>, ResourceLimits);
 
 impl TurnTracker {
     pub(crate) fn new(mut limits: ResourceLimits) -> Self {
+        let original_limits = limits.clone();
         let allocation_limit = limits.max_allocations.take();
         let duration = limits.max_duration;
-        Self(Arc::new(Mutex::new(Budget {
-            tracker: LimitedTracker::new(limits),
-            allocations: 0,
-            allocation_limit,
-            duration,
-        })))
+        Self(
+            Arc::new(Mutex::new(Budget {
+                tracker: LimitedTracker::new(limits),
+                allocations: 0,
+                allocation_limit,
+                duration,
+            })),
+            original_limits,
+        )
+    }
+
+    pub(crate) fn fresh(&self) -> Self {
+        Self::new(self.1.clone())
     }
 
     fn budget(&self) -> MutexGuard<'_, Budget> {

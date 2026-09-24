@@ -166,6 +166,11 @@ impl PersistentSandbox {
         F: Fn(String, Vec<MontyObject>, Vec<(MontyObject, MontyObject)>) -> Fut,
         Fut: Future<Output = Result<Value, String>>,
     {
+        // A cancelled execute can drop the REPL. Its former heap must not
+        // count toward the replacement heap, but retained REPL memory must.
+        if self.repl.is_none() {
+            self.tracker = self.tracker.fresh();
+        }
         self.tracker.begin_turn();
         let repl = match self.repl.take() {
             Some(repl) => repl,
