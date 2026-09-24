@@ -23,6 +23,9 @@ uuid = { workspace = true }
 # pydantic/monty Rust sandbox crate
 monty = { git = "https://github.com/pydantic/monty.git", package = "monty", rev = "bf7c7ef" }
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 axum = { workspace = true }

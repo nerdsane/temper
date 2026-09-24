@@ -3,6 +3,7 @@
 mod client_requests;
 mod code_analysis;
 mod elicit;
+mod file_bytes;
 mod policy_replacement;
 mod protocol;
 mod runtime;
