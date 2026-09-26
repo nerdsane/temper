@@ -2,7 +2,7 @@
 
 ## Sub-features
 Three distinct mechanisms - keep them separate:
-- **Outbound integrations** declared in specs (`[[integration]]` / `[[action.triggers]]`), fired post-transition (outbox pattern).
+- **Outbound integrations** declared in specs as `[[action.triggers]]` (`kind = "wasm"` / `"adapter"` / `"webhook"`), plus deployment `webhooks.toml` keyed on action names, fired post-transition (outbox pattern). `[[integration]]` blocks and `trigger`/`emit` effects are retired (ADR-0180) and fail to load.
 - **Inbound signed webhooks** (`/webhooks/{tenant}/{*path}`, HMAC, fail-closed).
 - **WASM-backed HTTP endpoints** (ADR-0069, inbound, `HttpEndpoint` entities).
 
@@ -11,7 +11,7 @@ A transition can call an external service; an external service can call in over 
 
 ## Driving it
 
-**Outbound** - declare an integration on an action (`type="webhook"`, `url`, `trigger=<action>`, or an `ActionTrigger` of `kind="webhook"` with `url`+`method`), invoke the triggering action, and watch for the async POST at the endpoint. It is fire-and-forget post-commit: the transition completes regardless, and the observable effect is the outbound request plus a `tracing` success/failure line. Beyond that, behavior depends on the wiring, so verify only what your spec actually exercises: retry/backoff and a dead-letter queue exist in the platform integration engine (`crates/temper-platform/src/integration/`, delivery core `temper_runtime::webhook::deliver_webhook`), and a follow-up action is dispatched only when the path returns `callback_params` and the integration declares an `on_success`/adapter mapping. Do not assume retries/DLQ/callbacks for a plain webhook that declares none.
+**Outbound** - declare a trigger on an action (`[[action.triggers]]` with `kind = "wasm"`/`"adapter"` and `config = { url = ..., method = ... }`), or a `[[webhook]]` entry in the app's `webhooks.toml` with `url` and `actions = ["<ActionName>"]` (each action emits its own name implicitly; `temper-server/src/webhooks/dispatcher.rs`), invoke the triggering action, and watch for the async request at the endpoint. A `kind = "webhook"` trigger parses and installs but no runtime dispatcher delivers it yet (ADR-0046 known gap, `temper-spec/src/automaton/parser.rs`) - do not treat its silence as a regression. It is fire-and-forget post-commit: the transition completes regardless, and the observable effect is the outbound request plus a `tracing` success/failure line. Beyond that, behavior depends on the wiring, so verify only what your spec actually exercises: retry/backoff and a dead-letter queue exist in the platform integration engine (`crates/temper-platform/src/integration/`, delivery core `temper_runtime::webhook::deliver_webhook`), and a follow-up action is dispatched only when the path returns `callback_params` and the integration declares an `on_success`/adapter mapping. Do not assume retries/DLQ/callbacks for a plain webhook that declares none.
 
 **Inbound signed webhook** - declare `[[webhook]]` with `path`, `action`, `hmac_secret` (supports `{secret:key}`), `hmac_header`, then:
 ```bash
@@ -30,7 +30,7 @@ curl -sS -X POST "http://localhost:3600/webhooks/default/<path>?entity_id=<id>" 
 ## Gotchas
 - Inbound HMAC is mandatory and fail-closed: missing secret/header/vault or an unresolved `{secret:...}` all return 401. The signature covers method + the FULL request path-and-query (including the `/webhooks/<tenant>/` prefix, `receiver.rs:90`) + body - not the body alone, and not a stripped path. Body hard cap 64 KB (413 over).
 - Outbound webhook/platform dispatch supports only POST/PUT (other verbs fall through to POST); the generic HTTP *adapter* honors arbitrary methods. Timeouts differ across paths (platform 5 s, shared runtime core 10 s).
-- Integrations are metadata-only: a broken integration never fails the state machine or verification - failures land in logs/DLQ.
+- Triggers never change the state machine: a broken trigger never fails the transition - failures land in logs/DLQ (or its `on_failure` action). Verification sees triggers only through `on_success`/`on_failure` and `liveness = "required"`.
 - WASM outbound calls go through `AuthorizedWasmHost`, which Cedar-authorizes every call by domain (userinfo stripped to block SSRF) - there is no static host allowlist, the gate decides.
 - `HttpEndpoint` routes cannot shadow reserved namespaces (`/tdata`, `/webhooks`, `/api`, `/observe`, `/_admin`, `/_internal`); each carries its own fuel/memory/timeout/response caps.
 - Discipline: one integration = one concern; a module fired by a transition must not itself dispatch transitions (see wasm-integration.md) - `on_success`/`on_failure` are how a result re-enters as an action.

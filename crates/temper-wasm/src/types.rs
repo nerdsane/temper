@@ -26,7 +26,7 @@ pub struct WasmInvocationContext {
     /// Session that triggered this invocation (if known).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    /// Configuration from the [[integration]] section (url, method, headers, etc.).
+    /// Configuration from the triggering `[[action.triggers]]` block (url, method, headers, etc.).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub integration_config: std::collections::BTreeMap<String, String>,
     /// W3C trace ID for cross-request trace correlation.

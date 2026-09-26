@@ -15,10 +15,7 @@ name = "SubmitEpisodeStartRequest"
 kind = "input"
 from = ["Draft"]
 to = "Submitted"
-effect = [
-  "set has_contract true",
-  { type = "trigger", name = "episode_start_requested" }
-]
+effect = ["has_contract = true"]
 params = [
   "DirectionId",
   "OrganismId",

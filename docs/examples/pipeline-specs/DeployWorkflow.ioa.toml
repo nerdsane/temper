@@ -17,7 +17,6 @@ kind = "input"
 from = ["Pending"]
 to = "Provisioning"
 hint = "Start provisioning infrastructure for deployment."
-effect = [{ type = "emit_event", event = "ProvisioningStarted" }]
 
 [[action]]
 name = "StartDeploy"
@@ -26,7 +25,6 @@ from = ["Provisioning"]
 to = "Deploying"
 params = ["environment", "version"]
 hint = "Begin deploying the application to the provisioned environment."
-effect = [{ type = "emit_event", event = "DeploymentStarted" }]
 
 [[action]]
 name = "Verify"
@@ -42,7 +40,6 @@ from = ["Verifying"]
 to = "Live"
 params = ["deploy_url"]
 hint = "Mark deployment as live and serving traffic."
-effect = [{ type = "emit_event", event = "DeploymentLive" }]
 
 [[action]]
 name = "Rollback"
@@ -51,4 +48,3 @@ from = ["Deploying", "Verifying"]
 to = "RolledBack"
 params = ["reason"]
 hint = "Roll back a failed or problematic deployment."
-effect = [{ type = "emit_event", event = "DeploymentRolledBack" }]

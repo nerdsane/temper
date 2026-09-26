@@ -36,7 +36,7 @@ initial = "0"
 name = "SetDescription"
 kind = "input"
 from = ["Planning", "Active", "Paused"]
-effect = "set has_description true"
+effect = ["has_description = true"]
 params = ["description"]
 hint = "Set or update the project description and goal."
 
@@ -52,7 +52,7 @@ hint = "Activate the project for work. Requires a description."
 name = "AddIssue"
 kind = "input"
 from = ["Active"]
-effect = "increment issue_count"
+effect = ["issue_count += 1"]
 params = ["IssueId"]
 hint = "Associate an issue with this project."
 
@@ -60,7 +60,7 @@ hint = "Associate an issue with this project."
 name = "AddCycle"
 kind = "input"
 from = ["Active"]
-effect = "increment cycle_count"
+effect = ["cycle_count += 1"]
 params = ["CycleId"]
 hint = "Create a new cycle (sprint) within this project."
 
@@ -68,7 +68,7 @@ hint = "Create a new cycle (sprint) within this project."
 name = "AddMember"
 kind = "input"
 from = ["Active", "Planning"]
-effect = "increment member_count"
+effect = ["member_count += 1"]
 params = ["AgentId"]
 hint = "Add a team member to the project."
 

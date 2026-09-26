@@ -1,5 +1,11 @@
 # Phase 2: Actors on the Mailbox Runtime — Implementation Plan
 
+> **Status note (ADR-0180):** the `emit` effect and external `reactions.toml`
+> routing described in the original plan are retired. Routing now comes from
+> each spec's entity-kind `[[action.triggers]]`: when an action is accepted, the
+> actor tells the sibling actor named by every `same_id` entity trigger on that
+> action (`src/spec_actor_routing.rs`). Sections below are updated to match.
+
 ## Goals
 
 1. **Generate actors from specs** — Load IOA TOML specs, create SpecDrivenActors,
@@ -13,7 +19,7 @@
    - Same HTTP surface as today, backed by the mailbox runtime instead of the
      old entity actor system.
 
-3. **Actor communication + state validation** — Reaction rules wire actors.
+3. **Actor communication + state validation** — Entity triggers wire actors.
    TransitionTable validates transitions. Invalid messages rejected by the spec.
    Full chain: Agent → ContextManager → ToolRouter → Compactor, all driven by
    specs with state transitions validated at every step.
@@ -22,62 +28,40 @@
 
 ## Key design decisions (from discussion)
 
-### 1. Specs stay pure (Option C)
+### 1. Specs declare their outgoing work
 
-Specs describe single-actor state machines. They emit messages but don't know
-WHO receives them. The routing is external — handled by reaction rules.
-
-```toml
-# agent.ioa.toml — spec doesn't know about ContextManager
-effect = [{ type = "emit", event = "PrepareContext" }]
-```
-
-### 2. Routing via reaction rules (same as current Temper)
-
-Reaction rules are external TOML config that wire actors together:
+Each spec is still a single-actor state machine; its effects touch only its
+own state. Work on another actor is an entity-kind trigger on the source
+action (there is no `emit` effect):
 
 ```toml
-[[reaction]]
+# agent.ioa.toml
+[[action]]
+name = "StartProcess"
+
+[[action.triggers]]
 name = "agent_requests_context"
-when = { entity_type = "Agent", action = "StartProcess" }
-then = { entity_type = "ContextManager", action = "PrepareContext" }
-resolve_target = { type = "SameId" }
-
-[[reaction]]
-name = "context_ready_to_agent"
-when = { entity_type = "ContextManager", action = "ContextReady" }
-then = { entity_type = "Agent", action = "ContextReady" }
-resolve_target = { type = "SameId" }
-
-[[reaction]]
-name = "agent_requests_tools"
-when = { entity_type = "Agent", action = "InferenceCompleteToolCalls" }
-then = { entity_type = "ToolRouter", action = "ToolCallBatchRequested" }
-resolve_target = { type = "SameId" }
-
-[[reaction]]
-name = "tools_complete_to_agent"
-when = { entity_type = "ToolRouter", action = "ToolCallBatchComplete" }
-then = { entity_type = "Agent", action = "ToolCallBatchComplete" }
-resolve_target = { type = "SameId" }
-
-[[reaction]]
-name = "agent_requests_compaction"
-when = { entity_type = "Agent", action = "ContextOverflow" }
-then = { entity_type = "Compactor", action = "CompactionNeeded" }
-resolve_target = { type = "SameId" }
-
-[[reaction]]
-name = "compaction_complete_to_agent"
-when = { entity_type = "Compactor", action = "CompactionComplete" }
-then = { entity_type = "Agent", action = "CompactionComplete" }
-resolve_target = { type = "SameId" }
+kind = "entity"
+target_entity = "ContextManager"
+target_action = "PrepareContext"
+resolve_target = { type = "same_id" }
 ```
+
+### 2. Routing via entity triggers (same as current Temper)
+
+The same triggers drive reactions in the entity-actor server. The agent system
+wires StartProcess → ContextManager.PrepareContext, ContextManager.ContextReady
+→ Agent.ContextReady, InferenceCompleteToolCalls → ToolRouter.ToolCallBatchRequested,
+ToolRouter.ToolCallBatchComplete → Agent.ToolCallBatchComplete, ContextOverflow →
+Compactor.CompactionNeeded, and Compactor.CompactionComplete →
+Agent.CompactionComplete, each with `resolve_target = { type = "same_id" }`.
+Actors address siblings in their own namespace, so only `same_id` triggers
+route in the actor runtime; others are skipped with a warning.
 
 ### 3. Routing resolved at registration time
 
-When actors are registered, the system reads the reaction rules and builds
-a per-actor routing map:
+When actors are registered, the system reads each spec's entity triggers and
+builds a per-actor routing map:
 
 ```
 Agent routing map:
@@ -99,7 +83,8 @@ Compactor routing map:
   "CompactionFailed"         → tell Agent
 ```
 
-The routing map is `HashMap<String, String>` — emit name → target actor type.
+The routing map is `BTreeMap<String, Vec<(String, String)>>` — accepted action
+name → (target actor type, target action).
 At runtime, the full ActorHandle is built using the current namespace:
 `ActorHandle::new(ctx.self_handle().namespace, target_actor_type)`.
 
@@ -203,19 +188,19 @@ temper-server and temper-actor-runtime depend on):
 - `ReactionTarget` — entity_type + action + params
 - `TargetResolver` — SameId only for Phase 2 (Field, Static, CreateIfMissing later)
 - `ReactionRegistry` — indexed by "EntityType:Action"
-- TOML parsing for reaction rules
+- Rules come from specs' entity-kind `[[action.triggers]]` (no separate TOML)
 
 ### 2. Routing map builder
 
-Takes the reaction registry + list of registered actor types → builds
-per-actor routing maps. Called once at registration time.
+Takes each registered spec's entity triggers → builds per-actor routing
+maps (`build_actor_routing`). Called once at registration time.
 
 ```rust
 fn build_routing_maps(
     registry: &ReactionRegistry,
     actor_types: &[String],
 ) -> HashMap<String, HashMap<String, String>>
-// actor_type → (emit_name → target_actor_type)
+// actor_type → (action_name → [(target_actor_type, target_action)])
 ```
 
 ### 3. SpecDrivenActor for the mailbox model
@@ -226,7 +211,7 @@ Implements `Actor` trait from temper-actor-runtime:
 struct SpecDrivenActor {
     name: String,
     table: TransitionTable,
-    routing: HashMap<String, String>,  // emit name → target actor type
+    routing: BTreeMap<String, Vec<(String, String)>>,  // action → (target type, target action)
 }
 
 impl Actor for SpecDrivenActor {
@@ -235,8 +220,8 @@ impl Actor for SpecDrivenActor {
         // 2. Build eval context from state
         // 3. Evaluate transition table for message.message_type
         // 4. If valid: apply effects (state changes)
-        // 5. For each emit effect: lookup routing → ctx.tell(target, msg)
-        // 6. For each trigger effect: ctx.tell(integration_actor, msg)
+        // 5. For each route on the accepted action: ctx.tell(target, target_action)
+        // 6. For each wasm/adapter trigger: ctx.tell(integration_actor, msg)
         // 7. Serialize state back
         // 8. If invalid: log warning, skip (state unchanged)
     }
@@ -322,15 +307,15 @@ Adapt the existing Temper OData handler to use the actor system:
 - State read → `system.load_state(namespace, actor_type)` (need to add this to ActorSystem)
 - Entity deletion → TBD
 
-### 7. Reaction rules TOML config
+### 7. Entity triggers in the agent specs
 
-The wiring config for the agent system (see section 2 above).
-Loaded at startup, parsed into ReactionRegistry, used to build routing maps.
+The wiring for the agent system (see section 2 above) lives in the specs'
+`[[action.triggers]]`; `build_actor_routing` turns them into routing maps.
 
 ### 8. Tests
 
 - Unit: SpecDrivenActor with a simple spec + routing, verify transitions + tells
-- Unit: reaction registry parsing from TOML
+- Unit: routing maps built from spec entity triggers
 - Integration (PG): full chain Agent → ContextManager → ToolRouter → Compactor
   with mock integrations, verify state transitions at each step
 - Integration (PG): OData endpoint creates actor, dispatches action, reads state
@@ -339,7 +324,7 @@ Loaded at startup, parsed into ReactionRegistry, used to build routing maps.
 
 Update experimental demo:
 1. Load IOA specs for all 4 actors
-2. Load reaction rules TOML
+2. Build routing maps from their entity triggers
 3. Register SpecDrivenActors with routing maps
 4. Register mock integration actors
 5. Create session via OData-like call
@@ -355,7 +340,7 @@ Update experimental demo:
 4. Routing map builder
 5. SpecDrivenActor for mailbox model
 6. Mock integration actors
-7. Reaction rules TOML for agent system
+7. Entity triggers in the agent system specs
 8. OData wiring
 9. Tests (unit + integration)
 10. E2E demo
@@ -381,4 +366,4 @@ Update experimental demo:
 4. **Integration actors** → tell() + callback (non-blocking)
 5. **Cross-namespace** → deferred, same-namespace only for Phase 2
 6. **Actor creation** → via OData POST (existing Temper surface)
-7. **Spec purity** → specs don't know routing; reaction rules handle wiring
+7. **Spec purity** → effects stay local; cross-actor wiring is the spec's `same_id` entity triggers

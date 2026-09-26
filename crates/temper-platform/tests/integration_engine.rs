@@ -1,10 +1,8 @@
 //! Integration engine tests.
 //!
 //! Covers the full integration pipeline:
-//! - IOA specs with `[[integration]]` sections parse correctly
-//! - IntegrationRegistry lookups match parsed spec integrations
 //! - WebhookDispatcher delivers events to a live mock server (wiremock)
-//! - Verification cascade still passes for specs with integrations
+//! - Verification cascade passes for the fixture spec
 //! - IntegrationEngine background task dispatches via channel
 
 use std::collections::BTreeMap;
@@ -18,10 +16,9 @@ use temper_platform::integration::{
     IntegrationConfig, IntegrationEngine, IntegrationEvent, IntegrationRegistry, IntegrationStatus,
     RetryPolicy, WebhookConfig, WebhookDispatcher,
 };
-use temper_spec::automaton::parse_automaton;
 use temper_verify::cascade::VerificationCascade;
 
-const ORDER_IOA_WITH_INTEGRATIONS: &str = r#"
+const ORDER_IOA: &str = r#"
 [automaton]
 name = "Order"
 states = ["Draft", "Submitted", "Confirmed", "Shipped"]
@@ -36,7 +33,7 @@ initial = "0"
 name = "AddItem"
 kind = "input"
 from = ["Draft"]
-effect = [{ type = "increment", var = "items" }]
+effect = ["items += 1"]
 
 [[action]]
 name = "SubmitOrder"
@@ -56,82 +53,7 @@ name = "ShipOrder"
 kind = "internal"
 from = ["Confirmed"]
 to = "Shipped"
-
-[[integration]]
-name = "notify_fulfillment"
-trigger = "SubmitOrder"
-type = "webhook"
-
-[[integration]]
-name = "charge_payment"
-trigger = "ConfirmOrder"
-type = "webhook"
-
-[[integration]]
-name = "notify_shipping"
-trigger = "ShipOrder"
-type = "webhook"
 "#;
-
-// -----------------------------------------------------------------------
-// Parser → Registry integration
-// -----------------------------------------------------------------------
-
-#[test]
-fn parsed_integrations_populate_registry() {
-    let automaton = parse_automaton(ORDER_IOA_WITH_INTEGRATIONS).expect("should parse");
-    assert_eq!(automaton.integrations.len(), 3);
-
-    // Build IntegrationConfigs from parsed Integration structs (production would
-    // read deployment config; here we synthesize configs from the spec).
-    let configs: Vec<IntegrationConfig> = automaton
-        .integrations
-        .iter()
-        .map(|ig| IntegrationConfig {
-            name: ig.name.clone(),
-            trigger: ig.trigger.clone(),
-            webhook: WebhookConfig {
-                url: format!("https://example.com/{}", ig.name),
-                method: "POST".to_string(),
-                headers: BTreeMap::new(),
-                timeout_ms: 5000,
-            },
-            retry: RetryPolicy::default(),
-        })
-        .collect();
-
-    let registry = IntegrationRegistry::from_configs(configs);
-    assert_eq!(registry.len(), 3);
-
-    // SubmitOrder triggers notify_fulfillment
-    let submit = registry.lookup("SubmitOrder");
-    assert_eq!(submit.len(), 1);
-    assert_eq!(submit[0].name, "notify_fulfillment");
-
-    // ConfirmOrder triggers charge_payment
-    let confirm = registry.lookup("ConfirmOrder");
-    assert_eq!(confirm.len(), 1);
-    assert_eq!(confirm[0].name, "charge_payment");
-
-    // ShipOrder triggers notify_shipping
-    let ship = registry.lookup("ShipOrder");
-    assert_eq!(ship.len(), 1);
-    assert_eq!(ship[0].name, "notify_shipping");
-
-    // AddItem triggers nothing
-    assert!(registry.lookup("AddItem").is_empty());
-}
-
-#[test]
-fn spec_with_integrations_in_entity_spec() {
-    let automaton = parse_automaton(ORDER_IOA_WITH_INTEGRATIONS).expect("should parse");
-    // Ensure the automaton itself carries integration metadata
-    assert_eq!(automaton.integrations[0].name, "notify_fulfillment");
-    assert_eq!(automaton.integrations[0].trigger, "SubmitOrder");
-    assert_eq!(automaton.integrations[0].integration_type, "webhook");
-    assert_eq!(automaton.integrations[1].name, "charge_payment");
-    assert_eq!(automaton.integrations[2].name, "notify_shipping");
-}
 
 // -----------------------------------------------------------------------
 // Webhook dispatcher with wiremock
@@ -352,12 +274,12 @@ async fn engine_process_event_skips_unmatched() {
 }
 
 // -----------------------------------------------------------------------
-// Verification cascade: specs with [[integration]] still pass
+// Verification cascade: the fixture spec passes
 // -----------------------------------------------------------------------
 
 #[test]
 fn verification_cascade_passes_with_integrations() {
-    let cascade = VerificationCascade::from_ioa(ORDER_IOA_WITH_INTEGRATIONS)
+    let cascade = VerificationCascade::from_ioa(ORDER_IOA)
         .with_max_items(2)
         .with_sim_seeds(3)
         .with_prop_test_cases(50);

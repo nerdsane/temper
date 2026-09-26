@@ -39,6 +39,7 @@ kind = "input"
 from = ["Draft"]
 params = ["ProductId", "Quantity"]
 hint = "Add a product to a draft order. Only works in Draft status."
+effect = ["items += 1"]
 
 [[action]]
 name = "RemoveItem"
@@ -46,6 +47,7 @@ kind = "input"
 from = ["Draft"]
 guard = "items > 0"
 params = ["ItemId"]
+effect = ["items -= 1"]
 
 [[action]]
 name = "SubmitOrder"

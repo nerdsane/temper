@@ -29,7 +29,13 @@ name="Run"
 from=["Idle"]
 to="Pending"
 params=[]
-effect="trigger local_job"
+
+[[action.triggers]]
+name = "local_job"
+kind = "wasm"
+module = "local_job"
+on_success = "Complete"
+on_failure = "Fail"
 [[action]]
 name="Complete"
 from=["Pending"]
@@ -57,13 +63,6 @@ name="Fail"
 from=["Pending"]
 to="Failed"
 params=["error"]
-[[integration]]
-name="local_job"
-trigger="local_job"
-type="wasm"
-module="local_job"
-on_success="Complete"
-on_failure="Fail"
 "#;
 const CSDL: &str = r#"<?xml version="1.0"?><edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="Test" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EntityType Name="Job"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/></EntityType><EntityContainer Name="Container"><EntitySet Name="Jobs" EntityType="Test.Job"/></EntityContainer></Schema></edmx:DataServices></edmx:Edmx>"#;
 

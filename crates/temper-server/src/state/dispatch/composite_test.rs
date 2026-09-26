@@ -1865,7 +1865,7 @@ name="Create"
 from=["Draft"]
 to="Active"
 params=["Name","expected_revision"]
-effect=[{type="increment",var="revision"}]
+effect = ["revision += 1"]
 [[action.constraints]]
 kind="param_equals_field"
 param="expected_revision"
@@ -1874,7 +1874,7 @@ field="revision"
 name="Update"
 from=["Active"]
 params=["Name","expected_revision"]
-effect=[{type="increment",var="revision"}]
+effect = ["revision += 1"]
 [[action.constraints]]
 kind="param_equals_field"
 param="expected_revision"

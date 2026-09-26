@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use temper_jit::table::{Effect, EvalContext, GuardFailure, TransitionTable};
+use temper_jit::table::{Effect, EvalContext, GuardFailure, TransitionTable, effect_args};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 use crate::blobs::{FIELD_OVERFLOW_BLOB_PREFIX, OverflowBlobWrite, blob_ref_value};
@@ -93,11 +93,6 @@ pub struct SpawnRequest {
     pub initial_action: Option<String>,
     /// Optional field on the parent to store the child's ID.
     pub store_id_in: Option<String>,
-    /// Optional list of field names to copy from parent state into child's initial_action params.
-    pub copy_fields: Option<Vec<String>>,
-    /// Field values copied from parent state (populated when copy_fields is Some).
-    #[serde(default)]
-    pub copied_field_values: serde_json::Map<String, serde_json::Value>,
 }
 
 /// A deferred schedule-at request — resolved after `sync_fields`.
@@ -641,7 +636,7 @@ fn json_string_param(params: &serde_json::Value, field: &str) -> Option<String> 
 /// # Arguments
 /// - `state` — The entity state to mutate.
 /// - `effects` — The effects returned by `TransitionTable::evaluate()`.
-/// - `params` — The action parameters (needed for `ListAppend` / `ListRemoveAt`).
+/// - `params` — The action parameters (read by `params.p` effect values).
 ///
 /// # Returns
 /// A tuple of (custom effect names, scheduled actions, spawn requests, schedule-at requests).
@@ -665,97 +660,54 @@ pub fn apply_effects(
             Effect::SetState(s) => {
                 state.status = s.clone();
             }
-            Effect::IncrementItems => {
-                state.item_count += 1;
-                *state.counters.entry("items".to_string()).or_default() += 1;
-            }
-            Effect::DecrementItems => {
-                state.item_count = state.item_count.saturating_sub(1);
-                let c = state.counters.entry("items".to_string()).or_default();
-                *c = c.saturating_sub(1);
-            }
-            Effect::IncrementCounter(var) => {
-                *state.counters.entry(var.clone()).or_default() += 1;
-                // Keep legacy item_count in sync.
-                if var == "items" {
-                    state.item_count += 1;
-                }
-            }
-            Effect::IncrementCounterByParam { var, param } => {
-                let delta = counter_delta_from_params(params, param);
-                *state.counters.entry(var.clone()).or_default() += delta;
-                if var == "items" {
-                    state.item_count += delta;
-                }
-            }
-            Effect::DecrementCounter(var) => {
-                let c = state.counters.entry(var.clone()).or_default();
-                *c = c.saturating_sub(1);
-                if var == "items" {
-                    state.item_count = state.item_count.saturating_sub(1);
-                }
-            }
-            Effect::DecrementCounterByParam { var, param } => {
-                let delta = counter_delta_from_params(params, param);
-                let c = state.counters.entry(var.clone()).or_default();
-                *c = c.saturating_sub(delta);
-                if var == "items" {
-                    state.item_count = state.item_count.saturating_sub(delta);
-                }
-            }
-            Effect::SetCounterFromParam { var, param } => {
-                let parsed = params
-                    .get(param)
-                    .and_then(|v| {
-                        v.as_u64()
-                            .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
-                    })
-                    .and_then(|n| usize::try_from(n).ok());
-                match parsed {
-                    Some(value) => {
-                        state.counters.insert(var.clone(), value);
-                        if var == "items" {
-                            state.item_count = value;
-                        }
-                    }
+            Effect::SetCounter { var, value } => {
+                match effect_args::count(value, &state.counters, params) {
+                    Some(value) => set_counter(state, var, value),
                     None => tracing::warn!(
                         entity_type = %state.entity_type,
                         entity_id = %state.entity_id,
                         counter = %var,
-                        param = %param,
-                        "set_counter_from_param skipped because param was missing or not a non-negative integer"
+                        value = %value,
+                        "counter assignment skipped: value missing or not a non-negative integer"
                     ),
                 }
             }
-            Effect::SetBool { var, value } => {
-                state.booleans.insert(var.clone(), *value);
+            Effect::AddCounter { var, value } => {
+                let delta = effect_args::count(value, &state.counters, params).unwrap_or(0);
+                let current = state.counters.get(var).copied().unwrap_or(0);
+                set_counter(state, var, current.saturating_add(delta));
             }
-            Effect::ListAppend(var) => {
-                if let Some(val) = params.get(var).and_then(|v| v.as_str()) {
-                    state
-                        .lists
-                        .entry(var.clone())
-                        .or_default()
-                        .push(val.to_string());
+            Effect::SubCounter { var, value } => {
+                let delta = effect_args::count(value, &state.counters, params).unwrap_or(0);
+                let current = state.counters.get(var).copied().unwrap_or(0);
+                set_counter(state, var, current.saturating_sub(delta));
+            }
+            Effect::SetBool { var, value } => {
+                match effect_args::boolean(value, &state.booleans, params) {
+                    Some(value) => {
+                        state.booleans.insert(var.clone(), value);
+                    }
+                    None => tracing::warn!(
+                        entity_type = %state.entity_type,
+                        entity_id = %state.entity_id,
+                        var = %var,
+                        value = %value,
+                        "bool assignment skipped: value missing or not a boolean"
+                    ),
                 }
             }
-            Effect::ListRemoveAt(var) => {
-                let index_key = format!("{var}_index");
-                if let Some(idx) = params.get(&index_key).and_then(|v| v.as_u64()) {
+            Effect::ListAppend { var, value } => {
+                if let Some(element) = effect_args::string(value, params) {
+                    state.lists.entry(var.clone()).or_default().push(element);
+                }
+            }
+            Effect::ListRemoveAt { var, index } => {
+                if let Some(index) = effect_args::count(index, &state.counters, params) {
                     let list = state.lists.entry(var.clone()).or_default();
-                    let idx = idx as usize;
-                    if idx < list.len() {
-                        list.remove(idx);
+                    if index < list.len() {
+                        list.remove(index);
                     }
                 }
-            }
-            Effect::EmitEvent(evt) => {
-                tracing::info!(
-                    entity_type = %state.entity_type,
-                    entity_id = %state.entity_id,
-                    event = %evt,
-                    "event emitted"
-                );
             }
             Effect::Custom(effect_name) => {
                 custom_effects.push(effect_name.clone());
@@ -784,21 +736,14 @@ pub fn apply_effects(
             }
             Effect::SpawnEntity {
                 entity_type,
-                entity_id_source,
                 initial_action,
                 store_id_in,
-                copy_fields,
+                id,
             } => {
-                // Resolve child entity ID from params or generate UUID
-                let child_id = if entity_id_source == "{uuid}" {
-                    sim_uuid().to_string()
-                } else {
-                    params
-                        .get(entity_id_source)
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| sim_uuid().to_string())
-                };
+                let child_id = id
+                    .as_ref()
+                    .and_then(|id| effect_args::string(id, params))
+                    .unwrap_or_else(|| sim_uuid().to_string());
 
                 // Store child ID in parent's fields if requested
                 if let Some(field_name) = store_id_in
@@ -810,25 +755,11 @@ pub fn apply_effects(
                     );
                 }
 
-                // Copy named fields from parent state into spawn request
-                let mut copied_field_values = serde_json::Map::new();
-                if let Some(fields_to_copy) = copy_fields
-                    && let Some(parent_obj) = state.fields.as_object()
-                {
-                    for field_name in fields_to_copy {
-                        if let Some(value) = parent_obj.get(field_name) {
-                            copied_field_values.insert(field_name.clone(), value.clone());
-                        }
-                    }
-                }
-
                 spawn_requests.push(SpawnRequest {
                     entity_type: entity_type.clone(),
                     entity_id: child_id.clone(),
-                    initial_action: initial_action.clone(),
+                    initial_action: Some(initial_action.clone()),
                     store_id_in: store_id_in.clone(),
-                    copy_fields: copy_fields.clone(),
-                    copied_field_values,
                 });
 
                 tracing::info!(
@@ -863,15 +794,13 @@ pub fn apply_effects(
     )
 }
 
-fn counter_delta_from_params(params: &serde_json::Value, param: &str) -> usize {
-    params
-        .get(param)
-        .and_then(|value| match value {
-            serde_json::Value::Number(number) => number.as_u64().map(|v| v as usize),
-            serde_json::Value::String(text) => text.parse::<usize>().ok(),
-            _ => None,
-        })
-        .unwrap_or(0)
+/// Write a counter, keeping the legacy `item_count` field in sync with the
+/// counter named `items`.
+fn set_counter(state: &mut EntityState, var: &str, value: usize) {
+    state.counters.insert(var.to_string(), value);
+    if var == "items" {
+        state.item_count = value;
+    }
 }
 
 /// Resolve deferred `schedule_at` requests into [`ScheduledAction`]s.
@@ -1160,7 +1089,12 @@ initial = "Active"
 name = "Activate"
 from = ["Refreshing"]
 to = "Active"
-effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
+effect = ["schedule('Refresh', 2700)"]
+
+[[action]]
+name = "Refresh"
+from = ["Active"]
+to = "Refreshing"
 "#;
 
         let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
@@ -1316,14 +1250,15 @@ to = "Closed"
 
     #[test]
     fn test_apply_effects_uses_numeric_param_amounts_for_counter_deltas() {
+        let arg = |source: &str| temper_spec::predicate::parse_arg(source).unwrap();
         let effects = vec![
-            Effect::IncrementCounterByParam {
+            Effect::AddCounter {
                 var: "used_bytes".into(),
-                param: "size_bytes".into(),
+                value: arg("params.size_bytes"),
             },
-            Effect::DecrementCounterByParam {
+            Effect::SubCounter {
                 var: "used_bytes".into(),
-                param: "released_bytes".into(),
+                value: arg("params.released_bytes"),
             },
         ];
 
@@ -1370,9 +1305,7 @@ initial = "Ready"
 name = "StartPlan"
 from = ["Ready"]
 to = "Planning"
-effect = [
-    { type = "spawn", entity_type = "TestWorkflow", entity_id_source = "{uuid}", initial_action = "Start", store_id_in = "test_wf_id" },
-]
+effect = ["spawn('TestWorkflow', 'Start', test_wf_id)"]
 "#;
 
         let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
@@ -1559,7 +1492,11 @@ initial = ""
 name = "TriggerComplete"
 from = ["Active"]
 params = ["next_run_at"]
-effect = [{ type = "schedule_at", field = "next_run_at", action = "Trigger" }]
+effect = ["schedule_at('Trigger', next_run_at)"]
+
+[[action]]
+name = "Trigger"
+from = ["Active"]
 "#;
 
         let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
@@ -1617,7 +1554,11 @@ initial = ""
 name = "TriggerComplete"
 from = ["Active"]
 params = ["next_run_at"]
-effect = [{ type = "schedule_at", field = "next_run_at", action = "Trigger" }]
+effect = ["schedule_at('Trigger', next_run_at)"]
+
+[[action]]
+name = "Trigger"
+from = ["Active"]
 "#;
 
         let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
@@ -1666,7 +1607,11 @@ initial = "Active"
 [[action]]
 name = "Complete"
 from = ["Active"]
-effect = [{ type = "schedule_at", field = "next_run_at", action = "Trigger" }]
+effect = ["schedule_at('Trigger', next_run_at)"]
+
+[[action]]
+name = "Trigger"
+from = ["Active"]
 "#;
 
         let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
@@ -1714,7 +1659,7 @@ name = "Complete"
 from = ["Pending"]
 to = "Ready"
 params = ["payload_size"]
-effect = [{ type = "set_counter_from_param", var = "size_bytes", param = "payload_size" }]
+effect = ["size_bytes = params.payload_size"]
 "#;
 
         let table = TransitionTable::from_ioa_source(spec);
@@ -1748,77 +1693,6 @@ effect = [{ type = "set_counter_from_param", var = "size_bytes", param = "payloa
         assert_eq!(
             state.fields.get("size_bytes").and_then(|v| v.as_u64()),
             Some(4096)
-        );
-    }
-
-    #[test]
-    fn test_spawn_with_copy_fields() {
-        let _guard = temper_runtime::scheduler::install_deterministic_context(42);
-
-        let spec = r#"
-[automaton]
-name = "Agent"
-states = ["Ready", "Spawning"]
-initial = "Ready"
-
-[[state]]
-name = "system_prompt"
-type = "string"
-initial = ""
-
-[[state]]
-name = "model"
-type = "string"
-initial = ""
-
-[[action]]
-name = "Launch"
-from = ["Ready"]
-to = "Spawning"
-effect = [
-    { type = "spawn", entity_type = "Session", entity_id_source = "{uuid}", initial_action = "Configure", store_id_in = "last_session_id", copy_fields = "system_prompt,model" },
-]
-"#;
-
-        let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
-        let mut state = EntityState {
-            entity_type: "Agent".into(),
-            entity_id: "agent-1".into(),
-            status: "Ready".into(),
-            item_count: 0,
-            counters: std::collections::BTreeMap::new(),
-            booleans: std::collections::BTreeMap::new(),
-            lists: std::collections::BTreeMap::new(),
-            fields: serde_json::json!({
-                "system_prompt": "You are a helpful assistant",
-                "model": "claude-3-opus"
-            }),
-            events: std::collections::VecDeque::new(),
-            total_event_count: 0,
-            events_since_snapshot: 0,
-            last_snapshot_sequence_nr: 0,
-            sequence_nr: 0,
-            processed_idempotency_keys: std::collections::BTreeMap::new(),
-        };
-
-        let result = process_action(&mut state, &table, "Launch", &serde_json::json!({}));
-
-        assert!(result.success, "action should succeed");
-        assert_eq!(result.spawn_requests.len(), 1);
-
-        let req = &result.spawn_requests[0];
-        assert_eq!(req.entity_type, "Session");
-        assert_eq!(
-            req.copy_fields.as_ref().unwrap(),
-            &vec!["system_prompt".to_string(), "model".to_string()]
-        );
-        assert_eq!(
-            req.copied_field_values.get("system_prompt").unwrap(),
-            "You are a helpful assistant"
-        );
-        assert_eq!(
-            req.copied_field_values.get("model").unwrap(),
-            "claude-3-opus"
         );
     }
 

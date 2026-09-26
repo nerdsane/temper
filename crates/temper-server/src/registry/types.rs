@@ -9,8 +9,6 @@ use temper_spec::automaton::{Automaton, Integration, Webhook};
 use temper_spec::cross_invariant::{CrossInvariantSpec, DeletePolicy};
 use temper_spec::csdl::CsdlDocument;
 
-use crate::trigger::types::ReactionRule;
-
 /// Verification status for a single entity type.
 #[derive(Debug, Clone, serde::Serialize)]
 pub enum VerificationStatus {
@@ -153,8 +151,6 @@ pub struct TenantConfig {
     pub entity_set_map: BTreeMap<String, String>,
     /// Per-entity-type specs.
     pub entities: BTreeMap<String, EntitySpec>,
-    /// Reaction rules for cross-entity coordination.
-    pub reactions: Vec<ReactionRule>,
     /// Tenant relation graph compiled from CSDL.
     pub relation_graph: RelationGraph,
     /// Optional parsed cross-entity invariant spec.

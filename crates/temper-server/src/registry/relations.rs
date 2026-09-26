@@ -198,6 +198,7 @@ mod tests {
             method: None,
             headers: std::collections::BTreeMap::new(),
             body_template: None,
+            hook: None,
         };
 
         let rule = synthesize_action_trigger_reaction("File", "StreamUpdated", &trigger)
@@ -240,6 +241,7 @@ mod tests {
             method: None,
             headers: std::collections::BTreeMap::new(),
             body_template: None,
+            hook: None,
         };
         assert!(synthesize_action_trigger_reaction("Order", "Confirm", &trigger).is_none());
     }
@@ -270,6 +272,7 @@ mod tests {
             method: Some("POST".to_string()),
             headers: std::collections::BTreeMap::new(),
             body_template: None,
+            hook: None,
         };
         assert!(synthesize_action_trigger_reaction("Order", "Confirm", &trigger).is_none());
     }

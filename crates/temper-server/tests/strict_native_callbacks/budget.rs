@@ -18,11 +18,11 @@ name = "Tick"
 from = ["Idle"]
 params = []
 guard = "ticks < 12"
-effect = [{type="increment",var="ticks"},{type="trigger",name="local_job"}]
-[[integration]]
+effect = ["ticks += 1"]
+
+[[action.triggers]]
 name = "local_job"
-trigger = "local_job"
-type = "wasm"
+kind = "wasm"
 module = "local_job"
 on_success = "Tick"
 "#;
@@ -114,11 +114,11 @@ name = "Fail"
 from = ["Idle"]
 params = ["error"]
 guard = "ticks < 40"
-effect = [{type="increment",var="ticks"},{type="trigger",name="failing_job"}]
-[[integration]]
+effect = ["ticks += 1"]
+
+[[action.triggers]]
 name = "failing_job"
-trigger = "failing_job"
-type = "wasm"
+kind = "wasm"
 module = "failing_job"
 "#;
     let mut registry = SpecRegistry::new();
@@ -235,11 +235,11 @@ name = "Tick"
 from = ["Idle"]
 params = []
 guard = "ticks < 241"
-effect = [{type="increment",var="ticks"},{type="trigger",name="local_job"}]
-[[integration]]
+effect = ["ticks += 1"]
+
+[[action.triggers]]
 name = "local_job"
-trigger = "local_job"
-type = "wasm"
+kind = "wasm"
 module = "local_job"
 on_success = "Tick"
 "#;
@@ -375,11 +375,11 @@ name = "Tick"
 from = ["Idle"]
 params = []
 guard = "ticks < 40"
-effect = [{type="increment",var="ticks"},{type="trigger",name="local_job"}]
-[[integration]]
+effect = ["ticks += 1"]
+
+[[action.triggers]]
 name = "local_job"
-trigger = "local_job"
-type = "wasm"
+kind = "wasm"
 module = "local_job"
 on_success = "Tick"
 "#;

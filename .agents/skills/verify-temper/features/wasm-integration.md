@@ -1,7 +1,7 @@
 # WASM integration
 
 ## Sub-features
-WASM modules fired by transitions via `[[action.triggers]]` (ADR-0046) or legacy `[[integration]]`. Engine in `crates/temper-wasm`; dispatch decision in `crates/temper-server/src/state/dispatch/wasm.rs`.
+WASM modules fired by transitions via a `kind = "wasm"` entry in `[[action.triggers]]` (ADR-0046; `module`, optional `on_success`/`on_failure`, `config = { ... }`). The old `[[integration]]` block and `trigger` effect are retired (ADR-0180) and fail to load; `temper migrate-predicates` converts them. Engine in `crates/temper-wasm`; dispatch decision in `crates/temper-server/src/state/dispatch/wasm.rs`.
 
 ## How to get to it (user POV)
 A transition can fire a WASM module (parse a payload, call an API, compute a result). The module's result can re-enter the machine as a follow-up action - but the module never drives the machine itself.
@@ -17,5 +17,5 @@ Three observable signals: a row in the `wasm_invocation_logs` table (module, tri
 ## Gotchas
 - The kernel decides whether to dispatch the module's `callback_action`, not the module. `callback_action = on_success` if the trigger sets it, else the module's returned value; **empty means nothing is dispatched.** A Composite integration returning the default SDK `"callback"` with no `on_success` is zeroed (`composite_result_consumed`, `wasm.rs`) so it does not become an implicit self-dispatch. This is the "inert callback" trap: return `""` for a genuine no-op, not `"callback"`.
 - "A module fired by a transition never dispatches transitions itself" is a DESIGN CONTRACT (paw-patrol's WASM rule, enforced in review), NOT a platform impossibility. The host trait has no *direct* dispatch call, but it DOES expose `http_call`/`http_call_binary` (`temper-wasm/src/authorized_host.rs`), so a module can reach the server's own governed `/tdata` and initiate a transition like any HTTP client - every such call is Cedar-authorized by domain through `AuthorizedWasmHost` (SSRF-guarded). So the intended path for a module result is still `on_success`/`on_failure` re-entering as an action; a module calling `/tdata` directly is possible but off-contract. (Load-bearing for stage 3: the guarantee is governance + the contract, not the absence of a capability.)
-- Triggers are fire-and-forget post-commit: a failing integration does not roll back the source transition (its `on_failure` action runs instead). Integrations are metadata-only and never affect verification.
+- Triggers are fire-and-forget post-commit: a failing module does not roll back the source transition (its `on_failure` action runs instead). The module itself is outside verification; only the `on_success`/`on_failure` actions it re-enters through are verified transitions.
 - Budgets per invocation: fuel 1e9, memory 64 MB, duration 120 s, response body 1 MB, module size 10 MB.

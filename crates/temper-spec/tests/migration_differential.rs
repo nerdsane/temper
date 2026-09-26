@@ -569,9 +569,10 @@ on_success = "Fire"
         "one synthesized Integration expected"
     );
     assert_eq!(
-        a.integrations[0].name, "__trigger__:Fire:my_trigger",
-        "expander must namespace synthesized names as `__trigger__:{{action}}:{{name}}`"
+        a.integrations[0].trigger, "__trigger__:Fire:my_trigger",
+        "expander must namespace dispatch keys as `__trigger__:{{action}}:{{name}}`"
     );
+    assert_eq!(a.integrations[0].name, "my_trigger");
 }
 
 #[test]

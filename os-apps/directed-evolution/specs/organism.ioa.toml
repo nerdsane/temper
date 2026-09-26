@@ -20,7 +20,7 @@ name = "ActivateOrganism"
 kind = "input"
 from = ["Draft"]
 to = "Active"
-effect = [{ type = "set_bool", var = "has_parent_version", value = "true" }, { type = "increment", var = "version_count" }]
+effect = ["has_parent_version = true", "version_count += 1"]
 params = ["Name", "AppRef", "ParentVersionId", "BaselineEvaluationJson"]
 hint = "Register the organism with its first parent version and baseline evaluation ladder."
 
@@ -28,7 +28,7 @@ hint = "Register the organism with its first parent version and baseline evaluat
 name = "RecordOrganismVersion"
 kind = "input"
 from = ["Active"]
-effect = "increment version_count"
+effect = ["version_count += 1"]
 params = ["OrganismVersionId", "PromotionId", "AppRef", "Summary"]
 hint = "Record that a promoted organism version belongs to this organism."
 

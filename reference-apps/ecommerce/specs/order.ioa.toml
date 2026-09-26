@@ -38,6 +38,7 @@ kind = "input"
 from = ["Draft"]
 params = ["ProductId", "Quantity"]
 hint = "Add a product to a draft order. Only works in Draft status."
+effect = ["items += 1"]
 
 [[action]]
 name = "RemoveItem"
@@ -45,6 +46,7 @@ kind = "input"
 from = ["Draft"]
 guard = "items > 0"
 params = ["ItemId"]
+effect = ["items -= 1"]
 
 [[action]]
 name = "SubmitOrder"
@@ -60,9 +62,7 @@ name = "ConfirmOrder"
 kind = "internal"
 from = ["Submitted"]
 to = "Confirmed"
-effect = [
-    { type = "set_bool", var = "payment_captured", value = true },
-]
+effect = ["payment_captured = true"]
 hint = "System action: confirms after payment authorization."
 
 [[action]]

@@ -118,7 +118,6 @@ name = "Start"
 kind = "input"
 from = ["Idle"]
 to = "Checking"
-effect = [{ type = "trigger", name = "crucible_check_schedules" }]
 
 [[action.triggers]]
 name = "crucible_check_schedules"

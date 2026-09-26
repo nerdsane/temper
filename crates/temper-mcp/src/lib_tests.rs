@@ -190,12 +190,11 @@ async fn register_test_operator(state: &PlatformState) {
     {
         let mut registry = state.registry.write().expect("registry lock");
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_with_constraints(
                 TenantId::new(TEST_TENANT),
                 credential_csdl,
                 CREDENTIAL_CSDL_XML.to_string(),
                 &credential_specs,
-                Vec::new(),
                 None,
                 true,
             )

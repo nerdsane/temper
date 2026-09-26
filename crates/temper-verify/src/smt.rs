@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use z3::ast::{Bool, Int};
 use z3::{SatResult, Solver};
 
-use temper_spec::predicate::{CmpOp, Expr, Literal, Operand, Set, unmodelable};
+use temper_spec::predicate::{Arg, CmpOp, Expr, Literal, Operand, Set, unmodelable};
 
 use crate::model::builder::build_model_from_ioa;
 use crate::model::semantics::collect_list_contains_pairs;
@@ -227,47 +227,70 @@ fn preserved_by(
 ) -> bool {
     let solver = Solver::new();
     let zero = Int::from_i64(0);
-    let one = Int::from_i64(1);
     let max_val = Int::from_i64(max_counter as i64);
     let lists = ListSymbolicVars::default();
 
     let mut pre_counters = BTreeMap::new();
-    let mut post_counters = BTreeMap::new();
     for name in model.initial_counters.keys() {
         let pre = Int::new_const(format!("{name}_pre"));
         solver.assert(pre.ge(&zero));
         solver.assert(pre.le(&max_val));
-        let mut post = pre.clone();
-        for effect in &t.effects {
-            match effect {
-                ModelEffect::IncrementCounter(v) if v == name => {
-                    post = Int::add(&[&post, &one]);
-                }
-                ModelEffect::DecrementCounter(v) if v == name => {
-                    // Runtime semantics are saturating_sub(1): max(counter-1, 0)
-                    let dec = Int::sub(&[&post, &one]);
-                    post = post.gt(&zero).ite(&dec, &zero);
-                }
-                _ => {}
-            }
-        }
         pre_counters.insert(name.clone(), pre);
-        post_counters.insert(name.clone(), post);
     }
     let mut pre_bools = BTreeMap::new();
-    let mut post_bools = BTreeMap::new();
     for name in model.initial_booleans.keys() {
-        let pre = Bool::new_const(format!("{name}_pre"));
-        let mut post = pre.clone();
-        for effect in &t.effects {
-            if let ModelEffect::SetBool { var, value } = effect
-                && var == name
-            {
-                post = Bool::from_bool(*value);
+        pre_bools.insert(name.clone(), Bool::new_const(format!("{name}_pre")));
+    }
+    // Apply the effects in order, as the runtime does; `params.p` is a fresh
+    // unknown (a non-negative integer or a boolean).
+    let mut post_counters = pre_counters.clone();
+    let mut post_bools = pre_bools.clone();
+    let count = |arg: &Arg, counters: &BTreeMap<String, Int>| -> Int {
+        match arg {
+            Arg::Lit(Literal::Int(n)) => Int::from_i64(*n),
+            Arg::Var(name) => counters.get(name).cloned().unwrap_or_else(|| zero.clone()),
+            Arg::Param(name) => {
+                let param = Int::new_const(format!("param:{name}"));
+                solver.assert(param.ge(&zero));
+                param
             }
+            Arg::Lit(_) => zero.clone(),
         }
-        pre_bools.insert(name.clone(), pre);
-        post_bools.insert(name.clone(), post);
+    };
+    for effect in &t.effects {
+        match effect {
+            ModelEffect::SetCounter { var, value } => {
+                let value = count(value, &post_counters);
+                post_counters.insert(var.clone(), value);
+            }
+            ModelEffect::AddCounter { var, value } => {
+                let delta = count(value, &post_counters);
+                if let Some(post) = post_counters.get_mut(var) {
+                    *post = Int::add(&[&*post, &delta]);
+                }
+            }
+            ModelEffect::SubCounter { var, value } => {
+                // Runtime semantics are saturating: max(counter - delta, 0).
+                let delta = count(value, &post_counters);
+                if let Some(post) = post_counters.get_mut(var) {
+                    let dec = Int::sub(&[&*post, &delta]);
+                    *post = post.gt(&delta).ite(&dec, &zero);
+                }
+            }
+            ModelEffect::SetBool { var, value } => {
+                let value = match value {
+                    Arg::Lit(Literal::Bool(b)) => Bool::from_bool(*b),
+                    Arg::Var(name) => post_bools
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| Bool::from_bool(false)),
+                    Arg::Param(name) => Bool::new_const(format!("param:{name}")),
+                    Arg::Lit(_) => Bool::from_bool(false),
+                };
+                post_bools.insert(var.clone(), value);
+            }
+            ModelEffect::ListAppend { .. } | ModelEffect::ListRemoveAt { .. } => {}
+        }
     }
     let pre_status = make_status_var(model, &solver);
     let post_status = match t
@@ -795,7 +818,7 @@ initial = "0"
 name = "GoB"
 from = ["A"]
 to = "B"
-effect = "decrement count"
+effect = ["count -= 1"]
 
 [[invariant]]
 name = "BNeedsCount"

@@ -18,7 +18,7 @@ initial = "0"
 name = "RecordVariantMutation"
 kind = "input"
 from = ["Created"]
-effect = "set has_mutation true"
+effect = ["has_mutation = true"]
 params = ["EpisodeId", "GenerationId", "MutationId", "AppRef", "BranchRef", "Summary", "BrainRunId"]
 hint = "Attach the generated mutation and runnable app ref to a variant."
 
@@ -44,7 +44,7 @@ hint = "Mark a variant runnable for evaluation and trials."
 name = "RecordVariantStageResult"
 kind = "input"
 from = ["Active"]
-effect = "increment stage_results"
+effect = ["stage_results += 1"]
 params = ["StageResultId"]
 hint = "Attach a stage result to the variant."
 

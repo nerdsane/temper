@@ -41,12 +41,8 @@ kind = "input"
 from = ["Active"]
 to = "Active"
 hint = "Fire this schedule — posts a user.message to the target session."
-effect = [{ type = "trigger", name = "crucible_cron_trigger" },
-          { type = "increment", var = "run_count" }]
+effect = ["run_count += 1"]
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "crucible_cron_trigger"
 kind = "wasm"

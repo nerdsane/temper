@@ -25,16 +25,14 @@ kind = "Composite"
 from = ["Active"]
 to = "Active"
 params = ["PackBytes", "RefUpdates", "ClientRequestId"]
-effect = [{ type = "trigger", name = "scm_ingest_pack" }]
 
 [[action.sub_writes]]
 target_entity = "Commit"
 action = "Create"
 
-[[integration]]
+[[action.triggers]]
 name = "scm_ingest_pack"
-trigger = "scm_ingest_pack"
-type = "wasm"
+kind = "wasm"
 module = "scm_ingest_pack"
 "#,
     )))
@@ -544,7 +542,10 @@ async fn duplicate_composite_idempotency_reemits_spec_trigger() {
         )
         .await
         .unwrap();
-    assert_eq!(first.custom_effects, vec!["scm_ingest_pack"]);
+    assert_eq!(
+        first.custom_effects,
+        vec!["__trigger__:IngestPack:scm_ingest_pack"]
+    );
 
     let duplicate: EntityResponse = actor_ref
         .ask(
@@ -560,7 +561,10 @@ async fn duplicate_composite_idempotency_reemits_spec_trigger() {
         .await
         .unwrap();
 
-    assert_eq!(duplicate.custom_effects, vec!["scm_ingest_pack"]);
+    assert_eq!(
+        duplicate.custom_effects,
+        vec!["__trigger__:IngestPack:scm_ingest_pack"]
+    );
     assert!(duplicate.state.fields.get("PackBytes").is_none());
     assert!(duplicate.state.fields.get("RefUpdates").is_none());
     assert!(duplicate.state.fields.get("ClientRequestId").is_none());
@@ -1341,10 +1345,7 @@ from = ["Created", "Ready"]
 to = "Ready"
 params = ["size_bytes"]
 guard = "Workspace[workspace_id].status not in ['Frozen', 'Archived']"
-effect = [
-  { type = "increment", var = "version_count" },
-  { type = "set_bool", var = "has_content", value = "true" },
-]
+effect = ["version_count += 1", "has_content = true"]
 "#,
     )));
 

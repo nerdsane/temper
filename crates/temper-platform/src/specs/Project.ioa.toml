@@ -24,7 +24,7 @@ name = "UpdateSpecs"
 from = ["Created", "Building", "Verified"]
 to = "Building"
 kind = "input"
-effect = "increment spec_count"
+effect = ["spec_count += 1"]
 
 [[action]]
 name = "Verify"
@@ -32,7 +32,7 @@ from = ["Building"]
 to = "Verified"
 kind = "internal"
 guard = "spec_count >= 1"
-effect = "set verified true"
+effect = ["verified = true"]
 
 [[action]]
 name = "Archive"

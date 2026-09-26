@@ -21,7 +21,7 @@ from = ["Active"]
 name = "StartProcess"
 kind = "input"
 from = ["Active"]
-effect = [{ type = "increment", var = "processes_started" }]
+effect = ["processes_started += 1"]
 hint = "Spawn a Process instance from this AgentDefinition."
 
 [[action]]

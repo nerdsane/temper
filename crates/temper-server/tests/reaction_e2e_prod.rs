@@ -4,8 +4,8 @@
 //! `SimReactionSystem` used in `reaction_cascade.rs`.
 //!
 //! This is the verification that closes the loop the ADR promises:
-//! a reaction declared in TOML (params_from + guard + Create resolver)
-//! actually dispatches through the live platform stack.
+//! a reaction declared as an entity-kind `[[action.triggers]]` block
+//! (params_from + guard) actually dispatches through the live platform stack.
 
 use std::sync::Arc;
 
@@ -14,7 +14,6 @@ use temper_runtime::tenant::TenantId;
 use temper_server::ServerState;
 use temper_server::registry::SpecRegistry;
 use temper_server::request_context::AgentContext;
-use temper_server::trigger::registry::parse_reactions;
 use temper_spec::csdl::parse_csdl;
 
 const REACTION_E2E_SERVICE: &str = "reaction-e2e-prod-test";
@@ -56,6 +55,7 @@ initial = "0"
 name = "AddItem"
 kind = "input"
 from = ["Draft"]
+effect = ["items += 1"]
 
 [[action]]
 name = "SubmitOrder"
@@ -103,19 +103,21 @@ to = "Failed"
 "#;
 
 /// Build a ServerState with Order + Payment registered under the given
-/// tenant plus the supplied reaction rules. Rebuilds the reaction dispatcher
-/// so reactions fire through the production code path.
-fn build_state(tenant: &str, reactions_toml: &str) -> ServerState {
+/// tenant, with `triggers` (`[[action.triggers]]` blocks) declared on
+/// `Order.ConfirmOrder`. Rebuilds the reaction dispatcher so reactions fire
+/// through the production code path.
+fn build_state(tenant: &str, triggers: &str) -> ServerState {
     let mut registry = SpecRegistry::new();
     let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
-    let reactions = parse_reactions(reactions_toml).expect("reactions TOML should parse");
+    let confirm = "to = \"Confirmed\"\n";
+    assert_eq!(ORDER_IOA.matches(confirm).count(), 1);
+    let order = ORDER_IOA.replace(confirm, &format!("{confirm}{triggers}"));
     registry
-        .try_register_tenant_with_reactions(
+        .try_register_tenant(
             tenant,
             csdl,
             CSDL_XML.to_string(),
-            &[("Order", ORDER_IOA), ("Payment", PAYMENT_IOA)],
-            reactions,
+            &[("Order", order.as_str()), ("Payment", PAYMENT_IOA)],
         )
         .expect("tenant registration");
 
@@ -188,7 +190,7 @@ async fn status(
 // =========================================================================
 // E2E-1: Basic reaction fires through production dispatcher.
 //
-// Proves the whole stack wires up: parse_reactions → try_register_tenant
+// Proves the whole stack wires up: [[action.triggers]] → try_register_tenant
 // → build_reaction_registry → ReactionDispatcher → dispatch_tenant_action
 // → reaction target action completes.
 // =========================================================================
@@ -196,17 +198,13 @@ async fn status(
 #[tokio::test(flavor = "multi_thread")]
 async fn prod_dispatcher_fires_basic_reaction() {
     let reactions = r#"
-[[reaction]]
+[[action.triggers]]
 name = "order_confirmed_authorizes_payment"
-[reaction.when]
-entity_type = "Order"
-action = "ConfirmOrder"
+kind = "entity"
 to_state = "Confirmed"
-[reaction.then]
-entity_type = "Payment"
-action = "AuthorizePayment"
-[reaction.resolve_target]
-type = "same_id"
+target_entity = "Payment"
+target_action = "AuthorizePayment"
+resolve_target = { type = "same_id" }
 "#;
     let tenant_name = "shop-e2e-1";
     let state = Arc::new(build_state(tenant_name, reactions));
@@ -267,29 +265,21 @@ async fn prod_dispatcher_honours_source_field_guard() {
     // state_in=["Cancelled"]. Only the Confirmed one should fire on
     // Order.ConfirmOrder.
     let reactions = r#"
-[[reaction]]
+[[action.triggers]]
 name = "fires_on_confirmed"
-[reaction.when]
-entity_type = "Order"
-action = "ConfirmOrder"
+kind = "entity"
 guard = "status == 'Confirmed'"
-[reaction.then]
-entity_type = "Payment"
-action = "AuthorizePayment"
-[reaction.resolve_target]
-type = "same_id"
+target_entity = "Payment"
+target_action = "AuthorizePayment"
+resolve_target = { type = "same_id" }
 
-[[reaction]]
+[[action.triggers]]
 name = "skipped_on_cancelled"
-[reaction.when]
-entity_type = "Order"
-action = "ConfirmOrder"
+kind = "entity"
 guard = "status == 'Cancelled'"
-[reaction.then]
-entity_type = "Payment"
-action = "FailPayment"
-[reaction.resolve_target]
-type = "same_id"
+target_entity = "Payment"
+target_action = "FailPayment"
+resolve_target = { type = "same_id" }
 "#;
     let tenant_name = "shop-e2e-2";
     let state = Arc::new(build_state(tenant_name, reactions));
@@ -342,17 +332,13 @@ type = "same_id"
 #[tokio::test(flavor = "multi_thread")]
 async fn prod_dispatcher_not_guard_skips_firing() {
     let reactions = r#"
-[[reaction]]
+[[action.triggers]]
 name = "skipped_when_confirmed"
-[reaction.when]
-entity_type = "Order"
-action = "ConfirmOrder"
+kind = "entity"
 guard = "!(status == 'Confirmed')"
-[reaction.then]
-entity_type = "Payment"
-action = "AuthorizePayment"
-[reaction.resolve_target]
-type = "same_id"
+target_entity = "Payment"
+target_action = "AuthorizePayment"
+resolve_target = { type = "same_id" }
 "#;
     let tenant_name = "shop-e2e-3";
     let state = Arc::new(build_state(tenant_name, reactions));
@@ -406,19 +392,15 @@ type = "same_id"
 #[tokio::test(flavor = "multi_thread")]
 async fn prod_dispatcher_params_from_missing_field_still_fires() {
     let reactions = r#"
-[[reaction]]
+[[action.triggers]]
 name = "order_confirmed_with_params_from"
-[reaction.when]
-entity_type = "Order"
-action = "ConfirmOrder"
-[reaction.then]
-entity_type = "Payment"
-action = "AuthorizePayment"
+kind = "entity"
+target_entity = "Payment"
+target_action = "AuthorizePayment"
 # Reference a field Order.ConfirmOrder never produces.
 params = { note = "from_reaction" }
 params_from = { passed_field = "nonexistent" }
-[reaction.resolve_target]
-type = "same_id"
+resolve_target = { type = "same_id" }
 "#;
     let tenant_name = "shop-e2e-4";
     let state = Arc::new(build_state(tenant_name, reactions));

@@ -1,44 +1,38 @@
-//! Reaction routing derived from the registered actor reaction rules.
-use std::collections::HashMap;
-use temper_runtime::reaction::ReactionRule;
+//! Routing derived from a spec's entity-kind `[[action.triggers]]`.
+use std::collections::BTreeMap;
 
-/// Build per-actor routing maps from reaction rules.
+use temper_spec::automaton::{Automaton, TargetResolver, TriggerKind};
+
+/// Per-action routes: `action name → [(target actor type, target action)]`.
 ///
-/// Returns `HashMap<actor_type, HashMap<emit_name, (target_actor_type, target_action)>>`.
-pub fn build_routing_maps(
-    rules: &[ReactionRule],
-) -> HashMap<String, HashMap<String, (String, String)>> {
-    let mut maps: HashMap<String, HashMap<String, (String, String)>> = HashMap::new();
-
-    for rule in rules {
-        if let Some(emit_name) = &rule.when.action {
-            maps.entry(rule.when.entity_type.clone())
-                .or_default()
-                .insert(
-                    emit_name.clone(),
-                    (rule.then.entity_type.clone(), rule.then.action.clone()),
+/// Actors address siblings in their own namespace, so only `same_id`
+/// entity triggers route here; other resolvers are skipped with a warning.
+pub fn build_actor_routing(automaton: &Automaton) -> BTreeMap<String, Vec<(String, String)>> {
+    let mut routes: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for action in &automaton.actions {
+        for trigger in &action.triggers {
+            if trigger.kind != TriggerKind::Entity {
+                continue;
+            }
+            let (Some(target_entity), Some(target_action)) =
+                (&trigger.target_entity, &trigger.target_action)
+            else {
+                continue;
+            };
+            if trigger.resolve_target != Some(TargetResolver::SameId) {
+                tracing::warn!(
+                    actor = %automaton.automaton.name,
+                    action = %action.name,
+                    trigger = %trigger.name,
+                    "actor runtime routes only same_id entity triggers; trigger skipped"
                 );
+                continue;
+            }
+            routes
+                .entry(action.name.clone())
+                .or_default()
+                .push((target_entity.clone(), target_action.clone()));
         }
     }
-
-    maps
-}
-
-/// Build a single actor's routing map from a reaction registry.
-pub fn build_actor_routing(
-    actor_type: &str,
-    rules: &[ReactionRule],
-) -> HashMap<String, (String, String)> {
-    rules
-        .iter()
-        .filter(|r| r.when.entity_type == actor_type)
-        .filter_map(|r| {
-            r.when.action.as_ref().map(|emit| {
-                (
-                    emit.clone(),
-                    (r.then.entity_type.clone(), r.then.action.clone()),
-                )
-            })
-        })
-        .collect()
+    routes
 }

@@ -24,7 +24,7 @@ name = "PromoteWinner"
 kind = "input"
 from = ["Pending"]
 to = "Promoted"
-effect = "set has_evidence true"
+effect = ["has_evidence = true"]
 params = ["EpisodeId", "WinningVariantId", "ParentVersionId", "NewOrganismVersionId", "SelectionExplanation", "EvidenceArtifactId", "AppRef"]
 hint = "Promote the winning variant as a new organism version."
 
@@ -33,7 +33,7 @@ name = "RecordPromotionMaterialization"
 kind = "input"
 from = ["Promoted"]
 to = "Promoted"
-effect = "set materialized true"
+effect = ["materialized = true"]
 params = ["CanonicalAppRef", "ProductionTenant", "RuntimeRef", "EvidenceArtifactId", "Summary"]
 hint = "Record that the promoted winner was materialized into the canonical Genesis runtime."
 
@@ -42,7 +42,7 @@ name = "RecordPromotionMaterializationFailure"
 kind = "input"
 from = ["Promoted"]
 to = "Promoted"
-effect = "set materialization_failed true"
+effect = ["materialization_failed = true"]
 params = ["FailureReason", "EvidenceArtifactId"]
 hint = "Record that canonical promotion materialization failed after selection."
 

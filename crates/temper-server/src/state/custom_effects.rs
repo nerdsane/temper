@@ -1,8 +1,8 @@
 //! Extension point for platform-level custom effects.
 //!
-//! Platform entities (temper-system) use `effect = "trigger Foo"` in their
-//! IOA specs. The dispatch pipeline calls this handler for each custom
-//! effect after WASM/adapter integration dispatch.
+//! Platform entities (temper-system) declare `kind = "hook"` triggers
+//! (`hook = "Foo"`) in their IOA specs. The dispatch pipeline calls this
+//! handler for each custom effect after WASM/adapter integration dispatch.
 //!
 //! This trait lives in `temper-server` so that `temper-platform` can implement
 //! it without introducing a circular dependency (platform depends on server,

@@ -79,7 +79,7 @@ fn server_repl_config(
 ///
 /// Security: 180s timeout, 64MB memory, method allowlisting, no filesystem or
 /// network access. Host ops (`upload_wasm`/`compile_wasm`) are gated off via
-/// `server_repl_config` (ARN-166). External APIs go through `[[integration]]`
+/// `server_repl_config` (ARN-166). External APIs go through `[[action.triggers]]`
 /// in IOA specs.
 #[instrument(skip_all, fields(otel.name = "POST /api/repl"))]
 pub(crate) async fn handle_repl(

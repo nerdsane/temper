@@ -22,7 +22,7 @@ name = "PassStageResult"
 kind = "input"
 from = ["Running"]
 to = "Passed"
-effect = "set has_evidence true"
+effect = ["has_evidence = true"]
 params = ["MetricsJson", "EvidenceArtifactId", "Summary"]
 hint = "Record a passing Stage Result with evidence."
 
@@ -31,7 +31,7 @@ name = "FailStageResult"
 kind = "input"
 from = ["Running"]
 to = "Failed"
-effect = "set has_evidence true"
+effect = ["has_evidence = true"]
 params = ["MetricsJson", "EvidenceArtifactId", "FailureReason"]
 hint = "Record a failing Stage Result with evidence."
 
@@ -40,7 +40,7 @@ name = "EliminateStageResult"
 kind = "input"
 from = ["Running", "Failed"]
 to = "Eliminated"
-effect = "set has_evidence true"
+effect = ["has_evidence = true"]
 params = ["EliminationRuleId", "EvidenceArtifactId", "Reason"]
 hint = "Record that this Stage Result eliminated the variant."
 

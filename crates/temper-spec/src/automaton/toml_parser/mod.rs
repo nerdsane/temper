@@ -5,8 +5,8 @@
 //! `[[vector]]`, `[[webhook]]`, `[[context_entity]]`, `[admission]` and the
 //! nested `[[action.*]]` tables) deserialize straight into their types. The
 //! core sections are read field by field so they keep the lenient value
-//! rules in [`values`] and the string forms of effects. Predicates are read
-//! in [`predicates`].
+//! rules in [`values`]. Predicates are read in [`predicates`], effects in
+//! [`effects`].
 
 mod effects;
 mod predicates;
@@ -14,10 +14,10 @@ pub(crate) mod values;
 
 use super::parser::AutomatonParseError;
 use super::types::*;
-use effects::parse_effect_value;
+use effects::parse_effects;
 use serde::de::DeserializeOwned;
 use toml::{Table, Value};
-use values::{any_string, bool_value, string, string_list, unsigned};
+use values::{bool_value, string, string_list, unsigned};
 
 /// Parse TOML into an Automaton struct.
 pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError> {
@@ -25,13 +25,19 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
         .parse()
         .map_err(|e: toml::de::Error| AutomatonParseError::Toml(e.to_string()))?;
 
+    if doc.contains_key("integration") {
+        return Err(AutomatonParseError::Validation(
+            "[[integration]] is no longer supported: declare the call as an [[action.triggers]] block on the action that fires it (`temper migrate-predicates` converts it)".into(),
+        ));
+    }
+
     let automaton = Automaton {
         automaton: parse_meta(&doc)?,
         state: named_items(&doc, "state", parse_state_var)?,
         actions: named_items(&doc, "action", parse_action)?,
         invariants: predicates::invariants(&doc)?,
         liveness: named_items(&doc, "liveness", parse_liveness)?,
-        integrations: named_items(&doc, "integration", parse_integration)?,
+        integrations: Vec::new(),
         webhooks: section(&doc, "webhook")?,
         context_entities: section(&doc, "context_entity")?,
         field_invariants: predicates::field_invariants(&doc)?,
@@ -138,10 +144,10 @@ fn parse_action(table: &Table) -> Result<(String, Action), AutomatonParseError> 
         Some(value) => predicates::action_guard(&name, value)?,
         None => crate::predicate::Expr::always(),
     };
-    let mut effect = Vec::new();
-    if let Some(value) = table.get("effect") {
-        parse_effect_value(value, &mut effect)?;
-    }
+    let effect = match table.get("effect") {
+        Some(value) => parse_effects(&name, value)?,
+        None => Vec::new(),
+    };
     let cedar_gate = match table.get("cedar_gate") {
         // `[[action.cedar_gate]]` is an array; the first gate applies.
         Some(Value::Array(gates)) => gates.first(),
@@ -212,44 +218,6 @@ fn parse_liveness(table: &Table) -> Result<(String, Liveness), AutomatonParseErr
             .map(|_| bool_value(table, "has_actions") == Some(true)),
     };
     Ok((name, liveness))
-}
-
-/// `[[integration]]`: known keys map to fields; every other key, and every
-/// entry of an `[integration.config]` table, is config.
-fn parse_integration(table: &Table) -> Result<(String, Integration), AutomatonParseError> {
-    let mut integration = Integration {
-        name: String::new(),
-        trigger: String::new(),
-        integration_type: "webhook".into(),
-        module: None,
-        on_success: None,
-        on_failure: None,
-        llm: false,
-        config: std::collections::BTreeMap::new(),
-    };
-    for (key, value) in table {
-        match key.as_str() {
-            "name" => integration.name = any_string(value),
-            "trigger" => integration.trigger = any_string(value),
-            "type" => integration.integration_type = any_string(value),
-            "module" => integration.module = Some(any_string(value)),
-            "on_success" => integration.on_success = Some(any_string(value)),
-            "on_failure" => integration.on_failure = Some(any_string(value)),
-            "llm" => integration.llm = bool_value(table, "llm") == Some(true),
-            // `[integration.config]` entries are config keys, like inline ones.
-            "config" if value.is_table() => {
-                for (config_key, config_value) in value.as_table().into_iter().flatten() {
-                    integration
-                        .config
-                        .insert(config_key.clone(), any_string(config_value));
-                }
-            }
-            _ => {
-                integration.config.insert(key.clone(), any_string(value));
-            }
-        }
-    }
-    Ok((integration.name.clone(), integration))
 }
 
 #[cfg(test)]

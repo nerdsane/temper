@@ -65,7 +65,14 @@ name = "Trigger"
 kind = "input"
 from = ["Idle"]
 to = "Pending"
-effect = [{{ type = "trigger", name = "adapter_call" }}]
+
+[[action.triggers]]
+name = "adapter_call"
+kind = "adapter"
+adapter = "http"
+on_success = "AdapterSucceeded"
+on_failure = "AdapterFailed"
+config = {{ url = "{url}/execute", method = "POST" }}
 
 [[action]]
 name = "AdapterSucceeded"
@@ -81,15 +88,6 @@ from = ["Pending"]
 to = "Failed"
 params = ["error_message"]
 
-[[integration]]
-name = "adapter_call"
-trigger = "adapter_call"
-type = "adapter"
-adapter = "http"
-on_success = "AdapterSucceeded"
-on_failure = "AdapterFailed"
-url = "{url}/execute"
-method = "POST"
 "#,
         url = mock_server.uri()
     );
@@ -139,7 +137,14 @@ name = "Trigger"
 kind = "input"
 from = ["Idle"]
 to = "Pending"
-effect = [{{ type = "trigger", name = "adapter_call" }}]
+
+[[action.triggers]]
+name = "adapter_call"
+kind = "adapter"
+adapter = "http"
+on_success = "AdapterSucceeded"
+on_failure = "AdapterFailed"
+config = {{ url = "{url}/execute", method = "POST" }}
 
 [[action]]
 name = "AdapterSucceeded"
@@ -155,15 +160,6 @@ from = ["Pending"]
 to = "Failed"
 params = ["error_message"]
 
-[[integration]]
-name = "adapter_call"
-trigger = "adapter_call"
-type = "adapter"
-adapter = "http"
-on_success = "AdapterSucceeded"
-on_failure = "AdapterFailed"
-url = "{url}/execute"
-method = "POST"
 "#,
         url = mock_server.uri()
     );
@@ -228,7 +224,14 @@ name = "Trigger"
 kind = "input"
 from = ["Idle"]
 to = "Pending"
-effect = [{{ type = "trigger", name = "adapter_call" }}]
+
+[[action.triggers]]
+name = "adapter_call"
+kind = "adapter"
+adapter = "claude_code"
+on_success = "AdapterSucceeded"
+on_failure = "AdapterFailed"
+config = {{ url = "{url}/execute", method = "POST" }}
 
 [[action]]
 name = "AdapterSucceeded"
@@ -243,16 +246,6 @@ kind = "input"
 from = ["Pending"]
 to = "Failed"
 params = ["error_message"]
-
-[[integration]]
-name = "adapter_call"
-trigger = "adapter_call"
-type = "adapter"
-adapter = "claude_code"
-on_success = "AdapterSucceeded"
-on_failure = "AdapterFailed"
-url = "{url}/execute"
-method = "POST"
 "#,
         url = mock_server.uri()
     );
@@ -316,7 +309,13 @@ name = "Trigger"
 kind = "input"
 from = ["Idle"]
 to = "Pending"
-effect = [{{ type = "trigger", name = "adapter_call" }}]
+
+[[action.triggers]]
+name = "adapter_call"
+kind = "adapter"
+adapter = "http"
+on_success = "AdapterSucceeded"
+config = {{ url = "{mock_uri}/execute", method = "POST" }}
 
 [[action]]
 name = "AdapterSucceeded"
@@ -332,14 +331,6 @@ from = ["Pending"]
 to = "Failed"
 params = ["error_message"]
 
-[[integration]]
-name = "adapter_call"
-trigger = "adapter_call"
-type = "adapter"
-adapter = "http"
-on_success = "AdapterSucceeded"
-url = "{mock_uri}/execute"
-method = "POST"
 "#
     )
 }
@@ -358,7 +349,13 @@ name = "Trigger"
 kind = "input"
 from = ["Idle"]
 to = "Pending"
-effect = [{{ type = "trigger", name = "adapter_call" }}]
+
+[[action.triggers]]
+name = "adapter_call"
+kind = "adapter"
+adapter = "http"
+on_success = "AdapterSucceeded"
+config = {{ url = "{mock_uri}/execute", method = "POST" }}
 
 [[action]]
 name = "AdapterSucceeded"
@@ -367,14 +364,6 @@ from = ["Pending"]
 to = "Done"
 params = ["result"]
 
-[[integration]]
-name = "adapter_call"
-trigger = "adapter_call"
-type = "adapter"
-adapter = "http"
-on_success = "AdapterSucceeded"
-url = "{mock_uri}/execute"
-method = "POST"
 "#
     )
 }

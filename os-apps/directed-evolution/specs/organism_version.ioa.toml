@@ -14,7 +14,7 @@ name = "MarkOrganismVersionParent"
 kind = "input"
 from = ["Recorded", "Superseded"]
 to = "Parent"
-effect = "set is_parent true"
+effect = ["is_parent = true"]
 params = ["OrganismId", "AppRef", "CommitRef", "PromotionId", "Summary"]
 hint = "Mark this organism version as the current parent."
 
@@ -23,7 +23,7 @@ name = "SupersedeOrganismVersion"
 kind = "input"
 from = ["Parent"]
 to = "Superseded"
-effect = "set is_parent false"
+effect = ["is_parent = false"]
 params = ["NewParentVersionId", "PromotionId"]
 hint = "Supersede this parent with a newly promoted version."
 
@@ -32,6 +32,6 @@ name = "RollbackOrganismVersion"
 kind = "input"
 from = ["Parent", "Superseded"]
 to = "RolledBack"
-effect = "set is_parent false"
+effect = ["is_parent = false"]
 params = ["RollbackPromotionId", "Reason"]
 hint = "Record that this version was rolled back."

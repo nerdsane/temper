@@ -76,7 +76,7 @@ initial = "false"
 name = "SetParent"
 kind = "input"
 from = ["Backlog", "Triage", "Todo", "Planning", "InProgress"]
-effect = "set has_parent true"
+effect = ["has_parent = true"]
 params = ["ParentIssueId"]
 hint = "Set the parent issue. Turns this issue into a sub-issue."
 
@@ -84,14 +84,14 @@ hint = "Set the parent issue. Turns this issue into a sub-issue."
 name = "RemoveParent"
 kind = "input"
 from = ["Backlog", "Triage", "Todo", "Planning", "InProgress"]
-effect = "set has_parent false"
+effect = ["has_parent = false"]
 hint = "Remove the parent issue link, making this a top-level issue again."
 
 [[action]]
 name = "AddSubIssue"
 kind = "input"
 from = ["Backlog", "Triage", "Todo", "Planning", "Planned", "InProgress", "InReview"]
-effect = "increment sub_issue_count"
+effect = ["sub_issue_count += 1"]
 params = ["SubIssueId"]
 hint = "Add a sub-issue to this issue. The sub-issue's ParentIssueId should reference this issue."
 
@@ -101,7 +101,7 @@ hint = "Add a sub-issue to this issue. The sub-issue's ParentIssueId should refe
 name = "SetDescription"
 kind = "input"
 from = ["Backlog", "Triage", "Todo", "Planning", "InProgress", "InReview"]
-effect = "set has_description true"
+effect = ["has_description = true"]
 params = ["description"]
 hint = "Set or update the issue description."
 
@@ -109,7 +109,7 @@ hint = "Set or update the issue description."
 name = "SetPriority"
 kind = "input"
 from = ["Backlog", "Triage", "Todo", "Planning", "InProgress"]
-effect = "increment priority"
+effect = ["priority += 1"]
 params = ["level"]
 hint = "Set priority level (1=urgent, 2=high, 3=medium, 4=low). Must be set before moving to Todo."
 
@@ -117,7 +117,7 @@ hint = "Set priority level (1=urgent, 2=high, 3=medium, 4=low). Must be set befo
 name = "AddLabel"
 kind = "input"
 from = ["Backlog", "Triage", "Todo", "Planning", "InProgress", "InReview"]
-effect = "increment label_count"
+effect = ["label_count += 1"]
 params = ["LabelId"]
 hint = "Attach a label to the issue for categorization."
 
@@ -125,7 +125,7 @@ hint = "Attach a label to the issue for categorization."
 name = "Assign"
 kind = "input"
 from = ["Backlog", "Triage", "Todo", "Planning", "Planned", "InProgress"]
-effect = "set assignee_set true"
+effect = ["assignee_set = true"]
 params = ["AgentId"]
 hint = "Assign an implementer agent. Can be different from the planner."
 
@@ -133,7 +133,7 @@ hint = "Assign an implementer agent. Can be different from the planner."
 name = "AssignPlanner"
 kind = "input"
 from = ["Backlog", "Triage", "Todo"]
-effect = "set planner_set true"
+effect = ["planner_set = true"]
 params = ["AgentId"]
 hint = "Assign a planner agent to draft the implementation plan."
 
@@ -141,7 +141,7 @@ hint = "Assign a planner agent to draft the implementation plan."
 name = "Unassign"
 kind = "input"
 from = ["Backlog", "Triage", "Todo"]
-effect = "set assignee_set false"
+effect = ["assignee_set = false"]
 hint = "Remove the current assignee from the issue."
 
 [[action]]
@@ -173,7 +173,7 @@ hint = "Start planning phase. A planner agent drafts the approach."
 name = "WritePlan"
 kind = "input"
 from = ["Planning"]
-effect = "set has_plan true"
+effect = ["has_plan = true"]
 params = ["plan", "acceptance_criteria"]
 hint = "Draft or update the implementation plan. What to do, how, and what done looks like."
 
@@ -181,7 +181,7 @@ hint = "Draft or update the implementation plan. What to do, how, and what done 
 name = "RevisePlan"
 kind = "input"
 from = ["Planning"]
-effect = "increment plan_revision_count"
+effect = ["plan_revision_count += 1"]
 params = ["feedback"]
 hint = "Request plan revision with feedback. Planner updates the plan."
 
@@ -198,7 +198,7 @@ name = "RejectPlan"
 kind = "input"
 from = ["Planned"]
 to = "Planning"
-effect = "increment plan_revision_count"
+effect = ["plan_revision_count += 1"]
 params = ["reason"]
 hint = "Reject an approved plan and send it back for revision."
 
@@ -217,7 +217,7 @@ hint = "Begin implementation. Requires an assignee and an approved plan."
 name = "UpdateImplementation"
 kind = "input"
 from = ["InProgress", "InReview"]
-effect = "increment comment_count"
+effect = ["comment_count += 1"]
 params = ["notes"]
 hint = "Agent drops implementation context -- progress notes, blockers, findings."
 
@@ -234,7 +234,7 @@ name = "RequestChanges"
 kind = "input"
 from = ["InReview"]
 to = "InProgress"
-effect = "increment review_cycles"
+effect = ["review_cycles += 1"]
 params = ["feedback"]
 hint = "Reviewer requests changes. Sends issue back to in-progress."
 
@@ -243,7 +243,7 @@ name = "ApproveReview"
 kind = "internal"
 from = ["InReview"]
 to = "Done"
-effect = "increment review_cycles"
+effect = ["review_cycles += 1"]
 hint = "Reviewer approves the work. Issue moves to done."
 
 [[action]]
@@ -272,7 +272,7 @@ hint = "Archive a completed or cancelled issue. Terminal state."
 name = "AddComment"
 kind = "input"
 from = ["Backlog", "Triage", "Todo", "Planning", "Planned", "InProgress", "InReview", "Done"]
-effect = "increment comment_count"
+effect = ["comment_count += 1"]
 params = ["CommentId"]
 hint = "Add a comment to the issue."
 

@@ -173,10 +173,14 @@ enum Commands {
     ///
     /// This subcommand is used internally by `temper serve --verify-subprocess`.
     VerifyIoa,
-    /// Convert IOA specs from the old predicate syntax to the current grammar.
+    /// Convert IOA specs from the old predicate and effect syntax to the
+    /// current grammar.
     ///
-    /// Rewrites each file in place, keeping comments and layout. `-` reads a
-    /// spec from stdin and writes the converted spec to stdout.
+    /// Predicates become expressions, effects become statements, and
+    /// `[[integration]]` blocks and `trigger` effects become
+    /// `[[action.triggers]]`. Rewrites each file in place, keeping comments
+    /// and layout. `-` reads a spec from stdin and writes the converted spec
+    /// to stdout.
     MigratePredicates {
         /// Spec files (`*.ioa.toml`), or `-` for stdin.
         #[arg(required = true)]

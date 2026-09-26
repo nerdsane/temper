@@ -72,143 +72,47 @@ pub fn parse_automaton_with_liveness(
     // ADR-0049: wire each state_timeout's `state` into the target action's
     // `from` list so the action is actually enabled from that state.
     wire_state_timeout_from_states(&mut automaton);
-    // ADR-0046/0078: expand `[[action.triggers]]` external integration blocks
-    // into synthesized `[[integration]]` entries + action effects so the
-    // existing WASM/adapter/webhook runtime picks them up without needing a parallel
-    // dispatch path. Entity-kind triggers are handled separately by the
-    // reaction dispatcher.
+    // ADR-0046/0078: derive the WASM/adapter/webhook dispatch records from
+    // external `[[action.triggers]]` blocks; translation emits a dispatch per
+    // trigger (`translate::dispatch_effects`). Entity-kind triggers are handled
+    // separately by the reaction dispatcher.
     expand_external_action_triggers(&mut automaton)?;
     // ADR-0050: enforce (or warn on) liveness coverage.
     check_liveness_coverage(&automaton, mode)?;
     Ok(automaton)
 }
 
-/// ADR-0046/0078: translate external `[[action.triggers]]` declarations into
-/// the existing `[[integration]]` + `Effect::Trigger` runtime. For each such
-/// trigger, synthesizes:
-///
-/// 1. A new `Integration` appended to `automaton.integrations` with
-///    fields copied from the trigger (module / adapter / url / method /
-///    config / on_success / on_failure).
-/// 2. A `trigger` effect on the source action so the transition table
-///    emits a `custom_effect` that the runtime's integration dispatcher
-///    picks up by name.
-///
-/// Synthesized integrations are named
-/// `"__trigger__:{source_action}:{trigger_name}"` to avoid collisions
-/// with hand-authored `[[integration]]` blocks that share trigger names.
-///
-/// Entity-kind triggers are skipped (they dispatch through the reaction
-/// system, not the integration runtime).
-fn synthesized_trigger_name(action_name: &str, trigger_name: &str) -> String {
+/// Name of the dispatch record synthesized for an external trigger. The
+/// transition emits it as a custom effect (see
+/// [`super::translate::dispatch_effects`]); the runtime's WASM/adapter
+/// dispatchers look the record up by it.
+pub(crate) fn synthesized_trigger_name(action_name: &str, trigger_name: &str) -> String {
     format!("__trigger__:{action_name}:{trigger_name}")
 }
 
-fn is_platform_custom_effect_name(effect_name: &str) -> bool {
-    effect_name.chars().any(|ch| ch.is_ascii_uppercase())
-}
-
+/// ADR-0046/0078: derive the runtime's dispatch records
+/// (`automaton.integrations`) from external `[[action.triggers]]` blocks
+/// (wasm / adapter / webhook), copying module / adapter / url / method /
+/// config / on_success / on_failure. A record is named after its trigger
+/// (logs, governance decisions) and dispatched by its synthesized
+/// `trigger` key. Entity-kind triggers dispatch through
+/// the reaction system and hook-kind triggers through the host's hook
+/// handler, so neither needs a record.
 fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), AutomatonParseError> {
-    use super::types::{Effect, Integration, TriggerKind};
-
-    let legacy_trigger_names: std::collections::BTreeSet<String> = automaton
-        .integrations
-        .iter()
-        .map(|integration| integration.trigger.clone())
-        .collect();
-    let mut inline_trigger_owners: std::collections::BTreeMap<String, Vec<String>> =
-        std::collections::BTreeMap::new();
-    for action in &automaton.actions {
-        for trigger in &action.triggers {
-            if matches!(
-                trigger.kind,
-                TriggerKind::Wasm | TriggerKind::Adapter | TriggerKind::Webhook
-            ) {
-                inline_trigger_owners
-                    .entry(trigger.name.clone())
-                    .or_default()
-                    .push(action.name.clone());
-            }
-        }
-    }
-
-    for action in automaton.actions.iter_mut() {
-        let local_inline_trigger_names: std::collections::BTreeSet<String> = action
-            .triggers
-            .iter()
-            .filter(|trigger| {
-                matches!(
-                    trigger.kind,
-                    TriggerKind::Wasm | TriggerKind::Adapter | TriggerKind::Webhook
-                )
-            })
-            .map(|trigger| trigger.name.clone())
-            .collect();
-
-        for effect in action.effect.iter_mut() {
-            let Effect::Trigger { name } = effect else {
-                continue;
-            };
-            let bare_name = name.clone();
-            if bare_name.starts_with("__trigger__:") || legacy_trigger_names.contains(&bare_name) {
-                continue;
-            }
-            if local_inline_trigger_names.contains(&bare_name) {
-                *name = synthesized_trigger_name(&action.name, &bare_name);
-                continue;
-            }
-            let Some(owners) = inline_trigger_owners.get(&bare_name) else {
-                if is_platform_custom_effect_name(&bare_name) {
-                    continue;
-                }
-                return Err(AutomatonParseError::Validation(format!(
-                    "action '{}' effect trigger '{}' does not resolve to a local [[action.triggers]] block, a unique reusable inline trigger, or a legacy [[integration]]",
-                    action.name, bare_name
-                )));
-            };
-            if owners.len() != 1 {
-                return Err(AutomatonParseError::Validation(format!(
-                    "action '{}' effect trigger '{}' is ambiguous across actions {:?}",
-                    action.name, bare_name, owners
-                )));
-            }
-            *name = synthesized_trigger_name(&owners[0], &bare_name);
-        }
-
-        let existing_effect_names: std::collections::BTreeSet<String> = action
-            .effect
-            .iter()
-            .filter_map(|effect| match effect {
-                Effect::Trigger { name } => Some(name.clone()),
-                _ => None,
-            })
-            .collect();
-        for trigger in &action.triggers {
-            if !matches!(
-                trigger.kind,
-                TriggerKind::Wasm | TriggerKind::Adapter | TriggerKind::Webhook
-            ) {
-                continue;
-            }
-            let synth_name = synthesized_trigger_name(&action.name, &trigger.name);
-            if !existing_effect_names.contains(&synth_name) {
-                action.effect.push(Effect::Trigger { name: synth_name });
-            }
-        }
-    }
+    use super::types::{Integration, TriggerKind};
 
     let mut synthesized: Vec<Integration> = Vec::new();
-    for action in automaton.actions.iter_mut() {
+    for action in &automaton.actions {
         for trigger in &action.triggers {
             let synth_name = synthesized_trigger_name(&action.name, &trigger.name);
             match trigger.kind {
-                TriggerKind::Entity => continue, // handled by reactions
+                TriggerKind::Entity | TriggerKind::Hook => continue,
                 TriggerKind::Wasm => {
                     let Some(module) = trigger.module.as_ref() else {
                         continue;
                     };
                     synthesized.push(Integration {
-                        name: synth_name.clone(),
+                        name: trigger.name.clone(),
                         trigger: synth_name.clone(),
                         integration_type: "wasm".to_string(),
                         module: Some(module.clone()),
@@ -227,7 +131,7 @@ fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), Auto
                         config.insert("adapter_type".to_string(), adapter_type.clone());
                     }
                     synthesized.push(Integration {
-                        name: synth_name.clone(),
+                        name: trigger.name.clone(),
                         trigger: synth_name.clone(),
                         integration_type: "adapter".to_string(),
                         module: None,
@@ -263,7 +167,7 @@ fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), Auto
                         config.insert("body_template".to_string(), body.clone());
                     }
                     synthesized.push(Integration {
-                        name: synth_name.clone(),
+                        name: trigger.name.clone(),
                         trigger: synth_name.clone(),
                         integration_type: "webhook".to_string(),
                         module: None,
@@ -417,38 +321,7 @@ pub fn to_state_machine(automaton: &Automaton) -> StateMachine {
 fn format_effects(effects: &[Effect]) -> String {
     effects
         .iter()
-        .map(|e| match e {
-            Effect::Increment { var, amount } => match amount {
-                Some(amount) => format!("{var}' = {var} + {amount}"),
-                None => format!("{var}' = {var} + 1"),
-            },
-            Effect::Decrement { var, amount } => match amount {
-                Some(amount) => format!("{var}' = {var} - {amount}"),
-                None => format!("{var}' = {var} - 1"),
-            },
-            Effect::SetCounterFromParam { var, param } => format!("{var}' = {param}"),
-            Effect::SetBool { var, value } => {
-                format!("{var}' = {}", if *value { "TRUE" } else { "FALSE" })
-            }
-            Effect::Emit { event } => format!("Emit(\"{event}\")"),
-            Effect::Trigger { name } => format!("Trigger(\"{name}\")"),
-            Effect::Schedule {
-                action,
-                delay_seconds,
-            } => format!("Schedule(\"{action}\", {delay_seconds})"),
-            Effect::ListAppend { var } => format!("ListAppend({var})"),
-            Effect::ListRemoveAt { var } => format!("ListRemoveAt({var})"),
-            Effect::ScheduleAt { action, field } => {
-                format!("ScheduleAt(\"{action}\", {field})")
-            }
-            Effect::Spawn {
-                entity_type,
-                entity_id_source,
-                ..
-            } => {
-                format!("Spawn({entity_type}, {entity_id_source})")
-            }
-        })
+        .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(" /\\ ")
 }
@@ -511,34 +384,7 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
         }
     }
 
-    // 4. Validate WASM integrations.
     let action_names: Vec<&str> = automaton.actions.iter().map(|a| a.name.as_str()).collect();
-    for ig in &automaton.integrations {
-        if ig.integration_type == "wasm" {
-            if ig.module.is_none() {
-                return Err(AutomatonParseError::Validation(format!(
-                    "integration '{}' is type 'wasm' but missing 'module' field",
-                    ig.name
-                )));
-            }
-            if let Some(ref cb) = ig.on_success
-                && !action_names.contains(&cb.as_str())
-            {
-                return Err(AutomatonParseError::Validation(format!(
-                    "integration '{}' on_success references unknown action '{cb}'",
-                    ig.name
-                )));
-            }
-            if let Some(ref cb) = ig.on_failure
-                && !action_names.contains(&cb.as_str())
-            {
-                return Err(AutomatonParseError::Validation(format!(
-                    "integration '{}' on_failure references unknown action '{cb}'",
-                    ig.name
-                )));
-            }
-        }
-    }
 
     // 5. Validate [[state_timeout]] declarations (ADR-0049).
     //    - `state` must be a declared state.
@@ -614,7 +460,7 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
 
 /// Name- and type-check every predicate, and check `terminal` states exist.
 fn validate_predicates(automaton: &Automaton) -> Result<(), AutomatonParseError> {
-    use crate::predicate::{Scope, VarKind, check};
+    use crate::predicate::{Scope, VarKind, check, check_effects};
 
     let vars: std::collections::BTreeMap<String, VarKind> = automaton
         .state
@@ -626,6 +472,21 @@ fn validate_predicates(automaton: &Automaton) -> Result<(), AutomatonParseError>
     for action in &automaton.actions {
         check(&action.guard, Scope::State(&vars))
             .map_err(|e| invalid(format!("action '{}' guard", action.name), e))?;
+        check_effects(&action.effect, &vars)
+            .map_err(|e| invalid(format!("action '{}' effect", action.name), e))?;
+        for effect in &action.effect {
+            let (Effect::Schedule { action: target, .. }
+            | Effect::ScheduleAt { action: target, .. }) = effect
+            else {
+                continue;
+            };
+            if !automaton.actions.iter().any(|a| &a.name == target) {
+                return Err(invalid(
+                    format!("action '{}' effect", action.name),
+                    format!("'{effect}' schedules unknown action '{target}'"),
+                ));
+            }
+        }
         for trigger in &action.triggers {
             if let Some(guard) = &trigger.guard {
                 check(guard, Scope::Fields).map_err(|e| {
@@ -777,6 +638,14 @@ fn validate_action_triggers(
                     if !has_adapter {
                         return Err(AutomatonParseError::Validation(format!(
                             "trigger '{}' on action '{}' is kind=\"adapter\" but missing 'adapter'",
+                            trigger.name, action.name
+                        )));
+                    }
+                }
+                TriggerKind::Hook => {
+                    if trigger.hook.as_deref().is_none_or(str::is_empty) {
+                        return Err(AutomatonParseError::Validation(format!(
+                            "trigger '{}' on action '{}' is kind=\"hook\" but missing 'hook'",
                             trigger.name, action.name
                         )));
                     }

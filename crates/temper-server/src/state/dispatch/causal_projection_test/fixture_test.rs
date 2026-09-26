@@ -59,7 +59,11 @@ initial="Idle"
 name="Verify"
 from=["Idle"]
 to="Checking"
-effect="trigger check_source"
+
+[[action.triggers]]
+name = "check_source"
+kind = "wasm"
+module = "check_source"
 [[action]]
 name="SawNew"
 from=["Checking"]
@@ -68,11 +72,6 @@ to="SawNew"
 name="SawOld"
 from=["Checking"]
 to="SawOld"
-[[integration]]
-name="check_source"
-trigger="check_source"
-type="wasm"
-module="check_source"
 "#;
 
 pub(super) struct FaultQueryPlane {
@@ -204,12 +203,13 @@ async fn fixture_from_source(
     stack.query_plane = Some(query.clone());
     let mut registry = SpecRegistry::new();
     registry
-        .try_register_tenant_with_reactions(
+        .try_register_tenant_with_constraints(
             "default",
             parse_csdl(CSDL).unwrap(),
             CSDL.into(),
             &[("Source", source), ("Verifier", VERIFIER)],
-            Vec::new(),
+            None,
+            false,
         )
         .unwrap();
     let mut state =

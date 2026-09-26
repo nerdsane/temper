@@ -81,7 +81,6 @@ kind = "input"
 from = ["Review"]
 to = "Done"
 hint = "Reviewer approves the submitted deliverable."
-effect = [{ type = "emit", event = "TaskApproved" }]
 
 [[action]]
 name = "RequestChanges"

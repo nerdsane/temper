@@ -32,7 +32,7 @@ hint = "Begin human-brain negotiation for an episode."
 name = "RecordEpisodeContract"
 kind = "input"
 from = ["Draft", "Negotiating"]
-effect = "set has_contract true"
+effect = ["has_contract = true"]
 params = ["AdaptationGoalId", "SelectionPressureId", "ViabilityConstraintIdsJson", "EvaluationStageIdsJson", "EliminationRuleIdsJson", "ScoringRuleIdsJson"]
 hint = "Record the Adaptation Goal, Viability Constraints, Selection Pressure, and evaluation rules."
 
@@ -42,7 +42,6 @@ kind = "input"
 from = ["Draft", "Negotiating"]
 to = "Running"
 guard = "has_contract"
-effect = [{ type = "trigger", name = "episode_started" }]
 params = ["StartedBy", "Reason"]
 hint = "Start the episode after a contract exists."
 
@@ -59,7 +58,7 @@ variant_target_count = "3"
 name = "AddGeneration"
 kind = "input"
 from = ["Running"]
-effect = "increment generation_count"
+effect = ["generation_count += 1"]
 params = ["GenerationId"]
 hint = "Attach a generation to this episode."
 
@@ -92,7 +91,7 @@ name = "RecordEpisodeWinner"
 kind = "input"
 from = ["Selecting"]
 to = "Promoting"
-effect = "set winner_selected true"
+effect = ["winner_selected = true"]
 params = ["WinningVariantId", "SelectorBrainRunId", "SelectionExplanation", "EvidenceArtifactId"]
 hint = "Record the selected winning variant."
 

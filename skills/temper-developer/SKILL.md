@@ -115,9 +115,16 @@ kind = "input"          # "input" | "output" | "internal"
 from = ["State1"]
 to = "State2"
 guard = "counter_var > 0"
-effect = "increment counter_var"
+effect = ["counter_var += 1"]
 params = ["Param1"]
 hint = "Description for agents."
+
+[[action.triggers]]     # fires after ActionName commits
+name = "notify_service"
+kind = "wasm"
+module = "notify_service"
+on_success = "NotifySucceeded"
+on_failure = "NotifyFailed"
 
 [[invariant]]
 name = "InvariantName"
@@ -127,15 +134,9 @@ assert = "status in ['State2', 'State3'] => counter_var > 0"
 name = "EventuallyDone"
 from = ["State1"]
 reaches = ["State3"]
-
-[[integration]]
-name = "notify_service"
-trigger = "ActionName"
-type = "wasm"
-module = "notify_service"
-on_success = "NotifySucceeded"
-on_failure = "NotifyFailed"
 ```
+
+**`effect` is a list of statements** in the guard grammar (`counter_var += 1`, `ready = true`, `append(tags, params.tag)`, `schedule('Expire', 3600)`, ...; see `docs/predicates.md#effects`). Nothing is implied by an action's name — an `AddItem` with no `effect` changes only `status`. **`[[action.triggers]]`** is the only way an action causes work elsewhere (`kind = "entity" | "wasm" | "adapter" | "webhook" | "hook"`). `[[integration]]` blocks and `trigger`/`emit` effects fail to load; `temper migrate-predicates <files>` converts them.
 
 **IMPORTANT: Integrations use WASM modules, NOT webhooks.** If the app needs external API calls (payments, notifications, email, etc.), you MUST generate a WASM module. See "Generate WASM Integration Modules" below — do NOT skip that section.
 
@@ -166,13 +167,19 @@ when { resource.ownerId == principal.id };
 
 When the app needs external API calls (payments, email, notifications, etc.):
 
-1. **Add integration actions to the spec** — use the `trigger` effect pattern:
+1. **Add integration actions to the spec** — a `kind = "wasm"` trigger on the action, plus callback actions:
    ```toml
    [[action]]
    name = "ChargeCard"
    from = ["Pending"]
    to = "Charging"
-   effect = "trigger stripe_charge"
+
+   [[action.triggers]]
+   name = "stripe_charge"
+   kind = "wasm"
+   module = "stripe_charge"
+   on_success = "ChargeSucceeded"
+   on_failure = "ChargeFailed"
 
    [[action]]
    name = "ChargeSucceeded"
@@ -185,14 +192,6 @@ When the app needs external API calls (payments, email, notifications, etc.):
    kind = "input"
    from = ["Charging"]
    to = "PaymentFailed"
-
-   [[integration]]
-   name = "stripe_charge"
-   trigger = "stripe_charge"
-   type = "wasm"
-   module = "stripe_charge"
-   on_success = "ChargeSucceeded"
-   on_failure = "ChargeFailed"
    ```
 
 2. **Generate WASM module source** — create a Rust `cdylib` project:
@@ -246,7 +245,7 @@ When the app needs external API calls (payments, email, notifications, etc.):
            )
        };
 
-       // 3. Return result — "action" should match on_success/on_failure from the integration
+       // 3. Return result — "action" should match on_success/on_failure from the trigger
        let result = br#"{"action":"CallbackName","params":{},"success":true}"#;
        unsafe { host_set_result(result.as_ptr() as i32, result.len() as i32) };
        0 // return 0 for success
@@ -267,7 +266,7 @@ When the app needs external API calls (payments, email, notifications, etc.):
    ```json
    {"action": "CallbackName", "params": {"key": "value"}, "success": true}
    ```
-   - `action`: the callback action name (should match `on_success` or `on_failure` in the integration)
+   - `action`: the callback action name (should match `on_success` or `on_failure` in the trigger)
    - `params`: arbitrary JSON passed as parameters to the callback action
    - `success`: `true` triggers `on_success`, `false` triggers `on_failure`
 
@@ -290,7 +289,7 @@ When the app needs external API calls (payments, email, notifications, etc.):
      --data-binary @target/wasm32-unknown-unknown/release/<module_name>.wasm
    ```
 
-5. **Deploy spec** as usual — the integration will invoke the WASM module when the trigger action fires.
+5. **Deploy spec** as usual — the trigger invokes the WASM module when its action commits.
 
 ## Start Server (Before Specs)
 
@@ -467,9 +466,17 @@ kind = "input"             # "input" | "output" | "internal"
 from = ["State1"]          # states this action can fire from
 to = "State2"              # target state (omit for self-loops)
 guard = "counter_var > 0 && bool_var"  # optional guard expression
-effect = "increment counter_var" # optional effect
+effect = ["counter_var += params.Param1", "bool_var = true"]  # optional effect statements
 params = ["Param1"]        # optional parameters
 hint = "Description."      # optional hint
+
+# Outgoing work — the only way an action reaches outside the entity
+[[action.triggers]]
+name = "notify_service"
+kind = "wasm"              # "entity" | "wasm" | "adapter" | "webhook" | "hook"
+module = "notify_service"
+on_success = "NotifySucceeded"
+on_failure = "NotifyFailed"
 
 # Output actions (events, no state change)
 [[action]]
@@ -487,16 +494,17 @@ assert = "status in ['State2', 'State3'] => counter_var > 0"  # proven in every 
 name = "EventuallyResolved"
 from = ["State1"]
 reaches = ["State3"]
-
-# Integrations (WASM modules — NOT webhooks)
-[[integration]]
-name = "notify_service"
-trigger = "ActionName"
-type = "wasm"
-module = "notify_service"
-on_success = "NotifySucceeded"
-on_failure = "NotifyFailed"
 ```
+
+**Effect statements** (type-checked at load; `params.p` is action parameter `p`):
+
+| Statement | Applies to |
+|---|---|
+| `x = 5`, `x = params.p`, `x += 1`, `x -= 1` | counter (`-=` stops at 0) |
+| `b = true`, `b = other_bool`, `b = params.p` | bool |
+| `append(tags, 'v')`, `append(tags, params.p)`, `remove_at(tags, params.i)` | list of strings |
+| `schedule('Action', 3600)`, `schedule_at('Action', field)` | a declared action on this entity |
+| `spawn('Type', 'Create', id_var)` (optional 4th arg: child id) | a new child entity |
 
 ### IOA-to-CSDL Mapping Rules
 

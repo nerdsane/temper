@@ -48,13 +48,10 @@ name = "SelectCandidate"
 kind = "input"
 from = ["Selecting"]
 to = "Evaluating"
-effect = [{ type = "increment", var = "candidate_count" }, { type = "trigger", name = "evaluate_candidate" }]
+effect = ["candidate_count += 1"]
 params = ["CandidateId", "SpecSource", "TrajectoryActions", "Trajectories"]
 hint = "Select a candidate spec from the Pareto frontier or seed pool."
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "evaluate_candidate"
 kind = "wasm"
@@ -71,9 +68,6 @@ to = "Reflecting"
 params = ["ReplayResultJson"]
 hint = "Record evaluation (replay) results from the WASM replay module."
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "build_reflective_dataset"
 kind = "wasm"
@@ -90,9 +84,6 @@ to = "Proposing"
 params = ["DatasetJson"]
 hint = "Record reflective dataset built by WASM module from OTS traces."
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "propose_mutation"
 kind = "wasm"
@@ -121,13 +112,10 @@ name = "RecordMutation"
 kind = "input"
 from = ["Proposing"]
 to = "Verifying"
-effect = [{ type = "increment", var = "mutation_attempts" }, { type = "trigger", name = "verify_candidate" }]
+effect = ["mutation_attempts += 1"]
 params = ["MutatedSpecSource", "MutationSummary"]
 hint = "Record the LLM-proposed spec mutation."
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "verify_candidate"
 kind = "wasm"
@@ -146,9 +134,6 @@ to = "Scoring"
 params = ["VerificationReport"]
 hint = "Record successful L0-L3 verification of the mutated spec."
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "score_candidate"
 kind = "wasm"
@@ -181,9 +166,6 @@ to = "Updating"
 params = ["ScoresJson"]
 hint = "Record multi-objective scores from WASM scoring module."
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "update_frontier"
 kind = "wasm"
@@ -208,9 +190,6 @@ to = "Deploying"
 params = ["FrontierUpdateJson"]
 hint = "Frontier updated, auto-approved for deployment."
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "deploy_candidate"
 kind = "wasm"
@@ -223,7 +202,7 @@ name = "ContinueEvolution"
 kind = "input"
 from = ["Updating"]
 to = "Selecting"
-effect = "increment generation"
+effect = ["generation += 1"]
 hint = "Continue to next generation."
 
 [[action]]
@@ -231,16 +210,21 @@ name = "Approve"
 kind = "input"
 from = ["AwaitingApproval"]
 to = "Deploying"
-effect = "trigger deploy_candidate"
 params = ["ApproverId"]
 hint = "Human or verified agent approves the evolution candidate."
+
+[[action.triggers]]
+name = "deploy_candidate"
+kind = "wasm"
+module = "gepa-deploy"
+on_failure = "Fail"
 
 [[action]]
 name = "Reject"
 kind = "input"
 from = ["AwaitingApproval"]
 to = "Selecting"
-effect = "increment generation"
+effect = ["generation += 1"]
 params = ["RejectionReason"]
 hint = "Reject the candidate, continue evolving."
 

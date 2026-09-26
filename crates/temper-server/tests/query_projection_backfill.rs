@@ -32,7 +32,7 @@ query_indexed = false
 name = "Touch"
 from = ["Draft"]
 to = "Draft"
-effect = [{ type = "increment", var = "progress_token" }]
+effect = ["progress_token += 1"]
 "#;
 
 fn build_state_with_turso(system_name: &str, store: TursoEventStore) -> ServerState {

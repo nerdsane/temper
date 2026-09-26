@@ -25,10 +25,7 @@ kind = "input"
 from = ["Planning"]
 to = "Testing"
 hint = "Move to the testing phase. Spawns a TestWorkflow child entity."
-effect = [
-  { type = "spawn_entity", entity_type = "TestWorkflow", entity_id_source = "{uuid}", initial_action = "Begin", store_id_in = "test_workflow_id" },
-  { type = "emit_event", event = "TestingStarted" }
-]
+effect = ["spawn('TestWorkflow', 'Begin', test_workflow_id)"]
 
 [[action]]
 name = "StartReview"
@@ -37,10 +34,7 @@ from = ["Testing"]
 to = "Reviewing"
 params = ["test_results"]
 hint = "Move to the review phase. Spawns a ReviewWorkflow child entity."
-effect = [
-  { type = "spawn_entity", entity_type = "ReviewWorkflow", entity_id_source = "{uuid}", initial_action = "Begin", store_id_in = "review_workflow_id" },
-  { type = "emit_event", event = "ReviewStarted" }
-]
+effect = ["spawn('ReviewWorkflow', 'Begin', review_workflow_id)"]
 
 [[action]]
 name = "StartDeploy"
@@ -49,10 +43,7 @@ from = ["Reviewing"]
 to = "Deploying"
 params = ["review_approval"]
 hint = "Move to the deployment phase. Spawns a DeployWorkflow child entity."
-effect = [
-  { type = "spawn_entity", entity_type = "DeployWorkflow", entity_id_source = "{uuid}", initial_action = "Begin", store_id_in = "deploy_workflow_id" },
-  { type = "emit_event", event = "DeployStarted" }
-]
+effect = ["spawn('DeployWorkflow', 'Begin', deploy_workflow_id)"]
 
 [[action]]
 name = "Complete"
@@ -61,7 +52,6 @@ from = ["Deploying"]
 to = "Completed"
 params = ["deploy_url"]
 hint = "Mark the pipeline as successfully completed."
-effect = [{ type = "emit_event", event = "PipelineCompleted" }]
 
 [[action]]
 name = "Fail"
@@ -70,4 +60,3 @@ from = ["Planning", "Testing", "Reviewing", "Deploying"]
 to = "Failed"
 params = ["reason"]
 hint = "Mark the pipeline as failed from any active phase."
-effect = [{ type = "emit_event", event = "PipelineFailed" }]

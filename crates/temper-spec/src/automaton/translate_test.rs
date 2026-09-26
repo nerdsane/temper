@@ -1,5 +1,6 @@
 use super::*;
 use crate::automaton::parse_automaton;
+use crate::predicate::Arg;
 
 #[test]
 fn translate_simple_action() {
@@ -49,157 +50,155 @@ guard = "items >= 1"
     assert_eq!(action.guard.to_string(), "items >= 1");
 }
 
-#[test]
-fn translate_effects_explicit() {
-    let spec = r#"
+const VARS: &str = r#"
 [automaton]
 name = "Test"
 states = ["Draft", "Active"]
 initial = "Draft"
 
+[[state]]
+name = "count"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "limit"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "done"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "tags"
+type = "list"
+initial = "[]"
+"#;
+
+fn effects_of(action: &str) -> Vec<ResolvedEffect> {
+    let automaton = parse_automaton(&format!("{VARS}\n{action}")).unwrap();
+    translate_actions(&automaton).remove(0).effects
+}
+
+fn arg(source: &str) -> Arg {
+    crate::predicate::parse_arg(source).unwrap()
+}
+
+#[test]
+fn effects_resolve_against_the_variable_types() {
+    let effects = effects_of(
+        r#"
 [[action]]
 name = "DoSomething"
 from = ["Draft"]
 to = "Active"
-effect = [{ type = "increment", var = "count" }, { type = "set_bool", var = "done", value = true }, { type = "emit", event = "thing_done" }]
-"#;
-    let automaton = parse_automaton(spec).unwrap();
-    let actions = translate_actions(&automaton);
-    let effects = &actions[0].effects;
-    assert_eq!(effects.len(), 3);
-    assert!(matches!(&effects[0], ResolvedEffect::IncrementCounter(v) if v == "count"));
-    assert!(matches!(
-        &effects[1],
-        ResolvedEffect::SetBool { var, value: true } if var == "done"
-    ));
-    assert!(matches!(&effects[2], ResolvedEffect::Emit(e) if e == "thing_done"));
-}
-
-#[test]
-fn translate_counter_effects_with_param_amounts_as_runtime_only() {
-    let spec = r#"
-[automaton]
-name = "Test"
-states = ["Draft", "Active"]
-initial = "Draft"
-
-[[action]]
-name = "TrackUsage"
-from = ["Draft"]
-to = "Active"
-effect = [
-  { type = "increment", var = "used_bytes", amount = "size_bytes" },
-  { type = "decrement", var = "used_bytes", amount = "released_bytes" }
-]
-"#;
-    let automaton = parse_automaton(spec).unwrap();
-    let actions = translate_actions(&automaton);
-    let effects = &actions[0].effects;
-    assert_eq!(effects.len(), 2);
-    assert!(matches!(
-        &effects[0],
-        ResolvedEffect::IncrementCounterByParam { var, param }
-            if var == "used_bytes" && param == "size_bytes"
-    ));
-    assert!(matches!(
-        &effects[1],
-        ResolvedEffect::DecrementCounterByParam { var, param }
-            if var == "used_bytes" && param == "released_bytes"
-    ));
-    assert!(
-        !effects[0].is_verifiable() && !effects[1].is_verifiable(),
-        "param-based counter deltas are runtime-only until verification models action-param arithmetic"
+effect = ["count += 1", "count -= params.n", "limit = count", "done = true", "append(tags, 'vip')", "remove_at(tags, params.i)"]
+"#,
     );
+    assert_eq!(
+        effects,
+        vec![
+            ResolvedEffect::AddCounter {
+                var: "count".into(),
+                value: arg("1")
+            },
+            ResolvedEffect::SubCounter {
+                var: "count".into(),
+                value: arg("params.n")
+            },
+            ResolvedEffect::SetCounter {
+                var: "limit".into(),
+                value: arg("count")
+            },
+            ResolvedEffect::SetBool {
+                var: "done".into(),
+                value: arg("true")
+            },
+            ResolvedEffect::ListAppend {
+                var: "tags".into(),
+                value: arg("'vip'")
+            },
+            ResolvedEffect::ListRemoveAt {
+                var: "tags".into(),
+                index: arg("params.i")
+            },
+        ]
+    );
+    assert!(effects.iter().all(ResolvedEffect::is_state_effect));
 }
 
 #[test]
-fn translate_set_counter_from_param_effects() {
-    let spec = r#"
-[automaton]
-name = "Upload"
-states = ["Pending", "Ready"]
-initial = "Pending"
-
-[[action]]
-name = "Complete"
-from = ["Pending"]
-to = "Ready"
-effect = [{ type = "set_counter_from_param", var = "size_bytes", param = "payload_size" }]
-"#;
-    let automaton = parse_automaton(spec).unwrap();
-    let actions = translate_actions(&automaton);
-    let effects = &actions[0].effects;
-    assert_eq!(effects.len(), 1);
-    assert!(matches!(
-        &effects[0],
-        ResolvedEffect::SetCounterFromParam { var, param } if var == "size_bytes" && param == "payload_size"
-    ));
-}
-
-#[test]
-fn translate_name_heuristic_additem() {
-    let spec = r#"
-[automaton]
-name = "Test"
-states = ["Draft"]
-initial = "Draft"
-
-[[state]]
-name = "items"
-type = "counter"
-initial = "0"
-
-[[state]]
-name = "quantity"
-type = "counter"
-initial = "0"
-
+fn action_names_imply_no_effects() {
+    let effects = effects_of(
+        r#"
 [[action]]
 name = "AddItem"
 from = ["Draft"]
-"#;
-    let automaton = parse_automaton(spec).unwrap();
-    let actions = translate_actions(&automaton);
-    let effects = &actions[0].effects;
-    assert!(effects.len() >= 2);
-    assert!(
-        effects
-            .iter()
-            .any(|effect| matches!(effect, ResolvedEffect::IncrementCounter(v) if v == "items"))
+"#,
     );
-    assert!(
-        effects
-            .iter()
-            .any(|effect| matches!(effect, ResolvedEffect::IncrementCounter(v) if v == "quantity"))
-    );
+    assert!(effects.is_empty(), "{effects:?}");
 }
 
 #[test]
-fn translate_runtime_only_effects() {
-    let spec = r#"
-[automaton]
-name = "Test"
-states = ["Idle", "Active"]
-initial = "Idle"
-
+fn runtime_only_effects_follow_the_statements_then_dispatches() {
+    let effects = effects_of(
+        r#"
 [[action]]
 name = "Start"
-from = ["Idle"]
+from = ["Draft"]
 to = "Active"
-effect = [{ type = "trigger", name = "run_wasm" }, { type = "schedule", action = "Refresh", delay_seconds = 60 }, { type = "spawn", entity_type = "Child", entity_id_source = "{uuid}", initial_action = "Init" }]
+effect = ["schedule('Refresh', 60)", "spawn('Child', 'Init', child_id)", "count += 1"]
 
-[[integration]]
+[[action.triggers]]
 name = "run_wasm"
-trigger = "run_wasm"
-type = "webhook"
-"#;
-    let automaton = parse_automaton(spec).unwrap();
-    let actions = translate_actions(&automaton);
-    let effects = &actions[0].effects;
-    assert_eq!(effects.len(), 3);
-    assert!(!effects[0].is_verifiable());
-    assert!(!effects[1].is_verifiable());
-    assert!(!effects[2].is_verifiable());
+kind = "wasm"
+module = "runner"
+
+[[action.triggers]]
+name = "callback"
+kind = "hook"
+hook = "DispatchCallback"
+
+[[action.triggers]]
+name = "notify_child"
+kind = "entity"
+target_entity = "Child"
+target_action = "Init"
+resolve_target = { type = "same_id" }
+
+[[action]]
+name = "Refresh"
+from = ["Active"]
+"#,
+    );
+    assert_eq!(
+        effects,
+        vec![
+            ResolvedEffect::Schedule {
+                action: "Refresh".into(),
+                delay_seconds: 60
+            },
+            ResolvedEffect::Spawn {
+                entity_type: "Child".into(),
+                initial_action: "Init".into(),
+                store_id_in: Some("child_id".into()),
+                id: None,
+            },
+            ResolvedEffect::AddCounter {
+                var: "count".into(),
+                value: arg("1")
+            },
+            ResolvedEffect::Dispatch("__trigger__:Start:run_wasm".into()),
+            ResolvedEffect::Dispatch("DispatchCallback".into()),
+        ]
+    );
+    let state: Vec<bool> = effects
+        .iter()
+        .map(ResolvedEffect::is_state_effect)
+        .collect();
+    assert_eq!(state, [false, false, true, false, false]);
 }
 
 #[test]
@@ -245,45 +244,4 @@ from = ["Draft"]
     let actions = translate_actions(&automaton);
     assert_eq!(actions.len(), 1);
     assert_eq!(actions[0].name, "DoWork");
-}
-
-#[test]
-fn is_verifiable_classification() {
-    assert!(ResolvedEffect::IncrementCounter("x".into()).is_verifiable());
-    assert!(ResolvedEffect::DecrementCounter("x".into()).is_verifiable());
-    assert!(
-        !ResolvedEffect::SetCounterFromParam {
-            var: "x".into(),
-            param: "value".into(),
-        }
-        .is_verifiable()
-    );
-    assert!(
-        ResolvedEffect::SetBool {
-            var: "x".into(),
-            value: true
-        }
-        .is_verifiable()
-    );
-    assert!(ResolvedEffect::ListAppend("x".into()).is_verifiable());
-    assert!(ResolvedEffect::ListRemoveAt("x".into()).is_verifiable());
-    assert!(!ResolvedEffect::Emit("e".into()).is_verifiable());
-    assert!(!ResolvedEffect::Trigger("t".into()).is_verifiable());
-    assert!(
-        !ResolvedEffect::Schedule {
-            action: "a".into(),
-            delay_seconds: 1
-        }
-        .is_verifiable()
-    );
-    assert!(
-        !ResolvedEffect::Spawn {
-            entity_type: "T".into(),
-            entity_id_source: "s".into(),
-            initial_action: None,
-            store_id_in: None,
-            copy_fields: None,
-        }
-        .is_verifiable()
-    );
 }

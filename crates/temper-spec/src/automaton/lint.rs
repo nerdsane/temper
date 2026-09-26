@@ -75,10 +75,8 @@ impl LintFinding {
 /// - lint: semantic completeness / consistency
 pub fn lint_automaton(automaton: &Automaton) -> Vec<LintFinding> {
     let mut findings = Vec::new();
-    let mut vars = BTreeSet::new();
 
     for state_var in &automaton.state {
-        vars.insert(state_var.name.clone());
         if !is_supported_state_var_type(&state_var.var_type) {
             findings.push(LintFinding::error(
                 "unknown_state_var_type",
@@ -99,21 +97,6 @@ pub fn lint_automaton(automaton: &Automaton) -> Vec<LintFinding> {
                     action.name
                 ),
             ));
-        }
-
-        for effect in &action.effect {
-            if let Some(var) = effect_var(effect)
-                && !vars.contains(var)
-            {
-                findings.push(LintFinding::error(
-                    "effect_unknown_var",
-                    format!(
-                        "effect '{}' references unknown variable '{}'",
-                        render_effect(effect),
-                        var
-                    ),
-                ));
-            }
         }
     }
 
@@ -212,34 +195,11 @@ fn lint_spawn_effect(
     let Effect::Spawn {
         entity_type,
         initial_action,
-        copy_fields,
         ..
     } = effect
     else {
         return;
     };
-
-    // Warn if copy_fields references undeclared state vars on the parent
-    if let Some(fields) = copy_fields {
-        let parent_automaton = automata.get(entity_name);
-        if let Some(parent) = parent_automaton {
-            let parent_vars: BTreeSet<String> =
-                parent.state.iter().map(|s| s.name.clone()).collect();
-            for field_name in fields {
-                if !parent_vars.contains(field_name) {
-                    findings.push(BundleLintFinding {
-                        entity: entity_name.to_string(),
-                        code: "spawn_copy_field_unknown".to_string(),
-                        severity: LintSeverity::Warning,
-                        message: format!(
-                            "action '{}' spawn copy_fields references unknown state var '{}' on '{}'",
-                            action.name, field_name, entity_name
-                        ),
-                    });
-                }
-            }
-        }
-    }
 
     let Some(target_automaton) = automata.get(entity_type) else {
         findings.push(BundleLintFinding::error(
@@ -253,9 +213,7 @@ fn lint_spawn_effect(
         return;
     };
 
-    let Some(initial_action_name) = initial_action.as_deref() else {
-        return;
-    };
+    let initial_action_name = initial_action.as_str();
 
     let Some(target_action) = target_action(target_automaton, initial_action_name) else {
         findings.push(BundleLintFinding::error(
@@ -278,7 +236,7 @@ fn lint_spawn_effect(
         target_action,
         findings,
     );
-    let available_params = available_spawn_params(action, parent_snake, copy_fields.as_deref());
+    let available_params = available_spawn_params(action, parent_snake);
     lint_spawn_param_mapping(
         entity_name,
         &action.name,
@@ -360,21 +318,12 @@ fn lint_spawn_param_mapping(
     ));
 }
 
-fn available_spawn_params(
-    action: &super::Action,
-    parent_snake: &str,
-    copy_fields: Option<&[String]>,
-) -> BTreeSet<String> {
+fn available_spawn_params(action: &super::Action, parent_snake: &str) -> BTreeSet<String> {
     let mut available_params: BTreeSet<String> =
         action.params.iter().map(|p| p.name().to_string()).collect();
     available_params.insert("parent_id".to_string());
     available_params.insert("parent_type".to_string());
     available_params.insert(format!("{parent_snake}_id"));
-    if let Some(fields) = copy_fields {
-        for f in fields {
-            available_params.insert(f.clone());
-        }
-    }
     available_params
 }
 
@@ -410,55 +359,6 @@ fn is_supported_state_var_type(var_type: &str) -> bool {
             | "float"
             | "number"
     )
-}
-
-fn effect_var(effect: &Effect) -> Option<&str> {
-    match effect {
-        Effect::Increment { var, .. } => Some(var.as_str()),
-        Effect::Decrement { var, .. } => Some(var.as_str()),
-        Effect::SetCounterFromParam { var, .. } => Some(var.as_str()),
-        Effect::SetBool { var, .. } => Some(var.as_str()),
-        Effect::Emit { .. } => None,
-        Effect::ListAppend { var } => Some(var.as_str()),
-        Effect::ListRemoveAt { var } => Some(var.as_str()),
-        Effect::Trigger { .. } => None,
-        Effect::Schedule { .. } => None,
-        Effect::ScheduleAt { .. } => None,
-        Effect::Spawn { .. } => None,
-    }
-}
-
-fn render_effect(effect: &Effect) -> String {
-    match effect {
-        Effect::Increment { var, amount } => amount
-            .as_ref()
-            .map(|amount| format!("increment {var} by {amount}"))
-            .unwrap_or_else(|| format!("increment {var}")),
-        Effect::Decrement { var, amount } => amount
-            .as_ref()
-            .map(|amount| format!("decrement {var} by {amount}"))
-            .unwrap_or_else(|| format!("decrement {var}")),
-        Effect::SetCounterFromParam { var, param } => {
-            format!("set_counter_from_param {var} <- {param}")
-        }
-        Effect::SetBool { var, value } => format!("set {var} {value}"),
-        Effect::Emit { event } => format!("emit {event}"),
-        Effect::ListAppend { var } => format!("list_append {var}"),
-        Effect::ListRemoveAt { var } => format!("list_remove_at {var}"),
-        Effect::Trigger { name } => format!("trigger {name}"),
-        Effect::Schedule {
-            action,
-            delay_seconds,
-        } => format!("schedule {action} {delay_seconds}s"),
-        Effect::ScheduleAt { action, field } => format!("schedule_at {field} {action}"),
-        Effect::Spawn {
-            entity_type,
-            entity_id_source,
-            ..
-        } => {
-            format!("spawn {entity_type} from {entity_id_source}")
-        }
-    }
 }
 
 fn to_snake_case(value: &str) -> String {

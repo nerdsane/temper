@@ -9,7 +9,7 @@ Every condition in an IOA spec is one string in one grammar (ADR-0179):
 | `[[invariant]]` | `assert` | every reachable state (proven by the verification cascade) |
 | `[[field_invariant]]` | `assert` | the entity's fields after a write (checked on writes) |
 
-`reactions.toml` `[reaction.when] guard` uses the same grammar as trigger guards.
+An action's `effect` is a list of statements over the same literals and names ([Effects](#effects)).
 
 ```toml
 [[action]]
@@ -54,6 +54,40 @@ literal = integer | 'string' | true | false | null
   - only a bad state blocks: `Workspace[workspace_id].status not in ['Frozen', 'Archived']`
 - **`=>`** is implication: `status in ['Done'] => approved`.
 
+## Effects
+
+`effect` is a list of statements, type-checked when the spec loads (ADR-0180):
+
+```toml
+effect = [
+  "items += 1",                         # counter add: int, counter var, or params.p
+  "retries -= 1",                       # counter subtract, stops at 0
+  "quota_limit = params.quota_limit",   # counter set
+  "ready = true",                       # bool set: true/false, bool var, or params.p
+  "append(tags, params.tag)",           # list append: 'string' or params.p
+  "remove_at(tags, params.tag_index)",  # list remove by index; out of range is a no-op
+  "schedule('Expire', 3600)",           # dispatch an action on this entity after N seconds
+  "schedule_at('Expire', expires_at)",  # dispatch at the timestamp in a field
+  "spawn('Task', 'Create', last_task_id)",  # create a child, run 'Create' on it, store its id
+]
+```
+
+```text
+effect  = assign | call
+assign  = name ( "=" | "+=" | "-=" ) arg
+call    = "append" "(" name "," arg ")" | "remove_at" "(" name "," arg ")"
+        | "schedule" "(" 'action' "," integer ")" | "schedule_at" "(" 'action' "," name ")"
+        | "spawn" "(" 'type' "," 'action' [ "," name [ "," arg ] ] ")"
+arg     = integer | 'string' | true | false | name | "params" "." name
+```
+
+- **`params.p`** is the action parameter `p`.
+- **Only counters and bools are assigned**; `+=` and `-=` only on counters. Lists take `append`/`remove_at`, and their elements are strings.
+- **`schedule`/`schedule_at` targets** must be declared actions.
+- **`spawn`** creates a child with a fresh id, or the id in its optional fourth argument (`'string'` or `params.p`). The child's initial action receives the parent action's params plus `parent_type`, `parent_id` and `<parent>_id`.
+- **Nothing is implied by an action's name.** An action with no `effect` changes only `status`.
+- **Work on other entities, modules, adapters, webhooks and platform hooks** is an `[[action.triggers]]` entry, not an effect ([reactions.md](reactions.md)).
+
 ## Terminal states
 
 States no action may leave are listed on the automaton, not written as an invariant:
@@ -71,10 +105,14 @@ terminal = ["Done", "Cancelled"]
 
 Guards may also read values the model does not track (string variables, reference fields, related entities). The verifier treats those as unknown: an action gated on one may fire, but is not guaranteed to.
 
+Effects that read `params.p` are verified with `p` unknown: a counter takes every value in `0..=bound`, a bool both values, and a list element every string literal a guard or invariant compares that list against, plus one fresh value.
+
 ## Converting old specs
 
-Specs written before this grammar (guard tables and clauses such as `is_true x` or `min x 3`, `when` + `assert`, `no_further_transitions`, trigger-guard and field-predicate tables) fail to load with a hint. Convert them in place:
+Specs written before this grammar (guard tables and clauses such as `is_true x` or `min x 3`, `when` + `assert`, `no_further_transitions`, trigger-guard and field-predicate tables, table or verb-string effects such as `{ type = "increment", var = "items" }` or `"set ready true"`, `trigger`/`emit` effects and `[[integration]]` blocks) fail to load with a hint. Convert them in place:
 
 ```bash
 temper migrate-predicates path/to/*.ioa.toml
 ```
+
+The converter rewrites effects as statements, moves integrations onto the actions that triggered them as `[[action.triggers]]`, writes out the effects the old action-name heuristic implied (`AddItem` incrementing counters), and prints a note for anything it drops: `emit` effects, integrations no action triggered, and webhook integrations without a `url` (which never fired).

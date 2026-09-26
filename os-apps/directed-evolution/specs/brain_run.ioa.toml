@@ -14,7 +14,7 @@ name = "StartBrainRun"
 kind = "input"
 from = ["Queued"]
 to = "Running"
-effect = "set started true"
+effect = ["started = true"]
 params = ["Role", "WorkItemId", "AgentKind", "Model", "ParentSessionId", "CorrelationJson"]
 hint = "Start a bounded agent brain run."
 

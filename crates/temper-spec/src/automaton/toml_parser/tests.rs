@@ -108,73 +108,57 @@ record_parent_event = "false"
 }
 
 #[test]
-fn guard_is_an_expression_and_effects_accept_strings_and_tables() {
+fn guard_is_an_expression_and_effects_are_statements() {
     let auto = parse_with(
         r#"
 [[action]]
 name = "Finish"
 guard = "ready && items >= 2"
-effect = [
-  "increment items",
-  { type = "set_bool", var = "ready", value = true },
-  { type = "spawn", entity_type = "Child", entity_id_source = "{uuid}", copy_fields = ["a", "b"] },
-]
+effect = ["items += 1", "ready = true", "spawn('Child', 'Init')"]
 "#,
     )
     .unwrap();
     let action = &auto.actions[0];
     assert_eq!(action.guard.to_string(), "ready && items >= 2");
-    assert!(matches!(&action.effect[0], Effect::Increment { var, amount: None } if var == "items"));
-    assert!(matches!(
-        &action.effect[1],
-        Effect::SetBool { value: true, .. }
-    ));
-    assert!(matches!(
-        &action.effect[2],
-        Effect::Spawn { copy_fields: Some(fields), .. } if fields == &["a", "b"]
-    ));
+    let effects: Vec<String> = action.effect.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        effects,
+        ["items += 1", "ready = true", "spawn('Child', 'Init')"]
+    );
 }
 
 #[test]
-fn unknown_string_effect_is_rejected() {
-    let err = parse_with("[[action]]\nname = \"Finish\"\neffect = \"frobnicate items\"\n")
-        .expect_err("unknown string effect must not be dropped");
-    assert!(err.to_string().contains("frobnicate items"), "{err}");
+fn old_effect_syntax_is_rejected_with_a_conversion_hint() {
+    for effect in [
+        "\"increment items\"",
+        "[\"set ready true\"]",
+        "[{ type = \"increment\", var = \"items\" }]",
+    ] {
+        let err = parse_with(&format!(
+            "[[action]]\nname = \"Finish\"\neffect = {effect}\n"
+        ))
+        .expect_err("old effect syntax must not load");
+        assert!(
+            err.to_string().contains("migrate-predicates"),
+            "{effect}: {err}"
+        );
+    }
+}
+
+#[test]
+fn unknown_effect_is_rejected() {
+    let err = parse_with("[[action]]\nname = \"Finish\"\neffect = [\"frobnicate(items)\"]\n")
+        .expect_err("unknown effect must not be dropped");
+    assert!(
+        err.to_string().contains("unknown effect 'frobnicate'"),
+        "{err}"
+    );
 }
 
 #[test]
 fn malformed_webhook_surfaces_error() {
     let err = parse_with("[[webhook]]\nname = \"cb\"\n").expect_err("webhook missing path/action");
     assert!(err.to_string().contains("webhook"), "{err}");
-}
-
-#[test]
-fn integration_extra_keys_become_config() {
-    let auto = parse_with(
-        r#"
-[[integration]]
-name = "invoke_llm"
-trigger = "invoke_llm"
-type = "llm"
-emits = ["A", "B"]
-timeout = 30
-
-[integration.config]
-temper_api_url = "{secret:temper_api_url}"
-"#,
-    )
-    .unwrap();
-    let config = &auto.integrations[0].config;
-    assert_eq!(
-        config.get("emits").map(String::as_str),
-        Some(r#"["A", "B"]"#)
-    );
-    assert_eq!(config.get("timeout").map(String::as_str), Some("30"));
-    assert_eq!(
-        config.get("temper_api_url").map(String::as_str),
-        Some("{secret:temper_api_url}")
-    );
-    assert!(!config.contains_key("config"));
 }
 
 #[test]
@@ -342,11 +326,6 @@ name = "OnTimeout"
 from = ["A"]
 to = "B"
 params = ["error_message"]
-
-[[integration]]
-name = "noop"
-trigger = "noop"
-type = "webhook"
 
 [[state_timeout]]
 state = "A"

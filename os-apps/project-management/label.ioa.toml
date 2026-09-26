@@ -28,7 +28,7 @@ hint = "Initialize label with name, color, and optional description."
 name = "IncrementUsage"
 kind = "input"
 from = ["Active"]
-effect = "increment usage_count"
+effect = ["usage_count += 1"]
 hint = "Increment usage count when label is attached to an issue."
 
 [[action]]

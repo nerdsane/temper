@@ -203,12 +203,11 @@ fn populate_registry<R: SpecRowLike>(
 
         let cross_invariants_toml = constraints_by_tenant.remove(&tenant);
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_with_constraints(
                 tenant.as_str(),
                 csdl,
                 csdl_xml,
                 &ioa_pairs,
-                Vec::new(),
                 cross_invariants_toml,
                 false,
             )
@@ -388,12 +387,11 @@ pub async fn restore_registry_from_platform_store(
             .map(|r| (r.entity_type.as_str(), r.ioa_source.as_str()))
             .collect();
 
-        match registry.try_register_tenant_with_reactions_and_constraints(
+        match registry.try_register_tenant_with_constraints(
             tenant.as_str(),
             csdl,
             csdl_xml,
             &ioa_pairs,
-            Vec::new(),
             None,
             false,
         ) {

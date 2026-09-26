@@ -16,20 +16,40 @@ name = "ToolCallBatchRequested"
 kind = "input"
 from = ["Idle"]
 to = "Executing"
-effect = [{ type = "trigger", name = "execute_tool_batch" }]
+
+[[action.triggers]]
+name = "tool_execute_trigger"
+kind = "entity"
+target_entity = "ToolExecutorIntegration"
+target_action = "execute_tool_batch"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "ToolCallBatchComplete"
 kind = "input"
 from = ["Executing"]
 to = "Idle"
-effect = [{ type = "increment", var = "batches_executed" }]
+effect = ["batches_executed += 1"]
+
+[[action.triggers]]
+name = "tools_complete_to_agent"
+kind = "entity"
+target_entity = "Process"
+target_action = "ToolCallBatchComplete"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "ToolCallBatchFailed"
 kind = "input"
 from = ["Executing"]
 to = "Idle"
+
+[[action.triggers]]
+name = "tools_failed_to_agent"
+kind = "entity"
+target_entity = "Process"
+target_action = "ToolCallBatchFailed"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "BatchNeedsApproval"
@@ -42,16 +62,16 @@ name = "ApprovalGranted"
 kind = "input"
 from = ["WaitingApproval"]
 to = "Executing"
-effect = [{ type = "trigger", name = "execute_tool_batch" }]
+
+[[action.triggers]]
+name = "tool_execute_trigger"
+kind = "entity"
+target_entity = "ToolExecutorIntegration"
+target_action = "execute_tool_batch"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "ApprovalDenied"
 kind = "input"
 from = ["WaitingApproval"]
 to = "Idle"
-
-[[integration]]
-name = "execute_tool_batch"
-trigger = "execute_tool_batch"
-type = "tool_executor"
-emits = ["ToolCallBatchComplete", "ToolCallBatchFailed", "BatchNeedsApproval"]

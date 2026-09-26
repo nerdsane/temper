@@ -129,7 +129,7 @@ name = "SelectCandidate"
 kind = "input"
 from = ["Selecting"]
 to = "Evaluating"
-effect = "increment candidate_count"
+effect = ["candidate_count += 1"]
 params = ["CandidateId", "SpecSource"]
 
 [[action]]
@@ -151,7 +151,7 @@ name = "RecordMutation"
 kind = "input"
 from = ["Proposing"]
 to = "Verifying"
-effect = "increment mutation_attempts"
+effect = ["mutation_attempts += 1"]
 params = ["MutatedSpecSource", "MutationSummary"]
 
 [[action]]
@@ -201,7 +201,7 @@ name = "ContinueEvolution"
 kind = "input"
 from = ["Updating"]
 to = "Selecting"
-effect = "increment generation"
+effect = ["generation += 1"]
 
 [[action]]
 name = "Approve"
@@ -215,7 +215,7 @@ name = "Reject"
 kind = "input"
 from = ["AwaitingApproval"]
 to = "Selecting"
-effect = "increment generation"
+effect = ["generation += 1"]
 params = ["RejectionReason"]
 
 [[action]]
@@ -941,12 +941,11 @@ hint = "Reassign the issue to a different implementer."
             .clone();
         let csdl_xml = temper_spec::csdl::emit_csdl_xml(&existing_csdl);
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_with_constraints(
                 tenant_id,
                 existing_csdl,
                 csdl_xml,
                 &[("Issue", &mutated_issue_spec)],
-                Vec::new(),
                 None,
                 true, // merge mode — only update Issue, preserve others
             )
@@ -1194,12 +1193,11 @@ hint = "Reassign the issue to a different implementer."
             .clone();
         let csdl_xml = temper_spec::csdl::emit_csdl_xml(&existing_csdl);
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_with_constraints(
                 tenant_id,
                 existing_csdl,
                 csdl_xml,
                 &[("Issue", &mutated_issue_spec)],
-                Vec::new(),
                 None,
                 true, // merge mode
             )

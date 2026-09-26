@@ -39,11 +39,18 @@ kind = "input"
 from = ["Idle"]
 to = "Busy"
 params = ["desired", "expected_desired", "user_prompt"]
-effect = [{type = "increment", var = "rounds"}, {type = "emit", event = "Processed"}]
+effect = ["rounds += 1"]
 [[action.constraints]]
 kind = "param_equals_field"
 param = "expected_desired"
 field = "desired"
+
+[[action.triggers]]
+name = "processed"
+kind = "entity"
+target_entity = "Audit"
+target_action = "Record"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "SendInput"
@@ -51,11 +58,18 @@ kind = "input"
 from = ["Busy"]
 to = "Idle"
 params = ["desired", "expected_desired", "user_prompt"]
-effect = [{type = "increment", var = "rounds"}, {type = "emit", event = "Processed"}]
+effect = ["rounds += 1"]
 [[action.constraints]]
 kind = "param_equals_field"
 param = "expected_desired"
 field = "desired"
+
+[[action.triggers]]
+name = "processed"
+kind = "entity"
+target_entity = "Audit"
+target_action = "Record"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "Noop"
@@ -65,11 +79,7 @@ params = []
 "#;
 
 fn actor(source: &str) -> SpecDrivenActor {
-    SpecDrivenActor::from_ioa(
-        source,
-        HashMap::from([("Processed".into(), ("Audit".into(), "Record".into()))]),
-    )
-    .unwrap()
+    SpecDrivenActor::from_ioa(source).unwrap()
 }
 
 fn message(action: &str, params: serde_json::Value, raw: bool) -> Message {
@@ -253,7 +263,7 @@ name = "Start"
 kind = "input"
 from = ["Idle"]
 to = "Running"
-effect = [{ type = "increment", var = "rounds" }]
+effect = ["rounds += 1"]
 
 [[action]]
 name = "Stop"
@@ -264,7 +274,7 @@ to = "Idle"
 
     #[test]
     fn test_spec_driven_actor_initial_state() {
-        let actor = SpecDrivenActor::from_ioa(SIMPLE_SPEC, HashMap::new()).unwrap();
+        let actor = SpecDrivenActor::from_ioa(SIMPLE_SPEC).unwrap();
         let state_bytes = actor.initial_state();
         let state: SpecActorState = serde_json::from_slice(&state_bytes).unwrap();
         assert_eq!(state.status, "Idle");
@@ -273,23 +283,38 @@ to = "Idle"
 
     #[test]
     fn test_routing_map_builder() {
-        let rules = vec![temper_runtime::reaction::ReactionRule {
-            name: "a".into(),
-            when: temper_runtime::reaction::ReactionTrigger {
-                entity_type: "Agent".into(),
-                action: Some("PrepareContext".into()),
-                to_state: None,
-            },
-            then: temper_runtime::reaction::ReactionTarget {
-                entity_type: "ContextManager".into(),
-                action: "PrepareContext".into(),
-            },
-            resolve_target: temper_runtime::reaction::TargetResolver::SameId,
-        }];
+        let spec = r#"
+[automaton]
+name = "Agent"
+states = ["Idle"]
+initial = "Idle"
 
-        let maps = build_routing_maps(&rules);
-        assert_eq!(maps["Agent"]["PrepareContext"].0, "ContextManager");
-        assert_eq!(maps["Agent"]["PrepareContext"].1, "PrepareContext");
+[[action]]
+name = "Start"
+kind = "input"
+from = ["Idle"]
+
+[[action.triggers]]
+name = "prepare"
+kind = "entity"
+target_entity = "ContextManager"
+target_action = "PrepareContext"
+resolve_target = { type = "same_id" }
+
+[[action.triggers]]
+name = "audit"
+kind = "entity"
+target_entity = "Audit"
+target_action = "Record"
+resolve_target = { type = "create" }
+"#;
+        let automaton = temper_spec::parse_automaton(spec).unwrap();
+        let routing = build_actor_routing(&automaton);
+        assert_eq!(
+            routing["Start"],
+            vec![("ContextManager".to_string(), "PrepareContext".to_string())],
+            "only same_id triggers route between actors"
+        );
     }
 }
 
@@ -434,7 +459,6 @@ name = "Noop"
 kind = "input"
 from = ["Idle"]
 "#,
-        HashMap::new(),
     )
     .unwrap();
     let mut empty = vec![];

@@ -1,6 +1,6 @@
 # Agent (Process) — the orchestrator state machine.
 # Pure state machine: receives messages, transitions states, emits coordination events.
-# Routing is handled by reaction rules (agent.reactions.toml), not by this spec.
+# Cross-actor routing is declared as [[action.triggers]] on the source actions.
 
 [automaton]
 name = "Process"
@@ -48,7 +48,13 @@ kind = "input"
 from = ["Ready"]
 to = "PreparingContext"
 params = [{ name = "user_prompt", type = "string" }]
-effect = [{ type = "emit", event = "PrepareContext" }]
+
+[[action.triggers]]
+name = "process_start_requests_context"
+kind = "entity"
+target_entity = "ContextManager"
+target_action = "PrepareContext"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "SendInput"
@@ -56,7 +62,13 @@ kind = "input"
 from = ["Ready", "Failed"]
 to = "PreparingContext"
 params = [{ name = "user_prompt", type = "string" }]
-effect = [{ type = "emit", event = "PrepareContext" }]
+
+[[action.triggers]]
+name = "process_start_requests_context"
+kind = "entity"
+target_entity = "ContextManager"
+target_action = "PrepareContext"
+resolve_target = { type = "same_id" }
 
 # ─── Context Preparation Results ─────────────────────────────────────────────
 
@@ -65,14 +77,26 @@ name = "ContextReady"
 kind = "input"
 from = ["PreparingContext"]
 to = "BlockedInference"
-effect = [{ type = "trigger", name = "invoke_llm" }]
+
+[[action.triggers]]
+name = "llm_invoke_trigger"
+kind = "entity"
+target_entity = "LlmIntegration"
+target_action = "invoke_llm"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "ContextOverflow"
 kind = "input"
 from = ["PreparingContext"]
 to = "BlockedCompaction"
-effect = [{ type = "emit", event = "CompactionNeeded" }]
+
+[[action.triggers]]
+name = "process_compaction_needed"
+kind = "entity"
+target_entity = "Compactor"
+target_action = "CompactionNeeded"
+resolve_target = { type = "same_id" }
 
 # ─── Inference Results ────────────────────────────────────────────────────────
 
@@ -81,27 +105,41 @@ name = "InferenceCompleteEndTurn"
 kind = "input"
 from = ["BlockedInference"]
 to = "Ready"
-effect = [
-    { type = "increment", var = "turns" },
-    { type = "trigger", name = "notify_parent" },
-]
+effect = ["turns += 1"]
+
+[[action.triggers]]
+name = "process_notify_parent"
+kind = "entity"
+target_entity = "ChildCompletionIntegration"
+target_action = "notify_parent_completion"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "InferenceCompleteToolCalls"
 kind = "input"
 from = ["BlockedInference"]
 to = "BlockedToolCall"
-effect = [
-    { type = "increment", var = "turns" },
-    { type = "emit", event = "ToolCallBatchRequested" },
-]
+effect = ["turns += 1"]
+
+[[action.triggers]]
+name = "process_tool_calls_to_router"
+kind = "entity"
+target_entity = "ToolRouter"
+target_action = "ToolCallBatchRequested"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "InferenceContextOverflow"
 kind = "input"
 from = ["BlockedInference"]
 to = "BlockedCompaction"
-effect = [{ type = "emit", event = "CompactionNeeded" }]
+
+[[action.triggers]]
+name = "process_compaction_needed"
+kind = "entity"
+target_entity = "Compactor"
+target_action = "CompactionNeeded"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "InferenceFailed"
@@ -116,17 +154,27 @@ name = "ToolCallBatchComplete"
 kind = "input"
 from = ["BlockedToolCall"]
 to = "BlockedInference"
-effect = [
-    { type = "increment", var = "tool_call_rounds" },
-    { type = "trigger", name = "invoke_llm" },
-]
+effect = ["tool_call_rounds += 1"]
+
+[[action.triggers]]
+name = "llm_invoke_trigger"
+kind = "entity"
+target_entity = "LlmIntegration"
+target_action = "invoke_llm"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "ToolCallBatchFailed"
 kind = "input"
 from = ["BlockedToolCall"]
 to = "Failed"
-effect = [{ type = "trigger", name = "notify_parent" }]
+
+[[action.triggers]]
+name = "process_notify_parent"
+kind = "entity"
+target_entity = "ChildCompletionIntegration"
+target_action = "notify_parent_completion"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "ApprovalRequired"
@@ -139,14 +187,26 @@ name = "ApproveToolCall"
 kind = "input"
 from = ["BlockedApproval"]
 to = "BlockedToolCall"
-effect = [{ type = "emit", event = "ToolCallBatchRequested" }]
+
+[[action.triggers]]
+name = "process_tool_calls_to_router"
+kind = "entity"
+target_entity = "ToolRouter"
+target_action = "ToolCallBatchRequested"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "DenyToolCall"
 kind = "input"
 from = ["BlockedApproval"]
 to = "BlockedInference"
-effect = [{ type = "trigger", name = "invoke_llm" }]
+
+[[action.triggers]]
+name = "llm_invoke_trigger"
+kind = "entity"
+target_entity = "LlmIntegration"
+target_action = "invoke_llm"
+resolve_target = { type = "same_id" }
 
 # ─── Compaction Results ───────────────────────────────────────────────────────
 
@@ -155,14 +215,26 @@ name = "CompactionComplete"
 kind = "input"
 from = ["BlockedCompaction"]
 to = "PreparingContext"
-effect = [{ type = "emit", event = "PrepareContext" }]
+
+[[action.triggers]]
+name = "process_start_requests_context"
+kind = "entity"
+target_entity = "ContextManager"
+target_action = "PrepareContext"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "CompactionFailed"
 kind = "input"
 from = ["BlockedCompaction"]
 to = "Failed"
-effect = [{ type = "trigger", name = "notify_parent" }]
+
+[[action.triggers]]
+name = "process_notify_parent"
+kind = "entity"
+target_entity = "ChildCompletionIntegration"
+target_action = "notify_parent_completion"
+resolve_target = { type = "same_id" }
 
 # ─── Control ──────────────────────────────────────────────────────────────────
 
@@ -190,17 +262,15 @@ name = "TimeoutExpired"
 kind = "input"
 from = ["BlockedInference", "BlockedToolCall", "BlockedApproval", "BlockedCompaction"]
 to = "Failed"
-effect = [{ type = "trigger", name = "notify_parent" }]
+
+[[action.triggers]]
+name = "process_notify_parent"
+kind = "entity"
+target_entity = "ChildCompletionIntegration"
+target_action = "notify_parent_completion"
+resolve_target = { type = "same_id" }
 
 # ─── Integrations ─────────────────────────────────────────────────────────────
-
-[[integration]]
-name = "invoke_llm"
-trigger = "invoke_llm"
-type = "llm"
-emits = ["InferenceCompleteEndTurn", "InferenceCompleteToolCalls", "InferenceContextOverflow", "InferenceFailed"]
-
-# ─── Child process primitives ─────────────────────────────────────────────────
 
 [[action]]
 name = "SpawnChild"
@@ -210,11 +280,15 @@ params = [
     { name = "child_definition_id", type = "string" },
     { name = "child_user_prompt",   type = "string" },
 ]
-effect = [
-    { type = "increment", var = "child_count" },
-    { type = "trigger",   name = "spawn_child" },
-]
+effect = ["child_count += 1"]
 hint = "Spawn a child Process. The child runs independently; parent can wait via BlockOnChild."
+
+[[action.triggers]]
+name = "process_spawn_child"
+kind = "entity"
+target_entity = "ChildSpawnerIntegration"
+target_action = "spawn_child"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "BlockOnChild"
@@ -229,8 +303,14 @@ kind = "input"
 from = ["BlockedChild"]
 to = "BlockedInference"
 params = [{ name = "child_result", type = "string" }]
-effect = [{ type = "trigger", name = "invoke_llm" }]
 hint = "Unblock parent when a child Process completes and resume inference with the child result."
+
+[[action.triggers]]
+name = "llm_invoke_trigger"
+kind = "entity"
+target_entity = "LlmIntegration"
+target_action = "invoke_llm"
+resolve_target = { type = "same_id" }
 
 # ─── Sleep primitive ──────────────────────────────────────────────────────────
 
@@ -240,8 +320,14 @@ kind = "input"
 from = ["Ready"]
 to = "Ready"
 params = [{ name = "sleep_seconds", type = "uint64" }]
-effect = [{ type = "trigger", name = "schedule_wakeup" }]
 hint = "Suspend execution for N seconds, then resume."
+
+[[action.triggers]]
+name = "process_schedule_wakeup"
+kind = "entity"
+target_entity = "WakeupSchedulerIntegration"
+target_action = "schedule_wakeup"
+resolve_target = { type = "same_id" }
 
 # ─── Completion with parent notification ─────────────────────────────────────
 
@@ -251,21 +337,12 @@ kind = "input"
 from = ["Ready"]
 to = "Terminated"
 params = [{ name = "final_answer", type = "string" }]
-effect = [{ type = "trigger", name = "notify_parent" }]
+
+[[action.triggers]]
+name = "process_notify_parent"
+kind = "entity"
+target_entity = "ChildCompletionIntegration"
+target_action = "notify_parent_completion"
+resolve_target = { type = "same_id" }
 
 # ─── Integrations for new primitives ─────────────────────────────────────────
-
-[[integration]]
-name = "spawn_child"
-trigger = "spawn_child"
-type = "child_spawner"
-
-[[integration]]
-name = "schedule_wakeup"
-trigger = "schedule_wakeup"
-type = "wakeup_scheduler"
-
-[[integration]]
-name = "notify_parent"
-trigger = "notify_parent"
-type = "child_completion"

@@ -15,6 +15,7 @@
 //! ```
 
 use super::ast::{CmpOp, Expr, Literal, Operand, Set};
+use super::effect::AssignOp;
 
 /// Maximum nesting depth of parentheses and `!` (TigerStyle budget: the
 /// parser recurses once per level).
@@ -22,8 +23,10 @@ pub const MAX_DEPTH: usize = 64;
 
 /// A parse failure with the byte offset where it was detected.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("invalid predicate '{source_text}': {message} at column {}", .offset + 1)]
+#[error("invalid {kind} '{source_text}': {message} at column {}", .offset + 1)]
 pub struct ParseError {
+    /// What was being parsed: `predicate` or `effect`.
+    pub kind: &'static str,
     /// The full expression being parsed.
     pub source_text: String,
     /// Byte offset of the failure.
@@ -33,7 +36,7 @@ pub struct ParseError {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Tok {
+pub(super) enum Tok {
     Ident(String),
     Int(i64),
     Str(String),
@@ -48,17 +51,13 @@ enum Tok {
     OrOr,
     Implies,
     Cmp(CmpOp),
+    /// `=`, `+=` or `-=` (effect statements only).
+    Assign(AssignOp),
 }
 
 /// Parse a predicate expression.
 pub fn parse(source: &str) -> Result<Expr, ParseError> {
-    let tokens = lex(source)?;
-    let mut parser = Parser {
-        source,
-        tokens,
-        pos: 0,
-        depth: 0,
-    };
+    let mut parser = Parser::new(source, "predicate")?;
     let expr = parser.expr()?;
     if parser.pos < parser.tokens.len() {
         return Err(parser.error("unexpected token after expression"));
@@ -66,8 +65,9 @@ pub fn parse(source: &str) -> Result<Expr, ParseError> {
     Ok(expr)
 }
 
-fn lex(source: &str) -> Result<Vec<(Tok, usize)>, ParseError> {
+fn lex(source: &str, kind: &'static str) -> Result<Vec<(Tok, usize)>, ParseError> {
     let err = |offset: usize, message: &str| ParseError {
+        kind,
         source_text: source.to_string(),
         offset,
         message: message.to_string(),
@@ -96,6 +96,9 @@ fn lex(source: &str) -> Result<Vec<(Tok, usize)>, ParseError> {
             _ if two == Some(b"!=") => (Tok::Cmp(CmpOp::Ne), 2),
             _ if two == Some(b"<=") => (Tok::Cmp(CmpOp::Le), 2),
             _ if two == Some(b">=") => (Tok::Cmp(CmpOp::Ge), 2),
+            _ if two == Some(b"+=") => (Tok::Assign(AssignOp::Add), 2),
+            _ if two == Some(b"-=") => (Tok::Assign(AssignOp::Sub), 2),
+            b'=' => (Tok::Assign(AssignOp::Set), 1),
             b'<' => (Tok::Cmp(CmpOp::Lt), 1),
             b'>' => (Tok::Cmp(CmpOp::Gt), 1),
             b'!' => (Tok::Not, 1),
@@ -136,28 +139,41 @@ fn scan(bytes: &[u8], from: usize, keep: impl Fn(u8) -> bool) -> usize {
     end
 }
 
-struct Parser<'a> {
-    source: &'a str,
-    tokens: Vec<(Tok, usize)>,
-    pos: usize,
-    depth: usize,
+pub(super) struct Parser<'a> {
+    pub(super) source: &'a str,
+    pub(super) tokens: Vec<(Tok, usize)>,
+    pub(super) pos: usize,
+    pub(super) depth: usize,
+    kind: &'static str,
 }
 
-impl Parser<'_> {
-    fn error(&self, message: &str) -> ParseError {
+impl<'a> Parser<'a> {
+    /// Lex `source` and position a parser at its first token.
+    pub(super) fn new(source: &'a str, kind: &'static str) -> Result<Self, ParseError> {
+        Ok(Parser {
+            source,
+            tokens: lex(source, kind)?,
+            pos: 0,
+            depth: 0,
+            kind,
+        })
+    }
+
+    pub(super) fn error(&self, message: &str) -> ParseError {
         let offset = self
             .tokens
             .get(self.pos)
             .map(|(_, offset)| *offset)
             .unwrap_or(self.source.len());
         ParseError {
+            kind: self.kind,
             source_text: self.source.to_string(),
             offset,
             message: message.to_string(),
         }
     }
 
-    fn peek(&self) -> Option<&Tok> {
+    pub(super) fn peek(&self) -> Option<&Tok> {
         self.tokens.get(self.pos).map(|(tok, _)| tok)
     }
 
@@ -165,7 +181,7 @@ impl Parser<'_> {
         matches!(self.peek(), Some(Tok::Ident(name)) if name == keyword)
     }
 
-    fn eat(&mut self, tok: &Tok) -> bool {
+    pub(super) fn eat(&mut self, tok: &Tok) -> bool {
         if self.peek() == Some(tok) {
             self.pos += 1;
             true
@@ -174,7 +190,7 @@ impl Parser<'_> {
         }
     }
 
-    fn expect(&mut self, tok: &Tok, what: &str) -> Result<(), ParseError> {
+    pub(super) fn expect(&mut self, tok: &Tok, what: &str) -> Result<(), ParseError> {
         if self.eat(tok) {
             Ok(())
         } else {
@@ -252,6 +268,9 @@ impl Parser<'_> {
 
     fn term(&mut self) -> Result<Expr, ParseError> {
         let lhs = self.operand()?;
+        if matches!(self.peek(), Some(Tok::Assign(_))) {
+            return Err(self.error("assignment in a predicate; compare with '=='"));
+        }
         if let Some(Tok::Cmp(op)) = self.peek().cloned() {
             self.pos += 1;
             let rhs = self.operand()?;
@@ -287,7 +306,7 @@ impl Parser<'_> {
         Ok(name)
     }
 
-    fn ident(&mut self) -> Result<String, ParseError> {
+    pub(super) fn ident(&mut self) -> Result<String, ParseError> {
         match self.peek().cloned() {
             Some(Tok::Ident(name)) if !is_keyword(&name) => {
                 self.pos += 1;
@@ -369,6 +388,6 @@ impl Parser<'_> {
 pub fn is_keyword(name: &str) -> bool {
     matches!(
         name,
-        "status" | "true" | "false" | "null" | "in" | "not" | "len" | "empty"
+        "status" | "true" | "false" | "null" | "in" | "not" | "len" | "empty" | "params"
     )
 }

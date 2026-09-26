@@ -229,7 +229,7 @@ from = ["Ready"]
 to = "Ready"
 params = ["expected"]
 guard = "sequence >= 3"
-effect = [{type="increment",var="sequence"}]
+effect = ["sequence += 1"]
 constraints = [{kind="param_equals_field",param="expected",field="sequence"}]
 "#;
     let table = Arc::new(RwLock::new(TransitionTable::from_ioa_source(source)));

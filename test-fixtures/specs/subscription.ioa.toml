@@ -29,7 +29,7 @@ name = "PaymentFailed"
 kind = "internal"
 from = ["Active"]
 to = "PastDue"
-effect = "increment payment_failures"
+effect = ["payment_failures += 1"]
 hint = "Payment processor reports a failed charge."
 
 [[action]]
@@ -73,7 +73,7 @@ name = "EnableAutoRenew"
 kind = "input"
 from = ["Active"]
 to = "Active"
-effect = "set auto_renew true"
+effect = ["auto_renew = true"]
 hint = "Customer enables automatic renewal."
 
 [[action]]
@@ -81,21 +81,9 @@ name = "DisableAutoRenew"
 kind = "input"
 from = ["Active"]
 to = "Active"
-effect = "set auto_renew false"
+effect = ["auto_renew = false"]
 hint = "Customer disables automatic renewal."
 
 [[invariant]]
 name = "PastDueHasFailure"
 assert = "status in ['PastDue', 'Suspended', 'Expired'] => payment_failures > 0"
-
-# --- Integrations ---
-
-[[integration]]
-name = "billing_webhook"
-trigger = "PaymentFailed"
-type = "webhook"
-
-[[integration]]
-name = "dunning_notice"
-trigger = "SuspendSubscription"
-type = "webhook"

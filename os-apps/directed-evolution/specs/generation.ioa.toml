@@ -27,7 +27,7 @@ name = "RecordGeneratedVariant"
 kind = "input"
 from = ["Generating", "Evaluating"]
 to = "Evaluating"
-effect = "increment variant_count"
+effect = ["variant_count += 1"]
 params = ["VariantId", "BrainRunId"]
 hint = "Record a generated variant."
 
@@ -36,7 +36,7 @@ name = "RecordGenerationSurvivor"
 kind = "input"
 from = ["Evaluating"]
 to = "Evaluating"
-effect = "increment survivor_count"
+effect = ["survivor_count += 1"]
 params = ["VariantId"]
 hint = "Record a variant that survived evaluation."
 

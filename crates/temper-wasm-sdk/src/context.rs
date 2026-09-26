@@ -106,7 +106,7 @@ impl SubWriteBuilder {
 /// Provides access to integration config, trigger parameters, entity state,
 /// and typed wrappers for host functions (HTTP, secrets, logging).
 pub struct Context {
-    /// Configuration from the `[[integration]]` section.
+    /// Configuration from the triggering `[[action.triggers]]` block.
     pub config: BTreeMap<String, String>,
     /// Parameters from the triggering action.
     pub trigger_params: Value,

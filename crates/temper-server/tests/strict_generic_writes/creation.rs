@@ -13,7 +13,7 @@ name = "SpawnChild"
 from = ["Draft"]
 to = "Submitted"
 params = ["child_id", "expected"]
-effect = [{type="spawn",entity_type="Customer",entity_id_source="child_id",initial_action="Initialize"}]
+effect = ["spawn('Customer', 'Initialize', child_ref, params.child_id)"]
 "#;
     let child = r#"
 [automaton]
@@ -268,7 +268,7 @@ name = "SpawnChild"
 from = ["Draft"]
 to = "Submitted"
 params = ["child_id", "payload"]
-effect = [{type="spawn",entity_type="Customer",entity_id_source="child_id",initial_action="Initialize"}]
+effect = ["spawn('Customer', 'Initialize', child_ref, params.child_id)"]
 "#;
     let child = r#"
 [automaton]

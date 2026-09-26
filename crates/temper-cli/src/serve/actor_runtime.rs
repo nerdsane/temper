@@ -1,6 +1,6 @@
 //! Actor runtime startup wiring for `temper serve`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -86,7 +86,7 @@ pub(super) async fn configure_postgres_actor_runtime(
 
     let system = Arc::new(PgActorSystem::new(actor_pool, SchedulerConfig::default()));
     for definition in definitions.definitions {
-        let actor = SpecDrivenActor::from_ioa(&definition.ioa_source, HashMap::new())
+        let actor = SpecDrivenActor::from_ioa(&definition.ioa_source)
             .map_err(|e| anyhow!("failed to build actor for {}: {e}", definition.entity_type))?;
         system.register(Arc::new(actor)).await.with_context(|| {
             format!(
@@ -252,12 +252,6 @@ fn validate_actor_runtime_compatible(
     entity_type: &str,
     spec: &EntitySpec,
 ) -> Result<()> {
-    if !spec.integrations.is_empty() {
-        bail!(
-            "tenant {tenant} entity {entity_type} declares legacy integrations, which are not yet supported by --actor-runtime postgres"
-        );
-    }
-
     for action in &spec.automaton.actions {
         if !action.triggers.is_empty() {
             bail!(
@@ -267,29 +261,13 @@ fn validate_actor_runtime_compatible(
         }
         for effect in &action.effect {
             match effect {
-                Effect::Increment {
-                    amount: Some(_), ..
-                }
-                | Effect::Decrement {
-                    amount: Some(_), ..
-                }
-                | Effect::SetCounterFromParam { .. }
-                | Effect::ListAppend { .. }
-                | Effect::ListRemoveAt { .. }
-                | Effect::Trigger { .. }
-                | Effect::Schedule { .. }
-                | Effect::ScheduleAt { .. }
-                | Effect::Spawn { .. } => {
+                Effect::Schedule { .. } | Effect::ScheduleAt { .. } | Effect::Spawn { .. } => {
                     bail!(
-                        "tenant {tenant} entity {entity_type} action {} uses effect {:?}, which is not yet supported by --actor-runtime postgres",
-                        action.name,
-                        effect
+                        "tenant {tenant} entity {entity_type} action {} uses effect `{effect}`, which is not yet supported by --actor-runtime postgres",
+                        action.name
                     );
                 }
-                Effect::Increment { amount: None, .. }
-                | Effect::Decrement { amount: None, .. }
-                | Effect::SetBool { .. }
-                | Effect::Emit { .. } => {}
+                Effect::Assign { .. } | Effect::Append { .. } | Effect::RemoveAt { .. } => {}
             }
         }
     }

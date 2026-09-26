@@ -124,7 +124,7 @@ name = "Assign"
 kind = "input"
 from = ["Open"]
 to = "InProgress"
-effect = "set is_assigned true"
+effect = ["is_assigned = true"]
 
 [[action]]
 name = "Complete"
@@ -138,7 +138,7 @@ name = "Reopen"
 kind = "input"
 from = ["Done"]
 to = "Open"
-effect = "set is_assigned false"
+effect = ["is_assigned = false"]
 
 [[invariant]]
 name = "DoneRequiresAssignment"
@@ -151,7 +151,7 @@ assert = "status in ['Done'] => is_assigned"
 
 **State variable types** — only two are valid:
 - `bool` — `initial = "false"` or `initial = "true"`
-- `counter` — `initial = "0"` (integer, supports `increment`/`decrement` effects and comparisons in guards)
+- `counter` — `initial = "0"` (integer, supports `+=`/`-=`/`=` effects and comparisons in guards)
 
 `int`, `string`, `float`, and any other type will pass L0-L3 verification silently but the entity set **will not register at runtime**. Store text/numeric data via action `params` (they become entity fields automatically). Use state variables only for values that drive guards and invariants.
 
@@ -170,19 +170,28 @@ to = "Active"   # required — even for self-loops
 params = ["Item"]
 ```
 
-**Effects** — state variable mutations on success:
-- `set var true/false` — set boolean
-- `increment var` / `decrement var` — counter arithmetic
+**Effects** — `effect` is a list of statements applied on success, e.g. `effect = ["items += 1", "is_assigned = true"]`:
+- `flag = true` / `flag = false` / `flag = params.p` — set boolean
+- `count += 1` / `count -= 1` (stops at 0) / `count = params.p` — counter arithmetic; `params.p` is action parameter `p`
+- `schedule('Action', 3600)` — dispatch an action on this entity later; see `docs/predicates.md#effects` for lists and `spawn`
+
+Nothing is implied by an action's name: an `AddItem` with no `effect` changes only `status`. Old forms (`"set var true"`, `"increment var"`, `[[integration]]`) fail to load; run `temper migrate-predicates <files>` to convert them.
 
 **Invariants** — one `assert` expression, proven by verification in every reachable state; use `status in [...] => ...` to scope it to some states. Invariants may only read `status`, `bool` and `counter` variables; rules about text fields belong in `[[field_invariant]]`, which is checked on writes.
 
-**Integrations (WASM)** — when your app needs external API calls (payments, email, notifications), add an `[[integration]]` block with `type = "wasm"`:
+**Integrations (WASM)** — when your app needs external API calls (payments, email, notifications), add a `kind = "wasm"` entry under the action's `[[action.triggers]]`:
 ```toml
 [[action]]
 name = "ChargeCard"
 from = ["Pending"]
 to = "Charging"
-effect = "trigger stripe_charge"
+
+[[action.triggers]]
+name = "stripe_charge"
+kind = "wasm"
+module = "stripe_charge"
+on_success = "ChargeSucceeded"
+on_failure = "ChargeFailed"
 
 [[action]]
 name = "ChargeSucceeded"
@@ -195,30 +204,20 @@ name = "ChargeFailed"
 kind = "input"
 from = ["Charging"]
 to = "PaymentFailed"
-
-[[integration]]
-name = "stripe_charge"
-trigger = "stripe_charge"
-type = "wasm"
-module = "stripe_charge"
-on_success = "ChargeSucceeded"
-on_failure = "ChargeFailed"
 ```
 The WASM module is a Rust `cdylib` compiled to `wasm32-unknown-unknown` and uploaded via `POST /api/wasm/modules/{name}`. See the developer skill (`.claude/skills/temper-developer.md`) for the full WASM module template.
 
-**Built-in module: `http_fetch`** — for simple HTTP integrations, use the pre-compiled `http_fetch` module instead of writing custom WASM. Configure it directly in the integration block:
+**Built-in module: `http_fetch`** — for simple HTTP integrations, use the pre-compiled `http_fetch` module instead of writing custom WASM. Configure it directly on the trigger:
 ```toml
-[[integration]]
+[[action.triggers]]
 name = "fetch_weather"
-trigger = "fetch_weather"
-type = "wasm"
+kind = "wasm"
 module = "http_fetch"
 on_success = "FetchSucceeded"
 on_failure = "FetchFailed"
-url = "https://api.example.com/{param}"
-method = "GET"
+config = { url = "https://api.example.com/{param}", method = "GET" }
 ```
-The `http_fetch` module reads `url`, `method`, and `body` from the integration config, makes the HTTP call via the host, and returns `{"status_code": "200", "body": "..."}` as callback params. URL templates support `{param}` substitution from action params.
+The `http_fetch` module reads `url`, `method`, and `body` from the trigger's `config`, makes the HTTP call via the host, and returns `{"status_code": "200", "body": "..."}` as callback params. URL templates support `{param}` substitution from action params.
 
 **Terminal states** — list them in `[automaton]` (`terminal = ["Done"]`); verification then checks that no action leaves them. Entities in terminal states can't move, so design them intentionally.
 

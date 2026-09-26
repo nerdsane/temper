@@ -13,7 +13,7 @@ initial = "false"
 name = "ProposeDirection"
 kind = "input"
 from = ["Proposed"]
-effect = "set has_provenance true"
+effect = ["has_provenance = true"]
 params = ["OrganismId", "PressureIdsJson", "PressureClass", "Title", "Summary", "ProvenanceJson", "AutonomyLane", "ProposedAdaptationGoal", "ProposedViabilityConstraintsJson", "BrainRunId"]
 hint = "Create a direction with provenance and a recommended autonomy lane."
 

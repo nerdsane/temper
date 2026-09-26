@@ -1,17 +1,19 @@
 //! Model builder: constructs a `TemperModel` directly from I/O Automaton specifications.
 //!
 //! Uses the shared translation layer in `temper-spec` for guard/effect translation,
-//! then converts to verification-specific types. Runtime-only effects (Emit, Trigger,
-//! Schedule, Spawn) are filtered out; CrossEntityState guards are kept as abstract
-//! guards so single-entity checks do not silently treat them as locally enabled.
+//! then converts to verification-specific types. Runtime-only effects (dispatch,
+//! schedule, spawn) are filtered out; parameter-driven effects are kept and
+//! explored over every candidate parameter value. Cross-entity guards are kept
+//! as abstract guards so single-entity checks do not silently treat them as
+//! locally enabled.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use temper_spec::automaton::{
     Automaton, ResolvedEffect, parse_bool_initial, parse_counter_initial_usize, parse_list_initial,
     translate_actions,
 };
-use temper_spec::predicate::VarKind;
+use temper_spec::predicate::{Arg, Literal, ParamKind, VarKind};
 
 use super::types::{
     LivenessKind, ModelEffect, ResolvedInvariant, ResolvedLiveness, ResolvedTransition, TemperModel,
@@ -62,6 +64,29 @@ pub fn build_model_from_automaton(automaton: &Automaton, max_counter: usize) -> 
     }
 
     let transitions = resolve_transitions(automaton);
+    // A counter written with a literal larger than the exploration bound is
+    // explored up to that literal, so the write is not pruned away.
+    for t in &transitions {
+        for effect in &t.effects {
+            if let ModelEffect::SetCounter {
+                var,
+                value: Arg::Lit(Literal::Int(n)),
+            }
+            | ModelEffect::AddCounter {
+                var,
+                value: Arg::Lit(Literal::Int(n)),
+            } = effect
+                && let (Some(bound), Ok(n)) = (counter_bounds.get_mut(var), usize::try_from(*n))
+            {
+                *bound = (*bound).max(n);
+            }
+        }
+    }
+    for (name, initial) in &initial_counters {
+        if let Some(bound) = counter_bounds.get_mut(name) {
+            *bound = (*bound).max(*initial);
+        }
+    }
     let invariants = resolve_invariants(automaton);
     let liveness = resolve_liveness(automaton);
     let var_kinds = automaton
@@ -83,51 +108,80 @@ pub fn build_model_from_automaton(automaton: &Automaton, max_counter: usize) -> 
         initial_lists,
         counter_bounds,
         default_max_counter: max_counter,
+        list_literals: list_literals(automaton),
     }
+}
+
+/// `'x' in list` literals per list, across every guard and invariant.
+fn list_literals(automaton: &Automaton) -> BTreeMap<String, BTreeSet<String>> {
+    let mut pairs = BTreeSet::new();
+    for action in &automaton.actions {
+        super::semantics::collect_list_contains_pairs(&action.guard, &mut pairs);
+    }
+    for inv in &automaton.invariants {
+        super::semantics::collect_list_contains_pairs(&inv.assert, &mut pairs);
+    }
+    let mut literals: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (list, value) in pairs {
+        literals.entry(list).or_default().insert(value);
+    }
+    literals
 }
 
 /// Translate IOA actions into resolved transitions using the shared translation layer.
 fn resolve_transitions(automaton: &Automaton) -> Vec<ResolvedTransition> {
     translate_actions(automaton)
         .into_iter()
-        .map(|a| ResolvedTransition {
-            name: a.name,
-            from_states: a.from_states,
-            to_state: a.to_state,
-            guard: a.guard,
-            effects: a
-                .effects
-                .into_iter()
-                .filter(|e| e.is_verifiable())
-                .map(convert_effect)
-                .collect(),
+        .map(|a| {
+            let effects: Vec<ModelEffect> =
+                a.effects.into_iter().filter_map(convert_effect).collect();
+            let params = effect_params(&effects);
+            ResolvedTransition {
+                name: a.name,
+                from_states: a.from_states,
+                to_state: a.to_state,
+                guard: a.guard,
+                effects,
+                params,
+            }
         })
         .collect()
 }
 
-/// Convert a verifiable [`ResolvedEffect`] to the verification [`ModelEffect`].
-///
-/// Only called for effects where `is_verifiable()` is true. Runtime-only
-/// effects are filtered before reaching this function.
-fn convert_effect(effect: ResolvedEffect) -> ModelEffect {
-    match effect {
-        ResolvedEffect::IncrementCounter(var) => ModelEffect::IncrementCounter(var),
-        ResolvedEffect::DecrementCounter(var) => ModelEffect::DecrementCounter(var),
+/// Convert a state [`ResolvedEffect`] to the verification [`ModelEffect`];
+/// runtime-only effects (dispatch, schedule, spawn) have no model.
+fn convert_effect(effect: ResolvedEffect) -> Option<ModelEffect> {
+    Some(match effect {
+        ResolvedEffect::SetCounter { var, value } => ModelEffect::SetCounter { var, value },
+        ResolvedEffect::AddCounter { var, value } => ModelEffect::AddCounter { var, value },
+        ResolvedEffect::SubCounter { var, value } => ModelEffect::SubCounter { var, value },
         ResolvedEffect::SetBool { var, value } => ModelEffect::SetBool { var, value },
-        ResolvedEffect::ListAppend(var) => ModelEffect::ListAppend(var),
-        ResolvedEffect::ListRemoveAt(var) => ModelEffect::ListRemoveAt(var),
-        // Runtime-only effects should have been filtered by is_verifiable()
-        ResolvedEffect::Emit(_)
-        | ResolvedEffect::SetCounterFromParam { .. }
-        | ResolvedEffect::Trigger(_)
-        | ResolvedEffect::IncrementCounterByParam { .. }
-        | ResolvedEffect::DecrementCounterByParam { .. }
+        ResolvedEffect::ListAppend { var, value } => ModelEffect::ListAppend { var, value },
+        ResolvedEffect::ListRemoveAt { var, index } => ModelEffect::ListRemoveAt { var, index },
+        ResolvedEffect::Dispatch(_)
         | ResolvedEffect::Schedule { .. }
         | ResolvedEffect::ScheduleAt { .. }
-        | ResolvedEffect::Spawn { .. } => {
-            unreachable!("runtime-only effect should have been filtered")
+        | ResolvedEffect::Spawn { .. } => return None,
+    })
+}
+
+/// The kind of every `params.p` the effects read (checked consistent at load).
+fn effect_params(effects: &[ModelEffect]) -> BTreeMap<String, ParamKind> {
+    let mut params = BTreeMap::new();
+    for effect in effects {
+        let (arg, kind) = match effect {
+            ModelEffect::SetCounter { value, .. }
+            | ModelEffect::AddCounter { value, .. }
+            | ModelEffect::SubCounter { value, .. } => (value, ParamKind::Count),
+            ModelEffect::SetBool { value, .. } => (value, ParamKind::Bool),
+            ModelEffect::ListAppend { value, .. } => (value, ParamKind::Str),
+            ModelEffect::ListRemoveAt { index, .. } => (index, ParamKind::Count),
+        };
+        if let Arg::Param(name) = arg {
+            params.insert(name.clone(), kind);
         }
     }
+    params
 }
 
 /// Translate IOA invariants into resolved invariants. Status membership
@@ -251,6 +305,7 @@ mod tests {
         let action = super::super::types::TemperModelAction {
             name: "SubmitOrder".to_string(),
             target_state: Some("Submitted".to_string()),
+            params: BTreeMap::new(),
         };
         let next = model.next_state(&state, action);
         assert!(next.is_some());
@@ -271,6 +326,7 @@ mod tests {
         let action = super::super::types::TemperModelAction {
             name: "AddItem".to_string(),
             target_state: None,
+            params: BTreeMap::new(),
         };
         let next = model.next_state(&state, action).unwrap();
         assert_eq!(*next.counters.get("items").unwrap(), 1);

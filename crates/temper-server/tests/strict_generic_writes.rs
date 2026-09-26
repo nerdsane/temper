@@ -288,7 +288,7 @@ async fn empty_action_body_is_empty_object_and_malformed_body_does_not_execute()
 async fn missing_strict_initializer_reports_refusal_without_creating_child() {
     let parent = SPEC.replace(
         "params = [\"Notes\"]",
-        "params = [\"Notes\"]\neffect = [{type=\"spawn\",entity_type=\"Customer\",entity_id_source=\"Notes\",initial_action=\"MissingInitializer\"}]",
+        "params = [\"Notes\"]\neffect = [\"spawn('Customer', 'MissingInitializer')\"]",
     );
     let child = SPEC.replace("name = \"Order\"", "name = \"Customer\"");
     let (state, _) = common::build_single_tenant_state(
@@ -349,7 +349,7 @@ name = "SpawnChild"
 from = ["Draft"]
 to = "Submitted"
 params = ["child_id", "payload", "unrelated"]
-effect = [{type="spawn",entity_type="Customer",entity_id_source="child_id",initial_action="Initialize"}]
+effect = ["spawn('Customer', 'Initialize', child_ref, params.child_id)"]
 "#;
     let child = r#"
 [automaton]

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use temper_jit::table::TransitionTable;
 use temper_runtime::scheduler::{FaultConfig, SimActorSystemConfig, install_deterministic_context};
-use temper_server::trigger::registry::{ReactionRegistry, parse_reactions};
+use temper_server::trigger::registry::ReactionRegistry;
 use temper_server::trigger::sim_dispatcher::SimReactionSystem;
 use temper_server::trigger::types::{
     ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver,
@@ -323,38 +323,6 @@ fn field_based_target_resolution() {
 }
 
 // =========================================================================
-// TOML parsing integration
-// =========================================================================
-
-#[test]
-fn parse_and_register_reactions_from_toml() {
-    let toml = r#"
-[[reaction]]
-name = "order_confirmed_triggers_payment"
-[reaction.when]
-entity_type = "Order"
-action = "ConfirmOrder"
-to_state = "Confirmed"
-[reaction.then]
-entity_type = "Payment"
-action = "AuthorizePayment"
-[reaction.resolve_target]
-type = "same_id"
-"#;
-
-    let rules = parse_reactions(toml).unwrap();
-    assert_eq!(rules.len(), 1);
-
-    let mut reg = ReactionRegistry::new();
-    reg.register_tenant_rules("t1", rules);
-
-    let tenant = temper_runtime::tenant::TenantId::new("t1");
-    let results = reg.lookup(&tenant, "Order", "ConfirmOrder", "Confirmed");
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].then.action, "AuthorizePayment");
-}
-
-// =========================================================================
 // Multi-step cascade (Order → Payment → ... stops at depth)
 // =========================================================================
 
@@ -486,99 +454,6 @@ fn cascade_with_params_from_fires_even_when_source_fields_missing() {
     );
     assert_eq!(results[0].rule_name, "order_confirmed_with_params_from");
 }
-
-#[test]
-fn reactions_toml_format_parses_cleanly() {
-    // Regression guard: the reactions.toml format used by paw-fs and
-    // katagami-curation in the openpaw repo must parse through
-    // parse_reactions. Prior to the Phase 3 audit this format was
-    // effectively dead data on some paths (PascalCase resolver types
-    // silently rejected by the snake_case parser).
-    //
-    // ADR-0046 note: the temper-repo temper-fs reactions were migrated to
-    // inline [[action.triggers]] in commit 92c79fc, and the old file
-    // deleted in f317b20. This test uses an inlined fixture matching the
-    // same three rules paw-fs still carries in the openpaw repo.
-    let source = r#"
-[[reaction]]
-name = "file_stream_updated_creates_version"
-[reaction.when]
-entity_type = "File"
-action = "StreamUpdated"
-to_state = "Ready"
-[reaction.then]
-entity_type = "FileVersion"
-action = "Create"
-[reaction.resolve_target]
-type = "create_if_missing"
-id_field = "last_version_id"
-
-[[reaction]]
-name = "file_stream_updated_supersedes_old_version"
-[reaction.when]
-entity_type = "File"
-action = "StreamUpdated"
-[reaction.then]
-entity_type = "FileVersion"
-action = "Supersede"
-[reaction.resolve_target]
-type = "field"
-field = "last_version_id"
-
-[[reaction]]
-name = "file_stream_updated_increments_workspace_usage"
-[reaction.when]
-entity_type = "File"
-action = "StreamUpdated"
-[reaction.then]
-entity_type = "Workspace"
-action = "IncrementUsage"
-[reaction.resolve_target]
-type = "field"
-field = "workspace_id"
-"#;
-    let rules = parse_reactions(source).expect("reactions.toml format must parse");
-    assert_eq!(rules.len(), 3);
-
-    let names: Vec<&str> = rules.iter().map(|r| r.name.as_str()).collect();
-    assert!(names.contains(&"file_stream_updated_creates_version"));
-    assert!(names.contains(&"file_stream_updated_supersedes_old_version"));
-    assert!(names.contains(&"file_stream_updated_increments_workspace_usage"));
-}
-
-#[test]
-fn parse_reactions_toml_with_params_from_loads_through_registry() {
-    let toml = r#"
-[[reaction]]
-name = "order_confirmed_pipes_payment"
-[reaction.when]
-entity_type = "Order"
-action = "ConfirmOrder"
-[reaction.then]
-entity_type = "Payment"
-action = "AuthorizePayment"
-params = { source = "reaction" }
-params_from = { origin_order = "order_id" }
-[reaction.resolve_target]
-type = "same_id"
-"#;
-    let rules = parse_reactions(toml).expect("parse");
-    assert_eq!(rules.len(), 1);
-    assert_eq!(rules[0].then.params_from.len(), 1);
-    assert_eq!(
-        rules[0]
-            .then
-            .params_from
-            .get("origin_order")
-            .map(String::as_str),
-        Some("order_id")
-    );
-}
-
-// =========================================================================
-// Phase 3: Guard on reaction.when — rule skips when guard fails, fires
-// when guard passes. Guard-skipped rules do NOT emit a ReactionResult.
-// =========================================================================
 
 #[test]
 fn guard_passing_rule_fires_guard_failing_rule_skipped() {

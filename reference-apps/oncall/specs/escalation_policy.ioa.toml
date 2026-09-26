@@ -28,7 +28,7 @@ name = "Activate"
 kind = "internal"
 from = ["Idle"]
 to = "Active"
-effect = "increment current_step"
+effect = ["current_step += 1"]
 hint = "Activate the escalation policy. Sets current step to 1."
 
 [[action]]
@@ -36,21 +36,21 @@ name = "StepUp"
 kind = "internal"
 from = ["Active"]
 guard = "can_escalate"
-effect = "increment current_step"
+effect = ["current_step += 1"]
 hint = "Move to the next escalation tier. Requires can_escalate to be true."
 
 [[action]]
 name = "Snooze"
 kind = "input"
 from = ["Active"]
-effect = "set can_escalate false"
+effect = ["can_escalate = false"]
 hint = "Snooze the escalation policy during maintenance windows."
 
 [[action]]
 name = "Unsnooze"
 kind = "input"
 from = ["Active"]
-effect = "set can_escalate true"
+effect = ["can_escalate = true"]
 hint = "Re-enable escalation after snooze period."
 
 [[action]]

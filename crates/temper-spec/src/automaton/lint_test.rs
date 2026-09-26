@@ -31,7 +31,7 @@ to = "Done"
 }
 
 #[test]
-fn unknown_guard_variables_fail_to_load_and_effect_variables_lint() {
+fn unknown_guard_and_effect_variables_fail_to_load() {
     let src = r#"
 [automaton]
 name = "Task"
@@ -48,21 +48,18 @@ name = "Complete"
 from = ["Draft"]
 to = "Done"
 guard = "phantom"
-effect = "set ghost true"
+effect = ["ghost = true"]
 "#;
     let err = parse_automaton(src).expect_err("unknown guard variable");
     assert!(
         err.to_string().contains("unknown state variable 'phantom'"),
         "{err}"
     );
-    let automaton = parse_automaton(&src.replace("guard = \"phantom\"", "guard = \"approved\""))
-        .expect("parse");
-    let findings = lint_automaton(&automaton);
+    let err = parse_automaton(&src.replace("guard = \"phantom\"", "guard = \"approved\""))
+        .expect_err("unknown effect variable");
     assert!(
-        findings
-            .iter()
-            .any(|finding| finding.code == "effect_unknown_var"
-                && finding.severity == LintSeverity::Error)
+        err.to_string().contains("unknown state variable 'ghost'"),
+        "{err}"
     );
 }
 
@@ -101,7 +98,6 @@ initial = "Draft"
 name = "EmitAudit"
 kind = "output"
 from = ["Draft"]
-effect = "emit audit"
 "#;
     let automaton = parse_automaton(src).expect("parse");
     let findings = lint_automaton(&automaton);
@@ -128,7 +124,7 @@ initial = "Draft"
 [[action]]
 name = "AddTask"
 from = ["Draft"]
-effect = [{ type = "spawn", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create" }]
+effect = ["spawn('Task', 'Create')"]
 "#,
     );
 
@@ -153,7 +149,7 @@ initial = "Draft"
 [[action]]
 name = "AddTask"
 from = ["Draft"]
-effect = [{ type = "spawn", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create" }]
+effect = ["spawn('Task', 'Create')"]
 "#,
     );
     let child = parse(
@@ -189,7 +185,7 @@ initial = "Draft"
 [[action]]
 name = "AddTask"
 from = ["Draft"]
-effect = [{ type = "spawn", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create" }]
+effect = ["spawn('Task', 'Create')"]
 "#,
     );
     let child = parse(
@@ -227,7 +223,7 @@ initial = "Draft"
 name = "AddTask"
 from = ["Draft"]
 params = ["title"]
-effect = [{ type = "spawn", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create" }]
+effect = ["spawn('Task', 'Create')"]
 "#,
     );
     let child = parse(
@@ -266,7 +262,7 @@ initial = "Active"
 name = "AddTask"
 from = ["Active"]
 params = ["title", "description"]
-effect = [{ type = "spawn", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create" }]
+effect = ["spawn('Task', 'Create')"]
 "#,
     );
     let child = parse(

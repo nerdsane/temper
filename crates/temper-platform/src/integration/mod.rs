@@ -1,6 +1,6 @@
 //! Integration engine: outbox-pattern event-driven integrations.
 //!
-//! Integrations are declared in IOA specs via `[[integration]]` sections and
+//! Integrations are configured per deployment ([`IntegrationConfig`]) and
 //! dispatched asynchronously after state transitions. The state machine remains
 //! pure and deterministically verifiable — external calls happen out-of-band.
 //!

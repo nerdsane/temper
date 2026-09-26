@@ -327,3 +327,140 @@ fn serializes_as_source_text() {
         vec![("W".into(), "a".into()), ("V".into(), "b".into())]
     );
 }
+
+mod effects {
+    use std::collections::BTreeMap;
+
+    use crate::predicate::{
+        Arg, AssignOp, Effect, Literal, ParamKind, VarKind, check_effects, parse, parse_effect,
+    };
+
+    fn vars() -> BTreeMap<String, VarKind> {
+        [
+            ("items", VarKind::Counter),
+            ("limit", VarKind::Counter),
+            ("ready", VarKind::Bool),
+            ("tags", VarKind::List),
+            ("goal", VarKind::Str),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect()
+    }
+
+    #[test]
+    fn every_statement_round_trips_through_its_canonical_text() {
+        for source in [
+            "items = 0",
+            "items += 1",
+            "items -= params.n",
+            "items = limit",
+            "ready = true",
+            "ready = params.ok",
+            "append(tags, 'vip')",
+            "append(tags, params.tag)",
+            "remove_at(tags, 0)",
+            "remove_at(tags, params.i)",
+            "schedule('Expire', 3600)",
+            "schedule_at('Expire', expires_at)",
+            "spawn('Task', 'Create', last_task_id)",
+            "spawn('Task', 'Create')",
+            "spawn('Task', 'Create', last_task_id, params.task_id)",
+        ] {
+            let effect = parse_effect(source).unwrap_or_else(|e| panic!("{source}: {e}"));
+            assert_eq!(effect.to_string(), source);
+            assert_eq!(parse_effect(&effect.to_string()).unwrap(), effect);
+        }
+    }
+
+    #[test]
+    fn parses_operators_and_params() {
+        assert_eq!(
+            parse_effect("used += params.size_bytes").unwrap(),
+            Effect::Assign {
+                var: "used".into(),
+                op: AssignOp::Add,
+                value: Arg::Param("size_bytes".into()),
+            }
+        );
+        assert_eq!(
+            parse_effect("n-=2").unwrap(),
+            Effect::Assign {
+                var: "n".into(),
+                op: AssignOp::Sub,
+                value: Arg::Lit(Literal::Int(2)),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_statements() {
+        for (source, message) in [
+            ("items", "expected '=', '+=', '-=' or '('"),
+            ("emit('Shipped')", "unknown effect 'emit'"),
+            ("trigger('notify')", "unknown effect 'trigger'"),
+            ("schedule('A')", "expected ','"),
+            ("schedule('A', -1)", "expected a delay"),
+            ("schedule(A, 1)", "expected a quoted name"),
+            ("items = params", "expected '.'"),
+            ("items += 1 2", "unexpected token after effect"),
+            ("set ready true", "expected '=', '+=', '-=' or '('"),
+            ("items = \"a\"", "strings use single quotes"),
+        ] {
+            let error = parse_effect(source).unwrap_err().to_string();
+            assert!(error.contains(message), "{source}: {error}");
+            assert!(error.starts_with("invalid effect"), "{source}: {error}");
+        }
+    }
+
+    #[test]
+    fn predicates_reject_assignment_and_params() {
+        let error = parse("items = 1").unwrap_err().to_string();
+        assert!(error.contains("compare with '=='"), "{error}");
+        assert!(parse("params.x == 1").is_err());
+    }
+
+    #[test]
+    fn checks_types_and_collects_param_kinds() {
+        let effects: Vec<Effect> = [
+            "items += params.n",
+            "ready = params.ok",
+            "append(tags, params.tag)",
+            "remove_at(tags, params.n)",
+        ]
+        .iter()
+        .map(|s| parse_effect(s).unwrap())
+        .collect();
+        let params = check_effects(&effects, &vars()).unwrap();
+        assert_eq!(params["n"], ParamKind::Count);
+        assert_eq!(params["ok"], ParamKind::Bool);
+        assert_eq!(params["tag"], ParamKind::Str);
+    }
+
+    #[test]
+    fn rejects_ill_typed_statements() {
+        for (source, message) in [
+            ("missing += 1", "unknown state variable 'missing'"),
+            ("ready += 1", "'+=' needs a counter"),
+            ("items = true", "a counter takes"),
+            ("items = -1", "a counter takes"),
+            ("items = ready", "a counter takes"),
+            ("ready = 1", "a bool takes"),
+            ("tags = 'a'", "use append() or remove_at()"),
+            ("goal = 'a'", "only counters and bools"),
+            ("append(items, 'a')", "'items' is not a list"),
+            ("append(tags, 1)", "lists hold strings"),
+            ("remove_at(tags, 'a')", "the index is"),
+        ] {
+            let effect = parse_effect(source).unwrap();
+            let error = check_effects(&[effect], &vars()).unwrap_err();
+            assert!(error.contains(message), "{source}: {error}");
+        }
+        let mixed = ["items += params.x", "ready = params.x"].map(|s| parse_effect(s).unwrap());
+        assert!(
+            check_effects(&mixed, &vars())
+                .unwrap_err()
+                .contains("params.x")
+        );
+    }
+}

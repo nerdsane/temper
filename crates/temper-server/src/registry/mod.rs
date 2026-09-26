@@ -25,26 +25,9 @@ use temper_spec::cross_invariant::parse_cross_invariants;
 use temper_spec::csdl::{CsdlDocument, emit_csdl_xml, merge_csdl};
 
 use crate::trigger::ReactionRegistry;
-use crate::trigger::types::ReactionRule;
-
 pub use types::*;
 
 use relations::{build_relation_graph, build_webhook_routes, synthesize_action_trigger_reaction};
-
-fn merge_reaction_rules(
-    existing: &[ReactionRule],
-    incoming: Vec<ReactionRule>,
-) -> Vec<ReactionRule> {
-    let mut merged: BTreeMap<String, ReactionRule> = existing
-        .iter()
-        .cloned()
-        .map(|rule| (rule.name.clone(), rule))
-        .collect();
-    for rule in incoming {
-        merged.insert(rule.name.clone(), rule);
-    }
-    merged.into_values().collect()
-}
 
 /// Multi-tenant specification registry.
 ///
@@ -79,16 +62,8 @@ impl SpecRegistry {
         csdl_xml: String,
         ioa_sources: &[(&str, &str)],
     ) {
-        self.try_register_tenant_with_reactions_and_constraints(
-            tenant,
-            csdl,
-            csdl_xml,
-            ioa_sources,
-            Vec::new(),
-            None,
-            false,
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
+        self.try_register_tenant_with_constraints(tenant, csdl, csdl_xml, ioa_sources, None, false)
+            .unwrap_or_else(|e| panic!("{e}"));
     }
 
     /// Fallible variant of [`register_tenant`](Self::register_tenant).
@@ -99,41 +74,32 @@ impl SpecRegistry {
         csdl_xml: String,
         ioa_sources: &[(&str, &str)],
     ) -> Result<(), RegistryError> {
-        self.try_register_tenant_with_reactions_and_constraints(
-            tenant,
-            csdl,
-            csdl_xml,
-            ioa_sources,
-            Vec::new(),
-            None,
-            false,
-        )
+        self.try_register_tenant_with_constraints(tenant, csdl, csdl_xml, ioa_sources, None, false)
     }
 
-    /// Register a tenant with CSDL, IOA specs, reaction rules, and optional
-    /// cross-entity invariant definitions.
-    pub fn register_tenant_with_reactions_and_constraints(
+    /// Register a tenant with CSDL, IOA specs, and optional cross-entity
+    /// invariant definitions. Cross-entity reactions come from the specs'
+    /// entity-kind `[[action.triggers]]`.
+    pub fn register_tenant_with_constraints(
         &mut self,
         tenant: impl Into<TenantId>,
         csdl: CsdlDocument,
         csdl_xml: String,
         ioa_sources: &[(&str, &str)],
-        reactions: Vec<ReactionRule>,
         cross_invariants_source: Option<String>,
     ) {
-        self.try_register_tenant_with_reactions_and_constraints(
+        self.try_register_tenant_with_constraints(
             tenant,
             csdl,
             csdl_xml,
             ioa_sources,
-            reactions,
             cross_invariants_source,
             false,
         )
         .unwrap_or_else(|e| panic!("{e}"));
     }
 
-    /// Fallible variant of [`register_tenant_with_reactions_and_constraints`](Self::register_tenant_with_reactions_and_constraints).
+    /// Fallible variant of [`register_tenant_with_constraints`](Self::register_tenant_with_constraints).
     ///
     /// When `merge` is `true`, the new specs are **merged** into the existing
     /// tenant config rather than replacing it.  Existing entity types, CSDL
@@ -142,14 +108,13 @@ impl SpecRegistry {
     /// `load-inline` (agent `submit_specs`), where the agent only submits
     /// its own entities and should not wipe platform types.
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip_all, fields(otel.name = "registry.try_register_tenant_with_reactions_and_constraints"))]
-    pub fn try_register_tenant_with_reactions_and_constraints(
+    #[instrument(skip_all, fields(otel.name = "registry.try_register_tenant_with_constraints"))]
+    pub fn try_register_tenant_with_constraints(
         &mut self,
         tenant: impl Into<TenantId>,
         csdl: CsdlDocument,
         csdl_xml: String,
         ioa_sources: &[(&str, &str)],
-        reactions: Vec<ReactionRule>,
         cross_invariants_source: Option<String>,
         merge: bool,
     ) -> Result<(), RegistryError> {
@@ -200,11 +165,6 @@ impl SpecRegistry {
                 existing_config.csdl_xml = Arc::new(csdl_xml);
                 existing_config.entity_set_map = entity_set_map;
             }
-            existing_config.reactions = if merge {
-                merge_reaction_rules(&existing_config.reactions, reactions)
-            } else {
-                reactions
-            };
             // In merge mode, an incoming payload without cross-invariants must
             // not wipe the ones previously loaded for the tenant — otherwise a
             // follow-up merge (e.g. Agent OS app bootstrap) silently disables
@@ -332,7 +292,6 @@ impl SpecRegistry {
                     csdl_xml: Arc::new(csdl_xml),
                     entity_set_map,
                     entities,
-                    reactions,
                     relation_graph,
                     cross_invariants,
                     cross_invariants_source,
@@ -345,53 +304,12 @@ impl SpecRegistry {
         Ok(())
     }
 
-    /// Register a tenant with CSDL, IOA specs, and reaction rules.
-    pub fn register_tenant_with_reactions(
-        &mut self,
-        tenant: impl Into<TenantId>,
-        csdl: CsdlDocument,
-        csdl_xml: String,
-        ioa_sources: &[(&str, &str)],
-        reactions: Vec<ReactionRule>,
-    ) {
-        self.try_register_tenant_with_reactions_and_constraints(
-            tenant,
-            csdl,
-            csdl_xml,
-            ioa_sources,
-            reactions,
-            None,
-            false,
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
-    }
-
-    /// Fallible variant of [`register_tenant_with_reactions`](Self::register_tenant_with_reactions).
-    pub fn try_register_tenant_with_reactions(
-        &mut self,
-        tenant: impl Into<TenantId>,
-        csdl: CsdlDocument,
-        csdl_xml: String,
-        ioa_sources: &[(&str, &str)],
-        reactions: Vec<ReactionRule>,
-    ) -> Result<(), RegistryError> {
-        self.try_register_tenant_with_reactions_and_constraints(
-            tenant,
-            csdl,
-            csdl_xml,
-            ioa_sources,
-            reactions,
-            None,
-            false,
-        )
-    }
-
-    /// Build a [`ReactionRegistry`] from all tenants' reaction rules,
-    /// including synthesized rules from `[[agent_trigger]]` sections.
+    /// Build a [`ReactionRegistry`] from every tenant's entity-kind
+    /// `[[action.triggers]]`.
     pub fn build_reaction_registry(&self) -> ReactionRegistry {
         let mut registry = ReactionRegistry::new();
         for (tenant, config) in &self.tenants {
-            let mut rules = config.reactions.clone();
+            let mut rules = Vec::new();
             // ADR-0046: synthesize reaction rules from [[action.triggers]]
             // entity-kind blocks on every entity's actions. Wasm/Webhook
             // kinds are handled by a separate runtime path.
@@ -720,12 +638,11 @@ mod tests {
             "[automaton]\nname = \"TrustedIssuer\"\nstates = [\"Active\"]\ninitial = \"Active\"\n";
 
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_with_constraints(
                 "rel-tenant",
                 parse_csdl(identity_csdl).expect("identity CSDL should parse"),
                 identity_csdl.to_string(),
                 &[("TrustedIssuer", issuer_ioa)],
-                Vec::new(),
                 None,
                 true, // merge
             )
@@ -806,12 +723,11 @@ mod tests {
 
         let (new_csdl, new_xml) = task_csdl();
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_with_constraints(
                 "alpha",
                 new_csdl,
                 new_xml,
                 &[("Task", ORDER_IOA)],
-                Vec::new(),
                 None,
                 true,
             )
@@ -857,12 +773,11 @@ assert = 'related(Order, OrderId).status in ["Active"]'
         let mut registry = SpecRegistry::new();
         let (csdl, xml) = minimal_csdl();
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_with_constraints(
                 "alpha",
                 csdl,
                 xml,
                 &[("Order", ORDER_IOA)],
-                Vec::new(),
                 Some(CROSS_INVARIANTS_TOML.to_string()),
                 false,
             )
@@ -881,12 +796,11 @@ assert = 'related(Order, OrderId).status in ["Active"]'
         // Merge with cross_invariants_source = None (mimics agent OS bootstrap).
         let (new_csdl, new_xml) = task_csdl();
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_with_constraints(
                 "alpha",
                 new_csdl,
                 new_xml,
                 &[("Task", ORDER_IOA)],
-                Vec::new(),
                 None,
                 true,
             )
@@ -924,12 +838,11 @@ assert = 'related(Order, OrderId).status in ["Active"]'
         let mut registry = SpecRegistry::new();
         let (csdl, xml) = minimal_csdl();
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_with_constraints(
                 "alpha",
                 csdl,
                 xml,
                 &[("Order", ORDER_IOA)],
-                Vec::new(),
                 Some(CROSS_INVARIANTS_TOML.to_string()),
                 false,
             )
@@ -937,12 +850,11 @@ assert = 'related(Order, OrderId).status in ["Active"]'
 
         let (csdl2, xml2) = minimal_csdl();
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_with_constraints(
                 "alpha",
                 csdl2,
                 xml2,
                 &[("Order", ORDER_IOA)],
-                Vec::new(),
                 None,
                 false,
             )
@@ -968,12 +880,11 @@ assert = 'related(Order, OrderId).status in ["Active"]'
 
         let (csdl2, xml2) = minimal_csdl();
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_with_constraints(
                 "alpha",
                 csdl2,
                 xml2,
                 &[("Task", ORDER_IOA)],
-                Vec::new(),
                 None,
                 false,
             )

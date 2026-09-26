@@ -71,73 +71,40 @@ initial = "A"
 name = "E1"
 from = ["A"]
 effect = [
-    { type = "increment", var = "count" },
-    { type = "decrement", var = "count" },
-    { type = "set_counter_from_param", var = "size_bytes", param = "payload_size" },
-    { type = "increment", var = "bytes", amount = "size_bytes" },
-    { type = "set_bool", var = "done", value = true },
-    { type = "emit", event = "order_placed" },
-    { type = "list_append", var = "log" },
-    { type = "list_remove_at", var = "log" },
-    { type = "trigger", name = "run_wasm" },
-    { type = "schedule", action = "Retry", delay_seconds = 30 },
+    "count += 1",
+    "count -= 1",
+    "size_bytes = params.payload_size",
+    "done = true",
+    "append(log, params.entry)",
+    "remove_at(log, 0)",
+    "schedule('Retry', 30)",
+    "spawn('Child', 'Init', child_id)",
 ]
 "#;
     let automaton: Automaton = toml::from_str(toml_src).unwrap();
-    let effects = &automaton.actions[0].effect;
-    assert_eq!(effects.len(), 10);
-    assert!(matches!(&effects[0], Effect::Increment { var, amount: None } if var == "count"));
-    assert!(matches!(&effects[1], Effect::Decrement { var, amount: None } if var == "count"));
-    assert!(matches!(
-        &effects[2],
-        Effect::SetCounterFromParam { var, param } if var == "size_bytes" && param == "payload_size"
-    ));
-    assert!(matches!(
-        &effects[3],
-        Effect::Increment { var, amount: Some(amount) } if var == "bytes" && amount == "size_bytes"
-    ));
-    assert!(matches!(&effects[4], Effect::SetBool { var, value: true } if var == "done"));
-    assert!(matches!(&effects[5], Effect::Emit { event } if event == "order_placed"));
-    assert!(matches!(&effects[6], Effect::ListAppend { var } if var == "log"));
-    assert!(matches!(&effects[7], Effect::ListRemoveAt { var } if var == "log"));
-    assert!(matches!(&effects[8], Effect::Trigger { name } if name == "run_wasm"));
-    assert!(
-        matches!(&effects[9], Effect::Schedule { action, delay_seconds: 30 } if action == "Retry")
+    let effects: Vec<String> = automaton.actions[0]
+        .effect
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        effects,
+        [
+            "count += 1",
+            "count -= 1",
+            "size_bytes = params.payload_size",
+            "done = true",
+            "append(log, params.entry)",
+            "remove_at(log, 0)",
+            "schedule('Retry', 30)",
+            "spawn('Child', 'Init', child_id)",
+        ]
     );
-}
-
-#[test]
-fn parse_spawn_effect() {
-    let toml_src = r#"
-[automaton]
-name = "T"
-states = ["A"]
-initial = "A"
-
-[[action]]
-name = "S1"
-from = ["A"]
-effect = [
-    { type = "spawn", entity_type = "Child", entity_id_source = "{uuid}", initial_action = "Init", store_id_in = "child_id" },
-]
-"#;
-    let automaton: Automaton = toml::from_str(toml_src).unwrap();
-    match &automaton.actions[0].effect[0] {
-        Effect::Spawn {
-            entity_type,
-            entity_id_source,
-            initial_action,
-            store_id_in,
-            copy_fields,
-        } => {
-            assert_eq!(entity_type, "Child");
-            assert_eq!(entity_id_source, "{uuid}");
-            assert_eq!(initial_action.as_deref(), Some("Init"));
-            assert_eq!(store_id_in.as_deref(), Some("child_id"));
-            assert!(copy_fields.is_none());
-        }
-        other => panic!("expected Spawn, got {other:?}"),
-    }
+    assert!(matches!(
+        &automaton.actions[0].effect[7],
+        Effect::Spawn { entity_type, initial_action, store_id_in: Some(field), id: None }
+            if entity_type == "Child" && initial_action == "Init" && field == "child_id"
+    ));
 }
 
 #[test]
@@ -169,36 +136,6 @@ reaches = ["C"]
     assert_eq!(automaton.liveness[0].name, "Progress");
     assert_eq!(automaton.liveness[0].from, vec!["A"]);
     assert_eq!(automaton.liveness[0].reaches, vec!["C"]);
-}
-
-#[test]
-fn parse_integration() {
-    let toml_src = r#"
-[automaton]
-name = "T"
-states = ["A"]
-initial = "A"
-
-[[integration]]
-name = "payment"
-trigger = "ChargeCard"
-type = "wasm"
-module = "payment_processor"
-on_success = "PaymentConfirmed"
-on_failure = "PaymentFailed"
-"#;
-    let automaton: Automaton = toml::from_str(toml_src).unwrap();
-    assert_eq!(automaton.integrations.len(), 1);
-    assert_eq!(automaton.integrations[0].name, "payment");
-    assert_eq!(automaton.integrations[0].integration_type, "wasm");
-    assert_eq!(
-        automaton.integrations[0].module.as_deref(),
-        Some("payment_processor")
-    );
-    assert_eq!(
-        automaton.integrations[0].on_success.as_deref(),
-        Some("PaymentConfirmed")
-    );
 }
 
 #[test]

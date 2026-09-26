@@ -193,12 +193,11 @@ fn bootstrap_tenant_specs_inner(
     {
         let mut registry = state.registry.write().unwrap(); // ci-ok: infallible lock
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_with_constraints(
                 tenant_id.clone(),
                 csdl,
                 csdl_source.to_string(),
                 specs,
-                Vec::new(),
                 cross_invariants_source.map(str::to_string),
                 merge,
             )
@@ -360,12 +359,11 @@ fn bootstrap_agent_subset_specs(
     let tenant_id = TenantId::new(tenant);
     let mut registry = state.registry.write().unwrap(); // ci-ok: infallible startup lock
 
-    registry.try_register_tenant_with_reactions_and_constraints(
+    registry.try_register_tenant_with_constraints(
         tenant_id.clone(),
         csdl_doc,
         csdl_xml,
         specs,
-        Vec::new(),
         None,
         true, // merge: additive; preserve any OS-app entities and schema
     )?;

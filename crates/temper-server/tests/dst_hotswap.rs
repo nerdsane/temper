@@ -27,10 +27,7 @@ name = "AddItem"
 from = ["Draft"]
 to = "Draft"
 kind = "input"
-
-[[action.effect]]
-type = "increment"
-var = "item_count"
+effect = ["item_count += 1"]
 
 [[action]]
 name = "SubmitOrder"

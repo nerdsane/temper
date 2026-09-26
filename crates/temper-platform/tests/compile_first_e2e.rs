@@ -178,12 +178,11 @@ async fn register_test_operator(
             .write()
             .expect("test registry lock should be available");
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_with_constraints(
                 tenant_id.clone(),
                 credential_csdl,
                 CREDENTIAL_CSDL_XML.to_string(),
                 &credential_specs,
-                Vec::new(),
                 None,
                 true,
             )

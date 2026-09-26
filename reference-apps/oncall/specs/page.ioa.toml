@@ -28,7 +28,7 @@ initial = "false"
 name = "AssignAgent"
 kind = "input"
 from = ["Triggered"]
-effect = "set agent_assigned true"
+effect = ["agent_assigned = true"]
 params = ["AgentId"]
 hint = "Assign an on-call agent to the page. Must happen before investigation can begin."
 
@@ -45,7 +45,7 @@ name = "Escalate"
 kind = "internal"
 from = ["Investigating"]
 to = "Escalated"
-effect = "increment escalation_tier"
+effect = ["escalation_tier += 1"]
 hint = "Agent escalates to a higher tier. Increments escalation counter."
 
 [[action]]
@@ -53,7 +53,7 @@ name = "ReassignAgent"
 kind = "input"
 from = ["Escalated"]
 to = "Investigating"
-effect = "set agent_assigned true"
+effect = ["agent_assigned = true"]
 params = ["AgentId"]
 hint = "Reassign to a more capable agent after escalation."
 
@@ -83,7 +83,7 @@ name = "Timeout"
 kind = "internal"
 from = ["Investigating"]
 to = "Escalated"
-effect = "increment escalation_tier"
+effect = ["escalation_tier += 1"]
 hint = "Investigation timed out — automatic escalation."
 
 [[invariant]]
