@@ -3,7 +3,7 @@
 //! Also provides conversion to the existing TemperModel and TransitionTable
 //! formats, so the verification cascade and runtime work unchanged.
 //!
-//! The hand-rolled TOML parser lives in [`super::toml_parser`] to keep this
+//! Reading the TOML document into an [`Automaton`] lives in [`super::toml_parser`] to keep this
 //! module focused on the public API and validation logic.
 
 use super::toml_parser;

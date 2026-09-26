@@ -1,118 +1,100 @@
 use super::AutomatonParseError;
-use super::inline::{parse_inline_fields, split_inline_tables};
+use super::values::{scalar_string, unsigned};
 use crate::automaton::Effect;
+use toml::{Table, Value};
 
+/// Parse an action `effect` value: one string effect, or an array whose
+/// entries are string effects or `{ type = ... }` tables.
 pub(super) fn parse_effect_value(
-    value: &str,
+    value: &Value,
     effects: &mut Vec<Effect>,
 ) -> Result<(), AutomatonParseError> {
-    let trimmed = value.trim();
-
-    if trimmed.starts_with('[') && trimmed.contains('{') {
-        return parse_effect_array(trimmed, effects);
-    }
-
-    if let Some(effect) = parse_legacy_effect(trimmed) {
-        effects.push(effect);
-    }
-
-    Ok(())
-}
-
-fn parse_effect_array(value: &str, effects: &mut Vec<Effect>) -> Result<(), AutomatonParseError> {
-    let trimmed = value.trim();
-    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
-        return Ok(());
-    }
-
-    let inner = &trimmed[1..trimmed.len() - 1];
-    for entry in split_inline_tables(inner) {
-        let entry = entry.trim().trim_matches('{').trim_matches('}').trim();
-        let fields = parse_inline_fields(entry);
-
-        if let Some(effect) = parse_effect_fields(&fields)? {
-            effects.push(effect);
+    match value {
+        Value::String(text) => effects.push(parse_string_effect(text)?),
+        Value::Array(entries) => {
+            for entry in entries {
+                match entry {
+                    Value::String(text) => effects.push(parse_string_effect(text)?),
+                    Value::Table(fields) => effects.extend(parse_effect_fields(fields)?),
+                    other => return Err(invalid_effect_value(other)),
+                }
+            }
         }
+        Value::Table(fields) => effects.extend(parse_effect_fields(fields)?),
+        other => return Err(invalid_effect_value(other)),
     }
-
     Ok(())
 }
 
-fn parse_effect_fields(
-    fields: &std::collections::BTreeMap<String, String>,
-) -> Result<Option<Effect>, AutomatonParseError> {
-    let effect_type = fields.get("type").map(|s| s.as_str()).unwrap_or("");
+fn invalid_effect_value(value: &Value) -> AutomatonParseError {
+    AutomatonParseError::Validation(format!(
+        "invalid effect '{value}' (expected a string effect or a {{ type = ... }} table)"
+    ))
+}
 
-    let effect = match effect_type {
+fn parse_string_effect(text: &str) -> Result<Effect, AutomatonParseError> {
+    parse_legacy_effect(text.trim()).ok_or_else(|| {
+        AutomatonParseError::Validation(format!("unsupported effect syntax '{}'", text.trim()))
+    })
+}
+
+fn parse_effect_fields(fields: &Table) -> Result<Option<Effect>, AutomatonParseError> {
+    let get = |key: &str| fields.get(key).and_then(scalar_string);
+    let text = |key: &str| get(key).unwrap_or_default();
+    let effect_type = text("type");
+
+    let effect = match effect_type.as_str() {
         "schedule" => {
-            let action = fields.get("action").cloned().unwrap_or_default();
+            let action = text("action");
             if action.is_empty() {
                 None
             } else {
-                let delay_seconds = fields
-                    .get("delay_seconds")
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
                 Some(Effect::Schedule {
                     action,
-                    delay_seconds,
+                    delay_seconds: unsigned(fields, "delay_seconds").unwrap_or(0),
                 })
             }
         }
         "schedule_at" => {
-            let action = fields.get("action").cloned().unwrap_or_default();
-            let field = fields.get("field").cloned().unwrap_or_default();
+            let action = text("action");
+            let field = text("field");
             if action.is_empty() || field.is_empty() {
                 None
             } else {
                 Some(Effect::ScheduleAt { action, field })
             }
         }
-        "increment" => fields.get("var").cloned().map(|var| Effect::Increment {
+        "increment" => get("var").map(|var| Effect::Increment {
             var,
-            amount: fields.get("amount").cloned(),
+            amount: get("amount"),
         }),
-        "decrement" => fields.get("var").cloned().map(|var| Effect::Decrement {
+        "decrement" => get("var").map(|var| Effect::Decrement {
             var,
-            amount: fields.get("amount").cloned(),
+            amount: get("amount"),
         }),
-        "set_counter_from_param" => fields.get("var").cloned().map(|var| {
-            let param = fields.get("param").cloned().unwrap_or_else(|| var.clone());
+        "set_counter_from_param" => get("var").map(|var| {
+            let param = get("param").unwrap_or_else(|| var.clone());
             Effect::SetCounterFromParam { var, param }
         }),
-        "set_bool" => fields.get("var").cloned().map(|var| Effect::SetBool {
+        "set_bool" => get("var").map(|var| Effect::SetBool {
             var,
-            value: fields.get("value").is_some_and(|s| s == "true"),
+            value: get("value").is_some_and(|s| s == "true"),
         }),
-        "emit" | "emit_event" => fields
-            .get("event")
-            .cloned()
-            .map(|event| Effect::Emit { event }),
-        "trigger" => fields
-            .get("name")
-            .cloned()
-            .map(|name| Effect::Trigger { name }),
+        "emit" | "emit_event" => get("event").map(|event| Effect::Emit { event }),
+        "trigger" => get("name").map(|name| Effect::Trigger { name }),
         "list_append" => list_var(fields).map(|var| Effect::ListAppend { var }),
         "list_remove_at" => list_var(fields).map(|var| Effect::ListRemoveAt { var }),
         "spawn" | "spawn_entity" => {
-            let entity_type = fields.get("entity_type").cloned().unwrap_or_default();
+            let entity_type = text("entity_type");
             if entity_type.is_empty() {
                 None
             } else {
-                let copy_fields = fields.get("copy_fields").and_then(|s| {
-                    let names: Vec<String> = s
-                        .split(',')
-                        .map(|f| f.trim().to_string())
-                        .filter(|f| !f.is_empty())
-                        .collect();
-                    if names.is_empty() { None } else { Some(names) }
-                });
                 Some(Effect::Spawn {
                     entity_type,
-                    entity_id_source: fields.get("entity_id_source").cloned().unwrap_or_default(),
-                    initial_action: fields.get("initial_action").cloned(),
-                    store_id_in: fields.get("store_id_in").cloned(),
-                    copy_fields,
+                    entity_id_source: text("entity_id_source"),
+                    initial_action: get("initial_action"),
+                    store_id_in: get("store_id_in"),
+                    copy_fields: copy_fields(fields),
                 })
             }
         }
@@ -124,6 +106,23 @@ fn parse_effect_fields(
     };
 
     Ok(effect)
+}
+
+/// `copy_fields` as a TOML array or a comma-separated string.
+fn copy_fields(fields: &Table) -> Option<Vec<String>> {
+    let names: Vec<String> = match fields.get("copy_fields")? {
+        Value::Array(items) => items.iter().filter_map(scalar_string).collect(),
+        other => scalar_string(other)?
+            .split(',')
+            .map(str::to_string)
+            .collect(),
+    };
+    let names: Vec<String> = names
+        .into_iter()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+    if names.is_empty() { None } else { Some(names) }
 }
 
 fn parse_legacy_effect(value: &str) -> Option<Effect> {
@@ -192,9 +191,9 @@ fn parse_bool_set(value: &str) -> Option<(String, bool)> {
     Some((parts[1].to_string(), parts[2].trim() == "true"))
 }
 
-fn list_var(fields: &std::collections::BTreeMap<String, String>) -> Option<String> {
+fn list_var(fields: &Table) -> Option<String> {
     fields
         .get("var")
-        .cloned()
-        .or_else(|| fields.get("list").cloned())
+        .or_else(|| fields.get("list"))
+        .and_then(scalar_string)
 }

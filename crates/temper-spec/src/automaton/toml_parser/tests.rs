@@ -1,17 +1,4 @@
-use super::inline::{parse_inline_fields, split_inline_tables};
 use super::*;
-
-#[test]
-fn parse_kv_simple() {
-    let (key, value) = parse_kv("name = \"Order\"").unwrap();
-    assert_eq!(key, "name");
-    assert_eq!(value, "Order");
-}
-
-#[test]
-fn parse_kv_no_equals() {
-    assert!(parse_kv("no_equals_here").is_none());
-}
 
 #[test]
 fn extracts_declared_unique_keys() {
@@ -30,7 +17,7 @@ properties = ["WorkspaceId", "Path"]
 name = "id"
 properties = ["Id"]
 "#;
-    let keys = extract_keys(src).expect("extract keys");
+    let keys = parse_toml_to_automaton(src).expect("parse").keys;
     assert_eq!(keys.len(), 2);
     assert_eq!(keys[0].name, "path");
     assert_eq!(keys[0].properties, vec!["WorkspaceId", "Path"]);
@@ -41,7 +28,7 @@ properties = ["Id"]
 #[test]
 fn extract_keys_empty_when_no_key_blocks() {
     let src = "[automaton]\nname = \"File\"\nstates = [\"Created\"]\ninitial = \"Created\"\n";
-    assert!(extract_keys(src).expect("extract keys").is_empty());
+    assert!(parse_toml_to_automaton(src).expect("parse").keys.is_empty());
 }
 
 #[test]
@@ -60,7 +47,7 @@ model_property = "taste_vector_model"
 dims = 384
 metric = "cosine"
 "#;
-    let vectors = extract_vectors(src).expect("extract vectors");
+    let vectors = parse_toml_to_automaton(src).expect("parse").vectors;
     assert_eq!(vectors.len(), 1);
     assert_eq!(vectors[0].name, "taste");
     assert_eq!(vectors[0].property, "taste_vector");
@@ -72,94 +59,133 @@ metric = "cosine"
 #[test]
 fn extract_vectors_empty_when_no_vector_blocks() {
     let src = "[automaton]\nname = \"File\"\nstates = [\"Created\"]\ninitial = \"Created\"\n";
-    assert!(extract_vectors(src).expect("extract vectors").is_empty());
-}
-
-#[test]
-fn parse_kv_trims_whitespace() {
-    let (key, value) = parse_kv("  key  =  \"value\"  ").unwrap();
-    assert_eq!(key, "key");
-    assert_eq!(value, "value");
-}
-
-#[test]
-fn parse_string_array_simple() {
-    let arr = parse_string_array("[\"Draft\", \"Active\", \"Done\"]");
-    assert_eq!(arr, vec!["Draft", "Active", "Done"]);
-}
-
-#[test]
-fn parse_string_array_single_value() {
-    let arr = parse_string_array("\"Active\"");
-    assert_eq!(arr, vec!["Active"]);
-}
-
-#[test]
-fn parse_string_array_empty_brackets() {
-    let arr = parse_string_array("[]");
-    assert!(arr.is_empty());
-}
-
-#[test]
-fn split_inline_tables_two_items() {
-    let result = split_inline_tables("{a = 1}, {b = 2}");
-    assert_eq!(result.len(), 2);
-    assert_eq!(result[0], "{a = 1}");
-    assert_eq!(result[1], "{b = 2}");
-}
-
-#[test]
-fn split_inline_tables_empty() {
-    let result = split_inline_tables("");
-    assert!(result.is_empty());
-}
-
-#[test]
-fn parse_inline_fields_simple() {
-    let map = parse_inline_fields("type = \"schedule\", action = \"Refresh\"");
-    assert_eq!(map.get("type").unwrap(), "schedule");
-    assert_eq!(map.get("action").unwrap(), "Refresh");
-}
-
-#[test]
-fn parse_inline_fields_keeps_nested_arrays_together() {
-    let map = parse_inline_fields(
-        "type = \"cross_entity_state\", required_status = [\"Draft\", \"Ready\"]",
+    assert!(
+        parse_toml_to_automaton(src)
+            .expect("parse")
+            .vectors
+            .is_empty()
     );
-    assert_eq!(map.get("type").unwrap(), "cross_entity_state");
+}
+
+const MINIMAL_HEADER: &str = r#"
+[automaton]
+name = "Doc"
+states = ["Draft", "Done"]
+initial = "Draft"
+"#;
+
+fn parse_with(body: &str) -> Result<Automaton, AutomatonParseError> {
+    parse_toml_to_automaton(&format!("{MINIMAL_HEADER}{body}"))
+}
+
+#[test]
+fn invalid_toml_is_rejected() {
+    let err = parse_with("[[action]]\nname = Finish\n").expect_err("unquoted string is not TOML");
+    assert!(matches!(err, AutomatonParseError::Toml(_)), "{err}");
+}
+
+#[test]
+fn lenient_core_values_are_accepted() {
+    let auto = parse_with(
+        r#"
+[[state]]
+name = "count"
+type = "counter"
+initial = 0
+query_indexed = "false"
+
+[[action]]
+name = "Finish"
+from = "Draft"
+record_parent_event = "false"
+"#,
+    )
+    .unwrap();
+    assert_eq!(auto.actions[0].from, vec!["Draft"]);
+    assert_eq!(auto.state[0].initial, "0");
+    assert_eq!(auto.state[0].query_indexed, Some(false));
+    assert!(!auto.actions[0].record_parent_event);
+}
+
+#[test]
+fn guard_and_effect_accept_strings_and_tables() {
+    let auto = parse_with(
+        r#"
+[[action]]
+name = "Finish"
+guard = ["is_true ready", { type = "min_count", var = "items", min = 2 }]
+effect = [
+  "increment items",
+  { type = "set_bool", var = "ready", value = true },
+  { type = "spawn", entity_type = "Child", entity_id_source = "{uuid}", copy_fields = ["a", "b"] },
+]
+"#,
+    )
+    .unwrap();
+    let action = &auto.actions[0];
+    assert!(matches!(&action.guard[0], Guard::IsTrue { var } if var == "ready"));
+    assert!(matches!(&action.guard[1], Guard::MinCount { var, min: 2 } if var == "items"));
+    assert!(matches!(&action.effect[0], Effect::Increment { var, amount: None } if var == "items"));
+    assert!(matches!(
+        &action.effect[1],
+        Effect::SetBool { value: true, .. }
+    ));
+    assert!(matches!(
+        &action.effect[2],
+        Effect::Spawn { copy_fields: Some(fields), .. } if fields == &["a", "b"]
+    ));
+}
+
+#[test]
+fn unknown_string_effect_is_rejected() {
+    let err = parse_with("[[action]]\nname = \"Finish\"\neffect = \"frobnicate items\"\n")
+        .expect_err("unknown string effect must not be dropped");
+    assert!(err.to_string().contains("frobnicate items"), "{err}");
+}
+
+#[test]
+fn malformed_webhook_surfaces_error() {
+    let err = parse_with("[[webhook]]\nname = \"cb\"\n").expect_err("webhook missing path/action");
+    assert!(err.to_string().contains("webhook"), "{err}");
+}
+
+#[test]
+fn integration_extra_keys_become_config() {
+    let auto = parse_with(
+        r#"
+[[integration]]
+name = "invoke_llm"
+trigger = "invoke_llm"
+type = "llm"
+emits = ["A", "B"]
+timeout = 30
+
+[integration.config]
+temper_api_url = "{secret:temper_api_url}"
+"#,
+    )
+    .unwrap();
+    let config = &auto.integrations[0].config;
     assert_eq!(
-        map.get("required_status").unwrap(),
-        "[\"Draft\", \"Ready\"]"
+        config.get("emits").map(String::as_str),
+        Some(r#"["A", "B"]"#)
     );
+    assert_eq!(config.get("timeout").map(String::as_str), Some("30"));
+    assert_eq!(
+        config.get("temper_api_url").map(String::as_str),
+        Some("{secret:temper_api_url}")
+    );
+    assert!(!config.contains_key("config"));
 }
 
 #[test]
-fn parse_inline_fields_empty() {
-    let map = parse_inline_fields("");
-    assert!(map.is_empty());
-}
-
-#[test]
-fn join_multiline_single_line() {
-    let result = join_multiline_arrays("key = [\"a\", \"b\"]");
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0], "key = [\"a\", \"b\"]");
-}
-
-#[test]
-fn join_multiline_continuation() {
-    let input = "effect = [\n  { var = \"x\" },\n]";
-    let result = join_multiline_arrays(input);
-    assert_eq!(result.len(), 1);
-    assert!(result[0].contains("effect = ["));
-    assert!(result[0].contains(']'));
-}
-
-#[test]
-fn join_multiline_no_brackets() {
-    let input = "name = \"Test\"\ninitial = \"Draft\"";
-    let result = join_multiline_arrays(input);
-    assert_eq!(result.len(), 2);
+fn context_entities_are_parsed() {
+    let auto = parse_with(
+        "[[context_entity]]\nname = \"parent\"\nentity_type = \"Lead\"\nid_field = \"lead_id\"\n",
+    )
+    .unwrap();
+    assert_eq!(auto.context_entities.len(), 1);
+    assert_eq!(auto.context_entities[0].entity_type, "Lead");
 }
 
 #[test]
@@ -363,7 +389,7 @@ fn allow_indefinite_states_parses_from_automaton_block() {
 }
 
 #[test]
-fn state_timeout_absent_yields_empty_vec() {
+fn absent_optional_sections_yield_defaults() {
     let minimal = r#"
 [automaton]
 name = "Trivial"
@@ -373,12 +399,13 @@ initial = "Idle"
     let auto = parse_toml_to_automaton(minimal).unwrap();
     assert!(auto.state_timeouts.is_empty());
     assert!(auto.automaton.allow_indefinite_states.is_empty());
+    assert!(auto.admission.is_none());
 }
 
 #[test]
 fn state_timeout_isolation_ignores_other_sections() {
-    // Ensures extract_state_timeouts' isolation doesn't pick up keys that
-    // happen to share a name with state_timeout fields in other sections.
+    // Keys that share a name with state_timeout fields in other sections
+    // must not leak into the timeout declarations.
     let spec = r#"
 [automaton]
 name = "X"
@@ -438,18 +465,6 @@ queue_timeout_seconds = 20
     );
     assert_eq!(admission.queue_depth, Some(75));
     assert_eq!(admission.queue_timeout_seconds, Some(20));
-}
-
-#[test]
-fn admission_block_absent_yields_none() {
-    let minimal = r#"
-[automaton]
-name = "Trivial"
-states = ["Idle"]
-initial = "Idle"
-"#;
-    let auto = parse_toml_to_automaton(minimal).unwrap();
-    assert!(auto.admission.is_none());
 }
 
 #[test]

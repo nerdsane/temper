@@ -1,19 +1,35 @@
 use super::AutomatonParseError;
-use super::inline::{parse_inline_fields, parse_string_array, split_inline_tables};
+use super::values::{scalar_string, unsigned};
 use crate::automaton::Guard;
+use toml::{Table, Value};
 
+/// Parse an action `guard` value: one string clause, or an array whose
+/// entries are string clauses or `{ type = ... }` tables.
 pub(super) fn parse_guard_value(
-    value: &str,
+    value: &Value,
     guards: &mut Vec<Guard>,
 ) -> Result<(), AutomatonParseError> {
-    let trimmed = value.trim();
-
-    if trimmed.starts_with('[') && trimmed.contains('{') {
-        return parse_guard_array(trimmed, guards);
+    match value {
+        Value::String(clause) => guards.push(parse_guard_clause(clause)?),
+        Value::Array(entries) => {
+            for entry in entries {
+                match entry {
+                    Value::String(clause) => guards.push(parse_guard_clause(clause)?),
+                    Value::Table(fields) => guards.push(parse_guard_fields(fields)?),
+                    other => return Err(invalid_guard_value(other)),
+                }
+            }
+        }
+        Value::Table(fields) => guards.push(parse_guard_fields(fields)?),
+        other => return Err(invalid_guard_value(other)),
     }
-
-    guards.push(parse_guard_clause(trimmed)?);
     Ok(())
+}
+
+fn invalid_guard_value(value: &Value) -> AutomatonParseError {
+    AutomatonParseError::Validation(format!(
+        "invalid guard '{value}' (expected a string clause or a {{ type = ... }} table)"
+    ))
 }
 
 pub(super) fn parse_guard_clause(value: &str) -> Result<Guard, AutomatonParseError> {
@@ -32,70 +48,40 @@ pub(super) fn parse_guard_clause(value: &str) -> Result<Guard, AutomatonParseErr
     parse_prefix_guard(trimmed)
 }
 
-fn parse_guard_array(value: &str, guards: &mut Vec<Guard>) -> Result<(), AutomatonParseError> {
-    let trimmed = value.trim();
-    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
-        return Ok(());
-    }
+fn parse_guard_fields(fields: &Table) -> Result<Guard, AutomatonParseError> {
+    let text = |key: &str| fields.get(key).and_then(scalar_string).unwrap_or_default();
+    let list = |key: &str| string_list_field(fields, key);
+    let count = |key: &str| unsigned::<usize>(fields, key).unwrap_or(0);
+    let guard_type = text("type");
 
-    let inner = &trimmed[1..trimmed.len() - 1];
-    for entry in split_inline_tables(inner) {
-        let entry = entry.trim().trim_matches('{').trim_matches('}').trim();
-        guards.push(parse_guard_fields(&parse_inline_fields(entry))?);
-    }
-
-    Ok(())
-}
-
-fn parse_guard_fields(
-    fields: &std::collections::BTreeMap<String, String>,
-) -> Result<Guard, AutomatonParseError> {
-    let guard_type = fields.get("type").map(|s| s.as_str()).unwrap_or("");
-
-    let guard = match guard_type {
+    let guard = match guard_type.as_str() {
         "cross_entity_state" => Guard::CrossEntityState {
-            entity_type: fields.get("entity_type").cloned().unwrap_or_default(),
-            entity_id_source: fields.get("entity_id_source").cloned().unwrap_or_default(),
-            required_status: fields
-                .get("required_status")
-                .map(|s| parse_string_array(s))
-                .unwrap_or_default(),
-            forbidden_status: fields
-                .get("forbidden_status")
-                .map(|s| parse_string_array(s))
-                .unwrap_or_default(),
-            required: fields
-                .get("required")
-                .map(|s| s.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
+            entity_type: text("entity_type"),
+            entity_id_source: text("entity_id_source"),
+            required_status: list("required_status"),
+            forbidden_status: list("forbidden_status"),
+            required: text("required").eq_ignore_ascii_case("true"),
         },
         "state_in" => Guard::StateIn {
-            values: fields
-                .get("values")
-                .map(|s| parse_string_array(s))
-                .unwrap_or_default(),
+            values: list("values"),
         },
         "min_count" => Guard::MinCount {
-            var: fields.get("var").cloned().unwrap_or_default(),
-            min: fields.get("min").and_then(|s| s.parse().ok()).unwrap_or(0),
+            var: text("var"),
+            min: count("min"),
         },
         "max_count" => Guard::MaxCount {
-            var: fields.get("var").cloned().unwrap_or_default(),
-            max: fields.get("max").and_then(|s| s.parse().ok()).unwrap_or(0),
+            var: text("var"),
+            max: count("max"),
         },
-        "is_true" => Guard::IsTrue {
-            var: fields.get("var").cloned().unwrap_or_default(),
-        },
-        "is_false" => Guard::IsFalse {
-            var: fields.get("var").cloned().unwrap_or_default(),
-        },
+        "is_true" => Guard::IsTrue { var: text("var") },
+        "is_false" => Guard::IsFalse { var: text("var") },
         "list_contains" => Guard::ListContains {
-            var: fields.get("var").cloned().unwrap_or_default(),
-            value: fields.get("value").cloned().unwrap_or_default(),
+            var: text("var"),
+            value: text("value"),
         },
         "list_length_min" => Guard::ListLengthMin {
-            var: fields.get("var").cloned().unwrap_or_default(),
-            min: fields.get("min").and_then(|s| s.parse().ok()).unwrap_or(0),
+            var: text("var"),
+            min: count("min"),
         },
         _ => {
             return Err(AutomatonParseError::Validation(format!(
@@ -105,6 +91,18 @@ fn parse_guard_fields(
     };
 
     Ok(guard)
+}
+
+/// List-valued guard field; a lone scalar is a one-element list.
+fn string_list_field(fields: &Table, key: &str) -> Vec<String> {
+    match fields.get(key) {
+        Some(Value::Array(items)) => items.iter().filter_map(scalar_string).collect(),
+        Some(other) => scalar_string(other).into_iter().collect(),
+        None => Vec::new(),
+    }
+    .into_iter()
+    .filter(|s| !s.is_empty())
+    .collect()
 }
 
 fn parse_infix_guard(
