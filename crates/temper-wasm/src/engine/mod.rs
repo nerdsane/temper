@@ -3,6 +3,9 @@
 //! Modules are compiled once and cached by SHA-256 hash. Each invocation
 //! gets a fresh `Store` with fuel + memory limits (TigerStyle budgets).
 
+mod compilation;
+#[cfg(test)]
+mod compilation_tests;
 #[cfg(test)]
 #[path = "guest_read_bounds_test.rs"]
 mod guest_read_bounds_test;
@@ -255,14 +258,26 @@ pub struct WasmEngine {
     /// The underlying wasmtime engine.
     engine: Engine,
     /// Shared epoch ticker used by per-store relative deadlines.
-    _epoch_ticker: EpochTicker,
+    _epoch_ticker: Arc<EpochTicker>,
     /// Compiled module cache: SHA-256 hash -> compiled module.
     cache: RwLock<BTreeMap<String, Arc<CachedModule>>>,
+    /// Optional test-only code cache; never contains guest or registration state.
+    #[cfg(any(test, feature = "test-shared-compilation"))]
+    shared_compiler: Option<Arc<compilation::SharedCompiler>>,
 }
 
 impl WasmEngine {
     /// Create a new WASM engine with fuel metering and epoch interruption enabled.
     pub fn new() -> Result<Self, WasmError> {
+        #[cfg(any(test, feature = "test-shared-compilation"))]
+        if configured_profiling_strategy().is_none() {
+            return compilation::shared_engine();
+        }
+        Self::new_private()
+    }
+
+    /// Construct the production cold-engine path, also exercised directly by tests.
+    fn new_private() -> Result<Self, WasmError> {
         let mut config = Config::new();
         config.consume_fuel(true);
         config.epoch_interruption(true);
@@ -288,8 +303,10 @@ impl WasmEngine {
 
         Ok(Self {
             engine,
-            _epoch_ticker: epoch_ticker,
+            _epoch_ticker: Arc::new(epoch_ticker),
             cache: RwLock::new(BTreeMap::new()),
+            #[cfg(any(test, feature = "test-shared-compilation"))]
+            shared_compiler: None,
         })
     }
 
@@ -322,48 +339,12 @@ impl WasmEngine {
             }
         }
 
-        let module = Module::new(&self.engine, wasm_bytes)
-            .map_err(|e| WasmError::Compilation(e.to_string()))?;
-
-        // Pre-link for both WASI and non-WASI paths.
-        let needs_wasi = module
-            .imports()
-            .any(|imp| imp.module() == "wasi_snapshot_preview1");
-
-        let (instance_pre, instance_pre_wasi) = if needs_wasi {
-            let mut linker = Linker::new(&self.engine);
-            host_functions::link_host_functions(&mut linker)
-                .map_err(|e| WasmError::Compilation(format!("pre-link host functions: {e}")))?;
-            preview1::add_to_linker_sync(&mut linker, |state: &mut HostState| {
-                state.wasi_ctx.as_mut().expect("wasi_ctx must be Some")
-            })
-            .map_err(|e| WasmError::Compilation(format!("pre-link WASI: {e}")))?;
-            let pre = linker
-                .instantiate_pre(&module)
-                .map_err(|e| WasmError::Compilation(format!("pre-instantiate WASI: {e}")))?;
-            (None, Some(pre))
-        } else {
-            let mut linker = Linker::new(&self.engine);
-            host_functions::link_host_functions(&mut linker)
-                .map_err(|e| WasmError::Compilation(format!("pre-link host functions: {e}")))?;
-            let pre = linker
-                .instantiate_pre(&module)
-                .map_err(|e| WasmError::Compilation(format!("pre-instantiate: {e}")))?;
-            (Some(pre), None)
-        };
-
-        let cached = Arc::new(CachedModule {
-            hash: hash.clone(),
-            module,
-            instance_pre,
-            instance_pre_wasi,
-        });
+        let cached = self.compile_module(&hash, wasm_bytes)?;
         {
             let mut cache = self.cache.write().expect("cache lock poisoned");
             cache.insert(hash.clone(), cached);
         }
 
-        tracing::info!(hash = %hash, size = wasm_bytes.len(), "WASM module compiled and cached");
         Ok(hash)
     }
 

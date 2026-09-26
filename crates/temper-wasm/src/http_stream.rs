@@ -150,12 +150,18 @@ impl std::fmt::Display for StreamError {
 
 impl std::error::Error for StreamError {}
 
-/// One end of a bounded stream channel. Sending side has the Sender;
-/// receiving side has the Receiver (wrapped in Arc<Mutex<>> so
-/// recv() can serialize across concurrent reads if needed).
+/// Serialize reads without holding the receiver lock while waiting for data.
+/// A close must reach the receiver even when a read future is pending inside
+/// an HTTP request body that the transport is no longer polling.
+struct ChannelReceiver {
+    read_lock: Mutex<()>,
+    receiver: std::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
+}
+
+/// One end of a bounded stream channel.
 enum ChannelEnd {
     Sender(mpsc::Sender<Vec<u8>>),
-    Receiver(Arc<Mutex<mpsc::Receiver<Vec<u8>>>>),
+    Receiver(Arc<ChannelReceiver>),
 }
 
 /// Registry of active stream handles. Lives on `ProductionWasmHost`
@@ -207,9 +213,13 @@ impl HttpStreamRegistry {
         let read_id = state.next_id;
         state.next_id += 1;
         state.handles.insert(write_id, ChannelEnd::Sender(tx));
-        state
-            .handles
-            .insert(read_id, ChannelEnd::Receiver(Arc::new(Mutex::new(rx))));
+        state.handles.insert(
+            read_id,
+            ChannelEnd::Receiver(Arc::new(ChannelReceiver {
+                read_lock: Mutex::new(()),
+                receiver: std::sync::Mutex::new(rx),
+            })),
+        );
         (StreamHandle(write_id), StreamHandle(read_id))
     }
 
@@ -259,14 +269,22 @@ impl HttpStreamRegistry {
             ));
         }
 
-        let rx_mutex = self.receiver_for(handle).await?;
-        let mut rx = rx_mutex.lock().await;
+        let receiver = self.receiver_for(handle).await?;
+        let _read_guard = receiver.read_lock.lock().await;
 
         if let Some(chunk) = self.take_pending_read(handle, max_bytes).await {
             return Ok(chunk);
         }
 
-        match rx.recv().await {
+        let chunk = futures_util::future::poll_fn(|cx| {
+            receiver
+                .receiver
+                .lock()
+                .expect("stream receiver poisoned")
+                .poll_recv(cx)
+        })
+        .await;
+        match chunk {
             Some(chunk) => Ok(self.split_for_bounded_read(handle, chunk, max_bytes).await),
             None => Ok(Vec::new()), // clean EOF
         }
@@ -279,7 +297,18 @@ impl HttpStreamRegistry {
         let mut state = self.inner.lock().await;
         state.pending_reads.remove(&handle.0);
         match state.handles.remove(&handle.0) {
-            Some(_) => Ok(()),
+            Some(ChannelEnd::Receiver(receiver)) => {
+                // Dropping the registry's Arc alone does not close a receiver
+                // retained by an outstanding read. Reject writes immediately,
+                // before publishing an early HTTP response to the guest.
+                receiver
+                    .receiver
+                    .lock()
+                    .expect("stream receiver poisoned")
+                    .close();
+                Ok(())
+            }
+            Some(ChannelEnd::Sender(_)) => Ok(()),
             None => Err(StreamError::InvalidHandle),
         }
     }
@@ -411,7 +440,7 @@ impl HttpStreamRegistry {
     async fn receiver_for(
         &self,
         handle: StreamHandle,
-    ) -> Result<Arc<Mutex<mpsc::Receiver<Vec<u8>>>>, StreamError> {
+    ) -> Result<Arc<ChannelReceiver>, StreamError> {
         let state = self.inner.lock().await;
         match state.handles.get(&handle.0) {
             Some(ChannelEnd::Receiver(rx)) => Ok(rx.clone()),
@@ -547,6 +576,35 @@ mod tests {
         reg.close(r).await.unwrap();
         let err = reg.write(w, b"x".to_vec()).await.unwrap_err();
         assert_eq!(err, StreamError::Closed);
+    }
+
+    #[tokio::test]
+    async fn close_receiver_with_pending_read_rejects_writes_immediately() {
+        let reg = HttpStreamRegistry::new();
+        let (w, r) = reg.create_pair().await;
+        let read = reg.read(r);
+        tokio::pin!(read);
+        assert!(futures_util::poll!(&mut read).is_pending());
+
+        reg.close(r).await.unwrap();
+        assert_eq!(reg.try_write(w, vec![1]).await, Err(StreamError::Closed));
+        assert_eq!(reg.write(w, vec![2]).await, Err(StreamError::Closed));
+        assert!(read.await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn close_receiver_wakes_a_backpressured_writer() {
+        let reg = HttpStreamRegistry::new();
+        let (w, r) = reg.create_pair().await;
+        for _ in 0..STREAM_CHANNEL_CAPACITY {
+            reg.try_write(w, vec![0]).await.unwrap();
+        }
+        let write = reg.write(w, vec![1]);
+        tokio::pin!(write);
+        assert!(futures_util::poll!(&mut write).is_pending());
+
+        reg.close(r).await.unwrap();
+        assert_eq!(write.await, Err(StreamError::Closed));
     }
 
     #[tokio::test]

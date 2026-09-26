@@ -29,6 +29,9 @@ uuid = { workspace = true }
 
 [features]
 test-helpers = []
+# Test-only compiled-code reuse. Registrations and per-invocation Stores remain
+# isolated. Keep this on dev-dependencies, never production dependencies.
+test-shared-compilation = []
 
 [dev-dependencies]
 base64 = "0.22"
