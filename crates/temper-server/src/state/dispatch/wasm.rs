@@ -846,27 +846,27 @@ impl crate::state::ServerState {
                     ctx.agent_ctx.security_ctx.as_ref(),
                     Some(&module_name),
                 );
-                let mut production_host_builder =
-                    ProductionWasmHost::with_timeout(tenant_secrets, http_timeout)
-                        .with_binary_http_interceptor(
-                            local_blob_interceptor
-                                .unwrap_or_else(|| Arc::new(|_, _, _, _| Box::pin(async { None }))),
-                        )
-                        .with_spec_evaluator(spec_evaluator_fn())
-                        .with_progress_emitter(progress_emitter)
-                        .with_internal_api_base_url(internal_api_url)
-                        .with_invocation_context(host_invocation_context)
-                        .with_llm_content_export(
-                            self.export_llm_content(ctx.entity_ref.tenant.as_str()),
-                        )
-                        .with_text_http_interceptor(
-                            local_file_interceptor
-                                .unwrap_or_else(|| Arc::new(|_, _, _, _| Box::pin(async { None }))),
-                        )
-                        .with_trace_id(
-                            current_otel_trace_id(active_span)
-                                .or_else(|| ctx.agent_ctx.trace_id.clone()),
-                        );
+                let mut production_host_builder = ProductionWasmHost::with_client_cache(
+                    tenant_secrets,
+                    http_timeout,
+                    self.wasm_engine.http_clients(),
+                )
+                .with_binary_http_interceptor(
+                    local_blob_interceptor
+                        .unwrap_or_else(|| Arc::new(|_, _, _, _| Box::pin(async { None }))),
+                )
+                .with_spec_evaluator(spec_evaluator_fn())
+                .with_progress_emitter(progress_emitter)
+                .with_internal_api_base_url(internal_api_url)
+                .with_invocation_context(host_invocation_context)
+                .with_llm_content_export(self.export_llm_content(ctx.entity_ref.tenant.as_str()))
+                .with_text_http_interceptor(
+                    local_file_interceptor
+                        .unwrap_or_else(|| Arc::new(|_, _, _, _| Box::pin(async { None }))),
+                )
+                .with_trace_id(
+                    current_otel_trace_id(active_span).or_else(|| ctx.agent_ctx.trace_id.clone()),
+                );
                 if let Some(issuer) = internal_capability_issuer {
                     production_host_builder =
                         production_host_builder.with_internal_capability_issuer(issuer);
@@ -1587,12 +1587,16 @@ impl crate::state::ServerState {
             context.entity_id.clone(),
             module_name.to_string(),
         );
-        let mut base_host = ProductionWasmHost::new(tenant_secrets)
-            .with_spec_evaluator(spec_evaluator_fn())
-            .with_progress_emitter(progress_emitter)
-            .with_internal_api_base_url(internal_api_base_url(self))
-            .with_invocation_context(context.clone())
-            .with_llm_content_export(self.export_llm_content(tenant.as_str()));
+        let mut base_host = ProductionWasmHost::with_client_cache(
+            tenant_secrets,
+            WasmResourceLimits::default().max_duration,
+            self.wasm_engine.http_clients(),
+        )
+        .with_spec_evaluator(spec_evaluator_fn())
+        .with_progress_emitter(progress_emitter)
+        .with_internal_api_base_url(internal_api_base_url(self))
+        .with_invocation_context(context.clone())
+        .with_llm_content_export(self.export_llm_content(tenant.as_str()));
         if let Some(resolver) = secret_resolver {
             base_host = base_host.with_secret_resolver(resolver);
         }

@@ -23,7 +23,7 @@ use wasmtime::{Config, Engine, Linker, Module, ProfilingStrategy, ResourceLimite
 use wasmtime_wasi::preview1::WasiP1Ctx;
 use wasmtime_wasi::{WasiCtxBuilder, preview1};
 
-use crate::host_trait::WasmHost;
+use crate::host_trait::{HttpClientCache, WasmHost};
 use crate::stream::StreamRegistry;
 use crate::types::{
     MAX_MODULE_SIZE, WasmInvocationContext, WasmInvocationResult, WasmResourceLimits,
@@ -258,6 +258,8 @@ pub struct WasmEngine {
     _epoch_ticker: EpochTicker,
     /// Compiled module cache: SHA-256 hash -> compiled module.
     cache: RwLock<BTreeMap<String, Arc<CachedModule>>>,
+    /// Outbound HTTP clients reused by every production host this engine serves.
+    http_clients: HttpClientCache,
 }
 
 impl WasmEngine {
@@ -290,7 +292,13 @@ impl WasmEngine {
             engine,
             _epoch_ticker: epoch_ticker,
             cache: RwLock::new(BTreeMap::new()),
+            http_clients: HttpClientCache::default(),
         })
+    }
+
+    /// HTTP clients shared by the production hosts of this engine's invocations.
+    pub fn http_clients(&self) -> &HttpClientCache {
+        &self.http_clients
     }
 
     /// Compute SHA-256 hash of WASM bytes.
