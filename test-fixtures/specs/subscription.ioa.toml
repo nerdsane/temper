@@ -8,6 +8,7 @@
 name = "Subscription"
 states = ["Active", "PastDue", "Suspended", "Cancelled", "Expired"]
 initial = "Active"
+terminal = ["Cancelled", "Expired"]
 
 # --- State Variables ---
 
@@ -83,22 +84,9 @@ to = "Active"
 effect = "set auto_renew false"
 hint = "Customer disables automatic renewal."
 
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "CancelledIsFinal"
-when = ["Cancelled"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "ExpiredIsFinal"
-when = ["Expired"]
-assert = "no_further_transitions"
-
 [[invariant]]
 name = "PastDueHasFailure"
-when = ["PastDue", "Suspended", "Expired"]
-assert = "payment_failures > 0"
+assert = "status in ['PastDue', 'Suspended', 'Expired'] => payment_failures > 0"
 
 # --- Integrations ---
 

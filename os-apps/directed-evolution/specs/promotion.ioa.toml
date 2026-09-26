@@ -64,5 +64,4 @@ hint = "Fail a promotion."
 
 [[invariant]]
 name = "PromotedHasEvidence"
-when = ["Promoted"]
-assert = "is_true has_evidence"
+assert = "status in ['Promoted'] => has_evidence"

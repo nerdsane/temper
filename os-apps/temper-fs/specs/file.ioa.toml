@@ -8,6 +8,7 @@
 name = "File"
 states = ["Created", "Ready", "Locked", "Archived"]
 initial = "Created"
+terminal = ["Archived"]
 
 # --- State Variables ---
 
@@ -57,9 +58,7 @@ kind = "input"
 from = ["Created", "Ready"]
 to = "Ready"
 params = ["content_hash", "size_bytes", "mime_type", "version_number", "previous_version_id", "created_by"]
-guard = [
-  { type = "cross_entity_state", entity_type = "Workspace", entity_id_source = "workspace_id", forbidden_status = ["Frozen", "Archived"] },
-]
+guard = "Workspace[workspace_id].status not in ['Frozen', 'Archived']"
 effect = [
   { type = "increment", var = "version_count" },
   { type = "set_counter_from_param", var = "size_bytes", param = "size_bytes" },
@@ -155,24 +154,14 @@ name = "FileContentUpdatedEvent"
 kind = "output"
 hint = "Emitted when file content is updated via StreamUpdated."
 
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "ArchivedIsFinal"
-when = ["Archived"]
-assert = "no_further_transitions"
-
 [[invariant]]
 name = "ReadyFilesHaveContent"
-when = ["Ready", "Locked"]
-assert = "has_content"
+assert = "status in ['Ready', 'Locked'] => has_content"
 
 [[invariant]]
 name = "VersionCountNonNegative"
-when = ["Created", "Ready", "Locked", "Archived"]
-assert = "version_count >= 0"
+assert = "status in ['Created', 'Ready', 'Locked', 'Archived'] => version_count >= 0"
 
 [[invariant]]
 name = "SizeBytesNonNegative"
-when = ["Created", "Ready", "Locked", "Archived"]
-assert = "size_bytes >= 0"
+assert = "status in ['Created', 'Ready', 'Locked', 'Archived'] => size_bytes >= 0"

@@ -47,7 +47,7 @@ initial = "false"
 name = "Complete"
 from = ["Draft"]
 to = "Done"
-guard = "is_true phantom"
+guard = "phantom"
 effect = "set ghost true"
 "#;
     let err = parse_automaton(src).expect_err("unknown guard variable");
@@ -55,7 +55,7 @@ effect = "set ghost true"
         err.to_string().contains("unknown state variable 'phantom'"),
         "{err}"
     );
-    let automaton = parse_automaton(&src.replace("is_true phantom", "is_true approved"))
+    let automaton = parse_automaton(&src.replace("guard = \"phantom\"", "guard = \"approved\""))
         .expect("parse");
     let findings = lint_automaton(&automaton);
     assert!(

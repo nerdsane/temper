@@ -20,6 +20,6 @@ pub use dispatcher::ReactionDispatcher;
 pub use registry::{ReactionRegistry, parse_reactions};
 pub use sim_dispatcher::SimReactionSystem;
 pub use types::{
-    MAX_REACTION_DEPTH, MAX_REACTIONS_PER_TENANT, ReactionResult,
-    ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver,
+    MAX_REACTION_DEPTH, MAX_REACTIONS_PER_TENANT, ReactionResult, ReactionRule, ReactionTarget,
+    ReactionTrigger, TargetResolver,
 };

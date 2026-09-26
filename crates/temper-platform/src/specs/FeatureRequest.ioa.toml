@@ -36,5 +36,4 @@ kind = "input"
 
 [[invariant]]
 name = "ResolvedIsTerminal"
-when = ["Resolved"]
-assert = "true"
+assert = "status in ['Resolved'] => true"

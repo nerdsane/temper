@@ -24,7 +24,7 @@ initial = "Open"
 [[action]]
 name = "Work"
 kind = "input"
-guard = [{ type = "state_in", values = ["Open"] }]
+guard = "status in ['Open']"
 to = "Working"
 
 [[action]]

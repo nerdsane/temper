@@ -31,7 +31,7 @@ name = "Verify"
 from = ["Building"]
 to = "Verified"
 kind = "internal"
-guard = "min spec_count 1"
+guard = "spec_count >= 1"
 effect = "set verified true"
 
 [[action]]
@@ -42,5 +42,4 @@ kind = "input"
 
 [[invariant]]
 name = "VerifiedRequiresSpecs"
-when = ["Verified"]
-assert = "spec_count > 0"
+assert = "status in ['Verified'] => spec_count > 0"

@@ -45,10 +45,11 @@ Wait for confirmation. Then generate specs.
 ### Technical mapping (internal — don't show this to the user)
 - Their "stages" = `states` in `[automaton]`
 - Their "what you can do" = `[[action]]` entries with `from`/`to`
-- "Can't" / "not allowed" = `[[invariant]]` with `assert`
+- "Can't" / "not allowed" = `[[invariant]]` with `assert` (e.g. `assert = "status in ['Shipped'] => items > 0"`)
 - "Only if" / "must have" = `guard` on the action
-- "Final" / "done forever" = `[[invariant]]` with `assert = "no_further_transitions"`
+- "Final" / "done forever" = `terminal = [...]` in `[automaton]`
 - Counters and flags: infer from context (e.g., "must have items" → counter `items`, guard `items > 0`)
+- Every `guard` and `assert` is one expression (`&&`, `||`, `!`, `=>`, comparisons, `in`, `empty()`, `len()`, `Type[ref].status`, single-quoted strings); see `docs/predicates.md`
 
 ## Generate Specs
 
@@ -101,6 +102,7 @@ Use the Write tool to create `specs/<entity>.ioa.toml` for each entity. Use this
 name = "EntityName"
 states = ["State1", "State2", "State3"]
 initial = "State1"
+terminal = ["State3"]
 
 [[state]]
 name = "counter_var"
@@ -119,8 +121,7 @@ hint = "Description for agents."
 
 [[invariant]]
 name = "InvariantName"
-when = ["State3"]
-assert = "no_further_transitions"
+assert = "status in ['State2', 'State3'] => counter_var > 0"
 
 [[liveness]]
 name = "EventuallyDone"
@@ -446,6 +447,7 @@ curl <TEMPER_URL>/observe/trajectories | jq '.failed_intents'
 name = "EntityName"
 states = ["State1", "State2", "State3"]
 initial = "State1"
+terminal = ["State3"]          # states no action may leave
 
 # State variables
 [[state]]
@@ -464,7 +466,7 @@ name = "ActionName"
 kind = "input"             # "input" | "output" | "internal"
 from = ["State1"]          # states this action can fire from
 to = "State2"              # target state (omit for self-loops)
-guard = "counter_var > 0"  # optional guard condition
+guard = "counter_var > 0 && bool_var"  # optional guard expression
 effect = "increment counter_var" # optional effect
 params = ["Param1"]        # optional parameters
 hint = "Description."      # optional hint
@@ -478,8 +480,7 @@ hint = "Emitted when something happens."
 # Safety invariants
 [[invariant]]
 name = "InvariantName"
-when = ["State2", "State3"]  # states where checked (empty = all)
-assert = "counter_var > 0"
+assert = "status in ['State2', 'State3'] => counter_var > 0"  # proven in every reachable state
 
 # Liveness properties
 [[liveness]]
@@ -536,7 +537,7 @@ on_failure = "NotifyFailed"
 | L1 counterexample | Model checker found a specific violating trace | Follow the trace — last transition is the problem |
 | L2 simulation failure | Fault injection broke an invariant | Tighten guards or add ordering constraints |
 | L3 property test failure | Random action sequence violated invariant | Add guard to prevent the violating action |
-| Deadlock (L1) | Entity stuck with no valid actions | Add transition out, or mark terminal with `no_further_transitions` |
+| Deadlock (L1) | Entity stuck with no valid actions | Add transition out, or list the state in `terminal` |
 
 ### CLI Quick Reference
 

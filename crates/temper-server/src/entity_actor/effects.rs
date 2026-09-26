@@ -1226,7 +1226,7 @@ initial = "Draft"
 name = "SubmitForReview"
 from = ["Draft"]
 to = "Submitted"
-guard = [{ type = "cross_entity_state", entity_type = "File", entity_id_source = "landing_file_id", required_status = ["Ready", "Locked"] }]
+guard = "empty(landing_file_id) || File[landing_file_id].status in ['Ready', 'Locked']"
 "#;
         let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
         let mut state = test_state("Doc", "Draft");
@@ -1429,9 +1429,7 @@ initial = "Planning"
 name = "Promote"
 from = ["Planning"]
 to = "Deployed"
-guard = [
-    { type = "cross_entity_state", entity_type = "TestWorkflow", entity_id_source = "test_wf_id", required_status = ["Passed"] }
-]
+guard = "empty(test_wf_id) || TestWorkflow[test_wf_id].status in ['Passed']"
 "#;
 
         let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
@@ -1488,16 +1486,7 @@ initial = "Draft"
 name = "Submit"
 from = ["Draft"]
 to = "Submitted"
-guard = [
-    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_a_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_b_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_c_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_d_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_e_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_f_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_g_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_h_id", required_status = ["Ready", "Locked"] }
-]
+guard = "(empty(attachment_a_id) || Attachment[attachment_a_id].status in ['Ready', 'Locked']) && (empty(attachment_b_id) || Attachment[attachment_b_id].status in ['Ready', 'Locked']) && (empty(attachment_c_id) || Attachment[attachment_c_id].status in ['Ready', 'Locked']) && (empty(attachment_d_id) || Attachment[attachment_d_id].status in ['Ready', 'Locked']) && (empty(attachment_e_id) || Attachment[attachment_e_id].status in ['Ready', 'Locked']) && (empty(attachment_f_id) || Attachment[attachment_f_id].status in ['Ready', 'Locked']) && (empty(attachment_g_id) || Attachment[attachment_g_id].status in ['Ready', 'Locked']) && (empty(attachment_h_id) || Attachment[attachment_h_id].status in ['Ready', 'Locked'])"
 "#;
 
         let table = temper_jit::table::TransitionTable::from_ioa_source(spec);

@@ -6,6 +6,7 @@
 name = "Label"
 states = ["Active", "Archived"]
 initial = "Active"
+terminal = ["Archived"]
 
 # --- State Variables ---
 
@@ -36,10 +37,3 @@ kind = "input"
 from = ["Active"]
 to = "Archived"
 hint = "Archive the label. Terminal state."
-
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "ArchivedIsFinal"
-when = ["Archived"]
-assert = "no_further_transitions"

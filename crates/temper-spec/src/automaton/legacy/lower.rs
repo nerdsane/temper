@@ -4,9 +4,9 @@
 //! differential tests in `lower_test.rs` compare both evaluators on
 //! generated states.
 
-use crate::automaton::assert_parser::{AssertCompareOp, ParsedAssert, parse_assert_expr};
-use crate::automaton::field_invariant::FieldPredicate;
-use crate::automaton::{Guard, TriggerGuard};
+use super::assert_parser::{AssertCompareOp, ParsedAssert, parse_assert_expr};
+use super::field_predicate::FieldPredicate;
+use super::syntax::{Guard, TriggerGuard};
 use crate::predicate::{CmpOp, Expr, Literal, Operand, Set};
 
 /// Result of lowering one `[[invariant]]`.
@@ -137,9 +137,9 @@ pub fn invariant_to_expr(when: &[String], assert: &str) -> Result<LoweredInvaria
         Some(parsed) => parsed_assert_to_expr(&parsed)?,
         // Shapes the old assert parser never understood: guard syntax such as
         // `is_true x`, or comparisons it rejected such as `x != ''`.
-        None => match crate::automaton::toml_parser::legacy_guard_clause(assert) {
-            Some(guard) => guard_to_expr(&guard),
-            None => crate::predicate::parse(assert).map_err(|e| e.to_string())?,
+        None => match super::guard_syntax::parse_guard_clause(assert) {
+            Ok(guard) => guard_to_expr(&guard),
+            Err(_) => crate::predicate::parse(assert).map_err(|e| e.to_string())?,
         },
     };
     Ok(LoweredInvariant::Assert(if when.is_empty() {

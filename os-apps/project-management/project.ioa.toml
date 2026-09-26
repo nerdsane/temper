@@ -6,6 +6,7 @@
 name = "Project"
 states = ["Planning", "Active", "Paused", "Completed", "Archived"]
 initial = "Planning"
+terminal = ["Archived"]
 
 # --- State Variables ---
 
@@ -44,7 +45,7 @@ name = "Activate"
 kind = "internal"
 from = ["Planning"]
 to = "Active"
-guard = "is_true has_description"
+guard = "has_description"
 hint = "Activate the project for work. Requires a description."
 
 [[action]]
@@ -107,22 +108,13 @@ name = "ProjectCompletedEvent"
 kind = "output"
 hint = "Emitted when project transitions to Completed."
 
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "ArchivedIsFinal"
-when = ["Archived"]
-assert = "no_further_transitions"
-
 [[invariant]]
 name = "CompletedRequiresIssues"
-when = ["Completed", "Archived"]
-assert = "issue_count > 0"
+assert = "status in ['Completed', 'Archived'] => issue_count > 0"
 
 [[invariant]]
 name = "ActiveRequiresDescription"
-when = ["Active", "Paused", "Completed", "Archived"]
-assert = "has_description"
+assert = "status in ['Active', 'Paused', 'Completed', 'Archived'] => has_description"
 
 # --- Liveness ---
 # No liveness property — projects can validly stay in Planning or Active

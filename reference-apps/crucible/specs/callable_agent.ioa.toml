@@ -17,12 +17,10 @@ initial = "Active"
 
 [[field_invariant]]
 name = "CalleeAgentIdRequired"
-when = { not = { field = "CalleeAgentId", absent = true } }
-require = { not = { field = "CalleeAgentId", empty = true } }
 message = "CallableAgent.CalleeAgentId must be non-empty"
+assert = "CalleeAgentId != null => !empty(CalleeAgentId)"
 
 [[field_invariant]]
 name = "CalleeAgentVersionRequired"
-when = { not = { field = "CalleeAgentVersion", absent = true } }
-require = { not = { field = "CalleeAgentVersion", empty = true } }
 message = "CallableAgent.CalleeAgentVersion must be set when present"
+assert = "CalleeAgentVersion != null => !empty(CalleeAgentVersion)"

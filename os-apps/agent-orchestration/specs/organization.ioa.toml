@@ -4,6 +4,7 @@
 name = "Organization"
 states = ["Setup", "Active", "Paused", "Archived"]
 initial = "Setup"
+terminal = ["Archived"]
 
 # --- State Variables ---
 
@@ -104,19 +105,10 @@ from = ["Setup", "Active", "Paused"]
 to = "Archived"
 hint = "Archive organization. Terminal state."
 
-# --- Invariants ---
-
-[[invariant]]
-name = "ArchivedIsFinal"
-when = ["Archived"]
-assert = "no_further_transitions"
-
-[[invariant]]
+[[field_invariant]]
 name = "ActiveRequiresName"
-when = ["Active", "Paused", "Archived"]
-assert = "name != ''"
+assert = "status in ['Active', 'Paused', 'Archived'] => name != ''"
 
 [[invariant]]
 name = "MemberCountNonNegative"
-when = ["Setup", "Active", "Paused", "Archived"]
-assert = "member_count >= 0"
+assert = "status in ['Setup', 'Active', 'Paused', 'Archived'] => member_count >= 0"

@@ -1,4 +1,3 @@
-use super::guards::parse_guard_clause;
 use super::*;
 
 #[test]
@@ -109,12 +108,12 @@ record_parent_event = "false"
 }
 
 #[test]
-fn guard_and_effect_accept_strings_and_tables() {
+fn guard_is_an_expression_and_effects_accept_strings_and_tables() {
     let auto = parse_with(
         r#"
 [[action]]
 name = "Finish"
-guard = ["is_true ready", { type = "min_count", var = "items", min = 2 }]
+guard = "ready && items >= 2"
 effect = [
   "increment items",
   { type = "set_bool", var = "ready", value = true },
@@ -186,85 +185,6 @@ fn context_entities_are_parsed() {
     .unwrap();
     assert_eq!(auto.context_entities.len(), 1);
     assert_eq!(auto.context_entities[0].entity_type, "Lead");
-}
-
-#[test]
-fn guard_gt() {
-    let g = parse_guard_clause("items > 3").unwrap();
-    assert!(matches!(g, Guard::MinCount { ref var, min: 4 } if var == "items"));
-}
-
-#[test]
-fn guard_gte() {
-    let g = parse_guard_clause("items >= 5").unwrap();
-    assert!(matches!(g, Guard::MinCount { ref var, min: 5 } if var == "items"));
-}
-
-#[test]
-fn guard_lt() {
-    let g = parse_guard_clause("items < 10").unwrap();
-    assert!(matches!(g, Guard::MaxCount { ref var, max: 10 } if var == "items"));
-}
-
-#[test]
-fn guard_lte() {
-    let g = parse_guard_clause("items <= 10").unwrap();
-    assert!(matches!(g, Guard::MaxCount { ref var, max: 11 } if var == "items"));
-}
-
-#[test]
-fn guard_prefix_min() {
-    let g = parse_guard_clause("min items 3").unwrap();
-    assert!(matches!(g, Guard::MinCount { ref var, min: 3 } if var == "items"));
-}
-
-#[test]
-fn guard_prefix_max() {
-    let g = parse_guard_clause("max items 10").unwrap();
-    assert!(matches!(g, Guard::MaxCount { ref var, max: 10 } if var == "items"));
-}
-
-#[test]
-fn guard_is_true() {
-    let g = parse_guard_clause("is_true approved").unwrap();
-    assert!(matches!(g, Guard::IsTrue { ref var } if var == "approved"));
-}
-
-#[test]
-fn guard_list_contains() {
-    let g = parse_guard_clause("list_contains tags vip").unwrap();
-    assert!(
-        matches!(g, Guard::ListContains { ref var, ref value } if var == "tags" && value == "vip")
-    );
-}
-
-#[test]
-fn guard_list_length_min() {
-    let g = parse_guard_clause("list_length_min tags 2").unwrap();
-    assert!(matches!(g, Guard::ListLengthMin { ref var, min: 2 } if var == "tags"));
-}
-
-#[test]
-fn guard_bare_boolean() {
-    let g = parse_guard_clause("has_mutation").unwrap();
-    assert!(matches!(g, Guard::IsTrue { ref var } if var == "has_mutation"));
-}
-
-#[test]
-fn guard_negation_prefix() {
-    let g = parse_guard_clause("!needs_approval").unwrap();
-    assert!(matches!(g, Guard::IsFalse { ref var } if var == "needs_approval"));
-}
-
-#[test]
-fn guard_is_false_prefix() {
-    let g = parse_guard_clause("is_false budget_exhausted").unwrap();
-    assert!(matches!(g, Guard::IsFalse { ref var } if var == "budget_exhausted"));
-}
-
-#[test]
-fn guard_unsupported_syntax() {
-    assert!(parse_guard_clause("two words bad").is_err());
 }
 
 #[test]
@@ -488,4 +408,41 @@ on_timeout = "X"
         msg.contains("state_timeout"),
         "error should be scoped to state_timeout: {msg}"
     );
+}
+
+#[test]
+fn old_predicate_syntax_fails_with_a_migration_hint() {
+    let header = "[automaton]\nname = \"T\"\nstates = [\"A\", \"B\"]\ninitial = \"A\"\n\n[[state]]\nname = \"ready\"\ntype = \"bool\"\ninitial = \"false\"\n";
+    for body in [
+        "[[action]]\nname = \"Go\"\nfrom = [\"A\"]\nto = \"B\"\nguard = \"is_true ready\"\n",
+        "[[action]]\nname = \"Go\"\nfrom = [\"A\"]\nto = \"B\"\nguard = [{ type = \"is_true\", var = \"ready\" }]\n",
+        "[[invariant]]\nname = \"I\"\nwhen = [\"B\"]\nassert = \"ready\"\n",
+        "[[invariant]]\nname = \"I\"\nassert = \"no_further_transitions\"\n",
+        "[[field_invariant]]\nname = \"F\"\nwhen = { field = \"x\", absent = true }\nrequire = { field = \"y\", absent = true }\n",
+    ] {
+        let err = parse_toml_to_automaton(&format!("{header}{body}"))
+            .and_then(|a| {
+                crate::automaton::parse_automaton_with_liveness(
+                    &format!("{header}{body}"),
+                    crate::automaton::LivenessEnforcement::WarnOnly,
+                )
+                .map(|_| a)
+            })
+            .expect_err("old syntax must not load");
+        assert!(
+            err.to_string().contains("temper migrate-predicates"),
+            "no hint for:\n{body}\n{err}"
+        );
+    }
+}
+
+#[test]
+fn an_invariant_the_verifier_cannot_model_fails_to_load() {
+    let spec = "[automaton]\nname = \"T\"\nstates = [\"A\"]\ninitial = \"A\"\n\n[[state]]\nname = \"title\"\ntype = \"string\"\ninitial = \"\"\n\n[[invariant]]\nname = \"HasTitle\"\nassert = \"title != ''\"\n";
+    let err = crate::automaton::parse_automaton_with_liveness(
+        spec,
+        crate::automaton::LivenessEnforcement::WarnOnly,
+    )
+    .expect_err("unmodelable invariant must not load");
+    assert!(err.to_string().contains("[[field_invariant]]"), "{err}");
 }

@@ -8,6 +8,7 @@
 name = "Policy"
 states = ["Draft", "Proposed", "Approved", "Active", "Revoked"]
 initial = "Draft"
+terminal = ["Revoked"]
 
 # --- State Variables ---
 
@@ -83,10 +84,3 @@ to = "Revoked"
 params = ["reason"]
 hint = "Revoke an active policy. Removes it from the authorization engine."
 effect = [{ type = "emit", event = "PolicyRevoked" }]
-
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "RevokedIsFinal"
-when = ["Revoked"]
-assert = "no_further_transitions"

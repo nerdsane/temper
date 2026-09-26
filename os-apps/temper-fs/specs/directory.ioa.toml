@@ -7,6 +7,7 @@
 name = "Directory"
 states = ["Active", "Archived"]
 initial = "Active"
+terminal = ["Archived"]
 
 # --- State Variables ---
 
@@ -38,7 +39,7 @@ name = "RemoveChild"
 kind = "input"
 from = ["Active"]
 to = "Active"
-guard = "min item_count 1"
+guard = "item_count >= 1"
 effect = "decrement item_count"
 hint = "Remove a child item from this directory. Requires at least one child."
 
@@ -55,7 +56,7 @@ name = "Archive"
 kind = "internal"
 from = ["Active"]
 to = "Archived"
-guard = "max item_count 1"
+guard = "item_count < 1"
 hint = "Archive an empty directory. Must contain no children. Terminal state."
 
 # --- Output Actions ---
@@ -65,14 +66,6 @@ name = "DirectoryArchivedEvent"
 kind = "output"
 hint = "Emitted when directory transitions to Archived."
 
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "ArchivedIsFinal"
-when = ["Archived"]
-assert = "no_further_transitions"
-
 [[invariant]]
 name = "ItemCountNonNegative"
-when = ["Active", "Archived"]
-assert = "item_count >= 0"
+assert = "status in ['Active', 'Archived'] => item_count >= 0"

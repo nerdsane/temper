@@ -8,6 +8,7 @@
 name = "Ticket"
 states = ["Open", "InProgress", "WaitingOnCustomer", "Resolved", "Closed"]
 initial = "Open"
+terminal = ["Closed"]
 
 # --- State Variables ---
 
@@ -69,17 +70,9 @@ from = ["Resolved"]
 to = "Open"
 hint = "Customer reopens a resolved ticket."
 
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "ClosedIsFinal"
-when = ["Closed"]
-assert = "no_further_transitions"
-
 [[invariant]]
 name = "ResolvedNeedsReply"
-when = ["Resolved", "Closed"]
-assert = "replies > 0"
+assert = "status in ['Resolved', 'Closed'] => replies > 0"
 
 # --- Liveness Properties ---
 

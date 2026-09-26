@@ -9,7 +9,7 @@ from = []
 to = "Open"
 kind = "input"
 params = ["analysis_id", "decided_by", "rationale", "verification_summary"]
-guard = [{ type = "cross_entity_state", entity_type = "Analysis", entity_id_source = "analysis_id", required_status = ["Reviewed"] }]
+guard = "empty(analysis_id) || Analysis[analysis_id].status in ['Reviewed']"
 
 [[action]]
 name = "Approve"
@@ -31,10 +31,8 @@ kind = "input"
 
 [[invariant]]
 name = "ApprovedIsTerminal"
-when = ["Approved"]
-assert = "true"
+assert = "status in ['Approved'] => true"
 
 [[invariant]]
 name = "RejectedIsTerminal"
-when = ["Rejected"]
-assert = "true"
+assert = "status in ['Rejected'] => true"

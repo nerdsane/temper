@@ -27,7 +27,7 @@ name = "StartVariantBuild"
 kind = "input"
 from = ["Created"]
 to = "Building"
-guard = "is_true has_mutation"
+guard = "has_mutation"
 params = ["WorkItemId"]
 hint = "Start building a variant."
 
@@ -36,7 +36,7 @@ name = "MarkVariantActive"
 kind = "input"
 from = ["Created", "Building"]
 to = "Active"
-guard = "is_true has_mutation"
+guard = "has_mutation"
 params = ["RuntimeRef", "EvidenceArtifactId"]
 hint = "Mark a variant runnable for evaluation and trials."
 

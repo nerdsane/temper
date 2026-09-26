@@ -86,7 +86,7 @@ pub struct CascadeResult {
     pub all_passed: bool,
     /// Per-level results.
     pub levels: Vec<LevelResult>,
-    /// Warnings about invariants that could not be verified at model level.
+    /// Warnings raised while verifying (for example, composite-plan issues).
     pub warnings: Vec<String>,
     /// Reachable paths extracted after L1 model check (if path extraction was configured).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -244,8 +244,7 @@ impl VerificationCascade {
         let mut levels = Vec::new();
         let model = self.build_temper_model();
 
-        // Collect warnings for Unverifiable invariants.
-        let mut warnings = collect_unverifiable_warnings(&model);
+        let mut warnings = Vec::new();
 
         // Level 0: SMT symbolic verification
         let l0 = self.run_symbolic_verification();
@@ -571,22 +570,6 @@ impl VerificationCascade {
     }
 }
 
-/// Collect warnings for invariants that read values the model does not track.
-fn collect_unverifiable_warnings(model: &TemperModel) -> Vec<String> {
-    model
-        .invariants
-        .iter()
-        .filter_map(|inv| {
-            temper_spec::predicate::unmodelable(&inv.assert, &model.var_kinds).map(|culprit| {
-                format!(
-                    "invariant '{}' has unverifiable assertion '{}' — skipped at model level",
-                    inv.name, culprit,
-                )
-            })
-        })
-        .collect()
-}
-
 /// Build a [`CompositeCascadeReport`] from the configured scope, appending
 /// any build-time warnings (e.g. missing seed) to the cascade's warning
 /// list. Returns `None` if the plan cannot be built — the cascade still
@@ -679,42 +662,6 @@ mod tests {
         let l3 = result.level_result(CascadeLevel::PropertyTest).unwrap();
         assert!(l3.summary.contains("L3"), "Should have L3 prefix");
         assert!(l3.passed);
-    }
-
-    #[test]
-    fn test_cascade_warnings_for_unverifiable_invariants() {
-        let spec = r#"
-[automaton]
-name = "Task"
-states = ["Draft", "Assigned"]
-initial = "Draft"
-
-[[state]]
-name = "goal"
-type = "string"
-initial = ""
-
-[[action]]
-name = "Assign"
-from = ["Draft"]
-to = "Assigned"
-
-[[invariant]]
-name = "AssignedRequiresGoal"
-when = ["Assigned"]
-assert = "goal != ''"
-"#;
-        let result = VerificationCascade::from_ioa(spec)
-            .with_sim_seeds(3)
-            .with_prop_test_cases(50)
-            .run();
-        assert_eq!(
-            result.warnings,
-            vec![
-                "invariant 'AssignedRequiresGoal' has unverifiable assertion 'goal != ''' — skipped at model level"
-                    .to_string()
-            ]
-        );
     }
 
     #[test]

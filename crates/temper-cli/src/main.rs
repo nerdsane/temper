@@ -13,6 +13,7 @@ mod decide;
 mod init;
 mod install;
 mod mcp;
+mod migrate_predicates;
 mod migrate_turso_to_postgres;
 mod serve;
 mod util;
@@ -172,6 +173,18 @@ enum Commands {
     ///
     /// This subcommand is used internally by `temper serve --verify-subprocess`.
     VerifyIoa,
+    /// Convert IOA specs from the old predicate syntax to the current grammar.
+    ///
+    /// Rewrites each file in place, keeping comments and layout. `-` reads a
+    /// spec from stdin and writes the converted spec to stdout.
+    MigratePredicates {
+        /// Spec files (`*.ioa.toml`), or `-` for stdin.
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Report which files would change without writing them.
+        #[arg(long)]
+        check: bool,
+    },
     /// Copy Turso/libSQL data into a PostgreSQL store.
     MigrateTursoToPostgres {
         /// Tenant to migrate, or `all` to discover tenants from source data.
@@ -343,6 +356,7 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
             prop_test_cases,
         } => verify_remote::run(&specs_dir, &url, sim_seeds, prop_test_cases).await?,
         Commands::VerifyIoa => verify_ioa::run()?,
+        Commands::MigratePredicates { paths, check } => migrate_predicates::run(&paths, check)?,
         Commands::Serve {
             port,
             storage,

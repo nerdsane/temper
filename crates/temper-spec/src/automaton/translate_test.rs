@@ -40,7 +40,7 @@ initial = "0"
 name = "Submit"
 from = ["Draft"]
 to = "Active"
-guard = [{ type = "min_count", var = "items", min = 1 }]
+guard = "items >= 1"
 "#;
     let automaton = parse_automaton(spec).unwrap();
     let actions = translate_actions(&automaton);
@@ -214,7 +214,7 @@ initial = "Waiting"
 name = "Proceed"
 from = ["Waiting"]
 to = "Ready"
-guard = [{ type = "cross_entity_state", entity_type = "Child", entity_id_source = "child_id", required_status = ["Done"] }]
+guard = "empty(child_id) || Child[child_id].status in ['Done']"
 "#;
     let automaton = parse_automaton(spec).unwrap();
     let actions = translate_actions(&automaton);

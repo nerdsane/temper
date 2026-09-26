@@ -7,6 +7,7 @@
 name = "DeployWorkflow"
 states = ["Pending", "Provisioning", "Deploying", "Verifying", "Live", "RolledBack"]
 initial = "Pending"
+terminal = ["Live", "RolledBack"]
 
 # --- Actions: Deploy Lifecycle ---
 
@@ -51,15 +52,3 @@ to = "RolledBack"
 params = ["reason"]
 hint = "Roll back a failed or problematic deployment."
 effect = [{ type = "emit_event", event = "DeploymentRolledBack" }]
-
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "LiveIsFinal"
-when = ["Live"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "RolledBackIsFinal"
-when = ["RolledBack"]
-assert = "no_further_transitions"

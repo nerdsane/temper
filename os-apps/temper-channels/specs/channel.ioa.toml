@@ -7,6 +7,7 @@
 name = "Channel"
 states = ["Created", "Connecting", "Connected", "Disconnected", "Archived"]
 initial = "Created"
+terminal = ["Archived"]
 
 [[state]]
 name = "channel_type"
@@ -175,8 +176,3 @@ kind = "input"
 from = ["Connected"]
 params = ["error_message"]
 hint = "Reply delivery WASM failed. Stay Connected."
-
-[[invariant]]
-name = "ArchivedIsFinal"
-when = ["Archived"]
-assert = "no_further_transitions"

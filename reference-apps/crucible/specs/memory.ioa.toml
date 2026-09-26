@@ -16,6 +16,5 @@ initial = "Active"
 
 [[field_invariant]]
 name = "PathMustNotBeEmpty"
-when = { not = { field = "Path", absent = true } }
-require = { not = { field = "Path", empty = true } }
 message = "Memory.Path must not be empty"
+assert = "Path != null => !empty(Path)"

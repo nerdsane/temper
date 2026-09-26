@@ -237,6 +237,7 @@ I/O Automaton TOML defines **how** entities behave — state machines, transitio
 name = "Order"
 states = ["Draft", "Submitted", "Cancelled"]
 initial = "Draft"
+terminal = ["Cancelled"]
 
 [[state]]
 name = "items"
@@ -262,16 +263,16 @@ hint = "Cancel an order. Only from Draft or Submitted."
 
 [[invariant]]
 name = "SubmitRequiresItems"
-when = ["Submitted"]
-assert = "items > 0"
+assert = "status in ['Submitted'] => items > 0"
 ```
 
 **Rules for I/O Automaton specs:**
 
-1. `[automaton]`: Define `name`, `states` (all valid status values), and `initial` state.
+1. `[automaton]`: Define `name`, `states` (all valid status values), `initial` state, and optional `terminal` states (no action may leave them).
 2. `[[state]]`: Declare state variables with `name`, `type` (`counter`, `bool`, `string`, `set`), and `initial` value.
 3. `[[action]]`: Define actions with `name`, `kind` (`input`/`output`/`internal`), `from` states, `to` state, optional `guard`, `params`, and `hint`.
-4. `[[invariant]]`: Define safety invariants with `name`, `when` (trigger states), and `assert` expression.
+4. `[[invariant]]`: Define safety invariants with `name` and one `assert` expression, proven over every reachable state.
+6. Every `guard` and `assert` is one expression in the predicate grammar (`&&`, `||`, `!`, `=>`, comparisons, `in`, `empty()`, `len()`, `Type[ref].status`); see [predicates.md](predicates.md).
 5. Action kinds: `input` = from environment (HTTP), always enabled in from-states; `output` = emitted events; `internal` = private state transitions.
 
 ### 3.3 Cedar (Access Control)
@@ -343,10 +344,11 @@ The entity actor holds:
 - `events`: Append-only event log of all transitions
 
 When an action is dispatched, the actor evaluates it through the TransitionTable
-with a full `EvalContext` containing counters and booleans:
+with a full `EvalContext` containing counters, booleans, lists, the fields the
+guard reads, and the statuses of related entities it reads:
 1. Find matching rule by action name
-2. Check `from_states` guard (is current status valid for this action?)
-3. Check additional guards (`CounterMin`, `BoolTrue`, compound `And`)
+2. Check `from_states` (is current status valid for this action?)
+3. Evaluate the `guard` expression
 4. If guards pass: apply effects (`SetState`, `IncrementCounter`, `SetBool`, `EmitEvent`, `Custom`), record event. `EmitEvent` feeds the Integration Engine for external webhooks (see [Section 9](#9-integration-engine)).
 5. If guards fail: return 409 Conflict with error message
 

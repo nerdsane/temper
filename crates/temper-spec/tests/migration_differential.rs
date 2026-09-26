@@ -254,7 +254,9 @@ const HISTORICAL_DUPLICATE_LINES: &[(&str, &str)] = &[(
     r#"temper_api_key = "{secret:temper_api_key}""#,
 )];
 
-/// Remove the second occurrence of each known duplicated line in `source`.
+/// Make a historical source parse today: remove the known duplicated lines,
+/// then convert its predicates to the current grammar (these sources predate
+/// ADR-0179). Neither step touches the integrations this test compares.
 fn repair_historical_source(path: &str, source: String) -> String {
     let mut out = source;
     for (_, line) in HISTORICAL_DUPLICATE_LINES
@@ -269,7 +271,9 @@ fn repair_historical_source(path: &str, source: String) -> String {
             .expect("known duplicate line repeated");
         out.replace_range(repeat..repeat + line.len() + 1, "");
     }
-    out
+    temper_spec::automaton::legacy::migrate_source(&out)
+        .unwrap_or_else(|e| panic!("{path}: historical source does not convert: {e}"))
+        .source
 }
 
 /// Integrations intentionally dropped (not just migrated) after the initial

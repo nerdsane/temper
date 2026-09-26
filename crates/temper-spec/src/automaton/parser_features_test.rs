@@ -55,19 +55,19 @@ initial = "[]"
 name = "Queue"
 from = ["Open"]
 to = "Queued"
-guard = "max retries 3"
+guard = "retries < 3"
 
 [[action]]
 name = "Escalate"
 from = ["Queued"]
 to = "Queued"
-guard = "list_contains labels urgent"
+guard = "'urgent' in labels"
 
 [[action]]
 name = "Close"
 from = ["Queued"]
 to = "Closed"
-guard = "list_length_min labels 1"
+guard = "len(labels) >= 1"
 "#;
 
     let automaton = parse_automaton(spec).expect("extended guard forms should parse");
@@ -252,9 +252,8 @@ hint = "Archive the session."
 
 [[field_invariant]]
 name = "ClosedRequiresArchivedAt"
-when = { field = "Status", equals = "Closed" }
-require = { not = { field = "ArchivedAt", absent = true } }
 message = "Closed sessions must set ArchivedAt"
+assert = "Status == 'Closed' => ArchivedAt != null"
 "#;
 
     let automaton = parse_automaton(spec).expect("should parse field invariants");

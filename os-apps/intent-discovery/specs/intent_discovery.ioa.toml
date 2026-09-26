@@ -2,6 +2,7 @@
 name = "IntentDiscovery"
 states = ["Triggered", "Gathering", "Analyzing", "Proposing", "Complete", "Failed"]
 initial = "Triggered"
+terminal = ["Complete", "Failed"]
 
 [[state]]
 name = "signal_summary_present"
@@ -137,25 +138,12 @@ hint = "Mark the intent-discovery cycle as failed."
 
 [[invariant]]
 name = "CompletedHasSignals"
-when = ["Complete"]
-assert = "is_true signal_summary_present"
+assert = "status in ['Complete'] => signal_summary_present"
 
 [[invariant]]
 name = "CompletedHasAnalysis"
-when = ["Complete"]
-assert = "is_true analysis_present"
+assert = "status in ['Complete'] => analysis_present"
 
 [[invariant]]
 name = "CompletedHasProposal"
-when = ["Complete"]
-assert = "is_true proposal_present"
-
-[[invariant]]
-name = "CompletedIsFinal"
-when = ["Complete"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "FailedIsFinal"
-when = ["Failed"]
-assert = "no_further_transitions"
+assert = "status in ['Complete'] => proposal_present"

@@ -190,6 +190,8 @@ fn numeric(ty: Ty) -> bool {
     matches!(ty, Ty::Num | Ty::Any)
 }
 
+/// Whether two operand types may be compared. Anything may be compared with
+/// `null` (absence).
 fn compatible(a: Ty, b: Ty) -> bool {
-    a == b || matches!(a, Ty::Any) || matches!(b, Ty::Any)
+    a == b || matches!(a, Ty::Any | Ty::Null) || matches!(b, Ty::Any | Ty::Null)
 }

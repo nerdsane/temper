@@ -9,6 +9,7 @@
 name = "Plan"
 states = ["Draft", "Active", "Paused", "Completed", "Failed"]
 initial = "Draft"
+terminal = ["Completed", "Failed"]
 
 # --- State Variables ---
 
@@ -81,15 +82,3 @@ to = "Failed"
 params = ["reason"]
 hint = "Mark the plan as failed from Active or Paused state."
 effect = [{ type = "emit", event = "PlanFailed" }]
-
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "CompletedIsFinal"
-when = ["Completed"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "FailedIsFinal"
-when = ["Failed"]
-assert = "no_further_transitions"

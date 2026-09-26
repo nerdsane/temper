@@ -22,6 +22,7 @@
 name = "SessionThread"
 states = ["Running", "Idle", "Terminated"]
 initial = "Running"
+terminal = ["Terminated"]
 
 # --- Actions ---
 
@@ -46,33 +47,19 @@ from = ["Running", "Idle"]
 to = "Terminated"
 hint = "Terminate the thread. Called when the sub-agent finishes its delegated task."
 
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "TerminatedIsFinal"
-when = ["Terminated"]
-assert = "no_further_transitions"
-
 # --- Cross-field validation ---
 
 [[field_invariant]]
 name = "StatusMustBeKnown"
-when = { not = { field = "Status", absent = true } }
-require = { any_of = [
-  { field = "Status", equals = "Running" },
-  { field = "Status", equals = "Idle" },
-  { field = "Status", equals = "Terminated" },
-]}
 message = "SessionThread.Status must be Running, Idle, or Terminated"
+assert = "Status != null => Status in ['Running', 'Idle', 'Terminated']"
 
 [[field_invariant]]
 name = "AgentIdRequired"
-when = { not = { field = "AgentId", absent = true } }
-require = { not = { field = "AgentId", empty = true } }
 message = "SessionThread.AgentId must be non-empty"
+assert = "AgentId != null => !empty(AgentId)"
 
 [[field_invariant]]
 name = "SessionIdRequired"
-when = { not = { field = "SessionId", absent = true } }
-require = { not = { field = "SessionId", empty = true } }
 message = "SessionThread.SessionId must be non-empty"
+assert = "SessionId != null => !empty(SessionId)"

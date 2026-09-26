@@ -15,9 +15,7 @@ use temper_spec::predicate::Truth;
 
 use crate::model::semantics::truth;
 
-use crate::model::{
-    TemperModel, TemperModelAction, TemperModelState, build_model_from_ioa,
-};
+use crate::model::{TemperModel, TemperModelAction, TemperModelState, build_model_from_ioa};
 
 // ---------------------------------------------------------------------------
 // Public result types
@@ -300,8 +298,8 @@ fn replay_failure(
 mod tests {
     use super::*;
     use crate::model::{ResolvedInvariant, ResolvedTransition};
-    use temper_spec::predicate::{Expr, parse};
     use std::collections::BTreeMap;
+    use temper_spec::predicate::{Expr, parse};
 
     const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
 

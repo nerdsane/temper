@@ -8,6 +8,7 @@
 name = "Remediation"
 states = ["Proposed", "Approved", "Executing", "Succeeded", "Failed", "Rejected"]
 initial = "Proposed"
+terminal = ["Succeeded", "Rejected"]
 
 # --- State Variables ---
 
@@ -78,25 +79,11 @@ from = ["Failed"]
 to = "Approved"
 hint = "Retry a failed remediation. Preserves approval state."
 
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "SucceededIsFinal"
-when = ["Succeeded"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "RejectedIsFinal"
-when = ["Rejected"]
-assert = "no_further_transitions"
-
 [[invariant]]
 name = "ExecutionTracked"
-when = ["Executing", "Succeeded", "Failed"]
-assert = "attempts > 0"
+assert = "status in ['Executing', 'Succeeded', 'Failed'] => attempts > 0"
 
 [[invariant]]
 name = "ApprovalRequired"
-when = ["Approved", "Executing", "Succeeded", "Failed"]
-assert = "human_approved"
+assert = "status in ['Approved', 'Executing', 'Succeeded', 'Failed'] => human_approved"
 

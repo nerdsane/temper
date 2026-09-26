@@ -33,7 +33,8 @@ fn check_terminal(model: &TemperModel, state: &TemperModelState) -> bool {
         return true;
     }
     !model.transitions.iter().any(|t| {
-        let status_ok = t.from_states.is_empty() || t.from_states.iter().any(|s| s == &state.status);
+        let status_ok =
+            t.from_states.is_empty() || t.from_states.iter().any(|s| s == &state.status);
         status_ok && evaluate_guard(&t.guard, &model.var_kinds, state)
     })
 }

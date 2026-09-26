@@ -3,9 +3,9 @@
 
 use std::collections::BTreeMap;
 
-use super::*;
-use crate::automaton::Guard;
-use crate::automaton::field_invariant::FieldPredicate;
+use super::field_predicate::FieldPredicate;
+use super::lower::*;
+use super::syntax::Guard;
 use crate::predicate::{Env, Expr, Truth, Val, eval};
 
 /// Deterministic LCG so failures reproduce.
@@ -305,4 +305,117 @@ fn lowers_invariant_forms() {
         LoweredInvariant::Dropped(_)
     ));
     let _: Expr = crate::predicate::parse("true").unwrap();
+}
+
+const OLD_SPEC: &str = r#"
+[automaton]
+name = "Doc"
+states = ["Draft", "Review", "Done", "Gone"]
+initial = "Draft"
+
+[[state]]
+name = "items"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "ready"
+type = "bool"
+initial = "false"
+
+[[state]]
+name = "title"
+type = "string"
+initial = ""
+
+# Submit needs content.
+[[action]]
+name = "Submit"
+from = ["Draft"]
+to = "Review"
+guard = ["is_true ready", { type = "min_count", var = "items", min = 2 }]
+
+[[action]]
+name = "Approve"
+from = ["Review"]
+to = "Done"
+guard = [{ type = "cross_entity_state", entity_type = "Folder", entity_id_source = "folder_id", forbidden_status = ["Frozen"] }]
+
+[[action.triggers]]
+name = "notify"
+kind = "entity"
+target_entity = "Folder"
+target_action = "Touch"
+guard = { type = "all_of", guards = [{ type = "bool_true", field = "ready" }, { type = "state_in", values = ["Done"] }] }
+[action.triggers.resolve_target]
+type = "field"
+field = "folder_id"
+
+[[invariant]]
+name = "ReviewHasItems"
+when = ["Review", "Done"]
+assert = "items > 0"
+
+[[invariant]]
+name = "DoneIsFinal"
+when = ["Done", "Gone"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "Ordered"
+when = ["Done"]
+assert = "ordering(Review, Done)"
+
+[[invariant]]
+name = "DoneHasTitle"
+when = ["Done"]
+assert = "title != ''"
+
+[[field_invariant]]
+name = "KindKnown"
+when = { not = { field = "Kind", absent = true } }
+require = { any_of = [{ field = "Kind", equals = "a" }, { field = "Kind", equals = "b" }] }
+"#;
+
+#[test]
+fn converts_every_old_form_and_keeps_comments() {
+    let migration = super::migrate_source(OLD_SPEC).expect("converts");
+    let out = &migration.source;
+    for expected in [
+        "# Submit needs content.",
+        r#"guard = "ready && items >= 2""#,
+        r#"guard = "Folder[folder_id].status not in ['Frozen']""#,
+        r#"guard = "ready && status in ['Done']""#,
+        r#"assert = "status in ['Review', 'Done'] => items > 0""#,
+        r#"terminal = ["Done", "Gone"]"#,
+        r#"assert = "status in ['Done'] => title != ''""#,
+        r#"assert = "Kind != null => Kind in ['a', 'b']""#,
+    ] {
+        assert!(out.contains(expected), "missing `{expected}` in:\n{out}");
+    }
+    for gone in ["when =", "require =", "no_further_transitions", "ordering("] {
+        assert!(!out.contains(gone), "`{gone}` survived in:\n{out}");
+    }
+    // The string check became a field invariant, and the history predicate
+    // was dropped; both are reported.
+    let automaton = crate::automaton::parse_automaton_with_liveness(
+        out,
+        crate::automaton::LivenessEnforcement::WarnOnly,
+    )
+    .expect("converted spec loads");
+    assert_eq!(
+        automaton.invariants.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(),
+        vec!["ReviewHasItems"]
+    );
+    assert!(automaton.field_invariants.iter().any(|f| f.name == "DoneHasTitle"));
+    assert_eq!(migration.notes.len(), 2, "{:?}", migration.notes);
+    // Converting again changes nothing.
+    assert_eq!(super::migrate_source(out).unwrap().source, *out);
+}
+
+#[test]
+fn an_invariant_over_an_undeclared_name_is_not_moved() {
+    let spec = OLD_SPEC.replace("assert = \"title != ''\"", "assert = \"titel != ''\"");
+    let err = super::migrate_source(&spec).expect_err("typo must surface");
+    assert!(err.contains("unknown state variable 'titel'"), "{err}");
 }

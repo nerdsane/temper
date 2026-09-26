@@ -317,7 +317,7 @@ initial = "Waiting"
 name = "Proceed"
 from = ["Waiting"]
 to = "Ready"
-guard = [{ type = "cross_entity_state", entity_type = "Child", entity_id_source = "child_id", required_status = ["Done"] }]
+guard = "empty(child_id) || Child[child_id].status in ['Done']"
 "#;
 
         let table = TransitionTable::from_ioa_source(spec);

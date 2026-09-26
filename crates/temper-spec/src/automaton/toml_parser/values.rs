@@ -11,7 +11,7 @@ use toml::{Table, Value};
 /// Render a scalar as the string the spec author wrote.
 ///
 /// Returns `None` for arrays and tables, which have no scalar spelling.
-pub(super) fn scalar_string(value: &Value) -> Option<String> {
+pub(crate) fn scalar_string(value: &Value) -> Option<String> {
     match value {
         Value::String(s) => Some(s.clone()),
         Value::Integer(i) => Some(i.to_string()),
@@ -82,6 +82,6 @@ pub(super) fn bool_value(table: &Table, key: &str) -> Option<bool> {
 /// Read a non-negative integer written as a number or a numeric string.
 ///
 /// Returns `None` when the key is absent or the value is not such an integer.
-pub(super) fn unsigned<T: std::str::FromStr>(table: &Table, key: &str) -> Option<T> {
+pub(crate) fn unsigned<T: std::str::FromStr>(table: &Table, key: &str) -> Option<T> {
     table.get(key).and_then(scalar_string)?.parse().ok()
 }

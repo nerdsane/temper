@@ -7,9 +7,7 @@ use temper_spec::cross_invariant::{CrossInvariantSpec, DeletePolicy};
 use temper_spec::csdl::CsdlDocument;
 
 use super::types::{EntitySpec, RelationEdge, RelationGraph};
-use crate::trigger::types::{
-    ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver,
-};
+use crate::trigger::types::{ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver};
 
 /// Build webhook route index from parsed entity specs.
 pub(super) fn build_webhook_routes(

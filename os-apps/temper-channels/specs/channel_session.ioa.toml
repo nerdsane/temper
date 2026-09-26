@@ -7,6 +7,7 @@
 name = "ChannelSession"
 states = ["Active", "Expired"]
 initial = "Active"
+terminal = ["Expired"]
 
 [[state]]
 name = "channel_id"
@@ -53,8 +54,3 @@ kind = "input"
 from = ["Active"]
 to = "Expired"
 hint = "Expire the session (timeout or manual cleanup)."
-
-[[invariant]]
-name = "ExpiredIsFinal"
-when = ["Expired"]
-assert = "no_further_transitions"

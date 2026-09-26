@@ -7,8 +7,7 @@ use std::collections::BTreeMap;
 use temper_runtime::tenant::TenantId;
 
 use super::types::{
-    MAX_REACTIONS_PER_TENANT, ReactionRule, ReactionTarget,
-    ReactionTrigger, TargetResolver,
+    MAX_REACTIONS_PER_TENANT, ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver,
 };
 
 /// Registry of reaction rules, indexed per-tenant for fast lookup.
@@ -659,7 +658,12 @@ field = "workspace_id"
         let rules = parse_reactions(toml).expect("parse");
         assert_eq!(rules.len(), 1);
         assert_eq!(
-            rules[0].when.guard.as_ref().map(ToString::to_string).as_deref(),
+            rules[0]
+                .when
+                .guard
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
             Some("job_type == 'source_search' && Workspace[workspace_id].status in ['Active']")
         );
     }

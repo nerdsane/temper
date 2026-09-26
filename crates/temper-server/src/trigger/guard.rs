@@ -104,8 +104,16 @@ mod tests {
     fn reads_fields_and_post_status() {
         let none = RelatedMap::new();
         let fields = json!({ "job_type": "export", "paid": true, "count": 3 });
-        assert!(holds("job_type == 'export' && paid && count >= 3", fields.clone(), &none));
-        assert!(holds("job_type in ['import', 'export']", fields.clone(), &none));
+        assert!(holds(
+            "job_type == 'export' && paid && count >= 3",
+            fields.clone(),
+            &none
+        ));
+        assert!(holds(
+            "job_type in ['import', 'export']",
+            fields.clone(),
+            &none
+        ));
         assert!(holds("status == 'Ready'", fields.clone(), &none));
         assert!(!holds("status in ['Draft']", fields.clone(), &none));
         // An absent field is null: not true, not an explicit false.
@@ -125,7 +133,10 @@ mod tests {
             related_ids(&guard, &fields),
             vec![
                 (("Parent".into(), "parent_id".into()), vec!["p-1".into()]),
-                (("Child".into(), "child_ids".into()), vec!["c-1".into(), "c-2".into()]),
+                (
+                    ("Child".into(), "child_ids".into()),
+                    vec!["c-1".into(), "c-2".into()]
+                ),
                 (("Other".into(), "none".into()), vec![]),
             ]
         );

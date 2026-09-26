@@ -12,7 +12,6 @@
 //!
 //! TLA+ remains available for humans who want temporal reasoning.
 
-pub mod assert_parser;
 mod contracts;
 pub mod field_invariant;
 mod initial;
@@ -25,8 +24,7 @@ pub mod translate;
 pub mod trigger_graph;
 mod types;
 
-pub use assert_parser::{AssertCompareOp, ParsedAssert, parse_assert_expr};
-pub use field_invariant::{FieldInvariant, FieldPredicate, PredicateParseError};
+pub use field_invariant::FieldInvariant;
 pub use initial::{
     parse_bool_initial, parse_counter_initial_usize, parse_list_initial, parse_var_initial_json,
 };

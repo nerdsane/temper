@@ -12,11 +12,11 @@ initial = "Waiting"
 name = "ProceedWhenChildDone"
 from = ["Waiting"]
 to = "Ready"
-guard = [{ type = "cross_entity_state", entity_type = "Child", entity_id_source = "child_id", required_status = ["Done"] }]
+guard = "empty(child_id) || Child[child_id].status in ['Done']"
 
 [[invariant]]
 name = "NeverLocallyReady"
-assert = "never(Ready)"
+assert = "status != 'Ready'"
 "#;
     let result = verify_symbolic(spec, 2);
 

@@ -272,9 +272,7 @@ name = "fires_on_confirmed"
 [reaction.when]
 entity_type = "Order"
 action = "ConfirmOrder"
-[reaction.when.guard]
-type = "state_in"
-values = ["Confirmed"]
+guard = "status == 'Confirmed'"
 [reaction.then]
 entity_type = "Payment"
 action = "AuthorizePayment"
@@ -286,9 +284,7 @@ name = "skipped_on_cancelled"
 [reaction.when]
 entity_type = "Order"
 action = "ConfirmOrder"
-[reaction.when.guard]
-type = "state_in"
-values = ["Cancelled"]
+guard = "status == 'Cancelled'"
 [reaction.then]
 entity_type = "Payment"
 action = "FailPayment"
@@ -351,11 +347,7 @@ name = "skipped_when_confirmed"
 [reaction.when]
 entity_type = "Order"
 action = "ConfirmOrder"
-[reaction.when.guard]
-type = "not"
-[reaction.when.guard.guard]
-type = "state_in"
-values = ["Confirmed"]
+guard = "!(status == 'Confirmed')"
 [reaction.then]
 entity_type = "Payment"
 action = "AuthorizePayment"

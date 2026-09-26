@@ -21,6 +21,7 @@
 name = "HttpEndpoint"
 initial = "Active"
 states = ["Active", "Paused", "Deleted"]
+terminal = ["Deleted"]
 
 # --- Actions ---
 
@@ -71,10 +72,3 @@ kind = "output"
 [[action]]
 name = "HttpEndpointDeletedEvent"
 kind = "output"
-
-# --- Safety invariants ---
-
-[[invariant]]
-name = "DeletedIsFinal"
-when = ["Deleted"]
-assert = "no_further_transitions"

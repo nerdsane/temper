@@ -60,7 +60,7 @@ type = "same_id"
 | `entity_type` | string | yes | Source entity type (e.g., `Order`) |
 | `action` | string | no | Action name — omit to match any action |
 | `to_state` | string | no | Required source post-state — omit to match any |
-| `guard` | table | no | Conditional predicate (see below) |
+| `guard` | string | no | Conditional predicate (see below) |
 
 ### `[reaction.then]` — target action
 
@@ -89,54 +89,17 @@ If a `params_from` source field is missing on the source entity at dispatch time
 
 ## Guards
 
-`[reaction.when.guard]` is an optional predicate that gates firing. Guard-skipped rules do **not** emit a `ReactionResult` — they never fired.
-
-### Source-field guards (sync, cheap)
+`guard` is an optional predicate, in the same grammar as every spec condition ([predicates.md](predicates.md)), that gates firing. It reads the source entity's fields and post-action `status`, and related entities' statuses. Guard-skipped rules do **not** emit a `ReactionResult` — they never fired.
 
 ```toml
-[reaction.when.guard]
-type = "field_equals"
-field = "job_type"
-value = "source_search"
+[reaction.when]
+entity_type = "Session"
+action = "Complete"
+guard = "ready && job_type in ['rank', 'source_search'] && Workspace[workspace_id].status == 'Active'"
 ```
 
-| `type` | Fields | Behavior |
-|---|---|---|
-| `field_equals` | `field`, `value` | Source field JSON-equals `value` |
-| `field_in` | `field`, `values` (array) | Source field ∈ `values` |
-| `bool_true` | `field` | Source field is JSON `true` |
-| `bool_false` | `field` | Source field is JSON `false` |
-| `state_in` | `values` (array) | Source post-status ∈ `values` — complements `to_state` when multiple states are acceptable |
-
-Missing source fields on any of the above evaluate to `false` with a `tracing::debug!`.
-
-### Cross-entity guard (async, one fetch per guard)
-
-```toml
-[reaction.when.guard]
-type = "cross_entity_state_in"
-entity_type = "Workspace"
-entity_id_source = "workspace_id"
-required_status = ["Active"]
-```
-
-Reads `workspace_id` from the source entity, fetches `Workspace:{workspace_id}` via the existing `resolve_entity_status` helper (same path IOA guards use), compares against `required_status`. Missing target ID or fetch failure evaluates to `false` with a `tracing::warn!` — stricter than IOA's vacuous-truth handling, since an empty target ID is almost always a misconfiguration.
-
-### Composite guards
-
-```toml
-[reaction.when.guard]
-type = "all_of"
-guards = [
-  { type = "bool_true", field = "ready" },
-  { type = "cross_entity_state_in",
-    entity_type = "Workspace",
-    entity_id_source = "workspace_id",
-    required_status = ["Active"] },
-]
-```
-
-`all_of` / `any_of` / `not` compose into `MAX_GUARD_DEPTH = 4` (validated at parse time).
+- A missing source field reads as `null`: `ready` is false, and `ready == false` is false too.
+- `Workspace[workspace_id].status` reads `workspace_id` from the source entity and fetches each referenced entity's status via `resolve_entity_status` (the same path action guards use). An unset id or a missing entity reads as `null`, so `== 'Active'` is false.
 
 ---
 
@@ -153,10 +116,7 @@ name = "source_search_complete_triggers_rank"
 [reaction.when]
 entity_type = "CurationJob"
 action = "Complete"
-[reaction.when.guard]
-type = "field_equals"
-field = "job_type"
-value = "source_search"
+guard = "job_type == 'source_search'"
 
 [reaction.then]
 entity_type = "CurationJob"
@@ -181,11 +141,7 @@ name = "session_complete_acks_parent"
 [reaction.when]
 entity_type = "Session"
 action = "Complete"
-[reaction.when.guard]
-type = "cross_entity_state_in"
-entity_type = "Workspace"
-entity_id_source = "workspace_id"
-required_status = ["Active"]
+guard = "Workspace[workspace_id].status == 'Active'"
 
 [reaction.then]
 entity_type = "Workspace"
@@ -231,7 +187,7 @@ These properties are load-bearing and unchanged by any of the four Phase additio
 - **Tenant isolation.** Reactions only fire for rules registered under the same tenant as the source action.
 - **System principal.** Target actions dispatched by reactions run under `AgentContext::system()`, not the source action's principal.
 - **Determinism under `SimReactionSystem`.** Two seeded runs with the same inputs produce the same reaction firing order and the same `create`-resolver IDs.
-- **Guard nesting bound.** `MAX_GUARD_DEPTH = 4` caps the nesting of composite reaction guards, enforced at parse time.
+- **Guard nesting bound.** The predicate parser caps nesting at `MAX_DEPTH = 64` levels.
 
 A tenant's reaction-rule count is deliberately **not** on this list. `MAX_REACTIONS_PER_TENANT = 256` is an advisory threshold: `register_tenant_rules` warns above it and registers every rule. It asserted until 2026-09-10, when a tenant's fifteenth app took it to 265 rules and the panic crash-looped the platform at startup. Nothing is sized from it, so exceeding it corrupts nothing. See ADR-0176.
 

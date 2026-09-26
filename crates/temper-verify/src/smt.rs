@@ -219,7 +219,12 @@ fn split_trigger(assert: &Expr) -> Option<(Vec<String>, &Expr)> {
 
 /// Whether transition `t` preserves `body`: `body(pre) ∧ post = effects(pre)
 /// ∧ ¬body(post)` is unsatisfiable.
-fn preserved_by(model: &TemperModel, body: &Expr, t: &ResolvedTransition, max_counter: usize) -> bool {
+fn preserved_by(
+    model: &TemperModel,
+    body: &Expr,
+    t: &ResolvedTransition,
+    max_counter: usize,
+) -> bool {
     let solver = Solver::new();
     let zero = Int::from_i64(0);
     let one = Int::from_i64(1);
@@ -265,7 +270,11 @@ fn preserved_by(model: &TemperModel, body: &Expr, t: &ResolvedTransition, max_co
         post_bools.insert(name.clone(), post);
     }
     let pre_status = make_status_var(model, &solver);
-    let post_status = match t.to_state.as_ref().and_then(|to| model.states.iter().position(|s| s == to)) {
+    let post_status = match t
+        .to_state
+        .as_ref()
+        .and_then(|to| model.states.iter().position(|s| s == to))
+    {
         Some(idx) => Int::from_i64(idx as i64),
         None => pre_status.clone(),
     };
@@ -460,12 +469,18 @@ fn encode(expr: &Expr, sym: &Symbols<'_>, model: &TemperModel) -> Bool {
     match expr {
         Expr::Const(value) => Bool::from_bool(*value),
         Expr::Not(inner) => encode(inner, sym, model).not(),
-        Expr::And(parts) => {
-            Bool::and(&parts.iter().map(|p| encode(p, sym, model)).collect::<Vec<_>>())
-        }
-        Expr::Or(parts) => {
-            Bool::or(&parts.iter().map(|p| encode(p, sym, model)).collect::<Vec<_>>())
-        }
+        Expr::And(parts) => Bool::and(
+            &parts
+                .iter()
+                .map(|p| encode(p, sym, model))
+                .collect::<Vec<_>>(),
+        ),
+        Expr::Or(parts) => Bool::or(
+            &parts
+                .iter()
+                .map(|p| encode(p, sym, model))
+                .collect::<Vec<_>>(),
+        ),
         Expr::Implies(lhs, rhs) => encode(lhs, sym, model).implies(encode(rhs, sym, model)),
         Expr::Var(name) => sym.bools.get(name).cloned().unwrap_or_else(free),
         Expr::Empty(name) => match sym.lists.len_vars.get(name) {
@@ -489,9 +504,10 @@ fn encode(expr: &Expr, sym: &Symbols<'_>, model: &TemperModel) -> Bool {
                     encode_state_membership(&sym.status, std::slice::from_ref(state), model),
                 ),
                 (Operand::Var(name), Operand::Lit(Literal::Bool(value)))
-                | (Operand::Lit(Literal::Bool(value)), Operand::Var(name)) => {
-                    sym.bools.get(name).map(|var| var.eq(Bool::from_bool(*value)))
-                }
+                | (Operand::Lit(Literal::Bool(value)), Operand::Var(name)) => sym
+                    .bools
+                    .get(name)
+                    .map(|var| var.eq(Bool::from_bool(*value))),
                 _ => None,
             };
             match (equal, op) {
@@ -660,10 +676,7 @@ initial = "[]"
 name = "ConflictingContains"
 from = ["S"]
 to = "S"
-guard = [
-    { type = "list_contains", var = "labels", value = "urgent" },
-    { type = "list_contains", var = "labels", value = "normal" },
-]
+guard = "'urgent' in labels && 'normal' in labels"
 "#;
 
         // With max_counter=1, a single-slot list cannot contain two distinct
@@ -737,8 +750,7 @@ to = "B"
 
 [[invariant]]
 name = "BRequiresCount"
-when = ["B"]
-assert = "count > 0"
+assert = "status in ['B'] => count > 0"
 "#;
         // GoB reaches B, no effects on count. The invariant says count > 0
         // when in B. Since GoB doesn't set count, if count was 0 in A,
@@ -787,8 +799,7 @@ effect = "decrement count"
 
 [[invariant]]
 name = "BNeedsCount"
-when = ["B"]
-assert = "count > 0"
+assert = "status in ['B'] => count > 0"
 "#;
         let result = verify_symbolic(spec, 2);
         let inv = result

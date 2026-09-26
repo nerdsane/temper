@@ -234,14 +234,17 @@ initial = "A"
 name = "Act"
 from = ["A"]
 to = "B"
-guard = [{ type = "cross_entity_state", entity_type = "Parent", entity_id_source = "parent_id", required_status = ["Done", "Approved"] }]
+guard = "empty(parent_id) || Parent[parent_id].status in ['Done', 'Approved']"
 "#;
     let automaton = super::super::parse_automaton_with_liveness(
         toml_src,
         super::super::LivenessEnforcement::WarnOnly,
     )
     .unwrap();
-    assert_eq!(automaton.actions[0].guard.to_string(), "empty(parent_id) || Parent[parent_id].status in ['Done', 'Approved']");
+    assert_eq!(
+        automaton.actions[0].guard.to_string(),
+        "empty(parent_id) || Parent[parent_id].status in ['Done', 'Approved']"
+    );
 }
 
 #[test]
@@ -256,14 +259,17 @@ initial = "A"
 name = "Act"
 from = ["A"]
 to = "B"
-guard = [{ type = "cross_entity_state", entity_type = "Parent", entity_id_source = "parent_id", required_status = ["Done"], required = true }]
+guard = "Parent[parent_id].status in ['Done']"
 "#;
     let automaton = super::super::parse_automaton_with_liveness(
         toml_src,
         super::super::LivenessEnforcement::WarnOnly,
     )
     .unwrap();
-    assert_eq!(automaton.actions[0].guard.to_string(), "Parent[parent_id].status in ['Done']");
+    assert_eq!(
+        automaton.actions[0].guard.to_string(),
+        "Parent[parent_id].status in ['Done']"
+    );
 }
 
 #[test]
@@ -278,14 +284,17 @@ initial = "A"
 name = "Act"
 from = ["A"]
 to = "B"
-guard = [{ type = "cross_entity_state", entity_type = "Workspace", entity_id_source = "workspace_id", forbidden_status = ["Frozen", "Archived"] }]
+guard = "Workspace[workspace_id].status not in ['Frozen', 'Archived']"
 "#;
     let automaton = super::super::parse_automaton_with_liveness(
         toml_src,
         super::super::LivenessEnforcement::WarnOnly,
     )
     .unwrap();
-    assert_eq!(automaton.actions[0].guard.to_string(), "Workspace[workspace_id].status not in ['Frozen', 'Archived']");
+    assert_eq!(
+        automaton.actions[0].guard.to_string(),
+        "Workspace[workspace_id].status not in ['Frozen', 'Archived']"
+    );
 }
 
 #[test]

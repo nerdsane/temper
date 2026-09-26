@@ -12,6 +12,7 @@
 name = "MemoryStore"
 states = ["Active", "Archived"]
 initial = "Active"
+terminal = ["Archived"]
 
 [[action]]
 name = "ArchiveMemoryStore"
@@ -20,16 +21,7 @@ from = ["Active"]
 to = "Archived"
 hint = "Archive the memory store. Prevents new writes; existing memories are preserved."
 
-[[invariant]]
-name = "ArchivedIsFinal"
-when = ["Archived"]
-assert = "no_further_transitions"
-
 [[field_invariant]]
 name = "StatusMustBeKnown"
-when = { not = { field = "Status", absent = true } }
-require = { any_of = [
-  { field = "Status", equals = "Active" },
-  { field = "Status", equals = "Archived" },
-]}
 message = "MemoryStore.Status must be Active or Archived"
+assert = "Status != null => Status in ['Active', 'Archived']"

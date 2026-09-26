@@ -22,6 +22,5 @@ initial = "Active"
 
 [[field_invariant]]
 name = "ServerTypeMustBeUrl"
-when = { not = { field = "Type", absent = true } }
-require = { field = "Type", equals = "url" }
 message = "AgentMcpServer.Type must be `url`"
+assert = "Type != null => Type == 'url'"

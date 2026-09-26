@@ -293,18 +293,17 @@ impl crate::state::ServerState {
             .await?;
 
             let table = self.transition_table_for_dispatch(tenant, &write.entity_type)?;
-            let related =
-                if table_has_cross_entity_guards_for_action(&table, &write.action) {
-                    self.resolve_cross_entity_guards(
-                        tenant,
-                        &write.entity_type,
-                        &write.entity_id,
-                        &write.action,
-                    )
-                    .await
-                } else {
-                    BTreeMap::new()
-                };
+            let related = if table_has_cross_entity_guards_for_action(&table, &write.action) {
+                self.resolve_cross_entity_guards(
+                    tenant,
+                    &write.entity_type,
+                    &write.entity_id,
+                    &write.action,
+                )
+                .await
+            } else {
+                BTreeMap::new()
+            };
             let stream = streams
                 .get_mut(&persistence_id)
                 .expect("stream inserted before processing sub-write");
@@ -846,18 +845,17 @@ impl crate::state::ServerState {
             stream.state.sequence_nr += 1;
             stream.state.push_event_bounded(created);
         }
-        let related =
-            if table_has_cross_entity_guards_for_action(&table, &write.action) {
-                self.resolve_cross_entity_guards(
-                    tenant,
-                    &write.entity_type,
-                    &write.entity_id,
-                    &write.action,
-                )
-                .await
-            } else {
-                BTreeMap::new()
-            };
+        let related = if table_has_cross_entity_guards_for_action(&table, &write.action) {
+            self.resolve_cross_entity_guards(
+                tenant,
+                &write.entity_type,
+                &write.entity_id,
+                &write.action,
+            )
+            .await
+        } else {
+            BTreeMap::new()
+        };
         let field_sync_mode = self
             .event_journal()
             .map(|(_, backend)| self.composite_batch_field_sync_mode(tenant, backend))
@@ -957,8 +955,7 @@ impl crate::state::ServerState {
         let related = self
             .resolve_cross_entity_guards(tenant, entity_type, entity_id, action)
             .await;
-        let eval_ctx =
-            build_eval_context_with_xref(&current.state, &related, &table, Some(action));
+        let eval_ctx = build_eval_context_with_xref(&current.state, &related, &table, Some(action));
 
         match table.evaluate_ctx(&current.state.status, &eval_ctx, action) {
             Some(result) if result.success => Ok(()),

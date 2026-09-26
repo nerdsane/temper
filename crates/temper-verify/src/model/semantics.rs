@@ -27,7 +27,9 @@ impl Env for ModelEnv<'_> {
             Some(VarKind::Counter) => {
                 Val::Num(self.state.counters.get(name).copied().unwrap_or(0) as f64)
             }
-            Some(VarKind::Bool) => Val::Bool(self.state.booleans.get(name).copied().unwrap_or(false)),
+            Some(VarKind::Bool) => {
+                Val::Bool(self.state.booleans.get(name).copied().unwrap_or(false))
+            }
             Some(VarKind::List) => self
                 .state
                 .lists
@@ -53,7 +55,11 @@ pub fn truth(expr: &Expr, kinds: &BTreeMap<String, VarKind>, state: &TemperModel
 /// gated on something the model cannot see (a related entity's status) is
 /// not locally enabled, so a state whose only exit is such a gate is correctly
 /// treated as a place the automaton may wait.
-pub fn evaluate_guard(guard: &Expr, kinds: &BTreeMap<String, VarKind>, state: &TemperModelState) -> bool {
+pub fn evaluate_guard(
+    guard: &Expr,
+    kinds: &BTreeMap<String, VarKind>,
+    state: &TemperModelState,
+) -> bool {
     truth(guard, kinds, state).must_hold()
 }
 
@@ -64,7 +70,11 @@ pub fn evaluate_guard(guard: &Expr, kinds: &BTreeMap<String, VarKind>, state: &T
 /// guard-false branch by also exploring states where the edge is not taken.
 /// Locally resolvable parts still decide: an unsatisfiable local condition
 /// keeps the guard false whatever the unknowns are.
-pub fn guard_may_hold(guard: &Expr, kinds: &BTreeMap<String, VarKind>, state: &TemperModelState) -> bool {
+pub fn guard_may_hold(
+    guard: &Expr,
+    kinds: &BTreeMap<String, VarKind>,
+    state: &TemperModelState,
+) -> bool {
     truth(guard, kinds, state).may_hold()
 }
 
@@ -183,10 +193,17 @@ mod tests {
     fn unmodeled_values_are_free_for_exploration_and_absent_for_enablement() {
         let s = state("A");
         let k = kinds();
-        for unknown in ["P[p].status == 'Done'", "goal != ''", "!(P[p].status == 'Done')"] {
+        for unknown in [
+            "P[p].status == 'Done'",
+            "goal != ''",
+            "!(P[p].status == 'Done')",
+        ] {
             let guard = g(unknown);
             assert!(guard_may_hold(&guard, &k, &s), "{unknown} may hold");
-            assert!(!evaluate_guard(&guard, &k, &s), "{unknown} is not guaranteed");
+            assert!(
+                !evaluate_guard(&guard, &k, &s),
+                "{unknown} is not guaranteed"
+            );
         }
         // A local condition that is false decides, whatever the unknown is.
         let guard = g("items > 5 && P[p].status == 'Done'");

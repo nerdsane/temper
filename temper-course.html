@@ -1945,7 +1945,7 @@
                 <span class="ct-meaning">When it fires, the issue moves to "Planning" status</span>
               </div>
               <div class="ct-line">
-                <span class="ct-label">guard = "is_true planner_set"</span>
+                <span class="ct-label">guard = "planner_set"</span>
                 <span class="ct-meaning">But wait &mdash; a planner must be assigned first. No planner, no planning.</span>
               </div>
               <div class="ct-line">
@@ -1981,11 +1981,11 @@
                 <span class="ct-meaning">This is a safety rule that must ALWAYS be true</span>
               </div>
               <div class="ct-line">
-                <span class="ct-label">when = [...]</span>
+                <span class="ct-label">assert = "status in [...] =&gt;</span>
                 <span class="ct-meaning">Whenever an order is in any of these statuses&hellip;</span>
               </div>
               <div class="ct-line">
-                <span class="ct-label">assert = "items &gt; 0"</span>
+                <span class="ct-label">items &gt; 0"</span>
                 <span class="ct-meaning">&hellip;it must have at least one item. If the system ever violates this, it's a bug &mdash; and Temper proves it CAN'T happen before the code ever runs.</span>
               </div>
             </div>

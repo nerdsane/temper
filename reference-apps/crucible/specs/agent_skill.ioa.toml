@@ -17,9 +17,5 @@ initial = "Active"
 
 [[field_invariant]]
 name = "SkillTypeMustBeKnown"
-when = { not = { field = "SkillType", absent = true } }
-require = { any_of = [
-  { field = "SkillType", equals = "anthropic" },
-  { field = "SkillType", equals = "custom" },
-]}
 message = "AgentSkill.SkillType must be `anthropic` or `custom`"
+assert = "SkillType != null => SkillType in ['anthropic', 'custom']"

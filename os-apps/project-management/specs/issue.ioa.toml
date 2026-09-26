@@ -11,6 +11,7 @@
 name = "Issue"
 states = ["Backlog", "Triage", "Todo", "Planning", "Planned", "InProgress", "InReview", "Done", "Cancelled", "Archived"]
 initial = "Backlog"
+terminal = ["Archived"]
 
 # --- State Variables ---
 
@@ -165,7 +166,7 @@ name = "BeginPlanning"
 kind = "internal"
 from = ["Todo"]
 to = "Planning"
-guard = "is_true planner_set"
+guard = "planner_set"
 hint = "Start planning phase. A planner agent drafts the approach."
 
 [[action]]
@@ -189,7 +190,7 @@ name = "ApprovePlan"
 kind = "internal"
 from = ["Planning"]
 to = "Planned"
-guard = "is_true has_plan"
+guard = "has_plan"
 hint = "Approve the plan. Only supervisors/humans. Requires a plan to exist."
 
 [[action]]
@@ -208,7 +209,7 @@ name = "StartWork"
 kind = "internal"
 from = ["Planned"]
 to = "InProgress"
-guard = "is_true assignee_set"
+guard = "assignee_set"
 params = ["repo", "branch_name", "worktree_path"]
 hint = "Begin implementation. Requires an assignee and an approved plan."
 
@@ -281,7 +282,7 @@ hint = "Add a comment to the issue."
 name = "Reassign"
 kind = "input"
 from = ["Backlog", "Triage", "Todo", "Planning", "Planned", "InProgress", "InReview"]
-guard = "is_true assignee_set"
+guard = "assignee_set"
 params = ["NewAssigneeId"]
 hint = "Reassign the issue to a different implementer."
 
@@ -307,29 +308,18 @@ name = "IssueCancelledEvent"
 kind = "output"
 hint = "Emitted when issue is cancelled."
 
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "ArchivedIsFinal"
-when = ["Archived"]
-assert = "no_further_transitions"
-
 [[invariant]]
 name = "InProgressRequiresAssignee"
-when = ["InProgress", "InReview", "Done"]
-assert = "assignee_set"
+assert = "status in ['InProgress', 'InReview', 'Done'] => assignee_set"
 
 [[invariant]]
 name = "TodoRequiresPriority"
-when = ["Todo", "Planning", "Planned", "InProgress", "InReview", "Done"]
-assert = "priority > 0"
+assert = "status in ['Todo', 'Planning', 'Planned', 'InProgress', 'InReview', 'Done'] => priority > 0"
 
 [[invariant]]
 name = "PlanningRequiresPlanner"
-when = ["Planning", "Planned"]
-assert = "planner_set"
+assert = "status in ['Planning', 'Planned'] => planner_set"
 
 [[invariant]]
 name = "PlannedRequiresPlan"
-when = ["Planned", "InProgress", "InReview", "Done"]
-assert = "has_plan"
+assert = "status in ['Planned', 'InProgress', 'InReview', 'Done'] => has_plan"

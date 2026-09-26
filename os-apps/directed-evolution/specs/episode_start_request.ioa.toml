@@ -3,6 +3,7 @@ name = "EpisodeStartRequest"
 states = ["Draft", "Submitted", "Started", "Failed", "Cancelled"]
 initial = "Draft"
 allow_indefinite_states = ["Draft", "Submitted"]
+terminal = ["Started", "Failed", "Cancelled"]
 
 [[state]]
 name = "has_contract"
@@ -72,20 +73,4 @@ hint = "Cancel an episode start request before it has materialized."
 
 [[invariant]]
 name = "SubmittedHasContract"
-when = ["Submitted", "Started"]
-assert = "is_true has_contract"
-
-[[invariant]]
-name = "StartedIsFinal"
-when = ["Started"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "FailedIsFinal"
-when = ["Failed"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "CancelledIsFinal"
-when = ["Cancelled"]
-assert = "no_further_transitions"
+assert = "status in ['Submitted', 'Started'] => has_contract"

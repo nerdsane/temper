@@ -9,9 +9,8 @@
 //! in [`predicates`].
 
 mod effects;
-mod guards;
 mod predicates;
-mod values;
+pub(crate) mod values;
 
 use super::parser::AutomatonParseError;
 use super::types::*;
@@ -20,30 +19,17 @@ use serde::de::DeserializeOwned;
 use toml::{Table, Value};
 use values::{any_string, bool_value, string, string_list, unsigned};
 
-/// Parse one legacy guard clause such as `is_true ready` (used when lowering
-/// asserts written in guard syntax).
-pub(crate) fn legacy_guard_clause(clause: &str) -> Option<Guard> {
-    guards::parse_guard_clause(clause).ok()
-}
-
 /// Parse TOML into an Automaton struct.
 pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError> {
     let doc: Table = input
         .parse()
         .map_err(|e: toml::de::Error| AutomatonParseError::Toml(e.to_string()))?;
 
-    let (invariants, legacy_terminal) = predicates::invariants(&doc)?;
-    let mut meta = parse_meta(&doc)?;
-    for state in legacy_terminal {
-        if !meta.terminal.contains(&state) {
-            meta.terminal.push(state);
-        }
-    }
     let automaton = Automaton {
-        automaton: meta,
+        automaton: parse_meta(&doc)?,
         state: named_items(&doc, "state", parse_state_var)?,
         actions: named_items(&doc, "action", parse_action)?,
-        invariants,
+        invariants: predicates::invariants(&doc)?,
         liveness: named_items(&doc, "liveness", parse_liveness)?,
         integrations: named_items(&doc, "integration", parse_integration)?,
         webhooks: section(&doc, "webhook")?,

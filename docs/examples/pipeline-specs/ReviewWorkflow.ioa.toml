@@ -7,6 +7,7 @@
 name = "ReviewWorkflow"
 states = ["Pending", "InReview", "Approved", "ChangesRequested", "Rejected"]
 initial = "Pending"
+terminal = ["Approved", "Rejected"]
 
 # --- Actions: Review Lifecycle ---
 
@@ -51,15 +52,3 @@ kind = "input"
 from = ["ChangesRequested"]
 to = "InReview"
 hint = "Resubmit code after addressing requested changes."
-
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "ApprovedIsFinal"
-when = ["Approved"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "RejectedIsFinal"
-when = ["Rejected"]
-assert = "no_further_transitions"

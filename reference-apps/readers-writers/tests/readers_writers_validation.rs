@@ -71,7 +71,10 @@ fn transition_table_encodes_safety_critical_callbacks() {
         .expect("WriterStarted rule");
     assert_eq!(writer_started.from_states, vec!["Idle".to_string()]);
     assert_eq!(writer_started.to_state.as_deref(), Some("Writing"));
-    assert!(guard_contains(&writer_started.guard, &expr("wasm_in_flight")));
+    assert!(guard_contains(
+        &writer_started.guard,
+        &expr("wasm_in_flight")
+    ));
     assert!(
         writer_started
             .effects

@@ -170,7 +170,6 @@ fn check_unsatisfiable_same_field_equals(inv: &FieldInvariant, findings: &mut Ve
     }
 }
 
-
 /// Run semantic lint checks across a bundle of automata.
 ///
 /// Cross-entity checks currently focus on spawn contracts:
@@ -413,7 +412,6 @@ fn is_supported_state_var_type(var_type: &str) -> bool {
     )
 }
 
-
 fn effect_var(effect: &Effect) -> Option<&str> {
     match effect {
         Effect::Increment { var, .. } => Some(var.as_str()),
@@ -429,7 +427,6 @@ fn effect_var(effect: &Effect) -> Option<&str> {
         Effect::Spawn { .. } => None,
     }
 }
-
 
 fn render_effect(effect: &Effect) -> String {
     match effect {

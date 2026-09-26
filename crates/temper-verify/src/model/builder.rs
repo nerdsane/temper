@@ -8,14 +8,13 @@
 use std::collections::BTreeMap;
 
 use temper_spec::automaton::{
-    Automaton, ResolvedEffect, parse_bool_initial, parse_counter_initial_usize,
-    parse_list_initial, translate_actions,
+    Automaton, ResolvedEffect, parse_bool_initial, parse_counter_initial_usize, parse_list_initial,
+    translate_actions,
 };
 use temper_spec::predicate::VarKind;
 
 use super::types::{
-    LivenessKind, ModelEffect, ResolvedInvariant, ResolvedLiveness, ResolvedTransition,
-    TemperModel,
+    LivenessKind, ModelEffect, ResolvedInvariant, ResolvedLiveness, ResolvedTransition, TemperModel,
 };
 
 /// Build a `TemperModel` from I/O Automaton TOML source.
@@ -384,13 +383,11 @@ to = "Shipped"
 
 [[invariant]]
 name = "TestingRequiresAllGates"
-when = ["Testing", "Shipped"]
-assert = "migrations_ok && typecheck_ok && unit_tests_ok"
+assert = "status in ['Testing', 'Shipped'] => migrations_ok && typecheck_ok && unit_tests_ok"
 
 [[invariant]]
 name = "EitherReviewer"
-when = ["Shipped"]
-assert = "migrations_ok || typecheck_ok"
+assert = "status in ['Shipped'] => migrations_ok || typecheck_ok"
 "#;
 
     #[test]
@@ -433,8 +430,7 @@ to = "Shipped"
 
 [[invariant]]
 name = "MixedDeclaredUndeclared"
-when = ["Shipped"]
-assert = "migrations_ok && undeclared_flag"
+assert = "status in ['Shipped'] => migrations_ok && undeclared_flag"
 "#;
 
     #[test]
@@ -442,6 +438,9 @@ assert = "migrations_ok && undeclared_flag"
         let err = build_model_from_ioa(COMPOUND_UNDECLARED_IOA, 2)
             .err()
             .expect("undeclared variable must be rejected");
-        assert!(err.contains("unknown state variable 'undeclared_flag'"), "{err}");
+        assert!(
+            err.contains("unknown state variable 'undeclared_flag'"),
+            "{err}"
+        );
     }
 }

@@ -1132,12 +1132,8 @@ impl Actor for EntityActor {
                 if let Some(key) = idempotency_key.as_deref()
                     && state.has_processed_idempotency_key(key)
                 {
-                    let custom_effects = duplicate_idempotency_custom_effects(
-                        &table,
-                        state,
-                        &name,
-                        &related,
-                    );
+                    let custom_effects =
+                        duplicate_idempotency_custom_effects(&table, state, &name, &related);
                     let mut response_state = state.clone();
                     if !custom_effects.is_empty() {
                         prune_transient_action_fields_from_state(&mut response_state);

@@ -615,14 +615,14 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
 /// Name- and type-check every predicate, and check `terminal` states exist.
 fn validate_predicates(automaton: &Automaton) -> Result<(), AutomatonParseError> {
     use crate::predicate::{Scope, VarKind, check};
+
     let vars: std::collections::BTreeMap<String, VarKind> = automaton
         .state
         .iter()
         .map(|sv| (sv.name.clone(), VarKind::from_type(&sv.var_type)))
         .collect();
-    let invalid = |slot: String, error: String| {
-        AutomatonParseError::Validation(format!("{slot}: {error}"))
-    };
+    let invalid =
+        |slot: String, error: String| AutomatonParseError::Validation(format!("{slot}: {error}"));
     for action in &automaton.actions {
         check(&action.guard, Scope::State(&vars))
             .map_err(|e| invalid(format!("action '{}' guard", action.name), e))?;
@@ -630,7 +630,10 @@ fn validate_predicates(automaton: &Automaton) -> Result<(), AutomatonParseError>
             if let Some(guard) = &trigger.guard {
                 check(guard, Scope::Fields).map_err(|e| {
                     invalid(
-                        format!("trigger '{}' on action '{}' guard", trigger.name, action.name),
+                        format!(
+                            "trigger '{}' on action '{}' guard",
+                            trigger.name, action.name
+                        ),
                         e,
                     )
                 })?;
@@ -638,8 +641,18 @@ fn validate_predicates(automaton: &Automaton) -> Result<(), AutomatonParseError>
         }
     }
     for inv in &automaton.invariants {
-        check(&inv.assert, Scope::State(&vars))
-            .map_err(|e| invalid(format!("invariant '{}'", inv.name), e))?;
+        let slot = format!("invariant '{}'", inv.name);
+        check(&inv.assert, Scope::State(&vars)).map_err(|e| invalid(slot.clone(), e))?;
+        if let Some(culprit) = crate::predicate::unmodelable(&inv.assert, &vars) {
+            return Err(invalid(
+                slot,
+                format!(
+                    "`{culprit}` reads a value the verification cascade cannot model \
+                     (a string, number, field or related entity); state it as a \
+                     [[field_invariant]], which is checked on writes"
+                ),
+            ));
+        }
     }
     for inv in &automaton.field_invariants {
         check(&inv.assert, Scope::Fields)

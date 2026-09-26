@@ -8,6 +8,7 @@
 name = "Approval"
 states = ["Drafted", "PendingApproval", "Approved", "Rejected", "Withdrawn"]
 initial = "Drafted"
+terminal = ["Withdrawn"]
 
 # --- State Variables ---
 
@@ -36,7 +37,7 @@ name = "SubmitForApproval"
 kind = "internal"
 from = ["Drafted"]
 to = "PendingApproval"
-guard = "is_true has_reviewer"
+guard = "has_reviewer"
 hint = "Submit document for review. Requires an assigned reviewer."
 
 [[action]]
@@ -73,10 +74,4 @@ hint = "Author revises after rejection. Must reassign reviewer."
 
 [[invariant]]
 name = "ApprovedHasApproval"
-when = ["Approved"]
-assert = "approvals > 0"
-
-[[invariant]]
-name = "WithdrawnIsFinal"
-when = ["Withdrawn"]
-assert = "no_further_transitions"
+assert = "status in ['Approved'] => approvals > 0"

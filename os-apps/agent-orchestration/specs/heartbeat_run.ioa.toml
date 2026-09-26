@@ -99,10 +99,7 @@ name = "CheckIn"
 kind = "input"
 from = ["Scheduled"]
 to = "CheckingIn"
-guard = [
-  { type = "is_true", var = "budget_approved" },
-  { type = "is_true", var = "agent_bound" }
-]
+guard = "budget_approved && agent_bound"
 hint = "Agent checks in after budget approval."
 
 [[action]]
@@ -149,7 +146,7 @@ name = "Complete"
 kind = "input"
 from = ["Working"]
 to = "Completed"
-guard = "is_true has_result"
+guard = "has_result"
 hint = "Complete run when a result has been recorded."
 
 [[action]]
@@ -171,18 +168,15 @@ hint = "Cancel execution before completion."
 
 [[invariant]]
 name = "WorkingRequiresAgent"
-when = ["CheckingIn", "Working", "Completed"]
-assert = "agent_bound"
+assert = "status in ['CheckingIn', 'Working', 'Completed'] => agent_bound"
 
 [[invariant]]
 name = "BudgetApprovedBeforeWork"
-when = ["CheckingIn", "Working", "Completed"]
-assert = "budget_approved"
+assert = "status in ['CheckingIn', 'Working', 'Completed'] => budget_approved"
 
 [[invariant]]
 name = "CompletedHasResult"
-when = ["Completed"]
-assert = "has_result"
+assert = "status in ['Completed'] => has_result"
 
 # --- Integrations ---
 

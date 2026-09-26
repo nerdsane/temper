@@ -1340,9 +1340,7 @@ kind = "input"
 from = ["Created", "Ready"]
 to = "Ready"
 params = ["size_bytes"]
-guard = [
-  { type = "cross_entity_state", entity_type = "Workspace", entity_id_source = "workspace_id", forbidden_status = ["Frozen", "Archived"] },
-]
+guard = "Workspace[workspace_id].status not in ['Frozen', 'Archived']"
 effect = [
   { type = "increment", var = "version_count" },
   { type = "set_bool", var = "has_content", value = "true" },

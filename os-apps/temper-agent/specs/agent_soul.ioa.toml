@@ -8,6 +8,7 @@
 name = "AgentSoul"
 states = ["Draft", "Active", "Archived"]
 initial = "Draft"
+terminal = ["Archived"]
 
 [[state]]
 name = "name"
@@ -63,8 +64,3 @@ kind = "input"
 from = ["Active"]
 to = "Archived"
 hint = "Archive the soul. No new agents can use it."
-
-[[invariant]]
-name = "ArchivedIsFinal"
-when = ["Archived"]
-assert = "no_further_transitions"

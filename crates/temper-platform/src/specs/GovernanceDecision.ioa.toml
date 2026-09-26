@@ -125,15 +125,12 @@ kind = "internal"
 
 [[invariant]]
 name = "ApprovedIsTerminal"
-when = ["Approved"]
-assert = "true"
+assert = "status in ['Approved'] => true"
 
 [[invariant]]
 name = "DeniedIsTerminal"
-when = ["Denied"]
-assert = "true"
+assert = "status in ['Denied'] => true"
 
 [[invariant]]
 name = "ExpiredIsTerminal"
-when = ["Expired"]
-assert = "true"
+assert = "status in ['Expired'] => true"

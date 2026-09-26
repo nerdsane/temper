@@ -2,6 +2,7 @@
 name = "Location"
 states = ["Active", "Paused", "Removed"]
 initial = "Active"
+terminal = ["Removed"]
 
 [[action]]
 name = "PauseTracking"
@@ -23,11 +24,6 @@ kind = "input"
 from = ["Active", "Paused"]
 to = "Removed"
 hint = "Permanently stop tracking this location."
-
-[[invariant]]
-name = "RemovedIsTerminal"
-when = ["Removed"]
-assert = "no_further_transitions"
 
 [[liveness]]
 name = "EventuallyRemoved"

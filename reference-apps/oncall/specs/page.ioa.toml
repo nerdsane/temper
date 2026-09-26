@@ -8,6 +8,7 @@
 name = "Page"
 states = ["Triggered", "Investigating", "Escalated", "Remediated", "Resolved"]
 initial = "Triggered"
+terminal = ["Resolved"]
 
 # --- State Variables ---
 
@@ -36,7 +37,7 @@ name = "StartInvestigation"
 kind = "internal"
 from = ["Triggered"]
 to = "Investigating"
-guard = "is_true agent_assigned"
+guard = "agent_assigned"
 hint = "Agent begins investigating the alert. Requires an assigned agent."
 
 [[action]]
@@ -85,20 +86,11 @@ to = "Escalated"
 effect = "increment escalation_tier"
 hint = "Investigation timed out — automatic escalation."
 
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "ResolvedIsFinal"
-when = ["Resolved"]
-assert = "no_further_transitions"
-
 [[invariant]]
 name = "InvestigationRequiresAgent"
-when = ["Investigating", "Remediated"]
-assert = "agent_assigned"
+assert = "status in ['Investigating', 'Remediated'] => agent_assigned"
 
 [[invariant]]
 name = "EscalationTracked"
-when = ["Escalated"]
-assert = "escalation_tier > 0"
+assert = "status in ['Escalated'] => escalation_tier > 0"
 

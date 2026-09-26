@@ -18,8 +18,7 @@ use temper_spec::predicate::Truth;
 use crate::model::semantics::truth;
 
 use crate::model::{
-    LivenessKind, TemperModel, TemperModelAction, TemperModelState,
-    build_model_from_ioa,
+    LivenessKind, TemperModel, TemperModelAction, TemperModelState, build_model_from_ioa,
 };
 
 /// Configuration for a simulation run.

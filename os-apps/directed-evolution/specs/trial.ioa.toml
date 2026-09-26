@@ -44,5 +44,4 @@ hint = "Archive a trial."
 
 [[invariant]]
 name = "RunningHasAgent"
-when = ["Running"]
-assert = "is_true has_agent"
+assert = "status in ['Running'] => has_agent"

@@ -3,6 +3,7 @@ name = "LineageEdge"
 states = ["Recorded", "Archived"]
 initial = "Recorded"
 allow_indefinite_states = ["Recorded"]
+terminal = ["Archived"]
 
 [[action]]
 name = "RecordLineageEdge"
@@ -18,8 +19,3 @@ from = ["Recorded"]
 to = "Archived"
 params = ["Reason"]
 hint = "Archive an erroneous lineage edge."
-
-[[invariant]]
-name = "ArchivedIsFinal"
-when = ["Archived"]
-assert = "no_further_transitions"

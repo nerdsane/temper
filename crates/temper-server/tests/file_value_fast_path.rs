@@ -140,9 +140,7 @@ kind = "input"
 from = ["Created", "Ready"]
 to = "Ready"
 params = ["content_hash", "size_bytes", "mime_type", "version_number", "previous_version_id", "created_by"]
-guard = [
-  { type = "cross_entity_state", entity_type = "Workspace", entity_id_source = "workspace_id", required_status = ["Active"] },
-]
+guard = "empty(workspace_id) || Workspace[workspace_id].status in ['Active']"
 effect = [
   { type = "increment", var = "version_count" },
   { type = "set_counter_from_param", var = "size_bytes", param = "size_bytes" },

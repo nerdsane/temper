@@ -3,6 +3,7 @@ name = "Episode"
 states = ["Draft", "Negotiating", "Running", "Paused", "Selecting", "Promoting", "Completed", "Stopped", "Failed"]
 initial = "Draft"
 allow_indefinite_states = ["Draft", "Negotiating", "Running", "Paused", "Selecting", "Promoting"]
+terminal = ["Completed", "Stopped", "Failed"]
 
 [[state]]
 name = "has_contract"
@@ -40,7 +41,7 @@ name = "StartEpisode"
 kind = "input"
 from = ["Draft", "Negotiating"]
 to = "Running"
-guard = "is_true has_contract"
+guard = "has_contract"
 effect = [{ type = "trigger", name = "episode_started" }]
 params = ["StartedBy", "Reason"]
 hint = "Start the episode after a contract exists."
@@ -100,7 +101,7 @@ name = "CompleteEpisode"
 kind = "input"
 from = ["Promoting"]
 to = "Completed"
-guard = "is_true winner_selected"
+guard = "winner_selected"
 params = ["PromotionId", "OrganismVersionId", "Summary"]
 hint = "Complete the episode after promotion."
 
@@ -122,20 +123,4 @@ hint = "Mark the episode failed."
 
 [[invariant]]
 name = "RunningHasContract"
-when = ["Running"]
-assert = "is_true has_contract"
-
-[[invariant]]
-name = "CompletedIsFinal"
-when = ["Completed"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "StoppedIsFinal"
-when = ["Stopped"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "FailedIsFinal"
-when = ["Failed"]
-assert = "no_further_transitions"
+assert = "status in ['Running'] => has_contract"

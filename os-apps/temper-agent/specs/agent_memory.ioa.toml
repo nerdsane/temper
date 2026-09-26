@@ -8,6 +8,7 @@
 name = "AgentMemory"
 states = ["Active", "Archived"]
 initial = "Active"
+terminal = ["Archived"]
 
 [[state]]
 name = "key"
@@ -60,8 +61,3 @@ name = "Recall"
 kind = "input"
 from = ["Active"]
 hint = "Read-only recall action for audit trail. No state mutation."
-
-[[invariant]]
-name = "ArchivedIsFinal"
-when = ["Archived"]
-assert = "no_further_transitions"

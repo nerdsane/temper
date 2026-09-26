@@ -72,7 +72,7 @@ pub(crate) async fn handle_list_specs(
                     states: automaton.automaton.states.clone(),
                     actions: automaton.actions.iter().map(|a| a.name.clone()).collect(),
                     initial_state: automaton.automaton.initial.clone(),
-                terminal_states: automaton.automaton.terminal.clone(),
+                    terminal_states: automaton.automaton.terminal.clone(),
                     verification_status,
                     levels_passed,
                     levels_total,

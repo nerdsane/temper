@@ -7,6 +7,7 @@
 name = "Workspace"
 states = ["Active", "Frozen", "Archived"]
 initial = "Active"
+terminal = ["Archived"]
 
 # --- State Variables ---
 
@@ -107,19 +108,10 @@ name = "WorkspaceArchivedEvent"
 kind = "output"
 hint = "Emitted when workspace transitions to Archived."
 
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "ArchivedIsFinal"
-when = ["Archived"]
-assert = "no_further_transitions"
-
 [[invariant]]
 name = "UsageBelowQuota"
-when = ["Active"]
-assert = "used_bytes <= quota_limit"
+assert = "status in ['Active'] => used_bytes <= quota_limit"
 
 [[invariant]]
 name = "FileCountNonNegative"
-when = ["Active", "Frozen", "Archived"]
-assert = "file_count >= 0"
+assert = "status in ['Active', 'Frozen', 'Archived'] => file_count >= 0"

@@ -1,5 +1,7 @@
 # ADR-0045: Reactions as a First-Class App Primitive
 
+> **Syntax superseded by [ADR-0179](0179-unified-predicate-grammar.md):** the predicate forms shown here (guard, assert and field-predicate tables or clauses) are now one expression grammar. The decision below stands; its examples use the old syntax.
+
 - Status: Proposed
 - Date: 2026-04-16
 - Deciders: Temper core maintainers

@@ -3,6 +3,7 @@ name = "Organism"
 states = ["Draft", "Active", "Archived"]
 initial = "Draft"
 allow_indefinite_states = ["Draft", "Active"]
+terminal = ["Archived"]
 
 [[state]]
 name = "has_parent_version"
@@ -48,10 +49,4 @@ hint = "Archive an organism."
 
 [[invariant]]
 name = "ActiveHasParentVersion"
-when = ["Active"]
-assert = "is_true has_parent_version"
-
-[[invariant]]
-name = "ArchivedIsFinal"
-when = ["Archived"]
-assert = "no_further_transitions"
+assert = "status in ['Active'] => has_parent_version"
