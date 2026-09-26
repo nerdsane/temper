@@ -16,6 +16,7 @@ pub mod assert_parser;
 mod contracts;
 pub mod field_invariant;
 mod initial;
+pub mod legacy;
 mod lint;
 pub mod metadata;
 pub mod parser;

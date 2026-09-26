@@ -14,12 +14,16 @@ mod values;
 use super::parser::AutomatonParseError;
 use super::types::*;
 use effects::parse_effect_value;
-#[cfg(test)]
-use guards::parse_guard_clause;
 use guards::parse_guard_value;
 use serde::de::DeserializeOwned;
 use toml::{Table, Value};
 use values::{any_string, bool_value, string, string_list, unsigned};
+
+/// Parse one legacy guard clause such as `is_true ready` (used when lowering
+/// asserts written in guard syntax).
+pub(crate) fn legacy_guard_clause(clause: &str) -> Option<Guard> {
+    guards::parse_guard_clause(clause).ok()
+}
 
 /// Parse TOML into an Automaton struct.
 pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, AutomatonParseError> {

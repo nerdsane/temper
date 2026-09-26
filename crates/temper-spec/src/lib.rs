@@ -13,6 +13,7 @@ pub mod cross_invariant;
 pub mod csdl;
 pub mod model;
 pub mod naming;
+pub mod predicate;
 
 /// TLA+ specification extractor (legacy — prefer [`automaton`] for new specs).
 pub mod tlaplus;

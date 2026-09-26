@@ -1,3 +1,4 @@
+use super::guards::parse_guard_clause;
 use super::*;
 
 #[test]
