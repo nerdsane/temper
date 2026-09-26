@@ -20,13 +20,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use z3::ast::{Bool, Int};
 use z3::{SatResult, Solver};
 
-use temper_spec::automaton::AssertCompareOp;
+use temper_spec::predicate::{CmpOp, Expr, Literal, Operand, Set, unmodelable};
 
 use crate::model::builder::build_model_from_ioa;
 use crate::model::semantics::collect_list_contains_pairs;
-use crate::model::types::{
-    InvariantKind, ModelEffect, ModelGuard, ResolvedTransition, TemperModel,
-};
+use crate::model::types::{ModelEffect, ResolvedTransition, TemperModel};
 
 /// Result of symbolic verification.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -79,7 +77,7 @@ fn approximation_notes(model: &TemperModel) -> Vec<String> {
     let cross_entity_guard_count = model
         .transitions
         .iter()
-        .filter(|transition| transition.guard.contains_cross_entity())
+        .filter(|transition| reads_related_entities(&transition.guard))
         .count();
     if cross_entity_guard_count == 0 {
         return Vec::new();
@@ -90,11 +88,16 @@ fn approximation_notes(model: &TemperModel) -> Vec<String> {
     )]
 }
 
+/// Whether a guard reads a related entity's status (not modeled here).
+fn reads_related_entities(guard: &Expr) -> bool {
+    !guard.cross_refs().is_empty()
+}
+
 fn concrete_transitions(model: &TemperModel) -> impl Iterator<Item = &ResolvedTransition> {
     model
         .transitions
         .iter()
-        .filter(|transition| !transition.guard.contains_cross_entity())
+        .filter(|transition| !reads_related_entities(&transition.guard))
 }
 
 // ---------------------------------------------------------------------------
@@ -132,15 +135,14 @@ fn check_guard_satisfiability(model: &TemperModel, max_counter: usize) -> Vec<(S
             }
 
             // Encode the guard as a Z3 formula and assert it
-            let guard_formula = encode_guard(
-                &t.guard,
-                &counter_vars,
-                &bool_vars,
-                &list_vars,
-                &status_var,
-                model,
-            );
-            solver.assert(&guard_formula);
+            let symbols = Symbols {
+                counters: counter_vars.into_iter().collect(),
+                bools: bool_vars.into_iter().collect(),
+                lists: &list_vars,
+                status: status_var,
+                prefix: "",
+            };
+            solver.assert(encode(&t.guard, &symbols, model));
 
             let sat = matches!(solver.check(), SatResult::Sat);
             (t.name.clone(), sat)
@@ -152,353 +154,139 @@ fn check_guard_satisfiability(model: &TemperModel, max_counter: usize) -> Vec<(S
 // Invariant induction
 // ---------------------------------------------------------------------------
 
-/// For each invariant, check that every transition preserves it.
+/// For each invariant, check that the transitions entering its states
+/// preserve it.
 ///
-/// For each (invariant, transition) pair where the transition can reach a
-/// trigger state:
-///   - Assume: invariant(S) ∧ guard(S) ∧ bounds
-///   - Apply: encode effects as S → S'
-///   - Prove: invariant(S') holds (check that ¬invariant(S') is UNSAT)
+/// L0 scope (unchanged by the unified grammar): an invariant written as
+/// `status in [W...] => P` is checked on every concrete transition whose
+/// target is in `W`: assume `P` in the pre-state, apply the effects, prove
+/// `P` in the post-state. Guards and other variables are not constrained, so
+/// this is a fast early filter; the model checker (L1) is the full proof.
+/// Invariants without a `status in [...] =>` prefix, and invariants over
+/// values the model does not track, are left to L1. Status membership and
+/// `terminal` states are checked structurally.
 fn check_invariant_induction(model: &TemperModel, max_counter: usize) -> Vec<(String, bool)> {
-    model
-        .invariants
-        .iter()
-        .map(|inv| {
-            let inductive = match &inv.kind {
-                InvariantKind::StatusInSet => {
-                    // Structurally guaranteed by parser validation: every
-                    // transition's to_state must be in model.states.
-                    concrete_transitions(model).all(|t| {
-                        t.to_state
-                            .as_ref()
-                            .map(|s| model.states.contains(s))
-                            .unwrap_or(true)
-                    })
-                }
-                InvariantKind::CounterPositive { var } => check_counter_positive_induction_z3(
-                    model,
-                    &inv.trigger_states,
-                    var,
-                    max_counter,
-                ),
-                InvariantKind::BoolRequired { var, expect } => {
-                    // Induction checker assumes `expect = true`. For `!flag`,
-                    // fall back to runtime simulation (model checking still
-                    // exercises it via proptest_gen and simulation).
-                    if *expect {
-                        check_bool_required_induction_z3(model, &inv.trigger_states, var)
-                    } else {
-                        true
-                    }
-                }
-                InvariantKind::NoFurtherTransitions => {
-                    // For each trigger state: no transitions should have it
-                    // as a from_state.
-                    inv.trigger_states.iter().all(|trigger| {
-                        !concrete_transitions(model)
-                            .any(|t| t.from_states.contains(trigger) || t.from_states.is_empty())
-                    })
-                }
-                InvariantKind::Implication => {
-                    if inv.required_states.is_empty() {
-                        true
-                    } else {
-                        concrete_transitions(model).all(|t| {
-                            if let Some(to) = &t.to_state {
-                                if inv.trigger_states.contains(to) {
-                                    let valid: Vec<&String> = inv
-                                        .required_states
-                                        .iter()
-                                        .filter(|s| model.states.contains(s))
-                                        .collect();
-                                    valid.is_empty() || valid.contains(&to)
-                                } else {
-                                    true
-                                }
-                            } else {
-                                true
-                            }
-                        })
-                    }
-                }
-                InvariantKind::CounterCompare { var, op, value } => {
-                    check_counter_compare_induction_z3(
-                        model,
-                        &inv.trigger_states,
-                        var,
-                        op,
-                        *value,
-                        max_counter,
-                    )
-                }
-                InvariantKind::NeverState { state } => {
-                    // Structural check: no transition has to_state == forbidden_state.
-                    !concrete_transitions(model)
-                        .any(|t| t.to_state.as_ref().is_some_and(|to| to == state))
-                }
-                InvariantKind::And(parts) => {
-                    // Sound over-approximation: `a && b` is inductive iff each
-                    // part is inductive under the same trigger_states.
-                    parts
-                        .iter()
-                        .all(|p| kind_inductive_smt(model, &inv.trigger_states, p, max_counter))
-                }
-                InvariantKind::Or(_) => {
-                    // Disjunctive induction requires joint encoding; runtime
-                    // simulation (proptest_gen/simulation) catches violations.
-                    true
-                }
-                InvariantKind::Unverifiable { .. } => {
-                    // Not checkable at model level — trivially inductive.
-                    true
-                }
-            };
-
-            (inv.name.clone(), inductive)
-        })
-        .collect()
-}
-
-/// Recursive induction check for a single [`InvariantKind`] — used by `And`.
-///
-/// Mirrors the per-variant logic in [`check_invariant_induction`]; compound
-/// recursion is sound at the And layer (all parts must hold). For Or, returns
-/// `true` (see note above — runtime catches disjunctive violations).
-fn kind_inductive_smt(
-    model: &TemperModel,
-    trigger_states: &[String],
-    kind: &InvariantKind,
-    max_counter: usize,
-) -> bool {
-    match kind {
-        InvariantKind::StatusInSet => concrete_transitions(model).all(|t| {
+    let mut results = vec![(
+        "TypeInvariant".to_string(),
+        concrete_transitions(model).all(|t| {
             t.to_state
                 .as_ref()
                 .map(|s| model.states.contains(s))
                 .unwrap_or(true)
         }),
-        InvariantKind::CounterPositive { var } => {
-            check_counter_positive_induction_z3(model, trigger_states, var, max_counter)
-        }
-        InvariantKind::BoolRequired { var, expect } => {
-            if *expect {
-                check_bool_required_induction_z3(model, trigger_states, var)
-            } else {
-                true
+    )];
+    for inv in &model.invariants {
+        let inductive = match split_trigger(&inv.assert) {
+            Some((trigger, body)) if unmodelable(body, &model.var_kinds).is_none() => {
+                concrete_transitions(model)
+                    .filter(|t| t.to_state.as_ref().is_some_and(|to| trigger.contains(to)))
+                    .all(|t| preserved_by(model, body, t, max_counter))
             }
-        }
-        InvariantKind::NoFurtherTransitions => trigger_states.iter().all(|trigger| {
-            !concrete_transitions(model)
-                .any(|t| t.from_states.contains(trigger) || t.from_states.is_empty())
-        }),
-        InvariantKind::Implication => true,
-        InvariantKind::CounterCompare { var, op, value } => {
-            check_counter_compare_induction_z3(model, trigger_states, var, op, *value, max_counter)
-        }
-        InvariantKind::NeverState { state } => {
-            !concrete_transitions(model).any(|t| t.to_state.as_ref().is_some_and(|to| to == state))
-        }
-        InvariantKind::And(parts) => parts
-            .iter()
-            .all(|p| kind_inductive_smt(model, trigger_states, p, max_counter)),
-        InvariantKind::Or(_) | InvariantKind::Unverifiable { .. } => true,
+            _ => true,
+        };
+        results.push((inv.name.clone(), inductive));
     }
+    for state in &model.terminal {
+        let closed = !concrete_transitions(model)
+            .any(|t| t.from_states.contains(state) || t.from_states.is_empty());
+        results.push((format!("Terminal({state})"), closed));
+    }
+    results
 }
 
-/// Z3 induction check for CounterPositive invariants.
-///
-/// For each transition T that reaches a trigger state:
-///   Assume: var > 0 (pre-state invariant) ∧ 0 ≤ var ≤ max
-///   Apply: effects (compute var')
-///   Check: var' > 0 must hold (i.e. ¬(var' > 0) is UNSAT)
-fn check_counter_positive_induction_z3(
-    model: &TemperModel,
-    trigger_states: &[String],
-    var: &str,
-    max_counter: usize,
-) -> bool {
-    for t in &model.transitions {
-        if t.guard.contains_cross_entity() {
-            continue;
-        }
-        // Only check transitions that reach a trigger state
-        let reaches_trigger = t
-            .to_state
-            .as_ref()
-            .is_some_and(|s| trigger_states.contains(s));
+/// `status in [W...] => P` as `(W, P)`.
+fn split_trigger(assert: &Expr) -> Option<(Vec<String>, &Expr)> {
+    let Expr::Implies(lhs, body) = assert else {
+        return None;
+    };
+    let Expr::In {
+        value: Operand::Status,
+        set: Set::List(items),
+        negated: false,
+    } = lhs.as_ref()
+    else {
+        return None;
+    };
+    let states = items
+        .iter()
+        .map(|item| match item {
+            Literal::Str(state) => Some(state.clone()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((states, body))
+}
 
-        if !reaches_trigger {
-            continue;
-        }
+/// Whether transition `t` preserves `body`: `body(pre) ∧ post = effects(pre)
+/// ∧ ¬body(post)` is unsatisfiable.
+fn preserved_by(model: &TemperModel, body: &Expr, t: &ResolvedTransition, max_counter: usize) -> bool {
+    let solver = Solver::new();
+    let zero = Int::from_i64(0);
+    let one = Int::from_i64(1);
+    let max_val = Int::from_i64(max_counter as i64);
+    let lists = ListSymbolicVars::default();
 
-        let solver = Solver::new();
-
-        // Pre-state counter variable
-        let counter_pre = Int::new_const(format!("{var}_pre"));
-        let zero = Int::from_i64(0);
-        let max_val = Int::from_i64(max_counter as i64);
-
-        // Assume: invariant holds in pre-state (var > 0)
-        solver.assert(counter_pre.gt(&zero));
-        // Assume: counter is within bounds
-        solver.assert(counter_pre.le(&max_val));
-
-        // Compute post-state counter value based on effects
-        let one = Int::from_i64(1);
-        let mut counter_post = counter_pre.clone();
+    let mut pre_counters = BTreeMap::new();
+    let mut post_counters = BTreeMap::new();
+    for name in model.initial_counters.keys() {
+        let pre = Int::new_const(format!("{name}_pre"));
+        solver.assert(pre.ge(&zero));
+        solver.assert(pre.le(&max_val));
+        let mut post = pre.clone();
         for effect in &t.effects {
             match effect {
-                ModelEffect::IncrementCounter(v) if v == var => {
-                    counter_post = Int::add(&[&counter_post, &one]);
+                ModelEffect::IncrementCounter(v) if v == name => {
+                    post = Int::add(&[&post, &one]);
                 }
-                ModelEffect::DecrementCounter(v) if v == var => {
+                ModelEffect::DecrementCounter(v) if v == name => {
                     // Runtime semantics are saturating_sub(1): max(counter-1, 0)
-                    let dec = Int::sub(&[&counter_post, &one]);
-                    counter_post = counter_post.gt(&zero).ite(&dec, &zero);
+                    let dec = Int::sub(&[&post, &one]);
+                    post = post.gt(&zero).ite(&dec, &zero);
                 }
                 _ => {}
             }
         }
-
-        // Check: ¬(var' > 0) — if SAT, invariant is not preserved
-        solver.assert(counter_post.le(&zero));
-
-        if matches!(solver.check(), SatResult::Sat) {
-            return false;
-        }
+        pre_counters.insert(name.clone(), pre);
+        post_counters.insert(name.clone(), post);
     }
-    true
-}
-
-/// Z3 induction check for BoolRequired invariants.
-///
-/// For each transition T that reaches a trigger state:
-///   Assume: var = true (pre-state invariant)
-///   Apply: effects
-///   Check: var' = true must hold (¬var' is UNSAT)
-fn check_bool_required_induction_z3(
-    model: &TemperModel,
-    trigger_states: &[String],
-    var: &str,
-) -> bool {
-    for t in &model.transitions {
-        if t.guard.contains_cross_entity() {
-            continue;
-        }
-        let reaches_trigger = t
-            .to_state
-            .as_ref()
-            .is_some_and(|s| trigger_states.contains(s));
-
-        if !reaches_trigger {
-            continue;
-        }
-
-        let solver = Solver::new();
-
-        // Pre-state: var = true (invariant holds)
-        let bool_pre = Bool::new_const(format!("{var}_pre"));
-        solver.assert(&bool_pre);
-
-        // Compute post-state based on effects
-        let mut bool_post = bool_pre.clone();
+    let mut pre_bools = BTreeMap::new();
+    let mut post_bools = BTreeMap::new();
+    for name in model.initial_booleans.keys() {
+        let pre = Bool::new_const(format!("{name}_pre"));
+        let mut post = pre.clone();
         for effect in &t.effects {
-            if let ModelEffect::SetBool { var: v, value } = effect
-                && v == var
+            if let ModelEffect::SetBool { var, value } = effect
+                && var == name
             {
-                bool_post = Bool::from_bool(*value);
+                post = Bool::from_bool(*value);
             }
         }
-
-        // Check: ¬var' — if SAT, invariant is not preserved
-        solver.assert(bool_post.not());
-
-        if matches!(solver.check(), SatResult::Sat) {
-            return false;
-        }
+        pre_bools.insert(name.clone(), pre);
+        post_bools.insert(name.clone(), post);
     }
-    true
-}
+    let pre_status = make_status_var(model, &solver);
+    let post_status = match t.to_state.as_ref().and_then(|to| model.states.iter().position(|s| s == to)) {
+        Some(idx) => Int::from_i64(idx as i64),
+        None => pre_status.clone(),
+    };
 
-/// Z3 induction check for CounterCompare invariants.
-///
-/// Generalisation of `check_counter_positive_induction_z3`:
-///   Assume: `var op value` (pre-state invariant) ∧ bounds
-///   Apply: effects → var'
-///   Check: `var' op value` must hold
-fn check_counter_compare_induction_z3(
-    model: &TemperModel,
-    trigger_states: &[String],
-    var: &str,
-    op: &AssertCompareOp,
-    value: usize,
-    max_counter: usize,
-) -> bool {
-    for t in &model.transitions {
-        if t.guard.contains_cross_entity() {
-            continue;
-        }
-        let reaches_trigger = t
-            .to_state
-            .as_ref()
-            .is_some_and(|s| trigger_states.contains(s));
-
-        if !reaches_trigger {
-            continue;
-        }
-
-        let solver = Solver::new();
-
-        let counter_pre = Int::new_const(format!("{var}_pre"));
-        let zero = Int::from_i64(0);
-        let max_val = Int::from_i64(max_counter as i64);
-        let val = Int::from_i64(value as i64);
-
-        // Assume: counter is within bounds
-        solver.assert(counter_pre.ge(&zero));
-        solver.assert(counter_pre.le(&max_val));
-
-        // Assume: invariant holds in pre-state
-        let pre_invariant = match op {
-            AssertCompareOp::Gt => counter_pre.gt(&val),
-            AssertCompareOp::Gte => counter_pre.ge(&val),
-            AssertCompareOp::Lt => counter_pre.lt(&val),
-            AssertCompareOp::Lte => counter_pre.le(&val),
-            AssertCompareOp::Eq => counter_pre.eq(&val),
-        };
-        solver.assert(&pre_invariant);
-
-        // Compute post-state counter value based on effects
-        let one = Int::from_i64(1);
-        let mut counter_post = counter_pre.clone();
-        for effect in &t.effects {
-            match effect {
-                ModelEffect::IncrementCounter(v) if v == var => {
-                    counter_post = Int::add(&[&counter_post, &one]);
-                }
-                ModelEffect::DecrementCounter(v) if v == var => {
-                    let dec = Int::sub(&[&counter_post, &one]);
-                    counter_post = counter_post.gt(&zero).ite(&dec, &zero);
-                }
-                _ => {}
-            }
-        }
-
-        // Check: ¬(var' op value) — if SAT, invariant is not preserved
-        let post_invariant = match op {
-            AssertCompareOp::Gt => counter_post.gt(&val),
-            AssertCompareOp::Gte => counter_post.ge(&val),
-            AssertCompareOp::Lt => counter_post.lt(&val),
-            AssertCompareOp::Lte => counter_post.le(&val),
-            AssertCompareOp::Eq => counter_post.eq(&val),
-        };
-        solver.assert(post_invariant.not());
-
-        if matches!(solver.check(), SatResult::Sat) {
-            return false;
-        }
-    }
-    true
+    let pre = Symbols {
+        counters: pre_counters,
+        bools: pre_bools,
+        lists: &lists,
+        status: pre_status,
+        prefix: "pre:",
+    };
+    let post = Symbols {
+        counters: post_counters,
+        bools: post_bools,
+        lists: &lists,
+        status: post_status,
+        prefix: "post:",
+    };
+    solver.assert(encode(body, &pre, model));
+    solver.assert(encode(body, &post, model).not());
+    !matches!(solver.check(), SatResult::Sat)
 }
 
 // ---------------------------------------------------------------------------
@@ -654,78 +442,113 @@ fn encode_list_contains(var: &str, value: &str, lists: &ListSymbolicVars) -> Boo
     Bool::or(&disjuncts)
 }
 
-/// Encode a `ModelGuard` as a Z3 boolean formula.
-fn encode_guard(
-    guard: &ModelGuard,
-    counter_vars: &[(String, Int)],
-    bool_vars: &[(String, Bool)],
-    list_vars: &ListSymbolicVars,
-    status_var: &Int,
-    model: &TemperModel,
-) -> Bool {
-    match guard {
-        ModelGuard::Always => Bool::from_bool(true),
-        ModelGuard::StateIn(states) => encode_state_membership(status_var, states, model),
-        ModelGuard::CounterMin { var, min } => {
-            let min_val = Int::from_i64(*min as i64);
-            if let Some((_, z3_var)) = counter_vars.iter().find(|(n, _)| n == var) {
-                z3_var.ge(&min_val)
-            } else {
-                // Unknown counter — unsatisfiable
-                Bool::from_bool(false)
+/// Symbolic values for one state.
+struct Symbols<'a> {
+    counters: BTreeMap<String, Int>,
+    bools: BTreeMap<String, Bool>,
+    lists: &'a ListSymbolicVars,
+    status: Int,
+    /// Distinguishes free atoms of different states (pre/post).
+    prefix: &'static str,
+}
+
+/// Encode an expression as a Z3 formula. Parts over values the model does
+/// not track (related-entity statuses, strings, fields) become free boolean
+/// atoms, named by their source text so repeated occurrences agree.
+fn encode(expr: &Expr, sym: &Symbols<'_>, model: &TemperModel) -> Bool {
+    let free = || Bool::new_const(format!("{}atom:{expr}", sym.prefix));
+    match expr {
+        Expr::Const(value) => Bool::from_bool(*value),
+        Expr::Not(inner) => encode(inner, sym, model).not(),
+        Expr::And(parts) => {
+            Bool::and(&parts.iter().map(|p| encode(p, sym, model)).collect::<Vec<_>>())
+        }
+        Expr::Or(parts) => {
+            Bool::or(&parts.iter().map(|p| encode(p, sym, model)).collect::<Vec<_>>())
+        }
+        Expr::Implies(lhs, rhs) => encode(lhs, sym, model).implies(encode(rhs, sym, model)),
+        Expr::Var(name) => sym.bools.get(name).cloned().unwrap_or_else(free),
+        Expr::Empty(name) => match sym.lists.len_vars.get(name) {
+            Some(len) => len.eq(Int::from_i64(0)),
+            None => free(),
+        },
+        Expr::Compare { lhs, op, rhs } => {
+            if let (Some(a), Some(b)) = (int_term(lhs, sym), int_term(rhs, sym)) {
+                return match op {
+                    CmpOp::Eq => a.eq(&b),
+                    CmpOp::Ne => a.eq(&b).not(),
+                    CmpOp::Lt => a.lt(&b),
+                    CmpOp::Le => a.le(&b),
+                    CmpOp::Gt => a.gt(&b),
+                    CmpOp::Ge => a.ge(&b),
+                };
+            }
+            let equal = match (lhs, rhs) {
+                (Operand::Status, Operand::Lit(Literal::Str(state)))
+                | (Operand::Lit(Literal::Str(state)), Operand::Status) => Some(
+                    encode_state_membership(&sym.status, std::slice::from_ref(state), model),
+                ),
+                (Operand::Var(name), Operand::Lit(Literal::Bool(value)))
+                | (Operand::Lit(Literal::Bool(value)), Operand::Var(name)) => {
+                    sym.bools.get(name).map(|var| var.eq(Bool::from_bool(*value)))
+                }
+                _ => None,
+            };
+            match (equal, op) {
+                (Some(equal), CmpOp::Eq) => equal,
+                (Some(equal), CmpOp::Ne) => equal.not(),
+                _ => free(),
             }
         }
-        ModelGuard::CounterMax { var, max } => {
-            let max_val = Int::from_i64(*max as i64);
-            if let Some((_, z3_var)) = counter_vars.iter().find(|(n, _)| n == var) {
-                z3_var.lt(&max_val)
-            } else {
-                Bool::from_bool(false)
+        Expr::In {
+            value,
+            set,
+            negated,
+        } => {
+            let member = match (value, set) {
+                (Operand::Status, Set::List(items)) => {
+                    let states: Option<Vec<String>> = items
+                        .iter()
+                        .map(|item| match item {
+                            Literal::Str(state) => Some(state.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    states.map(|states| encode_state_membership(&sym.status, &states, model))
+                }
+                (Operand::Lit(Literal::Str(value)), Set::Var(list))
+                    if sym.lists.len_vars.contains_key(list) =>
+                {
+                    Some(encode_list_contains(list, value, sym.lists))
+                }
+                (value, Set::List(items)) => int_term(value, sym).and_then(|term| {
+                    let options: Option<Vec<Bool>> = items
+                        .iter()
+                        .map(|item| match item {
+                            Literal::Int(n) => Some(term.eq(Int::from_i64(*n))),
+                            _ => None,
+                        })
+                        .collect();
+                    options.map(|options| Bool::or(&options))
+                }),
+                _ => None,
+            };
+            match member {
+                Some(member) if *negated => member.not(),
+                Some(member) => member,
+                None => free(),
             }
         }
-        ModelGuard::BoolTrue(var) => {
-            if let Some((_, z3_var)) = bool_vars.iter().find(|(n, _)| n == var) {
-                z3_var.clone()
-            } else {
-                // Unknown boolean — unsatisfiable
-                Bool::from_bool(false)
-            }
-        }
-        ModelGuard::BoolFalse(var) => {
-            if let Some((_, z3_var)) = bool_vars.iter().find(|(n, _)| n == var) {
-                z3_var.not()
-            } else {
-                // Unknown boolean defaults to false, so !false = true
-                Bool::from_bool(true)
-            }
-        }
-        ModelGuard::ListContains { var, value } => encode_list_contains(var, value, list_vars),
-        ModelGuard::ListLengthMin { var, min } => {
-            if let Some(len_var) = list_vars.len_vars.get(var) {
-                len_var.ge(Int::from_i64(*min as i64))
-            } else {
-                Bool::from_bool(false)
-            }
-        }
-        ModelGuard::CrossEntityState {
-            entity_type,
-            entity_id_source,
-            required_status,
-            forbidden_status,
-        } => Bool::new_const(format!(
-            "cross_entity_guard:{}:{}:{}:!{}",
-            entity_type,
-            entity_id_source,
-            required_status.join("|"),
-            forbidden_status.join("|")
-        )),
-        ModelGuard::And(guards) => {
-            let formulas: Vec<Bool> = guards
-                .iter()
-                .map(|g| encode_guard(g, counter_vars, bool_vars, list_vars, status_var, model))
-                .collect();
-            Bool::and(&formulas)
-        }
+    }
+}
+
+/// An integer-valued operand: a counter, a list length, or an integer.
+fn int_term(operand: &Operand, sym: &Symbols<'_>) -> Option<Int> {
+    match operand {
+        Operand::Var(name) => sym.counters.get(name).cloned(),
+        Operand::Len(name) => sym.lists.len_vars.get(name).cloned(),
+        Operand::Lit(Literal::Int(n)) => Some(Int::from_i64(*n)),
+        _ => None,
     }
 }
 
@@ -743,7 +566,7 @@ fn check_unreachable_states(model: &TemperModel) -> Vec<String> {
             continue;
         }
         for t in &model.transitions {
-            if t.guard.contains_cross_entity() {
+            if reads_related_entities(&t.guard) {
                 continue;
             }
             let can_fire_from =

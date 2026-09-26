@@ -1,5 +1,4 @@
 //! Resolve stored comparison values before the pure action interpreter runs.
-use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 use temper_jit::table::TransitionTable;
@@ -14,7 +13,7 @@ pub(crate) async fn process_action_with_blob_prestate(
     table: &TransitionTable,
     action: &str,
     params: &Value,
-    cross_entity_booleans: &BTreeMap<String, bool>,
+    related: &temper_jit::table::RelatedMap,
     mode: FieldSyncMode,
     blob_source: BlobReadSource<'_>,
 ) -> ProcessResult {
@@ -42,7 +41,7 @@ pub(crate) async fn process_action_with_blob_prestate(
         table,
         action,
         params,
-        cross_entity_booleans,
+        related,
         mode,
         Some(&fields),
     )

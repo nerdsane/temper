@@ -1,5 +1,7 @@
 //! Field invariants — cross-field validation on a single entity instance.
 //!
+//! [`FieldPredicate`] is the pre-grammar table form, kept for conversion.
+//!
 //! A field invariant declares: "when this predicate over the entity's fields
 //! matches, this other predicate must also match, or the write is rejected."
 //!
@@ -30,16 +32,13 @@ use std::fmt;
 use serde::{Deserialize, Serialize, de};
 use serde_json::Value as Json;
 
-/// A single cross-field validation rule on one entity.
+/// A single cross-field validation rule on one entity, checked on writes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FieldInvariant {
     /// Invariant name (used in error bodies and logs).
     pub name: String,
-    /// Triggering predicate. When this matches the entity's fields, `require`
-    /// must also match.
-    pub when: FieldPredicate,
-    /// Required predicate. Evaluated only when `when` matches.
-    pub require: FieldPredicate,
+    /// Must hold for the entity's fields after the write.
+    pub assert: crate::predicate::Expr,
     /// Human-readable error message returned on violation. Falls back to a
     /// generic message if omitted.
     #[serde(default)]
@@ -344,22 +343,21 @@ impl FieldPredicate {
 }
 
 impl FieldInvariant {
-    /// Evaluate this invariant against an entity's fields snapshot.
-    ///
-    /// Returns `true` if the invariant passes (either the `when` predicate
-    /// did not match, or both `when` and `require` matched).
-    pub fn passes(&self, fields: &Json) -> bool {
-        if !self.when.evaluate(fields) {
-            return true;
-        }
-        self.require.evaluate(fields)
+    /// Every field name the assertion reads.
+    pub fn referenced_fields(&self) -> BTreeSet<String> {
+        let mut fields = BTreeSet::new();
+        self.assert.for_each_name(&mut |name| {
+            if let crate::predicate::Name::Var(field) = name {
+                fields.insert(field.to_string());
+            }
+        });
+        fields
     }
 
-    /// All field names referenced by either the `when` or `require` predicate.
-    pub fn referenced_fields(&self) -> BTreeSet<String> {
-        let mut out = self.when.referenced_fields();
-        out.extend(self.require.referenced_fields());
-        out
+    /// Evaluate this invariant against an entity's fields snapshot.
+    pub fn passes(&self, fields: &Json) -> bool {
+        let env = crate::predicate::JsonEnv::new(fields);
+        crate::predicate::eval(&self.assert, &env) == crate::predicate::Truth::True
     }
 }
 
@@ -568,8 +566,10 @@ mod tests {
     fn invariant_passes_when_when_does_not_match() {
         let inv = FieldInvariant {
             name: "LocalMustBeUnrestricted".into(),
-            when: predicate(r#"{ field = "ConfigType", equals = "Local" }"#),
-            require: predicate(r#"{ field = "NetworkingType", equals = "Unrestricted" }"#),
+            assert: crate::predicate::parse(
+                "ConfigType == 'Local' => NetworkingType == 'Unrestricted'",
+            )
+            .unwrap(),
             message: None,
         };
         assert!(inv.passes(&json!({ "ConfigType": "Cloud" })));
@@ -580,8 +580,10 @@ mod tests {
     fn invariant_fails_when_require_does_not_match() {
         let inv = FieldInvariant {
             name: "LocalMustBeUnrestricted".into(),
-            when: predicate(r#"{ field = "ConfigType", equals = "Local" }"#),
-            require: predicate(r#"{ field = "NetworkingType", equals = "Unrestricted" }"#),
+            assert: crate::predicate::parse(
+                "ConfigType == 'Local' => NetworkingType == 'Unrestricted'",
+            )
+            .unwrap(),
             message: None,
         };
         assert!(inv.passes(&json!({
@@ -651,8 +653,7 @@ mod tests {
     fn field_invariant_deserializes_from_toml() {
         let src = r#"
 name = "LocalMustBeUnrestricted"
-when = { field = "ConfigType", equals = "Local" }
-require = { field = "NetworkingType", equals = "Unrestricted" }
+assert = "ConfigType == 'Local' => NetworkingType == 'Unrestricted'"
 message = "Local environments must use Unrestricted networking"
 "#;
         let inv: FieldInvariant = toml::from_str(src).expect("should parse");

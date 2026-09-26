@@ -72,6 +72,7 @@ pub(crate) async fn handle_list_specs(
                     states: automaton.automaton.states.clone(),
                     actions: automaton.actions.iter().map(|a| a.name.clone()).collect(),
                     initial_state: automaton.automaton.initial.clone(),
+                terminal_states: automaton.automaton.terminal.clone(),
                     verification_status,
                     levels_passed,
                     levels_total,
@@ -114,6 +115,7 @@ pub(crate) async fn handle_get_spec_detail(
                 spec_version: temper_store_turso::spec_content_hash(&entity_spec.ioa_source),
                 states: automaton.automaton.states.clone(),
                 initial_state: automaton.automaton.initial.clone(),
+                terminal_states: automaton.automaton.terminal.clone(),
                 actions: automaton
                     .actions
                     .iter()
@@ -122,7 +124,11 @@ pub(crate) async fn handle_get_spec_detail(
                         kind: a.kind.clone(),
                         from: a.from.clone(),
                         to: a.to.clone(),
-                        guards: a.guard.iter().map(|g| format!("{g:?}")).collect(),
+                        guards: if a.guard.is_always() {
+                            Vec::new()
+                        } else {
+                            vec![a.guard.to_string()]
+                        },
                         effects: a.effect.iter().map(|e| format!("{e:?}")).collect(),
                         params: a
                             .params
@@ -140,8 +146,7 @@ pub(crate) async fn handle_get_spec_detail(
                     .iter()
                     .map(|i| InvariantDetail {
                         name: i.name.clone(),
-                        when: i.when.clone(),
-                        assertion: i.assert.clone(),
+                        assertion: i.assert.to_string(),
                     })
                     .collect(),
                 state_variables: automaton

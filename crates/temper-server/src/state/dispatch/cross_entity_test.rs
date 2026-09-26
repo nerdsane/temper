@@ -179,6 +179,36 @@ from = ["Ready"]
 to = "Locked"
 "#;
 
+/// Whether `Doc('doc-1').Submit`'s guard passes, through the production path:
+/// resolve the related entities, build the evaluation context, evaluate.
+async fn submit_guard_passes(state: &ServerState, tenant: &TenantId) -> bool {
+    let related = state
+        .resolve_cross_entity_guards(tenant, "Doc", "doc-1", "Submit")
+        .await;
+    let current = state
+        .get_tenant_entity_state(tenant, "Doc", "doc-1")
+        .await
+        .expect("Doc state")
+        .state;
+    let table = state
+        .registry
+        .read()
+        .unwrap()
+        .get_spec(tenant, "Doc")
+        .expect("Doc spec")
+        .table();
+    let ctx = crate::entity_actor::effects::build_eval_context_with_xref(
+        &current,
+        &related,
+        &table,
+        Some("Submit"),
+    );
+    table
+        .evaluate_ctx(&current.status, &ctx, "Submit")
+        .expect("Submit rule")
+        .success
+}
+
 async fn state_with(doc_ioa: &str, test_name: &str) -> (ServerState, TenantId) {
     let csdl = parse_csdl(CSDL).expect("CSDL parses");
     let mut registry = SpecRegistry::new();
@@ -213,13 +243,9 @@ async fn required_empty_scalar_ref_fails_guard() {
         .await
         .expect("create Doc");
 
-    let resolved = state
-        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit")
-        .await;
-
     assert_eq!(
-        resolved.get("__xref:File:landing_file_id"),
-        Some(&false),
+        submit_guard_passes(&state, &tenant).await,
+        false,
         "an empty required scalar ref must fail the guard, not pass vacuously"
     );
 }
@@ -237,13 +263,9 @@ async fn required_empty_list_ref_fails_guard() {
         .await
         .expect("create Doc");
 
-    let resolved = state
-        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit")
-        .await;
-
     assert_eq!(
-        resolved.get("__xref:File:child_ids"),
-        Some(&false),
+        submit_guard_passes(&state, &tenant).await,
+        false,
         "an empty required list ref must fail the guard"
     );
 }
@@ -261,13 +283,9 @@ async fn optional_empty_list_ref_stays_vacuous_true() {
         .await
         .expect("create Doc");
 
-    let resolved = state
-        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit")
-        .await;
-
     assert_eq!(
-        resolved.get("__xref:File:child_ids"),
-        Some(&true),
+        submit_guard_passes(&state, &tenant).await,
+        true,
         "an empty optional list ref must stay vacuous-true (preserve blast radius)"
     );
 }
@@ -290,13 +308,9 @@ async fn forbidden_status_missing_target_allows() {
         .await
         .expect("create Doc");
 
-    let resolved = state
-        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit")
-        .await;
-
     assert_eq!(
-        resolved.get("__xref:Ghost:ghost_id"),
-        Some(&true),
+        submit_guard_passes(&state, &tenant).await,
+        true,
         "a denylist guard must allow a non-empty ref to an UNRESOLVABLE target"
     );
 }
@@ -319,13 +333,9 @@ async fn forbidden_status_allowed_target_allows() {
         .await
         .expect("create Doc");
 
-    let resolved = state
-        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit")
-        .await;
-
     assert_eq!(
-        resolved.get("__xref:File:landing_file_id"),
-        Some(&true),
+        submit_guard_passes(&state, &tenant).await,
+        true,
         "a denylist guard must allow a target whose status is not forbidden"
     );
 }
@@ -360,13 +370,9 @@ async fn forbidden_status_forbidden_target_rejects() {
         .await
         .expect("create Doc");
 
-    let resolved = state
-        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit")
-        .await;
-
     assert_eq!(
-        resolved.get("__xref:File:landing_file_id"),
-        Some(&false),
+        submit_guard_passes(&state, &tenant).await,
+        false,
         "a denylist guard must reject a target that IS in a forbidden status"
     );
 }
@@ -388,13 +394,9 @@ async fn forbidden_status_required_missing_target_rejects() {
         .await
         .expect("create Doc");
 
-    let resolved = state
-        .resolve_cross_entity_guards(&tenant, "Doc", "doc-1", "Submit")
-        .await;
-
     assert_eq!(
-        resolved.get("__xref:Ghost:ghost_id"),
-        Some(&false),
+        submit_guard_passes(&state, &tenant).await,
+        false,
         "a REQUIRED denylist scalar ref to an unresolvable target must fail (mandatory relation)"
     );
 }

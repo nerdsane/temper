@@ -6,6 +6,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use temper_spec::predicate::Expr;
+
 /// The state tracked by the Temper model during verification.
 ///
 /// Multi-variable state: status + named counters + named booleans.
@@ -79,56 +81,6 @@ impl fmt::Display for TemperModelAction {
 // Guards and effects — self-contained in temper-verify (mirror JIT types)
 // ---------------------------------------------------------------------------
 
-/// A guard condition for model checking.
-///
-/// Self-contained in temper-verify so we don't depend on temper-jit types.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ModelGuard {
-    /// Always enabled (no guard).
-    Always,
-    /// Current status must be in the given set.
-    StateIn(Vec<String>),
-    /// A counter variable must be >= min.
-    CounterMin { var: String, min: usize },
-    /// A counter variable must be < max.
-    CounterMax { var: String, max: usize },
-    /// A boolean variable must be true.
-    BoolTrue(String),
-    /// A boolean variable must be false.
-    BoolFalse(String),
-    /// A list variable must contain a value.
-    ListContains { var: String, value: String },
-    /// A list variable must have at least N elements.
-    ListLengthMin { var: String, min: usize },
-    /// A cross-entity status precondition: the related entity must be in
-    /// `required_status` (allowlist; empty ⇒ unconstrained) and NOT in
-    /// `forbidden_status` (denylist; empty ⇒ unconstrained).
-    ///
-    /// The single-entity verifier cannot resolve this guard from local state.
-    /// Backends treat it as an abstract guard rather than erasing it. The
-    /// composite verifier, where the target is in scope, resolves both lists
-    /// concretely against the target's slice.
-    CrossEntityState {
-        entity_type: String,
-        entity_id_source: String,
-        required_status: Vec<String>,
-        forbidden_status: Vec<String>,
-    },
-    /// All sub-guards must hold.
-    And(Vec<ModelGuard>),
-}
-
-impl ModelGuard {
-    /// Returns true when this guard depends on state outside the current entity.
-    pub fn contains_cross_entity(&self) -> bool {
-        match self {
-            ModelGuard::CrossEntityState { .. } => true,
-            ModelGuard::And(guards) => guards.iter().any(ModelGuard::contains_cross_entity),
-            _ => false,
-        }
-    }
-}
-
 /// A state effect applied when a transition fires.
 #[derive(Clone, Debug)]
 pub enum ModelEffect {
@@ -154,55 +106,20 @@ pub struct ResolvedTransition {
     pub from_states: Vec<String>,
     /// The target state (if deterministic).
     pub to_state: Option<String>,
-    /// Guard condition (beyond status check).
-    pub guard: ModelGuard,
+    /// Precondition beyond `from_states`.
+    pub guard: Expr,
     /// Effects applied when the transition fires.
     pub effects: Vec<ModelEffect>,
 }
 
-/// The kind of check a safety invariant performs.
-#[derive(Clone, Debug)]
-pub enum InvariantKind {
-    /// Status must be in a known set of states (TypeInvariant).
-    StatusInSet,
-    /// When status is in trigger_states, a counter must be > 0.
-    CounterPositive { var: String },
-    /// When status is in trigger_states, a boolean must match `expect`.
-    ///
-    /// `expect = true` encodes `flag`; `expect = false` encodes `!flag`.
-    BoolRequired { var: String, expect: bool },
-    /// When status is in trigger_states, no transitions should be enabled.
-    NoFurtherTransitions,
-    /// When status is in trigger_states, status must also be in required_states.
-    Implication,
-    /// Generalized counter comparison (e.g., `items >= 1`, `retries < 5`).
-    CounterCompare {
-        var: String,
-        op: temper_spec::automaton::AssertCompareOp,
-        value: usize,
-    },
-    /// The entity should never be in this state.
-    NeverState { state: String },
-    /// Compound: all subexpressions must hold.
-    And(Vec<InvariantKind>),
-    /// Compound: at least one subexpression must hold.
-    Or(Vec<InvariantKind>),
-    /// Assertion expression that cannot be verified at model level.
-    /// Surfaces as a warning in the cascade result.
-    Unverifiable { expression: String },
-}
-
-/// A safety invariant resolved for runtime checking.
+/// A safety invariant: `assert` must not be false in any reachable state.
 #[derive(Clone, Debug)]
 pub struct ResolvedInvariant {
     /// The invariant name.
     pub name: String,
-    /// States in which this invariant's check is activated (empty = always).
-    pub trigger_states: Vec<String>,
-    /// For implication invariants: the set of valid target states.
-    pub required_states: Vec<String>,
-    /// The kind of check this invariant performs.
-    pub kind: InvariantKind,
+    /// The assertion. Values the model does not track read as unknown, and
+    /// an unknown result is not a violation.
+    pub assert: Expr,
 }
 
 // ---------------------------------------------------------------------------
@@ -248,6 +165,10 @@ pub struct TemperModel {
     pub invariants: Vec<ResolvedInvariant>,
     /// Pre-resolved liveness properties.
     pub liveness: Vec<ResolvedLiveness>,
+    /// States from which no transition may be enabled.
+    pub terminal: Vec<String>,
+    /// Declared state variable types, for evaluating guards and invariants.
+    pub var_kinds: BTreeMap<String, temper_spec::predicate::VarKind>,
     /// The initial status (first state from Init, typically "Draft").
     pub(crate) initial_status: String,
     /// Initial counter values from [[state]] declarations.

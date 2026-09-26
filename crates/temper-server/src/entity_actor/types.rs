@@ -41,8 +41,8 @@ pub enum EntityMsg {
     Action {
         name: String,
         params: serde_json::Value,
-        /// Pre-resolved cross-entity state booleans (injected by dispatch layer).
-        cross_entity_booleans: BTreeMap<String, bool>,
+        /// Related entities' statuses the action's guards read (resolved by the dispatch layer).
+        related: temper_jit::table::RelatedMap,
         /// ADR-0048 sub-decision 5: idempotency key threaded through so the
         /// actor can dedupe against `IdempotencyCache` before executing.
         /// Covers the race where a dispatch-layer retry produces a second

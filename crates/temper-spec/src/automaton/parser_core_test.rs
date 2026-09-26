@@ -35,7 +35,7 @@ fn test_submit_order_has_guard() {
         .unwrap();
     assert_eq!(submit.from, vec!["Draft"]);
     assert_eq!(submit.to, Some("Submitted".to_string()));
-    assert!(!submit.guard.is_empty(), "SubmitOrder should have a guard");
+    assert!(!submit.guard.is_always(), "SubmitOrder should have a guard");
 }
 
 #[test]

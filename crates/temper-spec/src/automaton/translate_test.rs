@@ -18,10 +18,8 @@ to = "Active"
     let actions = translate_actions(&automaton);
     assert_eq!(actions.len(), 1);
     assert_eq!(actions[0].name, "Activate");
-    assert_eq!(
-        actions[0].guard,
-        ResolvedGuard::StateIn(vec!["Draft".to_string()])
-    );
+    assert_eq!(actions[0].from_states, vec!["Draft".to_string()]);
+    assert!(actions[0].guard.is_always());
     assert!(actions[0].effects.is_empty());
 }
 
@@ -47,17 +45,8 @@ guard = [{ type = "min_count", var = "items", min = 1 }]
     let automaton = parse_automaton(spec).unwrap();
     let actions = translate_actions(&automaton);
     let action = &actions[0];
-    match &action.guard {
-        ResolvedGuard::And(guards) => {
-            assert_eq!(guards.len(), 2);
-            assert!(matches!(&guards[0], ResolvedGuard::StateIn(_)));
-            assert!(matches!(
-                &guards[1],
-                ResolvedGuard::CounterMin { var, min: 1 } if var == "items"
-            ));
-        }
-        _ => panic!("expected And guard, got {:?}", action.guard),
-    }
+    assert_eq!(action.from_states, vec!["Draft".to_string()]);
+    assert_eq!(action.guard.to_string(), "items >= 1");
 }
 
 #[test]
@@ -230,15 +219,10 @@ guard = [{ type = "cross_entity_state", entity_type = "Child", entity_id_source 
     let automaton = parse_automaton(spec).unwrap();
     let actions = translate_actions(&automaton);
     let action = &actions[0];
-    match &action.guard {
-        ResolvedGuard::And(guards) => {
-            let has_cross = guards.iter().any(|guard| {
-                matches!(guard, ResolvedGuard::CrossEntityState { entity_type, .. } if entity_type == "Child")
-            });
-            assert!(has_cross, "expected CrossEntityState guard");
-        }
-        _ => panic!("expected And guard"),
-    }
+    assert_eq!(
+        action.guard.to_string(),
+        "empty(child_id) || Child[child_id].status in ['Done']"
+    );
 }
 
 #[test]

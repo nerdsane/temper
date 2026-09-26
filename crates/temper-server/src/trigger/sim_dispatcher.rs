@@ -149,23 +149,19 @@ impl SimReactionSystem {
             // Guard evaluation: skip rules whose guard fails. Guard-skipped
             // rules do not emit a `ReactionResult` — they never fired.
             if let Some(guard) = &rule.when.guard {
-                let mut queries = Vec::new();
-                super::guard::collect_cross_entity_queries(guard, fields, &mut queries);
-                let mut resolved = super::guard::CrossStatusMap::new();
-                for q in &queries {
-                    let key = format!("{}:{}", q.entity_type, q.target_entity_id);
-                    let matched = self
-                        .entity_to_actor
-                        .get(&key)
-                        .map(|actor_id| self.inner.status(actor_id))
-                        .map(|status| q.matches(&status))
-                        .unwrap_or(false);
-                    resolved.insert(q.key(), matched);
+                let mut related = temper_jit::table::RelatedMap::new();
+                for (reference, ids) in super::guard::related_ids(guard, fields) {
+                    let statuses = ids
+                        .iter()
+                        .map(|id| {
+                            self.entity_to_actor
+                                .get(&format!("{}:{id}", reference.0))
+                                .map(|actor_id| self.inner.status(actor_id))
+                        })
+                        .collect();
+                    related.insert(reference, temper_jit::table::Related::Statuses(statuses));
                 }
-                let passed = super::guard::evaluate_with_resolved(
-                    guard, fields, to_state, &resolved, &rule.name,
-                );
-                if !passed {
+                if !super::guard::guard_holds(guard, fields, to_state, &related) {
                     continue;
                 }
             }

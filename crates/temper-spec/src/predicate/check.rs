@@ -36,6 +36,7 @@ impl VarKind {
 #[derive(Debug, Clone, Copy)]
 pub enum Scope<'a> {
     /// `status` and the declared state variables (action guards, invariants).
+    /// Reference fields (`Type[id].status`, `empty(id)`) may be any field.
     State(&'a BTreeMap<String, VarKind>),
     /// `status` and any entity field (trigger guards, field invariants).
     Fields,
@@ -66,7 +67,7 @@ pub fn check(expr: &Expr, scope: Scope<'_>) -> Result<(), String> {
             Ty::Bool | Ty::Any => Ok(()),
             _ => Err(format!("'{name}' is not a bool; compare it explicitly")),
         },
-        Expr::Empty(name) => match var_ty(name, scope)? {
+        Expr::Empty(name) => match field_ty(name, scope) {
             Ty::Str | Ty::List | Ty::Any => Ok(()),
             _ => Err(format!(
                 "empty() needs a string or list, '{name}' is neither"
@@ -153,6 +154,13 @@ fn var_ty(name: &str, scope: Scope<'_>) -> Result<Ty, String> {
     }
 }
 
+/// Like [`var_ty`], but an undeclared name is an entity field of unknown
+/// type. Used where a spec names a reference field (`Type[id].status`,
+/// `empty(id)`), which is often a data-model property, not a state variable.
+fn field_ty(name: &str, scope: Scope<'_>) -> Ty {
+    var_ty(name, scope).unwrap_or(Ty::Any)
+}
+
 fn operand_ty(operand: &Operand, scope: Scope<'_>) -> Result<Ty, String> {
     match operand {
         Operand::Status => Ok(Ty::Str),
@@ -161,7 +169,7 @@ fn operand_ty(operand: &Operand, scope: Scope<'_>) -> Result<Ty, String> {
             Ty::List | Ty::Any => Ok(Ty::Num),
             _ => Err(format!("len() needs a list, '{name}' is not one")),
         },
-        Operand::CrossStatus { id_field, .. } => match var_ty(id_field, scope)? {
+        Operand::CrossStatus { id_field, .. } => match field_ty(id_field, scope) {
             Ty::Str | Ty::List | Ty::Any => Ok(Ty::Str),
             _ => Err(format!("'{id_field}' cannot hold an entity id")),
         },

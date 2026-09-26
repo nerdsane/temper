@@ -173,10 +173,6 @@ export default function SpecViewer() {
                 </div>
                 <div className="text-[13px] space-y-0.5">
                   <div className="flex gap-2">
-                    <span className="text-[var(--color-text-muted)] w-14 flex-shrink-0 text-[11px]">when</span>
-                    <code className="font-mono text-[var(--color-accent-pink)]/70 text-[11px]">{inv.when.length > 0 ? inv.when.join(", ") : "always"}</code>
-                  </div>
-                  <div className="flex gap-2">
                     <span className="text-[var(--color-text-muted)] w-14 flex-shrink-0 text-[11px]">assert</span>
                     <code className="font-mono text-[var(--color-accent-teal)]/70 text-[11px]">{inv.assertion}</code>
                   </div>

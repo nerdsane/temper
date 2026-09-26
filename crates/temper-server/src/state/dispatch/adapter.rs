@@ -487,7 +487,7 @@ impl crate::state::ServerState {
                 || EntityMsg::Action {
                     name: "Revoke".to_string(),
                     params: serde_json::json!({}),
-                    cross_entity_booleans: BTreeMap::new(),
+                    related: BTreeMap::new(),
                     idempotency_key: Some(idempotency_key.clone()),
                     expected_authorization_precondition: None,
                 },

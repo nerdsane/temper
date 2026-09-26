@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use temper_runtime::tenant::TenantId;
 
 use super::types::{
-    MAX_GUARD_DEPTH, MAX_REACTIONS_PER_TENANT, ReactionGuard, ReactionRule, ReactionTarget,
+    MAX_REACTIONS_PER_TENANT, ReactionRule, ReactionTarget,
     ReactionTrigger, TargetResolver,
 };
 
@@ -150,7 +150,7 @@ struct TriggerToml {
     action: Option<String>,
     to_state: Option<String>,
     #[serde(default)]
-    guard: Option<ReactionGuard>,
+    guard: Option<temper_spec::predicate::Expr>,
 }
 
 #[derive(serde::Deserialize)]
@@ -250,18 +250,6 @@ pub fn parse_reactions(toml_str: &str) -> Result<Vec<ReactionRule>, String> {
                         r.name, key
                     ));
                 }
-            }
-        }
-
-        // Guard depth budget — enforced at parse time so drift is caught
-        // before any reaction fires (TigerStyle).
-        if let Some(ref g) = r.when.guard {
-            let d = g.depth();
-            if d > MAX_GUARD_DEPTH {
-                return Err(format!(
-                    "Reaction '{}': guard nesting depth {d} exceeds budget of {MAX_GUARD_DEPTH}",
-                    r.name
-                ));
             }
         }
 
@@ -653,44 +641,14 @@ type = "same_id"
     }
 
     #[test]
-    fn parse_reactions_accepts_source_field_guard() {
+    fn parse_reactions_accepts_a_guard_expression() {
         let toml = r#"
 [[reaction]]
 name = "guarded"
 [reaction.when]
-entity_type = "CurationJob"
-action = "Complete"
-[reaction.when.guard]
-type = "field_equals"
-field = "job_type"
-value = "source_search"
-[reaction.then]
-entity_type = "CurationJob"
-action = "Submit"
-[reaction.resolve_target]
-type = "create"
-"#;
-        let rules = parse_reactions(toml).expect("parse");
-        assert_eq!(rules.len(), 1);
-        assert!(matches!(
-            rules[0].when.guard,
-            Some(ReactionGuard::FieldEquals { ref field, .. }) if field == "job_type"
-        ));
-    }
-
-    #[test]
-    fn parse_reactions_accepts_cross_entity_guard() {
-        let toml = r#"
-[[reaction]]
-name = "parent_active_only"
-[reaction.when]
 entity_type = "Session"
 action = "Complete"
-[reaction.when.guard]
-type = "cross_entity_state_in"
-entity_type = "Workspace"
-entity_id_source = "workspace_id"
-required_status = ["Active"]
+guard = "job_type == 'source_search' && Workspace[workspace_id].status in ['Active']"
 [reaction.then]
 entity_type = "Workspace"
 action = "Ack"
@@ -700,58 +658,20 @@ field = "workspace_id"
 "#;
         let rules = parse_reactions(toml).expect("parse");
         assert_eq!(rules.len(), 1);
-        assert!(matches!(
-            rules[0].when.guard,
-            Some(ReactionGuard::CrossEntityStateIn { ref entity_type, .. })
-                if entity_type == "Workspace"
-        ));
+        assert_eq!(
+            rules[0].when.guard.as_ref().map(ToString::to_string).as_deref(),
+            Some("job_type == 'source_search' && Workspace[workspace_id].status in ['Active']")
+        );
     }
 
     #[test]
-    fn parse_reactions_accepts_composite_guard() {
+    fn parse_reactions_rejects_an_invalid_guard() {
         let toml = r#"
 [[reaction]]
-name = "composite"
+name = "bad"
 [reaction.when]
 entity_type = "A"
-[reaction.when.guard]
-type = "all_of"
-guards = [
-  { type = "bool_true", field = "ready" },
-  { type = "state_in", values = ["Complete"] },
-]
-[reaction.then]
-entity_type = "B"
-action = "Do"
-[reaction.resolve_target]
-type = "same_id"
-"#;
-        let rules = parse_reactions(toml).expect("parse");
-        assert!(matches!(
-            rules[0].when.guard,
-            Some(ReactionGuard::AllOf { .. })
-        ));
-    }
-
-    #[test]
-    fn parse_reactions_rejects_deeply_nested_guard() {
-        // depth 5 > MAX_GUARD_DEPTH = 4 — should be rejected at parse.
-        let toml = r#"
-[[reaction]]
-name = "too_deep"
-[reaction.when]
-entity_type = "A"
-[reaction.when.guard]
-type = "not"
-[reaction.when.guard.guard]
-type = "not"
-[reaction.when.guard.guard.guard]
-type = "not"
-[reaction.when.guard.guard.guard.guard]
-type = "not"
-[reaction.when.guard.guard.guard.guard.guard]
-type = "bool_true"
-field = "x"
+guard = "ready &&"
 [reaction.then]
 entity_type = "B"
 action = "Do"
@@ -759,10 +679,7 @@ action = "Do"
 type = "same_id"
 "#;
         let err = parse_reactions(toml).unwrap_err();
-        assert!(
-            err.contains("guard nesting depth 5 exceeds budget of 4"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("invalid predicate"), "unexpected error: {err}");
     }
 
     #[test]

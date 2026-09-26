@@ -36,14 +36,7 @@ export default function StateMachineGraph({ spec }: StateMachineGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   const { nodes, edges, width, height } = useMemo(() => {
-    const terminalStates = new Set<string>();
-    for (const inv of spec.invariants) {
-      if (inv.name === "no_further_transitions" || inv.assertion.includes("no outgoing")) {
-        for (const state of inv.when) {
-          terminalStates.add(state);
-        }
-      }
-    }
+    const terminalStates = new Set<string>(spec.terminal_states ?? []);
 
     const g = new dagre.graphlib.Graph();
     g.setGraph({

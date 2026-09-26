@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use super::field_invariant::FieldInvariant;
+use crate::predicate::Expr;
 
 /// Return whether a field name is owned by the runtime rather than an action.
 ///
@@ -134,6 +135,10 @@ pub struct AutomatonMeta {
     /// Restrict writes to declared action parameters and guarded actions.
     #[serde(default)]
     pub strict_action_params: bool,
+    /// States no action may leave. The verifier checks that no action lists
+    /// them in `from`.
+    #[serde(default)]
+    pub terminal: Vec<String>,
 }
 
 /// A state variable declaration.
@@ -218,9 +223,9 @@ pub struct Action {
     pub from: Vec<String>,
     /// Effect: the target state after this action fires.
     pub to: Option<String>,
-    /// Additional guard conditions.
-    #[serde(default)]
-    pub guard: Vec<Guard>,
+    /// Precondition over the pre-state, beyond `from`. `true` when absent.
+    #[serde(default = "Expr::always", skip_serializing_if = "Expr::is_always")]
+    pub guard: Expr,
     /// Effects beyond state change.
     #[serde(default)]
     pub effect: Vec<Effect>,
@@ -442,17 +447,13 @@ pub enum Effect {
     },
 }
 
-/// A safety invariant.
+/// A safety invariant, proven by the verification cascade.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Invariant {
     /// Invariant name.
     pub name: String,
-    /// States in which this invariant is checked (trigger states).
-    /// If empty, checked in all states.
-    #[serde(default)]
-    pub when: Vec<String>,
-    /// The assertion (a simple expression).
-    pub assert: String,
+    /// Must hold in every reachable state.
+    pub assert: Expr,
 }
 
 /// A liveness property.
@@ -841,9 +842,9 @@ pub struct ActionTrigger {
     /// fire on any outcome.
     #[serde(default)]
     pub to_state: Option<String>,
-    /// Optional firing predicate evaluated post-commit.
+    /// Optional firing predicate over the source entity's post-action state.
     #[serde(default)]
-    pub guard: Option<TriggerGuard>,
+    pub guard: Option<Expr>,
     /// Liveness expectation (see `TriggerLiveness`).
     #[serde(default)]
     pub liveness: TriggerLiveness,

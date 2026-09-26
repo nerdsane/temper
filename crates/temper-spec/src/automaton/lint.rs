@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Automaton, Effect, FieldInvariant, Guard};
+use super::{Automaton, Effect, FieldInvariant};
 
 /// Severity of a lint finding.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -101,21 +101,6 @@ pub fn lint_automaton(automaton: &Automaton) -> Vec<LintFinding> {
             ));
         }
 
-        for guard in &action.guard {
-            if let Some(var) = guard_var(guard)
-                && !vars.contains(var)
-            {
-                findings.push(LintFinding::error(
-                    "guard_unknown_var",
-                    format!(
-                        "guard '{}' references unknown variable '{}'",
-                        render_guard(guard),
-                        var
-                    ),
-                ));
-            }
-        }
-
         for effect in &action.effect {
             if let Some(var) = effect_var(effect)
                 && !vars.contains(var)
@@ -137,16 +122,8 @@ pub fn lint_automaton(automaton: &Automaton) -> Vec<LintFinding> {
     findings
 }
 
-/// Validate parsed `[[field_invariant]]` entries.
-///
-/// The parser has already enforced structural well-formedness (no mixed
-/// operators, no unknown predicate keys). This pass adds semantic checks:
-///
-/// - Non-empty `name` (needed for error bodies).
-/// - Non-empty `when`/`require` trees — empty `any_of`/`all_of` are almost
-///   always a spec bug (trivially-false / trivially-true).
-/// - Referenced field names are non-empty identifiers. CSDL cross-checking
-///   against the actual entity properties happens in the cascade.
+/// Validate parsed `[[field_invariant]]` entries: names must be present and
+/// unique, and an `a == x => a == y` rule with `x != y` can never pass.
 fn lint_field_invariants(automaton: &Automaton, findings: &mut Vec<LintFinding>) {
     let mut seen_names: BTreeSet<&str> = BTreeSet::new();
     for inv in &automaton.field_invariants {
@@ -161,82 +138,38 @@ fn lint_field_invariants(automaton: &Automaton, findings: &mut Vec<LintFinding>)
                 format!("field_invariant '{}' is declared more than once", inv.name),
             ));
         }
-
-        if inv.when.has_empty_combinator() {
-            findings.push(LintFinding::error(
-                "field_invariant_empty_combinator",
-                format!(
-                    "field_invariant '{}' `when` tree contains an empty `any_of`/`all_of` — rule is always inert or always fires",
-                    inv.name
-                ),
-            ));
-        }
-        if inv.require.has_empty_combinator() {
-            findings.push(LintFinding::error(
-                "field_invariant_empty_combinator",
-                format!(
-                    "field_invariant '{}' `require` tree contains an empty `any_of`/`all_of` — rule is trivially true or trivially false",
-                    inv.name
-                ),
-            ));
-        }
-
-        for referenced in inv.referenced_fields() {
-            if !is_valid_field_identifier(&referenced) {
-                findings.push(LintFinding::error(
-                    "field_invariant_bad_field_name",
-                    format!(
-                        "field_invariant '{}' references field '{}' which is not a valid identifier",
-                        inv.name, referenced
-                    ),
-                ));
-            }
-        }
-
         check_unsatisfiable_same_field_equals(inv, findings);
     }
 }
 
 /// Detect the simplest class of trivially-unsatisfiable invariants:
-/// both `when` and `require` are `{ field = X, equals = V }` on the
-/// same field but with different `V`. A Local→Cloud check like this would
-/// never pass, so the violation would fire on every matching write.
+/// `x == a => x == b` with `a != b`. Every write matching the left side
+/// would be rejected.
 fn check_unsatisfiable_same_field_equals(inv: &FieldInvariant, findings: &mut Vec<LintFinding>) {
-    use super::FieldPredicate;
-    if let (
-        FieldPredicate::Equals {
-            field: lf,
-            equals: lv,
-        },
-        FieldPredicate::Equals {
-            field: rf,
-            equals: rv,
-        },
-    ) = (&inv.when, &inv.require)
+    use crate::predicate::{CmpOp, Expr, Operand};
+    let equality = |expr: &Expr| match expr {
+        Expr::Compare {
+            lhs: Operand::Var(field),
+            op: CmpOp::Eq,
+            rhs: Operand::Lit(lit),
+        } => Some((field.clone(), lit.clone())),
+        _ => None,
+    };
+    if let Expr::Implies(when, require) = &inv.assert
+        && let (Some((lf, lv)), Some((rf, rv))) = (equality(when), equality(require))
         && lf == rf
         && lv != rv
     {
         findings.push(LintFinding::warning(
             "field_invariant_trivially_unsatisfiable",
             format!(
-                "field_invariant '{}' requires field '{}' to equal both '{}' and '{}'",
+                "field_invariant '{}' requires field '{}' to equal both {} and {}",
                 inv.name, lf, lv, rv
             ),
         ));
     }
 }
 
-fn is_valid_field_identifier(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-    let mut chars = s.chars();
-    let first = chars.next().unwrap(); // ci-ok: non-empty checked above
-    if !(first.is_ascii_alphabetic() || first == '_') {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
 
 /// Run semantic lint checks across a bundle of automata.
 ///
@@ -480,18 +413,6 @@ fn is_supported_state_var_type(var_type: &str) -> bool {
     )
 }
 
-fn guard_var(guard: &Guard) -> Option<&str> {
-    match guard {
-        Guard::StateIn { .. } => None,
-        Guard::MinCount { var, .. } => Some(var.as_str()),
-        Guard::MaxCount { var, .. } => Some(var.as_str()),
-        Guard::IsTrue { var } => Some(var.as_str()),
-        Guard::IsFalse { var } => Some(var.as_str()),
-        Guard::ListContains { var, .. } => Some(var.as_str()),
-        Guard::ListLengthMin { var, .. } => Some(var.as_str()),
-        Guard::CrossEntityState { .. } => None,
-    }
-}
 
 fn effect_var(effect: &Effect) -> Option<&str> {
     match effect {
@@ -509,40 +430,6 @@ fn effect_var(effect: &Effect) -> Option<&str> {
     }
 }
 
-fn render_guard(guard: &Guard) -> String {
-    match guard {
-        Guard::StateIn { values } => format!("state_in {:?}", values),
-        Guard::MinCount { var, min } => format!("min {var} {min}"),
-        Guard::MaxCount { var, max } => format!("max {var} {max}"),
-        Guard::IsTrue { var } => format!("is_true {var}"),
-        Guard::IsFalse { var } => format!("is_false {var}"),
-        Guard::ListContains { var, value } => format!("list_contains {var} {value}"),
-        Guard::ListLengthMin { var, min } => format!("list_length_min {var} {min}"),
-        Guard::CrossEntityState {
-            entity_type,
-            entity_id_source,
-            required_status,
-            forbidden_status,
-            ..
-        } => {
-            if forbidden_status.is_empty() {
-                format!(
-                    "cross_entity_state {entity_type}.{entity_id_source} in {:?}",
-                    required_status
-                )
-            } else if required_status.is_empty() {
-                format!(
-                    "cross_entity_state {entity_type}.{entity_id_source} not in {:?}",
-                    forbidden_status
-                )
-            } else {
-                format!(
-                    "cross_entity_state {entity_type}.{entity_id_source} in {required_status:?} not in {forbidden_status:?}"
-                )
-            }
-        }
-    }
-}
 
 fn render_effect(effect: &Effect) -> String {
     match effect {

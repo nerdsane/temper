@@ -11,7 +11,7 @@ use temper_runtime::scheduler::{FaultConfig, SimActorSystemConfig, install_deter
 use temper_server::trigger::registry::{ReactionRegistry, parse_reactions};
 use temper_server::trigger::sim_dispatcher::SimReactionSystem;
 use temper_server::trigger::types::{
-    ReactionGuard, ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver,
+    ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver,
 };
 
 const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
@@ -597,9 +597,7 @@ fn guard_passing_rule_fires_guard_failing_rule_skipped() {
                     entity_type: "Order".to_string(),
                     action: Some("ConfirmOrder".to_string()),
                     to_state: None,
-                    guard: Some(ReactionGuard::StateIn {
-                        values: vec!["Confirmed".to_string()],
-                    }),
+                    guard: Some(temper_spec::predicate::parse("status == 'Confirmed'").unwrap()),
                 },
                 then: ReactionTarget {
                     entity_type: "Payment".to_string(),
@@ -616,9 +614,7 @@ fn guard_passing_rule_fires_guard_failing_rule_skipped() {
                     entity_type: "Order".to_string(),
                     action: Some("ConfirmOrder".to_string()),
                     to_state: None,
-                    guard: Some(ReactionGuard::StateIn {
-                        values: vec!["Cancelled".to_string()],
-                    }),
+                    guard: Some(temper_spec::predicate::parse("status == 'Cancelled'").unwrap()),
                 },
                 then: ReactionTarget {
                     entity_type: "Payment".to_string(),
@@ -667,11 +663,7 @@ fn not_guard_skips_rule_when_inner_passes() {
                 entity_type: "Order".to_string(),
                 action: Some("ConfirmOrder".to_string()),
                 to_state: None,
-                guard: Some(ReactionGuard::Not {
-                    guard: Box::new(ReactionGuard::StateIn {
-                        values: vec!["Confirmed".to_string()],
-                    }),
-                }),
+                guard: Some(temper_spec::predicate::parse("!(status == 'Confirmed')").unwrap()),
             },
             then: ReactionTarget {
                 entity_type: "Payment".to_string(),

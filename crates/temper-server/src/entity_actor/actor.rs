@@ -90,13 +90,13 @@ fn duplicate_idempotency_custom_effects(
     table: &TransitionTable,
     state: &EntityState,
     action: &str,
-    cross_entity_booleans: &BTreeMap<String, bool>,
+    related: &temper_jit::table::RelatedMap,
 ) -> Vec<String> {
     if !table.composite_actions.contains_key(action) {
         return Vec::new();
     }
 
-    let ctx = build_eval_context_with_xref(state, cross_entity_booleans);
+    let ctx = build_eval_context_with_xref(state, related, table, Some(action));
     table
         .evaluate_ctx(&state.status, &ctx, action)
         .filter(|result| result.success)
@@ -1074,7 +1074,7 @@ impl Actor for EntityActor {
             EntityMsg::Action {
                 name,
                 params,
-                cross_entity_booleans,
+                related,
                 idempotency_key,
                 expected_authorization_precondition,
             } => {
@@ -1136,7 +1136,7 @@ impl Actor for EntityActor {
                         &table,
                         state,
                         &name,
-                        &cross_entity_booleans,
+                        &related,
                     );
                     let mut response_state = state.clone();
                     if !custom_effects.is_empty() {
@@ -1245,7 +1245,7 @@ impl Actor for EntityActor {
                     &table,
                     &name,
                     &params,
-                    &cross_entity_booleans,
+                    &related,
                     field_sync_mode,
                     crate::blobs::BlobReadSource::Staged {
                         store: self.blob_store.as_ref(),
@@ -1391,7 +1391,7 @@ impl Actor for EntityActor {
                                         &table,
                                         &name,
                                         &params,
-                                        &cross_entity_booleans,
+                                        &related,
                                         field_sync_mode,
                                         crate::blobs::BlobReadSource::Staged {
                                             store: self.blob_store.as_ref(),

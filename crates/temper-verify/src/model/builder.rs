@@ -8,13 +8,14 @@
 use std::collections::BTreeMap;
 
 use temper_spec::automaton::{
-    Automaton, ParsedAssert, ResolvedEffect, ResolvedGuard, parse_assert_expr, parse_bool_initial,
-    parse_counter_initial_usize, parse_list_initial, translate_actions,
+    Automaton, ResolvedEffect, parse_bool_initial, parse_counter_initial_usize,
+    parse_list_initial, translate_actions,
 };
+use temper_spec::predicate::VarKind;
 
 use super::types::{
-    InvariantKind, LivenessKind, ModelEffect, ModelGuard, ResolvedInvariant, ResolvedLiveness,
-    ResolvedTransition, TemperModel,
+    LivenessKind, ModelEffect, ResolvedInvariant, ResolvedLiveness, ResolvedTransition,
+    TemperModel,
 };
 
 /// Build a `TemperModel` from I/O Automaton TOML source.
@@ -64,12 +65,19 @@ pub fn build_model_from_automaton(automaton: &Automaton, max_counter: usize) -> 
     let transitions = resolve_transitions(automaton);
     let invariants = resolve_invariants(automaton);
     let liveness = resolve_liveness(automaton);
+    let var_kinds = automaton
+        .state
+        .iter()
+        .map(|sv| (sv.name.clone(), VarKind::from_type(&sv.var_type)))
+        .collect();
 
     TemperModel {
         states,
         transitions,
         invariants,
         liveness,
+        terminal: automaton.automaton.terminal.clone(),
+        var_kinds,
         initial_status,
         initial_counters,
         initial_booleans,
@@ -87,7 +95,7 @@ fn resolve_transitions(automaton: &Automaton) -> Vec<ResolvedTransition> {
             name: a.name,
             from_states: a.from_states,
             to_state: a.to_state,
-            guard: convert_guard(a.guard),
+            guard: a.guard,
             effects: a
                 .effects
                 .into_iter()
@@ -96,42 +104,6 @@ fn resolve_transitions(automaton: &Automaton) -> Vec<ResolvedTransition> {
                 .collect(),
         })
         .collect()
-}
-
-/// Convert a shared [`ResolvedGuard`] to the verification [`ModelGuard`].
-///
-/// `CrossEntityState` guards are preserved as abstract guards because
-/// cross-entity state cannot be resolved from a single local model state.
-fn convert_guard(guard: ResolvedGuard) -> ModelGuard {
-    match guard {
-        ResolvedGuard::Always => ModelGuard::Always,
-        ResolvedGuard::StateIn(values) => ModelGuard::StateIn(values),
-        ResolvedGuard::CounterMin { var, min } => ModelGuard::CounterMin { var, min },
-        ResolvedGuard::CounterMax { var, max } => ModelGuard::CounterMax { var, max },
-        ResolvedGuard::BoolTrue(var) => ModelGuard::BoolTrue(var),
-        ResolvedGuard::BoolFalse(var) => ModelGuard::BoolFalse(var),
-        ResolvedGuard::ListContains { var, value } => ModelGuard::ListContains { var, value },
-        ResolvedGuard::ListLengthMin { var, min } => ModelGuard::ListLengthMin { var, min },
-        ResolvedGuard::CrossEntityState {
-            entity_type,
-            entity_id_source,
-            required_status,
-            forbidden_status,
-            // `required` does not affect L1 model checking: the cross-entity
-            // status is already a free boolean in the model (ADR-0149), so an
-            // empty-ref distinction is invisible at the single-entity level.
-            // It only changes runtime resolution (ARN-92 #2).
-            required: _,
-        } => ModelGuard::CrossEntityState {
-            entity_type,
-            entity_id_source,
-            required_status,
-            forbidden_status,
-        },
-        ResolvedGuard::And(guards) => {
-            ModelGuard::And(guards.into_iter().map(convert_guard).collect())
-        }
-    }
 }
 
 /// Convert a verifiable [`ResolvedEffect`] to the verification [`ModelEffect`].
@@ -159,103 +131,17 @@ fn convert_effect(effect: ResolvedEffect) -> ModelEffect {
     }
 }
 
-/// Translate IOA invariants into resolved invariants.
-///
-/// Uses [`parse_assert_expr`] from `temper-spec` as the primary classifier,
-/// then falls back to known boolean variable names. Unrecognized expressions
-/// become `Unverifiable` (with a warning) instead of silently passing.
-///
-/// A `TypeInvariant` (StatusInSet) is always auto-included.
+/// Translate IOA invariants into resolved invariants. Status membership
+/// (`TypeInvariant`) is checked by every backend separately.
 fn resolve_invariants(automaton: &Automaton) -> Vec<ResolvedInvariant> {
-    let mut result = Vec::new();
-
-    // Auto-include TypeInvariant
-    result.push(ResolvedInvariant {
-        name: "TypeInvariant".to_string(),
-        trigger_states: vec![],
-        required_states: vec![],
-        kind: InvariantKind::StatusInSet,
-    });
-
-    // Collect known boolean variable names for fallback classification
-    let bool_names: Vec<&str> = automaton
-        .state
+    automaton
+        .invariants
         .iter()
-        .filter(|s| s.var_type == "bool")
-        .map(|s| s.name.as_str())
-        .collect();
-
-    for inv in &automaton.invariants {
-        let expr = inv.assert.trim();
-
-        let kind = match parse_assert_expr(expr) {
-            Some(parsed) => translate_parsed_assert(parsed, expr, &bool_names),
-            None => InvariantKind::Unverifiable {
-                expression: expr.to_string(),
-            },
-        };
-        result.push(ResolvedInvariant {
+        .map(|inv| ResolvedInvariant {
             name: inv.name.clone(),
-            trigger_states: inv.when.clone(),
-            required_states: vec![],
-            kind,
-        });
-    }
-
-    result
-}
-
-/// Translate a [`ParsedAssert`] into an [`InvariantKind`].
-///
-/// Bare boolean references are only accepted when the variable is declared
-/// as a `bool` in the automaton state; otherwise the whole expression falls
-/// through to `Unverifiable`. This preserves the pre-compound behavior of
-/// rejecting unknown identifiers rather than silently asserting on them.
-fn translate_parsed_assert(parsed: ParsedAssert, raw: &str, bool_names: &[&str]) -> InvariantKind {
-    match try_translate(&parsed, bool_names) {
-        Some(kind) => kind,
-        None => InvariantKind::Unverifiable {
-            expression: raw.to_string(),
-        },
-    }
-}
-
-fn try_translate(parsed: &ParsedAssert, bool_names: &[&str]) -> Option<InvariantKind> {
-    match parsed {
-        ParsedAssert::CounterPositive { var } => {
-            Some(InvariantKind::CounterPositive { var: var.clone() })
-        }
-        ParsedAssert::NoFurtherTransitions => Some(InvariantKind::NoFurtherTransitions),
-        ParsedAssert::NeverState { state } => Some(InvariantKind::NeverState {
-            state: state.clone(),
-        }),
-        ParsedAssert::CounterCompare { var, op, value } => Some(InvariantKind::CounterCompare {
-            var: var.clone(),
-            op: op.clone(),
-            value: *value,
-        }),
-        ParsedAssert::BoolRequired { var, expect } => {
-            if bool_names.contains(&var.as_str()) {
-                Some(InvariantKind::BoolRequired {
-                    var: var.clone(),
-                    expect: *expect,
-                })
-            } else {
-                None
-            }
-        }
-        ParsedAssert::OrderingConstraint { .. } => None,
-        ParsedAssert::And(parts) => {
-            let mapped: Option<Vec<_>> =
-                parts.iter().map(|p| try_translate(p, bool_names)).collect();
-            mapped.map(InvariantKind::And)
-        }
-        ParsedAssert::Or(parts) => {
-            let mapped: Option<Vec<_>> =
-                parts.iter().map(|p| try_translate(p, bool_names)).collect();
-            mapped.map(InvariantKind::Or)
-        }
-    }
+            assert: inv.assert.clone(),
+        })
+        .collect()
 }
 
 /// Translate IOA liveness properties into resolved liveness.
@@ -400,29 +286,21 @@ mod tests {
     }
 
     #[test]
-    fn test_counter_positive_invariant_resolved() {
+    fn test_counter_invariant_resolved() {
         let model = build_order_model();
-        let counter_pos = model
-            .invariants
-            .iter()
-            .find(|i| matches!(i.kind, InvariantKind::CounterPositive { .. }));
         assert!(
-            counter_pos.is_some(),
-            "Should have a CounterPositive invariant"
+            model
+                .invariants
+                .iter()
+                .any(|i| i.assert.to_string().ends_with("=> items > 0")),
+            "Should have an `items > 0` invariant"
         );
     }
 
     #[test]
-    fn test_no_further_transitions_invariant_resolved() {
+    fn test_terminal_states_resolved() {
         let model = build_order_model();
-        let nft = model
-            .invariants
-            .iter()
-            .find(|i| matches!(i.kind, InvariantKind::NoFurtherTransitions));
-        assert!(
-            nft.is_some(),
-            "Should have a NoFurtherTransitions invariant"
-        );
+        assert!(!model.terminal.is_empty(), "Should have terminal states");
     }
 
     #[test]
@@ -437,7 +315,7 @@ initial = "Waiting"
 name = "Proceed"
 from = ["Waiting"]
 to = "Ready"
-guard = [{ type = "cross_entity_state", entity_type = "Child", entity_id_source = "child_id", required_status = ["Done"] }]
+guard = "Child[child_id].status in ['Done']"
 "#;
         let model = build_model_from_ioa(spec, 2).unwrap();
         let guard = &model
@@ -446,43 +324,15 @@ guard = [{ type = "cross_entity_state", entity_type = "Child", entity_id_source 
             .find(|transition| transition.name == "Proceed")
             .expect("Proceed transition")
             .guard;
-
+        assert_eq!(guard.to_string(), "Child[child_id].status in ['Done']");
+        let state = model.init_states().remove(0);
         assert!(
-            guard.contains_cross_entity(),
-            "cross-entity guard must not collapse to Always"
-        );
-        match guard {
-            ModelGuard::And(parts) => assert!(parts.iter().any(|part| matches!(
-                part,
-                ModelGuard::CrossEntityState {
-                    entity_type,
-                    entity_id_source,
-                    required_status,
-                    ..
-                } if entity_type == "Child"
-                    && entity_id_source == "child_id"
-                    && required_status == &vec!["Done".to_string()]
-            ))),
-            other => panic!("expected compound guard with CrossEntityState, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_undeclared_bool_invariant_falls_back_to_unverifiable() {
-        // payment_captured is NOT declared as a [[state]] bool var in the spec,
-        // so "ShipRequiresPayment" falls back to Unverifiable (we can't model it).
-        let model = build_order_model();
-        let ship_inv = model
-            .invariants
-            .iter()
-            .find(|i| i.name == "ShipRequiresPayment");
-        assert!(
-            ship_inv.is_some(),
-            "Should have ShipRequiresPayment invariant"
+            super::super::semantics::guard_may_hold(guard, &model.var_kinds, &state),
+            "a related-entity guard may hold (free boolean)"
         );
         assert!(
-            matches!(ship_inv.unwrap().kind, InvariantKind::Unverifiable { .. }),
-            "Undeclared bool should fall back to Unverifiable"
+            !super::super::semantics::evaluate_guard(guard, &model.var_kinds, &state),
+            "a related-entity guard is not locally enabled"
         );
     }
 
@@ -544,41 +394,24 @@ assert = "migrations_ok || typecheck_ok"
 "#;
 
     #[test]
-    fn test_compound_and_invariant_resolves_to_and() {
+    fn test_compound_invariants_keep_their_structure() {
         let model = build_model_from_ioa(COMPOUND_IOA, 2).unwrap();
-        let inv = model
-            .invariants
-            .iter()
-            .find(|i| i.name == "TestingRequiresAllGates")
-            .expect("TestingRequiresAllGates invariant must be present");
-        match &inv.kind {
-            InvariantKind::And(parts) => {
-                assert_eq!(parts.len(), 3);
-                for p in parts {
-                    assert!(
-                        matches!(p, InvariantKind::BoolRequired { expect: true, .. }),
-                        "part should be BoolRequired{{expect:true}}, got {p:?}"
-                    );
-                }
-            }
-            other => panic!("expected And, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_compound_or_invariant_resolves_to_or() {
-        let model = build_model_from_ioa(COMPOUND_IOA, 2).unwrap();
-        let inv = model
-            .invariants
-            .iter()
-            .find(|i| i.name == "EitherReviewer")
-            .expect("EitherReviewer invariant must be present");
-        match &inv.kind {
-            InvariantKind::Or(parts) => {
-                assert_eq!(parts.len(), 2);
-            }
-            other => panic!("expected Or, got {other:?}"),
-        }
+        let text = |name: &str| {
+            model
+                .invariants
+                .iter()
+                .find(|i| i.name == name)
+                .map(|i| i.assert.to_string())
+                .unwrap()
+        };
+        assert_eq!(
+            text("TestingRequiresAllGates"),
+            "status in ['Testing', 'Shipped'] => migrations_ok && typecheck_ok && unit_tests_ok"
+        );
+        assert_eq!(
+            text("EitherReviewer"),
+            "status in ['Shipped'] => migrations_ok || typecheck_ok"
+        );
     }
 
     const COMPOUND_UNDECLARED_IOA: &str = r#"
@@ -605,16 +438,10 @@ assert = "migrations_ok && undeclared_flag"
 "#;
 
     #[test]
-    fn test_compound_with_undeclared_bool_becomes_unverifiable() {
-        let model = build_model_from_ioa(COMPOUND_UNDECLARED_IOA, 2).unwrap();
-        let inv = model
-            .invariants
-            .iter()
-            .find(|i| i.name == "MixedDeclaredUndeclared")
-            .unwrap();
-        assert!(
-            matches!(inv.kind, InvariantKind::Unverifiable { .. }),
-            "compound expression referencing an undeclared bool must fall back to Unverifiable"
-        );
+    fn test_invariant_over_undeclared_variable_fails_to_load() {
+        let err = build_model_from_ioa(COMPOUND_UNDECLARED_IOA, 2)
+            .err()
+            .expect("undeclared variable must be rejected");
+        assert!(err.contains("unknown state variable 'undeclared_flag'"), "{err}");
     }
 }

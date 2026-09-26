@@ -1,238 +1,124 @@
-//! Tests for [`Guard`] evaluation (`check`, `check_detailed`).
+//! Tests for guard evaluation (`check`, `check_detailed`).
 
 use super::*;
 
-#[test]
-fn guard_always_passes() {
-    let guard = Guard::Always;
-    let ctx = EvalContext::default();
-    assert!(guard.check("Draft", &ctx));
+fn guard(source: &str) -> Expr {
+    temper_spec::predicate::parse(source).unwrap()
 }
 
-#[test]
-fn guard_state_in_matches() {
-    let guard = Guard::StateIn(vec!["Draft".to_string(), "Active".to_string()]);
-    let ctx = EvalContext::default();
-    assert!(guard.check("Draft", &ctx));
+fn declared() -> InitialValues {
+    let mut declared = InitialValues::default();
+    declared.counters.insert("items".into(), 0);
+    declared.booleans.insert("ready".into(), false);
+    declared.lists.insert("tags".into(), vec![]);
+    declared
 }
 
-#[test]
-fn guard_state_in_no_match() {
-    let guard = Guard::StateIn(vec!["Draft".to_string()]);
-    let ctx = EvalContext::default();
-    assert!(!guard.check("Active", &ctx));
-}
-
-#[test]
-fn guard_item_count_min_passes() {
-    let guard = Guard::ItemCountMin(2);
-    let mut ctx = EvalContext::default();
-    ctx.counters.insert("items".to_string(), 3);
-    assert!(guard.check("Draft", &ctx));
-}
-
-#[test]
-fn guard_item_count_min_fails() {
-    let guard = Guard::ItemCountMin(2);
-    let mut ctx = EvalContext::default();
-    ctx.counters.insert("items".to_string(), 1);
-    assert!(!guard.check("Draft", &ctx));
-}
-
-#[test]
-fn guard_counter_min_passes() {
-    let guard = Guard::CounterMin {
-        var: "cycles".to_string(),
-        min: 2,
-    };
-    let mut ctx = EvalContext::default();
-    ctx.counters.insert("cycles".to_string(), 3);
-    assert!(guard.check("Draft", &ctx));
-}
-
-#[test]
-fn guard_counter_max_passes() {
-    let guard = Guard::CounterMax {
-        var: "retries".to_string(),
-        max: 3,
-    };
-    let mut ctx = EvalContext::default();
-    ctx.counters.insert("retries".to_string(), 2);
-    assert!(guard.check("Draft", &ctx));
-}
-
-#[test]
-fn guard_counter_max_fails() {
-    let guard = Guard::CounterMax {
-        var: "retries".to_string(),
-        max: 3,
-    };
-    let mut ctx = EvalContext::default();
-    ctx.counters.insert("retries".to_string(), 3);
-    assert!(!guard.check("Draft", &ctx));
-}
-
-#[test]
-fn guard_bool_true_passes() {
-    let guard = Guard::BoolTrue("assigned".to_string());
-    let mut ctx = EvalContext::default();
-    ctx.booleans.insert("assigned".to_string(), true);
-    assert!(guard.check("Draft", &ctx));
-}
-
-#[test]
-fn guard_bool_true_fails_missing() {
-    let guard = Guard::BoolTrue("assigned".to_string());
-    let ctx = EvalContext::default();
-    assert!(!guard.check("Draft", &ctx));
-}
-
-#[test]
-fn guard_and_all_pass() {
-    let guard = Guard::And(vec![
-        Guard::Always,
-        Guard::StateIn(vec!["Draft".to_string()]),
-    ]);
-    let ctx = EvalContext::default();
-    assert!(guard.check("Draft", &ctx));
-}
-
-#[test]
-fn guard_and_one_fails() {
-    let guard = Guard::And(vec![
-        Guard::Always,
-        Guard::StateIn(vec!["Active".to_string()]),
-    ]);
-    let ctx = EvalContext::default();
-    assert!(!guard.check("Draft", &ctx));
-}
-
-// ---------------------------------------------------------------------
-// check_detailed (ADR-0151)
-// ---------------------------------------------------------------------
-
-#[test]
-fn check_detailed_counter_min_carries_var_required_found() {
-    let guard = Guard::CounterMin {
-        var: "cycles".to_string(),
-        min: 2,
-    };
-    let mut ctx = EvalContext::default();
-    ctx.counters.insert("cycles".to_string(), 1);
-
-    let failure = guard.check_detailed("Draft", &ctx).expect("should fail");
-    assert_eq!(failure.kind, GuardFailureKind::CounterMin);
-    assert_eq!(failure.var.as_deref(), Some("cycles"));
-    assert_eq!(failure.required.as_deref(), Some(">= 2"));
-    assert_eq!(failure.found.as_deref(), Some("1"));
-}
-
-#[test]
-fn check_detailed_bool_distinguishes_missing_from_false() {
-    let guard = Guard::BoolTrue("assigned".to_string());
-
-    // Missing -> "<missing>"
-    let ctx = EvalContext::default();
-    let failure = guard.check_detailed("Draft", &ctx).expect("should fail");
-    assert_eq!(failure.kind, GuardFailureKind::BoolTrue);
-    assert_eq!(failure.var.as_deref(), Some("assigned"));
-    assert_eq!(failure.found.as_deref(), Some("<missing>"));
-
-    // Explicit false -> "false"
-    let mut ctx_false = EvalContext::default();
-    ctx_false.booleans.insert("assigned".to_string(), false);
-    let failure = guard
-        .check_detailed("Draft", &ctx_false)
-        .expect("should fail");
-    assert_eq!(failure.found.as_deref(), Some("false"));
-}
-
-#[test]
-fn check_detailed_state_in_carries_current_state() {
-    let guard = Guard::StateIn(vec!["Draft".to_string(), "Ready".to_string()]);
-    let ctx = EvalContext::default();
-
-    let failure = guard.check_detailed("Active", &ctx).expect("should fail");
-    assert_eq!(failure.kind, GuardFailureKind::StateIn);
-    assert_eq!(failure.required.as_deref(), Some("state in [Draft,Ready]"));
-    assert_eq!(failure.found.as_deref(), Some("Active"));
-}
-
-#[test]
-fn check_detailed_cross_entity_names_entity_and_ref() {
-    let guard = Guard::CrossEntityStateIn {
-        entity_type: "File".to_string(),
-        entity_id_source: "landing_file_id".to_string(),
-        required_status: vec!["Ready".to_string(), "Locked".to_string()],
-        forbidden_status: vec![],
-        required: false,
-    };
-    let ctx = EvalContext::default();
-
-    let failure = guard.check_detailed("Draft", &ctx).expect("should fail");
-    assert_eq!(failure.kind, GuardFailureKind::CrossEntityState);
-    assert_eq!(failure.var.as_deref(), Some("landing_file_id"));
+fn holds(source: &str, state: &str, ctx: &EvalContext) -> bool {
+    let declared = declared();
+    let expr = guard(source);
+    let result = check(&expr, state, ctx, &declared);
+    // The cold path agrees with the hot path.
     assert_eq!(
-        failure.required.as_deref(),
-        Some("File status in [Ready,Locked]")
+        check_detailed(&expr, state, ctx, &declared).is_none(),
+        result,
+        "check and check_detailed disagree on `{source}`"
     );
+    result
 }
 
 #[test]
-fn check_detailed_and_reports_first_failure_in_source_order() {
-    // First conjunct passes, second fails, third would also fail: the
-    // detailed failure must name the second (first failing) one.
-    let guard = Guard::And(vec![
-        Guard::StateIn(vec!["Draft".to_string()]),
-        Guard::CounterMin {
-            var: "cycles".to_string(),
-            min: 2,
-        },
-        Guard::BoolTrue("approved".to_string()),
-    ]);
+fn reads_counters_booleans_lists_and_status() {
     let mut ctx = EvalContext::default();
-    ctx.counters.insert("cycles".to_string(), 0);
-
-    let failure = guard.check_detailed("Draft", &ctx).expect("should fail");
-    assert_eq!(failure.kind, GuardFailureKind::CounterMin);
-    assert_eq!(failure.var.as_deref(), Some("cycles"));
+    ctx.counters.insert("items".into(), 3);
+    ctx.booleans.insert("ready".into(), true);
+    ctx.lists.insert("tags".into(), vec!["urgent".into()]);
+    assert!(holds("true", "Draft", &ctx));
+    assert!(holds("status in ['Draft', 'Open']", "Draft", &ctx));
+    assert!(!holds("status == 'Open'", "Draft", &ctx));
+    assert!(holds("items >= 3 && items < 4", "Draft", &ctx));
+    assert!(holds(
+        "ready && 'urgent' in tags && len(tags) == 1",
+        "Draft",
+        &ctx
+    ));
+    assert!(!holds("!ready || items > 10", "Draft", &ctx));
 }
 
 #[test]
-fn check_detailed_returns_none_when_guard_passes() {
-    let guard = Guard::And(vec![
-        Guard::StateIn(vec!["Draft".to_string()]),
-        Guard::CounterMin {
-            var: "cycles".to_string(),
-            min: 2,
-        },
-    ]);
-    let mut ctx = EvalContext::default();
-    ctx.counters.insert("cycles".to_string(), 5);
-
-    assert!(guard.check_detailed("Draft", &ctx).is_none());
+fn declared_variables_missing_from_the_context_read_as_zero_values() {
+    let ctx = EvalContext::default();
+    assert!(holds("items == 0 && items < 1", "A", &ctx));
+    assert!(holds("!ready", "A", &ctx));
+    assert!(holds("len(tags) == 0 && 'x' not in tags", "A", &ctx));
+    // Undeclared names are absent.
+    assert!(holds("empty(parent_id)", "A", &ctx));
 }
 
 #[test]
-fn check_and_check_detailed_agree_on_pass_fail() {
-    let guard = Guard::And(vec![
-        Guard::CounterMin {
-            var: "a".to_string(),
-            min: 1,
-        },
-        Guard::BoolFalse("locked".to_string()),
-    ]);
+fn reads_fields() {
     let mut ctx = EvalContext::default();
-    ctx.counters.insert("a".to_string(), 1);
-    // passes
-    assert_eq!(
-        guard.check("S", &ctx),
-        guard.check_detailed("S", &ctx).is_none()
+    ctx.fields
+        .insert("goal".into(), serde_json::json!("ship it"));
+    assert!(holds("goal != '' && !empty(goal)", "A", &ctx));
+    assert!(!holds("goal == null", "A", &ctx));
+}
+
+#[test]
+fn related_statuses_must_hold_for_every_entity_and_missing_reads_null() {
+    let key = ("Workspace".to_string(), "workspace_id".to_string());
+    let allow = "Workspace[workspace_id].status in ['Active']";
+    let deny = "Workspace[workspace_id].status not in ['Frozen']";
+    let mut ctx = EvalContext::default();
+    // Unset reference.
+    assert!(!holds(allow, "A", &ctx));
+    assert!(holds(deny, "A", &ctx));
+    ctx.related
+        .insert(key.clone(), Related::Statuses(vec![Some("Active".into())]));
+    assert!(holds(allow, "A", &ctx));
+    ctx.related.insert(
+        key.clone(),
+        Related::Statuses(vec![Some("Active".into()), Some("Frozen".into())]),
     );
-    // now fail the bool
-    ctx.booleans.insert("locked".to_string(), true);
+    assert!(!holds(allow, "A", &ctx));
+    assert!(!holds(deny, "A", &ctx));
+    // Unresolved target.
+    ctx.related
+        .insert(key.clone(), Related::Statuses(vec![None]));
+    assert!(!holds(allow, "A", &ctx));
+    assert!(holds(deny, "A", &ctx));
+    // Unresolved (budget exhausted): neither passes.
+    ctx.related.insert(key, Related::Unresolved);
+    assert!(!holds(allow, "A", &ctx));
+    assert!(!holds(deny, "A", &ctx));
+}
+
+#[test]
+fn failure_names_the_failing_conjunct_and_its_values() {
+    let mut ctx = EvalContext::default();
+    ctx.counters.insert("items".into(), 1);
+    ctx.booleans.insert("ready".into(), true);
+    let failure = check_detailed(&guard("ready && items >= 2"), "Draft", &ctx, &declared())
+        .expect("guard fails");
     assert_eq!(
-        guard.check("S", &ctx),
-        guard.check_detailed("S", &ctx).is_none()
+        failure,
+        GuardFailure {
+            expr: "items >= 2".into(),
+            found: vec![("items".into(), "1".into())],
+        }
+    );
+    let failure = check_detailed(
+        &guard("Workspace[workspace_id].status in ['Active']"),
+        "Draft",
+        &ctx,
+        &declared(),
+    )
+    .expect("guard fails");
+    assert_eq!(
+        failure.found,
+        vec![
+            ("workspace_id".into(), "<missing>".into()),
+            ("Workspace[workspace_id].status".into(), "<missing>".into()),
+        ]
     );
 }

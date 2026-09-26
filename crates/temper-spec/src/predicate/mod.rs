@@ -12,7 +12,7 @@ mod print;
 
 pub use ast::{CmpOp, Expr, Literal, Name, Operand, Set};
 pub use check::{Scope, VarKind, check, unmodelable};
-pub use eval::{Env, Truth, Val, eval, explain};
+pub use eval::{Env, JsonEnv, Truth, Val, eval, explain};
 pub use parse::{MAX_DEPTH, ParseError, is_keyword, parse};
 
 impl std::str::FromStr for Expr {

@@ -20,7 +20,6 @@ export interface SpecAction {
 
 export interface SpecInvariant {
   name: string;
-  when: string[];
   assertion: string;
 }
 
@@ -40,6 +39,8 @@ export interface SpecDetail {
   spec_version?: string;
   states: string[];
   initial_state: string;
+  /** States no action may leave. Optional: a server older than the field omits it. */
+  terminal_states?: string[];
   actions: SpecAction[];
   invariants: SpecInvariant[];
   state_variables: StateVariable[];

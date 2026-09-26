@@ -2,13 +2,13 @@
 
 use std::collections::BTreeMap;
 
-use temper_spec::automaton::{ActionTrigger, TriggerGuard, TriggerKind, Webhook};
+use temper_spec::automaton::{ActionTrigger, TriggerKind, Webhook};
 use temper_spec::cross_invariant::{CrossInvariantSpec, DeletePolicy};
 use temper_spec::csdl::CsdlDocument;
 
 use super::types::{EntitySpec, RelationEdge, RelationGraph};
 use crate::trigger::types::{
-    ReactionGuard, ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver,
+    ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver,
 };
 
 /// Build webhook route index from parsed entity specs.
@@ -97,9 +97,7 @@ fn nav_target_entity(type_name: &str) -> String {
 /// for `kind = "entity"` triggers, translating the declaration into the
 /// existing reaction machinery, including the declared trigger principal.
 ///
-/// Guard translation: `TriggerGuard` and `ReactionGuard` are structurally
-/// identical enums living in different crates (spec vs server layer). The
-/// converter is a pure one-to-one mapping.
+/// The trigger's guard expression carries over unchanged.
 pub(super) fn synthesize_action_trigger_reaction(
     source_entity_type: &str,
     source_action: &str,
@@ -124,7 +122,7 @@ pub(super) fn synthesize_action_trigger_reaction(
             entity_type: source_entity_type.to_string(),
             action: Some(source_action.to_string()),
             to_state: trigger.to_state.clone(),
-            guard: trigger.guard.as_ref().map(trigger_guard_to_reaction_guard),
+            guard: trigger.guard.clone(),
         },
         then: ReactionTarget {
             entity_type: target_entity,
@@ -160,48 +158,6 @@ fn target_resolver_to_target_resolver(
             id_field: id_field.clone(),
         },
         Spec::Create => TargetResolver::Create,
-    }
-}
-
-/// Convert a [`TriggerGuard`] (spec layer) into a [`ReactionGuard`] (server
-/// layer). Structurally identical enums; the mapping is mechanical.
-fn trigger_guard_to_reaction_guard(g: &TriggerGuard) -> ReactionGuard {
-    match g {
-        TriggerGuard::FieldEquals { field, value } => ReactionGuard::FieldEquals {
-            field: field.clone(),
-            value: value.clone(),
-        },
-        TriggerGuard::FieldIn { field, values } => ReactionGuard::FieldIn {
-            field: field.clone(),
-            values: values.clone(),
-        },
-        TriggerGuard::BoolTrue { field } => ReactionGuard::BoolTrue {
-            field: field.clone(),
-        },
-        TriggerGuard::BoolFalse { field } => ReactionGuard::BoolFalse {
-            field: field.clone(),
-        },
-        TriggerGuard::StateIn { values } => ReactionGuard::StateIn {
-            values: values.clone(),
-        },
-        TriggerGuard::CrossEntityStateIn {
-            entity_type,
-            entity_id_source,
-            required_status,
-        } => ReactionGuard::CrossEntityStateIn {
-            entity_type: entity_type.clone(),
-            entity_id_source: entity_id_source.clone(),
-            required_status: required_status.clone(),
-        },
-        TriggerGuard::AllOf { guards } => ReactionGuard::AllOf {
-            guards: guards.iter().map(trigger_guard_to_reaction_guard).collect(),
-        },
-        TriggerGuard::AnyOf { guards } => ReactionGuard::AnyOf {
-            guards: guards.iter().map(trigger_guard_to_reaction_guard).collect(),
-        },
-        TriggerGuard::Not { guard } => ReactionGuard::Not {
-            guard: Box::new(trigger_guard_to_reaction_guard(guard)),
-        },
     }
 }
 

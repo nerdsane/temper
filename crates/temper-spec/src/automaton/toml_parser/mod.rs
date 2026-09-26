@@ -5,16 +5,17 @@
 //! `[[vector]]`, `[[webhook]]`, `[[context_entity]]`, `[admission]` and the
 //! nested `[[action.*]]` tables) deserialize straight into their types. The
 //! core sections are read field by field so they keep the lenient value
-//! rules in [`values`] and the string forms of guards and effects.
+//! rules in [`values`] and the string forms of effects. Predicates are read
+//! in [`predicates`].
 
 mod effects;
 mod guards;
+mod predicates;
 mod values;
 
 use super::parser::AutomatonParseError;
 use super::types::*;
 use effects::parse_effect_value;
-use guards::parse_guard_value;
 use serde::de::DeserializeOwned;
 use toml::{Table, Value};
 use values::{any_string, bool_value, string, string_list, unsigned};
@@ -31,16 +32,23 @@ pub(super) fn parse_toml_to_automaton(input: &str) -> Result<Automaton, Automato
         .parse()
         .map_err(|e: toml::de::Error| AutomatonParseError::Toml(e.to_string()))?;
 
+    let (invariants, legacy_terminal) = predicates::invariants(&doc)?;
+    let mut meta = parse_meta(&doc)?;
+    for state in legacy_terminal {
+        if !meta.terminal.contains(&state) {
+            meta.terminal.push(state);
+        }
+    }
     let automaton = Automaton {
-        automaton: parse_meta(&doc)?,
+        automaton: meta,
         state: named_items(&doc, "state", parse_state_var)?,
         actions: named_items(&doc, "action", parse_action)?,
-        invariants: named_items(&doc, "invariant", parse_invariant)?,
+        invariants,
         liveness: named_items(&doc, "liveness", parse_liveness)?,
         integrations: named_items(&doc, "integration", parse_integration)?,
         webhooks: section(&doc, "webhook")?,
         context_entities: section(&doc, "context_entity")?,
-        field_invariants: section(&doc, "field_invariant")?,
+        field_invariants: predicates::field_invariants(&doc)?,
         state_timeouts: section(&doc, "state_timeout")?,
         keys: section(&doc, "key")?,
         vectors: section(&doc, "vector")?,
@@ -119,6 +127,7 @@ fn parse_meta(doc: &Table) -> Result<AutomatonMeta, AutomatonParseError> {
         initial: string(table, S, "initial")?.unwrap_or_default(),
         allow_indefinite_states: string_list(table, S, "allow_indefinite_states")?,
         strict_action_params,
+        terminal: string_list(table, S, "terminal")?,
     })
 }
 
@@ -139,10 +148,10 @@ fn parse_state_var(table: &Table) -> Result<(String, StateVar), AutomatonParseEr
 fn parse_action(table: &Table) -> Result<(String, Action), AutomatonParseError> {
     const S: &str = "action";
     let name = string(table, S, "name")?.unwrap_or_default();
-    let mut guard = Vec::new();
-    if let Some(value) = table.get("guard") {
-        parse_guard_value(value, &mut guard)?;
-    }
+    let guard = match table.get("guard") {
+        Some(value) => predicates::action_guard(&name, value)?,
+        None => crate::predicate::Expr::always(),
+    };
     let mut effect = Vec::new();
     if let Some(value) = table.get("effect") {
         parse_effect_value(value, &mut effect)?;
@@ -163,7 +172,7 @@ fn parse_action(table: &Table) -> Result<(String, Action), AutomatonParseError> 
         constraints: nested(table, "constraints")?,
         hint: string(table, S, "hint")?,
         record_parent_event: bool_value(table, "record_parent_event").unwrap_or(true),
-        triggers: nested(table, "triggers")?,
+        triggers: predicates::triggers(table)?,
         cedar_gate: cedar_gate
             .map(|gate| deserialize(gate, "action metadata"))
             .transpose()?,
@@ -203,17 +212,6 @@ fn parse_action_params(table: &Table) -> Result<Vec<ActionParam>, AutomatonParse
         .into_iter()
         .filter(|param| !param.name().is_empty())
         .collect())
-}
-
-fn parse_invariant(table: &Table) -> Result<(String, Invariant), AutomatonParseError> {
-    const S: &str = "invariant";
-    let name = string(table, S, "name")?.unwrap_or_default();
-    let invariant = Invariant {
-        name: name.clone(),
-        when: string_list(table, S, "when")?,
-        assert: string(table, S, "assert")?.unwrap_or_default(),
-    };
-    Ok((name, invariant))
 }
 
 fn parse_liveness(table: &Table) -> Result<(String, Liveness), AutomatonParseError> {

@@ -14,59 +14,8 @@
 pub struct SpecInvariant {
     /// Invariant name (e.g., "SubmitRequiresItems").
     pub name: String,
-    /// States in which this invariant is checked. Empty means all states.
-    pub when: Vec<String>,
-    /// The assertion expression from the spec.
-    pub assert: SpecAssert,
-}
-
-/// A checkable assertion from the spec.
-///
-/// These map to the small set of invariant patterns that the framework can
-/// check automatically. Compound variants (`And`/`Or`) compose them, so
-/// `migrations_ok && typecheck_ok` becomes
-/// `And(vec![BoolRequired{"migrations_ok", true}, BoolRequired{"typecheck_ok", true}])`.
-#[derive(Debug, Clone)]
-pub enum SpecAssert {
-    /// A counter variable must be positive (e.g., `items > 0`).
-    CounterPositive { var: String },
-    /// The entity is in a terminal state — no further transitions allowed.
-    NoFurtherTransitions,
-    /// State A must have been visited before state B in event history.
-    /// Expressed as: `ordering(A, B)` — "A precedes B".
-    OrderingConstraint { before: String, after: String },
-    /// The entity should never be in this state.
-    /// Expressed as: `never(StateName)`.
-    NeverState { state: String },
-    /// A counter must satisfy a comparison (e.g., `items >= 1`, `retries < 5`).
-    CounterCompare {
-        var: String,
-        op: CompareOp,
-        value: usize,
-    },
-    /// A boolean state variable must match an expected value.
-    ///
-    /// `expect = true` for `flag`; `expect = false` for `!flag`.
-    BoolRequired { var: String, expect: bool },
-    /// All subexpressions must hold.
-    And(Vec<SpecAssert>),
-    /// At least one subexpression must hold.
-    Or(Vec<SpecAssert>),
-}
-
-/// Comparison operators for counter invariants.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CompareOp {
-    /// Greater than.
-    Gt,
-    /// Greater than or equal.
-    Gte,
-    /// Less than.
-    Lt,
-    /// Less than or equal.
-    Lte,
-    /// Equal.
-    Eq,
+    /// Must hold after every successful transition.
+    pub assert: temper_spec::predicate::Expr,
 }
 
 /// A type-erased actor handler for simulation.
@@ -104,12 +53,16 @@ pub trait SimActorHandler: Send {
         &[]
     }
 
-    /// Read a boolean state variable by name for invariant evaluation.
-    ///
-    /// Returns `None` when the variable is absent (treated as `false` by
-    /// `BoolRequired` evaluators). Override this to expose booleans
-    /// from the underlying entity state. Default: no boolean state.
-    fn bool_field(&self, _var: &str) -> Option<bool> {
+    /// States from the spec's `terminal` list. A successful transition from
+    /// one terminal state to another is a violation. Returns empty by default.
+    fn terminal_states(&self) -> &[String] {
+        &[]
+    }
+
+    /// A state variable or field by name, for invariant evaluation (counters
+    /// as numbers, booleans, lists as arrays). `None` reads as absent.
+    /// Default: no state.
+    fn state_value(&self, _name: &str) -> Option<serde_json::Value> {
         None
     }
 

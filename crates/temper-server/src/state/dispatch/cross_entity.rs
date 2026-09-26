@@ -1,51 +1,35 @@
 use crate::request_context::AgentContext;
+use temper_jit::table::{Related, RelatedMap};
 use temper_runtime::tenant::TenantId;
 use tracing::Instrument;
 
-/// A collected `cross_entity_state` guard, flattened for runtime resolution:
-/// `(target_type, id_source, required_statuses, forbidden_statuses, required_ref)`.
-///
-/// `required_statuses` is the allowlist (empty ⇒ unconstrained),
-/// `forbidden_statuses` the denylist (empty ⇒ unconstrained), and `required_ref`
-/// carries the IOA `required` attribute (ARN-92 #2).
-type CrossGuardSpec = (String, String, Vec<String>, Vec<String>, bool);
-
 impl crate::state::ServerState {
-    /// Pre-resolve cross-entity state guards for an action.
+    /// Resolve the related entities an action's guards read.
     ///
-    /// Reads the TransitionTable, walks rules for the given action, and for each
-    /// `CrossEntityStateIn` guard, resolves the target entity's status and compares
-    /// against the required statuses.
+    /// For each `Type[id_field].status` in the guards of `action`, reads the
+    /// id (or list of ids) from the entity's current fields and resolves each
+    /// related entity's status. An unset reference resolves to no statuses;
+    /// an entity that is not found resolves to `None`. When the lookup budget
+    /// runs out, the remaining references are [`Related::Unresolved`], which
+    /// no guard can pass.
     pub(super) async fn resolve_cross_entity_guards(
         &self,
         tenant: &TenantId,
         entity_type: &str,
         entity_id: &str,
         action: &str,
-    ) -> std::collections::BTreeMap<String, bool> {
+    ) -> RelatedMap {
         use crate::entity_actor::effects::MAX_CROSS_ENTITY_LOOKUPS;
 
-        let mut result = std::collections::BTreeMap::new();
-
-        // Get the transition table to find cross-entity guards.
-        let cross_guards: Vec<CrossGuardSpec> = {
+        let mut result = RelatedMap::new();
+        let refs: Vec<(String, String)> = {
             let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
             let Some(spec) = registry.get_spec(tenant, entity_type) else {
                 return result;
             };
-            let table = spec.table();
-
-            // Collect CrossEntityStateIn guards from rules matching this action
-            let mut guards = Vec::new();
-            for rule in &table.rules {
-                if rule.name == action {
-                    Self::collect_cross_guards(&rule.guard, &mut guards);
-                }
-            }
-            guards
+            spec.table().guard_related_refs(action)
         };
-
-        if cross_guards.is_empty() {
+        if refs.is_empty() {
             return result;
         }
 
@@ -58,152 +42,36 @@ impl crate::state::ServerState {
             Err(_) => return result,
         };
 
-        // A resolvable target status satisfies the guard iff it is allowed by
-        // the allowlist (empty allowlist ⇒ unconstrained) AND not in the
-        // denylist (empty denylist ⇒ unconstrained).
-        let status_ok = |status: &str, required: &[String], forbidden: &[String]| -> bool {
-            let allowed = required.is_empty() || required.iter().any(|s| s == status);
-            let not_forbidden = !forbidden.iter().any(|s| s == status);
-            allowed && not_forbidden
-        };
-
-        // Resolve each cross-entity guard (budget-limited)
-        let mut lookup_count = 0;
-        for (target_type, id_source, required_statuses, forbidden_statuses, required_ref) in
-            &cross_guards
-        {
-            if lookup_count >= MAX_CROSS_ENTITY_LOOKUPS {
+        let mut lookups = 0usize;
+        for (target_type, id_field) in refs {
+            let ids: Vec<&str> = match current_fields.get(&id_field) {
+                Some(serde_json::Value::Array(items)) => items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .filter(|id| !id.is_empty())
+                    .collect(),
+                Some(serde_json::Value::String(id)) if !id.is_empty() => vec![id.as_str()],
+                _ => Vec::new(),
+            };
+            if lookups + ids.len() > MAX_CROSS_ENTITY_LOOKUPS {
                 tracing::warn!(
                     entity_type,
                     entity_id,
                     "cross-entity lookup budget exhausted ({})",
                     MAX_CROSS_ENTITY_LOOKUPS
                 );
-                break;
-            }
-
-            let field_value = current_fields.get(id_source);
-            let key = format!("__xref:{}:{}", target_type, id_source);
-
-            // If the field is a list (e.g. child_agent_ids), resolve each element.
-            if let Some(arr) = field_value.and_then(|v| v.as_array()) {
-                if arr.is_empty() {
-                    // Empty list relation. A *required* relation cannot be
-                    // satisfied by an absent target, so it fails the guard
-                    // (ARN-92 #2). An optional list stays vacuous-true to
-                    // preserve the existing blast radius.
-                    result.insert(key, !*required_ref);
-                    continue;
-                }
-                let mut all_matched = true;
-                for item in arr {
-                    let item_id = item.as_str().unwrap_or("");
-                    if item_id.is_empty() {
-                        continue;
-                    }
-                    lookup_count += 1;
-                    if lookup_count > MAX_CROSS_ENTITY_LOOKUPS {
-                        tracing::warn!(
-                            entity_type,
-                            entity_id,
-                            "cross-entity lookup budget exhausted ({})",
-                            MAX_CROSS_ENTITY_LOOKUPS
-                        );
-                        all_matched = false;
-                        break;
-                    }
-                    if let Some(status) = self
-                        .resolve_entity_status(tenant, target_type, item_id)
-                        .await
-                    {
-                        if !status_ok(&status, required_statuses, forbidden_statuses) {
-                            all_matched = false;
-                            break;
-                        }
-                    } else {
-                        // A non-empty list element pointing at a missing entity
-                        // cannot satisfy an allowlist; with a denylist-only
-                        // guard the absent target is treated as not-forbidden
-                        // (the container does not exist, so it cannot be in a
-                        // bad state). A *required* ref still fails (the relation
-                        // was declared mandatory).
-                        if *required_ref || !required_statuses.is_empty() {
-                            all_matched = false;
-                            break;
-                        }
-                    }
-                }
-                result.insert(key, all_matched);
+                result.insert((target_type, id_field), Related::Unresolved);
                 continue;
             }
-
-            // Scalar field: resolve a single entity ID.
-            let target_id = field_value.and_then(|v| v.as_str()).unwrap_or("");
-
-            if target_id.is_empty() {
-                // Empty/missing scalar ref. A *required* ref that was never set
-                // cannot satisfy a cross-entity status precondition, so it fails
-                // the guard (ARN-92 #2). An optional ref stays vacuous-true.
-                result.insert(key, !*required_ref);
-                continue;
+            lookups += ids.len();
+            let mut statuses = Vec::with_capacity(ids.len());
+            for id in ids {
+                statuses.push(self.resolve_entity_status(tenant, &target_type, id).await);
             }
-
-            lookup_count += 1;
-            if let Some(status) = self
-                .resolve_entity_status(tenant, target_type, target_id)
-                .await
-            {
-                result.insert(
-                    key,
-                    status_ok(&status, required_statuses, forbidden_statuses),
-                );
-            } else {
-                // Non-empty scalar ref to a target that does not resolve. An
-                // allowlist cannot be satisfied by an absent target, so it
-                // fails; a *required* ref likewise fails (the relation was
-                // declared mandatory). A denylist-only, non-required guard is
-                // about a *specific bad state* the container can be in — an
-                // absent container is not in any state, so it does not forbid
-                // the action (matches the runtime write-gate's "unresolvable ⇒
-                // allow" semantics, and the list-element-missing branch above).
-                let allow = required_statuses.is_empty() && !*required_ref;
-                result.insert(key, allow);
-            }
+            result.insert((target_type, id_field), Related::Statuses(statuses));
         }
-
+        debug_assert!(lookups <= MAX_CROSS_ENTITY_LOOKUPS);
         result
-    }
-
-    /// Recursively collect CrossEntityStateIn guards from a guard tree into
-    /// [`CrossGuardSpec`] tuples for runtime resolution.
-    pub(super) fn collect_cross_guards(
-        guard: &temper_jit::table::Guard,
-        out: &mut Vec<CrossGuardSpec>,
-    ) {
-        use temper_jit::table::Guard;
-        match guard {
-            Guard::CrossEntityStateIn {
-                entity_type,
-                entity_id_source,
-                required_status,
-                forbidden_status,
-                required,
-            } => {
-                out.push((
-                    entity_type.clone(),
-                    entity_id_source.clone(),
-                    required_status.clone(),
-                    forbidden_status.clone(),
-                    *required,
-                ));
-            }
-            Guard::And(guards) => {
-                for g in guards {
-                    Self::collect_cross_guards(g, out);
-                }
-            }
-            _ => {}
-        }
     }
 
     /// Dispatch entity spawn requests post-transition.

@@ -79,7 +79,7 @@ impl SwapController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::table::{Guard, TransitionRule, TransitionTable};
+    use crate::table::{Expr, TransitionRule, TransitionTable};
 
     fn dummy_table(name: &str) -> TransitionTable {
         let mut table = TransitionTable {
@@ -92,7 +92,7 @@ mod tests {
                 name: "GoB".into(),
                 from_states: vec!["A".into()],
                 to_state: Some("B".into()),
-                guard: Guard::Always,
+                guard: Expr::always(),
                 effects: vec![],
             }],
             state_var_metadata: Default::default(),

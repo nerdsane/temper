@@ -24,5 +24,5 @@ pub use sim_actor_system::{
     ActorInvariantViolation, RunRecord, SimActorResult, SimActorSystem, SimActorSystemConfig,
     SimIntegrationResponses,
 };
-pub use sim_handler::{CompareOp, SimActorHandler, SpecAssert, SpecInvariant};
+pub use sim_handler::{SimActorHandler, SpecInvariant};
 pub use types::{FaultConfig, SimActorState, SimMessage, SimTime};

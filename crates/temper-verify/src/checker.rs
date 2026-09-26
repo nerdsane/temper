@@ -124,7 +124,7 @@ fn is_transition_enabled(
     // Use `guard_may_hold` (not `evaluate_guard`) so cross-entity gated edges
     // are walked during reachability BFS: a cross-entity guard is a free
     // boolean, so the gated target state is genuinely reachable in the model.
-    if !status_ok || !guard_may_hold(&transition.guard, state) {
+    if !status_ok || !guard_may_hold(&transition.guard, &model.var_kinds, state) {
         return false;
     }
 

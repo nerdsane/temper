@@ -529,7 +529,7 @@ impl crate::state::ServerState {
         };
 
         // Pre-resolve cross-entity state gates (Gap 1: Agent OS).
-        let cross_entity_booleans = self
+        let related = self
             .resolve_cross_entity_guards(tenant, entity_type, entity_id, action)
             .await;
 
@@ -601,7 +601,7 @@ impl crate::state::ServerState {
         let policy = self.dispatch_retry_policy();
         let action_name = action.to_string();
         let params_for_retry = params;
-        let cross_for_retry = cross_entity_booleans;
+        let cross_for_retry = related;
         let authorization_precondition_for_retry = expected_authorization_precondition;
         let idempotency_key = Some(agent_ctx.idempotency_key.clone().unwrap_or_else(|| {
             format!(
@@ -624,7 +624,7 @@ impl crate::state::ServerState {
                 || EntityMsg::Action {
                     name: action_name.clone(),
                     params: params_for_retry.clone(),
-                    cross_entity_booleans: cross_for_retry.clone(),
+                    related: cross_for_retry.clone(),
                     idempotency_key: idempotency_key.clone(),
                     expected_authorization_precondition: authorization_precondition_for_retry
                         .clone(),

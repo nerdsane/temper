@@ -10,7 +10,7 @@
 //! Each level produces a pass/fail result. All levels run independently.
 
 use crate::checker::{self, VerificationResult};
-use crate::model::{self, InvariantKind, TemperModel};
+use crate::model::{self, TemperModel};
 use crate::proptest_gen::{self, PropTestResult};
 use crate::simulation::{self, SimConfig, SimulationResult};
 use crate::smt::{self, SmtResult};
@@ -571,20 +571,18 @@ impl VerificationCascade {
     }
 }
 
-/// Collect warnings for invariants classified as `Unverifiable`.
+/// Collect warnings for invariants that read values the model does not track.
 fn collect_unverifiable_warnings(model: &TemperModel) -> Vec<String> {
     model
         .invariants
         .iter()
         .filter_map(|inv| {
-            if let InvariantKind::Unverifiable { expression } = &inv.kind {
-                Some(format!(
+            temper_spec::predicate::unmodelable(&inv.assert, &model.var_kinds).map(|culprit| {
+                format!(
                     "invariant '{}' has unverifiable assertion '{}' — skipped at model level",
-                    inv.name, expression,
-                ))
-            } else {
-                None
-            }
+                    inv.name, culprit,
+                )
+            })
         })
         .collect()
 }
@@ -685,24 +683,37 @@ mod tests {
 
     #[test]
     fn test_cascade_warnings_for_unverifiable_invariants() {
-        let cascade = VerificationCascade::from_ioa(ORDER_IOA)
-            .with_sim_seeds(3)
-            .with_prop_test_cases(50);
+        let spec = r#"
+[automaton]
+name = "Task"
+states = ["Draft", "Assigned"]
+initial = "Draft"
 
-        let result = cascade.run();
-        // Order spec has "payment_captured" which is not a declared bool,
-        // so ShipRequiresPayment becomes Unverifiable.
-        assert!(
-            !result.warnings.is_empty(),
-            "Should have warnings for unverifiable invariants"
-        );
-        assert!(
-            result
-                .warnings
-                .iter()
-                .any(|w| w.contains("ShipRequiresPayment")),
-            "Should warn about ShipRequiresPayment, got: {:?}",
+[[state]]
+name = "goal"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Assign"
+from = ["Draft"]
+to = "Assigned"
+
+[[invariant]]
+name = "AssignedRequiresGoal"
+when = ["Assigned"]
+assert = "goal != ''"
+"#;
+        let result = VerificationCascade::from_ioa(spec)
+            .with_sim_seeds(3)
+            .with_prop_test_cases(50)
+            .run();
+        assert_eq!(
             result.warnings,
+            vec![
+                "invariant 'AssignedRequiresGoal' has unverifiable assertion 'goal != ''' — skipped at model level"
+                    .to_string()
+            ]
         );
     }
 

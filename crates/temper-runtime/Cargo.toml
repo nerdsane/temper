@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "Actor runtime for the Temper framework — custom, tokio-based, Erlang/Akka-inspired"
 
 [dependencies]
+temper-spec = { path = "../temper-spec" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

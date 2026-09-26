@@ -266,6 +266,7 @@ fn checks_names_and_types_in_state_scope() {
         "empty(goal) || goal == 'x'",
         "status in ['A'] => items > 0",
         "P[goal].status == 'Done'",
+        "empty(parent_id) || P[parent_id].status == 'Done'",
     ] {
         check(&p(ok), scope).unwrap_or_else(|e| panic!("{ok}: {e}"));
     }

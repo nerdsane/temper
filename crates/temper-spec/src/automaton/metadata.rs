@@ -190,13 +190,11 @@ impl Automaton {
                     from_states.insert(from.clone());
                 }
                 // If this action has guards, its target is a guarded target state
-                if !action.guard.is_empty() {
+                if !action.guard.is_always() {
                     if !guarded_target_states.contains(to) {
                         guarded_target_states.push(to.clone());
                     }
-                    for guard in &action.guard {
-                        guard_summaries.push(format!("{}: {:?}", action.name, guard));
-                    }
+                    guard_summaries.push(format!("{}: {}", action.name, action.guard));
                 }
             } else {
                 // Self-loop (no `to` means status unchanged)

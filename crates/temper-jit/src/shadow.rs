@@ -96,8 +96,9 @@ pub fn shadow_test(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::table::{Effect, Guard, TransitionRule, TransitionTable};
+    use crate::table::{Effect, TransitionRule, TransitionTable};
     use std::collections::BTreeMap;
+    use temper_spec::predicate::parse;
 
     /// Build an EvalContext with a single "items" counter.
     fn ctx_with_items(n: usize) -> EvalContext {
@@ -105,8 +106,7 @@ mod tests {
         counters.insert("items".to_string(), n);
         EvalContext {
             counters,
-            booleans: BTreeMap::new(),
-            lists: BTreeMap::new(),
+            ..EvalContext::default()
         }
     }
 
@@ -122,7 +122,7 @@ mod tests {
                     name: "SubmitOrder".into(),
                     from_states: vec!["Draft".into()],
                     to_state: Some("Submitted".into()),
-                    guard: Guard::StateIn(vec!["Draft".into()]),
+                    guard: parse("status == 'Draft'").unwrap(),
                     effects: vec![
                         Effect::SetState("Submitted".into()),
                         Effect::EmitEvent("SubmitOrder".into()),
@@ -132,7 +132,7 @@ mod tests {
                     name: "CancelOrder".into(),
                     from_states: vec!["Draft".into(), "Submitted".into()],
                     to_state: Some("Cancelled".into()),
-                    guard: Guard::StateIn(vec!["Draft".into(), "Submitted".into()]),
+                    guard: parse("status in ['Draft', 'Submitted']").unwrap(),
                     effects: vec![
                         Effect::SetState("Cancelled".into()),
                         Effect::EmitEvent("CancelOrder".into()),
@@ -230,7 +230,7 @@ mod tests {
             name: "ExpediteOrder".into(),
             from_states: vec!["Submitted".into()],
             to_state: Some("Submitted".into()),
-            guard: Guard::StateIn(vec!["Submitted".into()]),
+            guard: parse("status == 'Submitted'").unwrap(),
             effects: vec![Effect::EmitEvent("ExpediteOrder".into())],
         });
         new.rebuild_index();
@@ -260,7 +260,7 @@ mod tests {
 
         // New table: SubmitOrder requires BoolTrue("ready") instead
         let mut new = base_table();
-        new.rules[0].guard = Guard::BoolTrue("ready".into());
+        new.rules[0].guard = parse("ready").unwrap();
 
         let mut ctx_not_ready = EvalContext::default();
         ctx_not_ready.booleans.insert("ready".to_string(), false);

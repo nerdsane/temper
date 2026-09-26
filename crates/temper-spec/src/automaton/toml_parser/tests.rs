@@ -124,8 +124,7 @@ effect = [
     )
     .unwrap();
     let action = &auto.actions[0];
-    assert!(matches!(&action.guard[0], Guard::IsTrue { var } if var == "ready"));
-    assert!(matches!(&action.guard[1], Guard::MinCount { var, min: 2 } if var == "items"));
+    assert_eq!(action.guard.to_string(), "ready && items >= 2");
     assert!(matches!(&action.effect[0], Effect::Increment { var, amount: None } if var == "items"));
     assert!(matches!(
         &action.effect[1],

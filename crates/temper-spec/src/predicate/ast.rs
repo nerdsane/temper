@@ -111,6 +111,16 @@ impl CmpOp {
 }
 
 impl Expr {
+    /// The always-true predicate (an absent guard).
+    pub fn always() -> Expr {
+        Expr::Const(true)
+    }
+
+    /// Whether this is the always-true predicate.
+    pub fn is_always(&self) -> bool {
+        matches!(self, Expr::Const(true))
+    }
+
     /// Conjunction that flattens nested `And`s and drops `true`.
     pub fn and(parts: Vec<Expr>) -> Expr {
         let mut flat = Vec::with_capacity(parts.len());

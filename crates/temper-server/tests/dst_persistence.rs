@@ -39,7 +39,7 @@ async fn dispatch_action(
             EntityMsg::Action {
                 name: action.to_string(),
                 params,
-                cross_entity_booleans: BTreeMap::new(),
+                related: BTreeMap::new(),
                 idempotency_key: None,
                 expected_authorization_precondition: None,
             },

@@ -263,3 +263,29 @@ pub fn explain<'e>(expr: &'e Expr, env: &dyn Env) -> Option<&'e Expr> {
         other => Some(other),
     }
 }
+
+/// An environment over a JSON object of entity fields. `status` reads the
+/// `Status` field; related-entity statuses are unknown.
+#[derive(Debug, Clone, Copy)]
+pub struct JsonEnv<'a> {
+    fields: &'a serde_json::Value,
+}
+
+impl<'a> JsonEnv<'a> {
+    /// Wrap a fields object.
+    pub fn new(fields: &'a serde_json::Value) -> Self {
+        Self { fields }
+    }
+}
+
+impl Env for JsonEnv<'_> {
+    fn status(&self) -> Val<'_> {
+        self.var("Status")
+    }
+    fn var(&self, name: &str) -> Val<'_> {
+        self.fields.get(name).map_or(Val::Null, Val::json)
+    }
+    fn cross_statuses(&self, _: &str, _: &str) -> Option<Vec<Val<'_>>> {
+        None
+    }
+}

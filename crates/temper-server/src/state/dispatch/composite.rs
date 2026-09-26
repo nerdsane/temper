@@ -293,7 +293,7 @@ impl crate::state::ServerState {
             .await?;
 
             let table = self.transition_table_for_dispatch(tenant, &write.entity_type)?;
-            let cross_entity_booleans =
+            let related =
                 if table_has_cross_entity_guards_for_action(&table, &write.action) {
                     self.resolve_cross_entity_guards(
                         tenant,
@@ -336,7 +336,7 @@ impl crate::state::ServerState {
                 &table,
                 &write.action,
                 &write.params,
-                &cross_entity_booleans,
+                &related,
                 field_sync_mode,
                 crate::blobs::BlobReadSource::Staged {
                     store: blob_store.as_ref(),
@@ -846,7 +846,7 @@ impl crate::state::ServerState {
             stream.state.sequence_nr += 1;
             stream.state.push_event_bounded(created);
         }
-        let cross_entity_booleans =
+        let related =
             if table_has_cross_entity_guards_for_action(&table, &write.action) {
                 self.resolve_cross_entity_guards(
                     tenant,
@@ -872,7 +872,7 @@ impl crate::state::ServerState {
             &table,
             &write.action,
             &write.params,
-            &cross_entity_booleans,
+            &related,
             field_sync_mode,
             crate::blobs::BlobReadSource::Staged {
                 store: self.blob_store_for_tenant(tenant).ok().as_ref(),
@@ -954,10 +954,11 @@ impl crate::state::ServerState {
             .get_tenant_entity_state(tenant, entity_type, entity_id)
             .await
             .map_err(DispatchError::Internal)?;
-        let cross_entity_booleans = self
+        let related = self
             .resolve_cross_entity_guards(tenant, entity_type, entity_id, action)
             .await;
-        let eval_ctx = build_eval_context_with_xref(&current.state, &cross_entity_booleans);
+        let eval_ctx =
+            build_eval_context_with_xref(&current.state, &related, &table, Some(action));
 
         match table.evaluate_ctx(&current.state.status, &eval_ctx, action) {
             Some(result) if result.success => Ok(()),

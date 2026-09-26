@@ -55,12 +55,17 @@ impl TransitionTable {
                 continue;
             }
 
-            if !rule.guard.check(current_state, ctx) {
+            if !self.guard_holds(rule, current_state, ctx) {
                 return Some(TransitionResult {
                     new_state: current_state.to_string(),
                     effects: vec![],
                     success: false,
-                    guard_failure: rule.guard.check_detailed(current_state, ctx),
+                    guard_failure: super::guard::check_detailed(
+                        &rule.guard,
+                        current_state,
+                        ctx,
+                        &self.initial_values,
+                    ),
                 });
             }
 
@@ -86,6 +91,17 @@ impl TransitionTable {
             success: false,
             guard_failure: None,
         })
+    }
+
+    /// Whether `rule`'s guard holds in `current_state` (the `from_states`
+    /// check is separate).
+    pub fn guard_holds(
+        &self,
+        rule: &super::types::TransitionRule,
+        current_state: &str,
+        ctx: &EvalContext,
+    ) -> bool {
+        super::guard::check(&rule.guard, current_state, ctx, &self.initial_values)
     }
 
     /// Effects to apply when **replaying** a durably-stored transition.
@@ -122,7 +138,7 @@ impl TransitionTable {
 
 #[cfg(test)]
 mod tests {
-    use super::super::guard::{EvalContext, Guard, GuardFailureKind};
+    use super::super::guard::GuardFailure;
     use super::super::types::*;
 
     const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
@@ -169,49 +185,6 @@ mod tests {
     }
 
     #[test]
-    fn guard_state_in() {
-        let guard = Guard::StateIn(vec!["Draft".into(), "Submitted".into()]);
-        assert!(guard.evaluate("Draft", 0));
-        assert!(guard.evaluate("Submitted", 0));
-        assert!(!guard.evaluate("Shipped", 0));
-    }
-
-    #[test]
-    fn guard_item_count_min() {
-        let guard = Guard::ItemCountMin(3);
-        assert!(!guard.evaluate("Draft", 0));
-        assert!(!guard.evaluate("Draft", 2));
-        assert!(guard.evaluate("Draft", 3));
-        assert!(guard.evaluate("Draft", 10));
-    }
-
-    #[test]
-    fn guard_counter_max() {
-        let guard = Guard::CounterMax {
-            var: "retries".into(),
-            max: 3,
-        };
-        let mut ctx = EvalContext::default();
-        ctx.counters.insert("retries".into(), 2);
-        assert!(guard.check("Draft", &ctx));
-        ctx.counters.insert("retries".into(), 3);
-        assert!(!guard.check("Draft", &ctx));
-    }
-
-    #[test]
-    fn guard_and_combinator() {
-        let guard = Guard::And(vec![
-            Guard::StateIn(vec!["Draft".into()]),
-            Guard::ItemCountMin(1),
-        ]);
-
-        assert!(guard.evaluate("Draft", 2));
-        assert!(!guard.evaluate("Shipped", 2));
-        assert!(!guard.evaluate("Draft", 0));
-        assert!(!guard.evaluate("Shipped", 0));
-    }
-
-    #[test]
     fn test_serde_roundtrip_preserves_rule_index() {
         let table = order_table();
 
@@ -246,9 +219,13 @@ mod tests {
         let failure = r
             .guard_failure
             .expect("guard rejection must carry a GuardFailure");
-        assert_eq!(failure.kind, GuardFailureKind::CounterMin);
-        assert_eq!(failure.var.as_deref(), Some("items"));
-        assert_eq!(failure.found.as_deref(), Some("0"));
+        assert_eq!(
+            failure,
+            GuardFailure {
+                expr: "items > 0".into(),
+                found: vec![("items".into(), "0".into())],
+            }
+        );
     }
 
     #[test]

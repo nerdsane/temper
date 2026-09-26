@@ -129,11 +129,6 @@ when = ["Submitted", "Confirmed", "Processing", "Shipped", "Delivered"]
 assert = "items > 0"
 
 [[invariant]]
-name = "ShipRequiresPayment"
-when = ["Shipped"]
-assert = "payment_captured"
-
-[[invariant]]
 name = "CancelledIsFinal"
 when = ["Cancelled"]
 assert = "no_further_transitions"
