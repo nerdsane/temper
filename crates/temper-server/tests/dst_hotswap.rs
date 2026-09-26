@@ -24,7 +24,7 @@ to = "Draft"
 kind = "input"
 
 [[action.effect]]
-type = "IncrementCounter"
+type = "increment"
 var = "item_count"
 
 [[action]]
@@ -34,7 +34,7 @@ to = "Submitted"
 kind = "input"
 
 [[action.guard]]
-type = "CounterMin"
+type = "min_count"
 var = "item_count"
 min = 1
 
