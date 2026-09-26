@@ -404,10 +404,19 @@ fn converts_every_old_form_and_keeps_comments() {
     )
     .expect("converted spec loads");
     assert_eq!(
-        automaton.invariants.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(),
+        automaton
+            .invariants
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>(),
         vec!["ReviewHasItems"]
     );
-    assert!(automaton.field_invariants.iter().any(|f| f.name == "DoneHasTitle"));
+    assert!(
+        automaton
+            .field_invariants
+            .iter()
+            .any(|f| f.name == "DoneHasTitle")
+    );
     assert_eq!(migration.notes.len(), 2, "{:?}", migration.notes);
     // Converting again changes nothing.
     assert_eq!(super::migrate_source(out).unwrap().source, *out);
