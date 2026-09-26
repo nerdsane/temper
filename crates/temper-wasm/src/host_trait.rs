@@ -21,9 +21,11 @@ use crate::workflow_headers::add_workflow_observability_headers;
 use temper_observe::wide_event::{self, EventKind, WideEvent};
 
 mod guest_progress;
+mod http_clients;
 mod internal_http;
 pub(crate) mod span_hints;
 
+pub use http_clients::HttpClientCache;
 pub use internal_http::{InternalHttpCapability, InternalHttpCapabilityIssuerFn};
 
 /// Re-exported so every channel that records guest-supplied `gen_ai.*` metadata
@@ -467,39 +469,6 @@ fn blob_transport_semaphore() -> &'static Semaphore {
     SEMAPHORE.get_or_init(|| Semaphore::new(blob_transport_max_concurrency()))
 }
 
-fn build_production_http_client(
-    secrets: &BTreeMap<String, String>,
-    timeout: std::time::Duration,
-    disable_redirects: bool,
-) -> reqwest::Client {
-    let mut builder = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(timeout);
-    if disable_redirects {
-        builder = builder
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy();
-    }
-
-    for (key, pem) in secrets {
-        if !key.starts_with("ca_cert:") {
-            continue;
-        }
-        match reqwest::Certificate::from_pem(pem.as_bytes()) {
-            Ok(cert) => {
-                builder = builder.add_root_certificate(cert);
-            }
-            Err(error) => {
-                tracing::warn!(key, error = %error, "failed to parse CA certificate from secret");
-            }
-        }
-    }
-
-    builder
-        .build()
-        .expect("production HTTP client configuration must be valid")
-}
-
 fn remote_blob_backend<'a>(secrets: &'a BTreeMap<String, String>, url: &str) -> Option<&'a str> {
     let endpoint = secrets.get("blob_endpoint")?.trim_end_matches('/');
     if endpoint.is_empty() || !url.starts_with(endpoint) {
@@ -602,9 +571,28 @@ impl ProductionWasmHost {
     /// lets operators provision private CA trust via the same secret store
     /// that WASM modules already use, with no filesystem or env var coupling.
     pub fn with_timeout(secrets: BTreeMap<String, String>, timeout: std::time::Duration) -> Self {
-        let client = build_production_http_client(&secrets, timeout, false);
-        let internal_client = build_production_http_client(&secrets, timeout, true);
+        let clients = http_clients::HttpClients::build(&secrets, timeout);
+        Self::with_clients(secrets, clients)
+    }
 
+    /// Create like [`Self::with_timeout`], reusing HTTP clients from `cache`.
+    ///
+    /// Per-invocation hosts should use this: building a client loads the
+    /// system trust store, which is too slow to repeat on every callback.
+    pub fn with_client_cache(
+        secrets: BTreeMap<String, String>,
+        timeout: std::time::Duration,
+        cache: &HttpClientCache,
+    ) -> Self {
+        let clients = cache.get(&secrets, timeout);
+        Self::with_clients(secrets, clients)
+    }
+
+    fn with_clients(secrets: BTreeMap<String, String>, clients: http_clients::HttpClients) -> Self {
+        let http_clients::HttpClients {
+            client,
+            internal_client,
+        } = clients;
         Self {
             client,
             internal_client,

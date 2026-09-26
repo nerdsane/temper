@@ -175,14 +175,25 @@ lru = "0.12"
 libc = "0.2"
 
 # Keep useful file/line backtraces without copying full type/variable debug
-# information into every workspace integration-test executable. The test
-# profile inherits these settings; incremental compilation remains enabled.
+# information into every workspace integration-test executable. Full debug
+# info made each of the ~100 test binaries ~1 GB, so rebuilds were disk-bound.
+# The test profile inherits these settings; incremental compilation remains enabled.
 [profile.dev]
 debug = "line-tables-only"
 
+# Dependencies are not debugged in dev/test builds; dropping their debug info
+# is most of the remaining size of each linked test binary. They are also
+# optimized: the DST suites spend most of their time in dependency code (WASM
+# validation and compilation, Cedar, TOML, the SQL store), and a full nextest
+# run takes 1m47s this way against 5m01s with only the compiler optimized.
+# Dependencies build once and stay cached, so this costs ~3 minutes on a clean
+# build only; workspace crates stay unoptimized and keep debug assertions.
+[profile.dev.package."*"]
+debug = false
+opt-level = 2
+
 # These dependencies are compilers executed by the tests, not just build-time
-# dependencies. Optimizing them makes runtime WASM compilation substantially
-# cheaper without optimizing application code or removing debug assertions.
+# dependencies, and get the highest optimization level.
 [profile.dev.package.cranelift-codegen]
 opt-level = 3
 

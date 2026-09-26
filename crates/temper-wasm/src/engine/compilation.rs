@@ -107,6 +107,7 @@ impl SharedCompiler {
             _epoch_ticker: Arc::clone(&self.epoch_ticker),
             cache: RwLock::new(BTreeMap::new()),
             shared_compiler: Some(Arc::clone(self)),
+            http_clients: HttpClientCache::default(),
         }
     }
 }

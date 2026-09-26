@@ -2,7 +2,6 @@ use super::*;
 
 #[tokio::test]
 async fn self_callback_stops_at_the_runtime_budget_before_the_spec_guard() {
-    let _slot = CALLBACK_TEST_SLOT.acquire().await.unwrap();
     let spec = r#"
 [automaton]
 name = "Job"
@@ -98,7 +97,6 @@ on_success = "Tick"
 
 #[tokio::test]
 async fn failed_compensation_chain_keeps_the_callback_budget() {
-    let _slot = CALLBACK_TEST_SLOT.acquire().await.unwrap();
     let spec = r#"
 [automaton]
 name = "Job"
@@ -219,7 +217,6 @@ module = "failing_job"
 
 #[tokio::test]
 async fn detached_callbacks_complete_a_bounded_long_workflow() {
-    let _slot = CALLBACK_TEST_SLOT.acquire().await.unwrap();
     let spec = r#"
 [automaton]
 name = "Job"
@@ -359,7 +356,6 @@ on_success = "Tick"
 
 #[tokio::test]
 async fn detached_callbacks_surface_cumulative_budget_exhaustion() {
-    let _slot = CALLBACK_TEST_SLOT.acquire().await.unwrap();
     let spec = r#"
 [automaton]
 name = "Job"

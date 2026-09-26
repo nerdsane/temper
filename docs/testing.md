@@ -6,16 +6,26 @@ Run the full suite with:
 cargo test --workspace --no-fail-fast
 ```
 
+`cargo nextest run --workspace --no-fail-fast` (what CI uses) runs the same tests
+in parallel across test executables, one process per test, and is several times
+faster on a many-core machine. It skips doctests; run `cargo test --doc
+--workspace` for those.
+
 The development profile (also inherited by tests) keeps line-number backtraces
 but omits full variable/type debug information. Incremental compilation and
-debug assertions remain enabled. If you need full debugger inspection, set
-`CARGO_PROFILE_DEV_DEBUG=2 CARGO_PROFILE_TEST_DEBUG=2`; switching profiles
+debug assertions remain enabled. Dependencies carry no debug information at all.
+If you need full debugger inspection of workspace code, set
+`CARGO_PROFILE_DEV_DEBUG=2 CARGO_PROFILE_TEST_DEBUG=2` (add
+`--config 'profile.dev.package."*".debug=2'` for dependencies); switching profiles
 requires rebuilding the affected artifacts and uses substantially more disk.
 
-Cranelift and regalloc2 are optimized even in development builds. These crates
-compile WebAssembly **while tests run**; leaving the compiler itself unoptimized
-makes app installation and simulated restarts unnecessarily expensive. Application
-code remains unoptimized, and release/dist profiles are unchanged.
+Dependencies are optimized even in development builds (`opt-level = 2`, with
+Cranelift and regalloc2 at 3). Cranelift compiles WebAssembly **while tests run**,
+and the DST suites also spend much of their time in WASM validation, Cedar, TOML
+parsing and the SQL store; leaving that code unoptimized makes app installation
+and simulated restarts unnecessarily expensive. Dependencies build once and stay
+cached, so the cost is a few extra minutes on a clean build. Application code
+remains unoptimized, and release/dist profiles are unchanged.
 
 ## Compiled-code reuse in tests
 
@@ -41,10 +51,16 @@ Full randomized workload seed counts, fault injection and invariants are unchang
 `TEMPER_DST_RANDOM_MODE=smoke` remains an explicitly narrower check, not a
 replacement for full coverage.
 
-The callback-budget integration cases reserve one test slot before starting their
-wall-clock deadlines. This prevents the independent 240-callback load from starving
-the shorter deadline cases; all callback counts, deadlines and assertions remain
-unchanged. Other test executables retain their normal parallelism.
+## Outbound HTTP clients
+
+Each `WasmEngine` owns an `HttpClientCache`, and every production host built for
+an invocation clones its HTTP clients from it. Building a `reqwest::Client` loads
+and parses the system trust store through OpenSSL, so building one per invocation
+cost ~100 ms per WASM callback and contended on OpenSSL's process-wide locks; the
+callback-budget integration tests timed out under that load. The cache is keyed by
+timeout and `ca_cert:*` secrets and bounded to 64 configurations. It belongs to the
+engine rather than the process because pooled connections belong to the tokio
+runtime that opened them, and each `#[tokio::test]` runs its own runtime.
 
 ## Comparing runs
 
@@ -56,9 +72,11 @@ time cargo test --workspace --no-fail-fast
 ```
 
 Use the same toolchain, features and fixtures on both revisions. CI builds five
-GEPA fixtures before running the tests:
+GEPA fixtures before running the tests; the pinned toolchain needs the WASM target
+first:
 
 ```sh
+rustup target add wasm32-unknown-unknown
 for module in gepa-replay gepa-reflective gepa-score gepa-pareto gepa-verify; do
   cargo build --manifest-path "wasm-modules/$module/Cargo.toml" \
     --target wasm32-unknown-unknown --release
