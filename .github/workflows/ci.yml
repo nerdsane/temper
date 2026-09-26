@@ -18,8 +18,9 @@ env:
   RUST_BACKTRACE: 1
   RUST_TOOLCHAIN: nightly-2026-02-08
   # CI does not reuse incremental state between jobs. Local builds retain it.
-  # Keep debug overrides aligned with Cargo.toml's dev/test defaults; file/line
-  # backtraces remain available without full type/variable debug information.
+  # Keep debug overrides aligned with Cargo.toml's dev/test defaults: workspace
+  # backtraces retain file/line information. Dependency debug sections
+  # are omitted by the package override in Cargo.toml.
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only

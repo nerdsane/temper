@@ -180,6 +180,11 @@ libc = "0.2"
 [profile.dev]
 debug = "line-tables-only"
 
+# Keep workspace backtraces, but do not duplicate third-party dependency debug
+# sections in every test executable. See docs/testing.md for the debugger opt-in.
+[profile.dev.package."*"]
+debug = false
+
 # These dependencies are compilers executed by the tests, not just build-time
 # dependencies. Optimizing them makes runtime WASM compilation substantially
 # cheaper without optimizing application code or removing debug assertions.

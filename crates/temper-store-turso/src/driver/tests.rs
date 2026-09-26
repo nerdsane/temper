@@ -1,6 +1,98 @@
 use super::*;
 
 #[tokio::test]
+async fn driver_futures_remain_send_and_lazy() {
+    fn send<T: Send>(value: T) -> T {
+        value
+    }
+
+    // Construction alone must not open a database or start network I/O.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("unpolled.db");
+    drop(send(Database::local(path.to_str().unwrap())));
+    assert!(!path.exists());
+    drop(send(Database::remote("https://db.invalid", "unused")));
+
+    let db = send(Database::local(":memory:")).await.unwrap();
+    let conn = db.connect().unwrap();
+    send(conn.execute("CREATE TABLE lazy_values(id INTEGER PRIMARY KEY)", ()))
+        .await
+        .unwrap();
+    drop(send(conn.execute("INSERT INTO lazy_values VALUES (1)", ())));
+    drop(send(conn.query("PRAGMA user_version=17", ())));
+    drop(send(conn.begin_immediate()));
+
+    let mut rows = send(conn.query("SELECT COUNT(*) FROM lazy_values", ()))
+        .await
+        .unwrap();
+    assert_eq!(
+        send(rows.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        0
+    );
+    let mut rows = send(conn.query("PRAGMA user_version", ())).await.unwrap();
+    // Dropping an unpolled next() must not consume the prefetched first row.
+    drop(send(rows.next()));
+    assert_eq!(
+        send(rows.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        0
+    );
+    drop(rows);
+
+    let tx = send(conn.begin_immediate()).await.unwrap();
+    drop(send(tx.execute("INSERT INTO lazy_values VALUES (2)", ())));
+    drop(send(tx.query(
+        "INSERT INTO lazy_values VALUES (3) RETURNING id",
+        (),
+    )));
+    let mut rows = send(tx.query("SELECT COUNT(*) FROM lazy_values", ()))
+        .await
+        .unwrap();
+    assert_eq!(
+        send(rows.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        0
+    );
+    drop(rows);
+    send(tx.execute("INSERT INTO lazy_values VALUES (4)", ()))
+        .await
+        .unwrap();
+    send(tx.commit()).await.unwrap();
+
+    let tx = send(conn.begin_immediate()).await.unwrap();
+    send(tx.execute("INSERT INTO lazy_values VALUES (5)", ()))
+        .await
+        .unwrap();
+    send(tx.rollback()).await.unwrap();
+    let mut rows = send(conn.query("SELECT id FROM lazy_values", ()))
+        .await
+        .unwrap();
+    assert_eq!(
+        send(rows.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        4
+    );
+    assert!(send(rows.next()).await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn local_connection_waits_for_a_contended_write_lock() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("contention.db");

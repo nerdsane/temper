@@ -1,9 +1,21 @@
 //! SQL operations shared by the official embedded and serverless Turso drivers.
 
+// Explicit `Send` bounds on driver futures keep downstream crates from walking
+// the embedded/HTTP drivers' entire async state machines for every store call.
+// Keep these allocation-free opaque boundaries instead of plain `async fn`s.
+#![allow(clippy::manual_async_fn)]
+
+use std::future::Future;
+
 use thiserror::Error;
 
 use turso_serverless::params::{IntoParams, Params};
 pub(crate) use turso_serverless::{Row, Value, params, params_from_iter};
+
+mod database;
+pub(crate) use database::Database;
+mod handle;
+use handle::DriverHandle;
 
 /// Driver failures retain the original engine or transport error.
 #[derive(Debug, Error)]
@@ -35,40 +47,8 @@ impl From<turso_serverless::Error> for DriverError {
     }
 }
 
-#[derive(Debug)]
-pub(crate) enum Database {
-    Local(turso::Database),
-    Remote(turso_serverless::Database),
-}
-
-impl Database {
-    pub(crate) async fn local(path: &str) -> Result<Self, DriverError> {
-        Ok(Self::Local(turso::Builder::new_local(path).build().await?))
-    }
-
-    pub(crate) async fn remote(url: &str, token: &str) -> Result<Self, DriverError> {
-        Ok(Self::Remote(
-            turso_serverless::Builder::new_remote(url)
-                .with_auth_token(token)
-                .build()
-                .await?,
-        ))
-    }
-
-    pub(crate) fn connect(&self) -> Result<Connection, DriverError> {
-        match self {
-            Self::Local(db) => {
-                let conn = db.connect()?;
-                conn.busy_timeout(std::time::Duration::from_secs(5))?;
-                Ok(Connection::Local(conn))
-            }
-            Self::Remote(db) => Ok(Connection::Remote(db.connect()?)),
-        }
-    }
-}
-
 pub(crate) enum Connection {
-    Local(turso::Connection),
+    Local(DriverHandle<'static, turso::Connection>),
     Remote(turso_serverless::Connection),
 }
 
@@ -95,99 +75,117 @@ impl Drop for Connection {
 }
 
 impl Connection {
-    pub(crate) async fn query(
+    pub(crate) fn query(
         &self,
         sql: &str,
-        params: impl IntoParams,
-    ) -> Result<Rows, DriverError> {
-        let params = params.into_params()?;
-        match self {
-            Self::Local(conn) => Rows::local(conn.query(sql, local_params(params)).await?).await,
-            Self::Remote(conn) => Ok(Rows::Remote(conn.query(sql, params).await?)),
+        params: impl IntoParams + Send,
+    ) -> impl Future<Output = Result<Rows, DriverError>> + Send {
+        async move {
+            let params = params.into_params()?;
+            match self {
+                Self::Local(conn) => {
+                    Rows::local(conn.query(sql, local_params(params)).await?).await
+                }
+                Self::Remote(conn) => Ok(Rows::Remote(conn.query(sql, params).await?)),
+            }
         }
     }
 
-    pub(crate) async fn execute(
+    pub(crate) fn execute(
         &self,
         sql: &str,
-        params: impl IntoParams,
-    ) -> Result<u64, DriverError> {
-        let params = params.into_params()?;
-        match self {
-            Self::Local(conn) => Ok(conn.execute(sql, local_params(params)).await?),
-            Self::Remote(conn) => Ok(conn.execute(sql, params).await?),
+        params: impl IntoParams + Send,
+    ) -> impl Future<Output = Result<u64, DriverError>> + Send {
+        async move {
+            let params = params.into_params()?;
+            match self {
+                Self::Local(conn) => Ok(conn.execute(sql, local_params(params)).await?),
+                Self::Remote(conn) => Ok(conn.execute(sql, params).await?),
+            }
         }
     }
 
-    pub(crate) async fn begin_immediate(&self) -> Result<Transaction<'_>, DriverError> {
-        // Each store operation owns its connection. The SDK still refuses a nested transaction.
-        match self {
-            Self::Local(conn) => Ok(Transaction::Local(
-                turso::transaction::Transaction::new_unchecked(
-                    conn,
-                    turso::transaction::TransactionBehavior::Immediate,
-                )
-                .await?,
-            )),
-            Self::Remote(conn) => Ok(Transaction::Remote(
-                turso_serverless::Transaction::new_unchecked(
-                    conn,
-                    turso_serverless::TransactionBehavior::Immediate,
-                )
-                .await?,
-            )),
+    pub(crate) fn begin_immediate(
+        &self,
+    ) -> impl Future<Output = Result<Transaction<'_>, DriverError>> + Send {
+        async move {
+            // Each store operation owns its connection. The SDK still refuses a nested transaction.
+            match self {
+                Self::Local(conn) => Ok(Transaction::Local(DriverHandle::new(
+                    turso::transaction::Transaction::new_unchecked(
+                        conn,
+                        turso::transaction::TransactionBehavior::Immediate,
+                    )
+                    .await?,
+                ))),
+                Self::Remote(conn) => Ok(Transaction::Remote(
+                    turso_serverless::Transaction::new_unchecked(
+                        conn,
+                        turso_serverless::TransactionBehavior::Immediate,
+                    )
+                    .await?,
+                )),
+            }
         }
     }
 }
 
 pub(crate) enum Transaction<'conn> {
-    Local(turso::transaction::Transaction<'conn>),
+    Local(DriverHandle<'conn, turso::transaction::Transaction<'conn>>),
     Remote(turso_serverless::Transaction<'conn>),
 }
 
 impl Transaction<'_> {
-    pub(crate) async fn query(
+    pub(crate) fn query(
         &self,
         sql: &str,
-        params: impl IntoParams,
-    ) -> Result<Rows, DriverError> {
-        let params = params.into_params()?;
-        match self {
-            Self::Local(tx) => Rows::local(tx.query(sql, local_params(params)).await?).await,
-            Self::Remote(tx) => Ok(Rows::Remote(tx.query(sql, params).await?)),
+        params: impl IntoParams + Send,
+    ) -> impl Future<Output = Result<Rows, DriverError>> + Send {
+        async move {
+            let params = params.into_params()?;
+            match self {
+                Self::Local(tx) => Rows::local(tx.query(sql, local_params(params)).await?).await,
+                Self::Remote(tx) => Ok(Rows::Remote(tx.query(sql, params).await?)),
+            }
         }
     }
 
-    pub(crate) async fn execute(
+    pub(crate) fn execute(
         &self,
         sql: &str,
-        params: impl IntoParams,
-    ) -> Result<u64, DriverError> {
-        let params = params.into_params()?;
-        match self {
-            Self::Local(tx) => Ok(tx.execute(sql, local_params(params)).await?),
-            Self::Remote(tx) => Ok(tx.execute(sql, params).await?),
+        params: impl IntoParams + Send,
+    ) -> impl Future<Output = Result<u64, DriverError>> + Send {
+        async move {
+            let params = params.into_params()?;
+            match self {
+                Self::Local(tx) => Ok(tx.execute(sql, local_params(params)).await?),
+                Self::Remote(tx) => Ok(tx.execute(sql, params).await?),
+            }
         }
     }
 
-    pub(crate) async fn rollback(self) -> Result<(), DriverError> {
-        match self {
-            Self::Local(tx) => Ok(tx.rollback().await?),
-            Self::Remote(tx) => Ok(tx.rollback().await?),
+    pub(crate) fn rollback(self) -> impl Future<Output = Result<(), DriverError>> + Send {
+        async move {
+            match self {
+                Self::Local(tx) => Ok(tx.into_inner().rollback().await?),
+                Self::Remote(tx) => Ok(tx.rollback().await?),
+            }
         }
     }
 
-    pub(crate) async fn commit(self) -> Result<(), DriverError> {
-        match self {
-            Self::Local(tx) => Ok(tx.commit().await?),
-            Self::Remote(tx) => Ok(tx.commit().await?),
+    pub(crate) fn commit(self) -> impl Future<Output = Result<(), DriverError>> + Send {
+        async move {
+            match self {
+                Self::Local(tx) => Ok(tx.into_inner().commit().await?),
+                Self::Remote(tx) => Ok(tx.commit().await?),
+            }
         }
     }
 }
 
 pub(crate) enum Rows {
     Local {
-        rows: turso::Rows,
+        rows: DriverHandle<'static, turso::Rows>,
         first: Option<Row>,
     },
     Remote(turso_serverless::Rows),
@@ -199,26 +197,28 @@ impl Rows {
         // Start the statement before returning, including PRAGMAs whose rows are discarded.
         match rows.next().await? {
             Some(row) => Ok(Self::Local {
-                rows,
+                rows: DriverHandle::new(rows),
                 first: Some(remote_row(row)?),
             }),
             None => Ok(Self::Exhausted),
         }
     }
 
-    pub(crate) async fn next(&mut self) -> Result<Option<Row>, DriverError> {
-        let row = match self {
-            Self::Remote(rows) => rows.next().await?,
-            Self::Local { rows, first } => match first.take() {
-                Some(row) => Some(row),
-                None => rows.next().await?.map(remote_row).transpose()?,
-            },
-            Self::Exhausted => None,
-        };
-        if row.is_none() {
-            *self = Self::Exhausted;
+    pub(crate) fn next(&mut self) -> impl Future<Output = Result<Option<Row>, DriverError>> + Send {
+        async move {
+            let row = match self {
+                Self::Remote(rows) => rows.next().await?,
+                Self::Local { rows, first } => match first.take() {
+                    Some(row) => Some(row),
+                    None => rows.next().await?.map(remote_row).transpose()?,
+                },
+                Self::Exhausted => None,
+            };
+            if row.is_none() {
+                *self = Self::Exhausted;
+            }
+            Ok(row)
         }
-        Ok(row)
     }
 }
 

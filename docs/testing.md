@@ -7,15 +7,38 @@ cargo test --workspace --no-fail-fast
 ```
 
 The development profile (also inherited by tests) keeps line-number backtraces
-but omits full variable/type debug information. Incremental compilation and
-debug assertions remain enabled. If you need full debugger inspection, set
-`CARGO_PROFILE_DEV_DEBUG=2 CARGO_PROFILE_TEST_DEBUG=2`; switching profiles
-requires rebuilding the affected artifacts and uses substantially more disk.
+for workspace code but omits full variable/type debug information. Third-party
+dependencies retain symbol names but omit debug sections, which otherwise get
+copied into every integration-test executable. Incremental compilation, debug
+assertions and overflow checks remain enabled.
+
+For full debugger inspection, including dependencies, use:
+
+```sh
+CARGO_PROFILE_DEV_DEBUG=2 CARGO_PROFILE_TEST_DEBUG=2 \
+  cargo --config 'profile.dev.package."*".debug=2' test --workspace
+```
+
+Switching these settings requires rebuilding affected artifacts and uses more
+disk. Release/dist profiles are unchanged.
 
 Cranelift and regalloc2 are optimized even in development builds. These crates
 compile WebAssembly **while tests run**; leaving the compiler itself unoptimized
 makes app installation and simulated restarts unnecessarily expensive. Application
 code remains unoptimized, and release/dist profiles are unchanged.
+
+## Storage compilation boundary
+
+The Turso adapter gives its SQL futures explicit `Send` bounds and keeps embedded
+engine handles behind private, compiler-checked `Send + Sync` interfaces. This
+prevents each downstream async-trait implementation from repeatedly checking the
+embedded engine's large internal type graph. It does not change the SQL, retries,
+transaction lifetime, cancellation, or when a future starts doing work.
+
+The boundary uses no unsafe trait implementations. It adds one allocation per
+database/native handle/result stream, not per result row; the adapter does not
+box returned futures. Driver regression tests cover unpolled futures, row
+consumption, contention, commit/rollback, and remote connection cleanup.
 
 ## Compiled-code reuse in tests
 
@@ -59,6 +82,7 @@ Use the same toolchain, features and fixtures on both revisions. CI builds five
 GEPA fixtures before running the tests:
 
 ```sh
+rustup target add wasm32-unknown-unknown
 for module in gepa-replay gepa-reflective gepa-score gepa-pareto gepa-verify; do
   cargo build --manifest-path "wasm-modules/$module/Cargo.toml" \
     --target wasm32-unknown-unknown --release
