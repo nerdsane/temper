@@ -245,6 +245,33 @@ fn read_current(repo_root: &Path, path: &str) -> String {
         .unwrap_or_else(|e| panic!("read {}: {e}", full_path.display()))
 }
 
+/// Pre-migration sources that are not valid TOML, with the exact line that
+/// must be removed to make them parse. The retired hand-written parser
+/// accepted these; the `toml` crate rightly rejects them. Each entry repeats
+/// an identical `key = value` line, so dropping the repeat keeps the meaning.
+const HISTORICAL_DUPLICATE_LINES: &[(&str, &str)] = &[(
+    "os-apps/evolution/evolution_run.ioa.toml",
+    r#"temper_api_key = "{secret:temper_api_key}""#,
+)];
+
+/// Remove the second occurrence of each known duplicated line in `source`.
+fn repair_historical_source(path: &str, source: String) -> String {
+    let mut out = source;
+    for (_, line) in HISTORICAL_DUPLICATE_LINES
+        .iter()
+        .filter(|(p, _)| *p == path)
+    {
+        let first = out.find(line).expect("known duplicate line present");
+        let second = first + line.len();
+        let repeat = out[second..]
+            .find(line)
+            .map(|offset| second + offset)
+            .expect("known duplicate line repeated");
+        out.replace_range(repeat..repeat + line.len() + 1, "");
+    }
+    out
+}
+
 /// Integrations intentionally dropped (not just migrated) after the initial
 /// conversion. These are expected to be missing from the post-migration spec
 /// — the differential treats their absence as correct, not a regression.
@@ -430,7 +457,7 @@ fn all_migrations_preserve_integrations() {
         };
         checked += 1;
 
-        let old_src = git_show(&repo_root, sha, path);
+        let old_src = repair_historical_source(path, git_show(&repo_root, sha, path));
         let new_src = read_current(&repo_root, path);
 
         let old = match parse_automaton(&old_src) {

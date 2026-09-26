@@ -886,7 +886,7 @@ initial = "Pending"
 name = "Approve"
 from = ["Pending"]
 to = "Approved"
-effect = '[{ type = "trigger", name = "GenerateCedarPolicy" }, { type = "trigger", name = "DispatchCallback" }]'
+effect = [{ type = "trigger", name = "GenerateCedarPolicy" }, { type = "trigger", name = "DispatchCallback" }]
 "#;
 
     let automaton = parse_automaton(spec).expect("CamelCase platform custom effects should parse");
