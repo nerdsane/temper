@@ -96,7 +96,7 @@ tracing-subscriber = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 temper-store-sim = { workspace = true }
 temper-server = { path = ".", features = ["sim"] }
-temper-wasm = { workspace = true, features = ["test-helpers"] }
+temper-wasm = { workspace = true, features = ["test-helpers", "test-shared-compilation"] }
 temper-platform = { workspace = true }
 
 [[bench]]

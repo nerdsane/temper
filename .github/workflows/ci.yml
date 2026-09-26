@@ -17,11 +17,9 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   RUST_TOOLCHAIN: nightly-2026-02-08
-  # ARN-439: CI-only compile speedups. These are env overrides scoped to CI runners; the
-  # developer-local profiles in Cargo.toml are untouched. Swatinem/rust-cache also sets
-  # CARGO_INCREMENTAL=0, but we set it here too so it holds for every cargo invocation.
-  # line-tables-only debuginfo keeps backtraces (RUST_BACKTRACE=1 above) while cutting the
-  # debuginfo that dominates codegen + link time on the compile-heavy jobs.
+  # CI does not reuse incremental state between jobs. Local builds retain it.
+  # Keep debug overrides aligned with Cargo.toml's dev/test defaults; file/line
+  # backtraces remain available without full type/variable debug information.
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
